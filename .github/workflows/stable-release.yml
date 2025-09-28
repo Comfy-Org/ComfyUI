@@ -112,10 +112,8 @@ jobs:
           ls
 
       - name: Upload binaries to release
-        uses: svenstaro/upload-release-action@v2
+        uses: ncipollo/release-action@v1
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: ComfyUI_windows_portable_${{ inputs.rel_name }}.7z
+          artifacts: ComfyUI_windows_portable_${{ inputs.rel_name }}.7z
           tag: ${{ inputs.git_tag }}
-          overwrite: true
           draft: true
