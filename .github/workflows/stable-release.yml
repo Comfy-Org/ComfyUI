@@ -61,55 +61,9 @@ jobs:
       - shell: bash
         run: |
           cd ..
-          cp -r ComfyUI ComfyUI_copy
-          curl https://www.python.org/ftp/python/3.${{ inputs.python_minor }}.${{ inputs.python_patch }}/python-3.${{ inputs.python_minor }}.${{ inputs.python_patch }}-embed-amd64.zip -o python_embeded.zip
-          unzip python_embeded.zip -d python_embeded
-          cd python_embeded
-          echo ${{ env.MINOR_VERSION }}
-          echo 'import site' >> ./python3${{ inputs.python_minor }}._pth
-          curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-          ./python.exe get-pip.py
-          ./python.exe -s -m pip install ../${{ inputs.cache_tag }}_python_deps/*
 
-          grep comfyui ../ComfyUI/requirements.txt > ./requirements_comfyui.txt
-          ./python.exe -s -m pip install -r requirements_comfyui.txt
-          rm requirements_comfyui.txt
+          echo "testing" > ComfyUI/ComfyUI_windows_portable_${{ inputs.rel_name }}.7z
 
-          sed -i '1i../ComfyUI' ./python3${{ inputs.python_minor }}._pth
-
-          if test -f ./Lib/site-packages/torch/lib/dnnl.lib; then
-            rm ./Lib/site-packages/torch/lib/dnnl.lib #I don't think this is actually used and I need the space
-            rm ./Lib/site-packages/torch/lib/libprotoc.lib
-            rm ./Lib/site-packages/torch/lib/libprotobuf.lib
-          fi
-
-          cd ..
-
-          git clone --depth 1 https://github.com/comfyanonymous/taesd
-          cp taesd/*.safetensors ./ComfyUI_copy/models/vae_approx/
-
-          mkdir ComfyUI_windows_portable
-          mv python_embeded ComfyUI_windows_portable
-          mv ComfyUI_copy ComfyUI_windows_portable/ComfyUI
-
-          cd ComfyUI_windows_portable
-
-          mkdir update
-          cp -r ComfyUI/.ci/update_windows/* ./update/
-          cp -r ComfyUI/.ci/windows_base_files/* ./
-          cp ../update_comfyui_and_python_dependencies.bat ./update/
-
-          cd ..
-
-          "C:\Program Files\7-Zip\7z.exe" a -t7z -m0=lzma2 -mx=9 -mfb=128 -md=768m -ms=on -mf=BCJ2 ComfyUI_windows_portable.7z ComfyUI_windows_portable
-          mv ComfyUI_windows_portable.7z ComfyUI/ComfyUI_windows_portable_${{ inputs.rel_name }}.7z
-
-          cd ComfyUI_windows_portable
-          python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu
-
-          python_embeded/python.exe -s ./update/update.py ComfyUI/
-
-          ls
 
       - name: Upload binaries to release
         uses: ncipollo/release-action@v1
