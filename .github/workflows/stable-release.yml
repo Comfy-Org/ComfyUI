@@ -66,8 +66,9 @@ jobs:
 
 
       - name: Upload binaries to release
-        uses: ncipollo/release-action@v1
+        uses: softprops/action-gh-release@v2
         with:
-          artifacts: ComfyUI_windows_portable_${{ inputs.rel_name }}.7z
-          tag: ${{ inputs.git_tag }}
+          files: ComfyUI_windows_portable_${{ inputs.rel_name }}.7z
+          tag_name: ${{ inputs.git_tag }}
           draft: true
+          overwrite_files: true
