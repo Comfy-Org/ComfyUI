@@ -28,6 +28,11 @@ on:
         required: true
         type: string
         default: "nvidia"
+      test_release:
+        description: 'Test Release'
+        required: true
+        type: boolean
+        default: true
 
 jobs:
   package_comfy_windows:
@@ -105,6 +110,7 @@ jobs:
           mv ComfyUI_windows_portable.7z ComfyUI/ComfyUI_windows_portable_${{ inputs.rel_name }}.7z
 
       - shell: bash
+        if: ${{ inputs.test_release }}
         run: |
           cd ..
           cd ComfyUI_windows_portable
