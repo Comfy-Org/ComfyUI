@@ -1,0 +1,49 @@
+name: "Release Stable All Portable Versions"
+
+on:
+  workflow_dispatch:
+    inputs:
+      git_tag:
+        description: 'Git tag'
+        required: true
+        type: string
+
+jobs:
+  release_nvidia_default:
+    name: "Release NVIDIA Default (cu129)"
+    uses: ./.github/workflows/stable-release.yml
+    with:
+      git_tag: ${{ inputs.git_tag }}
+      cache_tag: "cu129"
+      python_minor: "13"
+      python_patch: "6"
+      rel_name: "nvidia"
+      rel_extra_name: ""
+      test_release: true
+    secrets: inherit
+
+  release_nvidia_cu128:
+    name: "Release NVIDIA cu128"
+    uses: ./.github/workflows/stable-release.yml
+    with:
+      git_tag: ${{ inputs.git_tag }}
+      cache_tag: "cu128"
+      python_minor: "12"
+      python_patch: "10"
+      rel_name: "nvidia"
+      rel_extra_name: "_cu128"
+      test_release: true
+    secrets: inherit
+
+  release_amd_rocm:
+    name: "Release AMD ROCm 6.4.4"
+    uses: ./.github/workflows/stable-release.yml
+    with:
+      git_tag: ${{ inputs.git_tag }}
+      cache_tag: "rocm644"
+      python_minor: "12"
+      python_patch: "10"
+      rel_name: "amd"
+      rel_extra_name: ""
+      test_release: false
+    secrets: inherit
