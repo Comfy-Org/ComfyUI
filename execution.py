@@ -439,9 +439,10 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
     inputs = dynprompt.get_node(unique_id)['inputs']
     class_type = dynprompt.get_node(unique_id)['class_type']
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
+    merge = inputs.get('accumulate') is True
     cached = await caches.outputs.get(unique_id)
     if cached is not None:
-        emit_cached_output(server, unique_id, display_node_id, cached, prompt_id, ui_outputs, asset_manager)
+        emit_cached_output(server, unique_id, display_node_id, cached, prompt_id, ui_outputs, asset_manager, merge=merge)
         get_progress_state().finish_progress(unique_id)
         execution_list.cache_update(unique_id, cached)
         return (ExecutionResult.SUCCESS, None, None)
@@ -568,7 +569,7 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
             ui_outputs[unique_id] = {"meta": meta, "output": enriched_output_ui}
             cache_ui_value = {"meta": meta, "output": output_ui}
             if server.client_id is not None:
-                server.send_sync("executed", { "node": unique_id, "display_node": display_node_id, "output": enriched_output_ui, "prompt_id": prompt_id }, server.client_id)
+                server.send_sync("executed", { "node": unique_id, "display_node": display_node_id, "output": enriched_output_ui, "prompt_id": prompt_id, "merge": merge }, server.client_id)
         if has_subgraph:
             cached_outputs = []
             new_node_ids = []
