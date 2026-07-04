@@ -72,12 +72,13 @@ class TestTextEncoderDeviceMPS:
     def test_text_encoder_device_is_mps(self):
         assert mm.is_device_mps(mm.text_encoder_device())
 
-    def test_fp16_clip_loads_on_mps(self):
-        clip = make_clip(torch.float16)
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_castable_dtype_clip_loads_on_mps(self, dtype):
+        clip = make_clip(dtype)
         assert mm.is_device_mps(clip.patcher.load_device)
         weight = clip.cond_stage_model.linear.weight
         assert weight.device.type == "mps"
-        x = torch.ones((1, 8), dtype=torch.float16, device=weight.device)
+        x = torch.ones((1, 8), dtype=dtype, device=weight.device)
         assert clip.cond_stage_model(x).device.type == "mps"
 
     @pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
@@ -103,8 +104,16 @@ class TestTextEncoderDeviceMPS:
         sd = {
             "linear.weight": torch.zeros((8, 8), dtype=torch.uint8),
             "linear.comfy_quant": torch.zeros(16, dtype=torch.uint8),
+            "spiece_model": b"not a tensor",
         }
         clip = make_clip(torch.float16, state_dict=[sd])
+        assert not mm.is_device_mps(clip.patcher.load_device)
+        assert clip.cond_stage_model.construct_device.type == "cpu"
+
+    def test_fp8_full_model_state_dict_falls_back_to_cpu(self):
+        # Full checkpoints pass a single dict instead of a list.
+        sd = {"linear.weight": torch.zeros((8, 8), dtype=torch.float8_e4m3fn)}
+        clip = make_clip(torch.float16, state_dict=sd)
         assert not mm.is_device_mps(clip.patcher.load_device)
         assert clip.cond_stage_model.construct_device.type == "cpu"
 
@@ -129,3 +138,16 @@ class TestTextEncoderDeviceMPS:
         t = torch.zeros(4, dtype=fp8_dtype, device="mps")
         with pytest.raises((RuntimeError, TypeError)):
             t.to(torch.float16)
+
+
+@pytest.mark.parametrize("fp8_dtype", FP8_DTYPES)
+def test_fp8_capable_devices_skip_the_quant_fallback(fp8_dtype):
+    # The state dict scan in CLIP.__init__ is gated on this, so devices
+    # that can cast fp8 keep loading quantized text encoders on the GPU.
+    assert mm.supports_cast(torch.device("cuda"), fp8_dtype)
+
+
+@pytest.mark.parametrize("state", [mm.VRAMState.LOW_VRAM, mm.VRAMState.NO_VRAM])
+def test_low_vram_states_keep_text_encoders_on_cpu(monkeypatch, state):
+    monkeypatch.setattr(mm, "vram_state", state)
+    assert mm.text_encoder_device() == torch.device("cpu")
