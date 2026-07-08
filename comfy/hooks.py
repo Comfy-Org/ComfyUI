@@ -93,7 +93,7 @@ class Hook:
         self.hook_scope = hook_scope
         '''Scope of where this hook should apply in terms of the conds used in sampling run.'''
         self.custom_should_register = default_should_register
-        '''Can be overriden with a compatible function to decide if this hook should be registered without the need to override .should_register'''
+        '''Can be overridden with a compatible function to decide if this hook should be registered without the need to override .should_register'''
 
     @property
     def strength(self):

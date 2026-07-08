@@ -33,7 +33,7 @@ class MeshyTextToModelNode(IO.ComfyNode):
         return IO.Schema(
             node_id="MeshyTextToModelNode",
             display_name="Meshy: Text to Model",
-            category="api node/3d/Meshy",
+            category="partner/3d/Meshy",
             inputs=[
                 IO.Combo.Input("model", options=["latest"]),
                 IO.String.Input("prompt", multiline=True, default=""),
@@ -145,7 +145,7 @@ class MeshyRefineNode(IO.ComfyNode):
         return IO.Schema(
             node_id="MeshyRefineNode",
             display_name="Meshy: Refine Draft Model",
-            category="api node/3d/Meshy",
+            category="partner/3d/Meshy",
             description="Refine a previously created draft model.",
             inputs=[
                 IO.Combo.Input("model", options=["latest"]),
@@ -240,7 +240,7 @@ class MeshyImageToModelNode(IO.ComfyNode):
         return IO.Schema(
             node_id="MeshyImageToModelNode",
             display_name="Meshy: Image to Model",
-            category="api node/3d/Meshy",
+            category="partner/3d/Meshy",
             inputs=[
                 IO.Combo.Input("model", options=["latest"]),
                 IO.Image.Input("image"),
@@ -405,7 +405,7 @@ class MeshyMultiImageToModelNode(IO.ComfyNode):
         return IO.Schema(
             node_id="MeshyMultiImageToModelNode",
             display_name="Meshy: Multi-Image to Model",
-            category="api node/3d/Meshy",
+            category="partner/3d/Meshy",
             inputs=[
                 IO.Combo.Input("model", options=["latest"]),
                 IO.Autogrow.Input(
@@ -575,7 +575,7 @@ class MeshyRigModelNode(IO.ComfyNode):
         return IO.Schema(
             node_id="MeshyRigModelNode",
             display_name="Meshy: Rig Model",
-            category="api node/3d/Meshy",
+            category="partner/3d/Meshy",
             description="Provides a rigged character in standard formats. "
             "Auto-rigging is currently not suitable for untextured meshes, non-humanoid assets, "
             "or humanoid assets with unclear limb and body structure.",
@@ -656,7 +656,7 @@ class MeshyAnimateModelNode(IO.ComfyNode):
         return IO.Schema(
             node_id="MeshyAnimateModelNode",
             display_name="Meshy: Animate Model",
-            category="api node/3d/Meshy",
+            category="partner/3d/Meshy",
             description="Apply a specific animation action to a previously rigged character.",
             inputs=[
                 IO.Custom("MESHY_RIGGED_TASK_ID").Input("rig_task_id"),
@@ -722,7 +722,7 @@ class MeshyTextureNode(IO.ComfyNode):
         return IO.Schema(
             node_id="MeshyTextureNode",
             display_name="Meshy: Texture Model",
-            category="api node/3d/Meshy",
+            category="partner/3d/Meshy",
             inputs=[
                 IO.Combo.Input("model", options=["latest"]),
                 IO.Custom("MESHY_TASK_ID").Input("meshy_task_id"),

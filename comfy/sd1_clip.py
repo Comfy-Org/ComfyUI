@@ -46,7 +46,7 @@ class ClipTokenWeightEncoder:
         out, pooled = o[:2]
 
         if pooled is not None:
-            first_pooled = pooled[0:1].to(model_management.intermediate_device())
+            first_pooled = pooled[0:1].to(device=model_management.intermediate_device())
         else:
             first_pooled = pooled
 
@@ -63,16 +63,16 @@ class ClipTokenWeightEncoder:
             output.append(z)
 
         if (len(output) == 0):
-            r = (out[-1:].to(model_management.intermediate_device()), first_pooled)
+            r = (out[-1:].to(device=model_management.intermediate_device()), first_pooled)
         else:
-            r = (torch.cat(output, dim=-2).to(model_management.intermediate_device()), first_pooled)
+            r = (torch.cat(output, dim=-2).to(device=model_management.intermediate_device()), first_pooled)
 
         if len(o) > 2:
             extra = {}
             for k in o[2]:
                 v = o[2][k]
                 if k == "attention_mask":
-                    v = v[:sections].flatten().unsqueeze(dim=0).to(model_management.intermediate_device())
+                    v = v[:sections].flatten().unsqueeze(dim=0).to(device=model_management.intermediate_device())
                 extra[k] = v
 
             r = r + (extra,)
@@ -308,14 +308,14 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
     def load_sd(self, sd):
         return self.transformer.load_state_dict(sd, strict=False, assign=getattr(self, "can_assign_sd", False))
 
-    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed):
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0):
         if isinstance(tokens, dict):
             tokens_only = next(iter(tokens.values())) # todo: get this better?
         else:
             tokens_only = tokens
         tokens_only = [[t[0] for t in b] for b in tokens_only]
         embeds = self.process_tokens(tokens_only, device=self.execution_device)[0]
-        return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed)
+        return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=presence_penalty)
 
 def parse_parentheses(string):
     result = []
@@ -740,5 +740,5 @@ class SD1ClipModel(torch.nn.Module):
     def load_sd(self, sd):
         return getattr(self, self.clip).load_sd(sd)
 
-    def generate(self, tokens, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.95, min_p=0.0, repetition_penalty=1.0, seed=None):
-        return getattr(self, self.clip).generate(tokens, do_sample=do_sample, max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty, seed=seed)
+    def generate(self, tokens, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.95, min_p=0.0, repetition_penalty=1.0, seed=None, presence_penalty=0.0):
+        return getattr(self, self.clip).generate(tokens, do_sample=do_sample, max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty, seed=seed, presence_penalty=presence_penalty)

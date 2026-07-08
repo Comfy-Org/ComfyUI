@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import TypedDict, Dict, Optional, Tuple
 from typing_extensions import override
 from PIL import Image

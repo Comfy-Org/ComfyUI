@@ -27,7 +27,7 @@ class HyperTile(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="HyperTile",
-            category="model_patches/unet",
+            category="model/patch/unet",
             inputs=[
                 io.Model.Input("model"),
                 io.Int.Input("tile_size", default=256, min=1, max=2048, advanced=True),

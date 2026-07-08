@@ -363,7 +363,7 @@ class EasyCacheNode(io.ComfyNode):
             node_id="EasyCache",
             display_name="EasyCache",
             description="Native EasyCache implementation.",
-            category="advanced/debug/model",
+            category="advanced/debug",
             is_experimental=True,
             inputs=[
                 io.Model.Input("model", tooltip="The model to add EasyCache to."),
@@ -496,7 +496,7 @@ class LazyCacheNode(io.ComfyNode):
             node_id="LazyCache",
             display_name="LazyCache",
             description="A homebrew version of EasyCache - even 'easier' version of EasyCache to implement. Overall works worse than EasyCache, but better in some rare cases AND universal compatibility with everything in ComfyUI.",
-            category="advanced/debug/model",
+            category="advanced/debug",
             is_experimental=True,
             inputs=[
                 io.Model.Input("model", tooltip="The model to add LazyCache to."),

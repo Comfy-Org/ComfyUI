@@ -169,7 +169,8 @@ def _get_attention_scores_no_kv_chunking(
     try:
         attn_probs = attn_scores.softmax(dim=-1)
         del attn_scores
-    except model_management.OOM_EXCEPTION:
+    except Exception as e:
+        model_management.raise_non_oom(e)
         logging.warning("ran out of memory while running softmax in  _get_attention_scores_no_kv_chunking, trying slower in place softmax instead")
         attn_scores -= attn_scores.max(dim=-1, keepdim=True).values # noqa: F821 attn_scores is not defined
         torch.exp(attn_scores, out=attn_scores)

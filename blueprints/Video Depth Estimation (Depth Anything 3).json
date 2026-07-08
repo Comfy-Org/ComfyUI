@@ -1,0 +1,825 @@
+{
+  "revision": 0,
+  "last_node_id": 97,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 97,
+      "type": "253ec5ca-8333-4ddf-a036-9fc0923651b9",
+      "pos": [
+        410,
+        500
+      ],
+      "size": [
+        400,
+        400
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": null
+        },
+        {
+          "name": "start_time",
+          "type": "FLOAT",
+          "widget": {
+            "name": "start_time"
+          },
+          "link": null
+        },
+        {
+          "name": "duration",
+          "type": "FLOAT",
+          "widget": {
+            "name": "duration"
+          },
+          "link": null
+        },
+        {
+          "name": "resolution",
+          "type": "INT",
+          "widget": {
+            "name": "resolution"
+          },
+          "link": null
+        },
+        {
+          "name": "resize_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "resize_method"
+          },
+          "link": null
+        },
+        {
+          "label": "output_type",
+          "name": "output",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "output"
+          },
+          "link": null
+        },
+        {
+          "label": "normalization",
+          "name": "output.normalization",
+          "type": "COMBO",
+          "widget": {
+            "name": "output.normalization"
+          },
+          "link": null
+        },
+        {
+          "name": "output.apply_sky_clip",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "output.apply_sky_clip"
+          },
+          "link": null
+        },
+        {
+          "name": "model_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "model_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": []
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "96",
+            "start_time"
+          ],
+          [
+            "96",
+            "duration"
+          ],
+          [
+            "93",
+            "resolution"
+          ],
+          [
+            "93",
+            "resize_method"
+          ],
+          [
+            "92",
+            "output"
+          ],
+          [
+            "92",
+            "output.normalization"
+          ],
+          [
+            "92",
+            "output.apply_sky_clip"
+          ],
+          [
+            "94",
+            "model_name"
+          ]
+        ],
+        "cnr_id": "comfy-core",
+        "ver": "0.24.0"
+      },
+      "widgets_values": [],
+      "title": "Video Depth Estimation (Depth Anything 3)"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "253ec5ca-8333-4ddf-a036-9fc0923651b9",
+        "version": 1,
+        "state": {
+          "lastGroupId": 4,
+          "lastNodeId": 97,
+          "lastLinkId": 129,
+          "lastRerouteId": 0
+        },
+        "revision": 2,
+        "config": {},
+        "name": "Video Depth Estimation (Depth Anything 3)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -230,
+            130,
+            167.912109375,
+            228
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            1520,
+            140,
+            128,
+            108
+          ]
+        },
+        "inputs": [
+          {
+            "id": "698c28c6-cf92-4039-8b39-f3062868ea7c",
+            "name": "video",
+            "type": "VIDEO",
+            "linkIds": [
+              119
+            ],
+            "pos": [
+              -86.087890625,
+              154
+            ]
+          },
+          {
+            "id": "97a1f63e-1585-4a40-9dec-e2700120d84a",
+            "name": "start_time",
+            "type": "FLOAT",
+            "linkIds": [
+              121
+            ],
+            "pos": [
+              -86.087890625,
+              174
+            ]
+          },
+          {
+            "id": "4dbbd3b3-c5ee-4a56-a0d3-3268d3b2fd64",
+            "name": "duration",
+            "type": "FLOAT",
+            "linkIds": [
+              122
+            ],
+            "pos": [
+              -86.087890625,
+              194
+            ]
+          },
+          {
+            "id": "16f55101-f99d-4c0c-bebf-c3b31c54f13e",
+            "name": "resolution",
+            "type": "INT",
+            "linkIds": [
+              124
+            ],
+            "pos": [
+              -86.087890625,
+              214
+            ]
+          },
+          {
+            "id": "d9cd7693-4bb3-4ed7-9a75-276b997abcd9",
+            "name": "resize_method",
+            "type": "COMBO",
+            "linkIds": [
+              125
+            ],
+            "pos": [
+              -86.087890625,
+              234
+            ]
+          },
+          {
+            "id": "a6e90532-323b-462e-ba9c-1672384d5b31",
+            "name": "output",
+            "type": "COMFY_DYNAMICCOMBO_V3",
+            "linkIds": [
+              126
+            ],
+            "label": "output_type",
+            "pos": [
+              -86.087890625,
+              254
+            ]
+          },
+          {
+            "id": "69e6aeef-437d-4fde-b2fc-d5ab9369238d",
+            "name": "output.normalization",
+            "type": "COMBO",
+            "linkIds": [
+              127
+            ],
+            "label": "normalization",
+            "pos": [
+              -86.087890625,
+              274
+            ]
+          },
+          {
+            "id": "73206f72-f89a-4698-885e-5d9277df2998",
+            "name": "output.apply_sky_clip",
+            "type": "BOOLEAN",
+            "linkIds": [
+              128
+            ],
+            "pos": [
+              -86.087890625,
+              294
+            ]
+          },
+          {
+            "id": "dddbc7fc-9431-448a-9ed3-9aa62404288b",
+            "name": "model_name",
+            "type": "COMBO",
+            "linkIds": [
+              129
+            ],
+            "pos": [
+              -86.087890625,
+              314
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "478ab537-63bc-4d74-a9f0-c975f550880f",
+            "name": "IMAGE",
+            "type": "IMAGE",
+            "linkIds": [
+              7
+            ],
+            "localized_name": "IMAGE",
+            "pos": [
+              1544,
+              164
+            ]
+          },
+          {
+            "id": "cdaf037e-79bc-4a94-b06c-0fd32e76f615",
+            "name": "audio",
+            "type": "AUDIO",
+            "linkIds": [
+              112
+            ],
+            "pos": [
+              1544,
+              184
+            ]
+          },
+          {
+            "id": "4c0e5484-d193-49c7-b107-92619628880a",
+            "name": "fps",
+            "type": "FLOAT",
+            "linkIds": [
+              113
+            ],
+            "pos": [
+              1544,
+              204
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 92,
+            "type": "DA3Render",
+            "pos": [
+              740,
+              230
+            ],
+            "size": [
+              380,
+              130
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "da3_geometry",
+                "name": "da3_geometry",
+                "type": "DA3_GEOMETRY",
+                "link": 12
+              },
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "output"
+                },
+                "link": 126
+              },
+              {
+                "localized_name": "output.normalization",
+                "name": "output.normalization",
+                "type": "COMBO",
+                "widget": {
+                  "name": "output.normalization"
+                },
+                "link": 127
+              },
+              {
+                "localized_name": "output.apply_sky_clip",
+                "name": "output.apply_sky_clip",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "output.apply_sky_clip"
+                },
+                "link": 128
+              },
+              {
+                "name": "geometry",
+                "type": "DA3_GEOMETRY",
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "slot_index": 0,
+                "links": [
+                  7
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "DA3Render",
+              "cnr_id": "comfy-core",
+              "ver": "0.19.0"
+            },
+            "widgets_values": [
+              "depth",
+              "v2_style",
+              false
+            ]
+          },
+          {
+            "id": 93,
+            "type": "DA3Inference",
+            "pos": [
+              740,
+              -30
+            ],
+            "size": [
+              390,
+              130
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "da3_model",
+                "name": "da3_model",
+                "type": "DA3_MODEL",
+                "link": 107
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 111
+              },
+              {
+                "localized_name": "resolution",
+                "name": "resolution",
+                "type": "INT",
+                "widget": {
+                  "name": "resolution"
+                },
+                "link": 124
+              },
+              {
+                "localized_name": "resize_method",
+                "name": "resize_method",
+                "type": "COMBO",
+                "widget": {
+                  "name": "resize_method"
+                },
+                "link": 125
+              },
+              {
+                "localized_name": "mode",
+                "name": "mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "mode"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "da3_geometry",
+                "name": "da3_geometry",
+                "type": "DA3_GEOMETRY",
+                "slot_index": 0,
+                "links": [
+                  12
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "DA3Inference",
+              "cnr_id": "comfy-core",
+              "ver": "0.19.0"
+            },
+            "widgets_values": [
+              504,
+              "lower_bound_resize",
+              "mono"
+            ]
+          },
+          {
+            "id": 94,
+            "type": "LoadDA3Model",
+            "pos": [
+              50,
+              410
+            ],
+            "size": [
+              400,
+              140
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model_name",
+                "name": "model_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "model_name"
+                },
+                "link": 129
+              },
+              {
+                "localized_name": "weight_dtype",
+                "name": "weight_dtype",
+                "type": "COMBO",
+                "widget": {
+                  "name": "weight_dtype"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "DA3_MODEL",
+                "name": "DA3_MODEL",
+                "type": "DA3_MODEL",
+                "links": [
+                  107
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "LoadDA3Model",
+              "cnr_id": "comfy-core",
+              "ver": "0.24.0",
+              "models": [
+                {
+                  "name": "depth_anything_3_mono_large.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/Depth-Anything-3/resolve/main/geometry_estimation/depth_anything_3_mono_large.safetensors",
+                  "directory": "geometry_estimation"
+                }
+              ]
+            },
+            "widgets_values": [
+              "depth_anything_3_mono_large.safetensors",
+              "default"
+            ]
+          },
+          {
+            "id": 95,
+            "type": "GetVideoComponents",
+            "pos": [
+              70,
+              -140
+            ],
+            "size": [
+              260,
+              120
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "video",
+                "name": "video",
+                "type": "VIDEO",
+                "link": 120
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "links": [
+                  111
+                ]
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "type": "AUDIO",
+                "links": [
+                  112
+                ]
+              },
+              {
+                "localized_name": "fps",
+                "name": "fps",
+                "type": "FLOAT",
+                "links": [
+                  113
+                ]
+              },
+              {
+                "localized_name": "bit_depth",
+                "name": "bit_depth",
+                "type": "INT",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetVideoComponents",
+              "cnr_id": "comfy-core",
+              "ver": "0.24.0"
+            }
+          },
+          {
+            "id": 96,
+            "type": "Video Slice",
+            "pos": [
+              70,
+              -360
+            ],
+            "size": [
+              270,
+              170
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "video",
+                "name": "video",
+                "type": "VIDEO",
+                "link": 119
+              },
+              {
+                "localized_name": "start_time",
+                "name": "start_time",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "start_time"
+                },
+                "link": 121
+              },
+              {
+                "localized_name": "duration",
+                "name": "duration",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "duration"
+                },
+                "link": 122
+              },
+              {
+                "localized_name": "strict_duration",
+                "name": "strict_duration",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "strict_duration"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "VIDEO",
+                "name": "VIDEO",
+                "type": "VIDEO",
+                "links": [
+                  120
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "Video Slice",
+              "cnr_id": "comfy-core",
+              "ver": "0.24.0"
+            },
+            "widgets_values": [
+              0,
+              5,
+              false
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 12,
+            "origin_id": 93,
+            "origin_slot": 0,
+            "target_id": 92,
+            "target_slot": 0,
+            "type": "DA3_GEOMETRY"
+          },
+          {
+            "id": 7,
+            "origin_id": 92,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 107,
+            "origin_id": 94,
+            "origin_slot": 0,
+            "target_id": 93,
+            "target_slot": 0,
+            "type": "DA3_MODEL"
+          },
+          {
+            "id": 111,
+            "origin_id": 95,
+            "origin_slot": 0,
+            "target_id": 93,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 112,
+            "origin_id": 95,
+            "origin_slot": 1,
+            "target_id": -20,
+            "target_slot": 1,
+            "type": "AUDIO"
+          },
+          {
+            "id": 113,
+            "origin_id": 95,
+            "origin_slot": 2,
+            "target_id": -20,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 119,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 96,
+            "target_slot": 0,
+            "type": "VIDEO"
+          },
+          {
+            "id": 120,
+            "origin_id": 96,
+            "origin_slot": 0,
+            "target_id": 95,
+            "target_slot": 0,
+            "type": "VIDEO"
+          },
+          {
+            "id": 121,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 96,
+            "target_slot": 1,
+            "type": "FLOAT"
+          },
+          {
+            "id": 122,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 96,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 124,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 93,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 125,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 93,
+            "target_slot": 3,
+            "type": "COMBO"
+          },
+          {
+            "id": 126,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 92,
+            "target_slot": 1,
+            "type": "COMFY_DYNAMICCOMBO_V3"
+          },
+          {
+            "id": 127,
+            "origin_id": -10,
+            "origin_slot": 6,
+            "target_id": 92,
+            "target_slot": 2,
+            "type": "COMBO"
+          },
+          {
+            "id": 128,
+            "origin_id": -10,
+            "origin_slot": 7,
+            "target_id": 92,
+            "target_slot": 3,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 129,
+            "origin_id": -10,
+            "origin_slot": 8,
+            "target_id": 94,
+            "target_slot": 0,
+            "type": "COMBO"
+          }
+        ],
+        "extra": {},
+        "category": "Conditioning & Preprocessors/Depth",
+        "description": "This subgraph processes a video input through Depth Anything 3 to produce temporally consistent depth maps for each frame, outputting a depth video. It is ideal for video content requiring spatial geometry estimation, such as 3D reconstruction, SLAM, or novel view synthesis from moving cameras. The model uses a plain transformer backbone trained with a depth-ray representation, supporting any number of views without requiring known camera poses."
+      }
+    ]
+  },
+  "extra": {
+    "BlueprintDescription": "This subgraph processes a video input through Depth Anything 3 to produce temporally consistent depth maps for each frame, outputting a depth video. It is ideal for video content requiring spatial geometry estimation, such as 3D reconstruction, SLAM, or novel view synthesis from moving cameras. The model uses a plain transformer backbone trained with a depth-ray representation, supporting any number of views without requiring known camera poses."
+  }
+}

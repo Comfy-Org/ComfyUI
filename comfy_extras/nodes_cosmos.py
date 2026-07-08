@@ -13,7 +13,7 @@ class EmptyCosmosLatentVideo(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="EmptyCosmosLatentVideo",
-            category="latent/video",
+            category="model/latent/cosmos",
             inputs=[
                 io.Int.Input("width", default=1280, min=16, max=nodes.MAX_RESOLUTION, step=16),
                 io.Int.Input("height", default=704, min=16, max=nodes.MAX_RESOLUTION, step=16),
@@ -45,7 +45,7 @@ class CosmosImageToVideoLatent(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="CosmosImageToVideoLatent",
-            category="conditioning/inpaint",
+            category="model/conditioning/cosmos",
             inputs=[
                 io.Vae.Input("vae"),
                 io.Int.Input("width", default=1280, min=16, max=nodes.MAX_RESOLUTION, step=16),
@@ -88,7 +88,7 @@ class CosmosPredict2ImageToVideoLatent(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="CosmosPredict2ImageToVideoLatent",
-            category="conditioning/inpaint",
+            category="model/conditioning/cosmos",
             inputs=[
                 io.Vae.Input("vae"),
                 io.Int.Input("width", default=848, min=16, max=nodes.MAX_RESOLUTION, step=16),

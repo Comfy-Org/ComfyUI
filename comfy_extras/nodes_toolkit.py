@@ -1,4 +1,3 @@
-from __future__ import annotations
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 
@@ -14,7 +13,7 @@ class CreateList(io.ComfyNode):
         return io.Schema(
             node_id="CreateList",
             display_name="Create List",
-            category="logic",
+            category="utilities",
             is_input_list=True,
             search_aliases=["Image Iterator", "Text Iterator", "Iterator"],
             inputs=[io.Autogrow.Input("inputs", template=template_autogrow)],

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from aiohttp import web
 
 from typing import TYPE_CHECKING, TypedDict
@@ -31,8 +33,22 @@ class NodeReplaceManager:
         self._replacements: dict[str, list[NodeReplace]] = {}
 
     def register(self, node_replace: NodeReplace):
-        """Register a node replacement mapping."""
-        self._replacements.setdefault(node_replace.old_node_id, []).append(node_replace)
+        """Register a node replacement mapping.
+
+        Idempotent: if a replacement with the same (old_node_id, new_node_id)
+        is already registered, the duplicate is ignored. This prevents stale
+        entries from accumulating when custom nodes are reloaded in the same
+        process (e.g. via ComfyUI-Manager).
+        """
+        existing = self._replacements.setdefault(node_replace.old_node_id, [])
+        for entry in existing:
+            if entry.new_node_id == node_replace.new_node_id:
+                logging.debug(
+                    "Node replacement %s -> %s already registered, ignoring duplicate.",
+                    node_replace.old_node_id, node_replace.new_node_id,
+                )
+                return
+        existing.append(node_replace)
 
     def get_replacement(self, old_node_id: str) -> list[NodeReplace] | None:
         """Get replacements for an old node ID."""

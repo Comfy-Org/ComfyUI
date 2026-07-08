@@ -31,15 +31,39 @@ def TimePositionalEmbedding(dim: int, out_features: int) -> nn.Module:
     )
 
 
+class ExpoFourierFeatures(nn.Module):
+    """Exponentially-spaced Fourier features (no learnable parameters)."""
+    def __init__(self, dim, min_freq=0.5, max_freq=10000.0):
+        super().__init__()
+        self.dim = dim
+        self.min_freq = min_freq
+        self.max_freq = max_freq
+
+    def forward(self, t):
+        in_dtype = t.dtype
+        t = t.float()
+        if t.dim() == 1:
+            t = t.unsqueeze(-1)
+        half_dim = self.dim // 2
+        ramp = torch.linspace(0, 1, half_dim, device=t.device, dtype=torch.float32)
+        freqs = torch.exp(ramp * (math.log(self.max_freq) - math.log(self.min_freq)) + math.log(self.min_freq))
+        args = t * freqs * 2 * math.pi
+        return torch.cat([args.cos(), args.sin()], dim=-1).to(in_dtype)
+
+
 class NumberEmbedder(nn.Module):
     def __init__(
         self,
         features: int,
         dim: int = 256,
+        fourier_features_type="learned",
     ):
         super().__init__()
         self.features = features
-        self.embedding = TimePositionalEmbedding(dim=dim, out_features=features)
+        if fourier_features_type == "expo":
+            self.embedding = nn.Sequential(ExpoFourierFeatures(dim=dim), comfy.ops.manual_cast.Linear(in_features=dim, out_features=features))
+        else:
+            self.embedding = TimePositionalEmbedding(dim=dim, out_features=features)
 
     def forward(self, x: Union[List[float], Tensor]) -> Tensor:
         if not torch.is_tensor(x):
@@ -77,14 +101,15 @@ class NumberConditioner(Conditioner):
     def __init__(self,
                 output_dim: int,
                 min_val: float=0,
-                max_val: float=1
+                max_val: float=1,
+                fourier_features_type: str = "learned",
                 ):
         super().__init__(output_dim, output_dim)
 
         self.min_val = min_val
         self.max_val = max_val
 
-        self.embedder = NumberEmbedder(features=output_dim)
+        self.embedder = NumberEmbedder(features=output_dim, fourier_features_type=fourier_features_type)
 
     def forward(self, floats, device=None):
             # Cast the inputs to floats

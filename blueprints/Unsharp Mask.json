@@ -1,1 +1,442 @@
-{"revision": 0, "last_node_id": 30, "last_link_id": 0, "nodes": [{"id": 30, "type": "d99ba3f5-8a56-4365-8e45-3f3ea7c572a1", "pos": [4420, -370], "size": [210, 106], "flags": {}, "order": 4, "mode": 0, "inputs": [{"label": "image0", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": null}], "outputs": [{"localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": []}], "title": "Unsharp Mask", "properties": {"proxyWidgets": [["27", "value"], ["28", "value"], ["29", "value"]]}, "widgets_values": []}], "links": [], "version": 0.4, "definitions": {"subgraphs": [{"id": "d99ba3f5-8a56-4365-8e45-3f3ea7c572a1", "version": 1, "state": {"lastGroupId": 0, "lastNodeId": 29, "lastLinkId": 43, "lastRerouteId": 0}, "revision": 0, "config": {}, "name": "Unsharp Mask", "inputNode": {"id": -10, "bounding": [3920, -405, 120, 60]}, "outputNode": {"id": -20, "bounding": [4930, -405, 120, 60]}, "inputs": [{"id": "75354555-d2f3-46b9-a3dd-b076dcfca561", "name": "images.image0", "type": "IMAGE", "linkIds": [39], "localized_name": "images.image0", "label": "image0", "pos": [4020, -385]}], "outputs": [{"id": "04368b94-2a96-46ff-8c07-d0ce3235b40d", "name": "IMAGE0", "type": "IMAGE", "linkIds": [40], "localized_name": "IMAGE0", "pos": [4950, -385]}], "widgets": [], "nodes": [{"id": 27, "type": "PrimitiveFloat", "pos": [4100, -540], "size": [270, 58], "flags": {}, "order": 0, "mode": 0, "inputs": [{"label": "amount", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [41]}], "properties": {"Node name for S&R": "PrimitiveFloat", "min": 0, "max": 3, "precision": 2, "step": 0.05}, "widgets_values": [1]}, {"id": 28, "type": "PrimitiveFloat", "pos": [4100, -430], "size": [270, 58], "flags": {}, "order": 1, "mode": 0, "inputs": [{"label": "radius", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [42]}], "properties": {"Node name for S&R": "PrimitiveFloat", "min": 0, "max": 10, "precision": 1, "step": 0.5}, "widgets_values": [3]}, {"id": 29, "type": "PrimitiveFloat", "pos": [4100, -320], "size": [270, 58], "flags": {}, "order": 2, "mode": 0, "inputs": [{"label": "threshold", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [43]}], "properties": {"Node name for S&R": "PrimitiveFloat", "min": 0, "max": 1, "precision": 2, "step": 0.05}, "widgets_values": [0]}, {"id": 26, "type": "GLSLShader", "pos": [4470, -580], "size": [400, 232], "flags": {}, "order": 3, "mode": 0, "inputs": [{"label": "image0", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": 39}, {"label": "image1", "localized_name": "images.image1", "name": "images.image1", "shape": 7, "type": "IMAGE", "link": null}, {"label": "u_float0", "localized_name": "floats.u_float0", "name": "floats.u_float0", "shape": 7, "type": "FLOAT", "link": 41}, {"label": "u_float1", "localized_name": "floats.u_float1", "name": "floats.u_float1", "shape": 7, "type": "FLOAT", "link": 42}, {"label": "u_float2", "localized_name": "floats.u_float2", "name": "floats.u_float2", "shape": 7, "type": "FLOAT", "link": 43}, {"label": "u_float3", "localized_name": "floats.u_float3", "name": "floats.u_float3", "shape": 7, "type": "FLOAT", "link": null}, {"label": "u_int0", "localized_name": "ints.u_int0", "name": "ints.u_int0", "shape": 7, "type": "INT", "link": null}, {"localized_name": "fragment_shader", "name": "fragment_shader", "type": "STRING", "widget": {"name": "fragment_shader"}, "link": null}, {"localized_name": "size_mode", "name": "size_mode", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "size_mode"}, "link": null}], "outputs": [{"localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": [40]}, {"localized_name": "IMAGE1", "name": "IMAGE1", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE2", "name": "IMAGE2", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE3", "name": "IMAGE3", "type": "IMAGE", "links": null}], "properties": {"Node name for S&R": "GLSLShader"}, "widgets_values": ["#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform vec2 u_resolution;\nuniform float u_float0;  // amount    [0.0 - 3.0]  typical: 0.5-1.5\nuniform float u_float1;  // radius    [0.5 - 10.0] blur radius in pixels\nuniform float u_float2;  // threshold [0.0 - 0.1]  min difference to sharpen\n\nin vec2 v_texCoord;\nlayout(location = 0) out vec4 fragColor0;\n\nfloat gaussian(float x, float sigma) {\n    return exp(-(x * x) / (2.0 * sigma * sigma));\n}\n\nfloat getLuminance(vec3 color) {\n    return dot(color, vec3(0.2126, 0.7152, 0.0722));\n}\n\nvoid main() {\n    vec2 texel = 1.0 / u_resolution;\n    float radius = max(u_float1, 0.5);\n    float amount = u_float0;\n    float threshold = u_float2;\n\n    vec4 original = texture(u_image0, v_texCoord);\n\n    // Gaussian blur for the \"unsharp\" mask\n    int samples = int(ceil(radius));\n    float sigma = radius / 2.0;\n\n    vec4 blurred = vec4(0.0);\n    float totalWeight = 0.0;\n\n    for (int x = -samples; x <= samples; x++) {\n        for (int y = -samples; y <= samples; y++) {\n            vec2 offset = vec2(float(x), float(y)) * texel;\n            vec4 sample_color = texture(u_image0, v_texCoord + offset);\n\n            float dist = length(vec2(float(x), float(y)));\n            float weight = gaussian(dist, sigma);\n            blurred += sample_color * weight;\n            totalWeight += weight;\n        }\n    }\n    blurred /= totalWeight;\n\n    // Unsharp mask = original - blurred\n    vec3 mask = original.rgb - blurred.rgb;\n\n    // Luminance-based threshold with smooth falloff\n    float lumaDelta = abs(getLuminance(original.rgb) - getLuminance(blurred.rgb));\n    float thresholdScale = smoothstep(0.0, threshold, lumaDelta);\n    mask *= thresholdScale;\n\n    // Sharpen: original + mask * amount\n    vec3 sharpened = original.rgb + mask * amount;\n\n    fragColor0 = vec4(clamp(sharpened, 0.0, 1.0), original.a);\n}\n", "from_input"]}], "groups": [], "links": [{"id": 41, "origin_id": 27, "origin_slot": 0, "target_id": 26, "target_slot": 2, "type": "FLOAT"}, {"id": 42, "origin_id": 28, "origin_slot": 0, "target_id": 26, "target_slot": 3, "type": "FLOAT"}, {"id": 43, "origin_id": 29, "origin_slot": 0, "target_id": 26, "target_slot": 4, "type": "FLOAT"}, {"id": 39, "origin_id": -10, "origin_slot": 0, "target_id": 26, "target_slot": 0, "type": "IMAGE"}, {"id": 40, "origin_id": 26, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "IMAGE"}], "extra": {"workflowRendererVersion": "LG"}, "category": "Image Tools/Sharpen"}]}}
+{
+  "revision": 0,
+  "last_node_id": 30,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 30,
+      "type": "d99ba3f5-8a56-4365-8e45-3f3ea7c572a1",
+      "pos": [
+        4420,
+        -370
+      ],
+      "size": [
+        210,
+        106
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "image0",
+          "localized_name": "images.image0",
+          "name": "images.image0",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE0",
+          "name": "IMAGE0",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "Unsharp Mask",
+      "properties": {
+        "proxyWidgets": [
+          [
+            "27",
+            "value"
+          ],
+          [
+            "28",
+            "value"
+          ],
+          [
+            "29",
+            "value"
+          ]
+        ]
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "d99ba3f5-8a56-4365-8e45-3f3ea7c572a1",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 29,
+          "lastLinkId": 43,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Unsharp Mask",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            3920,
+            -405,
+            120,
+            60
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            4930,
+            -405,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "75354555-d2f3-46b9-a3dd-b076dcfca561",
+            "name": "images.image0",
+            "type": "IMAGE",
+            "linkIds": [
+              39
+            ],
+            "localized_name": "images.image0",
+            "label": "image0",
+            "pos": [
+              4020,
+              -385
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "04368b94-2a96-46ff-8c07-d0ce3235b40d",
+            "name": "IMAGE0",
+            "type": "IMAGE",
+            "linkIds": [
+              40
+            ],
+            "localized_name": "IMAGE0",
+            "pos": [
+              4950,
+              -385
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 27,
+            "type": "PrimitiveFloat",
+            "pos": [
+              4100,
+              -540
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "amount",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  41
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": 0,
+              "max": 3,
+              "precision": 2,
+              "step": 0.05
+            },
+            "widgets_values": [
+              1
+            ]
+          },
+          {
+            "id": 28,
+            "type": "PrimitiveFloat",
+            "pos": [
+              4100,
+              -430
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "radius",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  42
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": 0,
+              "max": 10,
+              "precision": 1,
+              "step": 0.5
+            },
+            "widgets_values": [
+              3
+            ]
+          },
+          {
+            "id": 29,
+            "type": "PrimitiveFloat",
+            "pos": [
+              4100,
+              -320
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "threshold",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  43
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": 0,
+              "max": 1,
+              "precision": 2,
+              "step": 0.05
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 26,
+            "type": "GLSLShader",
+            "pos": [
+              4470,
+              -580
+            ],
+            "size": [
+              400,
+              232
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "image0",
+                "localized_name": "images.image0",
+                "name": "images.image0",
+                "type": "IMAGE",
+                "link": 39
+              },
+              {
+                "label": "image1",
+                "localized_name": "images.image1",
+                "name": "images.image1",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "label": "u_float0",
+                "localized_name": "floats.u_float0",
+                "name": "floats.u_float0",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 41
+              },
+              {
+                "label": "u_float1",
+                "localized_name": "floats.u_float1",
+                "name": "floats.u_float1",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 42
+              },
+              {
+                "label": "u_float2",
+                "localized_name": "floats.u_float2",
+                "name": "floats.u_float2",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 43
+              },
+              {
+                "label": "u_float3",
+                "localized_name": "floats.u_float3",
+                "name": "floats.u_float3",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": null
+              },
+              {
+                "label": "u_int0",
+                "localized_name": "ints.u_int0",
+                "name": "ints.u_int0",
+                "shape": 7,
+                "type": "INT",
+                "link": null
+              },
+              {
+                "localized_name": "fragment_shader",
+                "name": "fragment_shader",
+                "type": "STRING",
+                "widget": {
+                  "name": "fragment_shader"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "size_mode",
+                "name": "size_mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "size_mode"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE0",
+                "name": "IMAGE0",
+                "type": "IMAGE",
+                "links": [
+                  40
+                ]
+              },
+              {
+                "localized_name": "IMAGE1",
+                "name": "IMAGE1",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE2",
+                "name": "IMAGE2",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE3",
+                "name": "IMAGE3",
+                "type": "IMAGE",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GLSLShader"
+            },
+            "widgets_values": [
+              "#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform float u_float0;  // amount    [0.0 - 3.0]  typical: 0.5-1.5\nuniform float u_float1;  // radius    [0.5 - 10.0] blur radius in pixels\nuniform float u_float2;  // threshold [0.0 - 0.1]  min difference to sharpen\n\nin vec2 v_texCoord;\nlayout(location = 0) out vec4 fragColor0;\n\nfloat gaussian(float x, float sigma) {\n    return exp(-(x * x) / (2.0 * sigma * sigma));\n}\n\nfloat getLuminance(vec3 color) {\n    return dot(color, vec3(0.2126, 0.7152, 0.0722));\n}\n\nvoid main() {\n    vec2 texel = 1.0 / vec2(textureSize(u_image0, 0));\n    float radius = max(u_float1, 0.5);\n    float amount = u_float0;\n    float threshold = u_float2;\n\n    vec4 original = texture(u_image0, v_texCoord);\n\n    // Gaussian blur for the \"unsharp\" mask\n    int samples = int(ceil(radius));\n    float sigma = radius / 2.0;\n\n    vec4 blurred = vec4(0.0);\n    float totalWeight = 0.0;\n\n    for (int x = -samples; x <= samples; x++) {\n        for (int y = -samples; y <= samples; y++) {\n            vec2 offset = vec2(float(x), float(y)) * texel;\n            vec4 sample_color = texture(u_image0, v_texCoord + offset);\n\n            float dist = length(vec2(float(x), float(y)));\n            float weight = gaussian(dist, sigma);\n            blurred += sample_color * weight;\n            totalWeight += weight;\n        }\n    }\n    blurred /= totalWeight;\n\n    // Unsharp mask = original - blurred\n    vec3 mask = original.rgb - blurred.rgb;\n\n    // Luminance-based threshold with smooth falloff\n    float lumaDelta = abs(getLuminance(original.rgb) - getLuminance(blurred.rgb));\n    float thresholdScale = smoothstep(0.0, threshold, lumaDelta);\n    mask *= thresholdScale;\n\n    // Sharpen: original + mask * amount\n    vec3 sharpened = original.rgb + mask * amount;\n\n    fragColor0 = vec4(clamp(sharpened, 0.0, 1.0), original.a);\n}\n",
+              "from_input"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 41,
+            "origin_id": 27,
+            "origin_slot": 0,
+            "target_id": 26,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 42,
+            "origin_id": 28,
+            "origin_slot": 0,
+            "target_id": 26,
+            "target_slot": 3,
+            "type": "FLOAT"
+          },
+          {
+            "id": 43,
+            "origin_id": 29,
+            "origin_slot": 0,
+            "target_id": 26,
+            "target_slot": 4,
+            "type": "FLOAT"
+          },
+          {
+            "id": 39,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 26,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 40,
+            "origin_id": 26,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Image Tools/Sharpen",
+        "description": "Enhances edge contrast via unsharp masking for a sharper image appearance."
+      }
+    ]
+  }
+}

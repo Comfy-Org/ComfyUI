@@ -1,0 +1,569 @@
+{
+  "revision": 0,
+  "last_node_id": 89,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 89,
+      "type": "85e595bd-af9e-40ee-85c5-b98bb15da47a",
+      "pos": [
+        320,
+        520
+      ],
+      "size": [
+        400,
+        360
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "resolution",
+          "type": "INT",
+          "widget": {
+            "name": "resolution"
+          },
+          "link": null
+        },
+        {
+          "name": "resize_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "resize_method"
+          },
+          "link": null
+        },
+        {
+          "label": "output_type",
+          "name": "output",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "output"
+          },
+          "link": null
+        },
+        {
+          "label": "output_normalization",
+          "name": "output.normalization",
+          "type": "COMBO",
+          "widget": {
+            "name": "output.normalization"
+          },
+          "link": null
+        },
+        {
+          "label": "apply_sky_clip",
+          "name": "output.apply_sky_clip",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "output.apply_sky_clip"
+          },
+          "link": null
+        },
+        {
+          "name": "model_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "model_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "87",
+            "resolution"
+          ],
+          [
+            "87",
+            "resize_method"
+          ],
+          [
+            "86",
+            "output"
+          ],
+          [
+            "86",
+            "output.normalization"
+          ],
+          [
+            "86",
+            "output.apply_sky_clip"
+          ],
+          [
+            "88",
+            "model_name"
+          ]
+        ],
+        "cnr_id": "comfy-core",
+        "ver": "0.24.0"
+      },
+      "widgets_values": [],
+      "title": "Image Depth Estimation (Depth Anything 3)"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "85e595bd-af9e-40ee-85c5-b98bb15da47a",
+        "version": 1,
+        "state": {
+          "lastGroupId": 4,
+          "lastNodeId": 89,
+          "lastLinkId": 109,
+          "lastRerouteId": 0
+        },
+        "revision": 2,
+        "config": {},
+        "name": "Image Depth Estimation (Depth Anything 3)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            400,
+            90,
+            166.998046875,
+            188
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            1250,
+            146,
+            128,
+            68
+          ]
+        },
+        "inputs": [
+          {
+            "id": "43cf3118-495a-487d-8eb3-a17c7e92f64f",
+            "name": "image",
+            "type": "IMAGE",
+            "linkIds": [
+              19
+            ],
+            "localized_name": "image",
+            "pos": [
+              542.998046875,
+              114
+            ]
+          },
+          {
+            "id": "1089a0a1-6db1-45a8-84b0-0bfdc2ed920a",
+            "name": "resolution",
+            "type": "INT",
+            "linkIds": [
+              22
+            ],
+            "pos": [
+              542.998046875,
+              134
+            ]
+          },
+          {
+            "id": "25fb64ac-26d5-466d-995b-6d51b9afa2c4",
+            "name": "resize_method",
+            "type": "COMBO",
+            "linkIds": [
+              23
+            ],
+            "pos": [
+              542.998046875,
+              154
+            ]
+          },
+          {
+            "id": "8acafb7c-6c8b-46b3-9d74-c563498a3af1",
+            "name": "output",
+            "type": "COMFY_DYNAMICCOMBO_V3",
+            "linkIds": [
+              24
+            ],
+            "label": "output_type",
+            "pos": [
+              542.998046875,
+              174
+            ]
+          },
+          {
+            "id": "1da5009b-4648-43e8-a257-16426630cf22",
+            "name": "output.normalization",
+            "type": "COMBO",
+            "linkIds": [
+              25
+            ],
+            "label": "output_normalization",
+            "pos": [
+              542.998046875,
+              194
+            ]
+          },
+          {
+            "id": "fd7edb33-5fb1-4538-a411-26e5039a9321",
+            "name": "output.apply_sky_clip",
+            "type": "BOOLEAN",
+            "linkIds": [
+              26
+            ],
+            "label": "apply_sky_clip",
+            "pos": [
+              542.998046875,
+              214
+            ]
+          },
+          {
+            "id": "b5be4c8a-b833-4f1e-8c94-3ed1dd722190",
+            "name": "model_name",
+            "type": "COMBO",
+            "linkIds": [
+              106
+            ],
+            "pos": [
+              542.998046875,
+              234
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "478ab537-63bc-4d74-a9f0-c975f550880f",
+            "name": "IMAGE",
+            "type": "IMAGE",
+            "linkIds": [
+              7
+            ],
+            "localized_name": "IMAGE",
+            "pos": [
+              1274,
+              170
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 86,
+            "type": "DA3Render",
+            "pos": [
+              800,
+              310
+            ],
+            "size": [
+              380,
+              130
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "da3_geometry",
+                "name": "da3_geometry",
+                "type": "DA3_GEOMETRY",
+                "link": 12
+              },
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "output"
+                },
+                "link": 24
+              },
+              {
+                "localized_name": "output.normalization",
+                "name": "output.normalization",
+                "type": "COMBO",
+                "widget": {
+                  "name": "output.normalization"
+                },
+                "link": 25
+              },
+              {
+                "localized_name": "output.apply_sky_clip",
+                "name": "output.apply_sky_clip",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "output.apply_sky_clip"
+                },
+                "link": 26
+              },
+              {
+                "name": "geometry",
+                "type": "DA3_GEOMETRY",
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "slot_index": 0,
+                "links": [
+                  7
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "DA3Render",
+              "cnr_id": "comfy-core",
+              "ver": "0.19.0"
+            },
+            "widgets_values": [
+              "depth",
+              "v2_style",
+              false
+            ]
+          },
+          {
+            "id": 87,
+            "type": "DA3Inference",
+            "pos": [
+              800,
+              50
+            ],
+            "size": [
+              390,
+              130
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "da3_model",
+                "name": "da3_model",
+                "type": "DA3_MODEL",
+                "link": 107
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 19
+              },
+              {
+                "localized_name": "resolution",
+                "name": "resolution",
+                "type": "INT",
+                "widget": {
+                  "name": "resolution"
+                },
+                "link": 22
+              },
+              {
+                "localized_name": "resize_method",
+                "name": "resize_method",
+                "type": "COMBO",
+                "widget": {
+                  "name": "resize_method"
+                },
+                "link": 23
+              },
+              {
+                "localized_name": "mode",
+                "name": "mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "mode"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "da3_geometry",
+                "name": "da3_geometry",
+                "type": "DA3_GEOMETRY",
+                "slot_index": 0,
+                "links": [
+                  12
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "DA3Inference",
+              "cnr_id": "comfy-core",
+              "ver": "0.19.0"
+            },
+            "widgets_values": [
+              504,
+              "upper_bound_resize",
+              "mono"
+            ]
+          },
+          {
+            "id": 88,
+            "type": "LoadDA3Model",
+            "pos": [
+              810,
+              -160
+            ],
+            "size": [
+              400,
+              140
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model_name",
+                "name": "model_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "model_name"
+                },
+                "link": 106
+              },
+              {
+                "localized_name": "weight_dtype",
+                "name": "weight_dtype",
+                "type": "COMBO",
+                "widget": {
+                  "name": "weight_dtype"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "DA3_MODEL",
+                "name": "DA3_MODEL",
+                "type": "DA3_MODEL",
+                "links": [
+                  107
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "LoadDA3Model",
+              "cnr_id": "comfy-core",
+              "ver": "0.24.0",
+              "models": [
+                {
+                  "name": "depth_anything_3_mono_large.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/Depth-Anything-3/resolve/main/geometry_estimation/depth_anything_3_mono_large.safetensors",
+                  "directory": "geometry_estimation"
+                }
+              ]
+            },
+            "widgets_values": [
+              "depth_anything_3_mono_large.safetensors",
+              "default"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 12,
+            "origin_id": 87,
+            "origin_slot": 0,
+            "target_id": 86,
+            "target_slot": 0,
+            "type": "DA3_GEOMETRY"
+          },
+          {
+            "id": 19,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 87,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 7,
+            "origin_id": 86,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 22,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 87,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 23,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 87,
+            "target_slot": 3,
+            "type": "COMBO"
+          },
+          {
+            "id": 24,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 86,
+            "target_slot": 1,
+            "type": "COMFY_DYNAMICCOMBO_V3"
+          },
+          {
+            "id": 25,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 86,
+            "target_slot": 2,
+            "type": "COMBO"
+          },
+          {
+            "id": 26,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 86,
+            "target_slot": 3,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 106,
+            "origin_id": -10,
+            "origin_slot": 6,
+            "target_id": 88,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 107,
+            "origin_id": 88,
+            "origin_slot": 0,
+            "target_id": 87,
+            "target_slot": 0,
+            "type": "DA3_MODEL"
+          }
+        ],
+        "extra": {},
+        "category": "Conditioning & Preprocessors/Depth",
+        "description": "This subgraph takes an input image and produces a depth map using the Depth Anything 3 model, which recovers spatially consistent geometry from any number of views. It is ideal for single or multi-view images, videos, and 3D scenes where accurate depth estimation is needed for tasks like SLAM, novel view synthesis, or spatial perception. The model uses a plain transformer backbone and supports both monocular and multi-view inputs without."
+      }
+    ]
+  },
+  "extra": {
+    "BlueprintDescription": "This subgraph takes an input image and produces a depth map using the Depth Anything 3 model, which recovers spatially consistent geometry from any number of views. It is ideal for single or multi-view images, videos, and 3D scenes where accurate depth estimation is needed for tasks like SLAM, novel view synthesis, or spatial perception. The model uses a plain transformer backbone and supports both monocular and multi-view inputs without."
+  }
+}

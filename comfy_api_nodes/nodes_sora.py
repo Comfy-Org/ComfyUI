@@ -33,9 +33,13 @@ class OpenAIVideoSora2(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="OpenAIVideoSora2",
-            display_name="OpenAI Sora - Video",
-            category="api node/video/Sora",
-            description="OpenAI video and audio generation.",
+            display_name="OpenAI Sora - Video (DEPRECATED)",
+            category="partner/video/Sora",
+            description=(
+                "OpenAI video and audio generation.\n\n"
+                "DEPRECATION NOTICE: OpenAI will stop serving the Sora v2 API in September 2026. "
+                "This node will be removed from ComfyUI at that time."
+            ),
             inputs=[
                 IO.Combo.Input(
                     "model",

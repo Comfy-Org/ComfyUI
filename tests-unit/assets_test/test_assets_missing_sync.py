@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 import requests
-from conftest import get_asset_filename, trigger_sync_seed_assets
+from helpers import get_asset_filename, trigger_sync_seed_assets
 
 
 
@@ -40,7 +40,9 @@ def test_seed_asset_removed_when_file_is_deleted(
     # there should be exactly one with that name
     matches = [a for a in body1.get("assets", []) if a.get("name") == name]
     assert matches
-    assert matches[0].get("asset_hash") is None
+    # Seed assets have no hash; exclude_none drops both keys from the response
+    assert "asset_hash" not in matches[0]
+    assert "hash" not in matches[0]
     asset_info_id = matches[0]["id"]
 
     # Remove the underlying file and sync again

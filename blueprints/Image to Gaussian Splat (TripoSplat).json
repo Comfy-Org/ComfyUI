@@ -1,0 +1,1983 @@
+{
+  "revision": 0,
+  "last_node_id": 118,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 118,
+      "type": "6c0b94f2-a3d2-4056-93f7-4072126afe39",
+      "pos": [
+        790,
+        1900
+      ],
+      "size": [
+        430,
+        670
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "label": "auto_remove_background",
+          "name": "switch",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "switch"
+          },
+          "link": null
+        },
+        {
+          "label": "num_gaussians",
+          "name": "num_gaussians_1",
+          "type": "INT",
+          "widget": {
+            "name": "num_gaussians_1"
+          },
+          "link": null
+        },
+        {
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "name": "unet_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "unet_name"
+          },
+          "link": null
+        },
+        {
+          "name": "clip_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "clip_name"
+          },
+          "link": null
+        },
+        {
+          "label": "splat_vae",
+          "name": "vae_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_name"
+          },
+          "link": null
+        },
+        {
+          "label": "flux2_vae",
+          "name": "vae_name_1",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_name_1"
+          },
+          "link": null
+        },
+        {
+          "label": "bg_removal_model",
+          "name": "bg_removal_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "bg_removal_name"
+          },
+          "link": null
+        },
+        {
+          "label": "mask",
+          "name": "on_false",
+          "type": "MASK",
+          "link": null
+        },
+        {
+          "label": "enable_preview",
+          "name": "switch_1",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "switch_1"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "splat",
+          "name": "splat",
+          "type": "SPLAT",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "103",
+            "switch"
+          ],
+          [
+            "108",
+            "num_gaussians"
+          ],
+          [
+            "102",
+            "seed"
+          ],
+          [
+            "111",
+            "unet_name"
+          ],
+          [
+            "105",
+            "clip_name"
+          ],
+          [
+            "106",
+            "vae_name"
+          ],
+          [
+            "107",
+            "vae_name"
+          ],
+          [
+            "109",
+            "bg_removal_name"
+          ],
+          [
+            "112",
+            "switch"
+          ],
+          [
+            "101",
+            "$$canvas-image-preview"
+          ]
+        ],
+        "cnr_id": "comfy-core",
+        "ver": "0.22.0",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [],
+      "title": "Image to Gaussian Splat (TripoSplat)"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "6c0b94f2-a3d2-4056-93f7-4072126afe39",
+        "version": 1,
+        "state": {
+          "lastGroupId": 6,
+          "lastNodeId": 118,
+          "lastLinkId": 219,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Image to Gaussian Splat (TripoSplat)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -110,
+            1050,
+            194.666015625,
+            268
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            2250,
+            700,
+            128,
+            68
+          ]
+        },
+        "inputs": [
+          {
+            "id": "736cc4fd-77da-4fb7-8db7-d94296654571",
+            "name": "image",
+            "type": "IMAGE",
+            "linkIds": [
+              165,
+              195
+            ],
+            "localized_name": "image",
+            "pos": [
+              60.666015625,
+              1074
+            ]
+          },
+          {
+            "id": "bc100771-6c6a-4223-a6b1-62f8c7b1c5b6",
+            "name": "switch",
+            "type": "BOOLEAN",
+            "linkIds": [
+              184
+            ],
+            "label": "auto_remove_background",
+            "pos": [
+              60.666015625,
+              1094
+            ]
+          },
+          {
+            "id": "13a86171-bf5d-4328-ae51-116502beb274",
+            "name": "num_gaussians_1",
+            "type": "INT",
+            "linkIds": [
+              196
+            ],
+            "label": "num_gaussians",
+            "pos": [
+              60.666015625,
+              1114
+            ]
+          },
+          {
+            "id": "38ebeca8-4674-4a73-a686-f8b9444c7bb6",
+            "name": "seed",
+            "type": "INT",
+            "linkIds": [
+              197
+            ],
+            "pos": [
+              60.666015625,
+              1134
+            ]
+          },
+          {
+            "id": "6952068a-04ba-4e56-b702-0986f69b0d96",
+            "name": "unet_name",
+            "type": "COMBO",
+            "linkIds": [
+              201
+            ],
+            "pos": [
+              60.666015625,
+              1154
+            ]
+          },
+          {
+            "id": "206819d5-2ecb-4788-8dcf-134138e46bbf",
+            "name": "clip_name",
+            "type": "COMBO",
+            "linkIds": [
+              202
+            ],
+            "pos": [
+              60.666015625,
+              1174
+            ]
+          },
+          {
+            "id": "83a8d3d1-4c75-4ce0-a03c-face70f57ac9",
+            "name": "vae_name",
+            "type": "COMBO",
+            "linkIds": [
+              203
+            ],
+            "label": "splat_vae",
+            "pos": [
+              60.666015625,
+              1194
+            ]
+          },
+          {
+            "id": "dce14e7e-37ca-493b-8dbe-24333d7cee63",
+            "name": "vae_name_1",
+            "type": "COMBO",
+            "linkIds": [
+              204
+            ],
+            "label": "flux2_vae",
+            "pos": [
+              60.666015625,
+              1214
+            ]
+          },
+          {
+            "id": "d9c843e7-567b-4acc-813d-752579cb89b5",
+            "name": "bg_removal_name",
+            "type": "COMBO",
+            "linkIds": [
+              205
+            ],
+            "label": "bg_removal_model",
+            "pos": [
+              60.666015625,
+              1234
+            ]
+          },
+          {
+            "id": "07d672fb-6e35-44d8-b973-7577c3468208",
+            "name": "on_false",
+            "type": "MASK",
+            "linkIds": [
+              209
+            ],
+            "label": "mask",
+            "pos": [
+              60.666015625,
+              1254
+            ]
+          },
+          {
+            "id": "8ae4f3b4-e3d2-4d42-84fa-4e9af9ffc3e7",
+            "name": "switch_1",
+            "type": "BOOLEAN",
+            "linkIds": [
+              212
+            ],
+            "label": "enable_preview",
+            "pos": [
+              60.666015625,
+              1274
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "4185ff5d-4179-4938-9fb6-cea3a8322606",
+            "name": "splat",
+            "type": "SPLAT",
+            "linkIds": [
+              156,
+              156
+            ],
+            "localized_name": "splat",
+            "pos": [
+              2274,
+              724
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 100,
+            "type": "TripoSplatConditioning",
+            "pos": [
+              940,
+              800
+            ],
+            "size": [
+              290,
+              120
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip_vision",
+                "name": "clip_vision",
+                "type": "CLIP_VISION",
+                "link": 45
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 46
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 47
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "positive",
+                "name": "positive",
+                "type": "CONDITIONING",
+                "links": [
+                  48
+                ]
+              },
+              {
+                "localized_name": "negative",
+                "name": "negative",
+                "type": "CONDITIONING",
+                "links": [
+                  49
+                ]
+              },
+              {
+                "localized_name": "latent",
+                "name": "latent",
+                "type": "LATENT",
+                "links": [
+                  54
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "TripoSplatConditioning",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            }
+          },
+          {
+            "id": 101,
+            "type": "PreviewImage",
+            "pos": [
+              1360,
+              1290
+            ],
+            "size": [
+              440,
+              530
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 4,
+            "inputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "link": 38
+              }
+            ],
+            "outputs": [],
+            "properties": {
+              "Node name for S&R": "PreviewImage",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            }
+          },
+          {
+            "id": 102,
+            "type": "KSampler",
+            "pos": [
+              1350,
+              570
+            ],
+            "size": [
+              290,
+              590
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 211
+              },
+              {
+                "localized_name": "positive",
+                "name": "positive",
+                "type": "CONDITIONING",
+                "link": 48
+              },
+              {
+                "localized_name": "negative",
+                "name": "negative",
+                "type": "CONDITIONING",
+                "link": 49
+              },
+              {
+                "localized_name": "latent_image",
+                "name": "latent_image",
+                "type": "LATENT",
+                "link": 54
+              },
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": 197
+              },
+              {
+                "localized_name": "steps",
+                "name": "steps",
+                "type": "INT",
+                "widget": {
+                  "name": "steps"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "cfg",
+                "name": "cfg",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "cfg"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "sampler_name",
+                "name": "sampler_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "sampler_name"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "scheduler",
+                "name": "scheduler",
+                "type": "COMBO",
+                "widget": {
+                  "name": "scheduler"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "denoise",
+                "name": "denoise",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "denoise"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "links": [
+                  103
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "KSampler",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              46,
+              "fixed",
+              20,
+              3,
+              "dpmpp_2m",
+              "simple",
+              1
+            ]
+          },
+          {
+            "id": 103,
+            "type": "ComfySwitchNode",
+            "pos": [
+              1020,
+              1330
+            ],
+            "size": [
+              270,
+              130
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "type": "*",
+                "link": 208
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "type": "*",
+                "link": 170
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 184
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "*",
+                "links": [
+                  95
+                ]
+              }
+            ],
+            "title": "Switch: Mask Source",
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              true
+            ]
+          },
+          {
+            "id": 104,
+            "type": "TripoSplatPreprocessImage",
+            "pos": [
+              940,
+              990
+            ],
+            "size": [
+              300,
+              160
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 195
+              },
+              {
+                "localized_name": "mask",
+                "name": "mask",
+                "type": "MASK",
+                "link": 95
+              },
+              {
+                "localized_name": "erode_radius",
+                "name": "erode_radius",
+                "type": "INT",
+                "widget": {
+                  "name": "erode_radius"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "size",
+                "name": "size",
+                "type": "INT",
+                "widget": {
+                  "name": "size"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "links": [
+                  38,
+                  47
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "TripoSplatPreprocessImage",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              1,
+              1024
+            ]
+          },
+          {
+            "id": 105,
+            "type": "CLIPVisionLoader",
+            "pos": [
+              410,
+              760
+            ],
+            "size": [
+              420,
+              140
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip_name",
+                "name": "clip_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "clip_name"
+                },
+                "link": 202
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CLIP_VISION",
+                "name": "CLIP_VISION",
+                "type": "CLIP_VISION",
+                "links": [
+                  45
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CLIPVisionLoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "models": [
+                {
+                  "name": "dino_v3_vit_h.safetensors",
+                  "url": "https://huggingface.co/VAST-AI/TripoSplat/resolve/main/clip_vision/dino_v3_vit_h.safetensors",
+                  "directory": "clip_vision"
+                }
+              ],
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "dino_v3_vit_h.safetensors"
+            ]
+          },
+          {
+            "id": 106,
+            "type": "VAELoader",
+            "pos": [
+              420,
+              930
+            ],
+            "size": [
+              410,
+              110
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "vae_name",
+                "name": "vae_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "vae_name"
+                },
+                "link": 203
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "VAE",
+                "name": "VAE",
+                "type": "VAE",
+                "links": [
+                  104,
+                  216
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAELoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "models": [
+                {
+                  "name": "triposplat_vae_decoder_fp16.safetensors",
+                  "url": "https://huggingface.co/VAST-AI/TripoSplat/resolve/main/vae/triposplat_vae_decoder_fp16.safetensors",
+                  "directory": "vae"
+                }
+              ],
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "triposplat_vae_decoder_fp16.safetensors"
+            ]
+          },
+          {
+            "id": 107,
+            "type": "VAELoader",
+            "pos": [
+              410,
+              1120
+            ],
+            "size": [
+              420,
+              110
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "vae_name",
+                "name": "vae_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "vae_name"
+                },
+                "link": 204
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "VAE",
+                "name": "VAE",
+                "type": "VAE",
+                "links": [
+                  46
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAELoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "models": [
+                {
+                  "name": "flux2-vae.safetensors",
+                  "url": "https://huggingface.co/VAST-AI/TripoSplat/resolve/main/vae/flux2-vae.safetensors",
+                  "directory": "vae"
+                }
+              ],
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "flux2-vae.safetensors"
+            ]
+          },
+          {
+            "id": 108,
+            "type": "VAEDecodeTripoSplat",
+            "pos": [
+              1730,
+              570
+            ],
+            "size": [
+              430,
+              160
+            ],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "samples",
+                "name": "samples",
+                "type": "LATENT",
+                "link": 103
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 104
+              },
+              {
+                "localized_name": "num_gaussians",
+                "name": "num_gaussians",
+                "type": "INT",
+                "widget": {
+                  "name": "num_gaussians"
+                },
+                "link": 196
+              },
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "splat",
+                "name": "splat",
+                "type": "SPLAT",
+                "links": [
+                  156
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAEDecodeTripoSplat",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              262144,
+              790219963981395,
+              "fixed"
+            ]
+          },
+          {
+            "id": 109,
+            "type": "e527b93c-76f7-485d-b285-fcf78914a4d5",
+            "pos": [
+              410,
+              1330
+            ],
+            "size": [
+              350,
+              160
+            ],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 165
+              },
+              {
+                "name": "bg_removal_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "bg_removal_name"
+                },
+                "link": 205
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  166,
+                  194
+                ]
+              },
+              {
+                "name": "mask",
+                "type": "MASK",
+                "links": [
+                  170
+                ]
+              }
+            ],
+            "properties": {
+              "proxyWidgets": [
+                [
+                  "115",
+                  "bg_removal_name"
+                ]
+              ],
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": []
+          },
+          {
+            "id": 110,
+            "type": "InvertMask",
+            "pos": [
+              430,
+              1540
+            ],
+            "size": [
+              230,
+              80
+            ],
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "mask",
+                "name": "mask",
+                "type": "MASK",
+                "link": 209
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MASK",
+                "name": "MASK",
+                "type": "MASK",
+                "links": [
+                  208
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "InvertMask",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            }
+          },
+          {
+            "id": 111,
+            "type": "UNETLoader",
+            "pos": [
+              410,
+              560
+            ],
+            "size": [
+              410,
+              140
+            ],
+            "flags": {},
+            "order": 11,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "unet_name",
+                "name": "unet_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "unet_name"
+                },
+                "link": 201
+              },
+              {
+                "localized_name": "weight_dtype",
+                "name": "weight_dtype",
+                "type": "COMBO",
+                "widget": {
+                  "name": "weight_dtype"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  213,
+                  215
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "UNETLoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "models": [
+                {
+                  "name": "triposplat_fp16.safetensors",
+                  "url": "https://huggingface.co/VAST-AI/TripoSplat/resolve/main/diffusion_models/triposplat_fp16.safetensors",
+                  "directory": "diffusion_models"
+                }
+              ],
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "triposplat_fp16.safetensors",
+              "default"
+            ]
+          },
+          {
+            "id": 112,
+            "type": "ComfySwitchNode",
+            "pos": [
+              930,
+              370
+            ],
+            "size": [
+              300,
+              140
+            ],
+            "flags": {},
+            "order": 12,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "type": "*",
+                "link": 213
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "type": "*",
+                "link": 217
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 212
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "*",
+                "links": [
+                  211
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              true
+            ]
+          },
+          {
+            "id": 113,
+            "type": "TripoSplatSamplingPreview",
+            "pos": [
+              940,
+              560
+            ],
+            "size": [
+              290,
+              190
+            ],
+            "flags": {},
+            "order": 13,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 215
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 216
+              },
+              {
+                "localized_name": "octree_level",
+                "name": "octree_level",
+                "type": "INT",
+                "widget": {
+                  "name": "octree_level"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "num_gaussians",
+                "name": "num_gaussians",
+                "type": "INT",
+                "widget": {
+                  "name": "num_gaussians"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "yaw",
+                "name": "yaw",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "yaw"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "pitch",
+                "name": "pitch",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "pitch"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "point_size",
+                "name": "point_size",
+                "type": "INT",
+                "widget": {
+                  "name": "point_size"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  217
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "TripoSplatSamplingPreview",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              5,
+              16384,
+              90,
+              15,
+              2
+            ]
+          }
+        ],
+        "groups": [
+          {
+            "id": 1,
+            "title": "Models",
+            "bounding": [
+              400,
+              490,
+              440,
+              748.625
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          },
+          {
+            "id": 2,
+            "title": "Image Preprocessing",
+            "bounding": [
+              400,
+              1260,
+              910,
+              370
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          }
+        ],
+        "links": [
+          {
+            "id": 45,
+            "origin_id": 105,
+            "origin_slot": 0,
+            "target_id": 100,
+            "target_slot": 0,
+            "type": "CLIP_VISION"
+          },
+          {
+            "id": 46,
+            "origin_id": 107,
+            "origin_slot": 0,
+            "target_id": 100,
+            "target_slot": 1,
+            "type": "VAE"
+          },
+          {
+            "id": 47,
+            "origin_id": 104,
+            "origin_slot": 0,
+            "target_id": 100,
+            "target_slot": 2,
+            "type": "IMAGE"
+          },
+          {
+            "id": 38,
+            "origin_id": 104,
+            "origin_slot": 0,
+            "target_id": 101,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 103,
+            "origin_id": 102,
+            "origin_slot": 0,
+            "target_id": 108,
+            "target_slot": 0,
+            "type": "LATENT"
+          },
+          {
+            "id": 104,
+            "origin_id": 106,
+            "origin_slot": 0,
+            "target_id": 108,
+            "target_slot": 1,
+            "type": "VAE"
+          },
+          {
+            "id": 48,
+            "origin_id": 100,
+            "origin_slot": 0,
+            "target_id": 102,
+            "target_slot": 1,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 49,
+            "origin_id": 100,
+            "origin_slot": 1,
+            "target_id": 102,
+            "target_slot": 2,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 54,
+            "origin_id": 100,
+            "origin_slot": 2,
+            "target_id": 102,
+            "target_slot": 3,
+            "type": "LATENT"
+          },
+          {
+            "id": 170,
+            "origin_id": 109,
+            "origin_slot": 1,
+            "target_id": 103,
+            "target_slot": 1,
+            "type": "MASK"
+          },
+          {
+            "id": 95,
+            "origin_id": 103,
+            "origin_slot": 0,
+            "target_id": 104,
+            "target_slot": 1,
+            "type": "MASK"
+          },
+          {
+            "id": 165,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 109,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 156,
+            "origin_id": 108,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "SPLAT"
+          },
+          {
+            "id": 184,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 103,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 195,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 104,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 196,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 108,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 197,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 102,
+            "target_slot": 4,
+            "type": "INT"
+          },
+          {
+            "id": 201,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 111,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 202,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 105,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 203,
+            "origin_id": -10,
+            "origin_slot": 6,
+            "target_id": 106,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 204,
+            "origin_id": -10,
+            "origin_slot": 7,
+            "target_id": 107,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 205,
+            "origin_id": -10,
+            "origin_slot": 8,
+            "target_id": 109,
+            "target_slot": 1,
+            "type": "COMBO"
+          },
+          {
+            "id": 208,
+            "origin_id": 110,
+            "origin_slot": 0,
+            "target_id": 103,
+            "target_slot": 0,
+            "type": "MASK"
+          },
+          {
+            "id": 209,
+            "origin_id": -10,
+            "origin_slot": 9,
+            "target_id": 110,
+            "target_slot": 0,
+            "type": "MASK"
+          },
+          {
+            "id": 211,
+            "origin_id": 112,
+            "origin_slot": 0,
+            "target_id": 102,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 212,
+            "origin_id": -10,
+            "origin_slot": 10,
+            "target_id": 112,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 213,
+            "origin_id": 111,
+            "origin_slot": 0,
+            "target_id": 112,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 215,
+            "origin_id": 111,
+            "origin_slot": 0,
+            "target_id": 113,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 216,
+            "origin_id": 106,
+            "origin_slot": 0,
+            "target_id": 113,
+            "target_slot": 1,
+            "type": "VAE"
+          },
+          {
+            "id": 217,
+            "origin_id": 113,
+            "origin_slot": 0,
+            "target_id": 112,
+            "target_slot": 1,
+            "type": "MODEL"
+          }
+        ],
+        "extra": {},
+        "category": "3D",
+        "description": "This subgraph takes a single 2D image as input and generates a variable number of 3D Gaussians (up to 262,144) as output, enabling high-quality 3D reconstruction. It is ideal for asset creation, AR/VR, game development, and simulation environments, handling diverse image styles from photos to illustrations."
+      },
+      {
+        "id": "e527b93c-76f7-485d-b285-fcf78914a4d5",
+        "version": 1,
+        "state": {
+          "lastGroupId": 6,
+          "lastNodeId": 118,
+          "lastLinkId": 219,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Remove Background (BiRefNet)",
+        "description": "Removes or replaces image backgrounds using BiRefNet segmentation and alpha compositing.",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -6810,
+            1480,
+            150.9140625,
+            88
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            -6169.049695722246,
+            1475.2619799128663,
+            128,
+            88
+          ]
+        },
+        "inputs": [
+          {
+            "id": "7bc321cd-df31-4c39-aaf7-7f0d01326189",
+            "name": "image",
+            "type": "IMAGE",
+            "linkIds": [
+              5,
+              7
+            ],
+            "localized_name": "image",
+            "pos": [
+              -6683.0859375,
+              1504
+            ]
+          },
+          {
+            "id": "e89d2cd8-daa3-4e29-8a69-851db85072cb",
+            "name": "bg_removal_name",
+            "type": "COMBO",
+            "linkIds": [
+              12
+            ],
+            "pos": [
+              -6683.0859375,
+              1524
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "16e7863c-4c38-46c2-aa74-e82991fbfe8d",
+            "name": "IMAGE",
+            "type": "IMAGE",
+            "linkIds": [
+              8
+            ],
+            "localized_name": "IMAGE",
+            "pos": [
+              -6145.049695722246,
+              1499.2619799128663
+            ]
+          },
+          {
+            "id": "f7240c19-5b80-406e-a8e2-9b12440ee2d6",
+            "name": "mask",
+            "type": "MASK",
+            "linkIds": [
+              11
+            ],
+            "pos": [
+              -6145.049695722246,
+              1519.2619799128663
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 114,
+            "type": "RemoveBackground",
+            "pos": [
+              -6540,
+              1440
+            ],
+            "size": [
+              310,
+              100
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "bg_removal_model",
+                "name": "bg_removal_model",
+                "type": "BACKGROUND_REMOVAL",
+                "link": 3
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 5
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "mask",
+                "name": "mask",
+                "type": "MASK",
+                "links": [
+                  4,
+                  11
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "RemoveBackground",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            }
+          },
+          {
+            "id": 115,
+            "type": "LoadBackgroundRemovalModel",
+            "pos": [
+              -6540,
+              1300
+            ],
+            "size": [
+              320,
+              110
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "bg_removal_name",
+                "name": "bg_removal_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "bg_removal_name"
+                },
+                "link": 12
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "bg_model",
+                "name": "bg_model",
+                "type": "BACKGROUND_REMOVAL",
+                "links": [
+                  3
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "LoadBackgroundRemovalModel",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "models": [
+                {
+                  "name": "birefnet.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/BiRefNet/resolve/main/background_removal/birefnet.safetensors",
+                  "directory": "background_removal"
+                }
+              ],
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "birefnet.safetensors"
+            ]
+          },
+          {
+            "id": 116,
+            "type": "InvertMask",
+            "pos": [
+              -6530,
+              1570
+            ],
+            "size": [
+              290,
+              80
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "mask",
+                "name": "mask",
+                "type": "MASK",
+                "link": 4
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MASK",
+                "name": "MASK",
+                "type": "MASK",
+                "links": [
+                  6
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "InvertMask",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            }
+          },
+          {
+            "id": 117,
+            "type": "JoinImageWithAlpha",
+            "pos": [
+              -6530,
+              1670
+            ],
+            "size": [
+              290,
+              100
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 7
+              },
+              {
+                "localized_name": "alpha",
+                "name": "alpha",
+                "type": "MASK",
+                "link": 6
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  8
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "JoinImageWithAlpha",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            }
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 3,
+            "origin_id": 115,
+            "origin_slot": 0,
+            "target_id": 114,
+            "target_slot": 0,
+            "type": "BACKGROUND_REMOVAL"
+          },
+          {
+            "id": 4,
+            "origin_id": 114,
+            "origin_slot": 0,
+            "target_id": 116,
+            "target_slot": 0,
+            "type": "MASK"
+          },
+          {
+            "id": 6,
+            "origin_id": 116,
+            "origin_slot": 0,
+            "target_id": 117,
+            "target_slot": 1,
+            "type": "MASK"
+          },
+          {
+            "id": 5,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 114,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 7,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 117,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 8,
+            "origin_id": 117,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 11,
+            "origin_id": 114,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 1,
+            "type": "MASK"
+          },
+          {
+            "id": 12,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 115,
+            "target_slot": 0,
+            "type": "COMBO"
+          }
+        ],
+        "extra": {}
+      }
+    ]
+  },
+  "extra": {
+    "BlueprintDescription": "This subgraph takes a single 2D image as input and generates a variable number of 3D Gaussians (up to 262,144) as output, enabling high-quality 3D reconstruction. It is ideal for asset creation, AR/VR, game development, and simulation environments, handling diverse image styles from photos to illustrations."
+  }
+}

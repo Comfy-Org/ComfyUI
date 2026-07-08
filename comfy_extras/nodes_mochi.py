@@ -10,7 +10,7 @@ class EmptyMochiLatentVideo(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="EmptyMochiLatentVideo",
-            category="latent/video",
+            category="model/latent/mochi",
             inputs=[
                 io.Int.Input("width", default=848, min=16, max=nodes.MAX_RESOLUTION, step=16),
                 io.Int.Input("height", default=480, min=16, max=nodes.MAX_RESOLUTION, step=16),

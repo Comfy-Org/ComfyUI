@@ -7,6 +7,7 @@ from . import sdxl_clip
 import comfy.text_encoders.sd2_clip
 import comfy.text_encoders.sd3_clip
 import comfy.text_encoders.sa_t5
+import comfy.text_encoders.sa3
 import comfy.text_encoders.aura_t5
 import comfy.text_encoders.pixart_t5
 import comfy.text_encoders.hydit
@@ -23,9 +24,16 @@ import comfy.text_encoders.qwen_image
 import comfy.text_encoders.hunyuan_image
 import comfy.text_encoders.kandinsky5
 import comfy.text_encoders.z_image
+import comfy.text_encoders.ideogram4
+import comfy.text_encoders.boogu
+import comfy.text_encoders.krea2
 import comfy.text_encoders.anima
 import comfy.text_encoders.ace15
 import comfy.text_encoders.longcat_image
+import comfy.text_encoders.ernie
+import comfy.text_encoders.cogvideo
+import comfy.text_encoders.hidream_o1
+import comfy.text_encoders.pixeldit
 
 from . import supported_models_base
 from . import latent_formats
@@ -600,6 +608,29 @@ class StableAudio(supported_models_base.BASE):
     def clip_target(self, state_dict={}):
         return supported_models_base.ClipTarget(comfy.text_encoders.sa_t5.SAT5Tokenizer, comfy.text_encoders.sa_t5.SAT5Model)
 
+class StableAudio3(StableAudio):
+    unet_config = {
+        "audio_model": "dit1.0",
+        "global_cond_shared_embed": True,
+    }
+
+    sampling_settings = {
+        "multiplier": 1.0,
+        "shift": 2.0,
+    }
+
+    latent_format = latent_formats.StableAudio3
+
+    memory_usage_factor = 7
+
+    def get_model(self, state_dict, prefix="", device=None):
+        seconds_total_sd = utils.state_dict_prefix_replace(state_dict, {"conditioner.conditioners.seconds_total.": ""}, filter_keys=True)
+        padding_embedding = state_dict.get("conditioner.conditioners.prompt.padding_embedding", None)
+        return model_base.StableAudio3(self, seconds_total_embedder_weights=seconds_total_sd, padding_embedding=padding_embedding, device=device)
+
+    def clip_target(self, state_dict={}):
+        return supported_models_base.ClipTarget(comfy.text_encoders.sa3.SAT5GemmaTokenizer, comfy.text_encoders.sa3.SAT5GemmaModel)
+
 class AuraFlow(supported_models_base.BASE):
     unet_config = {
         "cond_seq_dim": 2048,
@@ -801,6 +832,50 @@ class Flux2(Flux):
             return supported_models_base.ClipTarget(comfy.text_encoders.flux.Flux2Tokenizer, comfy.text_encoders.flux.flux2_te(**detect))
 
         return None
+
+
+class Lens(supported_models_base.BASE):
+    """Microsoft Lens (3.8B dual-stream MMDiT, GPT-OSS-20B text features, Flux2 VAE)."""
+
+    unet_config = {
+        "image_model": "lens",
+    }
+
+    sampling_settings = {
+        "shift": 1.829, # Default mu for 1440x1440 (and any seq_len > 4300
+    }
+
+    unet_extra_config = {}
+    latent_format = latent_formats.Flux2
+
+    memory_usage_factor = 4.0
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float32] # fp16 causes NaNs
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def __init__(self, unet_config):
+        super().__init__(unet_config)
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.Lens(self, model_type=model_base.ModelType.FLUX, device=device)
+
+    def clip_target(self, state_dict={}):
+        pref = self.text_encoder_key_prefix[0]
+        for hint in ("gpt_oss.transformer.", ""):
+            full_prefix = "{}{}".format(pref, hint)
+            if "{}layers.0.self_attn.sinks".format(full_prefix) in state_dict:
+                detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, full_prefix)
+                return supported_models_base.ClipTarget(
+                    comfy.text_encoders.gpt_oss.LensTokenizer,
+                    comfy.text_encoders.gpt_oss.lens_te(**detect),
+                )
+        return supported_models_base.ClipTarget(
+            comfy.text_encoders.gpt_oss.LensTokenizer,
+            comfy.text_encoders.gpt_oss.lens_te(),
+        )
+
 
 class GenmoMochi(supported_models_base.BASE):
     unet_config = {
@@ -1132,6 +1207,72 @@ class ZImagePixelSpace(ZImage):
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.ZImagePixelSpace(self, device=device)
 
+class PixelDiTT2I(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "pixeldit_t2i",
+    }
+
+    unet_extra_config = {}
+
+    sampling_settings = {
+        "shift": 4.0,  # 1024px stage 3 default; 2.0 for 512px
+    }
+
+    latent_format = latent_formats.PixelDiTPixel
+    memory_usage_factor = 0.04
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.PixelDiTT2I(self, device=device)
+
+    def process_unet_state_dict(self, state_dict):
+        # pixel_dim from pixel_embedder.proj.weight = (pixel_dim, in_channels); p2 derived per-weight from total // (6 * pixel_dim).
+        pixel_dim = next(v for k, v in state_dict.items() if k.endswith("pixel_embedder.proj.weight")).shape[0]
+
+        out = {}
+        marker = ".adaLN_modulation.0."
+        for k, v in state_dict.items():
+            if k.startswith("_repa_projector") or k.startswith("net_ema."):
+                continue
+            if k.startswith("core."):
+                k = k[len("core."):]
+            elif k.startswith("net."):
+                k = k[len("net."):]
+            if "pixel_blocks." in k and marker in k:
+                # Split into msa (chunks 0-2) and mlp (chunks 3-5) for the two-Linear PiTBlock to reduce peak VRAM
+                p2 = v.shape[0] // (6 * pixel_dim)
+                trail = v.shape[1:]  # () for bias, (in_dim,) for weight
+                vv = v.view(p2, 6, pixel_dim, *trail)
+                base, suffix = k.split(marker)
+                out[f"{base}.adaLN_modulation_msa.{suffix}"] = vv[:, 0:3].reshape(3 * p2 * pixel_dim, *trail).contiguous()
+                out[f"{base}.adaLN_modulation_mlp.{suffix}"] = vv[:, 3:6].reshape(3 * p2 * pixel_dim, *trail).contiguous()
+            else:
+                out[k] = v
+        return out
+
+    def clip_target(self, state_dict={}):
+        return supported_models_base.ClipTarget(
+            comfy.text_encoders.pixeldit.PixelDiTGemma2Tokenizer,
+            comfy.text_encoders.pixeldit.PixelDiTGemma2TE,
+        )
+
+class PiD(PixelDiTT2I):
+    unet_config = {
+        "image_model": "pid",
+    }
+
+    sampling_settings = {
+        "shift": 1.5, # close approximation of the original distill 4 steps [0.999, 0.866, 0.634, 0.342, 0]
+    }
+
+    memory_usage_factor = 0.04
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.PiD(self, device=device)
+
 class WAN21_T2V(supported_models_base.BASE):
     unet_config = {
         "image_model": "wan2.1",
@@ -1164,6 +1305,25 @@ class WAN21_T2V(supported_models_base.BASE):
         pref = self.text_encoder_key_prefix[0]
         t5_detect = comfy.text_encoders.sd3_clip.t5_xxl_detect(state_dict, "{}umt5xxl.transformer.".format(pref))
         return supported_models_base.ClipTarget(comfy.text_encoders.wan.WanT5Tokenizer, comfy.text_encoders.wan.te(**t5_detect))
+
+class WAN21_CausalAR_T2V(WAN21_T2V):
+    unet_config = {
+        "image_model": "wan2.1",
+        "model_type": "t2v",
+        "causal_ar": True,
+    }
+
+    sampling_settings = {
+        "shift": 5.0,
+    }
+
+    def __init__(self, unet_config):
+        super().__init__(unet_config)
+        self.unet_config.pop("causal_ar", None)
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.WAN21_CausalAR(self, device=device)
+
 
 class WAN21_I2V(WAN21_T2V):
     unet_config = {
@@ -1292,6 +1452,48 @@ class WAN21_SCAIL(WAN21_T2V):
         out = model_base.WAN21_SCAIL(self, image_to_video=False, device=device)
         return out
 
+
+class WAN21_SCAIL2(WAN21_T2V):
+    unet_config = {
+        "image_model": "wan2.1",
+        "model_type": "scail2",
+    }
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.WAN21_SCAIL2(self, image_to_video=False, device=device)
+        return out
+
+class WAN22_WanDancer(WAN21_T2V):
+    unet_config = {
+        "image_model": "wan2.1",
+        "model_type": "wandancer",
+        "in_dim": 36,
+    }
+
+    def __init__(self, unet_config):
+        super().__init__(unet_config)
+        self.memory_usage_factor = 1.8
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.WAN22_WanDancer(self, image_to_video=True, device=device)
+        return out
+
+    def process_unet_state_dict(self, state_dict):
+        out_sd = {}
+        for k in list(state_dict.keys()):
+            # split music_encoder in_proj into q_proj, k_proj, v_proj
+            if "music_encoder" in k and "self_attn.in_proj" in k:
+                suffix = "weight" if k.endswith("weight") else "bias"
+                tensor = state_dict[k]
+                d = tensor.shape[0] // 3
+                prefix = k.replace(f"in_proj_{suffix}", "")
+                out_sd[f"{prefix}q_proj.{suffix}"] = tensor[:d]
+                out_sd[f"{prefix}k_proj.{suffix}"] = tensor[d:2*d]
+                out_sd[f"{prefix}v_proj.{suffix}"] = tensor[2*d:]
+            else:
+                out_sd[k] = state_dict[k]
+        return out_sd
+
 class Hunyuan3Dv2(supported_models_base.BASE):
     unet_config = {
         "image_model": "hunyuan3d2",
@@ -1350,6 +1552,30 @@ class Hunyuan3Dv2mini(Hunyuan3Dv2):
 
     latent_format = latent_formats.Hunyuan3Dv2mini
 
+class TripoSplat(supported_models_base.BASE):
+    # Image -> 3D gaussian splat flow denoiser
+    unet_config = {
+        "image_model": "triposplat",
+    }
+
+    unet_extra_config = {}
+
+    sampling_settings = {
+        "shift": 3.0,
+    }
+
+    memory_usage_factor = 0.6
+
+    latent_format = latent_formats.TripoSplat
+
+    supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.TripoSplat(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        return None
+
 class HiDream(supported_models_base.BASE):
     unet_config = {
         "image_model": "hidream",
@@ -1378,6 +1604,50 @@ class HiDream(supported_models_base.BASE):
 
     def clip_target(self, state_dict={}):
         return None #  TODO
+
+class HiDreamO1(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "hidream_o1",
+    }
+
+    sampling_settings = {
+        "shift": 3.0,
+        "noise_scale": 8.0,
+    }
+
+    latent_format = latent_formats.HiDreamO1Pixel
+    memory_usage_factor = 0.033
+    # fp16 not supported: LM MLP down_proj activations fp16 overflow, causing NaNs
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    optimizations = {"fp8": False}
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.HiDreamO1(self, device=device)
+
+    def process_unet_state_dict(self, state_dict):
+        # Drop unused Qwen3-VL deepstack merger weights; upstream discards them at inference.
+        for key in list(state_dict.keys()):
+            if "visual.deepstack_merger_list" in key:
+                del state_dict[key]
+        return state_dict
+
+    def process_vae_state_dict(self, state_dict):
+        # Pixel-space model: inject sentinel so VAE construction picks PixelspaceConversionVAE.
+        return {"pixel_space_vae": torch.tensor(1.0)}
+
+    def process_clip_state_dict(self, state_dict):
+        # Tokenizer-only TE: inject sentinel so load_state_dict_guess_config triggers CLIP init.
+        return {"_hidream_o1_te_sentinel": torch.zeros(1)}
+
+    def clip_target(self, state_dict={}):
+        return supported_models_base.ClipTarget(
+            comfy.text_encoders.hidream_o1.HiDreamO1Tokenizer,
+            comfy.text_encoders.hidream_o1.HiDreamO1TE,
+        )
 
 class Chroma(supported_models_base.BASE):
     unet_config = {
@@ -1489,6 +1759,94 @@ class Omnigen2(supported_models_base.BASE):
         pref = self.text_encoder_key_prefix[0]
         hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen25_3b.transformer.".format(pref))
         return supported_models_base.ClipTarget(comfy.text_encoders.omnigen2.Omnigen2Tokenizer, comfy.text_encoders.omnigen2.te(**hunyuan_detect))
+
+class Boogu(Omnigen2):
+    unet_config = {
+        "image_model": "boogu",
+    }
+
+    sampling_settings = {
+        "multiplier": 1.0,
+        "shift": 3.16,
+    }
+
+    memory_usage_factor = 2.15
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.Boogu(self, device=device)
+        return out
+
+    def clip_target(self, state_dict={}):
+        pref = self.text_encoder_key_prefix[0]
+        hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen3vl_8b.transformer.".format(pref))
+        return supported_models_base.ClipTarget(comfy.text_encoders.boogu.BooguTokenizer, comfy.text_encoders.boogu.te(**hunyuan_detect))
+
+class Ideogram4(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "ideogram4",
+    }
+
+    sampling_settings = {
+        "multiplier": 1.0,
+        "shift": 1.0,
+    }
+
+    memory_usage_factor = 11.6
+
+    unet_extra_config = {
+        "num_attention_heads": 18,
+        "attention_head_dim": 256,
+        "intermediate_size": 12288,
+        "adaln_dim": 512,
+        "llm_features_dim": 53248,
+        "rope_theta": 5000000,
+        "mrope_section": [24, 20, 20],
+        "norm_eps": 1e-5,
+    }
+    latent_format = latent_formats.Flux2
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.Ideogram4(self, device=device)
+        return out
+
+    def clip_target(self, state_dict={}):
+        pref = self.text_encoder_key_prefix[0]
+        hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen3vl_8b.transformer.".format(pref))
+        return supported_models_base.ClipTarget(comfy.text_encoders.ideogram4.Ideogram4Tokenizer, comfy.text_encoders.ideogram4.te(**hunyuan_detect))
+
+
+class Krea2(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "krea2",
+    }
+
+    sampling_settings = {
+        "multiplier": 1.0,
+        "shift": 1.15,
+    }
+
+    memory_usage_factor = 2.2
+
+    latent_format = latent_formats.Wan21
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.Krea2(self, device=device)
+        return out
+
+    def clip_target(self, state_dict={}):
+        pref = self.text_encoder_key_prefix[0]
+        hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen3vl_4b.transformer.".format(pref))
+        return supported_models_base.ClipTarget(comfy.text_encoders.krea2.Krea2Tokenizer, comfy.text_encoders.krea2.te(**hunyuan_detect))
 
 class QwenImage(supported_models_base.BASE):
     unet_config = {
@@ -1734,6 +2092,282 @@ class LongCatImage(supported_models_base.BASE):
         hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen25_7b.transformer.".format(pref))
         return supported_models_base.ClipTarget(comfy.text_encoders.longcat_image.LongCatImageTokenizer, comfy.text_encoders.longcat_image.te(**hunyuan_detect))
 
-models = [LotusD, Stable_Zero123, SD15_instructpix2pix, SD15, SD20, SD21UnclipL, SD21UnclipH, SDXL_instructpix2pix, SDXLRefiner, SDXL, SSD1B, KOALA_700M, KOALA_1B, Segmind_Vega, SD_X4Upscaler, Stable_Cascade_C, Stable_Cascade_B, SV3D_u, SV3D_p, SD3, StableAudio, AuraFlow, PixArtAlpha, PixArtSigma, HunyuanDiT, HunyuanDiT1, FluxInpaint, Flux, LongCatImage, FluxSchnell, GenmoMochi, LTXV, LTXAV, HunyuanVideo15_SR_Distilled, HunyuanVideo15, HunyuanImage21Refiner, HunyuanImage21, HunyuanVideoSkyreelsI2V, HunyuanVideoI2V, HunyuanVideo, CosmosT2V, CosmosI2V, CosmosT2IPredict2, CosmosI2VPredict2, ZImagePixelSpace, ZImage, Lumina2, WAN22_T2V, WAN21_T2V, WAN21_I2V, WAN21_FunControl2V, WAN21_Vace, WAN21_Camera, WAN22_Camera, WAN22_S2V, WAN21_HuMo, WAN22_Animate, WAN21_FlowRVS, WAN21_SCAIL, Hunyuan3Dv2mini, Hunyuan3Dv2, Hunyuan3Dv2_1, HiDream, Chroma, ChromaRadiance, ACEStep, ACEStep15, Omnigen2, QwenImage, Flux2, Kandinsky5Image, Kandinsky5, Anima]
 
-models += [SVD_img2vid]
+class RT_DETR_v4(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "RT_DETR_v4",
+    }
+
+    supported_inference_dtypes = [torch.float16, torch.float32]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.RT_DETR_v4(self, device=device)
+        return out
+
+    def clip_target(self, state_dict={}):
+        return None
+
+
+class DepthAnything3(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "DepthAnything3",
+    }
+
+    # Mono path: no num_heads / num_head_channels needed.
+    unet_extra_config = {}
+
+    supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.DepthAnything3(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        return None
+
+
+class ErnieImage(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "ernie",
+    }
+
+    sampling_settings = {
+        "multiplier": 1000.0,
+        "shift": 3.0,
+    }
+
+    memory_usage_factor = 10.0
+
+    unet_extra_config = {}
+    latent_format = latent_formats.Flux2
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.ErnieImage(self, device=device)
+        return out
+
+    def clip_target(self, state_dict={}):
+        pref = self.text_encoder_key_prefix[0]
+        hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}ministral3_3b.transformer.".format(pref))
+        return supported_models_base.ClipTarget(comfy.text_encoders.ernie.ErnieTokenizer, comfy.text_encoders.ernie.te(**hunyuan_detect))
+
+
+class SAM3(supported_models_base.BASE):
+    unet_config = {"image_model": "SAM3"}
+    supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+    text_encoder_key_prefix = ["detector.backbone.language_backbone."]
+    unet_extra_prefix = ""
+
+    def process_clip_state_dict(self, state_dict):
+        clip_keys = getattr(self, "_clip_stash", {})
+        clip_keys = utils.state_dict_prefix_replace(clip_keys, {"detector.backbone.language_backbone.": "", "backbone.language_backbone.": ""}, filter_keys=True)
+        clip_keys = utils.clip_text_transformers_convert(clip_keys, "encoder.", "sam3_clip.transformer.")
+        return {k: v for k, v in clip_keys.items() if not k.startswith("resizer.")}
+
+    def process_unet_state_dict(self, state_dict):
+        self._clip_stash = {k: state_dict.pop(k) for k in list(state_dict.keys()) if "language_backbone" in k and "resizer" not in k}
+        # SAM3.1: remap tracker.model.* -> tracker.*
+        for k in list(state_dict.keys()):
+            if k.startswith("tracker.model."):
+                state_dict["tracker." + k[len("tracker.model."):]] = state_dict.pop(k)
+        # SAM3.1: remove per-block freqs_cis buffers (computed dynamically)
+        for k in [k for k in list(state_dict.keys()) if ".attn.freqs_cis" in k]:
+            state_dict.pop(k)
+        # Split fused QKV projections
+        for k in [k for k in list(state_dict.keys()) if k.endswith((".in_proj_weight", ".in_proj_bias"))]:
+            t = state_dict.pop(k)
+            base, suffix = k.rsplit(".in_proj_", 1)
+            s = ".weight" if suffix == "weight" else ".bias"
+            d = t.shape[0] // 3
+            state_dict[base + ".q_proj" + s] = t[:d]
+            state_dict[base + ".k_proj" + s] = t[d:2*d]
+            state_dict[base + ".v_proj" + s] = t[2*d:]
+        # Remap tracker SAM decoder transformer key names to match sam.py TwoWayTransformer
+        for k in list(state_dict.keys()):
+            if "sam_mask_decoder.transformer." not in k:
+                continue
+            new_k = k.replace(".mlp.lin1.", ".mlp.0.").replace(".mlp.lin2.", ".mlp.2.").replace(".norm_final_attn.", ".norm_final.")
+            if new_k != k:
+                state_dict[new_k] = state_dict.pop(k)
+        return state_dict
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.SAM3(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        import comfy.text_encoders.sam3_clip
+        return supported_models_base.ClipTarget(comfy.text_encoders.sam3_clip.SAM3TokenizerWrapper, comfy.text_encoders.sam3_clip.SAM3ClipModelWrapper)
+
+
+class SAM31(SAM3):
+    unet_config = {"image_model": "SAM31"}
+
+
+class CogVideoX_T2V(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "cogvideox",
+    }
+
+    sampling_settings = {
+        "linear_start": 0.00085,
+        "linear_end": 0.012,
+        "beta_schedule": "linear",
+        "zsnr": True,
+    }
+
+    unet_extra_config = {}
+    latent_format = latent_formats.CogVideoX
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def __init__(self, unet_config):
+        # 2b-class (dim=1920, heads=30) uses scale_factor=1.15258426.
+        # 5b-class (dim=3072, heads=48) — incl. CogVideoX-5b, 1.5-5B, and
+        # Fun-V1.5 inpainting — uses scale_factor=0.7 per vae/config.json.
+        if unet_config.get("num_attention_heads", 0) >= 48:
+            self.latent_format = latent_formats.CogVideoX1_5
+        super().__init__(unet_config)
+
+    def get_model(self, state_dict, prefix="", device=None):
+        # CogVideoX 1.5 (patch_size_t=2) has different training base dimensions for RoPE
+        if self.unet_config.get("patch_size_t") is not None:
+            self.unet_config.setdefault("sample_height", 96)
+            self.unet_config.setdefault("sample_width", 170)
+            self.unet_config.setdefault("sample_frames", 81)
+        out = model_base.CogVideoX(self, device=device)
+        return out
+
+    def clip_target(self, state_dict={}):
+        return supported_models_base.ClipTarget(comfy.text_encoders.cogvideo.CogVideoXT5Tokenizer, comfy.text_encoders.sd3_clip.T5XXLModel)
+
+class CogVideoX_I2V(CogVideoX_T2V):
+    unet_config = {
+        "image_model": "cogvideox",
+        "in_channels": 32,
+    }
+
+    def get_model(self, state_dict, prefix="", device=None):
+        if self.unet_config.get("patch_size_t") is not None:
+            self.unet_config.setdefault("sample_height", 96)
+            self.unet_config.setdefault("sample_width", 170)
+            self.unet_config.setdefault("sample_frames", 81)
+        out = model_base.CogVideoX(self, image_to_video=True, device=device)
+        return out
+
+class CogVideoX_Inpaint(CogVideoX_T2V):
+    unet_config = {
+        "image_model": "cogvideox",
+        "in_channels": 48,
+    }
+
+    def get_model(self, state_dict, prefix="", device=None):
+        if self.unet_config.get("patch_size_t") is not None:
+            self.unet_config.setdefault("sample_height", 96)
+            self.unet_config.setdefault("sample_width", 170)
+            self.unet_config.setdefault("sample_frames", 81)
+        out = model_base.CogVideoX(self, image_to_video=True, device=device)
+        return out
+
+
+models = [
+    LotusD,
+    Stable_Zero123,
+    SD15_instructpix2pix,
+    SD15,
+    SD20,
+    SD21UnclipL,
+    SD21UnclipH,
+    SDXL_instructpix2pix,
+    SDXLRefiner,
+    SDXL,
+    SSD1B,
+    KOALA_700M,
+    KOALA_1B,
+    Segmind_Vega,
+    SD_X4Upscaler,
+    Stable_Cascade_C,
+    Stable_Cascade_B,
+    SV3D_u,
+    SV3D_p,
+    SD3,
+    StableAudio3,
+    StableAudio,
+    AuraFlow,
+    PixArtAlpha,
+    PixArtSigma,
+    HunyuanDiT,
+    HunyuanDiT1,
+    FluxInpaint,
+    Flux,
+    LongCatImage,
+    FluxSchnell,
+    GenmoMochi,
+    LTXV,
+    LTXAV,
+    HunyuanVideo15_SR_Distilled,
+    HunyuanVideo15,
+    HunyuanImage21Refiner,
+    HunyuanImage21,
+    HunyuanVideoSkyreelsI2V,
+    HunyuanVideoI2V,
+    HunyuanVideo,
+    CosmosT2V,
+    CosmosI2V,
+    CosmosT2IPredict2,
+    CosmosI2VPredict2,
+    ZImagePixelSpace,
+    ZImage,
+    PiD,
+    PixelDiTT2I,
+    Lumina2,
+    WAN22_T2V,
+    WAN21_CausalAR_T2V,
+    WAN21_T2V,
+    WAN21_I2V,
+    WAN21_FunControl2V,
+    WAN21_Vace,
+    WAN21_Camera,
+    WAN22_Camera,
+    WAN22_S2V,
+    WAN21_HuMo,
+    WAN22_Animate,
+    WAN21_FlowRVS,
+    WAN21_SCAIL,
+    WAN21_SCAIL2,
+    WAN22_WanDancer,
+    Hunyuan3Dv2mini,
+    Hunyuan3Dv2,
+    Hunyuan3Dv2_1,
+    TripoSplat,
+    HiDream,
+    HiDreamO1,
+    Chroma,
+    ChromaRadiance,
+    ACEStep,
+    ACEStep15,
+    Omnigen2,
+    Boogu,
+    QwenImage,
+    Ideogram4,
+    Krea2,
+    Flux2,
+    Lens,
+    Kandinsky5Image,
+    Kandinsky5,
+    Anima,
+    RT_DETR_v4,
+    ErnieImage,
+    SAM3,
+    SAM31,
+    CogVideoX_Inpaint,
+    CogVideoX_I2V,
+    CogVideoX_T2V,
+    SVD_img2vid,
+    DepthAnything3,
+]

@@ -50,7 +50,7 @@ class TextToVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="LtxvApiTextToVideo",
             display_name="LTXV Text To Video",
-            category="api node/video/LTXV",
+            category="partner/video/LTXV",
             description="Professional-quality videos with customizable duration and resolution.",
             inputs=[
                 IO.Combo.Input("model", options=list(MODELS_MAP.keys())),
@@ -127,7 +127,7 @@ class ImageToVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="LtxvApiImageToVideo",
             display_name="LTXV Image To Video",
-            category="api node/video/LTXV",
+            category="partner/video/LTXV",
             description="Professional-quality videos with customizable duration and resolution based on start image.",
             inputs=[
                 IO.Image.Input("image", tooltip="First frame to be used for the video."),

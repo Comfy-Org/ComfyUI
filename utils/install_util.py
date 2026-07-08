@@ -39,7 +39,7 @@ def get_required_packages_versions():
                 if len(s) == 2:
                     version_str = s[-1]
                     if not is_valid_version(version_str):
-                        logging.error(f"Invalid version format in requirements.txt: {version_str}")
+                        logging.debug(f"Invalid version format for {s[0]} in requirements.txt: {version_str}")
                         continue
                     out[s[0]] = version_str
         return out.copy()

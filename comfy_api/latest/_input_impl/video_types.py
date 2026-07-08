@@ -1,4 +1,3 @@
-from __future__ import annotations
 from av.container import InputContainer
 from av.subtitles.stream import SubtitleStream
 from fractions import Fraction
@@ -12,6 +11,7 @@ import numpy as np
 import math
 import torch
 from .._util import VideoContainer, VideoCodec, VideoComponents
+import logging
 
 
 def container_to_output_format(container_format: str | None) -> str | None:
@@ -52,6 +52,12 @@ def get_open_write_kwargs(
     return open_kwargs
 
 
+def video_stream_bit_depth(stream) -> int:
+    if stream is None or stream.format is None or not stream.format.components:
+        return 8
+    return max(component.bits for component in stream.format.components)
+
+
 class VideoFromFile(VideoInput):
     """
     Class representing video input from a file.
@@ -75,6 +81,12 @@ class VideoFromFile(VideoInput):
             self.__file.seek(0)
         return self.__file
 
+    def get_active_trim_window(self) -> tuple[float, float]:
+        start_time = self.__start_time
+        if start_time < 0:
+            start_time = max(self._get_raw_duration() + start_time, 0.0)
+        return float(start_time), float(self.__duration)
+
     def get_dimensions(self) -> tuple[int, int]:
         """
         Returns the dimensions of the video input.
@@ -90,6 +102,13 @@ class VideoFromFile(VideoInput):
                     assert isinstance(stream, av.VideoStream)
                     return stream.width, stream.height
         raise ValueError(f"No video stream found in file '{self.__file}'")
+
+    def get_bit_depth(self) -> int:
+        if isinstance(self.__file, io.BytesIO):
+            self.__file.seek(0)  # Reset the BytesIO object to the beginning
+        with av.open(self.__file, mode="r") as container:
+            video_stream = container.streams.video[0] if len(container.streams.video) > 0 else None
+            return video_stream_bit_depth(video_stream)
 
     def get_duration(self) -> float:
         """
@@ -238,64 +257,147 @@ class VideoFromFile(VideoInput):
             start_time = max(self._get_raw_duration() + self.__start_time, 0)
         else:
             start_time = self.__start_time
+
         # Get video frames
         frames = []
+        audio_frames = []
+        alphas = None
         start_pts = int(start_time / video_stream.time_base)
         end_pts = int((start_time + self.__duration) / video_stream.time_base)
-        container.seek(start_pts, stream=video_stream)
-        for frame in container.decode(video_stream):
-            if frame.pts < start_pts:
-                continue
-            if self.__duration and frame.pts >= end_pts:
-                break
-            img = frame.to_ndarray(format='rgb24')  # shape: (H, W, 3)
-            img = torch.from_numpy(img) / 255.0  # shape: (H, W, 3)
-            frames.append(img)
 
-        images = torch.stack(frames) if len(frames) > 0 else torch.zeros(0, 3, 0, 0)
+        if start_pts != 0:
+            container.seek(start_pts, stream=video_stream)
+
+        image_format = 'gbrpf32le'
+        process_image_format = lambda a: a
+        align_graph = None
+        audio = None
+
+        streams = [video_stream]
+        has_first_audio_frame = False
+        checked_alpha = False
+
+        # Default to False so we decode until EOF if duration is 0
+        video_done = False
+        audio_done = True
+
+        if len(container.streams.audio):
+            audio_stream = container.streams.audio[-1]
+            streams += [audio_stream]
+            resampler = av.audio.resampler.AudioResampler(format='fltp')
+            audio_done = False
+
+        for packet in container.demux(*streams):
+            if video_done and audio_done:
+                break
+
+            if packet.stream.type == "video":
+                if video_done:
+                    continue
+                try:
+                    for frame in packet.decode():
+                        if frame.pts < start_pts:
+                            continue
+                        if self.__duration and frame.pts >= end_pts:
+                            video_done = True
+                            break
+
+                        if not checked_alpha:
+                            alpha_channel = False
+                            for comp in frame.format.components:
+                                if comp.is_alpha or frame.format.name == "pal8":
+                                    alphas = []
+                                    alpha_channel = True
+                                    break
+                            if frame.format.name in ("yuvj420p", "yuvj422p", "yuvj444p", "rgb24", "rgba", "pal8"):
+                                process_image_format = lambda a: a.float() / 255.0
+                                if alpha_channel:
+                                    image_format = 'rgba'
+                                else:
+                                    image_format = 'rgb24'
+                            else:
+                                process_image_format = lambda a: a
+                                if alpha_channel:
+                                    image_format = 'gbrapf32le'
+                                else:
+                                    image_format = 'gbrpf32le'
+
+                            checked_alpha = True
+
+                        # Fix non-deterministic video decode when the video width is not a multiple of 32
+                        # For non-yuvj pixel formats: most H.264/H.265 video and static images (e.g. lossy WebP via LoadImage)
+                        # Pad both axes to a multiple of 32 and smear the border so the alignment padding never bleeds into the cropped edges
+                        if image_format in ('gbrpf32le', 'gbrapf32le') and frame.width % 32 != 0:
+                            if align_graph is None:
+                                pad_w = ((frame.width + 31) // 32) * 32
+                                pad_h = ((frame.height + 31) // 32) * 32
+                                g = av.filter.Graph()
+                                g_src = g.add_buffer(width=frame.width, height=frame.height,
+                                                     format=frame.format.name, time_base=video_stream.time_base)
+                                g_pad = g.add('pad', f'{pad_w}:{pad_h}:0:0')
+                                g_fill = g.add('fillborders', f'left=0:right={pad_w - frame.width}:top=0:bottom={pad_h - frame.height}:mode=smear')
+                                g_sink = g.add('buffersink')
+                                g_src.link_to(g_pad)
+                                g_pad.link_to(g_fill)
+                                g_fill.link_to(g_sink)
+                                g.configure()
+                                align_graph = (g, g_src, g_sink)
+                            align_graph[1].push(frame)
+                            img = np.ascontiguousarray(align_graph[2].pull().to_ndarray(format=image_format)[:frame.height, :frame.width])
+                        else:
+                            img = frame.to_ndarray(format=image_format)
+                        if frame.rotation != 0:
+                            k = int(round(frame.rotation // 90))
+                            img = np.rot90(img, k=k, axes=(0, 1)).copy()
+                        if alphas is None:
+                            frames.append(torch.from_numpy(img))
+                        else:
+                            frames.append(torch.from_numpy(img[..., :-1]))
+                            alphas.append(torch.from_numpy(img[..., -1:]))
+                except av.error.InvalidDataError:
+                    logging.info("pyav decode error")
+
+            elif packet.stream.type == "audio":
+                if audio_done:
+                    continue
+
+                aframes = itertools.chain.from_iterable(
+                    map(resampler.resample, packet.decode())
+                )
+                for frame in aframes:
+                    if self.__duration and frame.time > start_time + self.__duration:
+                        audio_done = True
+                        break
+
+                    if not has_first_audio_frame:
+                        offset_seconds = start_time - frame.pts * audio_stream.time_base
+                        to_skip = max(0, int(offset_seconds * audio_stream.sample_rate))
+                        if to_skip < frame.samples:
+                            has_first_audio_frame = True
+                            audio_frames.append(frame.to_ndarray()[..., to_skip:])
+                    else:
+                        audio_frames.append(frame.to_ndarray())
+
+        images = process_image_format(torch.stack(frames)) if len(frames) > 0 else torch.zeros(0, 0, 0, 3)
+        if alphas is not None:
+            alphas = process_image_format(torch.stack(alphas)) if len(alphas) > 0 else torch.zeros(0, 0, 0, 1)
 
         # Get frame rate
         frame_rate = Fraction(video_stream.average_rate) if video_stream.average_rate else Fraction(1)
 
-        # Get audio if available
-        audio = None
-        container.seek(start_pts, stream=video_stream)
-        # Use last stream for consistency
-        if len(container.streams.audio):
-            audio_stream = container.streams.audio[-1]
-            audio_frames = []
-            resample = av.audio.resampler.AudioResampler(format='fltp').resample
-            frames = itertools.chain.from_iterable(
-                map(resample, container.decode(audio_stream))
-            )
+        if len(audio_frames) > 0:
+            audio_data = np.concatenate(audio_frames, axis=1)  # shape: (channels, total_samples)
+            if self.__duration:
+                audio_data = audio_data[..., :int(self.__duration * audio_stream.sample_rate)]
 
-            has_first_frame = False
-            for frame in frames:
-                offset_seconds = start_time - frame.pts * audio_stream.time_base
-                to_skip = int(offset_seconds * audio_stream.sample_rate)
-                if to_skip < frame.samples:
-                    has_first_frame = True
-                    break
-            if has_first_frame:
-                audio_frames.append(frame.to_ndarray()[..., to_skip:])
-
-            for frame in frames:
-                if frame.time > start_time + self.__duration:
-                    break
-                audio_frames.append(frame.to_ndarray())  # shape: (channels, samples)
-            if len(audio_frames) > 0:
-                audio_data = np.concatenate(audio_frames, axis=1)  # shape: (channels, total_samples)
-                if self.__duration:
-                    audio_data = audio_data[..., :int(self.__duration * audio_stream.sample_rate)]
-
-                audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)  # shape: (1, channels, total_samples)
-                audio = AudioInput({
-                    "waveform": audio_tensor,
-                    "sample_rate": int(audio_stream.sample_rate) if audio_stream.sample_rate else 1,
-                })
+            audio_tensor = torch.from_numpy(audio_data).unsqueeze(0)  # shape: (1, channels, total_samples)
+            audio = AudioInput({
+                "waveform": audio_tensor,
+                "sample_rate": int(audio_stream.sample_rate) if audio_stream.sample_rate else 1,
+            })
 
         metadata = container.metadata
-        return VideoComponents(images=images, audio=audio, frame_rate=frame_rate, metadata=metadata)
+        return VideoComponents(images=images, alpha=alphas, audio=audio, frame_rate=frame_rate, metadata=metadata)
 
     def get_components(self) -> VideoComponents:
         if isinstance(self.__file, io.BytesIO):
@@ -310,25 +412,32 @@ class VideoFromFile(VideoInput):
         format: VideoContainer = VideoContainer.AUTO,
         codec: VideoCodec = VideoCodec.AUTO,
         metadata: Optional[dict] = None,
+        bit_depth: int | None = None,
     ):
         if isinstance(self.__file, io.BytesIO):
             self.__file.seek(0)  # Reset the BytesIO object to the beginning
         with av.open(self.__file, mode='r') as container:
             container_format = container.format.name
-            video_encoding = container.streams.video[0].codec.name if len(container.streams.video) > 0 else None
+            video_stream = container.streams.video[0] if len(container.streams.video) > 0 else None
+            video_encoding = video_stream.codec.name if video_stream is not None else None
+            source_bit_depth = video_stream_bit_depth(video_stream)
             reuse_streams = True
             if format != VideoContainer.AUTO and format not in container_format.split(","):
                 reuse_streams = False
             if codec != VideoCodec.AUTO and codec != video_encoding and video_encoding is not None:
                 reuse_streams = False
+            if bit_depth is not None and video_encoding is not None and bit_depth != source_bit_depth:
+                reuse_streams = False
             if self.__start_time or self.__duration:
                 reuse_streams = False
 
             if not reuse_streams:
+                if bit_depth is None:
+                    bit_depth = source_bit_depth
                 components = self.get_components_internal(container)
                 video = VideoFromComponents(components)
                 return video.save_to(
-                    path, format=format, codec=codec, metadata=metadata
+                    path, format=format, codec=codec, metadata=metadata, bit_depth=bit_depth,
                 )
 
             streams = container.streams
@@ -384,8 +493,10 @@ class VideoFromComponents(VideoInput):
     Class representing video input from tensors.
     """
 
-    def __init__(self, components: VideoComponents):
+    def __init__(self, components: VideoComponents, bit_depth: int = 8):
         self.__components = components
+        # Tensor components have no inherent bit depth; this is the depth used when encoding.
+        self.__bit_depth = bit_depth
 
     def get_components(self) -> VideoComponents:
         return VideoComponents(
@@ -394,18 +505,26 @@ class VideoFromComponents(VideoInput):
             frame_rate=self.__components.frame_rate,
         )
 
+    def get_bit_depth(self) -> int:
+        return self.__bit_depth
+
     def save_to(
         self,
         path: str,
         format: VideoContainer = VideoContainer.AUTO,
         codec: VideoCodec = VideoCodec.AUTO,
         metadata: Optional[dict] = None,
+        bit_depth: int | None = None,
     ):
         """Save the video to a file path or BytesIO buffer."""
         if format != VideoContainer.AUTO and format != VideoContainer.MP4:
             raise ValueError("Only MP4 format is supported for now")
         if codec != VideoCodec.AUTO and codec != VideoCodec.H264:
             raise ValueError("Only H264 codec is supported for now")
+        # None means "use the depth this video was created with" (CreateVideo's choice).
+        if bit_depth is None:
+            bit_depth = self.__bit_depth
+        is_10bit = bit_depth >= 10
         extra_kwargs = {}
         if isinstance(format, VideoContainer) and format != VideoContainer.AUTO:
             extra_kwargs["format"] = format.value
@@ -421,10 +540,11 @@ class VideoFromComponents(VideoInput):
 
             frame_rate = Fraction(round(self.__components.frame_rate * 1000), 1000)
             # Create a video stream
+            pix_fmt = "yuv420p10le" if is_10bit else "yuv420p"
             video_stream = output.add_stream('h264', rate=frame_rate)
             video_stream.width = self.__components.images.shape[2]
             video_stream.height = self.__components.images.shape[1]
-            video_stream.pix_fmt = 'yuv420p'
+            video_stream.pix_fmt = pix_fmt
 
             # Create an audio stream
             audio_sample_rate = 1
@@ -438,9 +558,14 @@ class VideoFromComponents(VideoInput):
 
             # Encode video
             for i, frame in enumerate(self.__components.images):
-                img = (frame * 255).clamp(0, 255).byte().cpu().numpy() # shape: (H, W, 3)
-                frame = av.VideoFrame.from_ndarray(img, format='rgb24')
-                frame = frame.reformat(format='yuv420p')  # Convert to YUV420P as required by h264
+                if is_10bit:
+                    # 16-bit RGB keeps float precision through the conversion to 10-bit YUV.
+                    img = (frame.float() * 65535).clamp(0, 65535).cpu().numpy().astype(np.uint16)  # shape: (H, W, 3)
+                    frame = av.VideoFrame.from_ndarray(img, format="rgb48le")
+                else:
+                    img = (frame * 255).clamp(0, 255).byte().cpu().numpy() # shape: (H, W, 3)
+                    frame = av.VideoFrame.from_ndarray(img, format='rgb24')
+                frame = frame.reformat(format=pix_fmt)
                 packet = video_stream.encode(frame)
                 output.mux(packet)
 

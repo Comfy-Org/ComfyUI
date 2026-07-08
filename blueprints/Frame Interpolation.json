@@ -1,0 +1,858 @@
+{
+  "revision": 0,
+  "last_node_id": 16,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 16,
+      "type": "022693be-2baa-4009-870a-28921508a7ef",
+      "pos": [
+        -2990,
+        -3240
+      ],
+      "size": [
+        410,
+        200
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "video",
+          "name": "video",
+          "type": "VIDEO",
+          "link": null
+        },
+        {
+          "label": "multiplier",
+          "name": "value",
+          "type": "INT",
+          "widget": {
+            "name": "value"
+          },
+          "link": null
+        },
+        {
+          "label": "enable_fps_multiplier",
+          "name": "value_1",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "value_1"
+          },
+          "link": null
+        },
+        {
+          "name": "model_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "model_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "VIDEO",
+          "name": "VIDEO_1",
+          "type": "VIDEO",
+          "links": []
+        },
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "9",
+            "value"
+          ],
+          [
+            "13",
+            "value"
+          ],
+          [
+            "1",
+            "model_name"
+          ]
+        ],
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "cnr_id": "comfy-core",
+        "ver": "0.19.3"
+      },
+      "widgets_values": [],
+      "title": "Frame Interpolation"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "022693be-2baa-4009-870a-28921508a7ef",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 17,
+          "lastLinkId": 28,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Frame Interpolation",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -2810,
+            -3070,
+            159.7421875,
+            120
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            -1270,
+            -3075,
+            120,
+            80
+          ]
+        },
+        "inputs": [
+          {
+            "id": "05e31c51-dcb6-4a1e-9651-1b9ad4f7a287",
+            "name": "video",
+            "type": "VIDEO",
+            "linkIds": [
+              2
+            ],
+            "localized_name": "video",
+            "pos": [
+              -2670.2578125,
+              -3050
+            ]
+          },
+          {
+            "id": "feecb409-7d1c-4a99-9c63-50c5fecdd3c9",
+            "name": "value",
+            "type": "INT",
+            "linkIds": [
+              22
+            ],
+            "label": "multiplier",
+            "pos": [
+              -2670.2578125,
+              -3030
+            ]
+          },
+          {
+            "id": "0b8a861b-b581-4068-9e8c-f8d15daf1ca6",
+            "name": "value_1",
+            "type": "BOOLEAN",
+            "linkIds": [
+              23
+            ],
+            "label": "enable_fps_multiplier",
+            "pos": [
+              -2670.2578125,
+              -3010
+            ]
+          },
+          {
+            "id": "a22b101e-8773-4e17-a297-7ee3aae09162",
+            "name": "model_name",
+            "type": "COMBO",
+            "linkIds": [
+              24
+            ],
+            "pos": [
+              -2670.2578125,
+              -2990
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "ef2ada05-d5aa-492a-9394-6c3e71e39ebb",
+            "name": "VIDEO_1",
+            "type": "VIDEO",
+            "linkIds": [
+              26
+            ],
+            "label": "VIDEO",
+            "pos": [
+              -1250,
+              -3055
+            ]
+          },
+          {
+            "id": "5aacc622-2a07-4983-b31c-e04461f7f953",
+            "name": "IMAGE",
+            "type": "IMAGE",
+            "linkIds": [
+              28
+            ],
+            "pos": [
+              -1250,
+              -3035
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 1,
+            "type": "FrameInterpolationModelLoader",
+            "pos": [
+              -2510,
+              -3370
+            ],
+            "size": [
+              370,
+              90
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model_name",
+                "name": "model_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "model_name"
+                },
+                "link": 24
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "INTERP_MODEL",
+                "name": "INTERP_MODEL",
+                "type": "INTERP_MODEL",
+                "links": [
+                  1
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "FrameInterpolationModelLoader",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.19.3",
+              "models": [
+                {
+                  "name": "film_net_fp16.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/film_net_fp16.safetensors",
+                  "directory": "frame_interpolation"
+                }
+              ]
+            },
+            "widgets_values": [
+              "film_net_fp16.safetensors"
+            ]
+          },
+          {
+            "id": 2,
+            "type": "FrameInterpolate",
+            "pos": [
+              -2040,
+              -3370
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "interp_model",
+                "name": "interp_model",
+                "type": "INTERP_MODEL",
+                "link": 1
+              },
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "link": 3
+              },
+              {
+                "localized_name": "multiplier",
+                "name": "multiplier",
+                "type": "INT",
+                "widget": {
+                  "name": "multiplier"
+                },
+                "link": 8
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  4,
+                  28
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "FrameInterpolate",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.19.3"
+            },
+            "widgets_values": [
+              2
+            ]
+          },
+          {
+            "id": 5,
+            "type": "CreateVideo",
+            "pos": [
+              -1600,
+              -3370
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "link": 4
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "shape": 7,
+                "type": "AUDIO",
+                "link": 5
+              },
+              {
+                "localized_name": "fps",
+                "name": "fps",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "fps"
+                },
+                "link": 12
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "VIDEO",
+                "name": "VIDEO",
+                "type": "VIDEO",
+                "links": [
+                  26
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CreateVideo",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.19.3"
+            },
+            "widgets_values": [
+              30
+            ]
+          },
+          {
+            "id": 9,
+            "type": "PrimitiveInt",
+            "pos": [
+              -2500,
+              -2970
+            ],
+            "size": [
+              270,
+              90
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "INT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 22
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  8,
+                  19
+                ]
+              }
+            ],
+            "title": "Int (Multiplier)",
+            "properties": {
+              "Node name for S&R": "PrimitiveInt",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.19.3"
+            },
+            "widgets_values": [
+              2,
+              "fixed"
+            ]
+          },
+          {
+            "id": 10,
+            "type": "ComfySwitchNode",
+            "pos": [
+              -1610,
+              -3120
+            ],
+            "size": [
+              270,
+              130
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "type": "*",
+                "link": 11
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "type": "*",
+                "link": 13
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 15
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "*",
+                "links": [
+                  12
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.19.3"
+            },
+            "widgets_values": [
+              true
+            ]
+          },
+          {
+            "id": 13,
+            "type": "PrimitiveBoolean",
+            "pos": [
+              -2500,
+              -2770
+            ],
+            "size": [
+              310,
+              90
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 23
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "BOOLEAN",
+                "name": "BOOLEAN",
+                "type": "BOOLEAN",
+                "links": [
+                  15
+                ]
+              }
+            ],
+            "title": "Boolean (Apply multiplier to FPS?)",
+            "properties": {
+              "Node name for S&R": "PrimitiveBoolean",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.19.3"
+            },
+            "widgets_values": [
+              true
+            ]
+          },
+          {
+            "id": 3,
+            "type": "GetVideoComponents",
+            "pos": [
+              -2500,
+              -3170
+            ],
+            "size": [
+              230,
+              100
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "video",
+                "name": "video",
+                "type": "VIDEO",
+                "link": 2
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "links": [
+                  3
+                ]
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "type": "AUDIO",
+                "links": [
+                  5
+                ]
+              },
+              {
+                "localized_name": "fps",
+                "name": "fps",
+                "type": "FLOAT",
+                "links": [
+                  11,
+                  18
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetVideoComponents",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.19.3"
+            }
+          },
+          {
+            "id": 11,
+            "type": "ComfyMathExpression",
+            "pos": [
+              -2090,
+              -3070
+            ],
+            "size": [
+              400,
+              210
+            ],
+            "flags": {
+              "collapsed": false
+            },
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "a",
+                "localized_name": "values.a",
+                "name": "values.a",
+                "type": "FLOAT,INT",
+                "link": 18
+              },
+              {
+                "label": "b",
+                "localized_name": "values.b",
+                "name": "values.b",
+                "shape": 7,
+                "type": "FLOAT,INT",
+                "link": 19
+              },
+              {
+                "label": "c",
+                "localized_name": "values.c",
+                "name": "values.c",
+                "shape": 7,
+                "type": "FLOAT,INT",
+                "link": null
+              },
+              {
+                "localized_name": "expression",
+                "name": "expression",
+                "type": "STRING",
+                "widget": {
+                  "name": "expression"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  13
+                ]
+              },
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfyMathExpression",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.19.3"
+            },
+            "widgets_values": [
+              "min(abs(b), 16) * a"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 1,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": 2,
+            "target_slot": 0,
+            "type": "INTERP_MODEL"
+          },
+          {
+            "id": 3,
+            "origin_id": 3,
+            "origin_slot": 0,
+            "target_id": 2,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 8,
+            "origin_id": 9,
+            "origin_slot": 0,
+            "target_id": 2,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 4,
+            "origin_id": 2,
+            "origin_slot": 0,
+            "target_id": 5,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 5,
+            "origin_id": 3,
+            "origin_slot": 1,
+            "target_id": 5,
+            "target_slot": 1,
+            "type": "AUDIO"
+          },
+          {
+            "id": 12,
+            "origin_id": 10,
+            "origin_slot": 0,
+            "target_id": 5,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 11,
+            "origin_id": 3,
+            "origin_slot": 2,
+            "target_id": 10,
+            "target_slot": 0,
+            "type": "FLOAT"
+          },
+          {
+            "id": 13,
+            "origin_id": 11,
+            "origin_slot": 0,
+            "target_id": 10,
+            "target_slot": 1,
+            "type": "FLOAT"
+          },
+          {
+            "id": 15,
+            "origin_id": 13,
+            "origin_slot": 0,
+            "target_id": 10,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 18,
+            "origin_id": 3,
+            "origin_slot": 2,
+            "target_id": 11,
+            "target_slot": 0,
+            "type": "FLOAT"
+          },
+          {
+            "id": 19,
+            "origin_id": 9,
+            "origin_slot": 0,
+            "target_id": 11,
+            "target_slot": 1,
+            "type": "INT"
+          },
+          {
+            "id": 2,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 3,
+            "target_slot": 0,
+            "type": "VIDEO"
+          },
+          {
+            "id": 22,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 9,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 23,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 13,
+            "target_slot": 0,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 24,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 1,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 26,
+            "origin_id": 5,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "VIDEO"
+          },
+          {
+            "id": 28,
+            "origin_id": 2,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 1,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {},
+        "category": "Video Tools",
+        "description": "Increases video frame rate by synthesizing intermediate frames with a frame interpolation model."
+      }
+    ]
+  },
+  "extra": {}
+}

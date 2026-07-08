@@ -1,1 +1,901 @@
-{"revision": 0, "last_node_id": 84, "last_link_id": 0, "nodes": [{"id": 84, "type": "8e8aa94a-647e-436d-8440-8ee4691864de", "pos": [-6100, 2620], "size": [290, 160], "flags": {}, "order": 0, "mode": 0, "inputs": [{"label": "Before Video", "localized_name": "video", "name": "video", "type": "VIDEO", "link": null}, {"label": "After Video", "localized_name": "video_1", "name": "video_1", "type": "VIDEO", "link": null}, {"name": "direction", "type": "COMBO", "widget": {"name": "direction"}, "link": null}, {"name": "match_image_size", "type": "BOOLEAN", "widget": {"name": "match_image_size"}, "link": null}, {"name": "spacing_width", "type": "INT", "widget": {"name": "spacing_width"}, "link": null}, {"name": "spacing_color", "type": "COMBO", "widget": {"name": "spacing_color"}, "link": null}], "outputs": [{"localized_name": "VIDEO", "name": "VIDEO", "type": "VIDEO", "links": []}], "properties": {"proxyWidgets": [["-1", "direction"], ["-1", "match_image_size"], ["-1", "spacing_width"], ["-1", "spacing_color"]], "cnr_id": "comfy-core", "ver": "0.13.0"}, "widgets_values": ["right", true, 0, "white"], "title": "Video Stitch"}], "links": [], "version": 0.4, "definitions": {"subgraphs": [{"id": "8e8aa94a-647e-436d-8440-8ee4691864de", "version": 1, "state": {"lastGroupId": 1, "lastNodeId": 84, "lastLinkId": 262, "lastRerouteId": 0}, "revision": 0, "config": {}, "name": "Video Stitch", "inputNode": {"id": -10, "bounding": [-6580, 2649, 143.55859375, 160]}, "outputNode": {"id": -20, "bounding": [-5720, 2659, 120, 60]}, "inputs": [{"id": "85555afe-c7a1-4f6e-b073-7c37f7bace7f", "name": "video", "type": "VIDEO", "linkIds": [253], "localized_name": "video", "label": "Before Video", "pos": [-6456.44140625, 2669]}, {"id": "022773ee-6b4f-4e3d-bead-68b3e75e2d20", "name": "video_1", "type": "VIDEO", "linkIds": [254], "localized_name": "video_1", "label": "After Video", "pos": [-6456.44140625, 2689]}, {"id": "7bcd7cbc-e918-472a-a0cf-2e0900545372", "name": "direction", "type": "COMBO", "linkIds": [259], "pos": [-6456.44140625, 2709]}, {"id": "9a00389d-c1c8-40d5-87fe-f41019b61fbc", "name": "match_image_size", "type": "BOOLEAN", "linkIds": [260], "pos": [-6456.44140625, 2729]}, {"id": "b95e0440-3ea8-4ae0-887e-12e75701042a", "name": "spacing_width", "type": "INT", "linkIds": [261], "pos": [-6456.44140625, 2749]}, {"id": "83ab9382-0a70-4169-b26a-66ab026b43c4", "name": "spacing_color", "type": "COMBO", "linkIds": [262], "pos": [-6456.44140625, 2769]}], "outputs": [{"id": "09707f43-7552-4a6e-bd23-d962d31801c2", "name": "VIDEO", "type": "VIDEO", "linkIds": [255], "localized_name": "VIDEO", "pos": [-5700, 2679]}], "widgets": [], "nodes": [{"id": 78, "type": "GetVideoComponents", "pos": [-6390, 2560], "size": [193.530859375, 66], "flags": {}, "order": 1, "mode": 0, "inputs": [{"localized_name": "video", "name": "video", "type": "VIDEO", "link": 254}], "outputs": [{"localized_name": "images", "name": "images", "type": "IMAGE", "links": [249]}, {"localized_name": "audio", "name": "audio", "type": "AUDIO", "links": null}, {"localized_name": "fps", "name": "fps", "type": "FLOAT", "links": null}], "properties": {"cnr_id": "comfy-core", "ver": "0.13.0", "Node name for S&R": "GetVideoComponents"}}, {"id": 77, "type": "GetVideoComponents", "pos": [-6390, 2420], "size": [193.530859375, 66], "flags": {}, "order": 0, "mode": 0, "inputs": [{"localized_name": "video", "name": "video", "type": "VIDEO", "link": 253}], "outputs": [{"localized_name": "images", "name": "images", "type": "IMAGE", "links": [248]}, {"localized_name": "audio", "name": "audio", "type": "AUDIO", "links": [251]}, {"localized_name": "fps", "name": "fps", "type": "FLOAT", "links": [252]}], "properties": {"cnr_id": "comfy-core", "ver": "0.13.0", "Node name for S&R": "GetVideoComponents"}}, {"id": 79, "type": "ImageStitch", "pos": [-6390, 2700], "size": [270, 150], "flags": {}, "order": 2, "mode": 0, "inputs": [{"localized_name": "image1", "name": "image1", "type": "IMAGE", "link": 248}, {"localized_name": "image2", "name": "image2", "shape": 7, "type": "IMAGE", "link": 249}, {"localized_name": "direction", "name": "direction", "type": "COMBO", "widget": {"name": "direction"}, "link": 259}, {"localized_name": "match_image_size", "name": "match_image_size", "type": "BOOLEAN", "widget": {"name": "match_image_size"}, "link": 260}, {"localized_name": "spacing_width", "name": "spacing_width", "type": "INT", "widget": {"name": "spacing_width"}, "link": 261}, {"localized_name": "spacing_color", "name": "spacing_color", "type": "COMBO", "widget": {"name": "spacing_color"}, "link": 262}], "outputs": [{"localized_name": "IMAGE", "name": "IMAGE", "type": "IMAGE", "links": [250]}], "properties": {"cnr_id": "comfy-core", "ver": "0.13.0", "Node name for S&R": "ImageStitch"}, "widgets_values": ["right", true, 0, "white"]}, {"id": 80, "type": "CreateVideo", "pos": [-6040, 2610], "size": [270, 78], "flags": {}, "order": 3, "mode": 0, "inputs": [{"localized_name": "images", "name": "images", "type": "IMAGE", "link": 250}, {"localized_name": "audio", "name": "audio", "shape": 7, "type": "AUDIO", "link": 251}, {"localized_name": "fps", "name": "fps", "type": "FLOAT", "widget": {"name": "fps"}, "link": 252}], "outputs": [{"localized_name": "VIDEO", "name": "VIDEO", "type": "VIDEO", "links": [255]}], "properties": {"cnr_id": "comfy-core", "ver": "0.13.0", "Node name for S&R": "CreateVideo"}, "widgets_values": [30]}], "groups": [], "links": [{"id": 248, "origin_id": 77, "origin_slot": 0, "target_id": 79, "target_slot": 0, "type": "IMAGE"}, {"id": 249, "origin_id": 78, "origin_slot": 0, "target_id": 79, "target_slot": 1, "type": "IMAGE"}, {"id": 250, "origin_id": 79, "origin_slot": 0, "target_id": 80, "target_slot": 0, "type": "IMAGE"}, {"id": 251, "origin_id": 77, "origin_slot": 1, "target_id": 80, "target_slot": 1, "type": "AUDIO"}, {"id": 252, "origin_id": 77, "origin_slot": 2, "target_id": 80, "target_slot": 2, "type": "FLOAT"}, {"id": 253, "origin_id": -10, "origin_slot": 0, "target_id": 77, "target_slot": 0, "type": "VIDEO"}, {"id": 254, "origin_id": -10, "origin_slot": 1, "target_id": 78, "target_slot": 0, "type": "VIDEO"}, {"id": 255, "origin_id": 80, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "VIDEO"}, {"id": 259, "origin_id": -10, "origin_slot": 2, "target_id": 79, "target_slot": 2, "type": "COMBO"}, {"id": 260, "origin_id": -10, "origin_slot": 3, "target_id": 79, "target_slot": 3, "type": "BOOLEAN"}, {"id": 261, "origin_id": -10, "origin_slot": 4, "target_id": 79, "target_slot": 4, "type": "INT"}, {"id": 262, "origin_id": -10, "origin_slot": 5, "target_id": 79, "target_slot": 5, "type": "COMBO"}], "extra": {"workflowRendererVersion": "LG"}, "category": "Video Tools/Stitch videos"}]}}
+{
+  "revision": 0,
+  "last_node_id": 85,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 85,
+      "type": "637913e7-0206-46ba-8ded-70ae3a7c2e19",
+      "pos": [
+        -880,
+        -2260
+      ],
+      "size": [
+        290,
+        160
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "Before Video",
+          "localized_name": "video",
+          "name": "video",
+          "type": "VIDEO",
+          "link": null
+        },
+        {
+          "label": "After Video",
+          "localized_name": "video_1",
+          "name": "video_1",
+          "type": "VIDEO",
+          "link": null
+        },
+        {
+          "name": "direction",
+          "type": "COMBO",
+          "widget": {
+            "name": "direction"
+          },
+          "link": null
+        },
+        {
+          "name": "match_image_size",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "match_image_size"
+          },
+          "link": null
+        },
+        {
+          "name": "spacing_width",
+          "type": "INT",
+          "widget": {
+            "name": "spacing_width"
+          },
+          "link": null
+        },
+        {
+          "name": "spacing_color",
+          "type": "COMBO",
+          "widget": {
+            "name": "spacing_color"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "VIDEO",
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "79",
+            "direction"
+          ],
+          [
+            "79",
+            "match_image_size"
+          ],
+          [
+            "79",
+            "spacing_width"
+          ],
+          [
+            "79",
+            "spacing_color"
+          ]
+        ],
+        "cnr_id": "comfy-core",
+        "ver": "0.13.0"
+      },
+      "widgets_values": [],
+      "title": "Video Stitch"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "637913e7-0206-46ba-8ded-70ae3a7c2e19",
+        "version": 1,
+        "state": {
+          "lastGroupId": 1,
+          "lastNodeId": 97,
+          "lastLinkId": 282,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Video Stitch",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -6810,
+            2580,
+            143.55859375,
+            160
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            -4770,
+            2600,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "85555afe-c7a1-4f6e-b073-7c37f7bace7f",
+            "name": "video",
+            "type": "VIDEO",
+            "linkIds": [
+              253
+            ],
+            "localized_name": "video",
+            "label": "Before Video",
+            "pos": [
+              -6686.44140625,
+              2600
+            ]
+          },
+          {
+            "id": "022773ee-6b4f-4e3d-bead-68b3e75e2d20",
+            "name": "video_1",
+            "type": "VIDEO",
+            "linkIds": [
+              254
+            ],
+            "localized_name": "video_1",
+            "label": "After Video",
+            "pos": [
+              -6686.44140625,
+              2620
+            ]
+          },
+          {
+            "id": "7bcd7cbc-e918-472a-a0cf-2e0900545372",
+            "name": "direction",
+            "type": "COMBO",
+            "linkIds": [
+              259
+            ],
+            "pos": [
+              -6686.44140625,
+              2640
+            ]
+          },
+          {
+            "id": "9a00389d-c1c8-40d5-87fe-f41019b61fbc",
+            "name": "match_image_size",
+            "type": "BOOLEAN",
+            "linkIds": [
+              260
+            ],
+            "pos": [
+              -6686.44140625,
+              2660
+            ]
+          },
+          {
+            "id": "b95e0440-3ea8-4ae0-887e-12e75701042a",
+            "name": "spacing_width",
+            "type": "INT",
+            "linkIds": [
+              261
+            ],
+            "pos": [
+              -6686.44140625,
+              2680
+            ]
+          },
+          {
+            "id": "83ab9382-0a70-4169-b26a-66ab026b43c4",
+            "name": "spacing_color",
+            "type": "COMBO",
+            "linkIds": [
+              262
+            ],
+            "pos": [
+              -6686.44140625,
+              2700
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "09707f43-7552-4a6e-bd23-d962d31801c2",
+            "name": "VIDEO",
+            "type": "VIDEO",
+            "linkIds": [
+              255
+            ],
+            "localized_name": "VIDEO",
+            "pos": [
+              -4750,
+              2620
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 78,
+            "type": "GetVideoComponents",
+            "pos": [
+              -6390,
+              2600
+            ],
+            "size": [
+              230,
+              120
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "video",
+                "name": "video",
+                "type": "VIDEO",
+                "link": 254
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "links": [
+                  249
+                ]
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "type": "AUDIO",
+                "links": null
+              },
+              {
+                "localized_name": "fps",
+                "name": "fps",
+                "type": "FLOAT",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetVideoComponents",
+              "cnr_id": "comfy-core",
+              "ver": "0.13.0"
+            }
+          },
+          {
+            "id": 77,
+            "type": "GetVideoComponents",
+            "pos": [
+              -6390,
+              2420
+            ],
+            "size": [
+              230,
+              120
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "video",
+                "name": "video",
+                "type": "VIDEO",
+                "link": 253
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "links": [
+                  248
+                ]
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "type": "AUDIO",
+                "links": [
+                  251
+                ]
+              },
+              {
+                "localized_name": "fps",
+                "name": "fps",
+                "type": "FLOAT",
+                "links": [
+                  252
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetVideoComponents",
+              "cnr_id": "comfy-core",
+              "ver": "0.13.0"
+            }
+          },
+          {
+            "id": 90,
+            "type": "GetImageSize",
+            "pos": [
+              -6390,
+              3030
+            ],
+            "size": [
+              230,
+              120
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 266
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "width",
+                "name": "width",
+                "type": "INT",
+                "links": [
+                  274
+                ]
+              },
+              {
+                "localized_name": "height",
+                "name": "height",
+                "type": "INT",
+                "links": [
+                  276
+                ]
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetImageSize"
+            }
+          },
+          {
+            "id": 80,
+            "type": "CreateVideo",
+            "pos": [
+              -5190,
+              2420
+            ],
+            "size": [
+              270,
+              130
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "link": 282
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "shape": 7,
+                "type": "AUDIO",
+                "link": 251
+              },
+              {
+                "localized_name": "fps",
+                "name": "fps",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "fps"
+                },
+                "link": 252
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "VIDEO",
+                "name": "VIDEO",
+                "type": "VIDEO",
+                "links": [
+                  255
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CreateVideo",
+              "cnr_id": "comfy-core",
+              "ver": "0.13.0"
+            },
+            "widgets_values": [
+              30
+            ]
+          },
+          {
+            "id": 95,
+            "type": "ComfyMathExpression",
+            "pos": [
+              -6040,
+              3020
+            ],
+            "size": [
+              400,
+              200
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "a",
+                "localized_name": "values.a",
+                "name": "values.a",
+                "type": "FLOAT,INT",
+                "link": 274
+              },
+              {
+                "label": "b",
+                "localized_name": "values.b",
+                "name": "values.b",
+                "shape": 7,
+                "type": "FLOAT,INT",
+                "link": null
+              },
+              {
+                "localized_name": "expression",
+                "name": "expression",
+                "type": "STRING",
+                "widget": {
+                  "name": "expression"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": null
+              },
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  279
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfyMathExpression"
+            },
+            "widgets_values": [
+              "a & ~1"
+            ]
+          },
+          {
+            "id": 96,
+            "type": "ComfyMathExpression",
+            "pos": [
+              -6040,
+              3290
+            ],
+            "size": [
+              400,
+              200
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "a",
+                "localized_name": "values.a",
+                "name": "values.a",
+                "type": "FLOAT,INT",
+                "link": 276
+              },
+              {
+                "label": "b",
+                "localized_name": "values.b",
+                "name": "values.b",
+                "shape": 7,
+                "type": "FLOAT,INT",
+                "link": null
+              },
+              {
+                "localized_name": "expression",
+                "name": "expression",
+                "type": "STRING",
+                "widget": {
+                  "name": "expression"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": null
+              },
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  280
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfyMathExpression"
+            },
+            "widgets_values": [
+              "a & ~1"
+            ]
+          },
+          {
+            "id": 79,
+            "type": "ImageStitch",
+            "pos": [
+              -6390,
+              2780
+            ],
+            "size": [
+              270,
+              160
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image1",
+                "name": "image1",
+                "type": "IMAGE",
+                "link": 248
+              },
+              {
+                "localized_name": "image2",
+                "name": "image2",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": 249
+              },
+              {
+                "localized_name": "direction",
+                "name": "direction",
+                "type": "COMBO",
+                "widget": {
+                  "name": "direction"
+                },
+                "link": 259
+              },
+              {
+                "localized_name": "match_image_size",
+                "name": "match_image_size",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "match_image_size"
+                },
+                "link": 260
+              },
+              {
+                "localized_name": "spacing_width",
+                "name": "spacing_width",
+                "type": "INT",
+                "widget": {
+                  "name": "spacing_width"
+                },
+                "link": 261
+              },
+              {
+                "localized_name": "spacing_color",
+                "name": "spacing_color",
+                "type": "COMBO",
+                "widget": {
+                  "name": "spacing_color"
+                },
+                "link": 262
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  266,
+                  281
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ImageStitch",
+              "cnr_id": "comfy-core",
+              "ver": "0.13.0"
+            },
+            "widgets_values": [
+              "right",
+              true,
+              0,
+              "white"
+            ]
+          },
+          {
+            "id": 97,
+            "type": "ResizeImageMaskNode",
+            "pos": [
+              -5560,
+              2790
+            ],
+            "size": [
+              270,
+              160
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "input",
+                "name": "input",
+                "type": "IMAGE,MASK",
+                "link": 281
+              },
+              {
+                "localized_name": "resize_type",
+                "name": "resize_type",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "resize_type"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "width",
+                "name": "resize_type.width",
+                "type": "INT",
+                "widget": {
+                  "name": "resize_type.width"
+                },
+                "link": 279
+              },
+              {
+                "localized_name": "height",
+                "name": "resize_type.height",
+                "type": "INT",
+                "widget": {
+                  "name": "resize_type.height"
+                },
+                "link": 280
+              },
+              {
+                "localized_name": "crop",
+                "name": "resize_type.crop",
+                "type": "COMBO",
+                "widget": {
+                  "name": "resize_type.crop"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "scale_method",
+                "name": "scale_method",
+                "type": "COMBO",
+                "widget": {
+                  "name": "scale_method"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "resized",
+                "name": "resized",
+                "type": "*",
+                "links": [
+                  282
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ResizeImageMaskNode"
+            },
+            "widgets_values": [
+              "scale dimensions",
+              512,
+              512,
+              "center",
+              "area"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 248,
+            "origin_id": 77,
+            "origin_slot": 0,
+            "target_id": 79,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 249,
+            "origin_id": 78,
+            "origin_slot": 0,
+            "target_id": 79,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 251,
+            "origin_id": 77,
+            "origin_slot": 1,
+            "target_id": 80,
+            "target_slot": 1,
+            "type": "AUDIO"
+          },
+          {
+            "id": 252,
+            "origin_id": 77,
+            "origin_slot": 2,
+            "target_id": 80,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 253,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 77,
+            "target_slot": 0,
+            "type": "VIDEO"
+          },
+          {
+            "id": 254,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 78,
+            "target_slot": 0,
+            "type": "VIDEO"
+          },
+          {
+            "id": 255,
+            "origin_id": 80,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "VIDEO"
+          },
+          {
+            "id": 259,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 79,
+            "target_slot": 2,
+            "type": "COMBO"
+          },
+          {
+            "id": 260,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 79,
+            "target_slot": 3,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 261,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 79,
+            "target_slot": 4,
+            "type": "INT"
+          },
+          {
+            "id": 262,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 79,
+            "target_slot": 5,
+            "type": "COMBO"
+          },
+          {
+            "id": 266,
+            "origin_id": 79,
+            "origin_slot": 0,
+            "target_id": 90,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 274,
+            "origin_id": 90,
+            "origin_slot": 0,
+            "target_id": 95,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 276,
+            "origin_id": 90,
+            "origin_slot": 1,
+            "target_id": 96,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 279,
+            "origin_id": 95,
+            "origin_slot": 1,
+            "target_id": 97,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 280,
+            "origin_id": 96,
+            "origin_slot": 1,
+            "target_id": 97,
+            "target_slot": 3,
+            "type": "INT"
+          },
+          {
+            "id": 281,
+            "origin_id": 79,
+            "origin_slot": 0,
+            "target_id": 97,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 282,
+            "origin_id": 97,
+            "origin_slot": 0,
+            "target_id": 80,
+            "target_slot": 0,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Video Tools/Stitch videos",
+        "description": "Stitches multiple video clips into a single sequential video file."
+      }
+    ]
+  },
+  "extra": {}
+}

@@ -11,10 +11,46 @@ class VOXEL:
         self.data = data
 
 
+class SPLAT:
+    """A batch of 3D Gaussian splats in render-ready (activated, world-space) form.
+
+    Tensors are (B, N, ...) and zero-padded to a common N across the batch; `counts` (B,) holds the
+    real per-item lengths (None when rows are uniform and no slicing is needed). SH coefficients are
+    stored as (B, N, K, 3) with K = (sh_degree + 1)**2; the DC (diffuse) term is sh[..., 0, :].
+    """
+
+    def __init__(self, positions: torch.Tensor, scales: torch.Tensor, rotations: torch.Tensor,
+                 opacities: torch.Tensor, sh: torch.Tensor, counts: torch.Tensor | None = None):
+        self.positions = positions    # (B, N, 3) world-space centers
+        self.scales = scales          # (B, N, 3) linear (positive) per-axis std
+        self.rotations = rotations    # (B, N, 4) quaternion wxyz (normalized)
+        self.opacities = opacities    # (B, N, 1) in [0, 1]
+        self.sh = sh                  # (B, N, K, 3) spherical-harmonic color coefficients
+        self.counts = counts          # (B,) real lengths, or None
+
+
 class MESH:
-    def __init__(self, vertices: torch.Tensor, faces: torch.Tensor):
-        self.vertices = vertices
-        self.faces = faces
+    def __init__(self, vertices: torch.Tensor, faces: torch.Tensor,
+                 uvs: torch.Tensor | None = None,
+                 vertex_colors: torch.Tensor | None = None,
+                 texture: torch.Tensor | None = None,
+                 vertex_counts: torch.Tensor | None = None,
+                 face_counts: torch.Tensor | None = None,
+                 unlit: bool = False):
+
+        assert (vertex_counts is None) == (face_counts is None), \
+            "vertex_counts and face_counts must be provided together (both or neither)"
+        self.vertices = vertices            # vertices: (B, N, 3)
+        self.faces = faces                  # faces: (B, M, 3)
+        self.uvs = uvs                      # uvs: (B, N, 2)
+        self.vertex_colors = vertex_colors  # vertex_colors: (B, N, 3 or 4)
+        self.texture = texture              # texture: (B, H, W, 3)
+        # When vertices/faces are zero-padded to a common N/M across the batch (variable-size mesh batch),
+        # these hold the real per-item lengths (B,). None means rows are uniform and no slicing is needed.
+        self.vertex_counts = vertex_counts
+        self.face_counts = face_counts
+        # Render flat / emissive (no scene lighting) when saved, e.g. for gaussian-splat-derived meshes.
+        self.unlit = unlit
 
 
 class File3D:

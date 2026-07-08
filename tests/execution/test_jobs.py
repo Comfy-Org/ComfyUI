@@ -1,5 +1,7 @@
 """Unit tests for comfy_execution/jobs.py"""
 
+import pytest
+
 from comfy_execution.jobs import (
     JobStatus,
     is_previewable,
@@ -10,7 +12,48 @@ from comfy_execution.jobs import (
     get_outputs_summary,
     apply_sorting,
     has_3d_extension,
+    validate_job_id,
 )
+
+
+class TestValidateJobId:
+    """validate_job_id guards job creation: POST /prompt rejects ids it raises on."""
+
+    def test_canonical_form_passes_through(self):
+        cid = "a1b2c3d4-e5f6-7a89-b0c1-d2e3f4a5b6c7"
+        assert validate_job_id(cid) == cid
+
+    @pytest.mark.parametrize(
+        "variant",
+        [
+            "A1B2C3D4-E5F6-7A89-B0C1-D2E3F4A5B6C7",          # uppercase
+            "{a1b2c3d4-e5f6-7a89-b0c1-d2e3f4a5b6c7}",        # braced
+            "urn:uuid:a1b2c3d4-e5f6-7a89-b0c1-d2e3f4a5b6c7",  # URN
+            "a1b2c3d4e5f67a89b0c1d2e3f4a5b6c7",              # bare hex
+            " a1b2c3d4-e5f6-7a89-b0c1-d2e3f4a5b6c7 ",        # padded
+        ],
+    )
+    def test_non_canonical_spellings_rejected(self, variant):
+        # uuid.UUID parses all of these, but accepting them would silently
+        # rewrite the client's id (history keys, websocket events, and
+        # /interrupt matching all match the stored form exactly).
+        with pytest.raises(ValueError):
+            validate_job_id(variant)
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["", "not-a-uuid", "prompt-123", "a1b2c3d4-e5f6-7a89-b0c1", "None"],
+    )
+    def test_non_uuid_strings_rejected(self, bad):
+        with pytest.raises(ValueError):
+            validate_job_id(bad)
+
+    @pytest.mark.parametrize("bad", [123, 1.5, True, None, ["a"], {"id": "x"}])
+    def test_non_strings_rejected(self, bad):
+        # uuid.UUID raises AttributeError/TypeError on non-strings; the helper
+        # must normalize those to ValueError so callers need one except clause.
+        with pytest.raises(ValueError):
+            validate_job_id(bad)
 
 
 class TestJobStatus:

@@ -124,9 +124,11 @@ class TestMathExpressionExecute:
         with pytest.raises(Exception, match="not defined"):
             self._exec("str(a)", a=42)
 
-    def test_boolean_result_raises(self):
-        with pytest.raises(ValueError, match="got bool"):
-            self._exec("a > b", a=5, b=3)
+    def test_boolean_result(self):
+        result = self._exec("a > b", a=5, b=3)
+        assert result[2] is True
+        result = self._exec("a > b", a=3, b=5)
+        assert result[2] is False
 
     def test_empty_expression_raises(self):
         with pytest.raises(ValueError, match="Expression cannot be empty"):
@@ -195,3 +197,10 @@ class TestMathExpressionExecute:
     def test_pow_huge_exponent_raises(self):
         with pytest.raises(ValueError, match="Exponent .* exceeds maximum"):
             self._exec("pow(a, b)", a=10, b=10000000)
+
+    def test_huge_int_result_raises_value_error(self):
+        # Exponent is within the allowed MAX_EXPONENT range, so the result is a
+        # finite Python int that is nonetheless too large to convert to float.
+        # This must raise a clean ValueError, not an uncaught OverflowError.
+        with pytest.raises(ValueError, match="too large to represent as a float"):
+            self._exec("2 ** 3999")

@@ -139,9 +139,9 @@ Example:
   "_quantization_metadata": {
     "format_version": "1.0",
     "layers": {
-      "model.layers.0.mlp.up_proj": "float8_e4m3fn",
-      "model.layers.0.mlp.down_proj": "float8_e4m3fn",
-      "model.layers.1.mlp.up_proj": "float8_e4m3fn"
+      "model.layers.0.mlp.up_proj": {"format": "float8_e4m3fn"},
+      "model.layers.0.mlp.down_proj": {"format": "float8_e4m3fn"},
+      "model.layers.1.mlp.up_proj": {"format": "float8_e4m3fn"}
     }
   }
 }

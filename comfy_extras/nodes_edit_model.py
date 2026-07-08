@@ -8,7 +8,8 @@ class ReferenceLatent(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="ReferenceLatent",
-            category="advanced/conditioning/edit_models",
+            display_name="Set Reference Latent",
+            category="model/conditioning",
             description="This node sets the guiding latent for an edit model. If the model supports it you can chain multiple to set multiple reference images.",
             inputs=[
                 io.Conditioning.Input("conditioning"),

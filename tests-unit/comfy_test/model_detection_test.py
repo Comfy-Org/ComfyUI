@@ -1,7 +1,21 @@
+from collections import defaultdict
+
 import torch
 
 from comfy.model_detection import detect_unet_config, model_config_from_unet_config
 import comfy.supported_models
+
+
+def _freeze(value):
+    """Recursively convert a value to a hashable form so configs can be
+    compared/used as dict keys or set members."""
+    if isinstance(value, dict):
+        return frozenset((k, _freeze(v)) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    if isinstance(value, set):
+        return frozenset(_freeze(v) for v in value)
+    return value
 
 
 def _make_longcat_comfyui_sd():
@@ -110,3 +124,21 @@ class TestModelDetection:
         model_config = model_config_from_unet_config(unet_config, sd)
         assert model_config is not None
         assert type(model_config).__name__ == "FluxSchnell"
+
+    def test_unet_config_and_required_keys_combination_is_unique(self):
+        """Each model in the registry must have a unique combination of
+        ``unet_config`` and ``required_keys``. If two models share the same
+        combination, ``BASE.matches`` cannot disambiguate between them and the
+        first one in the list will always win."""
+        models = comfy.supported_models.models
+        groups = defaultdict(list)
+        for model in models:
+            key = (_freeze(model.unet_config), _freeze(model.required_keys))
+            groups[key].append(model.__name__)
+
+        duplicates = {k: names for k, names in groups.items() if len(names) > 1}
+        assert not duplicates, (
+            "Found models sharing the same (unet_config, required_keys) "
+            "combination, which makes detection ambiguous: "
+            + "; ".join(", ".join(names) for names in duplicates.values())
+        )

@@ -228,6 +228,62 @@ class TestMixedPrecisionOps(unittest.TestCase):
         with self.assertRaises(KeyError):
             model.load_state_dict(state_dict, strict=False)
 
+    def test_int8_convrot_metadata_loads_into_params(self):
+        """ConvRot metadata must reach TensorWiseINT8Layout params."""
+        torch.manual_seed(123)
+        layer_quant_config = {
+            "layer": {
+                "format": "int8_tensorwise",
+                "convrot": True,
+                "convrot_groupsize": 256,
+            }
+        }
+        weight = torch.randn(16, 256, dtype=torch.bfloat16)
+        bias = torch.randn(16, dtype=torch.bfloat16)
+        q_weight = QuantizedTensor.from_float(
+            weight,
+            "TensorWiseINT8Layout",
+            per_channel=True,
+            convrot=True,
+            convrot_groupsize=256,
+        )
+        state_dict = {
+            "layer.weight": q_weight._qdata,
+            "layer.bias": bias,
+            "layer.weight_scale": q_weight._params.scale,
+        }
+
+        state_dict, _ = comfy.utils.convert_old_quants(
+            state_dict,
+            metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
+        )
+        model = torch.nn.Module()
+        model.layer = ops.mixed_precision_ops({}).Linear(256, 16, device="cpu", dtype=torch.bfloat16)
+        model.load_state_dict(state_dict, strict=False)
+
+        self.assertIsInstance(model.layer.weight, QuantizedTensor)
+        self.assertEqual(model.layer.weight._layout_cls, "TensorWiseINT8Layout")
+        self.assertTrue(model.layer.weight._params.convrot)
+        self.assertEqual(model.layer.weight._params.convrot_groupsize, 256)
+
+        input_tensor = torch.randn(4, 256, dtype=torch.bfloat16)
+        loaded_out = model.layer(input_tensor)
+        ref_out = torch.nn.functional.linear(input_tensor, q_weight, bias)
+        self.assertTrue(torch.equal(loaded_out, ref_out))
+
+        fp16_input = input_tensor.to(torch.float16)
+        loaded_fp16_out = model.layer(fp16_input)
+        ref_fp16_out = torch.nn.functional.linear(
+            fp16_input,
+            q_weight.to(dtype=torch.float16),
+            bias.to(dtype=torch.float16),
+        )
+        self.assertTrue(torch.equal(loaded_fp16_out, ref_fp16_out))
+
+        saved = model.state_dict()
+        saved_conf = json.loads(saved["layer.comfy_quant"].numpy().tobytes())
+        self.assertTrue(saved_conf["convrot"])
+        self.assertEqual(saved_conf["convrot_groupsize"], 256)
+
 if __name__ == "__main__":
     unittest.main()
-

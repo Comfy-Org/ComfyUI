@@ -1,0 +1,1206 @@
+{
+  "revision": 0,
+  "last_node_id": 675,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 675,
+      "type": "01b6a731-fb78-4070-9a38-c87146da9604",
+      "pos": [
+        -2480,
+        3400
+      ],
+      "size": [
+        370,
+        590.625
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "input",
+          "name": "input",
+          "type": "IMAGE,MASK",
+          "link": null
+        },
+        {
+          "label": "resize_target_longer_size",
+          "name": "resize_type.longer_size",
+          "type": "INT",
+          "widget": {
+            "name": "resize_type.longer_size"
+          },
+          "link": null
+        },
+        {
+          "name": "scale_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "scale_method"
+          },
+          "link": null
+        },
+        {
+          "name": "draw_body",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "draw_body"
+          },
+          "link": null
+        },
+        {
+          "name": "draw_hands",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "draw_hands"
+          },
+          "link": null
+        },
+        {
+          "name": "draw_face",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "draw_face"
+          },
+          "link": null
+        },
+        {
+          "name": "draw_feet",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "draw_feet"
+          },
+          "link": null
+        },
+        {
+          "name": "stick_width",
+          "type": "INT",
+          "widget": {
+            "name": "stick_width"
+          },
+          "link": null
+        },
+        {
+          "name": "face_point_size",
+          "type": "INT",
+          "widget": {
+            "name": "face_point_size"
+          },
+          "link": null
+        },
+        {
+          "name": "score_threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "score_threshold"
+          },
+          "link": null
+        },
+        {
+          "label": "detect_threshold",
+          "name": "threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "threshold"
+          },
+          "link": null
+        },
+        {
+          "label": "detect_class",
+          "name": "class_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "class_name"
+          },
+          "link": null
+        },
+        {
+          "name": "max_detections",
+          "type": "INT",
+          "widget": {
+            "name": "max_detections"
+          },
+          "link": null
+        },
+        {
+          "name": "ckpt_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "ckpt_name"
+          },
+          "link": null
+        },
+        {
+          "name": "unet_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "unet_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "keypoints",
+          "type": "POSE_KEYPOINT",
+          "links": null
+        },
+        {
+          "name": "bboxes",
+          "type": "BOUNDING_BOX",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "674",
+            "resize_type.longer_size"
+          ],
+          [
+            "674",
+            "scale_method"
+          ],
+          [
+            "672",
+            "draw_body"
+          ],
+          [
+            "672",
+            "draw_hands"
+          ],
+          [
+            "672",
+            "draw_face"
+          ],
+          [
+            "672",
+            "draw_feet"
+          ],
+          [
+            "672",
+            "stick_width"
+          ],
+          [
+            "672",
+            "face_point_size"
+          ],
+          [
+            "672",
+            "score_threshold"
+          ],
+          [
+            "678",
+            "threshold"
+          ],
+          [
+            "678",
+            "class_name"
+          ],
+          [
+            "678",
+            "max_detections"
+          ],
+          [
+            "673",
+            "ckpt_name"
+          ],
+          [
+            "677",
+            "unet_name"
+          ]
+        ],
+        "cnr_id": "comfy-core",
+        "ver": "0.15.1",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [],
+      "title": "Image to Pose Map (SDPose Multi-Person)"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "01b6a731-fb78-4070-9a38-c87146da9604",
+        "version": 1,
+        "state": {
+          "lastGroupId": 2,
+          "lastNodeId": 691,
+          "lastLinkId": 1740,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Image to Pose Map (SDPose Multi-Person)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -3350,
+            3410,
+            190.8984375,
+            348
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            -1840,
+            3570,
+            128,
+            108
+          ]
+        },
+        "inputs": [
+          {
+            "id": "e24699c3-1356-4634-9eb4-19bb58e5c0b0",
+            "name": "input",
+            "type": "IMAGE,MASK",
+            "linkIds": [
+              1700
+            ],
+            "localized_name": "input",
+            "pos": [
+              -3183.1015625,
+              3434
+            ]
+          },
+          {
+            "id": "088eefc1-cd8a-4573-993f-9e4da008a12d",
+            "name": "resize_type.longer_size",
+            "type": "INT",
+            "linkIds": [
+              1704
+            ],
+            "label": "resize_target_longer_size",
+            "pos": [
+              -3183.1015625,
+              3454
+            ]
+          },
+          {
+            "id": "b6449bd3-73d4-41c8-b81f-cf8d33f76a2e",
+            "name": "scale_method",
+            "type": "COMBO",
+            "linkIds": [
+              1705
+            ],
+            "pos": [
+              -3183.1015625,
+              3474
+            ]
+          },
+          {
+            "id": "4cff52ad-ed07-4c97-8803-fcbd89554fd0",
+            "name": "draw_body",
+            "type": "BOOLEAN",
+            "linkIds": [
+              1706
+            ],
+            "pos": [
+              -3183.1015625,
+              3494
+            ]
+          },
+          {
+            "id": "7af63dce-f7df-4d7e-8215-d7c7f60bf81c",
+            "name": "draw_hands",
+            "type": "BOOLEAN",
+            "linkIds": [
+              1707
+            ],
+            "pos": [
+              -3183.1015625,
+              3514
+            ]
+          },
+          {
+            "id": "af3a9bce-61f9-4aca-b530-9f65e028b35e",
+            "name": "draw_face",
+            "type": "BOOLEAN",
+            "linkIds": [
+              1708
+            ],
+            "pos": [
+              -3183.1015625,
+              3534
+            ]
+          },
+          {
+            "id": "4620f6a3-2c85-4b79-ad8f-35d0326b568f",
+            "name": "draw_feet",
+            "type": "BOOLEAN",
+            "linkIds": [
+              1709
+            ],
+            "pos": [
+              -3183.1015625,
+              3554
+            ]
+          },
+          {
+            "id": "fee5d0c9-8d4b-4934-81d8-ba2206dc56cb",
+            "name": "stick_width",
+            "type": "INT",
+            "linkIds": [
+              1710
+            ],
+            "pos": [
+              -3183.1015625,
+              3574
+            ]
+          },
+          {
+            "id": "aafdd060-ba81-4324-a9cc-b656e1ebc133",
+            "name": "face_point_size",
+            "type": "INT",
+            "linkIds": [
+              1711
+            ],
+            "pos": [
+              -3183.1015625,
+              3594
+            ]
+          },
+          {
+            "id": "514c5503-f9e6-4d23-b1ae-1d3291acb2a3",
+            "name": "score_threshold",
+            "type": "FLOAT",
+            "linkIds": [
+              1712
+            ],
+            "pos": [
+              -3183.1015625,
+              3614
+            ]
+          },
+          {
+            "id": "4eb3e4ea-7a36-4511-8483-0d12aadd32f7",
+            "name": "threshold",
+            "type": "FLOAT",
+            "linkIds": [
+              1718
+            ],
+            "label": "detect_threshold",
+            "pos": [
+              -3183.1015625,
+              3634
+            ]
+          },
+          {
+            "id": "c76a7a05-81e6-4b17-a9e0-85f47a5844f2",
+            "name": "class_name",
+            "type": "COMBO",
+            "linkIds": [
+              1719
+            ],
+            "label": "detect_class",
+            "pos": [
+              -3183.1015625,
+              3654
+            ]
+          },
+          {
+            "id": "4417e988-6e80-4236-be31-4c179037f5a2",
+            "name": "max_detections",
+            "type": "INT",
+            "linkIds": [
+              1720
+            ],
+            "pos": [
+              -3183.1015625,
+              3674
+            ]
+          },
+          {
+            "id": "7d7c4a0b-0d1b-4c98-942b-f90548d2a492",
+            "name": "ckpt_name",
+            "type": "COMBO",
+            "linkIds": [
+              1721
+            ],
+            "pos": [
+              -3183.1015625,
+              3694
+            ]
+          },
+          {
+            "id": "4d75122c-2c14-452a-98fe-d1545d3e012a",
+            "name": "unet_name",
+            "type": "COMBO",
+            "linkIds": [
+              1722
+            ],
+            "pos": [
+              -3183.1015625,
+              3714
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "f05ed8cc-9403-4f14-8085-4364b06f8a48",
+            "name": "IMAGE",
+            "type": "IMAGE",
+            "linkIds": [
+              1701
+            ],
+            "localized_name": "IMAGE",
+            "pos": [
+              -1816,
+              3594
+            ]
+          },
+          {
+            "id": "4b64118e-3cef-4eeb-9dad-4cd09cfd63a2",
+            "name": "keypoints",
+            "type": "POSE_KEYPOINT",
+            "linkIds": [
+              1725
+            ],
+            "pos": [
+              -1816,
+              3614
+            ]
+          },
+          {
+            "id": "a27f7e34-dcbc-4fb0-a4e1-2c5fc423ca5f",
+            "name": "bboxes",
+            "type": "BOUNDING_BOX",
+            "linkIds": [
+              1726
+            ],
+            "pos": [
+              -1816,
+              3634
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 671,
+            "type": "SDPoseKeypointExtractor",
+            "pos": [
+              -2550,
+              3080
+            ],
+            "size": [
+              270,
+              180
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 1696
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 1697
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 1698
+              },
+              {
+                "localized_name": "bboxes",
+                "name": "bboxes",
+                "shape": 7,
+                "type": "BOUNDING_BOX",
+                "link": 1717
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "widget": {
+                  "name": "batch_size"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "keypoints",
+                "name": "keypoints",
+                "type": "POSE_KEYPOINT",
+                "links": [
+                  1699,
+                  1725
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "SDPoseKeypointExtractor",
+              "cnr_id": "comfy-core",
+              "ver": "0.15.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              16
+            ]
+          },
+          {
+            "id": 674,
+            "type": "ResizeImageMaskNode",
+            "pos": [
+              -2970,
+              3580
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "input",
+                "name": "input",
+                "type": "IMAGE,MASK",
+                "link": 1700
+              },
+              {
+                "localized_name": "resize_type",
+                "name": "resize_type",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "resize_type"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "resize_type.longer_size",
+                "name": "resize_type.longer_size",
+                "type": "INT",
+                "widget": {
+                  "name": "resize_type.longer_size"
+                },
+                "link": 1704
+              },
+              {
+                "localized_name": "scale_method",
+                "name": "scale_method",
+                "type": "COMBO",
+                "widget": {
+                  "name": "scale_method"
+                },
+                "link": 1705
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "resized",
+                "name": "resized",
+                "type": "*",
+                "links": [
+                  1698,
+                  1716
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ResizeImageMaskNode",
+              "cnr_id": "comfy-core",
+              "ver": "0.15.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "scale longer dimension",
+              1024,
+              "lanczos"
+            ]
+          },
+          {
+            "id": 672,
+            "type": "SDPoseDrawKeypoints",
+            "pos": [
+              -2540,
+              3590
+            ],
+            "size": [
+              270,
+              280
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "keypoints",
+                "name": "keypoints",
+                "type": "POSE_KEYPOINT",
+                "link": 1699
+              },
+              {
+                "localized_name": "draw_body",
+                "name": "draw_body",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "draw_body"
+                },
+                "link": 1706
+              },
+              {
+                "localized_name": "draw_hands",
+                "name": "draw_hands",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "draw_hands"
+                },
+                "link": 1707
+              },
+              {
+                "localized_name": "draw_face",
+                "name": "draw_face",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "draw_face"
+                },
+                "link": 1708
+              },
+              {
+                "localized_name": "draw_feet",
+                "name": "draw_feet",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "draw_feet"
+                },
+                "link": 1709
+              },
+              {
+                "localized_name": "stick_width",
+                "name": "stick_width",
+                "type": "INT",
+                "widget": {
+                  "name": "stick_width"
+                },
+                "link": 1710
+              },
+              {
+                "localized_name": "face_point_size",
+                "name": "face_point_size",
+                "type": "INT",
+                "widget": {
+                  "name": "face_point_size"
+                },
+                "link": 1711
+              },
+              {
+                "localized_name": "score_threshold",
+                "name": "score_threshold",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "score_threshold"
+                },
+                "link": 1712
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  1701
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "SDPoseDrawKeypoints",
+              "cnr_id": "comfy-core",
+              "ver": "0.15.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              true,
+              true,
+              true,
+              true,
+              4,
+              2,
+              0.5
+            ]
+          },
+          {
+            "id": 673,
+            "type": "CheckpointLoaderSimple",
+            "pos": [
+              -3040,
+              3080
+            ],
+            "size": [
+              390,
+              190
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "ckpt_name",
+                "name": "ckpt_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "ckpt_name"
+                },
+                "link": 1721
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  1696
+                ]
+              },
+              {
+                "localized_name": "CLIP",
+                "name": "CLIP",
+                "type": "CLIP",
+                "links": []
+              },
+              {
+                "localized_name": "VAE",
+                "name": "VAE",
+                "type": "VAE",
+                "links": [
+                  1697
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CheckpointLoaderSimple",
+              "cnr_id": "comfy-core",
+              "ver": "0.15.0",
+              "models": [
+                {
+                  "name": "sdpose_wholebody_fp16.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/SDPose/resolve/main/checkpoints/sdpose_wholebody_fp16.safetensors",
+                  "directory": "checkpoints"
+                }
+              ],
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "sdpose_wholebody_fp16.safetensors"
+            ]
+          },
+          {
+            "id": 677,
+            "type": "UNETLoader",
+            "pos": [
+              -3030,
+              3330
+            ],
+            "size": [
+              370,
+              140
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "unet_name",
+                "name": "unet_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "unet_name"
+                },
+                "link": 1722
+              },
+              {
+                "localized_name": "weight_dtype",
+                "name": "weight_dtype",
+                "type": "COMBO",
+                "widget": {
+                  "name": "weight_dtype"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  1715
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "UNETLoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.14.1",
+              "models": [
+                {
+                  "name": "rt_detr_v4-x-hgnet_fp16.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/SDPose/resolve/main/diffusion_models/rt_detr_v4-x-hgnet_fp16.safetensors",
+                  "directory": "diffusion_models"
+                }
+              ],
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "rt_detr_v4-x-hgnet_fp16.safetensors",
+              "default"
+            ]
+          },
+          {
+            "id": 678,
+            "type": "RTDETR_detect",
+            "pos": [
+              -2540,
+              3320
+            ],
+            "size": [
+              270,
+              200
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "model",
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 1715
+              },
+              {
+                "label": "image",
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 1716
+              },
+              {
+                "localized_name": "threshold",
+                "name": "threshold",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "threshold"
+                },
+                "link": 1718
+              },
+              {
+                "localized_name": "class_name",
+                "name": "class_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "class_name"
+                },
+                "link": 1719
+              },
+              {
+                "localized_name": "max_detections",
+                "name": "max_detections",
+                "type": "INT",
+                "widget": {
+                  "name": "max_detections"
+                },
+                "link": 1720
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "bboxes",
+                "name": "bboxes",
+                "type": "BOUNDING_BOX",
+                "links": [
+                  1717,
+                  1726
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "RTDETR_detect",
+              "cnr_id": "comfy-core",
+              "ver": "0.15.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              0.5,
+              "person",
+              1
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 1696,
+            "origin_id": 673,
+            "origin_slot": 0,
+            "target_id": 671,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 1697,
+            "origin_id": 673,
+            "origin_slot": 2,
+            "target_id": 671,
+            "target_slot": 1,
+            "type": "VAE"
+          },
+          {
+            "id": 1698,
+            "origin_id": 674,
+            "origin_slot": 0,
+            "target_id": 671,
+            "target_slot": 2,
+            "type": "IMAGE"
+          },
+          {
+            "id": 1699,
+            "origin_id": 671,
+            "origin_slot": 0,
+            "target_id": 672,
+            "target_slot": 0,
+            "type": "POSE_KEYPOINT"
+          },
+          {
+            "id": 1700,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 674,
+            "target_slot": 0,
+            "type": "IMAGE,MASK"
+          },
+          {
+            "id": 1701,
+            "origin_id": 672,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 1704,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 674,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 1705,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 674,
+            "target_slot": 3,
+            "type": "COMBO"
+          },
+          {
+            "id": 1706,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 672,
+            "target_slot": 1,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 1707,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 672,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 1708,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 672,
+            "target_slot": 3,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 1709,
+            "origin_id": -10,
+            "origin_slot": 6,
+            "target_id": 672,
+            "target_slot": 4,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 1710,
+            "origin_id": -10,
+            "origin_slot": 7,
+            "target_id": 672,
+            "target_slot": 5,
+            "type": "INT"
+          },
+          {
+            "id": 1711,
+            "origin_id": -10,
+            "origin_slot": 8,
+            "target_id": 672,
+            "target_slot": 6,
+            "type": "INT"
+          },
+          {
+            "id": 1712,
+            "origin_id": -10,
+            "origin_slot": 9,
+            "target_id": 672,
+            "target_slot": 7,
+            "type": "FLOAT"
+          },
+          {
+            "id": 1715,
+            "origin_id": 677,
+            "origin_slot": 0,
+            "target_id": 678,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 1716,
+            "origin_id": 674,
+            "origin_slot": 0,
+            "target_id": 678,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 1717,
+            "origin_id": 678,
+            "origin_slot": 0,
+            "target_id": 671,
+            "target_slot": 3,
+            "type": "BOUNDING_BOX"
+          },
+          {
+            "id": 1718,
+            "origin_id": -10,
+            "origin_slot": 10,
+            "target_id": 678,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 1719,
+            "origin_id": -10,
+            "origin_slot": 11,
+            "target_id": 678,
+            "target_slot": 3,
+            "type": "COMBO"
+          },
+          {
+            "id": 1720,
+            "origin_id": -10,
+            "origin_slot": 12,
+            "target_id": 678,
+            "target_slot": 4,
+            "type": "INT"
+          },
+          {
+            "id": 1721,
+            "origin_id": -10,
+            "origin_slot": 13,
+            "target_id": 673,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 1722,
+            "origin_id": -10,
+            "origin_slot": 14,
+            "target_id": 677,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 1725,
+            "origin_id": 671,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 1,
+            "type": "POSE_KEYPOINT"
+          },
+          {
+            "id": 1726,
+            "origin_id": 678,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 2,
+            "type": "BOUNDING_BOX"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Conditioning & Preprocessors/Pose",
+        "description": "Detects multiple people in an image and outputs per-person pose keypoints, skeleton renders, and bounding boxes using SDPose."
+      }
+    ]
+  },
+  "extra": {}
+}

@@ -10,6 +10,7 @@ from comfy_api_nodes.apis.ideogram import (
     ImageRequest,
     IdeogramV3Request,
     IdeogramV3EditRequest,
+    IdeogramV4Request,
 )
 from comfy_api_nodes.util import (
     ApiEndpoint,
@@ -17,6 +18,7 @@ from comfy_api_nodes.util import (
     download_url_as_bytesio,
     resize_mask_to_image,
     sync_op,
+    validate_string,
 )
 
 V1_V1_RES_MAP = {
@@ -234,7 +236,7 @@ class IdeogramV1(IO.ComfyNode):
         return IO.Schema(
             node_id="IdeogramV1",
             display_name="Ideogram V1",
-            category="api node/image/Ideogram",
+            category="partner/image/Ideogram",
             description="Generates images using the Ideogram V1 model.",
             inputs=[
                 IO.String.Input(
@@ -360,7 +362,7 @@ class IdeogramV2(IO.ComfyNode):
         return IO.Schema(
             node_id="IdeogramV2",
             display_name="Ideogram V2",
-            category="api node/image/Ideogram",
+            category="partner/image/Ideogram",
             description="Generates images using the Ideogram V2 model.",
             inputs=[
                 IO.String.Input(
@@ -526,7 +528,7 @@ class IdeogramV3(IO.ComfyNode):
         return IO.Schema(
             node_id="IdeogramV3",
             display_name="Ideogram V3",
-            category="api node/image/Ideogram",
+            category="partner/image/Ideogram",
             description="Generates images using the Ideogram V3 model. "
                         "Supports both regular image generation from text prompts and image editing with mask.",
             inputs=[
@@ -798,6 +800,119 @@ class IdeogramV3(IO.ComfyNode):
         return IO.NodeOutput(await download_and_process_images(image_urls))
 
 
+class IdeogramV4(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="IdeogramV4",
+            display_name="Ideogram V4",
+            category="partner/image/Ideogram",
+            description="Generates images using the Ideogram 4.0 model from a text prompt.",
+            inputs=[
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="Text prompt for the image generation.",
+                ),
+                IO.Combo.Input(
+                    "resolution",
+                    options=[
+                        "Auto",
+                        "2048x2048 (1:1)",
+                        "1440x2880 (1:2)",
+                        "2880x1440 (2:1)",
+                        "1664x2496 (2:3)",
+                        "2496x1664 (3:2)",
+                        "1792x2240 (4:5)",
+                        "2240x1792 (5:4)",
+                        "1440x2560 (9:16)",
+                        "2560x1440 (16:9)",
+                        "1600x2560 (5:8)",
+                        "2560x1600 (8:5)",
+                        "1728x2304 (3:4)",
+                        "2304x1728 (4:3)",
+                        "1296x3168 (9:22)",
+                        "3168x1296 (22:9)",
+                        "1152x2944 (9:23)",
+                        "2944x1152 (23:9)",
+                        "1248x3328 (3:8)",
+                        "3328x1248 (8:3)",
+                        "1280x3072 (5:12)",
+                        "3072x1280 (12:5)",
+                    ],
+                    default="Auto",
+                ),
+                IO.Combo.Input(
+                    "rendering_speed",
+                    options=["DEFAULT", "TURBO", "QUALITY"],
+                    default="DEFAULT",
+                    tooltip="Controls the trade-off between generation speed and quality.",
+                ),
+                IO.Int.Input(
+                    "seed",
+                    default=0,
+                    min=0,
+                    max=2147483647,
+                    step=1,
+                    control_after_generate=True,
+                    display_mode=IO.NumberDisplay.number,
+                ),
+            ],
+            outputs=[
+                IO.Image.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["rendering_speed"]),
+                expr="""
+                (
+                  $speed := widgets.rendering_speed;
+                  $price :=
+                    $contains($speed,"turbo") ? 0.0429 :
+                    $contains($speed,"quality") ? 0.143 :
+                    0.0858;
+                  {"type":"usd","usd": $price}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        prompt: str,
+        resolution: str,
+        rendering_speed: str,
+        seed: int,
+    ):
+        validate_string(prompt, strip_whitespace=True, min_length=1)
+        response = await sync_op(
+            cls,
+            ApiEndpoint(path="/proxy/ideogram/ideogram-v4/generate", method="POST"),
+            response_model=IdeogramGenerateResponse,
+            data=IdeogramV4Request(
+                text_prompt=prompt,
+                resolution=resolution.split(" ")[0] if resolution != "Auto" else None,
+                rendering_speed=rendering_speed,
+            ),
+            max_retries=1,
+        )
+
+        if not response.data or len(response.data) == 0:
+            raise Exception("No images were generated in the response")
+        image_urls = [image_data.url for image_data in response.data if image_data.url]
+        if not image_urls:
+            raise Exception("No image URLs were generated in the response")
+        return IO.NodeOutput(await download_and_process_images(image_urls))
+
+
 class IdeogramExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -805,6 +920,7 @@ class IdeogramExtension(ComfyExtension):
             IdeogramV1,
             IdeogramV2,
             IdeogramV3,
+            IdeogramV4,
         ]
 
 

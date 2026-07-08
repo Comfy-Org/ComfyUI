@@ -17,7 +17,7 @@ from folder_paths import get_output_directory
 from . import request_logger
 from ._helpers import (
     default_base_url,
-    get_auth_header,
+    get_comfy_api_headers,
     is_processing_interrupted,
     sleep_with_interrupt,
     to_aiohttp_url,
@@ -64,7 +64,7 @@ async def download_url_to_bytesio(
         if cls is None:
             raise ValueError("For relative 'cloud' paths, the `cls` parameter is required.")
         url = urljoin(default_base_url().rstrip("/") + "/", url.lstrip("/"))
-        headers = get_auth_header(cls)
+        headers = get_comfy_api_headers(cls)
 
     while True:
         attempt += 1

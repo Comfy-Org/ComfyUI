@@ -5,6 +5,20 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 import pytest
 
+from app.assets.api.schemas_out import Asset, AssetCreated
+
+
+def test_asset_created_inherits_hash_field():
+    """AssetCreated must inherit `hash` from Asset so POST /api/assets responses emit it.
+
+    Schema-level guard: integration tests cover the wire shape, but inheritance
+    drift (e.g. AssetCreated ever being redefined to no longer extend Asset)
+    would silently drop `hash` from a major endpoint without this check.
+    """
+    assert "hash" in Asset.model_fields
+    assert "hash" in AssetCreated.model_fields
+    assert AssetCreated.model_fields["hash"].annotation == Asset.model_fields["hash"].annotation
+
 
 def test_upload_ok_duplicate_reference(http: requests.Session, api_base: str, make_asset_bytes):
     name = "dup_a.safetensors"
@@ -17,26 +31,28 @@ def test_upload_ok_duplicate_reference(http: requests.Session, api_base: str, ma
     a1 = r1.json()
     assert r1.status_code == 201, a1
     assert a1["created_new"] is True
+    assert a1["hash"] == a1["asset_hash"]
 
-    # Second upload with the same data and name should return created_new == False and the same asset
+    # Second upload with the same data and name creates a new AssetReference (duplicates allowed)
+    # Returns 200 because Asset already exists, but a new AssetReference is created
     files = {"file": (name, data, "application/octet-stream")}
     form = {"tags": json.dumps(tags), "name": name, "user_metadata": json.dumps(meta)}
     r2 = http.post(api_base + "/api/assets", data=form, files=files, timeout=120)
     a2 = r2.json()
-    assert r2.status_code == 200, a2
-    assert a2["created_new"] is False
+    assert r2.status_code in (200, 201), a2
     assert a2["asset_hash"] == a1["asset_hash"]
-    assert a2["id"] == a1["id"]  # old reference
+    assert a2["hash"] == a1["hash"]
+    assert a2["id"] != a1["id"]  # new reference with same content
 
-    # Third upload with the same data but new name should return created_new == False and the new AssetReference
+    # Third upload with the same data but different name also creates new AssetReference
     files = {"file": (name, data, "application/octet-stream")}
     form = {"tags": json.dumps(tags), "name": name + "_d", "user_metadata": json.dumps(meta)}
-    r2 = http.post(api_base + "/api/assets", data=form, files=files, timeout=120)
-    a3 = r2.json()
-    assert r2.status_code == 200, a3
-    assert a3["created_new"] is False
+    r3 = http.post(api_base + "/api/assets", data=form, files=files, timeout=120)
+    a3 = r3.json()
+    assert r3.status_code in (200, 201), a3
     assert a3["asset_hash"] == a1["asset_hash"]
-    assert a3["id"] != a1["id"]  # old reference
+    assert a3["id"] != a1["id"]
+    assert a3["id"] != a2["id"]
 
 
 def test_upload_fastpath_from_existing_hash_no_file(http: requests.Session, api_base: str):
@@ -50,6 +66,7 @@ def test_upload_fastpath_from_existing_hash_no_file(http: requests.Session, api_
     b1 = r1.json()
     assert r1.status_code == 201, b1
     h = b1["asset_hash"]
+    assert b1["hash"] == h
 
     # Now POST /api/assets with only hash and no file
     files = [
@@ -63,6 +80,7 @@ def test_upload_fastpath_from_existing_hash_no_file(http: requests.Session, api_
     assert r2.status_code == 200, b2  # fast path returns 200 with created_new == False
     assert b2["created_new"] is False
     assert b2["asset_hash"] == h
+    assert b2["hash"] == h
 
 
 def test_upload_fastpath_with_known_hash_and_file(
@@ -75,6 +93,7 @@ def test_upload_fastpath_with_known_hash_and_file(
     b1 = r1.json()
     assert r1.status_code == 201, b1
     h = b1["asset_hash"]
+    assert b1["hash"] == h
 
     # Send both file and hash of existing content -> server must drain file and create from hash (200)
     files = {"file": ("ignored.bin", b"ignored" * 10, "application/octet-stream")}
@@ -84,6 +103,7 @@ def test_upload_fastpath_with_known_hash_and_file(
     assert r2.status_code == 200, b2
     assert b2["created_new"] is False
     assert b2["asset_hash"] == h
+    assert b2["hash"] == h
 
 
 def test_upload_multiple_tags_fields_are_merged(http: requests.Session, api_base: str):
@@ -116,7 +136,7 @@ def test_concurrent_upload_identical_bytes_different_names(
 ):
     """
     Two concurrent uploads of identical bytes but different names.
-    Expect a single Asset (same hash), two AssetInfo rows, and exactly one created_new=True.
+    Expect a single Asset (same hash), two AssetReference rows, and exactly one created_new=True.
     """
     scope = f"concupload-{uuid.uuid4().hex[:6]}"
     name1, name2 = "cu_a.bin", "cu_b.bin"
@@ -142,6 +162,8 @@ def test_concurrent_upload_identical_bytes_different_names(
     assert r1.status_code in (200, 201), b1
     assert r2.status_code in (200, 201), b2
     assert b1["asset_hash"] == b2["asset_hash"]
+    assert b1["hash"] == b2["hash"]
+    assert b1["hash"] == b1["asset_hash"]
     assert b1["id"] != b2["id"]
 
     created_flags = sorted([bool(b1.get("created_new")), bool(b2.get("created_new"))])
@@ -241,6 +263,15 @@ def test_upload_tags_traversal_guard(http: requests.Session, api_base: str):
     body = r.json()
     assert r.status_code == 400
     assert body["error"]["code"] in ("BAD_REQUEST", "INVALID_BODY")
+
+
+def test_upload_empty_tags_rejected(http: requests.Session, api_base: str):
+    files = {"file": ("notags.bin", b"A" * 64, "application/octet-stream")}
+    form = {"tags": json.dumps([]), "name": "notags.bin", "user_metadata": json.dumps({})}
+    r = http.post(api_base + "/api/assets", data=form, files=files, timeout=120)
+    body = r.json()
+    assert r.status_code == 400
+    assert body["error"]["code"] == "INVALID_BODY"
 
 
 @pytest.mark.parametrize("root", ["input", "output"])

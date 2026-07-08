@@ -23,7 +23,7 @@ class BriaEditImageRequest(BaseModel):
         None,
         description="Mask image (black and white). Black areas will be preserved, white areas will be edited. "
         "If omitted, the edit applies to the entire image. "
-        "The input image and the the input mask must be of the same size.",
+        "The input image and the input mask must be of the same size.",
     )
     negative_prompt: str | None = Field(None)
     guidance_scale: float = Field(...)
@@ -97,3 +97,28 @@ class BriaRemoveVideoBackgroundResult(BaseModel):
 class BriaRemoveVideoBackgroundResponse(BaseModel):
     status: str = Field(...)
     result: BriaRemoveVideoBackgroundResult | None = Field(None)
+
+
+class BriaVideoGreenScreenRequest(BaseModel):
+    video: str = Field(..., description="Publicly accessible URL of the input video.")
+    green_shade: str = Field(
+        default="broadcast_green",
+        description="Solid chroma-key shade applied behind the foreground "
+        "(broadcast_green, chroma_green, or blue_screen).",
+    )
+    output_container_and_codec: str = Field(...)
+    preserve_audio: bool = Field(True)
+    seed: int = Field(...)
+
+
+class BriaVideoReplaceBackgroundRequest(BaseModel):
+    video: str = Field(..., description="Publicly accessible URL of the input (foreground) video.")
+    background_url: str = Field(
+        ...,
+        description="Publicly accessible URL of the background image or video to composite behind "
+        "the foreground. Stretched to the foreground frame; match its aspect ratio for "
+        "undistorted results.",
+    )
+    output_container_and_codec: str = Field(...)
+    preserve_audio: bool = Field(True)
+    seed: int = Field(...)

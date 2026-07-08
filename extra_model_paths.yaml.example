@@ -8,27 +8,43 @@
 #     # You can use is_default to mark that these folders should be listed first, and used as the default dirs for eg downloads
 #     #is_default: true
 #     checkpoints: models/checkpoints/
+#     configs: models/configs/
+#     loras: models/loras/
+#     vae: models/vae/
 #     text_encoders: |
 #          models/text_encoders/
-#          models/clip/  # legacy location still supported
-#     clip_vision: models/clip_vision/
-#     configs: models/configs/
-#     controlnet: models/controlnet/
+#          models/clip/
 #     diffusion_models: |
-#                  models/diffusion_models
-#                  models/unet
+#          models/unet/
+#          models/diffusion_models/
+#     clip_vision: models/clip_vision/
+#     style_models: models/style_models/
 #     embeddings: models/embeddings/
-#     loras: models/loras/
+#     diffusers: models/diffusers/
+#     vae_approx: models/vae_approx/
+#     controlnet: |
+#          models/controlnet/
+#          models/t2i_adapter/
+#     gligen: models/gligen/
 #     upscale_models: models/upscale_models/
-#     vae: models/vae/
-#     audio_encoders: models/audio_encoders/
+#     latent_upscale_models: models/latent_upscale_models/
+#     custom_nodes: custom_nodes/
+#     hypernetworks: models/hypernetworks/
+#     photomaker: models/photomaker/
+#     classifiers: models/classifiers/
 #     model_patches: models/model_patches/
+#     audio_encoders: models/audio_encoders/
+#     background_removal: models/background_removal/
+#     frame_interpolation: models/frame_interpolation/
+#     geometry_estimation: models/geometry_estimation/
+#     optical_flow: models/optical_flow/
+#     detection: models/detection/
 
 
 #config for a1111 ui
 #all you have to do is uncomment this (remove the #) and change the base_path to where yours is installed
 
-#a111:
+#a1111:
 #     base_path: path/to/stable-diffusion-webui/
 #     checkpoints: models/Stable-diffusion
 #     configs: models/Stable-diffusion
@@ -45,8 +61,7 @@
 #     controlnet: models/ControlNet
 
 
-# For a full list of supported keys (style_models, vae_approx, hypernetworks, photomaker,
-# model_patches, audio_encoders, classifiers, etc.) see folder_paths.py.
+# For the canonical list of supported keys and extensions, see folder_paths.py.
 
 #other_ui:
 #    base_path: path/to/ui

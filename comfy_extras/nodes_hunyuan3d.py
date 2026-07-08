@@ -1,12 +1,7 @@
 import torch
-import os
-import json
-import struct
-import numpy as np
 from comfy.ldm.modules.diffusionmodules.mmdit import get_1d_sincos_pos_embed_from_grid_torch
-import folder_paths
 import comfy.model_management
-from comfy.cli_args import args
+from comfy_extras.nodes_save_3d import pack_variable_mesh_batch
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, IO, Types
 from comfy_api.latest._util import MESH, VOXEL  # only for backward compatibility if someone import it from this file (will be removed later) # noqa
@@ -17,7 +12,7 @@ class EmptyLatentHunyuan3Dv2(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="EmptyLatentHunyuan3Dv2",
-            category="latent/3d",
+            category="model/latent/hunyuan 3d",
             inputs=[
                 IO.Int.Input("resolution", default=3072, min=1, max=8192),
                 IO.Int.Input("batch_size", default=1, min=1, max=4096, tooltip="The number of latent images in the batch."),
@@ -40,7 +35,7 @@ class Hunyuan3Dv2Conditioning(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="Hunyuan3Dv2Conditioning",
-            category="conditioning/video_models",
+            category="model/conditioning/hunyuan 3d",
             inputs=[
                 IO.ClipVisionOutput.Input("clip_vision_output"),
             ],
@@ -65,7 +60,7 @@ class Hunyuan3Dv2ConditioningMultiView(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="Hunyuan3Dv2ConditioningMultiView",
-            category="conditioning/video_models",
+            category="model/conditioning/hunyuan 3d",
             inputs=[
                 IO.ClipVisionOutput.Input("front", optional=True),
                 IO.ClipVisionOutput.Input("left", optional=True),
@@ -102,7 +97,7 @@ class VAEDecodeHunyuan3D(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="VAEDecodeHunyuan3D",
-            category="latent/3d",
+            category="model/latent/hunyuan 3d",
             inputs=[
                 IO.Latent.Input("samples"),
                 IO.Vae.Input("vae"),
@@ -424,14 +419,17 @@ class VoxelToMeshBasic(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="VoxelToMeshBasic",
+            display_name="Voxel to Mesh (Basic) (DEPRECATED)",
             category="3d",
+            description="Converts a voxel grid to a mesh.",
+            is_deprecated=True, # This node is superseded by the Voxel To Mesh node
             inputs=[
                 IO.Voxel.Input("voxel"),
                 IO.Float.Input("threshold", default=0.6, min=-1.0, max=1.0, step=0.01),
             ],
             outputs=[
                 IO.Mesh.Output(),
-            ]
+            ],
         )
 
     @classmethod
@@ -443,7 +441,9 @@ class VoxelToMeshBasic(IO.ComfyNode):
             vertices.append(v)
             faces.append(f)
 
-        return IO.NodeOutput(Types.MESH(torch.stack(vertices), torch.stack(faces)))
+        if vertices and all(v.shape == vertices[0].shape for v in vertices) and all(f.shape == faces[0].shape for f in faces):
+            return IO.NodeOutput(Types.MESH(torch.stack(vertices), torch.stack(faces)))
+        return IO.NodeOutput(pack_variable_mesh_batch(vertices, faces))
 
     decode = execute  # TODO: remove
 
@@ -453,10 +453,12 @@ class VoxelToMesh(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="VoxelToMesh",
+            display_name="Voxel to Mesh",
             category="3d",
+            description="Converts a voxel grid to a mesh.",
             inputs=[
                 IO.Voxel.Input("voxel"),
-                IO.Combo.Input("algorithm", options=["surface net", "basic"], advanced=True),
+                IO.Combo.Input("algorithm", options=["surface net", "basic"]),
                 IO.Float.Input("threshold", default=0.6, min=-1.0, max=1.0, step=0.01),
             ],
             outputs=[
@@ -479,204 +481,11 @@ class VoxelToMesh(IO.ComfyNode):
             vertices.append(v)
             faces.append(f)
 
-        return IO.NodeOutput(Types.MESH(torch.stack(vertices), torch.stack(faces)))
+        if vertices and all(v.shape == vertices[0].shape for v in vertices) and all(f.shape == faces[0].shape for f in faces):
+            return IO.NodeOutput(Types.MESH(torch.stack(vertices), torch.stack(faces)))
+        return IO.NodeOutput(pack_variable_mesh_batch(vertices, faces))
 
     decode = execute  # TODO: remove
-
-
-def save_glb(vertices, faces, filepath, metadata=None):
-    """
-    Save PyTorch tensor vertices and faces as a GLB file without external dependencies.
-
-    Parameters:
-    vertices: torch.Tensor of shape (N, 3) - The vertex coordinates
-    faces: torch.Tensor of shape (M, 3) - The face indices (triangle faces)
-    filepath: str - Output filepath (should end with .glb)
-    """
-
-    # Convert tensors to numpy arrays
-    vertices_np = vertices.cpu().numpy().astype(np.float32)
-    faces_np = faces.cpu().numpy().astype(np.uint32)
-
-    vertices_buffer = vertices_np.tobytes()
-    indices_buffer = faces_np.tobytes()
-
-    def pad_to_4_bytes(buffer):
-        padding_length = (4 - (len(buffer) % 4)) % 4
-        return buffer + b'\x00' * padding_length
-
-    vertices_buffer_padded = pad_to_4_bytes(vertices_buffer)
-    indices_buffer_padded = pad_to_4_bytes(indices_buffer)
-
-    buffer_data = vertices_buffer_padded + indices_buffer_padded
-
-    vertices_byte_length = len(vertices_buffer)
-    vertices_byte_offset = 0
-    indices_byte_length = len(indices_buffer)
-    indices_byte_offset = len(vertices_buffer_padded)
-
-    gltf = {
-        "asset": {"version": "2.0", "generator": "ComfyUI"},
-        "buffers": [
-            {
-                "byteLength": len(buffer_data)
-            }
-        ],
-        "bufferViews": [
-            {
-                "buffer": 0,
-                "byteOffset": vertices_byte_offset,
-                "byteLength": vertices_byte_length,
-                "target": 34962  # ARRAY_BUFFER
-            },
-            {
-                "buffer": 0,
-                "byteOffset": indices_byte_offset,
-                "byteLength": indices_byte_length,
-                "target": 34963  # ELEMENT_ARRAY_BUFFER
-            }
-        ],
-        "accessors": [
-            {
-                "bufferView": 0,
-                "byteOffset": 0,
-                "componentType": 5126,  # FLOAT
-                "count": len(vertices_np),
-                "type": "VEC3",
-                "max": vertices_np.max(axis=0).tolist(),
-                "min": vertices_np.min(axis=0).tolist()
-            },
-            {
-                "bufferView": 1,
-                "byteOffset": 0,
-                "componentType": 5125,  # UNSIGNED_INT
-                "count": faces_np.size,
-                "type": "SCALAR"
-            }
-        ],
-        "meshes": [
-            {
-                "primitives": [
-                    {
-                        "attributes": {
-                            "POSITION": 0
-                        },
-                        "indices": 1,
-                        "mode": 4  # TRIANGLES
-                    }
-                ]
-            }
-        ],
-        "nodes": [
-            {
-                "mesh": 0
-            }
-        ],
-        "scenes": [
-            {
-                "nodes": [0]
-            }
-        ],
-        "scene": 0
-    }
-
-    if metadata is not None:
-        gltf["asset"]["extras"] = metadata
-
-    # Convert the JSON to bytes
-    gltf_json = json.dumps(gltf).encode('utf8')
-
-    def pad_json_to_4_bytes(buffer):
-        padding_length = (4 - (len(buffer) % 4)) % 4
-        return buffer + b' ' * padding_length
-
-    gltf_json_padded = pad_json_to_4_bytes(gltf_json)
-
-    # Create the GLB header
-    # Magic glTF
-    glb_header = struct.pack('<4sII', b'glTF', 2, 12 + 8 + len(gltf_json_padded) + 8 + len(buffer_data))
-
-    # Create JSON chunk header (chunk type 0)
-    json_chunk_header = struct.pack('<II', len(gltf_json_padded), 0x4E4F534A)  # "JSON" in little endian
-
-    # Create BIN chunk header (chunk type 1)
-    bin_chunk_header = struct.pack('<II', len(buffer_data), 0x004E4942)  # "BIN\0" in little endian
-
-    # Write the GLB file
-    with open(filepath, 'wb') as f:
-        f.write(glb_header)
-        f.write(json_chunk_header)
-        f.write(gltf_json_padded)
-        f.write(bin_chunk_header)
-        f.write(buffer_data)
-
-    return filepath
-
-
-class SaveGLB(IO.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        return IO.Schema(
-            node_id="SaveGLB",
-            display_name="Save 3D Model",
-            search_aliases=["export 3d model", "save mesh"],
-            category="3d",
-            essentials_category="Basics",
-            is_output_node=True,
-            inputs=[
-                IO.MultiType.Input(
-                    IO.Mesh.Input("mesh"),
-                    types=[
-                        IO.File3DGLB,
-                        IO.File3DGLTF,
-                        IO.File3DOBJ,
-                        IO.File3DFBX,
-                        IO.File3DSTL,
-                        IO.File3DUSDZ,
-                        IO.File3DAny,
-                    ],
-                    tooltip="Mesh or 3D file to save",
-                ),
-                IO.String.Input("filename_prefix", default="mesh/ComfyUI"),
-            ],
-            hidden=[IO.Hidden.prompt, IO.Hidden.extra_pnginfo]
-        )
-
-    @classmethod
-    def execute(cls, mesh: Types.MESH | Types.File3D, filename_prefix: str) -> IO.NodeOutput:
-        full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, folder_paths.get_output_directory())
-        results = []
-
-        metadata = {}
-        if not args.disable_metadata:
-            if cls.hidden.prompt is not None:
-                metadata["prompt"] = json.dumps(cls.hidden.prompt)
-            if cls.hidden.extra_pnginfo is not None:
-                for x in cls.hidden.extra_pnginfo:
-                    metadata[x] = json.dumps(cls.hidden.extra_pnginfo[x])
-
-        if isinstance(mesh, Types.File3D):
-            # Handle File3D input - save BytesIO data to output folder
-            ext = mesh.format or "glb"
-            f = f"{filename}_{counter:05}_.{ext}"
-            mesh.save_to(os.path.join(full_output_folder, f))
-            results.append({
-                "filename": f,
-                "subfolder": subfolder,
-                "type": "output"
-            })
-        else:
-            # Handle Mesh input - save vertices and faces as GLB
-            for i in range(mesh.vertices.shape[0]):
-                f = f"{filename}_{counter:05}_.glb"
-                save_glb(mesh.vertices[i], mesh.faces[i], os.path.join(full_output_folder, f), metadata)
-                results.append({
-                    "filename": f,
-                    "subfolder": subfolder,
-                    "type": "output"
-                })
-                counter += 1
-        return IO.NodeOutput(ui={"3d": results})
 
 
 class Hunyuan3dExtension(ComfyExtension):
@@ -689,7 +498,6 @@ class Hunyuan3dExtension(ComfyExtension):
             VAEDecodeHunyuan3D,
             VoxelToMeshBasic,
             VoxelToMesh,
-            SaveGLB,
         ]
 
 

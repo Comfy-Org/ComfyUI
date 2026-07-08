@@ -1,0 +1,616 @@
+{
+  "revision": 0,
+  "last_node_id": 10,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 10,
+      "type": "d5c462c8-1372-4af8-84f2-547c83470d04",
+      "pos": [
+        3610,
+        -2630
+      ],
+      "size": [
+        270,
+        420
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "image",
+          "localized_name": "images.image0",
+          "name": "images.image0",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "IMAGE",
+          "localized_name": "IMAGE0",
+          "name": "IMAGE0",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "4",
+            "curve"
+          ],
+          [
+            "5",
+            "curve"
+          ],
+          [
+            "6",
+            "curve"
+          ],
+          [
+            "7",
+            "curve"
+          ]
+        ]
+      },
+      "widgets_values": [],
+      "title": "Color Curves"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "d5c462c8-1372-4af8-84f2-547c83470d04",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 9,
+          "lastLinkId": 38,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Color Curves",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            2660,
+            -4500,
+            120,
+            60
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            4270,
+            -4500,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "abc345b7-f55e-4f32-a11d-3aa4c2b0936b",
+            "name": "images.image0",
+            "type": "IMAGE",
+            "linkIds": [
+              29,
+              34
+            ],
+            "localized_name": "images.image0",
+            "label": "image",
+            "pos": [
+              2760,
+              -4480
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "eb0ec079-46da-4408-8263-9ef85569d33d",
+            "name": "IMAGE0",
+            "type": "IMAGE",
+            "linkIds": [
+              28
+            ],
+            "localized_name": "IMAGE0",
+            "label": "IMAGE",
+            "pos": [
+              4290,
+              -4480
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 4,
+            "type": "CurveEditor",
+            "pos": [
+              3060,
+              -4500
+            ],
+            "size": [
+              270,
+              200
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "curve",
+                "localized_name": "curve",
+                "name": "curve",
+                "type": "CURVE",
+                "widget": {
+                  "name": "curve"
+                },
+                "link": null
+              },
+              {
+                "label": "histogram",
+                "localized_name": "histogram",
+                "name": "histogram",
+                "type": "HISTOGRAM",
+                "shape": 7,
+                "link": 35
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CURVE",
+                "name": "CURVE",
+                "type": "CURVE",
+                "links": [
+                  30
+                ]
+              }
+            ],
+            "title": "RGB Master",
+            "properties": {
+              "Node name for S&R": "CurveEditor"
+            },
+            "widgets_values": []
+          },
+          {
+            "id": 5,
+            "type": "CurveEditor",
+            "pos": [
+              3060,
+              -4250
+            ],
+            "size": [
+              270,
+              200
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "curve",
+                "localized_name": "curve",
+                "name": "curve",
+                "type": "CURVE",
+                "widget": {
+                  "name": "curve"
+                },
+                "link": null
+              },
+              {
+                "label": "histogram",
+                "localized_name": "histogram",
+                "name": "histogram",
+                "type": "HISTOGRAM",
+                "shape": 7,
+                "link": 36
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CURVE",
+                "name": "CURVE",
+                "type": "CURVE",
+                "links": [
+                  31
+                ]
+              }
+            ],
+            "title": "Red",
+            "properties": {
+              "Node name for S&R": "CurveEditor"
+            },
+            "widgets_values": []
+          },
+          {
+            "id": 6,
+            "type": "CurveEditor",
+            "pos": [
+              3060,
+              -4000
+            ],
+            "size": [
+              270,
+              200
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "curve",
+                "localized_name": "curve",
+                "name": "curve",
+                "type": "CURVE",
+                "widget": {
+                  "name": "curve"
+                },
+                "link": null
+              },
+              {
+                "label": "histogram",
+                "localized_name": "histogram",
+                "name": "histogram",
+                "type": "HISTOGRAM",
+                "shape": 7,
+                "link": 37
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CURVE",
+                "name": "CURVE",
+                "type": "CURVE",
+                "links": [
+                  32
+                ]
+              }
+            ],
+            "title": "Green",
+            "properties": {
+              "Node name for S&R": "CurveEditor"
+            },
+            "widgets_values": []
+          },
+          {
+            "id": 7,
+            "type": "CurveEditor",
+            "pos": [
+              3060,
+              -3750
+            ],
+            "size": [
+              270,
+              200
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "curve",
+                "localized_name": "curve",
+                "name": "curve",
+                "type": "CURVE",
+                "widget": {
+                  "name": "curve"
+                },
+                "link": null
+              },
+              {
+                "label": "histogram",
+                "localized_name": "histogram",
+                "name": "histogram",
+                "type": "HISTOGRAM",
+                "shape": 7,
+                "link": 38
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CURVE",
+                "name": "CURVE",
+                "type": "CURVE",
+                "links": [
+                  33
+                ]
+              }
+            ],
+            "title": "Blue",
+            "properties": {
+              "Node name for S&R": "CurveEditor"
+            },
+            "widgets_values": []
+          },
+          {
+            "id": 8,
+            "type": "GLSLShader",
+            "pos": [
+              3590,
+              -4500
+            ],
+            "size": [
+              420,
+              500
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "image0",
+                "localized_name": "images.image0",
+                "name": "images.image0",
+                "type": "IMAGE",
+                "link": 29
+              },
+              {
+                "label": "image1",
+                "localized_name": "images.image1",
+                "name": "images.image1",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "label": "u_curve0",
+                "localized_name": "curves.u_curve0",
+                "name": "curves.u_curve0",
+                "shape": 7,
+                "type": "CURVE",
+                "link": 30
+              },
+              {
+                "label": "u_curve1",
+                "localized_name": "curves.u_curve1",
+                "name": "curves.u_curve1",
+                "shape": 7,
+                "type": "CURVE",
+                "link": 31
+              },
+              {
+                "label": "u_curve2",
+                "localized_name": "curves.u_curve2",
+                "name": "curves.u_curve2",
+                "shape": 7,
+                "type": "CURVE",
+                "link": 32
+              },
+              {
+                "label": "u_curve3",
+                "localized_name": "curves.u_curve3",
+                "name": "curves.u_curve3",
+                "shape": 7,
+                "type": "CURVE",
+                "link": 33
+              },
+              {
+                "localized_name": "fragment_shader",
+                "name": "fragment_shader",
+                "type": "STRING",
+                "widget": {
+                  "name": "fragment_shader"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "size_mode",
+                "name": "size_mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "size_mode"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE0",
+                "name": "IMAGE0",
+                "type": "IMAGE",
+                "links": [
+                  28
+                ]
+              },
+              {
+                "localized_name": "IMAGE1",
+                "name": "IMAGE1",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE2",
+                "name": "IMAGE2",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE3",
+                "name": "IMAGE3",
+                "type": "IMAGE",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GLSLShader"
+            },
+            "widgets_values": [
+              "#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform sampler2D u_curve0;  // RGB master curve (256x1 LUT)\nuniform sampler2D u_curve1;  // Red channel curve\nuniform sampler2D u_curve2;  // Green channel curve\nuniform sampler2D u_curve3;  // Blue channel curve\n\nin vec2 v_texCoord;\nlayout(location = 0) out vec4 fragColor0;\n\n// GIMP-compatible curve lookup with manual linear interpolation.\n// Matches gimp_curve_map_value_inline() from gimpcurve-map.c:\n//   index = value * (n_samples - 1)\n//   f = fract(index)\n//   result = (1-f) * samples[floor] + f * samples[ceil]\n//\n// Uses texelFetch (NEAREST) to avoid GPU half-texel offset issues\n// that occur with texture() + GL_LINEAR on small 256x1 LUTs.\nfloat applyCurve(sampler2D curve, float value) {\n    value = clamp(value, 0.0, 1.0);\n\n    float pos = value * 255.0;\n    int lo = int(floor(pos));\n    int hi = min(lo + 1, 255);\n    float f = pos - float(lo);\n\n    float a = texelFetch(curve, ivec2(lo, 0), 0).r;\n    float b = texelFetch(curve, ivec2(hi, 0), 0).r;\n\n    return a + f * (b - a);\n}\n\nvoid main() {\n    vec4 color = texture(u_image0, v_texCoord);\n\n    // GIMP order: per-channel curves first, then RGB master curve.\n    // See gimp_curve_map_pixels() default case in gimpcurve-map.c:\n    //   dest = colors_curve( channel_curve( src ) )\n    float tmp_r = applyCurve(u_curve1, color.r);\n    float tmp_g = applyCurve(u_curve2, color.g);\n    float tmp_b = applyCurve(u_curve3, color.b);\n    color.r = applyCurve(u_curve0, tmp_r);\n    color.g = applyCurve(u_curve0, tmp_g);\n    color.b = applyCurve(u_curve0, tmp_b);\n\n    fragColor0 = vec4(color.rgb, color.a);\n}\n",
+              "from_input"
+            ]
+          },
+          {
+            "id": 9,
+            "type": "ImageHistogram",
+            "pos": [
+              2800,
+              -4300
+            ],
+            "size": [
+              210,
+              150
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "image",
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 34
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "HISTOGRAM",
+                "name": "rgb",
+                "type": "HISTOGRAM",
+                "links": [
+                  35
+                ]
+              },
+              {
+                "localized_name": "HISTOGRAM",
+                "name": "luminance",
+                "type": "HISTOGRAM",
+                "links": []
+              },
+              {
+                "localized_name": "HISTOGRAM",
+                "name": "red",
+                "type": "HISTOGRAM",
+                "links": [
+                  36
+                ]
+              },
+              {
+                "localized_name": "HISTOGRAM",
+                "name": "green",
+                "type": "HISTOGRAM",
+                "links": [
+                  37
+                ]
+              },
+              {
+                "localized_name": "HISTOGRAM",
+                "name": "blue",
+                "type": "HISTOGRAM",
+                "links": [
+                  38
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ImageHistogram"
+            },
+            "widgets_values": []
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 29,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 28,
+            "origin_id": 8,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 30,
+            "origin_id": 4,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 2,
+            "type": "CURVE"
+          },
+          {
+            "id": 31,
+            "origin_id": 5,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 3,
+            "type": "CURVE"
+          },
+          {
+            "id": 32,
+            "origin_id": 6,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 4,
+            "type": "CURVE"
+          },
+          {
+            "id": 33,
+            "origin_id": 7,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 5,
+            "type": "CURVE"
+          },
+          {
+            "id": 34,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 9,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 35,
+            "origin_id": 9,
+            "origin_slot": 0,
+            "target_id": 4,
+            "target_slot": 1,
+            "type": "HISTOGRAM"
+          },
+          {
+            "id": 36,
+            "origin_id": 9,
+            "origin_slot": 2,
+            "target_id": 5,
+            "target_slot": 1,
+            "type": "HISTOGRAM"
+          },
+          {
+            "id": 37,
+            "origin_id": 9,
+            "origin_slot": 3,
+            "target_id": 6,
+            "target_slot": 1,
+            "type": "HISTOGRAM"
+          },
+          {
+            "id": 38,
+            "origin_id": 9,
+            "origin_slot": 4,
+            "target_id": 7,
+            "target_slot": 1,
+            "type": "HISTOGRAM"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Image Tools/Color adjust",
+        "description": "Fine-tunes tone and color with per-channel curve adjustments using a real-time GPU fragment shader."
+      }
+    ]
+  }
+}

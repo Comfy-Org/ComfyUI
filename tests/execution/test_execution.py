@@ -183,8 +183,7 @@ class TestExecution:
     # Initialize server and client
     #
     @fixture(scope="class", autouse=True, params=[
-        { "extra_args" : [], "should_cache_results" : True },
-        { "extra_args" : ["--cache-lru", 0], "should_cache_results" : True },
+        { "extra_args" : ["--cache-classic"], "should_cache_results" : True },
         { "extra_args" : ["--cache-lru", 100], "should_cache_results" : True },
         { "extra_args" : ["--cache-none"], "should_cache_results" : False },
     ])

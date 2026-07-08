@@ -60,7 +60,7 @@ class FreSca(io.ComfyNode):
             node_id="FreSca",
             search_aliases=["frequency guidance"],
             display_name="FreSca",
-            category="_for_testing",
+            category="experimental",
             description="Applies frequency-dependent scaling to the guidance",
             inputs=[
                 io.Model.Input("model"),

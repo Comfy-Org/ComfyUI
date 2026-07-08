@@ -15,7 +15,7 @@ class PerturbedAttentionGuidance(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="PerturbedAttentionGuidance",
-            category="model_patches/unet",
+            category="model/patch/unet",
             inputs=[
                 io.Model.Input("model"),
                 io.Float.Input("scale", default=3.0, min=0.0, max=100.0, step=0.01, round=0.01),

@@ -1,0 +1,24 @@
+name: Detect Unreviewed Merge
+
+# SOC 2 compliance — reusable workflow lives in Comfy-Org/github-workflows,
+# tracking issues are filed in Comfy-Org/unreviewed-merges.
+
+on:
+  push:
+    branches: [master]
+
+concurrency:
+  group: detect-unreviewed-merge-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  detect:
+    uses: Comfy-Org/github-workflows/.github/workflows/detect-unreviewed-merge.yml@4d9cb6b87f953bb7cd69954280e1465fb9bd2040 # v1
+    with:
+      approval-mode: latest-per-reviewer
+    secrets:
+      UNREVIEWED_MERGES_TOKEN: ${{ secrets.UNREVIEWED_MERGES_TOKEN }}

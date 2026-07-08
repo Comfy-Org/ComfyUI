@@ -16,6 +16,7 @@ from .conversions import (
     convert_mask_to_image,
     downscale_image_tensor,
     downscale_image_tensor_by_max_side,
+    downscale_video_to_max_pixels,
     image_tensor_pair_to_batch,
     pil_to_bytesio,
     resize_mask_to_image,
@@ -25,6 +26,7 @@ from .conversions import (
     text_filepath_to_base64_string,
     text_filepath_to_data_uri,
     trim_video,
+    upscale_video_to_min_pixels,
     video_to_base64_string,
 )
 from .download_helpers import (
@@ -87,6 +89,7 @@ __all__ = [
     "convert_mask_to_image",
     "downscale_image_tensor",
     "downscale_image_tensor_by_max_side",
+    "downscale_video_to_max_pixels",
     "image_tensor_pair_to_batch",
     "pil_to_bytesio",
     "resize_mask_to_image",
@@ -96,6 +99,7 @@ __all__ = [
     "text_filepath_to_base64_string",
     "text_filepath_to_data_uri",
     "trim_video",
+    "upscale_video_to_min_pixels",
     "video_to_base64_string",
     # Validation utilities
     "get_image_dimensions",

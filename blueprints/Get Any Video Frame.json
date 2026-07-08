@@ -1,0 +1,485 @@
+{
+  "revision": 0,
+  "last_node_id": 98,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 98,
+      "type": "dca6e78d-fb06-421e-97f7-6ce17a665260",
+      "pos": [
+        -410,
+        -2230
+      ],
+      "size": [
+        270,
+        104
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": null
+        },
+        {
+          "label": "frame_index",
+          "name": "value",
+          "type": "INT",
+          "widget": {
+            "name": "value"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "Get Any Video Frame",
+      "properties": {
+        "proxyWidgets": [
+          [
+            "100",
+            "value"
+          ]
+        ]
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "dca6e78d-fb06-421e-97f7-6ce17a665260",
+        "version": 1,
+        "state": {
+          "lastGroupId": 1,
+          "lastNodeId": 136,
+          "lastLinkId": 302,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Get Any Video Frame",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            380,
+            -57,
+            120,
+            80
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            1460,
+            -57,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "2ceec378-8dcf-4340-8570-155967f59a93",
+            "name": "video",
+            "type": "VIDEO",
+            "linkIds": [
+              4
+            ],
+            "pos": [
+              480,
+              -37
+            ]
+          },
+          {
+            "id": "819955f6-c686-4896-8032-ff2d0059109a",
+            "name": "value",
+            "type": "INT",
+            "linkIds": [
+              283
+            ],
+            "label": "frame_index",
+            "pos": [
+              480,
+              -17
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "1ab0684d-6a44-45b6-8aa4-a0b971a1d41e",
+            "name": "IMAGE",
+            "type": "IMAGE",
+            "linkIds": [
+              5
+            ],
+            "pos": [
+              1480,
+              -37
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 1,
+            "type": "GetVideoComponents",
+            "pos": [
+              560,
+              -150
+            ],
+            "size": [
+              230,
+              120
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "video",
+                "name": "video",
+                "type": "VIDEO",
+                "link": 4
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "links": [
+                  1,
+                  2
+                ]
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "type": "AUDIO",
+                "links": null
+              },
+              {
+                "localized_name": "fps",
+                "name": "fps",
+                "type": "FLOAT",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetVideoComponents"
+            }
+          },
+          {
+            "id": 2,
+            "type": "GetImageSize",
+            "pos": [
+              560,
+              50
+            ],
+            "size": [
+              230,
+              120
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 1
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "width",
+                "name": "width",
+                "type": "INT",
+                "links": null
+              },
+              {
+                "localized_name": "height",
+                "name": "height",
+                "type": "INT",
+                "links": null
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "links": [
+                  285
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetImageSize"
+            }
+          },
+          {
+            "id": 3,
+            "type": "ImageFromBatch",
+            "pos": [
+              1130,
+              -150
+            ],
+            "size": [
+              270,
+              140
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 2
+              },
+              {
+                "localized_name": "batch_index",
+                "name": "batch_index",
+                "type": "INT",
+                "widget": {
+                  "name": "batch_index"
+                },
+                "link": 286
+              },
+              {
+                "localized_name": "length",
+                "name": "length",
+                "type": "INT",
+                "widget": {
+                  "name": "length"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  5
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ImageFromBatch"
+            },
+            "widgets_values": [
+              0,
+              1
+            ]
+          },
+          {
+            "id": 99,
+            "type": "ComfyMathExpression",
+            "pos": [
+              910,
+              100
+            ],
+            "size": [
+              400,
+              200
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "a",
+                "localized_name": "values.a",
+                "name": "values.a",
+                "type": "FLOAT,INT",
+                "link": 284
+              },
+              {
+                "label": "b",
+                "localized_name": "values.b",
+                "name": "values.b",
+                "shape": 7,
+                "type": "FLOAT,INT",
+                "link": 285
+              },
+              {
+                "label": "c",
+                "localized_name": "values.c",
+                "name": "values.c",
+                "shape": 7,
+                "type": "FLOAT,INT",
+                "link": null
+              },
+              {
+                "localized_name": "expression",
+                "name": "expression",
+                "type": "STRING",
+                "widget": {
+                  "name": "expression"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": null
+              },
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  286
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfyMathExpression"
+            },
+            "widgets_values": [
+              "min(max(int(a if a >= 0 else b + a), 0), b - 1)"
+            ]
+          },
+          {
+            "id": 100,
+            "type": "PrimitiveInt",
+            "pos": [
+              560,
+              250
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "INT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 283
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  284
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveInt"
+            },
+            "widgets_values": [
+              0,
+              "fixed"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 1,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": 2,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 2,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": 3,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 4,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 1,
+            "target_slot": 0,
+            "type": "VIDEO"
+          },
+          {
+            "id": 5,
+            "origin_id": 3,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 283,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 100,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 284,
+            "origin_id": 100,
+            "origin_slot": 0,
+            "target_id": 99,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 285,
+            "origin_id": 2,
+            "origin_slot": 2,
+            "target_id": 99,
+            "target_slot": 1,
+            "type": "INT"
+          },
+          {
+            "id": 286,
+            "origin_id": 99,
+            "origin_slot": 1,
+            "target_id": 3,
+            "target_slot": 1,
+            "type": "INT"
+          }
+        ],
+        "extra": {},
+        "category": "Video Tools",
+        "description": "Extracts one image frame from a video at a chosen index, with optional trim and FPS control."
+      }
+    ]
+  },
+  "extra": {
+    "ds": {
+      "scale": 1.197015527856339,
+      "offset": [
+        -168.76833554248222,
+        540.6638955283997
+      ]
+    },
+    "frontendVersion": "1.42.8"
+  }
+}

@@ -211,7 +211,7 @@ class TimestepEmbedder(nn.Module):
     Embeds scalar timesteps into vector representations.
     """
 
-    def __init__(self, hidden_size, frequency_embedding_size=256, output_size=None, dtype=None, device=None, operations=None):
+    def __init__(self, hidden_size, frequency_embedding_size=256, output_size=None, dtype=None, device=None, operations=None, max_period=10000):
         super().__init__()
         if output_size is None:
             output_size = hidden_size
@@ -221,9 +221,10 @@ class TimestepEmbedder(nn.Module):
             operations.Linear(hidden_size, output_size, bias=True, dtype=dtype, device=device),
         )
         self.frequency_embedding_size = frequency_embedding_size
+        self.max_period = max_period
 
     def forward(self, t, dtype, **kwargs):
-        t_freq = timestep_embedding(t, self.frequency_embedding_size).to(dtype)
+        t_freq = timestep_embedding(t, self.frequency_embedding_size, max_period=self.max_period).to(dtype)
         t_emb = self.mlp(t_freq)
         return t_emb
 

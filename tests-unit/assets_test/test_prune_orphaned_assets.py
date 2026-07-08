@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 import requests
-from conftest import get_asset_filename, trigger_sync_seed_assets
+from helpers import get_asset_filename, trigger_sync_seed_assets
 
 
 @pytest.fixture

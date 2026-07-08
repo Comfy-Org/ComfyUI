@@ -6,13 +6,14 @@ import comfy.model_management
 import torch
 import math
 import nodes
+import comfy.ldm.flux.math
 
 class CLIPTextEncodeFlux(io.ComfyNode):
     @classmethod
     def define_schema(cls):
         return io.Schema(
             node_id="CLIPTextEncodeFlux",
-            category="advanced/conditioning/flux",
+            category="model/conditioning/flux",
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("clip_l", multiline=True, dynamic_prompts=True),
@@ -39,7 +40,7 @@ class EmptyFlux2LatentImage(io.ComfyNode):
         return io.Schema(
             node_id="EmptyFlux2LatentImage",
             display_name="Empty Flux 2 Latent",
-            category="latent",
+            category="model/latent/flux",
             inputs=[
                 io.Int.Input("width", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16),
                 io.Int.Input("height", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=16),
@@ -60,7 +61,7 @@ class FluxGuidance(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="FluxGuidance",
-            category="advanced/conditioning/flux",
+            category="model/conditioning/flux",
             inputs=[
                 io.Conditioning.Input("conditioning"),
                 io.Float.Input("guidance", default=3.5, min=0.0, max=100.0, step=0.1),
@@ -83,7 +84,7 @@ class FluxDisableGuidance(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="FluxDisableGuidance",
-            category="advanced/conditioning/flux",
+            category="model/conditioning/flux",
             description="This node completely disables the guidance embed on Flux and Flux like models",
             inputs=[
                 io.Conditioning.Input("conditioning"),
@@ -101,7 +102,7 @@ class FluxDisableGuidance(io.ComfyNode):
     append = execute  # TODO: remove
 
 
-PREFERED_KONTEXT_RESOLUTIONS = [
+PREFERRED_KONTEXT_RESOLUTIONS = [
     (672, 1568),
     (688, 1504),
     (720, 1456),
@@ -127,7 +128,7 @@ class FluxKontextImageScale(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="FluxKontextImageScale",
-            category="advanced/conditioning/flux",
+            category="model/conditioning/flux",
             description="This node resizes the image to one that is more optimal for flux kontext.",
             inputs=[
                 io.Image.Input("image"),
@@ -142,7 +143,7 @@ class FluxKontextImageScale(io.ComfyNode):
         width = image.shape[2]
         height = image.shape[1]
         aspect_ratio = width / height
-        _, width, height = min((abs(aspect_ratio - w / h), w, h) for w, h in PREFERED_KONTEXT_RESOLUTIONS)
+        _, width, height = min((abs(aspect_ratio - w / h), w, h) for w, h in PREFERRED_KONTEXT_RESOLUTIONS)
         image = comfy.utils.common_upscale(image.movedim(-1, 1), width, height, "lanczos", "center").movedim(1, -1)
         return io.NodeOutput(image)
 
@@ -155,7 +156,7 @@ class FluxKontextMultiReferenceLatentMethod(io.ComfyNode):
         return io.Schema(
             node_id="FluxKontextMultiReferenceLatentMethod",
             display_name="Edit Model Reference Method",
-            category="advanced/conditioning/flux",
+            category="model/conditioning/flux",
             inputs=[
                 io.Conditioning.Input("conditioning"),
                 io.Combo.Input(
@@ -214,7 +215,7 @@ class Flux2Scheduler(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="Flux2Scheduler",
-            category="sampling/custom_sampling/schedulers",
+            category="model/sampling/schedulers",
             inputs=[
                 io.Int.Input("steps", default=20, min=1, max=4096),
                 io.Int.Input("width", default=1024, min=16, max=nodes.MAX_RESOLUTION, step=1),
@@ -231,6 +232,73 @@ class Flux2Scheduler(io.ComfyNode):
         sigmas = get_schedule(steps, round(seq_len))
         return io.NodeOutput(sigmas)
 
+class KV_Attn_Input:
+    def __init__(self):
+        self.cache = {}
+
+    def __call__(self, q, k, v, extra_options, **kwargs):
+        reference_image_num_tokens = extra_options.get("reference_image_num_tokens", [])
+        if len(reference_image_num_tokens) == 0:
+            return {}
+
+        ref_toks = sum(reference_image_num_tokens)
+        cache_key = "{}_{}".format(extra_options["block_type"], extra_options["block_index"])
+        if cache_key in self.cache:
+            kk, vv = self.cache[cache_key]
+
+            # Fix batch size changing.
+            kk = comfy.utils.repeat_to_batch_size(kk, k.shape[0])
+            vv = comfy.utils.repeat_to_batch_size(vv, v.shape[0])
+
+            self.set_cache = False
+            return {"q": q, "k": torch.cat((k, kk), dim=2), "v": torch.cat((v, vv), dim=2)}
+
+        self.cache[cache_key] = (k[:, :, -ref_toks:].clone(), v[:, :, -ref_toks:].clone())
+        self.set_cache = True
+        return {"q": q, "k": k, "v": v}
+
+    def cleanup(self):
+        self.cache = {}
+
+
+class FluxKVCache(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="FluxKVCache",
+            display_name="Flux KV Cache",
+            description="Enables KV Cache optimization for reference images on Flux family models.",
+            category="experimental",
+            is_experimental=True,
+            inputs=[
+                io.Model.Input("model", tooltip="The model to use KV Cache on."),
+            ],
+            outputs=[
+                io.Model.Output(tooltip="The patched model with KV Cache enabled."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model: io.Model.Type) -> io.NodeOutput:
+        m = model.clone()
+        input_patch_obj = KV_Attn_Input()
+
+        def model_input_patch(inputs):
+            if len(input_patch_obj.cache) > 0:
+                ref_image_tokens = sum(inputs["transformer_options"].get("reference_image_num_tokens", []))
+                if ref_image_tokens > 0:
+                    img = inputs["img"]
+                    inputs["img"] = img[:, :-ref_image_tokens]
+            return inputs
+
+        m.set_model_attn1_patch(input_patch_obj)
+        m.set_model_post_input_patch(model_input_patch)
+        if hasattr(model.model.diffusion_model, "params"):
+            m.add_object_patch("diffusion_model.params.default_ref_method", "index_timestep_zero")
+        else:
+            m.add_object_patch("diffusion_model.default_ref_method", "index_timestep_zero")
+
+        return io.NodeOutput(m)
 
 class FluxExtension(ComfyExtension):
     @override
@@ -243,6 +311,7 @@ class FluxExtension(ComfyExtension):
             FluxKontextMultiReferenceLatentMethod,
             EmptyFlux2LatentImage,
             Flux2Scheduler,
+            FluxKVCache,
         ]
 
 

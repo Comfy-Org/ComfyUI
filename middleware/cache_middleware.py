@@ -32,7 +32,7 @@ async def cache_control(
     )
 
     if request.path.endswith(".js") or request.path.endswith(".css") or is_entry_point:
-        response.headers.setdefault("Cache-Control", "no-cache")
+        response.headers.setdefault("Cache-Control", "no-store")
         return response
 
     # Early return for non-image files - no cache headers needed

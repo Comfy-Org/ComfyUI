@@ -14,15 +14,7 @@ from torchvision import transforms
 import comfy.patcher_extension
 from comfy.ldm.modules.attention import optimized_attention
 import comfy.ldm.common_dit
-
-def apply_rotary_pos_emb(
-    t: torch.Tensor,
-    freqs: torch.Tensor,
-) -> torch.Tensor:
-    t_ = t.reshape(*t.shape[:-1], 2, -1).movedim(-2, -1).unsqueeze(-2).float()
-    t_out = freqs[..., 0] * t_[..., 0] + freqs[..., 1] * t_[..., 1]
-    t_out = t_out.movedim(-1, -2).reshape(*t.shape).type_as(t)
-    return t_out
+import comfy.quant_ops
 
 
 # ---------------------- Feed Forward Network -----------------------
@@ -173,8 +165,7 @@ class Attention(nn.Module):
             k = self.k_norm(k)
             v = self.v_norm(v)
             if self.is_selfattn and rope_emb is not None:  # only apply to self-attention!
-                q = apply_rotary_pos_emb(q, rope_emb)
-                k = apply_rotary_pos_emb(k, rope_emb)
+                q, k = comfy.quant_ops.ck.apply_rope_split_half(q, k, rope_emb)
             return q, k, v
 
         q, k, v = apply_norm_and_rotary_pos_emb(q, k, v, rope_emb)
@@ -524,7 +515,7 @@ class Block(nn.Module):
             h=H,
             w=W,
         )
-        x_B_T_H_W_D = x_B_T_H_W_D + gate_self_attn_B_T_1_1_D.to(residual_dtype) * result_B_T_H_W_D.to(residual_dtype)
+        x_B_T_H_W_D = torch.addcmul(x_B_T_H_W_D, gate_self_attn_B_T_1_1_D.to(residual_dtype), result_B_T_H_W_D.to(residual_dtype))
 
         def _x_fn(
             _x_B_T_H_W_D: torch.Tensor,
@@ -557,7 +548,7 @@ class Block(nn.Module):
             shift_cross_attn_B_T_1_1_D,
             transformer_options=transformer_options,
         )
-        x_B_T_H_W_D = result_B_T_H_W_D.to(residual_dtype) * gate_cross_attn_B_T_1_1_D.to(residual_dtype) + x_B_T_H_W_D
+        x_B_T_H_W_D = torch.addcmul(x_B_T_H_W_D, gate_cross_attn_B_T_1_1_D.to(residual_dtype), result_B_T_H_W_D.to(residual_dtype))
 
         normalized_x_B_T_H_W_D = _fn(
             x_B_T_H_W_D,
@@ -566,7 +557,7 @@ class Block(nn.Module):
             shift_mlp_B_T_1_1_D,
         )
         result_B_T_H_W_D = self.mlp(normalized_x_B_T_H_W_D.to(compute_dtype))
-        x_B_T_H_W_D = x_B_T_H_W_D + gate_mlp_B_T_1_1_D.to(residual_dtype) * result_B_T_H_W_D.to(residual_dtype)
+        x_B_T_H_W_D = torch.addcmul(x_B_T_H_W_D, gate_mlp_B_T_1_1_D.to(residual_dtype), result_B_T_H_W_D.to(residual_dtype))
         return x_B_T_H_W_D
 
 

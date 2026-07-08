@@ -69,7 +69,7 @@ class ElevenLabsSpeechToText(IO.ComfyNode):
         return IO.Schema(
             node_id="ElevenLabsSpeechToText",
             display_name="ElevenLabs Speech to Text",
-            category="api node/audio/ElevenLabs",
+            category="partner/audio/ElevenLabs",
             description="Transcribe audio to text. "
             "Supports automatic language detection, speaker diarization, and audio event tagging.",
             inputs=[
@@ -210,7 +210,7 @@ class ElevenLabsVoiceSelector(IO.ComfyNode):
         return IO.Schema(
             node_id="ElevenLabsVoiceSelector",
             display_name="ElevenLabs Voice Selector",
-            category="api node/audio/ElevenLabs",
+            category="partner/audio/ElevenLabs",
             description="Select a predefined ElevenLabs voice for text-to-speech generation.",
             inputs=[
                 IO.Combo.Input(
@@ -239,7 +239,7 @@ class ElevenLabsTextToSpeech(IO.ComfyNode):
         return IO.Schema(
             node_id="ElevenLabsTextToSpeech",
             display_name="ElevenLabs Text to Speech",
-            category="api node/audio/ElevenLabs",
+            category="partner/audio/ElevenLabs",
             description="Convert text to speech.",
             inputs=[
                 IO.Custom(ELEVENLABS_VOICE).Input(
@@ -414,7 +414,7 @@ class ElevenLabsAudioIsolation(IO.ComfyNode):
         return IO.Schema(
             node_id="ElevenLabsAudioIsolation",
             display_name="ElevenLabs Voice Isolation",
-            category="api node/audio/ElevenLabs",
+            category="partner/audio/ElevenLabs",
             description="Remove background noise from audio, isolating vocals or speech.",
             inputs=[
                 IO.Audio.Input(
@@ -459,7 +459,7 @@ class ElevenLabsTextToSoundEffects(IO.ComfyNode):
         return IO.Schema(
             node_id="ElevenLabsTextToSoundEffects",
             display_name="ElevenLabs Text to Sound Effects",
-            category="api node/audio/ElevenLabs",
+            category="partner/audio/ElevenLabs",
             description="Generate sound effects from text descriptions.",
             inputs=[
                 IO.String.Input(
@@ -555,7 +555,7 @@ class ElevenLabsInstantVoiceClone(IO.ComfyNode):
         return IO.Schema(
             node_id="ElevenLabsInstantVoiceClone",
             display_name="ElevenLabs Instant Voice Clone",
-            category="api node/audio/ElevenLabs",
+            category="partner/audio/ElevenLabs",
             description="Create a cloned voice from audio samples. "
             "Provide 1-8 audio recordings of the voice to clone.",
             inputs=[
@@ -658,7 +658,7 @@ class ElevenLabsSpeechToSpeech(IO.ComfyNode):
         return IO.Schema(
             node_id="ElevenLabsSpeechToSpeech",
             display_name="ElevenLabs Speech to Speech",
-            category="api node/audio/ElevenLabs",
+            category="partner/audio/ElevenLabs",
             description="Transform speech from one voice to another while preserving the original content and emotion.",
             inputs=[
                 IO.Custom(ELEVENLABS_VOICE).Input(
@@ -793,7 +793,7 @@ class ElevenLabsTextToDialogue(IO.ComfyNode):
         return IO.Schema(
             node_id="ElevenLabsTextToDialogue",
             display_name="ElevenLabs Text to Dialogue",
-            category="api node/audio/ElevenLabs",
+            category="partner/audio/ElevenLabs",
             description="Generate multi-speaker dialogue from text. Each dialogue entry has its own text and voice.",
             inputs=[
                 IO.Float.Input(

@@ -2,7 +2,6 @@
 precision mediump float;
 
 uniform sampler2D u_image0;
-uniform vec2 u_resolution;
 uniform int u_int0;      // Blend mode
 uniform int u_int1;      // Color tint
 uniform float u_float0;  // Intensity
@@ -75,7 +74,7 @@ void main() {
     float t0 = threshold - 0.15;
     float t1 = threshold + 0.15;
     
-    vec2 texelSize = 1.0 / u_resolution;
+    vec2 texelSize = 1.0 / vec2(textureSize(u_image0, 0));
     float radius2 = radius * radius;
     
     float sampleScale = clamp(radius * 0.75, 0.35, 1.0);

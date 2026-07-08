@@ -1,4 +1,3 @@
-from __future__ import annotations
 from typing import Type, Literal
 
 import nodes
@@ -204,12 +203,12 @@ class ExecutionList(TopologicalSort):
         self.execution_cache_listeners = {}
 
     def is_cached(self, node_id):
-        return self.output_cache.get(node_id) is not None
+        return self.output_cache.get_local(node_id) is not None
 
     def cache_link(self, from_node_id, to_node_id):
         if to_node_id not in self.execution_cache:
             self.execution_cache[to_node_id] = {}
-        self.execution_cache[to_node_id][from_node_id] = self.output_cache.get(from_node_id)
+        self.execution_cache[to_node_id][from_node_id] = self.output_cache.get_local(from_node_id)
         if from_node_id not in self.execution_cache_listeners:
             self.execution_cache_listeners[from_node_id] = set()
         self.execution_cache_listeners[from_node_id].add(to_node_id)
@@ -221,7 +220,7 @@ class ExecutionList(TopologicalSort):
         if value is None:
             return None
         #Write back to the main cache on touch.
-        self.output_cache.set(from_node_id, value)
+        self.output_cache.set_local(from_node_id, value)
         return value
 
     def cache_update(self, node_id, value):

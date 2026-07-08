@@ -285,7 +285,7 @@ class AudioSaveHelper:
         results = []
         for batch_number, waveform in enumerate(audio["waveform"].cpu()):
             filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
-            file = f"{filename_with_batch_num}_{counter:05}_.{format}"
+            file = f"{filename_with_batch_num}_{counter:05}.{format}"
             output_path = os.path.join(full_output_folder, file)
 
             # Use original sample rate initially
@@ -452,6 +452,16 @@ class PreviewUI3D(_UIOutput):
         return {"result": [self.model_file, self.camera_info, self.bg_image_path]}
 
 
+class PreviewUI3DAdvanced(_UIOutput):
+    def __init__(self, model_file, camera_info, model_3d_info):
+        self.model_file = model_file
+        self.camera_info = camera_info
+        self.model_3d_info = model_3d_info
+
+    def as_dict(self):
+        return {"result": [self.model_file, self.camera_info, self.model_3d_info]}
+
+
 class PreviewText(_UIOutput):
     def __init__(self, value: str, **kwargs):
         self.value = value
@@ -471,5 +481,6 @@ __all__ = [
     "PreviewAudio",
     "PreviewVideo",
     "PreviewUI3D",
+    "PreviewUI3DAdvanced",
     "PreviewText",
 ]

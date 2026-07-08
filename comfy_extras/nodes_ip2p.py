@@ -9,7 +9,7 @@ class InstructPixToPixConditioning(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="InstructPixToPixConditioning",
-            category="conditioning/instructpix2pix",
+            category="model/conditioning/instructpix2pix",
             inputs=[
                 io.Conditioning.Input("positive"),
                 io.Conditioning.Input("negative"),

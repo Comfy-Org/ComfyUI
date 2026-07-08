@@ -1,0 +1,1137 @@
+{
+  "revision": 0,
+  "last_node_id": 20,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 20,
+      "type": "243b9e93-7303-4500-8c70-58acb712f5bc",
+      "pos": [
+        3610,
+        -2630
+      ],
+      "size": [
+        270,
+        420
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "image",
+          "localized_name": "images.image0",
+          "name": "images.image0",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "IMAGE",
+          "localized_name": "IMAGE0",
+          "name": "IMAGE0",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "4",
+            "value"
+          ],
+          [
+            "5",
+            "value"
+          ],
+          [
+            "6",
+            "value"
+          ],
+          [
+            "7",
+            "value"
+          ],
+          [
+            "8",
+            "value"
+          ],
+          [
+            "9",
+            "value"
+          ],
+          [
+            "10",
+            "value"
+          ],
+          [
+            "11",
+            "value"
+          ],
+          [
+            "12",
+            "value"
+          ],
+          [
+            "13",
+            "value"
+          ]
+        ]
+      },
+      "widgets_values": [],
+      "title": "Color Balance"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "243b9e93-7303-4500-8c70-58acb712f5bc",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 15,
+          "lastLinkId": 39,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Color Balance",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            2660,
+            -4500,
+            120,
+            60
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            4270,
+            -4500,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "d24c0b6d-00bd-4e95-be80-8114e8376ec0",
+            "name": "images.image0",
+            "type": "IMAGE",
+            "linkIds": [
+              29
+            ],
+            "localized_name": "images.image0",
+            "label": "image",
+            "pos": [
+              2760,
+              -4480
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "92723f62-996e-496d-ad4f-81a38be4ad64",
+            "name": "IMAGE0",
+            "type": "IMAGE",
+            "linkIds": [
+              28
+            ],
+            "localized_name": "IMAGE0",
+            "label": "IMAGE",
+            "pos": [
+              4290,
+              -4480
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 4,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3060,
+              -4500
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "shadows red",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  30
+                ]
+              }
+            ],
+            "title": "Shadows Red",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    0,
+                    255,
+                    255
+                  ]
+                },
+                {
+                  "offset": 0.5,
+                  "color": [
+                    128,
+                    128,
+                    128
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    255,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 5,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3060,
+              -4390
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "shadows green",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  31
+                ]
+              }
+            ],
+            "title": "Shadows Green",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    255,
+                    0,
+                    255
+                  ]
+                },
+                {
+                  "offset": 0.5,
+                  "color": [
+                    128,
+                    128,
+                    128
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    0,
+                    255,
+                    0
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 6,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3060,
+              -4280
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "shadows blue",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  32
+                ]
+              }
+            ],
+            "title": "Shadows Blue",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    255,
+                    255,
+                    0
+                  ]
+                },
+                {
+                  "offset": 0.5,
+                  "color": [
+                    128,
+                    128,
+                    128
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    0,
+                    0,
+                    255
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 7,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3060,
+              -4170
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "midtones red",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  33
+                ]
+              }
+            ],
+            "title": "Midtones Red",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    0,
+                    255,
+                    255
+                  ]
+                },
+                {
+                  "offset": 0.5,
+                  "color": [
+                    128,
+                    128,
+                    128
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    255,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 8,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3060,
+              -4060
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "midtones green",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  34
+                ]
+              }
+            ],
+            "title": "Midtones Green",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    255,
+                    0,
+                    255
+                  ]
+                },
+                {
+                  "offset": 0.5,
+                  "color": [
+                    128,
+                    128,
+                    128
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    0,
+                    255,
+                    0
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 9,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3060,
+              -3950
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "midtones blue",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  35
+                ]
+              }
+            ],
+            "title": "Midtones Blue",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    255,
+                    255,
+                    0
+                  ]
+                },
+                {
+                  "offset": 0.5,
+                  "color": [
+                    128,
+                    128,
+                    128
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    0,
+                    0,
+                    255
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 10,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3060,
+              -3840
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "highlights red",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  36
+                ]
+              }
+            ],
+            "title": "Highlights Red",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    0,
+                    255,
+                    255
+                  ]
+                },
+                {
+                  "offset": 0.5,
+                  "color": [
+                    128,
+                    128,
+                    128
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    255,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 11,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3060,
+              -3730
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "highlights green",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  37
+                ]
+              }
+            ],
+            "title": "Highlights Green",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    255,
+                    0,
+                    255
+                  ]
+                },
+                {
+                  "offset": 0.5,
+                  "color": [
+                    128,
+                    128,
+                    128
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    0,
+                    255,
+                    0
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 12,
+            "type": "PrimitiveFloat",
+            "pos": [
+              3060,
+              -3620
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "highlights blue",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  38
+                ]
+              }
+            ],
+            "title": "Highlights Blue",
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "max": 100,
+              "min": -100,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    255,
+                    255,
+                    0
+                  ]
+                },
+                {
+                  "offset": 0.5,
+                  "color": [
+                    128,
+                    128,
+                    128
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    0,
+                    0,
+                    255
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 13,
+            "type": "PrimitiveBoolean",
+            "pos": [
+              3060,
+              -3510
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "preserve luminosity",
+                "localized_name": "value",
+                "name": "value",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "BOOLEAN",
+                "name": "BOOLEAN",
+                "type": "BOOLEAN",
+                "links": [
+                  39
+                ]
+              }
+            ],
+            "title": "Preserve Luminosity",
+            "properties": {
+              "Node name for S&R": "PrimitiveBoolean"
+            },
+            "widgets_values": [
+              true
+            ]
+          },
+          {
+            "id": 15,
+            "type": "GLSLShader",
+            "pos": [
+              3590,
+              -4500
+            ],
+            "size": [
+              420,
+              500
+            ],
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "image0",
+                "localized_name": "images.image0",
+                "name": "images.image0",
+                "type": "IMAGE",
+                "link": 29
+              },
+              {
+                "label": "image1",
+                "localized_name": "images.image1",
+                "name": "images.image1",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "label": "u_float0",
+                "localized_name": "floats.u_float0",
+                "name": "floats.u_float0",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 30
+              },
+              {
+                "label": "u_float1",
+                "localized_name": "floats.u_float1",
+                "name": "floats.u_float1",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 31
+              },
+              {
+                "label": "u_float2",
+                "localized_name": "floats.u_float2",
+                "name": "floats.u_float2",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 32
+              },
+              {
+                "label": "u_float3",
+                "localized_name": "floats.u_float3",
+                "name": "floats.u_float3",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 33
+              },
+              {
+                "label": "u_float4",
+                "localized_name": "floats.u_float4",
+                "name": "floats.u_float4",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 34
+              },
+              {
+                "label": "u_float5",
+                "localized_name": "floats.u_float5",
+                "name": "floats.u_float5",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 35
+              },
+              {
+                "label": "u_float6",
+                "localized_name": "floats.u_float6",
+                "name": "floats.u_float6",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 36
+              },
+              {
+                "label": "u_float7",
+                "localized_name": "floats.u_float7",
+                "name": "floats.u_float7",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 37
+              },
+              {
+                "label": "u_float8",
+                "localized_name": "floats.u_float8",
+                "name": "floats.u_float8",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 38
+              },
+              {
+                "label": "u_bool0",
+                "localized_name": "bools.u_bool0",
+                "name": "bools.u_bool0",
+                "shape": 7,
+                "type": "BOOLEAN",
+                "link": 39
+              },
+              {
+                "localized_name": "fragment_shader",
+                "name": "fragment_shader",
+                "type": "STRING",
+                "widget": {
+                  "name": "fragment_shader"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "size_mode",
+                "name": "size_mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "size_mode"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE0",
+                "name": "IMAGE0",
+                "type": "IMAGE",
+                "links": [
+                  28
+                ]
+              },
+              {
+                "localized_name": "IMAGE1",
+                "name": "IMAGE1",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE2",
+                "name": "IMAGE2",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE3",
+                "name": "IMAGE3",
+                "type": "IMAGE",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GLSLShader"
+            },
+            "widgets_values": [
+              "#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform float u_float0; // shadows red (-100 to 100)\nuniform float u_float1; // shadows green (-100 to 100)\nuniform float u_float2; // shadows blue (-100 to 100)\nuniform float u_float3; // midtones red (-100 to 100)\nuniform float u_float4; // midtones green (-100 to 100)\nuniform float u_float5; // midtones blue (-100 to 100)\nuniform float u_float6; // highlights red (-100 to 100)\nuniform float u_float7; // highlights green (-100 to 100)\nuniform float u_float8; // highlights blue (-100 to 100)\nuniform bool u_bool0;   // preserve luminosity\n\nin vec2 v_texCoord;\nout vec4 fragColor;\n\nvec3 rgb2hsl(vec3 c) {\n    float maxC = max(c.r, max(c.g, c.b));\n    float minC = min(c.r, min(c.g, c.b));\n    float l = (maxC + minC) * 0.5;\n    if (maxC == minC) return vec3(0.0, 0.0, l);\n    float d = maxC - minC;\n    float s = l > 0.5 ? d / (2.0 - maxC - minC) : d / (maxC + minC);\n    float h;\n    if (maxC == c.r) {\n        h = (c.g - c.b) / d + (c.g < c.b ? 6.0 : 0.0);\n    } else if (maxC == c.g) {\n        h = (c.b - c.r) / d + 2.0;\n    } else {\n        h = (c.r - c.g) / d + 4.0;\n    }\n    h /= 6.0;\n    return vec3(h, s, l);\n}\n\nfloat hue2rgb(float p, float q, float t) {\n    if (t < 0.0) t += 1.0;\n    if (t > 1.0) t -= 1.0;\n    if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;\n    if (t < 1.0 / 2.0) return q;\n    if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;\n    return p;\n}\n\nvec3 hsl2rgb(vec3 hsl) {\n    float h = hsl.x, s = hsl.y, l = hsl.z;\n    if (s == 0.0) return vec3(l);\n    float q = l < 0.5 ? l * (1.0 + s) : l + s - l * s;\n    float p = 2.0 * l - q;\n    return vec3(\n        hue2rgb(p, q, h + 1.0 / 3.0),\n        hue2rgb(p, q, h),\n        hue2rgb(p, q, h - 1.0 / 3.0)\n    );\n}\n\nvoid main() {\n    vec4 tex = texture(u_image0, v_texCoord);\n    vec3 color = tex.rgb;\n\n    // Build shadows/midtones/highlights vectors (scale -100..100 to -1..1)\n    vec3 shadows = vec3(u_float0, u_float1, u_float2) * 0.01;\n    vec3 midtones = vec3(u_float3, u_float4, u_float5) * 0.01;\n    vec3 highlights = vec3(u_float6, u_float7, u_float8) * 0.01;\n\n    // GIMP: HSL lightness for weight calculation\n    float maxC = max(color.r, max(color.g, color.b));\n    float minC = min(color.r, min(color.g, color.b));\n    float lightness = (maxC + minC) * 0.5;\n\n    // GIMP weight curves: linear ramps with constants a=0.25, b=0.333, scale=0.7\n    const float a = 0.25;\n    const float b = 0.333;\n    const float scale = 0.7;\n\n    float sw = clamp((lightness - b) / -a + 0.5, 0.0, 1.0) * scale;\n    float mw = clamp((lightness - b) / a + 0.5, 0.0, 1.0) *\n               clamp((lightness + b - 1.0) / -a + 0.5, 0.0, 1.0) * scale;\n    float hw = clamp((lightness + b - 1.0) / a + 0.5, 0.0, 1.0) * scale;\n\n    color += sw * shadows + mw * midtones + hw * highlights;\n\n    if (u_bool0) {\n        vec3 hsl = rgb2hsl(clamp(color, 0.0, 1.0));\n        hsl.z = lightness;\n        color = hsl2rgb(hsl);\n    }\n\n    fragColor = vec4(clamp(color, 0.0, 1.0), tex.a);\n}",
+              "from_input"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 29,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 28,
+            "origin_id": 15,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 30,
+            "origin_id": 4,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 31,
+            "origin_id": 5,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 3,
+            "type": "FLOAT"
+          },
+          {
+            "id": 32,
+            "origin_id": 6,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 4,
+            "type": "FLOAT"
+          },
+          {
+            "id": 33,
+            "origin_id": 7,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 5,
+            "type": "FLOAT"
+          },
+          {
+            "id": 34,
+            "origin_id": 8,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 6,
+            "type": "FLOAT"
+          },
+          {
+            "id": 35,
+            "origin_id": 9,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 7,
+            "type": "FLOAT"
+          },
+          {
+            "id": 36,
+            "origin_id": 10,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 8,
+            "type": "FLOAT"
+          },
+          {
+            "id": 37,
+            "origin_id": 11,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 9,
+            "type": "FLOAT"
+          },
+          {
+            "id": 38,
+            "origin_id": 12,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 10,
+            "type": "FLOAT"
+          },
+          {
+            "id": 39,
+            "origin_id": 13,
+            "origin_slot": 0,
+            "target_id": 15,
+            "target_slot": 11,
+            "type": "BOOLEAN"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Image Tools/Color adjust",
+        "description": "Balances colors across shadows, midtones, and highlights using a real-time GPU fragment shader."
+      }
+    ]
+  }
+}

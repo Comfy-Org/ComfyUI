@@ -27,7 +27,7 @@ class WavespeedFlashVSRNode(IO.ComfyNode):
         return IO.Schema(
             node_id="WavespeedFlashVSRNode",
             display_name="FlashVSR Video Upscale",
-            category="api node/video/WaveSpeed",
+            category="partner/video/WaveSpeed",
             description="Fast, high-quality video upscaler that "
             "boosts resolution and restores clarity for low-resolution or blurry footage.",
             inputs=[
@@ -84,7 +84,6 @@ class WavespeedFlashVSRNode(IO.ComfyNode):
             response_model=TaskResultResponse,
             status_extractor=lambda x: "failed" if x.data is None else x.data.status,
             poll_interval=10.0,
-            max_poll_attempts=480,
         )
         if final_response.code != 200:
             raise ValueError(
@@ -99,7 +98,7 @@ class WavespeedImageUpscaleNode(IO.ComfyNode):
         return IO.Schema(
             node_id="WavespeedImageUpscaleNode",
             display_name="WaveSpeed Image Upscale",
-            category="api node/image/WaveSpeed",
+            category="partner/image/WaveSpeed",
             description="Boost image resolution and quality, upscaling photos to 4K or 8K for sharp, detailed results.",
             inputs=[
                 IO.Combo.Input("model", options=["SeedVR2", "Ultimate"]),
@@ -156,7 +155,6 @@ class WavespeedImageUpscaleNode(IO.ComfyNode):
             response_model=TaskResultResponse,
             status_extractor=lambda x: "failed" if x.data is None else x.data.status,
             poll_interval=10.0,
-            max_poll_attempts=480,
         )
         if final_response.code != 200:
             raise ValueError(

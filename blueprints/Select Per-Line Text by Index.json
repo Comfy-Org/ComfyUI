@@ -1,0 +1,485 @@
+{
+  "revision": 0,
+  "last_node_id": 10,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 10,
+      "type": "3fb7557a-470d-4983-9d8c-6d5caa9788f0",
+      "pos": [
+        -250,
+        8590
+      ],
+      "size": [
+        280,
+        360
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "text_per_line",
+          "name": "text_per_line",
+          "type": "STRING",
+          "widget": {
+            "name": "text_per_line"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "index",
+          "name": "index",
+          "type": "INT",
+          "widget": {
+            "name": "index"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "selected_line",
+          "name": "selected_line",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "2",
+            "string"
+          ],
+          [
+            "3",
+            "value"
+          ]
+        ],
+        "cnr_id": "comfy-core",
+        "ver": "0.19.0",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [],
+      "title": "Select Per-Line Text by Index"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "3fb7557a-470d-4983-9d8c-6d5caa9788f0",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 10,
+          "lastLinkId": 14,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Select Per-Line Text by Index",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -990,
+            8595,
+            128,
+            88
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            710,
+            8585,
+            128,
+            68
+          ]
+        },
+        "inputs": [
+          {
+            "id": "75417d82-a934-4ac9-b667-d8dcd5a3bfb3",
+            "name": "text_per_line",
+            "type": "STRING",
+            "linkIds": [
+              13
+            ],
+            "localized_name": "text_per_line",
+            "pos": [
+              -886,
+              8619
+            ]
+          },
+          {
+            "id": "46e69a73-1804-4ca6-9175-31445bf0be96",
+            "name": "index",
+            "type": "INT",
+            "linkIds": [
+              14
+            ],
+            "localized_name": "index",
+            "pos": [
+              -886,
+              8639
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "e34e8ad1-84d2-4bd2-a460-eb7de6067c10",
+            "name": "selected_line",
+            "type": "STRING",
+            "linkIds": [
+              10
+            ],
+            "localized_name": "selected_line",
+            "pos": [
+              734,
+              8609
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 1,
+            "type": "PreviewAny",
+            "pos": [
+              -500,
+              8400
+            ],
+            "size": [
+              230,
+              180
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "source",
+                "name": "source",
+                "type": "*",
+                "link": 1
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  6
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PreviewAny",
+              "cnr_id": "comfy-core",
+              "ver": "0.19.0",
+              "ue_properties": {
+                "widget_ue_connectable": {},
+                "input_ue_unconnectable": {}
+              }
+            },
+            "widgets_values": [
+              null,
+              null,
+              null
+            ]
+          },
+          {
+            "id": 2,
+            "type": "RegexExtract",
+            "pos": [
+              -240,
+              8740
+            ],
+            "size": [
+              470,
+              460
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "showAdvanced": false,
+            "inputs": [
+              {
+                "localized_name": "string",
+                "name": "string",
+                "type": "STRING",
+                "widget": {
+                  "name": "string"
+                },
+                "link": 13
+              },
+              {
+                "localized_name": "regex_pattern",
+                "name": "regex_pattern",
+                "type": "STRING",
+                "widget": {
+                  "name": "regex_pattern"
+                },
+                "link": 9
+              },
+              {
+                "localized_name": "mode",
+                "name": "mode",
+                "type": "COMBO",
+                "widget": {
+                  "name": "mode"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "case_insensitive",
+                "name": "case_insensitive",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "case_insensitive"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "multiline",
+                "name": "multiline",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "multiline"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "dotall",
+                "name": "dotall",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "dotall"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "group_index",
+                "name": "group_index",
+                "type": "INT",
+                "widget": {
+                  "name": "group_index"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  10
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "RegexExtract",
+              "cnr_id": "comfy-core",
+              "ver": "0.19.0",
+              "ue_properties": {
+                "widget_ue_connectable": {},
+                "input_ue_unconnectable": {}
+              }
+            },
+            "widgets_values": [
+              "",
+              "",
+              "First Group",
+              false,
+              false,
+              false,
+              1
+            ]
+          },
+          {
+            "id": 3,
+            "type": "PrimitiveInt",
+            "pos": [
+              -810,
+              8400
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "INT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 14
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  1
+                ]
+              }
+            ],
+            "title": "Int (line index)",
+            "properties": {
+              "Node name for S&R": "Int (line index)",
+              "cnr_id": "comfy-core",
+              "ver": "0.19.0",
+              "ue_properties": {
+                "widget_ue_connectable": {},
+                "input_ue_unconnectable": {}
+              }
+            },
+            "widgets_values": [
+              0,
+              "fixed"
+            ]
+          },
+          {
+            "id": 8,
+            "type": "StringReplace",
+            "pos": [
+              -240,
+              8400
+            ],
+            "size": [
+              400,
+              280
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "string",
+                "name": "string",
+                "type": "STRING",
+                "widget": {
+                  "name": "string"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "find",
+                "name": "find",
+                "type": "STRING",
+                "widget": {
+                  "name": "find"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "replace",
+                "name": "replace",
+                "type": "STRING",
+                "widget": {
+                  "name": "replace"
+                },
+                "link": 6
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  9
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "StringReplace",
+              "cnr_id": "comfy-core",
+              "ver": "0.19.0",
+              "ue_properties": {
+                "widget_ue_connectable": {},
+                "input_ue_unconnectable": {}
+              }
+            },
+            "widgets_values": [
+              "^(?:[^\\n]*\\n){index}([^\\n]*)(?:\\n|$)",
+              "index",
+              ""
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 1,
+            "origin_id": 3,
+            "origin_slot": 0,
+            "target_id": 1,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 9,
+            "origin_id": 8,
+            "origin_slot": 0,
+            "target_id": 2,
+            "target_slot": 1,
+            "type": "STRING"
+          },
+          {
+            "id": 6,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 2,
+            "type": "STRING"
+          },
+          {
+            "id": 10,
+            "origin_id": 2,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 13,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 2,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 14,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 3,
+            "target_slot": 0,
+            "type": "INT"
+          }
+        ],
+        "extra": {},
+        "category": "Text Tools",
+        "description": "Selects one line from multiline text by zero-based index for batch or list-driven prompt workflows."
+      }
+    ]
+  },
+  "extra": {
+    "ue_links": [],
+    "links_added_by_ue": []
+  }
+}

@@ -16,31 +16,31 @@ from comfy.ldm.lightricks.model import (
 from comfy.ldm.lightricks.symmetric_patchifier import AudioPatchifier
 from comfy.ldm.lightricks.embeddings_connector import Embeddings1DConnector
 import comfy.ldm.common_dit
+import comfy.model_prefetch
 
 class CompressedTimestep:
     """Store video timestep embeddings in compressed form using per-frame indexing."""
     __slots__ = ('data', 'batch_size', 'num_frames', 'patches_per_frame', 'feature_dim')
 
-    def __init__(self, tensor: torch.Tensor, patches_per_frame: int):
+    def __init__(self, tensor: torch.Tensor, patches_per_frame: int, per_frame: bool = False):
         """
-        tensor: [batch_size, num_tokens, feature_dim] tensor where num_tokens = num_frames * patches_per_frame
-        patches_per_frame: Number of spatial patches per frame (height * width in latent space), or None to disable compression
+        tensor: [batch, num_tokens, feature_dim] (per-token, default) or
+                [batch, num_frames, feature_dim] (per_frame=True, already compressed).
+        patches_per_frame: spatial patches per frame; pass None to disable compression.
         """
-        self.batch_size, num_tokens, self.feature_dim = tensor.shape
-
-        # Check if compression is valid (num_tokens must be divisible by patches_per_frame)
-        if patches_per_frame is not None and num_tokens % patches_per_frame == 0 and num_tokens >= patches_per_frame:
+        self.batch_size, n, self.feature_dim = tensor.shape
+        if per_frame:
             self.patches_per_frame = patches_per_frame
-            self.num_frames = num_tokens // patches_per_frame
-
-            # Reshape to [batch, frames, patches_per_frame, feature_dim] and store one value per frame
-            # All patches in a frame are identical, so we only keep the first one
-            reshaped = tensor.view(self.batch_size, self.num_frames, patches_per_frame, self.feature_dim)
-            self.data = reshaped[:, :, 0, :].contiguous()  # [batch, frames, feature_dim]
+            self.num_frames = n
+            self.data = tensor
+        elif patches_per_frame is not None and n >= patches_per_frame and n % patches_per_frame == 0:
+            self.patches_per_frame = patches_per_frame
+            self.num_frames = n // patches_per_frame
+            # All patches in a frame are identical — keep only the first.
+            self.data = tensor.view(self.batch_size, self.num_frames, patches_per_frame, self.feature_dim)[:, :, 0, :].contiguous()
         else:
-            # Not divisible or too small - store directly without compression
             self.patches_per_frame = 1
-            self.num_frames = num_tokens
+            self.num_frames = n
             self.data = tensor
 
     def expand(self):
@@ -681,6 +681,33 @@ class LTXAVModel(LTXVModel):
         additional_args["has_spatial_mask"] = has_spatial_mask
 
         ax, a_latent_coords = self.a_patchifier.patchify(ax)
+
+        # Inject reference audio for ID-LoRA in-context conditioning
+        ref_audio = kwargs.get("ref_audio", None)
+        ref_audio_seq_len = 0
+        if ref_audio is not None:
+            ref_tokens = ref_audio["tokens"].to(dtype=ax.dtype, device=ax.device)
+            if ref_tokens.shape[0] < ax.shape[0]:
+                ref_tokens = ref_tokens.expand(ax.shape[0], -1, -1)
+            ref_audio_seq_len = ref_tokens.shape[1]
+            B = ax.shape[0]
+
+            # Compute negative temporal positions matching ID-LoRA convention:
+            # offset by -(end_of_last_token + time_per_latent) so reference ends just before t=0
+            p = self.a_patchifier
+            tpl = p.hop_length * p.audio_latent_downsample_factor / p.sample_rate
+            ref_start = p._get_audio_latent_time_in_sec(0, ref_audio_seq_len, torch.float32, ax.device)
+            ref_end = p._get_audio_latent_time_in_sec(1, ref_audio_seq_len + 1, torch.float32, ax.device)
+            time_offset = ref_end[-1].item() + tpl
+            ref_start = (ref_start - time_offset).unsqueeze(0).expand(B, -1).unsqueeze(1)
+            ref_end = (ref_end - time_offset).unsqueeze(0).expand(B, -1).unsqueeze(1)
+            ref_pos = torch.stack([ref_start, ref_end], dim=-1)
+
+            additional_args["ref_audio_seq_len"] = ref_audio_seq_len
+            additional_args["target_audio_seq_len"] = ax.shape[1]
+            ax = torch.cat([ref_tokens, ax], dim=1)
+            a_latent_coords = torch.cat([ref_pos.to(a_latent_coords), a_latent_coords], dim=2)
+
         ax = self.audio_patchify_proj(ax)
 
         # additional_args.update({"av_orig_shape": list(x.shape)})
@@ -688,32 +715,35 @@ class LTXAVModel(LTXVModel):
 
     def _prepare_timestep(self, timestep, batch_size, hidden_dtype, **kwargs):
         """Prepare timestep embeddings."""
-        # TODO: some code reuse is needed here.
         grid_mask = kwargs.get("grid_mask", None)
-        if grid_mask is not None:
-            timestep = timestep[:, grid_mask]
-
-        timestep_scaled = timestep * self.timestep_scale_multiplier
-
-        v_timestep, v_embedded_timestep = self.adaln_single(
-            timestep_scaled.flatten(),
-            {"resolution": None, "aspect_ratio": None},
-            batch_size=batch_size,
-            hidden_dtype=hidden_dtype,
-        )
-
-        # Calculate patches_per_frame from orig_shape: [batch, channels, frames, height, width]
-        # Video tokens are arranged as (frames * height * width), so patches_per_frame = height * width
         orig_shape = kwargs.get("orig_shape")
         has_spatial_mask = kwargs.get("has_spatial_mask", None)
         v_patches_per_frame = None
         if not has_spatial_mask and orig_shape is not None and len(orig_shape) == 5:
-            # orig_shape[3] = height, orig_shape[4] = width (in latent space)
             v_patches_per_frame = orig_shape[3] * orig_shape[4]
 
-        # Reshape to [batch_size, num_tokens, dim] and compress for storage
-        v_timestep = CompressedTimestep(v_timestep.view(batch_size, -1, v_timestep.shape[-1]), v_patches_per_frame)
-        v_embedded_timestep = CompressedTimestep(v_embedded_timestep.view(batch_size, -1, v_embedded_timestep.shape[-1]), v_patches_per_frame)
+        # Used by compute_prompt_timestep and the audio cross-attention paths.
+        timestep_scaled = (timestep[:, grid_mask] if grid_mask is not None else timestep) * self.timestep_scale_multiplier
+
+        # When patches in a frame share a timestep (no spatial mask), project one row per frame instead of one per token
+        per_frame_path = v_patches_per_frame is not None and (timestep.numel() // batch_size) % v_patches_per_frame == 0
+        if per_frame_path:
+            per_frame = timestep.reshape(batch_size, -1, v_patches_per_frame)[:, :, 0]
+            if grid_mask is not None:
+                # All-or-nothing per frame when has_spatial_mask=False.
+                per_frame = per_frame[:, grid_mask[::v_patches_per_frame]]
+            ts_input = per_frame * self.timestep_scale_multiplier
+        else:
+            ts_input = timestep_scaled
+
+        v_timestep, v_embedded_timestep = self.adaln_single(
+            ts_input.flatten(),
+            {"resolution": None, "aspect_ratio": None},
+            batch_size=batch_size,
+            hidden_dtype=hidden_dtype,
+        )
+        v_timestep = CompressedTimestep(v_timestep.view(batch_size, -1, v_timestep.shape[-1]), v_patches_per_frame, per_frame=per_frame_path)
+        v_embedded_timestep = CompressedTimestep(v_embedded_timestep.view(batch_size, -1, v_embedded_timestep.shape[-1]), v_patches_per_frame, per_frame=per_frame_path)
 
         v_prompt_timestep = compute_prompt_timestep(
             self.prompt_adaln_single, timestep_scaled, batch_size, hidden_dtype
@@ -721,6 +751,14 @@ class LTXAVModel(LTXVModel):
 
         # Prepare audio timestep
         a_timestep = kwargs.get("a_timestep")
+        ref_audio_seq_len = kwargs.get("ref_audio_seq_len", 0)
+        if ref_audio_seq_len > 0 and a_timestep is not None:
+            # Reference tokens must have timestep=0, expand scalar/1D timestep to per-token so ref=0 and target=sigma.
+            target_len = kwargs.get("target_audio_seq_len")
+            if a_timestep.dim() <= 1:
+                a_timestep = a_timestep.view(-1, 1).expand(batch_size, target_len)
+            ref_ts = torch.zeros(batch_size, ref_audio_seq_len, *a_timestep.shape[2:], device=a_timestep.device, dtype=a_timestep.dtype)
+            a_timestep = torch.cat([ref_ts, a_timestep], dim=1)
         if a_timestep is not None:
             a_timestep_scaled = a_timestep * self.timestep_scale_multiplier
             a_timestep_flat = a_timestep_scaled.flatten()
@@ -729,25 +767,25 @@ class LTXAVModel(LTXVModel):
 
             # Cross-attention timesteps - compress these too
             av_ca_audio_scale_shift_timestep, _ = self.av_ca_audio_scale_shift_adaln_single(
-                timestep.max().expand_as(a_timestep_flat),
+                a_timestep_flat,
                 {"resolution": None, "aspect_ratio": None},
                 batch_size=batch_size,
                 hidden_dtype=hidden_dtype,
             )
             av_ca_video_scale_shift_timestep, _ = self.av_ca_video_scale_shift_adaln_single(
-                a_timestep.max().expand_as(timestep_flat),
+                timestep_flat,
                 {"resolution": None, "aspect_ratio": None},
                 batch_size=batch_size,
                 hidden_dtype=hidden_dtype,
             )
             av_ca_a2v_gate_noise_timestep, _ = self.av_ca_a2v_gate_adaln_single(
-                a_timestep.max().expand_as(timestep_flat) * av_ca_factor,
+                a_timestep_scaled.max().expand_as(timestep_flat) * av_ca_factor,
                 {"resolution": None, "aspect_ratio": None},
                 batch_size=batch_size,
                 hidden_dtype=hidden_dtype,
             )
             av_ca_v2a_gate_noise_timestep, _ = self.av_ca_v2a_gate_adaln_single(
-                timestep.max().expand_as(a_timestep_flat) * av_ca_factor,
+                timestep_scaled.max().expand_as(a_timestep_flat) * av_ca_factor,
                 {"resolution": None, "aspect_ratio": None},
                 batch_size=batch_size,
                 hidden_dtype=hidden_dtype,
@@ -872,9 +910,11 @@ class LTXAVModel(LTXVModel):
         """Process transformer blocks for LTXAV."""
         patches_replace = transformer_options.get("patches_replace", {})
         blocks_replace = patches_replace.get("dit", {})
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.transformer_blocks), vx.device, transformer_options)
 
         # Process transformer blocks
         for i, block in enumerate(self.transformer_blocks):
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, vx.device, block)
             if ("double_block", i) in blocks_replace:
 
                 def block_wrap(args):
@@ -947,6 +987,8 @@ class LTXAVModel(LTXVModel):
                     a_prompt_timestep=a_prompt_timestep,
                 )
 
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, vx.device, None)
+
         return [vx, ax]
 
     def _process_output(self, x, embedded_timestep, keyframe_idxs, **kwargs):
@@ -954,6 +996,13 @@ class LTXAVModel(LTXVModel):
         ax = x[1]
         v_embedded_timestep = embedded_timestep[0]
         a_embedded_timestep = embedded_timestep[1]
+
+        # Trim reference audio tokens before unpatchification
+        ref_audio_seq_len = kwargs.get("ref_audio_seq_len", 0)
+        if ref_audio_seq_len > 0:
+            ax = ax[:, ref_audio_seq_len:]
+            if a_embedded_timestep.shape[1] > 1:
+                a_embedded_timestep = a_embedded_timestep[:, ref_audio_seq_len:]
 
         # Expand compressed video timestep if needed
         if isinstance(v_embedded_timestep, CompressedTimestep):

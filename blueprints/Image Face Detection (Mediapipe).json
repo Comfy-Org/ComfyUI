@@ -1,0 +1,779 @@
+{
+  "revision": 0,
+  "last_node_id": 33,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 33,
+      "type": "6062babb-b649-4a71-be9e-20ebce567744",
+      "pos": [
+        -450,
+        4240
+      ],
+      "size": [
+        420,
+        400
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "face_landmarker",
+          "type": "FACE_LANDMARKER",
+          "link": null
+        },
+        {
+          "name": "detector_variant",
+          "type": "COMBO",
+          "widget": {
+            "name": "detector_variant"
+          },
+          "link": null
+        },
+        {
+          "name": "num_faces",
+          "type": "INT",
+          "widget": {
+            "name": "num_faces"
+          },
+          "link": null
+        },
+        {
+          "label": "custom_face_oval",
+          "name": "regions.face_oval",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "regions.face_oval"
+          },
+          "link": null
+        },
+        {
+          "label": "custom_lips",
+          "name": "regions.lips",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "regions.lips"
+          },
+          "link": null
+        },
+        {
+          "label": "custom_left_eye",
+          "name": "regions.left_eye",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "regions.left_eye"
+          },
+          "link": null
+        },
+        {
+          "label": "custom_right_eye",
+          "name": "regions.right_eye",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "regions.right_eye"
+          },
+          "link": null
+        },
+        {
+          "label": "custom_irises",
+          "name": "regions.irises",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "regions.irises"
+          },
+          "link": null
+        },
+        {
+          "name": "model_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "model_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "face_landmarks",
+          "name": "face_landmarks",
+          "type": "FACE_LANDMARKS",
+          "links": []
+        },
+        {
+          "localized_name": "bboxes",
+          "name": "bboxes",
+          "type": "BOUNDING_BOX",
+          "links": []
+        },
+        {
+          "label": "mask",
+          "name": "MASK_1",
+          "type": "MASK",
+          "links": []
+        }
+      ],
+      "title": "Image Face Detection (Mediapipe)",
+      "properties": {
+        "proxyWidgets": [
+          [
+            "11",
+            "detector_variant"
+          ],
+          [
+            "11",
+            "num_faces"
+          ],
+          [
+            "20",
+            "regions.face_oval"
+          ],
+          [
+            "20",
+            "regions.lips"
+          ],
+          [
+            "20",
+            "regions.left_eye"
+          ],
+          [
+            "20",
+            "regions.right_eye"
+          ],
+          [
+            "20",
+            "regions.irises"
+          ],
+          [
+            "2",
+            "model_name"
+          ]
+        ],
+        "cnr_id": "comfy-core",
+        "ver": "0.22.0",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "6062babb-b649-4a71-be9e-20ebce567744",
+        "version": 1,
+        "state": {
+          "lastGroupId": 2,
+          "lastNodeId": 158,
+          "lastLinkId": 140,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Image Face Detection (Mediapipe)",
+        "description": "Detects facial landmarks from an image using MediaPipe, outputting landmark data, face bounding boxes, and an optional face-region mask.",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -710,
+            4300,
+            148.880859375,
+            248
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            140,
+            4480,
+            137.677734375,
+            108
+          ]
+        },
+        "inputs": [
+          {
+            "id": "705dc1ae-6dc9-4155-92df-52f816ad451e",
+            "name": "image",
+            "type": "IMAGE",
+            "linkIds": [
+              60
+            ],
+            "localized_name": "image",
+            "pos": [
+              -585.119140625,
+              4324
+            ]
+          },
+          {
+            "id": "d6277190-732c-4604-b7cd-d3a9588bf761",
+            "name": "face_landmarker",
+            "type": "FACE_LANDMARKER",
+            "linkIds": [
+              74
+            ],
+            "pos": [
+              -585.119140625,
+              4344
+            ]
+          },
+          {
+            "id": "ac473a08-6a86-42a7-b460-e70c6c5e1e2b",
+            "name": "detector_variant",
+            "type": "COMBO",
+            "linkIds": [
+              75
+            ],
+            "pos": [
+              -585.119140625,
+              4364
+            ]
+          },
+          {
+            "id": "1bec2252-ca2d-496e-8a33-33a61d21f897",
+            "name": "num_faces",
+            "type": "INT",
+            "linkIds": [
+              76
+            ],
+            "pos": [
+              -585.119140625,
+              4384
+            ]
+          },
+          {
+            "id": "17994fa2-0ea0-4c9b-a70a-19789c459c80",
+            "name": "regions.face_oval",
+            "type": "BOOLEAN",
+            "linkIds": [
+              77
+            ],
+            "label": "custom_face_oval",
+            "pos": [
+              -585.119140625,
+              4404
+            ]
+          },
+          {
+            "id": "1c6c5893-2aee-4c37-b702-15ef2e20d863",
+            "name": "regions.lips",
+            "type": "BOOLEAN",
+            "linkIds": [
+              78
+            ],
+            "label": "custom_lips",
+            "pos": [
+              -585.119140625,
+              4424
+            ]
+          },
+          {
+            "id": "f353fcea-4b6f-42a1-8fdd-32b3aa1e1f09",
+            "name": "regions.left_eye",
+            "type": "BOOLEAN",
+            "linkIds": [
+              79
+            ],
+            "label": "custom_left_eye",
+            "pos": [
+              -585.119140625,
+              4444
+            ]
+          },
+          {
+            "id": "1387e121-c1fb-4522-8f0d-43459e11dd86",
+            "name": "regions.right_eye",
+            "type": "BOOLEAN",
+            "linkIds": [
+              80
+            ],
+            "label": "custom_right_eye",
+            "pos": [
+              -585.119140625,
+              4464
+            ]
+          },
+          {
+            "id": "14acb0a0-d1f4-48f3-ba31-811b26236ef9",
+            "name": "regions.irises",
+            "type": "BOOLEAN",
+            "linkIds": [
+              81
+            ],
+            "label": "custom_irises",
+            "pos": [
+              -585.119140625,
+              4484
+            ]
+          },
+          {
+            "id": "25a82859-87de-42c8-8431-09948665546e",
+            "name": "model_name",
+            "type": "COMBO",
+            "linkIds": [
+              86
+            ],
+            "pos": [
+              -585.119140625,
+              4504
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "d2ba3f92-e8b1-49c3-9590-cfad56c54cf4",
+            "name": "face_landmarks",
+            "type": "FACE_LANDMARKS",
+            "linkIds": [
+              44
+            ],
+            "localized_name": "face_landmarks",
+            "pos": [
+              164,
+              4504
+            ]
+          },
+          {
+            "id": "4f356bb0-d4c4-4f93-b4cf-0845a65c4e6d",
+            "name": "bboxes",
+            "type": "BOUNDING_BOX",
+            "linkIds": [
+              25
+            ],
+            "localized_name": "bboxes",
+            "pos": [
+              164,
+              4524
+            ]
+          },
+          {
+            "id": "f6309e1d-6397-4363-b38f-778a122abc51",
+            "name": "MASK_1",
+            "type": "MASK",
+            "linkIds": [
+              83
+            ],
+            "label": "mask",
+            "pos": [
+              164,
+              4544
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 11,
+            "type": "MediaPipeFaceLandmarker",
+            "pos": [
+              -280,
+              4280
+            ],
+            "size": [
+              350,
+              220
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "face_detection_model",
+                "name": "face_detection_model",
+                "type": "FACE_DETECTION_MODEL",
+                "link": 66
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 60
+              },
+              {
+                "localized_name": "detector_variant",
+                "name": "detector_variant",
+                "type": "COMBO",
+                "widget": {
+                  "name": "detector_variant"
+                },
+                "link": 75
+              },
+              {
+                "localized_name": "num_faces",
+                "name": "num_faces",
+                "type": "INT",
+                "widget": {
+                  "name": "num_faces"
+                },
+                "link": 76
+              },
+              {
+                "localized_name": "min_confidence",
+                "name": "min_confidence",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "min_confidence"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "missing_frame_fallback",
+                "name": "missing_frame_fallback",
+                "type": "COMBO",
+                "widget": {
+                  "name": "missing_frame_fallback"
+                },
+                "link": null
+              },
+              {
+                "name": "face_landmarker",
+                "type": "FACE_LANDMARKER",
+                "link": 74
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "face_landmarks",
+                "name": "face_landmarks",
+                "type": "FACE_LANDMARKS",
+                "links": [
+                  44,
+                  46
+                ]
+              },
+              {
+                "localized_name": "bboxes",
+                "name": "bboxes",
+                "type": "BOUNDING_BOX",
+                "links": [
+                  25
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MediaPipeFaceLandmarker",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "full",
+              0,
+              0.5,
+              "empty"
+            ]
+          },
+          {
+            "id": 2,
+            "type": "LoadMediaPipeFaceLandmarker",
+            "pos": [
+              -290,
+              4060
+            ],
+            "size": [
+              350,
+              140
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model_name",
+                "name": "model_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "model_name"
+                },
+                "link": 86
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FACE_DETECTION_MODEL",
+                "name": "FACE_DETECTION_MODEL",
+                "type": "FACE_DETECTION_MODEL",
+                "links": [
+                  66
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "LoadMediaPipeFaceLandmarker",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "models": [
+                {
+                  "name": "mediapipe_face_fp32.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/mediapipe/resolve/main/detection/mediapipe_face_fp32.safetensors",
+                  "directory": "detection"
+                }
+              ],
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "mediapipe_face_fp32.safetensors"
+            ]
+          },
+          {
+            "id": 20,
+            "type": "MediaPipeFaceMask",
+            "pos": [
+              -290,
+              4560
+            ],
+            "size": [
+              360,
+              180
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "face_landmarks",
+                "name": "face_landmarks",
+                "type": "FACE_LANDMARKS",
+                "link": 46
+              },
+              {
+                "localized_name": "regions",
+                "name": "regions",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "regions"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "regions.face_oval",
+                "name": "regions.face_oval",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "regions.face_oval"
+                },
+                "link": 77
+              },
+              {
+                "localized_name": "regions.lips",
+                "name": "regions.lips",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "regions.lips"
+                },
+                "link": 78
+              },
+              {
+                "localized_name": "regions.left_eye",
+                "name": "regions.left_eye",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "regions.left_eye"
+                },
+                "link": 79
+              },
+              {
+                "localized_name": "regions.right_eye",
+                "name": "regions.right_eye",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "regions.right_eye"
+                },
+                "link": 80
+              },
+              {
+                "localized_name": "regions.irises",
+                "name": "regions.irises",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "regions.irises"
+                },
+                "link": 81
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MASK",
+                "name": "MASK",
+                "type": "MASK",
+                "links": [
+                  83
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MediaPipeFaceMask",
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "custom",
+              true,
+              false,
+              false,
+              false,
+              false
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 66,
+            "origin_id": 2,
+            "origin_slot": 0,
+            "target_id": 11,
+            "target_slot": 0,
+            "type": "FACE_DETECTION_MODEL"
+          },
+          {
+            "id": 46,
+            "origin_id": 11,
+            "origin_slot": 0,
+            "target_id": 20,
+            "target_slot": 0,
+            "type": "FACE_LANDMARKS"
+          },
+          {
+            "id": 60,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 11,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 44,
+            "origin_id": 11,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "FACE_LANDMARKS"
+          },
+          {
+            "id": 25,
+            "origin_id": 11,
+            "origin_slot": 1,
+            "target_id": -20,
+            "target_slot": 1,
+            "type": "BOUNDING_BOX"
+          },
+          {
+            "id": 74,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 11,
+            "target_slot": 6,
+            "type": "FACE_LANDMARKER"
+          },
+          {
+            "id": 75,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 11,
+            "target_slot": 2,
+            "type": "COMBO"
+          },
+          {
+            "id": 76,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 11,
+            "target_slot": 3,
+            "type": "INT"
+          },
+          {
+            "id": 77,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 20,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 78,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 20,
+            "target_slot": 3,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 79,
+            "origin_id": -10,
+            "origin_slot": 6,
+            "target_id": 20,
+            "target_slot": 4,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 80,
+            "origin_id": -10,
+            "origin_slot": 7,
+            "target_id": 20,
+            "target_slot": 5,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 81,
+            "origin_id": -10,
+            "origin_slot": 8,
+            "target_id": 20,
+            "target_slot": 6,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 83,
+            "origin_id": 20,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 2,
+            "type": "MASK"
+          },
+          {
+            "id": 86,
+            "origin_id": -10,
+            "origin_slot": 9,
+            "target_id": 2,
+            "target_slot": 0,
+            "type": "COMBO"
+          }
+        ],
+        "extra": {},
+        "category": "Conditioning & Preprocessors/Face Detection"
+      }
+    ]
+  },
+  "extra": {}
+}

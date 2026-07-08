@@ -1,7 +1,39 @@
 import re
+import json
+import string
 from typing_extensions import override
 
 from comfy_api.latest import ComfyExtension, io
+
+
+class StringFormat(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        autogrow = io.Autogrow.TemplateNames(
+            input=io.AnyType.Input("value"),
+            names=list(string.ascii_lowercase),
+            min=0,
+        )
+        return io.Schema(
+            node_id="StringFormat",
+            display_name="Format Text",
+            category="text",
+            search_aliases=["string", "format"],
+            description="Same as Python's string format method. Supports all of Python's format options and features.",
+            inputs=[
+                io.Autogrow.Input("values", template=autogrow),
+                io.String.Input("f_string", default="{a}", multiline=True),
+            ],
+            outputs=[
+                io.String.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls, values: io.Autogrow.Type, f_string: str
+    ) -> io.NodeOutput:
+        return io.NodeOutput(f_string.format(**values))
 
 
 class StringConcatenate(io.ComfyNode):
@@ -9,9 +41,9 @@ class StringConcatenate(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StringConcatenate",
-            display_name="Concatenate",
-            category="utils/string",
-            search_aliases=["text concat", "join text", "merge text", "combine strings", "concat", "concatenate", "append text", "combine text", "string"],
+            search_aliases=["concatenate", "text concat", "join text", "merge text", "combine strings", "string concat", "append text", "combine text"],
+            display_name="Concatenate Text",
+            category="text",
             inputs=[
                 io.String.Input("string_a", multiline=True),
                 io.String.Input("string_b", multiline=True),
@@ -32,9 +64,9 @@ class StringSubstring(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StringSubstring",
-            search_aliases=["extract text", "text portion"],
+            search_aliases=["substring", "extract text", "text portion"],
             display_name="Substring",
-            category="utils/string",
+            category="text",
             inputs=[
                 io.String.Input("string", multiline=True),
                 io.Int.Input("start"),
@@ -55,9 +87,9 @@ class StringLength(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StringLength",
-            search_aliases=["character count", "text size"],
-            display_name="Length",
-            category="utils/string",
+            search_aliases=["character count", "text size", "string length"],
+            display_name="Text Length",
+            category="text",
             inputs=[
                 io.String.Input("string", multiline=True),
             ],
@@ -76,9 +108,9 @@ class CaseConverter(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="CaseConverter",
-            search_aliases=["text case", "uppercase", "lowercase", "capitalize"],
-            display_name="Case Converter",
-            category="utils/string",
+            search_aliases=["case converter", "text case", "uppercase", "lowercase", "capitalize"],
+            display_name="Convert Text Case",
+            category="text",
             inputs=[
                 io.String.Input("string", multiline=True),
                 io.Combo.Input("mode", options=["UPPERCASE", "lowercase", "Capitalize", "Title Case"]),
@@ -109,9 +141,9 @@ class StringTrim(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StringTrim",
-            search_aliases=["clean whitespace", "remove whitespace"],
-            display_name="Trim",
-            category="utils/string",
+            search_aliases=["trim", "clean whitespace", "remove whitespace", "remove spaces","strip"],
+            display_name="Trim Text",
+            category="text",
             inputs=[
                 io.String.Input("string", multiline=True),
                 io.Combo.Input("mode", options=["Both", "Left", "Right"]),
@@ -140,9 +172,9 @@ class StringReplace(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StringReplace",
-            search_aliases=["find and replace", "substitute", "swap text"],
-            display_name="Replace",
-            category="utils/string",
+            search_aliases=["replace", "find and replace", "substitute", "swap text"],
+            display_name="Replace Text",
+            category="text",
             inputs=[
                 io.String.Input("string", multiline=True),
                 io.String.Input("find", multiline=True),
@@ -163,9 +195,9 @@ class StringContains(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StringContains",
-            search_aliases=["text includes", "string includes"],
-            display_name="Contains",
-            category="utils/string",
+            search_aliases=["contains", "text includes", "string includes"],
+            display_name="Contains Text",
+            category="text",
             inputs=[
                 io.String.Input("string", multiline=True),
                 io.String.Input("substring", multiline=True),
@@ -191,9 +223,9 @@ class StringCompare(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StringCompare",
-            search_aliases=["text match", "string equals", "starts with", "ends with"],
-            display_name="Compare",
-            category="utils/string",
+            search_aliases=["compare", "text match", "string equals", "starts with", "ends with"],
+            display_name="Compare Text",
+            category="text",
             inputs=[
                 io.String.Input("string_a", multiline=True),
                 io.String.Input("string_b", multiline=True),
@@ -227,9 +259,9 @@ class RegexMatch(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="RegexMatch",
-            search_aliases=["pattern match", "text contains", "string match"],
-            display_name="Regex Match",
-            category="utils/string",
+            search_aliases=["regex match", "regex", "pattern match", "text contains", "string match"],
+            display_name="Match Text",
+            category="text",
             inputs=[
                 io.String.Input("string", multiline=True),
                 io.String.Input("regex_pattern", multiline=True),
@@ -268,9 +300,9 @@ class RegexExtract(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="RegexExtract",
-            search_aliases=["pattern extract", "text parser", "parse text"],
-            display_name="Regex Extract",
-            category="utils/string",
+            search_aliases=["regex extract", "regex", "pattern extract", "text parser", "parse text"],
+            display_name="Extract Text",
+            category="text",
             inputs=[
                 io.String.Input("string", multiline=True),
                 io.String.Input("regex_pattern", multiline=True),
@@ -343,9 +375,9 @@ class RegexReplace(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="RegexReplace",
-            search_aliases=["pattern replace", "find and replace", "substitution"],
-            display_name="Regex Replace",
-            category="utils/string",
+            search_aliases=["regex replace", "regex", "pattern replace", "substitution"],
+            display_name="Replace Text (Regex)",
+            category="text",
             description="Find and replace text using regex patterns.",
             inputs=[
                 io.String.Input("string", multiline=True),
@@ -375,10 +407,95 @@ class RegexReplace(io.ComfyNode):
         return io.NodeOutput(result)
 
 
+class JsonExtractString(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="JsonExtractString",
+            display_name="Extract Text from JSON",
+            category="text",
+            search_aliases=["json", "extract json", "parse json", "json value", "read json"],
+            inputs=[
+                io.String.Input("json_string", multiline=True),
+                io.String.Input("key", multiline=False),
+            ],
+            outputs=[
+                io.String.Output(),
+            ]
+        )
+
+    @classmethod
+    def execute(cls, json_string, key):
+        try:
+            data = json.loads(json_string)
+            if isinstance(data, dict) and key in data:
+                value = data[key]
+                if value is None:
+                    return io.NodeOutput("")
+
+                return io.NodeOutput(str(value))
+
+            return io.NodeOutput("")
+
+        except (json.JSONDecodeError, TypeError):
+            return io.NodeOutput("")
+
+
+def _dump_json(value, indent):
+    return json.dumps(value, ensure_ascii=False, indent=indent or None)
+
+
+class ConvertDictionaryToString(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ConvertDictionaryToString",
+            display_name="Convert Dictionary to String",
+            category="text",
+            search_aliases=["json", "dict to json", "stringify", "serialize", "dict to string"],
+            inputs=[
+                io.Dict.Input("dictionary"),
+                io.Int.Input("indent", default=2, min=0, max=8,
+                             tooltip="Spaces per indent level. 0 produces compact single-line string."),
+            ],
+            outputs=[
+                io.String.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, dictionary, indent=2):
+        return io.NodeOutput(_dump_json(dictionary, indent))
+
+
+class ConvertArrayToString(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ConvertArrayToString",
+            display_name="Convert Array to String",
+            category="text",
+            search_aliases=["json", "list to json", "stringify", "serialize", "list to string", "array to json"],
+            inputs=[
+                io.Array.Input("array"),
+                io.Int.Input("indent", default=2, min=0, max=8,
+                             tooltip="Spaces per indent level. 0 produces compact single-line string."),
+            ],
+            outputs=[
+                io.String.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, array, indent=2):
+        return io.NodeOutput(_dump_json(array, indent))
+
+
 class StringExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
+            StringFormat,
             StringConcatenate,
             StringSubstring,
             StringLength,
@@ -390,6 +507,9 @@ class StringExtension(ComfyExtension):
             RegexMatch,
             RegexExtract,
             RegexReplace,
+            JsonExtractString,
+            ConvertDictionaryToString,
+            ConvertArrayToString,
         ]
 
 async def comfy_entrypoint() -> StringExtension:

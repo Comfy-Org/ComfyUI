@@ -4,9 +4,6 @@ import math
 import torch
 import torchaudio
 
-import comfy.model_management
-import comfy.model_patcher
-import comfy.utils as utils
 from comfy.ldm.mmaudio.vae.distributions import DiagonalGaussianDistribution
 from comfy.ldm.lightricks.symmetric_patchifier import AudioPatchifier
 from comfy.ldm.lightricks.vae.causal_audio_autoencoder import (
@@ -42,30 +39,6 @@ class AudioVAEComponentConfig:
         assert vocoder_config is not None, "Vocoder config is required for audio VAE"
 
         return cls(autoencoder=audio_config, vocoder=vocoder_config)
-
-
-class ModelDeviceManager:
-    """Manages device placement and GPU residency for the composed model."""
-
-    def __init__(self, module: torch.nn.Module):
-        load_device = comfy.model_management.get_torch_device()
-        offload_device = comfy.model_management.vae_offload_device()
-        self.patcher = comfy.model_patcher.ModelPatcher(module, load_device, offload_device)
-
-    def ensure_model_loaded(self) -> None:
-        comfy.model_management.free_memory(
-            self.patcher.model_size(),
-            self.patcher.load_device,
-        )
-        comfy.model_management.load_model_gpu(self.patcher)
-
-    def move_to_load_device(self, tensor: torch.Tensor) -> torch.Tensor:
-        return tensor.to(self.patcher.load_device)
-
-    @property
-    def load_device(self):
-        return self.patcher.load_device
-
 
 class AudioLatentNormalizer:
     """Applies per-channel statistics in patch space and restores original layout."""
@@ -132,22 +105,16 @@ class AudioPreprocessor:
 class AudioVAE(torch.nn.Module):
     """High-level Audio VAE wrapper exposing encode and decode entry points."""
 
-    def __init__(self, state_dict: dict, metadata: dict):
+    def __init__(self, metadata: dict):
         super().__init__()
 
         component_config = AudioVAEComponentConfig.from_metadata(metadata)
-
-        vae_sd = utils.state_dict_prefix_replace(state_dict, {"audio_vae.": ""}, filter_keys=True)
-        vocoder_sd = utils.state_dict_prefix_replace(state_dict, {"vocoder.": ""}, filter_keys=True)
 
         self.autoencoder = CausalAudioAutoencoder(config=component_config.autoencoder)
         if "bwe" in component_config.vocoder:
             self.vocoder = VocoderWithBWE(config=component_config.vocoder)
         else:
             self.vocoder = Vocoder(config=component_config.vocoder)
-
-        self.autoencoder.load_state_dict(vae_sd, strict=False)
-        self.vocoder.load_state_dict(vocoder_sd, strict=False)
 
         autoencoder_config = self.autoencoder.get_config()
         self.normalizer = AudioLatentNormalizer(
@@ -168,18 +135,12 @@ class AudioVAE(torch.nn.Module):
             n_fft=autoencoder_config["n_fft"],
         )
 
-        self.device_manager = ModelDeviceManager(self)
-
-    def encode(self, audio: dict) -> torch.Tensor:
+    def encode(self, audio, sample_rate=44100) -> torch.Tensor:
         """Encode a waveform dictionary into normalized latent tensors."""
 
-        waveform = audio["waveform"]
-        waveform_sample_rate = audio["sample_rate"]
+        waveform = audio
+        waveform_sample_rate = sample_rate
         input_device = waveform.device
-        # Ensure that Audio VAE is loaded on the correct device.
-        self.device_manager.ensure_model_loaded()
-
-        waveform = self.device_manager.move_to_load_device(waveform)
         expected_channels = self.autoencoder.encoder.in_channels
         if waveform.shape[1] != expected_channels:
             if waveform.shape[1] == 1:
@@ -190,7 +151,7 @@ class AudioVAE(torch.nn.Module):
                 )
 
         mel_spec = self.preprocessor.waveform_to_mel(
-            waveform, waveform_sample_rate, device=self.device_manager.load_device
+            waveform, waveform_sample_rate, device=waveform.device
         )
 
         latents = self.autoencoder.encode(mel_spec)
@@ -204,17 +165,13 @@ class AudioVAE(torch.nn.Module):
         """Decode normalized latent tensors into an audio waveform."""
         original_shape = latents.shape
 
-        # Ensure that Audio VAE is loaded on the correct device.
-        self.device_manager.ensure_model_loaded()
-
-        latents = self.device_manager.move_to_load_device(latents)
         latents = self.normalizer.denormalize(latents)
 
         target_shape = self.target_shape_from_latents(original_shape)
         mel_spec = self.autoencoder.decode(latents, target_shape=target_shape)
 
         waveform = self.run_vocoder(mel_spec)
-        return self.device_manager.move_to_load_device(waveform)
+        return waveform
 
     def target_shape_from_latents(self, latents_shape):
         batch, _, time, _ = latents_shape

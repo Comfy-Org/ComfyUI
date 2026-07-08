@@ -10,6 +10,17 @@ from torch import nn
 from torch.nn import functional as F
 import math
 import comfy.ops
+from .embedders import ExpoFourierFeatures
+
+
+def _left_pad_to_match(emb, target_len):
+    emb_len = emb.shape[-2]
+    if emb_len < target_len:
+        return F.pad(emb, (0, 0, target_len - emb_len, 0), value=0.)
+    elif emb_len > target_len:
+        return emb[:, -target_len:, :]
+    return emb
+
 
 class FourierFeatures(nn.Module):
     def __init__(self, in_features, out_features, std=1., dtype=None, device=None):
@@ -21,6 +32,7 @@ class FourierFeatures(nn.Module):
     def forward(self, input):
         f = 2 * math.pi * input @ comfy.ops.cast_to_input(self.weight.T, input)
         return torch.cat([f.cos(), f.sin()], dim=-1)
+
 
 # norms
 class LayerNorm(nn.Module):
@@ -42,6 +54,16 @@ class LayerNorm(nn.Module):
         if beta is not None:
             beta = comfy.ops.cast_to_input(beta, x)
         return F.layer_norm(x, x.shape[-1:], weight=comfy.ops.cast_to_input(self.gamma, x), bias=beta)
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, dtype=None, device=None):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.empty(dim, dtype=dtype, device=device))
+
+    def forward(self, x):
+        return F.rms_norm(x, x.shape[-1:], weight=comfy.ops.cast_to_input(self.gamma, x))
+
 
 class GLU(nn.Module):
     def __init__(
@@ -236,13 +258,6 @@ class FeedForward(nn.Module):
 
         linear_out = operations.Linear(inner_dim, dim_out, bias = not no_bias, dtype=dtype, device=device) if not use_conv else operations.Conv1d(inner_dim, dim_out, conv_kernel_size, padding = (conv_kernel_size // 2), bias = not no_bias, dtype=dtype, device=device)
 
-        # # init last linear layer to 0
-        # if zero_init_output:
-        #     nn.init.zeros_(linear_out.weight)
-        #     if not no_bias:
-        #         nn.init.zeros_(linear_out.bias)
-
-
         self.ff = nn.Sequential(
             linear_in,
             rearrange('b d n -> b n d') if use_conv else nn.Identity(),
@@ -261,8 +276,10 @@ class Attention(nn.Module):
         dim_context = None,
         causal = False,
         zero_init_output=True,
-        qk_norm = False,
+        qk_norm = "none",
+        differential = False,
         natten_kernel_size = None,
+        feat_scale = False,
         dtype=None,
         device=None,
         operations=None,
@@ -271,6 +288,7 @@ class Attention(nn.Module):
         self.dim = dim
         self.dim_heads = dim_heads
         self.causal = causal
+        self.differential = differential
 
         dim_kv = dim_context if dim_context is not None else dim
 
@@ -278,18 +296,37 @@ class Attention(nn.Module):
         self.kv_heads = dim_kv // dim_heads
 
         if dim_context is not None:
-            self.to_q = operations.Linear(dim, dim, bias=False, dtype=dtype, device=device)
-            self.to_kv = operations.Linear(dim_kv, dim_kv * 2, bias=False, dtype=dtype, device=device)
+            if differential:
+                self.to_q = operations.Linear(dim, dim * 2, bias=False, dtype=dtype, device=device)
+                self.to_kv = operations.Linear(dim_kv, dim_kv * 3, bias=False, dtype=dtype, device=device)
+            else:
+                self.to_q = operations.Linear(dim, dim, bias=False, dtype=dtype, device=device)
+                self.to_kv = operations.Linear(dim_kv, dim_kv * 2, bias=False, dtype=dtype, device=device)
         else:
-            self.to_qkv = operations.Linear(dim, dim * 3, bias=False, dtype=dtype, device=device)
+            if differential:
+                self.to_qkv = operations.Linear(dim, dim * 5, bias=False, dtype=dtype, device=device)
+            else:
+                self.to_qkv = operations.Linear(dim, dim * 3, bias=False, dtype=dtype, device=device)
 
         self.to_out = operations.Linear(dim, dim, bias=False, dtype=dtype, device=device)
 
-        # if zero_init_output:
-        #     nn.init.zeros_(self.to_out.weight)
-
+        # Accept bool for backward compat
+        if isinstance(qk_norm, bool):
+            qk_norm = "l2" if qk_norm else "none"
         self.qk_norm = qk_norm
 
+        if self.qk_norm == "ln":
+            self.q_norm = operations.LayerNorm(dim_heads, elementwise_affine=True, eps=1.0e-6, dtype=dtype, device=device)
+            self.k_norm = operations.LayerNorm(dim_heads, elementwise_affine=True, eps=1.0e-6, dtype=dtype, device=device)
+        elif self.qk_norm == "rms":
+            self.q_norm = RMSNorm(dim_heads, dtype=dtype, device=device)
+            self.k_norm = RMSNorm(dim_heads, dtype=dtype, device=device)
+
+        self.feat_scale = feat_scale
+
+        if self.feat_scale:
+            self.lambda_dc = nn.Parameter(torch.empty(dim, dtype=dtype, device=device))
+            self.lambda_hf = nn.Parameter(torch.empty(dim, dtype=dtype, device=device))
 
     def forward(
         self,
@@ -306,22 +343,51 @@ class Attention(nn.Module):
         kv_input = context if has_context else x
 
         if hasattr(self, 'to_q'):
-            # Use separate linear projections for q and k/v
-            q = self.to_q(x)
-            q = rearrange(q, 'b n (h d) -> b h n d', h = h)
+            if self.differential:
+                # cross-attention differential: to_q → (q, q_diff), to_kv → (k, k_diff, v)
+                q, q_diff = self.to_q(x).chunk(2, dim=-1)
+                q      = rearrange(q,      'b n (h d) -> b h n d', h=h)
+                q_diff = rearrange(q_diff, 'b n (h d) -> b h n d', h=h)
+                q = torch.stack([q, q_diff], dim=1)  # (B, 2, H, N, D)
+                k, k_diff, v = self.to_kv(kv_input).chunk(3, dim=-1)
+                k      = rearrange(k,      'b n (h d) -> b h n d', h=kv_h)
+                k_diff = rearrange(k_diff, 'b n (h d) -> b h n d', h=kv_h)
+                v      = rearrange(v,      'b n (h d) -> b h n d', h=kv_h)
+                k = torch.stack([k, k_diff], dim=1)  # (B, 2, H, M, D)
+            else:
+                # Use separate linear projections for q and k/v
+                q = self.to_q(x)
+                q = rearrange(q, 'b n (h d) -> b h n d', h = h)
 
-            k, v = self.to_kv(kv_input).chunk(2, dim=-1)
+                k, v = self.to_kv(kv_input).chunk(2, dim=-1)
 
-            k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = kv_h), (k, v))
+                k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = kv_h), (k, v))
         else:
-            # Use fused linear projection
-            q, k, v = self.to_qkv(x).chunk(3, dim=-1)
-            q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+            if self.differential:
+                # self-attention differential: to_qkv → (q, k, v, q_diff, k_diff)
+                q, k, v, q_diff, k_diff = self.to_qkv(x).chunk(5, dim=-1)
+                q, k, v, q_diff, k_diff = map(
+                    lambda t: rearrange(t, 'b n (h d) -> b h n d', h=h),
+                    (q, k, v, q_diff, k_diff)
+                )
+                q = torch.stack([q, q_diff], dim=1)  # (B, 2, H, N, D)
+                k = torch.stack([k, k_diff], dim=1)
+            else:
+                # Use fused linear projection
+                q, k, v = self.to_qkv(x).chunk(3, dim=-1)
+                q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
         # Normalize q and k for cosine sim attention
-        if self.qk_norm:
+        if self.qk_norm == "l2":
             q = F.normalize(q, dim=-1)
             k = F.normalize(k, dim=-1)
+        elif self.qk_norm == "rms":
+            q_type, k_type = q.dtype, k.dtype
+            q = self.q_norm(q).to(q_type)
+            k = self.k_norm(k).to(k_type)
+        elif self.qk_norm != 'none':
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         if rotary_pos_emb is not None and not has_context:
             freqs, _ = rotary_pos_emb
@@ -364,8 +430,23 @@ class Attention(nn.Module):
             heads_per_kv_head = h // kv_h
             k, v = map(lambda t: t.repeat_interleave(heads_per_kv_head, dim = 1), (k, v))
 
-        out = optimized_attention(q, k, v, h, skip_reshape=True, transformer_options=transformer_options)
+        if self.differential:
+            q, q_diff = q.unbind(dim=1)
+            k, k_diff = k.unbind(dim=1)
+            out      = optimized_attention(q,      k,      v, h, skip_reshape=True, low_precision_attention=False, transformer_options=transformer_options)
+            out_diff = optimized_attention(q_diff, k_diff, v, h, skip_reshape=True, low_precision_attention=False, transformer_options=transformer_options)
+            out = out - out_diff
+        else:
+            out = optimized_attention(q, k, v, h, skip_reshape=True, low_precision_attention=False, transformer_options=transformer_options)
+
         out = self.to_out(out)
+
+        if self.feat_scale:
+            out_dc = out.mean(dim=-2, keepdim=True)
+            out_hf = out - out_dc
+
+            # Selectively modulate DC and high frequency components
+            out = out + comfy.ops.cast_to_input(self.lambda_dc, out) * out_dc + comfy.ops.cast_to_input(self.lambda_hf, out) * out_hf
 
         if mask is not None:
             mask = rearrange(mask, 'b n -> b n 1')
@@ -417,11 +498,14 @@ class TransformerBlock(nn.Module):
             cross_attend = False,
             dim_context = None,
             global_cond_dim = None,
+            global_cond_shared_embed = False,
+            local_add_cond_dim = None,
             causal = False,
             zero_init_branch_outputs = True,
             conformer = False,
             layer_ix = -1,
             remove_norms = False,
+            norm_type = "layer_norm",
             attn_kwargs = {},
             ff_kwargs = {},
             norm_kwargs = {},
@@ -436,8 +520,20 @@ class TransformerBlock(nn.Module):
         self.cross_attend = cross_attend
         self.dim_context = dim_context
         self.causal = causal
+        self.global_cond_shared_embed = global_cond_shared_embed
 
-        self.pre_norm = LayerNorm(dim, dtype=dtype, device=device, **norm_kwargs) if not remove_norms else nn.Identity()
+        norm_layer_map = {
+            "layer_norm": LayerNorm,
+            "rms_norm": RMSNorm,
+        }
+        norm_cls = norm_layer_map.get(norm_type, LayerNorm)
+
+        def make_norm():
+            if remove_norms:
+                return nn.Identity()
+            return norm_cls(dim, dtype=dtype, device=device, **norm_kwargs)
+
+        self.pre_norm = make_norm()
 
         self.self_attn = Attention(
             dim,
@@ -451,7 +547,7 @@ class TransformerBlock(nn.Module):
         )
 
         if cross_attend:
-            self.cross_attend_norm = LayerNorm(dim, dtype=dtype, device=device, **norm_kwargs) if not remove_norms else nn.Identity()
+            self.cross_attend_norm = make_norm()
             self.cross_attn = Attention(
                 dim,
                 dim_heads = dim_heads,
@@ -464,37 +560,56 @@ class TransformerBlock(nn.Module):
                 **attn_kwargs
             )
 
-        self.ff_norm = LayerNorm(dim, dtype=dtype, device=device, **norm_kwargs) if not remove_norms else nn.Identity()
-        self.ff = FeedForward(dim, zero_init_output=zero_init_branch_outputs, dtype=dtype, device=device, operations=operations,**ff_kwargs)
+        self.ff_norm = make_norm()
+        self.ff = FeedForward(dim, zero_init_output=zero_init_branch_outputs, dtype=dtype, device=device, operations=operations, **ff_kwargs)
 
         self.layer_ix = layer_ix
 
         self.conformer = ConformerModule(dim, norm_kwargs=norm_kwargs) if conformer else None
 
-        self.global_cond_dim = global_cond_dim
+        # Global conditioning
+        self.has_global_cond = (global_cond_dim is not None) or global_cond_shared_embed
 
-        if global_cond_dim is not None:
+        if global_cond_shared_embed:
+            # SA3 style: learnable per-block additive bias; global_cond is pre-projected to (B, dim*6)
+            self.to_scale_shift_gate = nn.Parameter(torch.empty(dim * 6, device=device, dtype=dtype))
+        elif global_cond_dim is not None:
+            # SA1 style: per-block MLP projects global_cond → (B, dim*6)
             self.to_scale_shift_gate = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(global_cond_dim, dim * 6, bias=False)
+                operations.Linear(global_cond_dim, dim * 6, bias=False, device=device, dtype=dtype)
             )
 
-            nn.init.zeros_(self.to_scale_shift_gate[1].weight)
-            #nn.init.zeros_(self.to_scale_shift_gate_self[1].bias)
+        # Local additive conditioning (e.g. inpaint mask + masked latent)
+        self.local_add_cond_dim = local_add_cond_dim
+        if local_add_cond_dim is not None:
+            self.to_local_embed = nn.Sequential(
+                operations.Linear(local_add_cond_dim, dim, bias=True, dtype=dtype, device=device),
+                nn.SiLU(),
+                operations.Linear(dim, dim, bias=True, dtype=dtype, device=device),
+            )
+        else:
+            self.to_local_embed = None
 
     def forward(
         self,
         x,
         context = None,
         global_cond=None,
+        local_add_cond=None,
         mask = None,
         context_mask = None,
         rotary_pos_emb = None,
         transformer_options={}
     ):
-        if self.global_cond_dim is not None and self.global_cond_dim > 0 and global_cond is not None:
+        if self.has_global_cond and global_cond is not None:
+            if self.global_cond_shared_embed:
+                # global_cond already has shape (B, dim*6)
+                ssg = (comfy.ops.cast_to_input(self.to_scale_shift_gate, global_cond) + global_cond).unsqueeze(1)
+            else:
+                ssg = self.to_scale_shift_gate(global_cond).unsqueeze(1)
 
-            scale_self, shift_self, gate_self, scale_ff, shift_ff, gate_ff = self.to_scale_shift_gate(global_cond).unsqueeze(1).chunk(6, dim = -1)
+            scale_self, shift_self, gate_self, scale_ff, shift_ff, gate_ff = ssg.chunk(6, dim = -1)
 
             # self-attention with adaLN
             residual = x
@@ -509,6 +624,9 @@ class TransformerBlock(nn.Module):
 
             if self.conformer is not None:
                 x = x + self.conformer(x)
+
+            if local_add_cond is not None and self.to_local_embed is not None:
+                x = x + _left_pad_to_match(self.to_local_embed(local_add_cond), x.shape[-2])
 
             # feedforward with adaLN
             residual = x
@@ -527,6 +645,9 @@ class TransformerBlock(nn.Module):
             if self.conformer is not None:
                 x = x + self.conformer(x)
 
+            if local_add_cond is not None and self.to_local_embed is not None:
+                x = x + _left_pad_to_match(self.to_local_embed(local_add_cond), x.shape[-2])
+
             x = x + self.ff(self.ff_norm(x))
 
         return x
@@ -543,6 +664,8 @@ class ContinuousTransformer(nn.Module):
         cross_attend=False,
         cond_token_dim=None,
         global_cond_dim=None,
+        global_cond_shared_embed=False,
+        local_add_cond_dim=None,
         causal=False,
         rotary_pos_emb=True,
         zero_init_branch_outputs=True,
@@ -550,6 +673,7 @@ class ContinuousTransformer(nn.Module):
         use_sinusoidal_emb=False,
         use_abs_pos_emb=False,
         abs_pos_emb_max_length=10000,
+        num_memory_tokens=0,
         dtype=None,
         device=None,
         operations=None,
@@ -562,6 +686,8 @@ class ContinuousTransformer(nn.Module):
         self.depth = depth
         self.causal = causal
         self.layers = nn.ModuleList([])
+        self.num_memory_tokens = num_memory_tokens
+        self.global_cond_shared_embed = global_cond_shared_embed
 
         self.project_in = operations.Linear(dim_in, dim, bias=False, dtype=dtype, device=device) if dim_in is not None else nn.Identity()
         self.project_out = operations.Linear(dim, dim_out, bias=False, dtype=dtype, device=device) if dim_out is not None else nn.Identity()
@@ -577,7 +703,22 @@ class ContinuousTransformer(nn.Module):
 
         self.use_abs_pos_emb = use_abs_pos_emb
         if use_abs_pos_emb:
-            self.pos_emb = AbsolutePositionalEmbedding(dim, abs_pos_emb_max_length)
+            self.pos_emb = AbsolutePositionalEmbedding(dim, abs_pos_emb_max_length + num_memory_tokens)
+
+        if num_memory_tokens > 0:
+            self.memory_tokens = nn.Parameter(torch.empty(num_memory_tokens, dim, device=device, dtype=dtype))
+
+        # Shared global-cond embedder (SA3 style): projects (B, global_cond_dim) → (B, dim*6)
+        self.global_cond_embedder = None
+        if global_cond_shared_embed and global_cond_dim is not None:
+            self.global_cond_embedder = nn.Sequential(
+                operations.Linear(global_cond_dim, dim, bias=True, dtype=dtype, device=device),
+                nn.SiLU(),
+                operations.Linear(dim, dim * 6, bias=True, dtype=dtype, device=device),
+            )
+
+        # When using shared embed, TransformerBlocks use per-block Parameter (not per-block MLP)
+        block_global_cond_dim = None if global_cond_shared_embed else global_cond_dim
 
         for i in range(depth):
             self.layers.append(
@@ -586,7 +727,9 @@ class ContinuousTransformer(nn.Module):
                     dim_heads = dim_heads,
                     cross_attend = cross_attend,
                     dim_context = cond_token_dim,
-                    global_cond_dim = global_cond_dim,
+                    global_cond_dim = block_global_cond_dim,
+                    global_cond_shared_embed = global_cond_shared_embed,
+                    local_add_cond_dim = local_add_cond_dim,
                     causal = causal,
                     zero_init_branch_outputs = zero_init_branch_outputs,
                     conformer=conformer,
@@ -605,6 +748,7 @@ class ContinuousTransformer(nn.Module):
         prepend_embeds = None,
         prepend_mask = None,
         global_cond = None,
+        local_add_cond = None,
         return_info = False,
         **kwargs
     ):
@@ -632,7 +776,9 @@ class ContinuousTransformer(nn.Module):
 
                 mask = torch.cat((prepend_mask, mask), dim = -1)
 
-        # Attention layers
+        if self.num_memory_tokens > 0:
+            memory_tokens = comfy.ops.cast_to_input(self.memory_tokens, x).expand(batch, -1, -1)
+            x = torch.cat((memory_tokens, x), dim=1)
 
         if self.rotary_pos_emb is not None:
             rotary_pos_emb = self.rotary_pos_emb.forward_from_seq_len(x.shape[1], dtype=torch.float, device=x.device)
@@ -641,6 +787,10 @@ class ContinuousTransformer(nn.Module):
 
         if self.use_sinusoidal_emb or self.use_abs_pos_emb:
             x = x + self.pos_emb(x)
+
+        # Project global_cond once (SA3 shared-embed path)
+        if global_cond is not None and self.global_cond_embedder is not None:
+            global_cond = self.global_cond_embedder(global_cond)
 
         blocks_replace = patches_replace.get("dit", {})
         # Iterate over the transformer layers
@@ -654,11 +804,16 @@ class ContinuousTransformer(nn.Module):
                 out = blocks_replace[("double_block", i)]({"img": x, "txt": context, "vec": global_cond, "pe": rotary_pos_emb, "transformer_options": transformer_options}, {"original_block": block_wrap})
                 x = out["img"]
             else:
-                x = layer(x, rotary_pos_emb = rotary_pos_emb, global_cond=global_cond, context=context, transformer_options=transformer_options)
-            # x = checkpoint(layer, x, rotary_pos_emb = rotary_pos_emb, global_cond=global_cond, **kwargs)
+                x = layer(x, rotary_pos_emb=rotary_pos_emb, global_cond=global_cond,
+                          local_add_cond=local_add_cond, context=context,
+                          transformer_options=transformer_options)
 
             if return_info:
                 info["hidden_states"].append(x)
+
+        # Strip memory tokens before projecting out
+        if self.num_memory_tokens > 0:
+            x = x[:, self.num_memory_tokens:, :]
 
         x = self.project_out(x)
 
@@ -682,6 +837,7 @@ class AudioDiffusionTransformer(nn.Module):
         num_heads=24,
         transformer_type: tp.Literal["continuous_transformer"] = "continuous_transformer",
         global_cond_type: tp.Literal["prepend", "adaLN"] = "prepend",
+        timestep_features_type: str = "learned",
         audio_model="",
         dtype=None,
         device=None,
@@ -696,7 +852,10 @@ class AudioDiffusionTransformer(nn.Module):
         # Timestep embeddings
         timestep_features_dim = 256
 
-        self.timestep_features = FourierFeatures(1, timestep_features_dim, dtype=dtype, device=device)
+        if timestep_features_type == "expo":
+            self.timestep_features = ExpoFourierFeatures(timestep_features_dim, 0.5, 10000.0)
+        else:
+            self.timestep_features = FourierFeatures(1, timestep_features_dim, dtype=dtype, device=device)
 
         self.to_timestep_embed = nn.Sequential(
             operations.Linear(timestep_features_dim, embed_dim, bias=True, dtype=dtype, device=device),
@@ -781,6 +940,7 @@ class AudioDiffusionTransformer(nn.Module):
         cross_attn_cond=None,
         cross_attn_cond_mask=None,
         input_concat_cond=None,
+        local_add_cond=None,
         global_embed=None,
         prepend_cond=None,
         prepend_cond_mask=None,
@@ -802,8 +962,12 @@ class AudioDiffusionTransformer(nn.Module):
             prepend_cond = self.to_prepend_embed(prepend_cond)
 
             prepend_inputs = prepend_cond
+            prepend_length = prepend_cond.shape[1]
             if prepend_cond_mask is not None:
                 prepend_mask = prepend_cond_mask
+
+        if local_add_cond is not None and local_add_cond.dim() == 3:
+            local_add_cond = local_add_cond.permute(0, 2, 1)
 
         if input_concat_cond is not None:
 
@@ -850,7 +1014,7 @@ class AudioDiffusionTransformer(nn.Module):
         if self.transformer_type == "x-transformers":
             output = self.transformer(x, prepend_embeds=prepend_inputs, context=cross_attn_cond, context_mask=cross_attn_cond_mask, mask=mask, prepend_mask=prepend_mask, **extra_args, **kwargs)
         elif self.transformer_type == "continuous_transformer":
-            output = self.transformer(x, prepend_embeds=prepend_inputs, context=cross_attn_cond, context_mask=cross_attn_cond_mask, mask=mask, prepend_mask=prepend_mask, return_info=return_info, **extra_args, **kwargs)
+            output = self.transformer(x, prepend_embeds=prepend_inputs, context=cross_attn_cond, context_mask=cross_attn_cond_mask, mask=mask, prepend_mask=prepend_mask, return_info=return_info, local_add_cond=local_add_cond, **extra_args, **kwargs)
 
             if return_info:
                 output, info = output
@@ -876,6 +1040,7 @@ class AudioDiffusionTransformer(nn.Module):
         context=None,
         context_mask=None,
         input_concat_cond=None,
+        local_add_cond=None,
         global_embed=None,
         negative_global_embed=None,
         prepend_cond=None,
@@ -890,6 +1055,7 @@ class AudioDiffusionTransformer(nn.Module):
                 cross_attn_cond=context,
                 cross_attn_cond_mask=context_mask,
                 input_concat_cond=input_concat_cond,
+                local_add_cond=local_add_cond,
                 global_embed=global_embed,
                 prepend_cond=prepend_cond,
                 prepend_cond_mask=prepend_cond_mask,

@@ -1,1 +1,315 @@
-{"revision": 0, "last_node_id": 233, "last_link_id": 0, "nodes": [{"id": 233, "type": "dcf32045-0ee4-4efc-9aca-9f26f3a157be", "pos": [0, 1140], "size": [400, 260], "flags": {}, "order": 7, "mode": 0, "inputs": [{"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": null}, {"name": "model", "type": "COMBO", "widget": {"name": "model"}, "link": null}, {"name": "video", "type": "VIDEO", "link": null}], "outputs": [{"localized_name": "STRING", "name": "STRING", "type": "STRING", "links": []}], "title": "Video Captioning(Gemini)", "properties": {"proxyWidgets": [["-1", "prompt"], ["-1", "model"], ["1", "seed"]], "cnr_id": "comfy-core", "ver": "0.13.0"}, "widgets_values": ["Describe this video", "gemini-2.5-pro"]}], "links": [], "version": 0.4, "definitions": {"subgraphs": [{"id": "dcf32045-0ee4-4efc-9aca-9f26f3a157be", "version": 1, "state": {"lastGroupId": 1, "lastNodeId": 16, "lastLinkId": 17, "lastRerouteId": 0}, "revision": 0, "config": {}, "name": "Video Captioning(Gemini)", "inputNode": {"id": -10, "bounding": [-6870, 2530, 120, 100]}, "outputNode": {"id": -20, "bounding": [-6240, 2530, 120, 60]}, "inputs": [{"id": "d8cbd7eb-636a-4d7b-8ff6-b22f1755e26c", "name": "prompt", "type": "STRING", "linkIds": [15], "pos": [-6770, 2550]}, {"id": "b034e26a-d114-4604-aec2-32783e86aa6b", "name": "model", "type": "COMBO", "linkIds": [16], "pos": [-6770, 2570]}, {"id": "f7363f60-a106-4e06-90af-df5f53355b98", "name": "video", "type": "VIDEO", "linkIds": [17], "pos": [-6770, 2590]}], "outputs": [{"id": "e12c6e80-5210-4328-a581-bc8924c53070", "name": "STRING", "type": "STRING", "linkIds": [6], "localized_name": "STRING", "pos": [-6220, 2550]}], "widgets": [], "nodes": [{"id": 1, "type": "GeminiNode", "pos": [-6690, 2360], "size": [390, 430], "flags": {}, "order": 0, "mode": 0, "inputs": [{"localized_name": "images", "name": "images", "shape": 7, "type": "IMAGE", "link": null}, {"localized_name": "audio", "name": "audio", "shape": 7, "type": "AUDIO", "link": null}, {"localized_name": "video", "name": "video", "shape": 7, "type": "VIDEO", "link": 17}, {"localized_name": "files", "name": "files", "shape": 7, "type": "GEMINI_INPUT_FILES", "link": null}, {"localized_name": "prompt", "name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": 15}, {"localized_name": "model", "name": "model", "type": "COMBO", "widget": {"name": "model"}, "link": 16}, {"localized_name": "seed", "name": "seed", "type": "INT", "widget": {"name": "seed"}, "link": null}, {"localized_name": "system_prompt", "name": "system_prompt", "shape": 7, "type": "STRING", "widget": {"name": "system_prompt"}, "link": null}], "outputs": [{"localized_name": "STRING", "name": "STRING", "type": "STRING", "links": [6]}], "properties": {"cnr_id": "comfy-core", "ver": "0.5.1", "Node name for S&R": "GeminiNode"}, "widgets_values": ["Describe this video", "gemini-2.5-pro", 511865409297955, "randomize", "- Role: AI Video Analysis and Description Specialist\n- Background: The user requires a prompt that enables AI to analyze videos (including frame sequences, dynamic movements, audio-visual elements) and generate detailed, structured descriptions. These descriptions must be directly usable as video generation prompts to create similar videos, serving core tasks such as video content creation, creative inspiration extraction, and artistic style exploration.\n- Profile: As an AI Video Analysis and Description Specialist, you possess expertise in computer vision, video temporal sequence processing, motion analysis, and multi-modal natural language generation. You excel at interpreting dynamic visual data (frame-by-frame features + continuous motion) and translating it into precise descriptive text that fully guides the creation of new videos with matching style, rhythm, and content.\n- Skills: Proficiency in video frame feature extraction, motion trajectory recognition, temporal rhythm analysis, scene/shot segmentation, color grading detection, camera movement identification (pan/tilt/zoom/dolly), audio-visual element correlation analysis, and descriptive language generation that captures both static visual features and dynamic temporal characteristics. Mastery of artistic elements in video: composition (per frame + dynamic framing), color palette (consistent + transitional), texture (surface details + motion blur), pacing (frame rate, shot duration), and sound style (background music, ambient sound cues).\n- Goals: To analyze the provided video comprehensively, generate a detailed, structured description that captures all key video elements (static visual features + dynamic motion/temporal characteristics + audio-visual style), and ensure this description can directly serve as a high-quality prompt for creating similar videos.\n- Constraints: \n  1. The description must be clear, structured, and specific enough to guide end-to-end video creation (including frame rate, shot duration, camera movement, motion speed, color transitions).\n  2. Avoid ambiguity; focus on the most salient static (per-frame) and dynamic (temporal) features of the video.\n  3. Prioritize video-specific elements: motion trajectory, shot types (close-up/wide shot/etc.), camera movement, frame rate, scene transitions, rhythm/pacing, and temporal color changes.\n  4. The output must only contain the video generation prompt (no extra explanations).\n- OutputFormat: A detailed, hierarchical text description of the video, structured as follows:\n  1. Core Content & Narrative: Brief overview of the video's subject and temporal progression\n  2. Visual Style (Static): Per-frame key elements (objects, colors, composition, lighting, texture)\n  3. Dynamic Elements (Temporal): Motion details (speed, trajectory, direction), camera movement (type, speed, direction), shot duration/frame rate, scene transitions\n  4. Audio-Visual Style: Color grading (consistent/transitional), rhythm/pacing, and implied audio style (if discernible)\n- Workflow:\n  1. Analyze the video to segment shots/scenes, identify frame-by-frame static visual elements (objects, colors, composition) and cross-frame dynamic elements (motion, camera movement, temporal changes).\n  2. Extract video-specific technical features: frame rate, shot duration, scene transition types, motion speed/rhythm.\n  3. Generate a structured, detailed description that captures the essence of the video (static + dynamic + temporal characteristics), ensuring specificity and actionability for video generation.\n  4. Refine the description for clarity, conciseness, and alignment with video generation prompt norms (e.g., including frame rate, camera movement terms, motion speed descriptors)."], "color": "#432", "bgcolor": "#653"}], "groups": [], "links": [{"id": 6, "origin_id": 1, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "*"}, {"id": 15, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 4, "type": "STRING"}, {"id": 16, "origin_id": -10, "origin_slot": 1, "target_id": 1, "target_slot": 5, "type": "COMBO"}, {"id": 17, "origin_id": -10, "origin_slot": 2, "target_id": 1, "target_slot": 2, "type": "VIDEO"}], "extra": {"workflowRendererVersion": "LG"}, "category": "Text generation/Video Captioning"}]}}
+{
+  "revision": 0,
+  "last_node_id": 233,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 233,
+      "type": "dcf32045-0ee4-4efc-9aca-9f26f3a157be",
+      "pos": [
+        0,
+        1140
+      ],
+      "size": [
+        400,
+        260
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "prompt"
+          },
+          "link": null
+        },
+        {
+          "name": "model",
+          "type": "COMBO",
+          "widget": {
+            "name": "model"
+          },
+          "link": null
+        },
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "STRING",
+          "name": "STRING",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "title": "Video Captioning(Gemini)",
+      "properties": {
+        "proxyWidgets": [
+          [
+            "-1",
+            "prompt"
+          ],
+          [
+            "-1",
+            "model"
+          ],
+          [
+            "1",
+            "seed"
+          ]
+        ],
+        "cnr_id": "comfy-core",
+        "ver": "0.13.0"
+      },
+      "widgets_values": [
+        "Describe this video",
+        "gemini-2.5-pro"
+      ]
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "dcf32045-0ee4-4efc-9aca-9f26f3a157be",
+        "version": 1,
+        "state": {
+          "lastGroupId": 1,
+          "lastNodeId": 16,
+          "lastLinkId": 17,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Video Captioning(Gemini)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -6870,
+            2530,
+            120,
+            100
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            -6240,
+            2530,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "d8cbd7eb-636a-4d7b-8ff6-b22f1755e26c",
+            "name": "prompt",
+            "type": "STRING",
+            "linkIds": [
+              15
+            ],
+            "pos": [
+              -6770,
+              2550
+            ]
+          },
+          {
+            "id": "b034e26a-d114-4604-aec2-32783e86aa6b",
+            "name": "model",
+            "type": "COMBO",
+            "linkIds": [
+              16
+            ],
+            "pos": [
+              -6770,
+              2570
+            ]
+          },
+          {
+            "id": "f7363f60-a106-4e06-90af-df5f53355b98",
+            "name": "video",
+            "type": "VIDEO",
+            "linkIds": [
+              17
+            ],
+            "pos": [
+              -6770,
+              2590
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "e12c6e80-5210-4328-a581-bc8924c53070",
+            "name": "STRING",
+            "type": "STRING",
+            "linkIds": [
+              6
+            ],
+            "localized_name": "STRING",
+            "pos": [
+              -6220,
+              2550
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 1,
+            "type": "GeminiNode",
+            "pos": [
+              -6690,
+              2360
+            ],
+            "size": [
+              390,
+              430
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "shape": 7,
+                "type": "AUDIO",
+                "link": null
+              },
+              {
+                "localized_name": "video",
+                "name": "video",
+                "shape": 7,
+                "type": "VIDEO",
+                "link": 17
+              },
+              {
+                "localized_name": "files",
+                "name": "files",
+                "shape": 7,
+                "type": "GEMINI_INPUT_FILES",
+                "link": null
+              },
+              {
+                "localized_name": "prompt",
+                "name": "prompt",
+                "type": "STRING",
+                "widget": {
+                  "name": "prompt"
+                },
+                "link": 15
+              },
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "COMBO",
+                "widget": {
+                  "name": "model"
+                },
+                "link": 16
+              },
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "system_prompt",
+                "name": "system_prompt",
+                "shape": 7,
+                "type": "STRING",
+                "widget": {
+                  "name": "system_prompt"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  6
+                ]
+              }
+            ],
+            "properties": {
+              "cnr_id": "comfy-core",
+              "ver": "0.5.1",
+              "Node name for S&R": "GeminiNode"
+            },
+            "widgets_values": [
+              "Describe this video",
+              "gemini-2.5-pro",
+              511865409297955,
+              "randomize",
+              "- Role: AI Video Analysis and Description Specialist\n- Background: The user requires a prompt that enables AI to analyze videos (including frame sequences, dynamic movements, audio-visual elements) and generate detailed, structured descriptions. These descriptions must be directly usable as video generation prompts to create similar videos, serving core tasks such as video content creation, creative inspiration extraction, and artistic style exploration.\n- Profile: As an AI Video Analysis and Description Specialist, you possess expertise in computer vision, video temporal sequence processing, motion analysis, and multi-modal natural language generation. You excel at interpreting dynamic visual data (frame-by-frame features + continuous motion) and translating it into precise descriptive text that fully guides the creation of new videos with matching style, rhythm, and content.\n- Skills: Proficiency in video frame feature extraction, motion trajectory recognition, temporal rhythm analysis, scene/shot segmentation, color grading detection, camera movement identification (pan/tilt/zoom/dolly), audio-visual element correlation analysis, and descriptive language generation that captures both static visual features and dynamic temporal characteristics. Mastery of artistic elements in video: composition (per frame + dynamic framing), color palette (consistent + transitional), texture (surface details + motion blur), pacing (frame rate, shot duration), and sound style (background music, ambient sound cues).\n- Goals: To analyze the provided video comprehensively, generate a detailed, structured description that captures all key video elements (static visual features + dynamic motion/temporal characteristics + audio-visual style), and ensure this description can directly serve as a high-quality prompt for creating similar videos.\n- Constraints: \n  1. The description must be clear, structured, and specific enough to guide end-to-end video creation (including frame rate, shot duration, camera movement, motion speed, color transitions).\n  2. Avoid ambiguity; focus on the most salient static (per-frame) and dynamic (temporal) features of the video.\n  3. Prioritize video-specific elements: motion trajectory, shot types (close-up/wide shot/etc.), camera movement, frame rate, scene transitions, rhythm/pacing, and temporal color changes.\n  4. The output must only contain the video generation prompt (no extra explanations).\n- OutputFormat: A detailed, hierarchical text description of the video, structured as follows:\n  1. Core Content & Narrative: Brief overview of the video's subject and temporal progression\n  2. Visual Style (Static): Per-frame key elements (objects, colors, composition, lighting, texture)\n  3. Dynamic Elements (Temporal): Motion details (speed, trajectory, direction), camera movement (type, speed, direction), shot duration/frame rate, scene transitions\n  4. Audio-Visual Style: Color grading (consistent/transitional), rhythm/pacing, and implied audio style (if discernible)\n- Workflow:\n  1. Analyze the video to segment shots/scenes, identify frame-by-frame static visual elements (objects, colors, composition) and cross-frame dynamic elements (motion, camera movement, temporal changes).\n  2. Extract video-specific technical features: frame rate, shot duration, scene transition types, motion speed/rhythm.\n  3. Generate a structured, detailed description that captures the essence of the video (static + dynamic + temporal characteristics), ensuring specificity and actionability for video generation.\n  4. Refine the description for clarity, conciseness, and alignment with video generation prompt norms (e.g., including frame rate, camera movement terms, motion speed descriptors)."
+            ],
+            "color": "#432",
+            "bgcolor": "#653"
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 6,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "*"
+          },
+          {
+            "id": 15,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 1,
+            "target_slot": 4,
+            "type": "STRING"
+          },
+          {
+            "id": 16,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 1,
+            "target_slot": 5,
+            "type": "COMBO"
+          },
+          {
+            "id": 17,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 1,
+            "target_slot": 2,
+            "type": "VIDEO"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Video Tools",
+        "description": "Generates descriptive captions for video input using Google's Gemini multimodal LLM."
+      }
+    ]
+  }
+}

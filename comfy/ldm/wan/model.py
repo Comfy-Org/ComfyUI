@@ -8,7 +8,7 @@ from einops import rearrange
 
 from comfy.ldm.modules.attention import optimized_attention
 from comfy.ldm.flux.layers import EmbedND
-from comfy.ldm.flux.math import apply_rope1
+from comfy.ldm.flux.math import apply_rope1, rope
 import comfy.ldm.common_dit
 import comfy.model_management
 import comfy.patcher_extension
@@ -570,6 +570,14 @@ class WanModel(torch.nn.Module):
                 full_ref = self.ref_conv(full_ref).flatten(2).transpose(1, 2)
                 x = torch.concat((full_ref, x), dim=1)
 
+        # In-context reference (Bernini)
+        context_latents = kwargs.get("context_latents", None)
+        main_len = x.shape[1]
+        if context_latents is not None:
+            for lat in context_latents:
+                cl = self.patch_embedding(lat.float().to(x.device)).to(x.dtype).flatten(2).transpose(1, 2)
+                x = torch.cat([x, cl], dim=1)
+
         # context
         context = self.text_embedding(context)
 
@@ -599,6 +607,9 @@ class WanModel(torch.nn.Module):
         # head
         x = self.head(x, e)
 
+        if context_latents is not None:
+            x = x[:, :main_len]
+
         if full_ref is not None:
             x = x[:, full_ref.shape[1]:]
 
@@ -606,7 +617,7 @@ class WanModel(torch.nn.Module):
         x = self.unpatchify(x, grid_sizes)
         return x
 
-    def rope_encode(self, t, h, w, t_start=0, steps_t=None, steps_h=None, steps_w=None, device=None, dtype=None, transformer_options={}):
+    def rope_encode(self, t, h, w, t_start=0, steps_t=None, steps_h=None, steps_w=None, device=None, dtype=None, transformer_options={}, source_id=0):
         patch_size = self.patch_size
         t_len = ((t + (patch_size[0] // 2)) // patch_size[0])
         h_len = ((h + (patch_size[1] // 2)) // patch_size[1])
@@ -638,6 +649,13 @@ class WanModel(torch.nn.Module):
         img_ids = img_ids.reshape(1, -1, img_ids.shape[-1])
 
         freqs = self.rope_embedder(img_ids).movedim(1, 2)
+
+        # In-context reference: a non-zero source_id composes an extra rotation into the spatial rope
+        if source_id:
+            d = self.dim // self.num_heads
+            pos = torch.tensor([[float(source_id)]], device=freqs.device, dtype=torch.float32)
+            id_rot = rope(pos, d, self.rope_embedder.theta).reshape(1, 1, 1, d // 2, 2, 2).to(freqs.dtype)
+            freqs = torch.einsum('...ij,...jk->...ik', freqs, id_rot)
         return freqs
 
     def forward(self, x, timestep, context, clip_fea=None, time_dim_concat=None, transformer_options={}, **kwargs):
@@ -661,6 +679,15 @@ class WanModel(torch.nn.Module):
             t_len += 1
 
         freqs = self.rope_encode(t_len, h, w, device=x.device, dtype=x.dtype, transformer_options=transformer_options)
+
+        # In-context reference: one rope block per stream, each with it's own source_id (1, 2, ...) to distinguish from the target (id 0).
+        context_latents = kwargs.get("context_latents", None)
+        if context_latents is not None:
+            context_latents = [comfy.ldm.common_dit.pad_to_patch_size(lat, self.patch_size) for lat in context_latents]
+            for i, lat in enumerate(context_latents):
+                freqs = torch.cat([freqs, self.rope_encode(lat.shape[-3], lat.shape[-2], lat.shape[-1], device=x.device, dtype=x.dtype, transformer_options=transformer_options, source_id=i + 1)], dim=1)
+            kwargs = {**kwargs, "context_latents": context_latents}
+
         return self.forward_orig(x, timestep, context, clip_fea=clip_fea, freqs=freqs, transformer_options=transformer_options, **kwargs)[:, :, :t, :h, :w]
 
     def unpatchify(self, x, grid_sizes):
@@ -1135,7 +1162,7 @@ class AudioInjector_WAN(nn.Module):
                 self.injector_adain_output_layers = nn.ModuleList(
                     [operations.Linear(dim, dim, dtype=dtype, device=device) for _ in range(audio_injector_id)])
 
-    def forward(self, x, block_id, audio_emb, audio_emb_global, seq_len):
+    def forward(self, x, block_id, audio_emb, audio_emb_global, seq_len, scale=1.0):
         audio_attn_id = self.injected_block_id.get(block_id, None)
         if audio_attn_id is None:
             return x
@@ -1148,12 +1175,15 @@ class AudioInjector_WAN(nn.Module):
             attn_hidden_states = adain_hidden_states
         else:
             attn_hidden_states = self.injector_pre_norm_feat[audio_attn_id](input_hidden_states)
-        audio_emb = rearrange(audio_emb, "b t n c -> (b t) n c", t=num_frames)
-        attn_audio_emb = audio_emb
+
+        if audio_emb.dim() == 3: # WanDancer case
+            attn_audio_emb = rearrange(audio_emb, "b t c -> (b t) 1 c", t=num_frames)
+        else: # S2V case
+            attn_audio_emb = rearrange(audio_emb, "b t n c -> (b t) n c", t=num_frames)
+
         residual_out = self.injector[audio_attn_id](x=attn_hidden_states, context=attn_audio_emb)
-        residual_out = rearrange(
-            residual_out, "(b t) n c -> b (t n) c", t=num_frames)
-        x[:, :seq_len] = x[:, :seq_len] + residual_out
+        residual_out = rearrange(residual_out, "(b t) n c -> b (t n) c", t=num_frames)
+        x[:, :seq_len] = x[:, :seq_len] + residual_out * scale
         return x
 
 
@@ -1628,13 +1658,15 @@ class SCAILWanModel(WanModel):
 
         self.patch_embedding_pose = operations.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size, device=device, dtype=torch.float32)
 
-    def forward_orig(self, x, t, context, clip_fea=None, freqs=None, transformer_options={}, pose_latents=None, reference_latent=None, **kwargs):
+    def forward_orig(self, x, t, context, clip_fea=None, freqs=None, transformer_options={}, pose_latents=None, reference_latent=None, ref_mask_latents=None, sam_latents=None, **kwargs):
 
         if reference_latent is not None:
             x = torch.cat((reference_latent, x), dim=2)
 
         # embeddings
         x = self.patch_embedding(x.float()).to(x.dtype)
+        if ref_mask_latents is not None:  # SCAIL-2 additive mask stream (one identity mask frame per reference, then video)
+            x = x + self.patch_embedding_mask(ref_mask_latents.float()).to(x.dtype)
         grid_sizes = x.shape[2:]
         transformer_options["grid_sizes"] = grid_sizes
         x = x.flatten(2).transpose(1, 2)
@@ -1642,6 +1674,8 @@ class SCAILWanModel(WanModel):
         scail_pose_seq_len = 0
         if pose_latents is not None:
             scail_x = self.patch_embedding_pose(pose_latents.float()).to(x.dtype)
+            if sam_latents is not None:  # SCAIL-2 additive mask stream
+                scail_x = scail_x + self.patch_embedding_mask(sam_latents.float()).to(x.dtype)
             scail_x = scail_x.flatten(2).transpose(1, 2)
             scail_pose_seq_len = scail_x.shape[1]
             x = torch.cat([x, scail_x], dim=1)
@@ -1692,15 +1726,43 @@ class SCAILWanModel(WanModel):
 
         return x
 
-    def rope_encode(self, t, h, w, t_start=0, steps_t=None, steps_h=None, steps_w=None, device=None, dtype=None, pose_latents=None, reference_latent=None, transformer_options={}):
+    # ref_mask_flag is a scalar bool (CONDConstant, SCAIL-2 only). False => replacement mode,
+    # which places ref/pose via H/W rope shifts instead of the animation-mode temporal offset.
+    # reference_latent may stack several frames: the last is the primary reference adjacent to the video, the earlier frames are additional references.
+    def rope_encode(self, t, h, w, t_start=0, steps_t=None, steps_h=None, steps_w=None, device=None, dtype=None, pose_latents=None, reference_latent=None, ref_mask_flag=None, transformer_options={}):
+        ref_t_patches = 0
+        if reference_latent is not None:
+            ref_t_patches = (reference_latent.shape[2] + (self.patch_size[0] // 2)) // self.patch_size[0]
+
+        if ref_mask_flag is not None and not bool(ref_mask_flag):
+            REF_ROPE_H = 120.0
+            POSE_ROPE_W = 120.0
+
+            main_t_patches = t - ref_t_patches
+            video_t_start = max(ref_t_patches - 1, 0)
+
+            parts = []
+            if ref_t_patches > 0:
+                ref_tf = {"rope_options": {"shift_y": REF_ROPE_H, "shift_x": 0.0, "scale_y": 1.0, "scale_x": 1.0}}
+                parts.append(super().rope_encode(ref_t_patches, h, w, t_start=0, device=device, dtype=dtype, transformer_options=ref_tf))
+            if main_t_patches > 0:
+                parts.append(super().rope_encode(main_t_patches, h, w, t_start=video_t_start, device=device, dtype=dtype, transformer_options=transformer_options))
+
+            if pose_latents is not None:
+                F_pose, H_pose, W_pose = pose_latents.shape[-3], pose_latents.shape[-2], pose_latents.shape[-1]
+                h_scale = h / H_pose
+                w_scale = w / W_pose
+                h_shift = (h_scale - 1) / 2
+                w_shift = (w_scale - 1) / 2
+                pose_tf = {"rope_options": {"shift_y": h_shift, "shift_x": POSE_ROPE_W + w_shift, "scale_y": h_scale, "scale_x": w_scale}}
+                parts.append(super().rope_encode(F_pose, H_pose, W_pose, t_start=video_t_start, device=device, dtype=dtype, transformer_options=pose_tf))
+
+            return torch.cat(parts, dim=1)
+
         main_freqs = super().rope_encode(t, h, w, t_start=t_start, steps_t=steps_t, steps_h=steps_h, steps_w=steps_w, device=device, dtype=dtype, transformer_options=transformer_options)
 
         if pose_latents is None:
             return main_freqs
-
-        ref_t_patches = 0
-        if reference_latent is not None:
-            ref_t_patches = (reference_latent.shape[2] + (self.patch_size[0] // 2)) // self.patch_size[0]
 
         F_pose, H_pose, W_pose = pose_latents.shape[-3], pose_latents.shape[-2], pose_latents.shape[-1]
 
@@ -1716,12 +1778,16 @@ class SCAILWanModel(WanModel):
 
         return torch.cat([main_freqs, pose_freqs], dim=1)
 
-    def _forward(self, x, timestep, context, clip_fea=None, time_dim_concat=None, transformer_options={}, pose_latents=None, **kwargs):
+    def _forward(self, x, timestep, context, clip_fea=None, time_dim_concat=None, transformer_options={}, pose_latents=None, ref_mask_latents=None, sam_latents=None, **kwargs):
         bs, c, t, h, w = x.shape
         x = comfy.ldm.common_dit.pad_to_patch_size(x, self.patch_size)
 
         if pose_latents is not None:
             pose_latents = comfy.ldm.common_dit.pad_to_patch_size(pose_latents, self.patch_size)
+        if ref_mask_latents is not None:  # SCAIL-2
+            ref_mask_latents = comfy.ldm.common_dit.pad_to_patch_size(ref_mask_latents, self.patch_size)
+        if sam_latents is not None:  # SCAIL-2
+            sam_latents = comfy.ldm.common_dit.pad_to_patch_size(sam_latents, self.patch_size)
 
         t_len = t
         if time_dim_concat is not None:
@@ -1734,5 +1800,15 @@ class SCAILWanModel(WanModel):
             reference_latent = comfy.ldm.common_dit.pad_to_patch_size(kwargs.pop("reference_latent"), self.patch_size)
             t_len += reference_latent.shape[2]
 
-        freqs = self.rope_encode(t_len, h, w, device=x.device, dtype=x.dtype, transformer_options=transformer_options, pose_latents=pose_latents, reference_latent=reference_latent)
-        return self.forward_orig(x, timestep, context, clip_fea=clip_fea, freqs=freqs, transformer_options=transformer_options, pose_latents=pose_latents, reference_latent=reference_latent, **kwargs)[:, :, :t, :h, :w]
+        ref_mask_flag = kwargs.pop("ref_mask_flag", None)  # SCAIL-2
+
+        freqs = self.rope_encode(t_len, h, w, device=x.device, dtype=x.dtype, transformer_options=transformer_options, pose_latents=pose_latents, reference_latent=reference_latent, ref_mask_flag=ref_mask_flag)
+        return self.forward_orig(x, timestep, context, clip_fea=clip_fea, freqs=freqs, transformer_options=transformer_options, pose_latents=pose_latents, reference_latent=reference_latent, ref_mask_latents=ref_mask_latents, sam_latents=sam_latents, **kwargs)[:, :, :t, :h, :w]
+
+
+class SCAIL2WanModel(SCAILWanModel):
+    """SCAIL-2: SCAIL-Preview + an additive binary multi-identity mask stream."""
+
+    def __init__(self, model_type="scail2", patch_size=(1, 2, 2), in_dim=20, mask_in_dim=28, dim=5120, operations=None, device=None, dtype=None, **kwargs):
+        super().__init__(model_type=model_type, patch_size=patch_size, in_dim=in_dim, dim=dim, operations=operations, device=device, dtype=dtype, **kwargs)
+        self.patch_embedding_mask = operations.Conv3d(mask_in_dim, dim, kernel_size=patch_size, stride=patch_size, device=device, dtype=torch.float32)

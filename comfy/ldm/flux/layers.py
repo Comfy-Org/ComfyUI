@@ -144,9 +144,9 @@ def apply_mod(tensor, m_mult, m_add=None, modulation_dims=None):
             return tensor * m_mult
     else:
         for d in modulation_dims:
-            tensor[:, d[0]:d[1]] *= m_mult[:, d[2]]
+            tensor[:, d[0]:d[1]] *= m_mult[:, d[2]:d[2] + 1]
             if m_add is not None:
-                tensor[:, d[0]:d[1]] += m_add[:, d[2]]
+                tensor[:, d[0]:d[1]] += m_add[:, d[2]:d[2] + 1]
         return tensor
 
 
@@ -223,12 +223,19 @@ class DoubleStreamBlock(nn.Module):
         del txt_k, img_k
         v = torch.cat((txt_v, img_v), dim=2)
         del txt_v, img_v
+
+        extra_options["img_slice"] = [txt.shape[1], q.shape[2]]
+        if "attn1_patch" in transformer_patches:
+            patch = transformer_patches["attn1_patch"]
+            for p in patch:
+                out = p(q, k, v, pe=pe, attn_mask=attn_mask, extra_options=extra_options)
+                q, k, v, pe, attn_mask = out.get("q", q), out.get("k", k), out.get("v", v), out.get("pe", pe), out.get("attn_mask", attn_mask)
+
         # run actual attention
         attn = attention(q, k, v, pe=pe, mask=attn_mask, transformer_options=transformer_options)
         del q, k, v
 
         if "attn1_output_patch" in transformer_patches:
-            extra_options["img_slice"] = [txt.shape[1], attn.shape[1]]
             patch = transformer_patches["attn1_output_patch"]
             for p in patch:
                 attn = p(attn, extra_options)
@@ -320,6 +327,12 @@ class SingleStreamBlock(nn.Module):
         q, k, v = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
         del qkv
         q, k = self.norm(q, k, v)
+
+        if "attn1_patch" in transformer_patches:
+            patch = transformer_patches["attn1_patch"]
+            for p in patch:
+                out = p(q, k, v, pe=pe, attn_mask=attn_mask, extra_options=extra_options)
+                q, k, v, pe, attn_mask = out.get("q", q), out.get("k", k), out.get("v", v), out.get("pe", pe), out.get("attn_mask", attn_mask)
 
         # compute attention
         attn = attention(q, k, v, pe=pe, mask=attn_mask, transformer_options=transformer_options)

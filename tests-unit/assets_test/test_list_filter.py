@@ -1,7 +1,9 @@
 import time
 import uuid
 
+import pytest
 import requests
+from helpers import assert_hash_fields_consistent
 
 
 def test_list_assets_paging_and_sort(http: requests.Session, api_base: str, asset_factory, make_asset_bytes):
@@ -25,6 +27,10 @@ def test_list_assets_paging_and_sort(http: requests.Session, api_base: str, asse
     got1 = [a["name"] for a in b1["assets"]]
     assert got1 == sorted(names)[:2]
     assert b1["has_more"] is True
+    # Populated assets in list responses must carry both `hash` and `asset_hash` consistently
+    for asset in b1["assets"]:
+        assert_hash_fields_consistent(asset)
+        assert "hash" in asset, "populated asset must emit hash on list endpoint"
 
     r2 = http.get(
         api_base + "/api/assets",
@@ -283,30 +289,21 @@ def test_list_assets_offset_beyond_total_and_limit_boundary(http, api_base, asse
     assert b2["has_more"] is False
 
 
-def test_list_assets_offset_negative_and_limit_nonint_rejected(http, api_base):
-    r1 = http.get(api_base + "/api/assets", params={"offset": "-1"}, timeout=120)
-    b1 = r1.json()
-    assert r1.status_code == 400
-    assert b1["error"]["code"] == "INVALID_QUERY"
-
-    r2 = http.get(api_base + "/api/assets", params={"limit": "abc"}, timeout=120)
-    b2 = r2.json()
-    assert r2.status_code == 400
-    assert b2["error"]["code"] == "INVALID_QUERY"
-
-
-def test_list_assets_invalid_query_rejected(http: requests.Session, api_base: str):
-    # limit too small
-    r1 = http.get(api_base + "/api/assets", params={"limit": "0"}, timeout=120)
-    b1 = r1.json()
-    assert r1.status_code == 400
-    assert b1["error"]["code"] == "INVALID_QUERY"
-
-    # bad metadata JSON
-    r2 = http.get(api_base + "/api/assets", params={"metadata_filter": "{not json"}, timeout=120)
-    b2 = r2.json()
-    assert r2.status_code == 400
-    assert b2["error"]["code"] == "INVALID_QUERY"
+@pytest.mark.parametrize(
+    "params,error_code",
+    [
+        ({"offset": "-1"}, "INVALID_QUERY"),
+        ({"limit": "abc"}, "INVALID_QUERY"),
+        ({"limit": "0"}, "INVALID_QUERY"),
+        ({"metadata_filter": "{not json"}, "INVALID_QUERY"),
+    ],
+    ids=["negative_offset", "non_int_limit", "zero_limit", "invalid_metadata_json"],
+)
+def test_list_assets_invalid_query_rejected(http: requests.Session, api_base: str, params, error_code):
+    r = http.get(api_base + "/api/assets", params=params, timeout=120)
+    body = r.json()
+    assert r.status_code == 400
+    assert body["error"]["code"] == error_code
 
 
 def test_list_assets_name_contains_literal_underscore(

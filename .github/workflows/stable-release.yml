@@ -145,6 +145,8 @@ jobs:
           cp -r ComfyUI/.ci/windows_${{ inputs.rel_name }}_base_files/* ./
           cp ../update_comfyui_and_python_dependencies.bat ./update/
 
+          echo 'local-portable' > ComfyUI/.comfy_environment
+
           cd ..
 
           "C:\Program Files\7-Zip\7z.exe" a -t7z -m0=lzma2 -mx=9 -mfb=128 -md=768m -ms=on -mf=BCJ2 ComfyUI_windows_portable.7z ComfyUI_windows_portable

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 import time
 import mimetypes
@@ -51,6 +49,16 @@ folder_names_and_paths["classifiers"] = ([os.path.join(models_dir, "classifiers"
 folder_names_and_paths["model_patches"] = ([os.path.join(models_dir, "model_patches")], supported_pt_extensions)
 
 folder_names_and_paths["audio_encoders"] = ([os.path.join(models_dir, "audio_encoders")], supported_pt_extensions)
+
+folder_names_and_paths["background_removal"] = ([os.path.join(models_dir, "background_removal")], supported_pt_extensions)
+
+folder_names_and_paths["frame_interpolation"] = ([os.path.join(models_dir, "frame_interpolation")], supported_pt_extensions)
+
+folder_names_and_paths["geometry_estimation"] = ([os.path.join(models_dir, "geometry_estimation")], supported_pt_extensions)
+
+folder_names_and_paths["optical_flow"] = ([os.path.join(models_dir, "optical_flow")], supported_pt_extensions)
+
+folder_names_and_paths["detection"] = ([os.path.join(models_dir, "detection")], supported_pt_extensions)
 
 output_directory = os.path.join(base_path, "output")
 temp_directory = os.path.join(base_path, "temp")
@@ -430,7 +438,9 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
         prefix_len = len(os.path.basename(filename_prefix))
         prefix = filename[:prefix_len + 1]
         try:
-            digits = int(filename[prefix_len + 1:].split('_')[0])
+            remainder = filename[prefix_len + 1:]
+            base_remainder = remainder.split('.')[0]
+            digits = int(base_remainder.split('_')[0])
         except:
             digits = 0
         return digits, prefix

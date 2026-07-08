@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -72,8 +72,11 @@ class VideoEnhancementFilter(BaseModel):
     grain: Optional[float] = Field(None, description="Grain after AI model processing")
     grainSize: Optional[float] = Field(None, description="Size of generated grain")
     recoverOriginalDetailValue: Optional[float] = Field(None, description="Source details into the output video")
-    creativity: Optional[str] = Field(None, description="Creativity level(high, low) for slc-1 only")
+    creativity: float | str | None = Field(None, description="slc-1/slp-2.5: enum (low/middle/high). ast-2: decimal 0.0-1.0.")
     isOptimizedMode: Optional[bool] = Field(None, description="Set to true for Starlight Creative (slc-1) only")
+    prompt: str | None = Field(None, description="Descriptive scene prompt (ast-2 only)")
+    sharp: float | None = Field(None, description="ast-2 pre-enhance sharpness")
+    realism: float | None = Field(None, description="ast-2 realism control")
 
 
 class OutputInformationVideo(BaseModel):
@@ -90,7 +93,7 @@ class Overrides(BaseModel):
 
 class CreateVideoRequest(BaseModel):
     source: CreateVideoRequestSource = Field(...)
-    filters: list[Union[VideoFrameInterpolationFilter, VideoEnhancementFilter]] = Field(...)
+    filters: list[VideoFrameInterpolationFilter | VideoEnhancementFilter] = Field(...)
     output: OutputInformationVideo = Field(...)
     overrides: Overrides = Field(Overrides(isPaidDiffusion=True))
 

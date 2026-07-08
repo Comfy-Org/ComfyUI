@@ -61,6 +61,30 @@ class Mistral3Small24BConfig:
     lm_head: bool = False
 
 @dataclass
+class Ministral3_3BConfig:
+    vocab_size: int = 131072
+    hidden_size: int = 3072
+    intermediate_size: int = 9216
+    num_hidden_layers: int = 26
+    num_attention_heads: int = 32
+    num_key_value_heads: int = 8
+    max_position_embeddings: int = 262144
+    rms_norm_eps: float = 1e-5
+    rope_theta: float = 1000000.0
+    transformer_type: str = "llama"
+    head_dim = 128
+    rms_norm_add = False
+    mlp_activation = "silu"
+    qkv_bias = False
+    rope_dims = None
+    q_norm = None
+    k_norm = None
+    rope_scale = None
+    final_norm: bool = True
+    lm_head: bool = False
+    stop_tokens = [2]
+
+@dataclass
 class Qwen25_3BConfig:
     vocab_size: int = 151936
     hidden_size: int = 2048
@@ -224,8 +248,21 @@ class Qwen3_8BConfig:
     k_norm = "gemma3"
     rope_scale = None
     final_norm: bool = True
-    lm_head: bool = False
+    lm_head: bool = True
     stop_tokens = [151643, 151645]
+
+@dataclass
+class Qwen3VL_8BConfig(Qwen3_8BConfig):
+    max_position_embeddings: int = 262144
+    rope_theta: float = 5000000.0
+    rope_dims = [24, 20, 20]
+    interleaved_mrope = True
+
+@dataclass
+class Qwen3VL_4BConfig(Qwen3VL_8BConfig):
+    hidden_size: int = 2560
+    intermediate_size: int = 9728
+    lm_head: bool = False  # 4B ties word embeddings
 
 @dataclass
 class Ovis25_2BConfig:
@@ -373,7 +410,7 @@ class RMSNorm(nn.Module):
 
 
 
-def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_dims=None, device=None):
+def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_dims=None, device=None, interleaved_mrope=False):
     if not isinstance(theta, list):
         theta = [theta]
 
@@ -391,16 +428,27 @@ def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_di
         inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
         position_ids_expanded = position_ids[:, None, :].float()
         freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-        emb = torch.cat((freqs, freqs), dim=-1)
-        cos = emb.cos()
-        sin = emb.sin()
-        if rope_dims is not None and position_ids.shape[0] > 1:
-            mrope_section = rope_dims * 2
-            cos = torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1).unsqueeze(0)
-            sin = torch.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1).unsqueeze(0)
+        if rope_dims is not None and position_ids.shape[0] > 1 and interleaved_mrope:
+            # Qwen3-VL interleaved MRoPE: T-freqs by default, H/W replace every 3rd dim.
+            freqs_inter = freqs[0].clone()
+            for axis_idx, offset in ((1, 1), (2, 2)):
+                length = rope_dims[axis_idx] * 3
+                idx = slice(offset, length, 3)
+                freqs_inter[..., idx] = freqs[axis_idx, ..., idx]
+            emb = torch.cat((freqs_inter, freqs_inter), dim=-1)
+            cos = emb.cos().unsqueeze(0)
+            sin = emb.sin().unsqueeze(0)
         else:
-            cos = cos.unsqueeze(1)
-            sin = sin.unsqueeze(1)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos()
+            sin = emb.sin()
+            if rope_dims is not None and position_ids.shape[0] > 1:
+                mrope_section = rope_dims * 2
+                cos = torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1).unsqueeze(0)
+                sin = torch.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1).unsqueeze(0)
+            else:
+                cos = cos.unsqueeze(1)
+                sin = sin.unsqueeze(1)
         sin_split = sin.shape[-1] // 2
         out.append((cos, sin[..., : sin_split], -sin[..., sin_split :]))
 
@@ -497,7 +545,7 @@ class Attention(nn.Module):
             else:
                 present_key_value = (xk, xv, index + num_tokens)
 
-            if sliding_window is not None and xk.shape[2] > sliding_window:
+            if sliding_window is not None and xk.shape[2] > sliding_window and seq_length == 1:
                 xk = xk[:, :, -sliding_window:]
                 xv = xv[:, :, -sliding_window:]
                 attention_mask = attention_mask[..., -sliding_window:] if attention_mask is not None else None
@@ -509,12 +557,12 @@ class Attention(nn.Module):
         return self.o_proj(output), present_key_value
 
 class MLP(nn.Module):
-    def __init__(self, config: Llama2Config, device=None, dtype=None, ops: Any = None):
+    def __init__(self, config: Llama2Config, device=None, dtype=None, ops: Any = None, intermediate_size=None):
         super().__init__()
-        ops = ops or nn
-        self.gate_proj = ops.Linear(config.hidden_size, config.intermediate_size, bias=False, device=device, dtype=dtype)
-        self.up_proj = ops.Linear(config.hidden_size, config.intermediate_size, bias=False, device=device, dtype=dtype)
-        self.down_proj = ops.Linear(config.intermediate_size, config.hidden_size, bias=False, device=device, dtype=dtype)
+        intermediate_size = intermediate_size or config.intermediate_size
+        self.gate_proj = ops.Linear(config.hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
+        self.up_proj = ops.Linear(config.hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
+        self.down_proj = ops.Linear(intermediate_size, config.hidden_size, bias=False, device=device, dtype=dtype)
         if config.mlp_activation == "silu":
             self.activation = torch.nn.functional.silu
         elif config.mlp_activation == "gelu_pytorch_tanh":
@@ -623,24 +671,25 @@ class TransformerBlockGemma2(nn.Module):
 
         return x, present_key_value
 
+def _make_scaled_embedding(ops, vocab_size, hidden_size, scale, device, dtype):
+    class ScaledEmbedding(ops.Embedding):
+        def forward(self, input_ids, out_dtype=None):
+            return super().forward(input_ids, out_dtype=out_dtype) * scale
+    return ScaledEmbedding(vocab_size, hidden_size, device=device, dtype=dtype)
+
+
 class Llama2_(nn.Module):
     def __init__(self, config, device=None, dtype=None, ops=None):
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = ops.Embedding(
-            config.vocab_size,
-            config.hidden_size,
-            device=device,
-            dtype=dtype
-        )
         if self.config.transformer_type == "gemma2" or self.config.transformer_type == "gemma3":
             transformer = TransformerBlockGemma2
-            self.normalize_in = True
+            self.embed_tokens = _make_scaled_embedding(ops, config.vocab_size, config.hidden_size, config.hidden_size ** 0.5, device, dtype)
         else:
             transformer = TransformerBlock
-            self.normalize_in = False
+            self.embed_tokens = ops.Embedding(config.vocab_size, config.hidden_size, device=device, dtype=dtype)
 
         self.layers = nn.ModuleList([
             transformer(config, index=i, device=device, dtype=dtype, ops=ops)
@@ -655,29 +704,34 @@ class Llama2_(nn.Module):
         if config.lm_head:
             self.lm_head = ops.Linear(config.hidden_size, config.vocab_size, bias=False, device=device, dtype=dtype)
 
-    def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=None, position_ids=None, embeds_info=[], past_key_values=None):
+    def get_past_len(self, past_key_values):
+        return past_key_values[0][2]
+
+    def compute_freqs_cis(self, position_ids, device):
+        return precompute_freqs_cis(self.config.head_dim,
+                                    position_ids,
+                                    self.config.rope_theta,
+                                    self.config.rope_scale,
+                                    self.config.rope_dims,
+                                    interleaved_mrope=getattr(self.config, "interleaved_mrope", False),
+                                    device=device)
+
+    def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True,
+                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None):
         if embeds is not None:
             x = embeds
         else:
             x = self.embed_tokens(x, out_dtype=dtype)
 
-        if self.normalize_in:
-            x *= self.config.hidden_size ** 0.5
-
         seq_len = x.shape[1]
         past_len = 0
         if past_key_values is not None and len(past_key_values) > 0:
-            past_len = past_key_values[0][2]
+            past_len = self.get_past_len(past_key_values)
 
         if position_ids is None:
             position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
 
-        freqs_cis = precompute_freqs_cis(self.config.head_dim,
-                                         position_ids,
-                                         self.config.rope_theta,
-                                         self.config.rope_scale,
-                                         self.config.rope_dims,
-                                         device=x.device)
+        freqs_cis = self.compute_freqs_cis(position_ids, x.device)
 
         mask = None
         if attention_mask is not None:
@@ -726,6 +780,10 @@ class Llama2_(nn.Module):
 
             if current_kv is not None:
                 next_key_values.append(current_kv)
+
+            # DeepStack: add per-layer visual features into the first len() decoder layers at image positions (Qwen3-VL)
+            if deepstack_embeds is not None and i < len(deepstack_embeds):
+                x[visual_pos_masks] = x[visual_pos_masks] + deepstack_embeds[i].to(x)
 
             if i == intermediate_output:
                 intermediate = x.clone()
@@ -812,9 +870,16 @@ class BaseGenerate:
         comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
         return x
 
-    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0):
-        device = embeds.device
+    def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         model_config = self.model.config
+        past_key_values = []
+        for x in range(model_config.num_hidden_layers):
+            past_key_values.append((torch.empty([batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype),
+                                    torch.empty([batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype), 0))
+        return past_key_values
+
+    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None):
+        device = embeds.device
 
         if stop_tokens is None:
             stop_tokens = self.model.config.stop_tokens
@@ -829,26 +894,36 @@ class BaseGenerate:
         if embeds.ndim == 2:
             embeds = embeds.unsqueeze(0)
 
-        past_key_values = [] #kv_cache init
         max_cache_len = embeds.shape[1] + max_length
-        for x in range(model_config.num_hidden_layers):
-            past_key_values.append((torch.empty([embeds.shape[0], model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype),
-                                    torch.empty([embeds.shape[0], model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype), 0))
+        past_key_values = self.init_kv_cache(embeds.shape[0], max_cache_len, device, execution_dtype)
 
         generator = torch.Generator(device=device).manual_seed(seed) if do_sample else None
 
         generated_token_ids = []
         pbar = comfy.utils.ProgressBar(max_length)
 
+        # MRoPE: prefill uses explicit 3D position_ids, decode continues from the last position
+        next_pos = int(position_ids[:, -1].max()) + 1 if position_ids is not None else None
+
         # Generation loop
+        current_input_ids = initial_input_ids
         for step in tqdm(range(max_length), desc="Generating tokens"):
-            x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values)
+            # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
+            extra = {}
+            if step == 0 and deepstack_embeds is not None:
+                extra["deepstack_embeds"] = deepstack_embeds
+                extra["visual_pos_masks"] = visual_pos_masks
+            x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
             logits = self.logits(x)[:, -1]
-            next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample)
+            next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
             token_id = next_token[0].item()
             generated_token_ids.append(token_id)
 
             embeds = self.model.embed_tokens(next_token).to(execution_dtype)
+            current_input_ids = next_token if initial_input_ids is not None else None
+            if next_pos is not None:  # advance MRoPE position for the next (decode) step
+                position_ids = torch.tensor([[next_pos]], device=device)
+                next_pos += 1
             pbar.update(1)
 
             if token_id in stop_tokens:
@@ -856,7 +931,7 @@ class BaseGenerate:
 
         return generated_token_ids
 
-    def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True):
+    def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
 
         if not do_sample or temperature == 0.0:
             return torch.argmax(logits, dim=-1, keepdim=True)
@@ -866,6 +941,11 @@ class BaseGenerate:
             for i in range(logits.shape[0]):
                 for token_id in set(token_history):
                     logits[i, token_id] *= repetition_penalty if logits[i, token_id] < 0 else 1/repetition_penalty
+
+        if presence_penalty is not None and presence_penalty != 0.0:
+            for i in range(logits.shape[0]):
+                for token_id in set(token_history):
+                    logits[i, token_id] -= presence_penalty
 
         if temperature != 1.0:
             logits = logits / temperature
@@ -897,6 +977,9 @@ class BaseGenerate:
 class BaseQwen3:
     def logits(self, x):
         input = x[:, -1:]
+        if self.model.config.lm_head:
+            return self.model.lm_head(input)
+
         module = self.model.embed_tokens
 
         offload_stream = None
@@ -923,6 +1006,15 @@ class Mistral3Small24B(BaseLlama, torch.nn.Module):
     def __init__(self, config_dict, dtype, device, operations):
         super().__init__()
         config = Mistral3Small24BConfig(**config_dict)
+        self.num_layers = config.num_hidden_layers
+
+        self.model = Llama2_(config, device=device, dtype=dtype, ops=operations)
+        self.dtype = dtype
+
+class Ministral3_3B(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
+    def __init__(self, config_dict, dtype, device, operations):
+        super().__init__()
+        config = Ministral3_3BConfig(**config_dict)
         self.num_layers = config.num_hidden_layers
 
         self.model = Llama2_(config, device=device, dtype=dtype, ops=operations)
@@ -1028,12 +1120,19 @@ class Qwen25_7BVLI(BaseLlama, BaseGenerate, torch.nn.Module):
                 grid = e.get("extra", None)
                 start = e.get("index")
                 if position_ids is None:
-                    position_ids = torch.zeros((3, embeds.shape[1]), device=embeds.device)
+                    position_ids = torch.ones((3, embeds.shape[1]), device=embeds.device, dtype=torch.long)
                     position_ids[:, :start] = torch.arange(0, start, device=embeds.device)
                 end = e.get("size") + start
                 len_max = int(grid.max()) // 2
                 start_next = len_max + start
-                position_ids[:, end:] = torch.arange(start_next + offset, start_next + (embeds.shape[1] - end) + offset, device=embeds.device)
+                if attention_mask is not None:
+                    # Assign compact sequential positions to attended tokens only,
+                    # skipping over padding so post-padding tokens aren't inflated.
+                    after_mask = attention_mask[0, end:]
+                    text_positions = after_mask.cumsum(0) - 1 + start_next + offset
+                    position_ids[:, end:] = torch.where(after_mask.bool(), text_positions, position_ids[0, end:])
+                else:
+                    position_ids[:, end:] = torch.arange(start_next + offset, start_next + (embeds.shape[1] - end) + offset, device=embeds.device)
                 position_ids[0, start:end] = start + offset
                 max_d = int(grid[0][1]) // 2
                 position_ids[1, start:end] = torch.arange(start + offset, start + max_d + offset, device=embeds.device).unsqueeze(1).repeat(1, math.ceil((end - start) / max_d)).flatten(0)[:end - start]

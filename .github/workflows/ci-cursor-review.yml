@@ -1,0 +1,38 @@
+name: CI - Cursor Review
+
+# Thin caller for the shared reusable cursor-review workflow in
+# Comfy-Org/github-workflows. The review logic (panel matrix, judge
+# consolidation, prompts, extract/post/notify scripts) lives there as the
+# single source of truth, so this repo only carries the repo-specific diff
+# excludes.
+
+on:
+  pull_request:
+    types: [labeled, unlabeled]
+
+concurrency:
+  group: cursor-review-pr-${{ github.event.pull_request.number }}-${{ github.event.label.name }}
+  cancel-in-progress: true
+
+jobs:
+  cursor-review:
+    if: github.event.label.name == 'cursor-review'
+    permissions:
+      contents: read
+      pull-requests: write
+    # SHA-pinned per zizmor `unpinned-uses: hash-pin`. Bump this SHA to pick up
+    # upstream changes; keep `workflows_ref` matching so prompts/scripts load
+    # from the same commit as the workflow definition.
+    uses: Comfy-Org/github-workflows/.github/workflows/cursor-review.yml@047ca48febe3a6647608ed2e0c4331b491cb9d6a # github-workflows#9
+    with:
+      workflows_ref: 047ca48febe3a6647608ed2e0c4331b491cb9d6a
+      diff_excludes: >-
+        :!**/.claude/**
+        :!**/dist/**
+        :!**/vendor/**
+        :!**/*.generated.*
+        :!**/*.min.js
+        :!**/*.min.css
+    secrets:
+      CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

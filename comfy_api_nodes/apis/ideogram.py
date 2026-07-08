@@ -290,3 +290,19 @@ class IdeogramV3Request(BaseModel):
         None,
         description='Optional masks for character reference images. When provided, must match the number of character_reference_images. Each mask should be a grayscale image of the same dimensions as the corresponding character reference image. The images should be in JPEG, PNG or WebP format.'
     )
+
+
+class IdeogramV4Request(BaseModel):
+    text_prompt: str | None = Field(
+        None,
+        description="Natural-language prompt; Magic Prompt is applied automatically. "
+        "Supply exactly one of text_prompt or json_prompt.",
+    )
+    json_prompt: dict[str, Any] | None = Field(
+        None,
+        description="Structured V4 prompt object consumed directly (disables Magic Prompt). "
+        "Supply exactly one of text_prompt or json_prompt.",
+    )
+    resolution: str | None = Field(None, description="Output resolution in WIDTHxHEIGHT (e.g. '2048x2048').")
+    rendering_speed: str | None = Field(None, description="Rendering speed: 'TURBO', 'DEFAULT', or 'QUALITY'.")
+    enable_copyright_detection: bool | None = Field(None, description="Opt into post-generation copyright detection.")

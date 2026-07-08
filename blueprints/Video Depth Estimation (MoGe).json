@@ -1,0 +1,1226 @@
+{
+  "revision": 0,
+  "last_node_id": 72,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 72,
+      "type": "7ff83f68-6848-47a8-aa43-9036ca6c46e8",
+      "pos": [
+        -4440,
+        4550
+      ],
+      "size": [
+        430,
+        330
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "inference_resolution",
+          "name": "inference_resolution",
+          "type": "INT",
+          "widget": {
+            "name": "inference_resolution"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "inference_batch_size",
+          "name": "inference_batch_size",
+          "type": "INT",
+          "widget": {
+            "name": "inference_batch_size"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "moge_model",
+          "name": "moge_model",
+          "type": "COMBO",
+          "widget": {
+            "name": "moge_model"
+          },
+          "link": null
+        },
+        {
+          "label": "auto_resize_input",
+          "name": "switch",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "switch"
+          },
+          "link": null
+        },
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "depth_colored",
+          "name": "depth_colored",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "localized_name": "depth",
+          "name": "depth",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "13",
+            "resolution_level"
+          ],
+          [
+            "13",
+            "batch_size"
+          ],
+          [
+            "32",
+            "model_name"
+          ],
+          [
+            "53",
+            "switch"
+          ]
+        ],
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "cnr_id": "comfy-core",
+        "ver": "0.21.1"
+      },
+      "widgets_values": [],
+      "title": "Video Depth Estimation (MoGe)"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "7ff83f68-6848-47a8-aa43-9036ca6c46e8",
+        "version": 1,
+        "state": {
+          "lastGroupId": 1,
+          "lastNodeId": 72,
+          "lastLinkId": 96,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Video Depth Estimation (MoGe)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -5320,
+            5320,
+            167.337890625,
+            148
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            -3090,
+            4966,
+            129,
+            108
+          ]
+        },
+        "inputs": [
+          {
+            "id": "06eefa21-8e60-49f3-9a34-35b081f4ae52",
+            "name": "inference_resolution",
+            "type": "INT",
+            "linkIds": [
+              73
+            ],
+            "localized_name": "inference_resolution",
+            "pos": [
+              -5176.662109375,
+              5344
+            ]
+          },
+          {
+            "id": "616638fe-f603-4d10-bae9-fc87c134380f",
+            "name": "inference_batch_size",
+            "type": "INT",
+            "linkIds": [
+              74
+            ],
+            "localized_name": "inference_batch_size",
+            "pos": [
+              -5176.662109375,
+              5364
+            ]
+          },
+          {
+            "id": "65694805-186e-4181-a721-df8b5af49d31",
+            "name": "moge_model",
+            "type": "COMBO",
+            "linkIds": [
+              79
+            ],
+            "localized_name": "moge_model",
+            "pos": [
+              -5176.662109375,
+              5384
+            ]
+          },
+          {
+            "id": "badf1be1-53c6-4fc1-b5cd-79ad3daf1674",
+            "name": "switch",
+            "type": "BOOLEAN",
+            "linkIds": [
+              83
+            ],
+            "label": "auto_resize_input",
+            "pos": [
+              -5176.662109375,
+              5404
+            ]
+          },
+          {
+            "id": "749bad18-d00a-4ec4-a5ff-e45b1d0cf089",
+            "name": "video",
+            "type": "VIDEO",
+            "linkIds": [
+              91
+            ],
+            "pos": [
+              -5176.662109375,
+              5424
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "59c37b52-074f-49fc-9731-483f899c12c4",
+            "name": "depth_colored",
+            "type": "IMAGE",
+            "linkIds": [
+              36
+            ],
+            "localized_name": "depth_colored",
+            "pos": [
+              -3066,
+              4990
+            ]
+          },
+          {
+            "id": "f583e936-da5c-4630-9901-391fa605c1f8",
+            "name": "depth",
+            "type": "IMAGE",
+            "linkIds": [
+              40
+            ],
+            "localized_name": "depth",
+            "pos": [
+              -3066,
+              5010
+            ]
+          },
+          {
+            "id": "6845b6a1-1980-454a-9451-314f24495c1d",
+            "name": "MASK",
+            "type": "MASK",
+            "linkIds": [
+              86
+            ],
+            "pos": [
+              -3066,
+              5030
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 13,
+            "type": "MoGeInference",
+            "pos": [
+              -3790,
+              5180
+            ],
+            "size": [
+              270,
+              230
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "moge_model",
+                "name": "moge_model",
+                "type": "MOGE_MODEL",
+                "link": 58
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 81
+              },
+              {
+                "localized_name": "resolution_level",
+                "name": "resolution_level",
+                "type": "INT",
+                "widget": {
+                  "name": "resolution_level"
+                },
+                "link": 73
+              },
+              {
+                "localized_name": "fov_x_degrees",
+                "name": "fov_x_degrees",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "fov_x_degrees"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "widget": {
+                  "name": "batch_size"
+                },
+                "link": 74
+              },
+              {
+                "localized_name": "force_projection",
+                "name": "force_projection",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "force_projection"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "apply_mask",
+                "name": "apply_mask",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "apply_mask"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "moge_geometry",
+                "name": "moge_geometry",
+                "type": "MOGE_GEOMETRY",
+                "links": [
+                  35,
+                  39,
+                  61
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MoGeInference",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1"
+            },
+            "widgets_values": [
+              9,
+              0,
+              4,
+              true,
+              true
+            ]
+          },
+          {
+            "id": 23,
+            "type": "MoGeRender",
+            "pos": [
+              -3430,
+              4870
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "moge_geometry",
+                "name": "moge_geometry",
+                "type": "MOGE_GEOMETRY",
+                "link": 35
+              },
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "COMBO",
+                "widget": {
+                  "name": "output"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  36
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MoGeRender",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1"
+            },
+            "widgets_values": [
+              "depth_colored"
+            ]
+          },
+          {
+            "id": 25,
+            "type": "MoGeRender",
+            "pos": [
+              -3430,
+              5030
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "moge_geometry",
+                "name": "moge_geometry",
+                "type": "MOGE_GEOMETRY",
+                "link": 39
+              },
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "COMBO",
+                "widget": {
+                  "name": "output"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  40
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MoGeRender",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1"
+            },
+            "widgets_values": [
+              "depth"
+            ]
+          },
+          {
+            "id": 32,
+            "type": "LoadMoGeModel",
+            "pos": [
+              -4180,
+              4880
+            ],
+            "size": [
+              270,
+              140
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model_name",
+                "name": "model_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "model_name"
+                },
+                "link": 79
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MOGE_MODEL",
+                "name": "MOGE_MODEL",
+                "type": "MOGE_MODEL",
+                "links": [
+                  58
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "LoadMoGeModel",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1",
+              "models": [
+                {
+                  "name": "moge_2_vitl_normal_fp16.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/MoGe/resolve/main/geometry_estimation/moge_2_vitl_normal_fp16.safetensors",
+                  "directory": "geometry_estimation"
+                }
+              ]
+            },
+            "widgets_values": [
+              "moge_2_vitl_normal_fp16.safetensors"
+            ]
+          },
+          {
+            "id": 36,
+            "type": "ComfyMathExpression",
+            "pos": [
+              -4720,
+              4910
+            ],
+            "size": [
+              400,
+              200
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "a",
+                "localized_name": "values.a",
+                "name": "values.a",
+                "type": "FLOAT,INT,BOOLEAN",
+                "link": 49
+              },
+              {
+                "label": "b",
+                "localized_name": "values.b",
+                "name": "values.b",
+                "shape": 7,
+                "type": "FLOAT,INT,BOOLEAN",
+                "link": null
+              },
+              {
+                "localized_name": "expression",
+                "name": "expression",
+                "type": "STRING",
+                "widget": {
+                  "name": "expression"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": null
+              },
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": null
+              },
+              {
+                "localized_name": "BOOL",
+                "name": "BOOL",
+                "type": "BOOLEAN",
+                "links": [
+                  53
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfyMathExpression",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1"
+            },
+            "widgets_values": [
+              "a > 2048"
+            ]
+          },
+          {
+            "id": 37,
+            "type": "GetImageSize",
+            "pos": [
+              -4980,
+              4910
+            ],
+            "size": [
+              230,
+              160
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 92
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "width",
+                "name": "width",
+                "type": "INT",
+                "links": [
+                  49
+                ]
+              },
+              {
+                "localized_name": "height",
+                "name": "height",
+                "type": "INT",
+                "links": null
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetImageSize",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1"
+            }
+          },
+          {
+            "id": 40,
+            "type": "ResizeImagesByLongerEdge",
+            "pos": [
+              -4650,
+              5210
+            ],
+            "size": [
+              310,
+              110
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "link": 93
+              },
+              {
+                "localized_name": "longer_edge",
+                "name": "longer_edge",
+                "type": "INT",
+                "widget": {
+                  "name": "longer_edge"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "links": [
+                  54
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ResizeImagesByLongerEdge",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1"
+            },
+            "widgets_values": [
+              2048
+            ]
+          },
+          {
+            "id": 42,
+            "type": "ComfySwitchNode",
+            "pos": [
+              -4180,
+              5060
+            ],
+            "size": [
+              270,
+              130
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "type": "*",
+                "link": 94
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "type": "*",
+                "link": 54
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 53
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "*",
+                "links": [
+                  80
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1"
+            },
+            "widgets_values": [
+              false
+            ]
+          },
+          {
+            "id": 45,
+            "type": "MoGeRender",
+            "pos": [
+              -3430,
+              5200
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "moge_geometry",
+                "name": "moge_geometry",
+                "type": "MOGE_GEOMETRY",
+                "link": 61
+              },
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "COMBO",
+                "widget": {
+                  "name": "output"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  85
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MoGeRender",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1"
+            },
+            "widgets_values": [
+              "mask"
+            ]
+          },
+          {
+            "id": 53,
+            "type": "ComfySwitchNode",
+            "pos": [
+              -4160,
+              5340
+            ],
+            "size": [
+              270,
+              130
+            ],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "type": "*",
+                "link": 95
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "type": "*",
+                "link": 80
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 83
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "*",
+                "links": [
+                  81
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.21.1"
+            },
+            "widgets_values": [
+              true
+            ]
+          },
+          {
+            "id": 68,
+            "type": "ImageToMask",
+            "pos": [
+              -3420,
+              5360
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 85
+              },
+              {
+                "localized_name": "channel",
+                "name": "channel",
+                "type": "COMBO",
+                "widget": {
+                  "name": "channel"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MASK",
+                "name": "MASK",
+                "type": "MASK",
+                "links": [
+                  86
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ImageToMask",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0"
+            },
+            "widgets_values": [
+              "red"
+            ]
+          },
+          {
+            "id": 70,
+            "type": "GetVideoComponents",
+            "pos": [
+              -4920,
+              5490
+            ],
+            "size": [
+              230,
+              120
+            ],
+            "flags": {},
+            "order": 11,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "video",
+                "name": "video",
+                "type": "VIDEO",
+                "link": 91
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "links": [
+                  92,
+                  93,
+                  94,
+                  95
+                ]
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "type": "AUDIO",
+                "links": null
+              },
+              {
+                "localized_name": "fps",
+                "name": "fps",
+                "type": "FLOAT",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetVideoComponents",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "cnr_id": "comfy-core",
+              "ver": "0.22.0"
+            }
+          }
+        ],
+        "groups": [
+          {
+            "id": 1,
+            "title": "auto_resize_if_width_gt_2048",
+            "bounding": [
+              -5000,
+              4840,
+              690,
+              280
+            ],
+            "color": "#3f789e",
+            "flags": {}
+          }
+        ],
+        "links": [
+          {
+            "id": 58,
+            "origin_id": 32,
+            "origin_slot": 0,
+            "target_id": 13,
+            "target_slot": 0,
+            "type": "MOGE_MODEL"
+          },
+          {
+            "id": 35,
+            "origin_id": 13,
+            "origin_slot": 0,
+            "target_id": 23,
+            "target_slot": 0,
+            "type": "MOGE_GEOMETRY"
+          },
+          {
+            "id": 39,
+            "origin_id": 13,
+            "origin_slot": 0,
+            "target_id": 25,
+            "target_slot": 0,
+            "type": "MOGE_GEOMETRY"
+          },
+          {
+            "id": 49,
+            "origin_id": 37,
+            "origin_slot": 0,
+            "target_id": 36,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 54,
+            "origin_id": 40,
+            "origin_slot": 0,
+            "target_id": 42,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 53,
+            "origin_id": 36,
+            "origin_slot": 2,
+            "target_id": 42,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 61,
+            "origin_id": 13,
+            "origin_slot": 0,
+            "target_id": 45,
+            "target_slot": 0,
+            "type": "MOGE_GEOMETRY"
+          },
+          {
+            "id": 36,
+            "origin_id": 23,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 40,
+            "origin_id": 25,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 73,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 13,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 74,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 13,
+            "target_slot": 4,
+            "type": "INT"
+          },
+          {
+            "id": 79,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 32,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 80,
+            "origin_id": 42,
+            "origin_slot": 0,
+            "target_id": 53,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 81,
+            "origin_id": 53,
+            "origin_slot": 0,
+            "target_id": 13,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 83,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 53,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 85,
+            "origin_id": 45,
+            "origin_slot": 0,
+            "target_id": 68,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 86,
+            "origin_id": 68,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 2,
+            "type": "MASK"
+          },
+          {
+            "id": 91,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 70,
+            "target_slot": 0,
+            "type": "VIDEO"
+          },
+          {
+            "id": 92,
+            "origin_id": 70,
+            "origin_slot": 0,
+            "target_id": 37,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 93,
+            "origin_id": 70,
+            "origin_slot": 0,
+            "target_id": 40,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 94,
+            "origin_id": 70,
+            "origin_slot": 0,
+            "target_id": 42,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 95,
+            "origin_id": 70,
+            "origin_slot": 0,
+            "target_id": 53,
+            "target_slot": 0,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {},
+        "category": "Conditioning & Preprocessors/Depth",
+        "description": "Estimates monocular depth from an input video using MoGe, outputting both raw and colorized depth maps plus a mask."
+      }
+    ]
+  },
+  "extra": {}
+}

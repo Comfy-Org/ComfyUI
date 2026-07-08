@@ -14,6 +14,8 @@ from .sub_quadratic_attention import efficient_dot_product_attention
 
 from comfy import model_management
 
+TORCH_HAS_GQA = model_management.torch_version_numeric >= (2, 5)
+
 if model_management.xformers_enabled():
     import xformers
     import xformers.ops
@@ -150,7 +152,12 @@ def attention_basic(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
         b, _, dim_head = q.shape
         dim_head //= heads
 
-    scale = dim_head ** -0.5
+    if kwargs.get("enable_gqa", False) and q.shape[-3] != k.shape[-3]:
+        n_rep = q.shape[-3] // k.shape[-3]
+        k = k.repeat_interleave(n_rep, dim=-3)
+        v = v.repeat_interleave(n_rep, dim=-3)
+
+    scale = kwargs.get("scale", dim_head ** -0.5)
 
     h = heads
     if skip_reshape:
@@ -218,6 +225,10 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
     else:
         b, _, dim_head = query.shape
         dim_head //= heads
+
+    if "scale" in kwargs:
+        # Pre-scale query to match requested scale (cancels internal 1/sqrt(dim_head))
+        query = query * (kwargs["scale"] * dim_head ** 0.5)
 
     if skip_reshape:
         query = query.reshape(b * heads, -1, dim_head)
@@ -290,7 +301,7 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
         b, _, dim_head = q.shape
         dim_head //= heads
 
-    scale = dim_head ** -0.5
+    scale = kwargs.get("scale", dim_head ** -0.5)
 
     if skip_reshape:
          q, k, v = map(
@@ -372,7 +383,8 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
                 r1[:, i:end] = einsum('b i j, b j d -> b i d', s2, v)
                 del s2
             break
-        except model_management.OOM_EXCEPTION as e:
+        except Exception as e:
+            model_management.raise_non_oom(e)
             if first_op_done == False:
                 model_management.soft_empty_cache(True)
                 if cleared_cache == False:
@@ -499,8 +511,13 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
         if mask.ndim == 3:
             mask = mask.unsqueeze(1)
 
+    # Pass through extra SDPA kwargs (scale, enable_gqa) if provided
+    # enable_gqa requires PyTorch 2.5+; older versions use manual KV expansion above
+    sdpa_keys = ("scale", "enable_gqa") if TORCH_HAS_GQA else ("scale",)
+    sdpa_extra = {k: v for k, v in kwargs.items() if k in sdpa_keys}
+
     if SDP_BATCH_LIMIT >= b:
-        out = comfy.ops.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False)
+        out = comfy.ops.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False, **sdpa_extra)
         if not skip_output_reshape:
             out = (
                 out.transpose(1, 2).reshape(b, -1, heads * dim_head)
@@ -518,7 +535,7 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
                 k[i : i + SDP_BATCH_LIMIT],
                 v[i : i + SDP_BATCH_LIMIT],
                 attn_mask=m,
-                dropout_p=0.0, is_causal=False
+                dropout_p=0.0, is_causal=False, **sdpa_extra
             ).transpose(1, 2).reshape(-1, q.shape[2], heads * dim_head)
     return out
 
@@ -724,12 +741,12 @@ optimized_attention = attention_basic
 if model_management.sage_attention_enabled():
     logging.info("Using sage attention")
     optimized_attention = attention_sage
-elif model_management.xformers_enabled():
-    logging.info("Using xformers attention")
-    optimized_attention = attention_xformers
 elif model_management.flash_attention_enabled():
     logging.info("Using Flash Attention")
     optimized_attention = attention_flash
+elif model_management.xformers_enabled():
+    logging.info("Using xformers attention")
+    optimized_attention = attention_xformers
 elif model_management.pytorch_attention_enabled():
     logging.info("Using pytorch attention")
     optimized_attention = attention_pytorch

@@ -1,1 +1,459 @@
-{"revision": 0, "last_node_id": 136, "last_link_id": 0, "nodes": [{"id": 136, "type": "c6dc0f88-416b-4db1-bed1-442d793de5ad", "pos": [669.0822222222221, 835.5507407407408], "size": [210, 106], "flags": {}, "order": 1, "mode": 0, "inputs": [{"label": "image", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": null}], "outputs": [{"label": "IMAGE", "localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": []}], "properties": {"proxyWidgets": [["130", "value"], ["131", "value"], ["133", "value"]]}, "widgets_values": [], "title": "Edge-Preserving Blur"}], "links": [], "version": 0.4, "definitions": {"subgraphs": [{"id": "c6dc0f88-416b-4db1-bed1-442d793de5ad", "version": 1, "state": {"lastGroupId": 0, "lastNodeId": 138, "lastLinkId": 109, "lastRerouteId": 0}, "revision": 0, "config": {}, "name": "Edge-Preserving Blur", "inputNode": {"id": -10, "bounding": [1750, -620, 120, 60]}, "outputNode": {"id": -20, "bounding": [2700, -620, 120, 60]}, "inputs": [{"id": "06a6d0ad-25d7-4784-8c72-7fc8e7110a22", "name": "images.image0", "type": "IMAGE", "linkIds": [106], "localized_name": "images.image0", "label": "image", "pos": [1850, -600]}], "outputs": [{"id": "3ae9f5d7-be63-4c9f-9893-6f848defa377", "name": "IMAGE0", "type": "IMAGE", "linkIds": [99], "localized_name": "IMAGE0", "label": "IMAGE", "pos": [2720, -600]}], "widgets": [], "nodes": [{"id": 128, "type": "GLSLShader", "pos": [2220, -860], "size": [420, 252], "flags": {}, "order": 3, "mode": 0, "inputs": [{"label": "image0", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": 106}, {"label": "image1", "localized_name": "images.image1", "name": "images.image1", "shape": 7, "type": "IMAGE", "link": null}, {"label": "u_float0", "localized_name": "floats.u_float0", "name": "floats.u_float0", "shape": 7, "type": "FLOAT", "link": 100}, {"label": "u_float1", "localized_name": "floats.u_float1", "name": "floats.u_float1", "shape": 7, "type": "FLOAT", "link": 101}, {"label": "u_float2", "localized_name": "floats.u_float2", "name": "floats.u_float2", "shape": 7, "type": "FLOAT", "link": null}, {"label": "u_int0", "localized_name": "ints.u_int0", "name": "ints.u_int0", "shape": 7, "type": "INT", "link": 107}, {"label": "u_int1", "localized_name": "ints.u_int1", "name": "ints.u_int1", "shape": 7, "type": "INT", "link": 103}, {"label": "u_int2", "localized_name": "ints.u_int2", "name": "ints.u_int2", "shape": 7, "type": "INT", "link": null}, {"localized_name": "fragment_shader", "name": "fragment_shader", "type": "STRING", "widget": {"name": "fragment_shader"}, "link": null}, {"localized_name": "size_mode", "name": "size_mode", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "size_mode"}, "link": null}], "outputs": [{"localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": [99]}, {"localized_name": "IMAGE1", "name": "IMAGE1", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE2", "name": "IMAGE2", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE3", "name": "IMAGE3", "type": "IMAGE", "links": null}], "properties": {"Node name for S&R": "GLSLShader"}, "widgets_values": ["#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform float u_float0;   // Blur radius (0–20, default ~5)\nuniform float u_float1;   // Edge threshold (0–100, default ~30)\nuniform int u_int0;       // Step size (0/1 = every pixel, 2+ = skip pixels)\n\nin vec2 v_texCoord;\nout vec4 fragColor;\n\nconst int MAX_RADIUS = 20;\nconst float EPSILON = 0.0001;\n\n// Perceptual luminance\nfloat getLuminance(vec3 rgb) {\n    return dot(rgb, vec3(0.299, 0.587, 0.114));\n}\n\nvec4 bilateralFilter(vec2 uv, vec2 texelSize, int radius,\n                     float sigmaSpatial, float sigmaColor)\n{\n    vec4 center = texture(u_image0, uv);\n    vec3 centerRGB = center.rgb;\n\n    float invSpatial2 = -0.5 / (sigmaSpatial * sigmaSpatial);\n    float invColor2   = -0.5 / (sigmaColor * sigmaColor + EPSILON);\n\n    vec3 sumRGB = vec3(0.0);\n    float sumWeight = 0.0;\n\n    int step = max(u_int0, 1);\n    float radius2 = float(radius * radius);\n\n    for (int dy = -MAX_RADIUS; dy <= MAX_RADIUS; dy++) {\n        if (dy < -radius || dy > radius) continue;\n        if (abs(dy) % step != 0) continue;\n\n        for (int dx = -MAX_RADIUS; dx <= MAX_RADIUS; dx++) {\n            if (dx < -radius || dx > radius) continue;\n            if (abs(dx) % step != 0) continue;\n\n            vec2 offset = vec2(float(dx), float(dy));\n            float dist2 = dot(offset, offset);\n            if (dist2 > radius2) continue;\n\n            vec3 sampleRGB = texture(u_image0, uv + offset * texelSize).rgb;\n\n            // Spatial Gaussian\n            float spatialWeight = exp(dist2 * invSpatial2);\n\n            // Perceptual color distance (weighted RGB)\n            vec3 diff = sampleRGB - centerRGB;\n            float colorDist = dot(diff * diff, vec3(0.299, 0.587, 0.114));\n            float colorWeight = exp(colorDist * invColor2);\n\n            float w = spatialWeight * colorWeight;\n            sumRGB += sampleRGB * w;\n            sumWeight += w;\n        }\n    }\n\n    vec3 resultRGB = sumRGB / max(sumWeight, EPSILON);\n    return vec4(resultRGB, center.a); // preserve center alpha\n}\n\nvoid main() {\n    vec2 texelSize = 1.0 / vec2(textureSize(u_image0, 0));\n\n    float radiusF = clamp(u_float0, 0.0, float(MAX_RADIUS));\n    int radius = int(radiusF + 0.5);\n\n    if (radius == 0) {\n        fragColor = texture(u_image0, v_texCoord);\n        return;\n    }\n\n    // Edge threshold → color sigma\n    // Squared curve for better low-end control\n    float t = clamp(u_float1, 0.0, 100.0) / 100.0;\n    t *= t;\n    float sigmaColor = mix(0.01, 0.5, t);\n\n    // Spatial sigma tied to radius\n    float sigmaSpatial = max(radiusF * 0.75, 0.5);\n\n    fragColor = bilateralFilter(\n        v_texCoord,\n        texelSize,\n        radius,\n        sigmaSpatial,\n        sigmaColor\n    );\n}", "from_input"]}, {"id": 130, "type": "PrimitiveFloat", "pos": [1930, -860], "size": [270, 58], "flags": {}, "order": 0, "mode": 0, "inputs": [{"label": "blur_radius", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [100]}], "properties": {"Node name for S&R": "PrimitiveFloat", "min": 0, "max": 20, "step": 0.5, "precision": 1}, "widgets_values": [20]}, {"id": 131, "type": "PrimitiveFloat", "pos": [1930, -760], "size": [270, 58], "flags": {}, "order": 1, "mode": 0, "inputs": [{"label": "edge_threshold", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [101]}], "properties": {"Node name for S&R": "PrimitiveFloat", "min": 0, "max": 100, "step": 1}, "widgets_values": [50]}, {"id": 133, "type": "PrimitiveInt", "pos": [1930, -660], "size": [270, 82], "flags": {}, "order": 2, "mode": 0, "inputs": [{"label": "step_size", "localized_name": "value", "name": "value", "type": "INT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "INT", "name": "INT", "type": "INT", "links": [103, 107]}], "properties": {"Node name for S&R": "PrimitiveInt", "min": 0}, "widgets_values": [1, "fixed"]}], "groups": [], "links": [{"id": 100, "origin_id": 130, "origin_slot": 0, "target_id": 128, "target_slot": 2, "type": "FLOAT"}, {"id": 101, "origin_id": 131, "origin_slot": 0, "target_id": 128, "target_slot": 3, "type": "FLOAT"}, {"id": 107, "origin_id": 133, "origin_slot": 0, "target_id": 128, "target_slot": 5, "type": "INT"}, {"id": 103, "origin_id": 133, "origin_slot": 0, "target_id": 128, "target_slot": 6, "type": "INT"}, {"id": 106, "origin_id": -10, "origin_slot": 0, "target_id": 128, "target_slot": 0, "type": "IMAGE"}, {"id": 99, "origin_id": 128, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "IMAGE"}], "extra": {"workflowRendererVersion": "LG"}, "category": "Image Tools/Blur"}]}, "extra": {}}
+{
+  "revision": 0,
+  "last_node_id": 136,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 136,
+      "type": "c6dc0f88-416b-4db1-bed1-442d793de5ad",
+      "pos": [
+        669.0822222222221,
+        835.5507407407408
+      ],
+      "size": [
+        210,
+        106
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "image",
+          "localized_name": "images.image0",
+          "name": "images.image0",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "IMAGE",
+          "localized_name": "IMAGE0",
+          "name": "IMAGE0",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "130",
+            "value"
+          ],
+          [
+            "131",
+            "value"
+          ],
+          [
+            "133",
+            "value"
+          ]
+        ]
+      },
+      "widgets_values": [],
+      "title": "Edge-Preserving Blur"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "c6dc0f88-416b-4db1-bed1-442d793de5ad",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 138,
+          "lastLinkId": 109,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Edge-Preserving Blur",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            1750,
+            -620,
+            120,
+            60
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            2700,
+            -620,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "06a6d0ad-25d7-4784-8c72-7fc8e7110a22",
+            "name": "images.image0",
+            "type": "IMAGE",
+            "linkIds": [
+              106
+            ],
+            "localized_name": "images.image0",
+            "label": "image",
+            "pos": [
+              1850,
+              -600
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "3ae9f5d7-be63-4c9f-9893-6f848defa377",
+            "name": "IMAGE0",
+            "type": "IMAGE",
+            "linkIds": [
+              99
+            ],
+            "localized_name": "IMAGE0",
+            "label": "IMAGE",
+            "pos": [
+              2720,
+              -600
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 128,
+            "type": "GLSLShader",
+            "pos": [
+              2220,
+              -860
+            ],
+            "size": [
+              420,
+              252
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "image0",
+                "localized_name": "images.image0",
+                "name": "images.image0",
+                "type": "IMAGE",
+                "link": 106
+              },
+              {
+                "label": "image1",
+                "localized_name": "images.image1",
+                "name": "images.image1",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "label": "u_float0",
+                "localized_name": "floats.u_float0",
+                "name": "floats.u_float0",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 100
+              },
+              {
+                "label": "u_float1",
+                "localized_name": "floats.u_float1",
+                "name": "floats.u_float1",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 101
+              },
+              {
+                "label": "u_float2",
+                "localized_name": "floats.u_float2",
+                "name": "floats.u_float2",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": null
+              },
+              {
+                "label": "u_int0",
+                "localized_name": "ints.u_int0",
+                "name": "ints.u_int0",
+                "shape": 7,
+                "type": "INT",
+                "link": 107
+              },
+              {
+                "label": "u_int1",
+                "localized_name": "ints.u_int1",
+                "name": "ints.u_int1",
+                "shape": 7,
+                "type": "INT",
+                "link": 103
+              },
+              {
+                "label": "u_int2",
+                "localized_name": "ints.u_int2",
+                "name": "ints.u_int2",
+                "shape": 7,
+                "type": "INT",
+                "link": null
+              },
+              {
+                "localized_name": "fragment_shader",
+                "name": "fragment_shader",
+                "type": "STRING",
+                "widget": {
+                  "name": "fragment_shader"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "size_mode",
+                "name": "size_mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "size_mode"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE0",
+                "name": "IMAGE0",
+                "type": "IMAGE",
+                "links": [
+                  99
+                ]
+              },
+              {
+                "localized_name": "IMAGE1",
+                "name": "IMAGE1",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE2",
+                "name": "IMAGE2",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE3",
+                "name": "IMAGE3",
+                "type": "IMAGE",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GLSLShader"
+            },
+            "widgets_values": [
+              "#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform float u_float0;   // Blur radius (0–20, default ~5)\nuniform float u_float1;   // Edge threshold (0–100, default ~30)\nuniform int u_int0;       // Step size (0/1 = every pixel, 2+ = skip pixels)\n\nin vec2 v_texCoord;\nout vec4 fragColor;\n\nconst int MAX_RADIUS = 20;\nconst float EPSILON = 0.0001;\n\n// Perceptual luminance\nfloat getLuminance(vec3 rgb) {\n    return dot(rgb, vec3(0.299, 0.587, 0.114));\n}\n\nvec4 bilateralFilter(vec2 uv, vec2 texelSize, int radius,\n                     float sigmaSpatial, float sigmaColor)\n{\n    vec4 center = texture(u_image0, uv);\n    vec3 centerRGB = center.rgb;\n\n    float invSpatial2 = -0.5 / (sigmaSpatial * sigmaSpatial);\n    float invColor2   = -0.5 / (sigmaColor * sigmaColor + EPSILON);\n\n    vec3 sumRGB = vec3(0.0);\n    float sumWeight = 0.0;\n\n    int step = max(u_int0, 1);\n    float radius2 = float(radius * radius);\n\n    for (int dy = -MAX_RADIUS; dy <= MAX_RADIUS; dy++) {\n        if (dy < -radius || dy > radius) continue;\n        if (abs(dy) % step != 0) continue;\n\n        for (int dx = -MAX_RADIUS; dx <= MAX_RADIUS; dx++) {\n            if (dx < -radius || dx > radius) continue;\n            if (abs(dx) % step != 0) continue;\n\n            vec2 offset = vec2(float(dx), float(dy));\n            float dist2 = dot(offset, offset);\n            if (dist2 > radius2) continue;\n\n            vec3 sampleRGB = texture(u_image0, uv + offset * texelSize).rgb;\n\n            // Spatial Gaussian\n            float spatialWeight = exp(dist2 * invSpatial2);\n\n            // Perceptual color distance (weighted RGB)\n            vec3 diff = sampleRGB - centerRGB;\n            float colorDist = dot(diff * diff, vec3(0.299, 0.587, 0.114));\n            float colorWeight = exp(colorDist * invColor2);\n\n            float w = spatialWeight * colorWeight;\n            sumRGB += sampleRGB * w;\n            sumWeight += w;\n        }\n    }\n\n    vec3 resultRGB = sumRGB / max(sumWeight, EPSILON);\n    return vec4(resultRGB, center.a); // preserve center alpha\n}\n\nvoid main() {\n    vec2 texelSize = 1.0 / vec2(textureSize(u_image0, 0));\n\n    float radiusF = clamp(u_float0, 0.0, float(MAX_RADIUS));\n    int radius = int(radiusF + 0.5);\n\n    if (radius == 0) {\n        fragColor = texture(u_image0, v_texCoord);\n        return;\n    }\n\n    // Edge threshold → color sigma\n    // Squared curve for better low-end control\n    float t = clamp(u_float1, 0.0, 100.0) / 100.0;\n    t *= t;\n    float sigmaColor = mix(0.01, 0.5, t);\n\n    // Spatial sigma tied to radius\n    float sigmaSpatial = max(radiusF * 0.75, 0.5);\n\n    fragColor = bilateralFilter(\n        v_texCoord,\n        texelSize,\n        radius,\n        sigmaSpatial,\n        sigmaColor\n    );\n}",
+              "from_input"
+            ]
+          },
+          {
+            "id": 130,
+            "type": "PrimitiveFloat",
+            "pos": [
+              1930,
+              -860
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "blur_radius",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  100
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": 0,
+              "max": 20,
+              "step": 0.5,
+              "precision": 1
+            },
+            "widgets_values": [
+              20
+            ]
+          },
+          {
+            "id": 131,
+            "type": "PrimitiveFloat",
+            "pos": [
+              1930,
+              -760
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "edge_threshold",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  101
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": 0,
+              "max": 100,
+              "step": 1
+            },
+            "widgets_values": [
+              50
+            ]
+          },
+          {
+            "id": 133,
+            "type": "PrimitiveInt",
+            "pos": [
+              1930,
+              -660
+            ],
+            "size": [
+              270,
+              82
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "step_size",
+                "localized_name": "value",
+                "name": "value",
+                "type": "INT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  103,
+                  107
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveInt",
+              "min": 0
+            },
+            "widgets_values": [
+              1,
+              "fixed"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 100,
+            "origin_id": 130,
+            "origin_slot": 0,
+            "target_id": 128,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 101,
+            "origin_id": 131,
+            "origin_slot": 0,
+            "target_id": 128,
+            "target_slot": 3,
+            "type": "FLOAT"
+          },
+          {
+            "id": 107,
+            "origin_id": 133,
+            "origin_slot": 0,
+            "target_id": 128,
+            "target_slot": 5,
+            "type": "INT"
+          },
+          {
+            "id": 103,
+            "origin_id": 133,
+            "origin_slot": 0,
+            "target_id": 128,
+            "target_slot": 6,
+            "type": "INT"
+          },
+          {
+            "id": 106,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 128,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 99,
+            "origin_id": 128,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Image Tools/Blur",
+        "description": "Applies bilateral (edge-preserving) blur to soften images while retaining detail."
+      }
+    ]
+  },
+  "extra": {}
+}

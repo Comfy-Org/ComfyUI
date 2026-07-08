@@ -62,7 +62,7 @@ class StabilityStableImageUltraNode(IO.ComfyNode):
         return IO.Schema(
             node_id="StabilityStableImageUltraNode",
             display_name="Stability AI Stable Image Ultra",
-            category="api node/image/Stability AI",
+            category="partner/image/Stability AI",
             description=cleandoc(cls.__doc__ or ""),
             inputs=[
                 IO.String.Input(
@@ -197,7 +197,7 @@ class StabilityStableImageSD_3_5Node(IO.ComfyNode):
         return IO.Schema(
             node_id="StabilityStableImageSD_3_5Node",
             display_name="Stability AI Stable Diffusion 3.5 Image",
-            category="api node/image/Stability AI",
+            category="partner/image/Stability AI",
             description=cleandoc(cls.__doc__ or ""),
             inputs=[
                 IO.String.Input(
@@ -354,7 +354,7 @@ class StabilityUpscaleConservativeNode(IO.ComfyNode):
         return IO.Schema(
             node_id="StabilityUpscaleConservativeNode",
             display_name="Stability AI Upscale Conservative",
-            category="api node/image/Stability AI",
+            category="partner/image/Stability AI",
             description=cleandoc(cls.__doc__ or ""),
             inputs=[
                 IO.Image.Input("image"),
@@ -401,7 +401,7 @@ class StabilityUpscaleConservativeNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.25}""",
+                expr="""{"type":"usd","usd":0.4}""",
             ),
         )
 
@@ -457,7 +457,7 @@ class StabilityUpscaleCreativeNode(IO.ComfyNode):
         return IO.Schema(
             node_id="StabilityUpscaleCreativeNode",
             display_name="Stability AI Upscale Creative",
-            category="api node/image/Stability AI",
+            category="partner/image/Stability AI",
             description=cleandoc(cls.__doc__ or ""),
             inputs=[
                 IO.Image.Input("image"),
@@ -510,7 +510,7 @@ class StabilityUpscaleCreativeNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.25}""",
+                expr="""{"type":"usd","usd":0.6}""",
             ),
         )
 
@@ -578,7 +578,7 @@ class StabilityUpscaleFastNode(IO.ComfyNode):
         return IO.Schema(
             node_id="StabilityUpscaleFastNode",
             display_name="Stability AI Upscale Fast",
-            category="api node/image/Stability AI",
+            category="partner/image/Stability AI",
             description=cleandoc(cls.__doc__ or ""),
             inputs=[
                 IO.Image.Input("image"),
@@ -593,7 +593,7 @@ class StabilityUpscaleFastNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.01}""",
+                expr="""{"type":"usd","usd":0.02}""",
             ),
         )
 
@@ -630,7 +630,7 @@ class StabilityTextToAudio(IO.ComfyNode):
         return IO.Schema(
             node_id="StabilityTextToAudio",
             display_name="Stability AI Text To Audio",
-            category="api node/audio/Stability AI",
+            category="partner/audio/Stability AI",
             essentials_category="Audio",
             description=cleandoc(cls.__doc__ or ""),
             inputs=[
@@ -708,7 +708,7 @@ class StabilityAudioToAudio(IO.ComfyNode):
         return IO.Schema(
             node_id="StabilityAudioToAudio",
             display_name="Stability AI Audio To Audio",
-            category="api node/audio/Stability AI",
+            category="partner/audio/Stability AI",
             description=cleandoc(cls.__doc__ or ""),
             inputs=[
                 IO.Combo.Input(
@@ -802,7 +802,7 @@ class StabilityAudioInpaint(IO.ComfyNode):
         return IO.Schema(
             node_id="StabilityAudioInpaint",
             display_name="Stability AI Audio Inpaint",
-            category="api node/audio/Stability AI",
+            category="partner/audio/Stability AI",
             description=cleandoc(cls.__doc__ or ""),
             inputs=[
                 IO.Combo.Input(

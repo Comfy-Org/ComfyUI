@@ -50,8 +50,7 @@ class Gemma3_4B_Vision_Model(sd1_clip.SDClipModel):
         super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config={}, dtype=dtype, special_tokens={"start": 2, "pad": 0}, layer_norm_hidden_state=False, model_class=comfy.text_encoders.llama.Gemma3_4B_Vision, enable_attention_masks=attention_mask, return_attention_masks=attention_mask, model_options=model_options)
 
     def process_tokens(self, tokens, device):
-        embeds, _, _, embeds_info = super().process_tokens(tokens, device)
-        comfy.utils.normalize_image_embeddings(embeds, embeds_info, self.transformer.model.config.hidden_size ** 0.5)
+        embeds, _, _, _ = super().process_tokens(tokens, device)
         return embeds
 
 class LuminaModel(sd1_clip.SD1ClipModel):

@@ -1,0 +1,31 @@
+name: OpenAPI Lint
+
+on:
+  pull_request:
+    paths:
+      - 'openapi.yaml'
+      - '.spectral.yaml'
+      - '.github/workflows/openapi-lint.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  spectral:
+    name: Run Spectral
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Spectral
+        run: npm install -g @stoplight/spectral-cli@6
+
+      - name: Lint openapi.yaml
+        run: spectral lint openapi.yaml --ruleset .spectral.yaml --fail-severity=error

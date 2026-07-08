@@ -1,4 +1,3 @@
-from __future__ import annotations
 import argparse
 import logging
 import os
@@ -27,7 +26,7 @@ def frontend_install_warning_message():
     return f"""
 {get_missing_requirements_message()}
 
-This error is happening because the ComfyUI frontend is no longer shipped as part of the main repo but as a pip package instead.
+The ComfyUI frontend is shipped in a pip package so it needs to be updated separately from the ComfyUI code.
 """.strip()
 
 def parse_version(version: str) -> tuple[int, int, int]:
@@ -38,40 +37,63 @@ def is_valid_version(version: str) -> bool:
     pattern = r"^(\d+)\.(\d+)\.(\d+)$"
     return bool(re.match(pattern, version))
 
-def get_installed_frontend_version():
-    """Get the currently installed frontend package version."""
-    frontend_version_str = version("comfyui-frontend-package")
-    return frontend_version_str
-
-
 def get_required_frontend_version():
     return get_required_packages_versions().get("comfyui-frontend-package", None)
 
 
-def check_frontend_version():
-    """Check if the frontend version is up to date."""
+COMFY_PACKAGE_VERSIONS = []
+def get_comfy_package_versions():
+    """List installed/required versions for every comfy* package in requirements.txt."""
+    if COMFY_PACKAGE_VERSIONS:
+        return COMFY_PACKAGE_VERSIONS.copy()
+    out = COMFY_PACKAGE_VERSIONS
+    for name, required in (get_required_packages_versions() or {}).items():
+        if not name.startswith("comfy"):
+            continue
+        try:
+            installed = version(name)
+        except Exception:
+            installed = None
+        out.append({"name": name, "installed": installed, "required": required})
+    return out.copy()
 
-    try:
-        frontend_version_str = get_installed_frontend_version()
-        frontend_version = parse_version(frontend_version_str)
-        required_frontend_str = get_required_frontend_version()
-        required_frontend = parse_version(required_frontend_str)
-        if frontend_version < required_frontend:
-            app.logger.log_startup_warning(
-                f"""
+
+def check_comfy_packages_versions():
+    """Warn for every comfy* package whose installed version is below requirements.txt."""
+    from packaging.version import InvalidVersion, parse as parse_pep440
+    outdated_packages = []
+
+    for pkg in get_comfy_package_versions():
+        installed_str = pkg["installed"]
+        required_str = pkg["required"]
+        if not installed_str or not required_str:
+            continue
+        try:
+            outdated = parse_pep440(installed_str) < parse_pep440(required_str)
+        except InvalidVersion as e:
+            logging.error(f"Failed to check {pkg['name']} version: {e}")
+            continue
+        if outdated:
+            outdated_packages.append((pkg["name"], installed_str, required_str))
+        else:
+            logging.info("{} version: {}".format(pkg["name"], installed_str))
+
+    if outdated_packages:
+        package_warnings = "\n".join(
+            f"Installed {name} version {installed} is lower than the recommended version {required}."
+            for name, installed, required in outdated_packages
+        )
+        app.logger.log_startup_warning(
+            f"""
 ________________________________________________________________________
 WARNING WARNING WARNING WARNING WARNING
 
-Installed frontend version {".".join(map(str, frontend_version))} is lower than the recommended version {".".join(map(str, required_frontend))}.
+{package_warnings}
 
-{frontend_install_warning_message()}
+{get_missing_requirements_message()}
 ________________________________________________________________________
 """.strip()
-            )
-        else:
-            logging.info("ComfyUI frontend version: {}".format(frontend_version_str))
-    except Exception as e:
-        logging.error(f"Failed to check frontend version: {e}")
+        )
 
 
 REQUEST_TIMEOUT = 10  # seconds
@@ -200,6 +222,11 @@ class FrontendManager:
     @classmethod
     def get_required_templates_version(cls) -> str:
         return get_required_packages_versions().get("comfyui-workflow-templates", None)
+
+    @classmethod
+    def get_comfy_package_versions(cls):
+        """List installed/required versions for every comfy* package in requirements.txt."""
+        return get_comfy_package_versions()
 
     @classmethod
     def default_frontend_path(cls) -> str:
@@ -341,7 +368,7 @@ comfyui-workflow-templates is not installed.
             main error source might be request timeout or invalid URL.
         """
         if version_string == DEFAULT_VERSION_STRING:
-            check_frontend_version()
+            check_comfy_packages_versions()
             return cls.default_frontend_path()
 
         repo_owner, repo_name, version = cls.parse_version_string(version_string)
@@ -403,7 +430,7 @@ comfyui-workflow-templates is not installed.
         except Exception as e:
             logging.error("Failed to initialize frontend: %s", e)
             logging.info("Falling back to the default frontend.")
-            check_frontend_version()
+            check_comfy_packages_versions()
             return cls.default_frontend_path()
     @classmethod
     def template_asset_handler(cls):

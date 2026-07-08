@@ -1,0 +1,827 @@
+{
+  "revision": 0,
+  "last_node_id": 130,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 130,
+      "type": "7937cf78-b52b-40a3-93b2-b4e2e5f98df1",
+      "pos": [
+        -1210,
+        -2780
+      ],
+      "size": [
+        300,
+        370
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": null
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": null
+        },
+        {
+          "name": "bboxes",
+          "type": "BOUNDING_BOX",
+          "link": null
+        },
+        {
+          "name": "positive_coords",
+          "type": "STRING",
+          "link": null
+        },
+        {
+          "name": "negative_coords",
+          "type": "STRING",
+          "link": null
+        },
+        {
+          "name": "threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "threshold"
+          },
+          "link": null
+        },
+        {
+          "name": "refine_iterations",
+          "type": "INT",
+          "widget": {
+            "name": "refine_iterations"
+          },
+          "link": null
+        },
+        {
+          "name": "individual_masks",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "individual_masks"
+          },
+          "link": null
+        },
+        {
+          "name": "ckpt_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "ckpt_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "masks",
+          "name": "masks",
+          "type": "MASK",
+          "links": []
+        },
+        {
+          "localized_name": "bboxes",
+          "name": "bboxes",
+          "type": "BOUNDING_BOX",
+          "links": []
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": null
+        },
+        {
+          "name": "fps",
+          "type": "FLOAT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "125",
+            "text"
+          ],
+          [
+            "126",
+            "threshold"
+          ],
+          [
+            "126",
+            "refine_iterations"
+          ],
+          [
+            "126",
+            "individual_masks"
+          ],
+          [
+            "127",
+            "ckpt_name"
+          ]
+        ],
+        "cnr_id": "comfy-core",
+        "ver": "0.19.3",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [],
+      "title": "Video Segmentation (SAM3)"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "7937cf78-b52b-40a3-93b2-b4e2e5f98df1",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 130,
+          "lastLinkId": 299,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Video Segmentation (SAM3)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -2260,
+            -3450,
+            136.369140625,
+            220
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            -1050,
+            -3510,
+            120,
+            120
+          ]
+        },
+        "inputs": [
+          {
+            "id": "680ffd88-32fe-48be-88d6-91ea44d5eaee",
+            "name": "video",
+            "type": "VIDEO",
+            "linkIds": [
+              252
+            ],
+            "pos": [
+              -2143.630859375,
+              -3430
+            ]
+          },
+          {
+            "id": "ceaf249c-32d7-4624-8bf6-e590e347ed90",
+            "name": "text",
+            "type": "STRING",
+            "linkIds": [
+              254
+            ],
+            "pos": [
+              -2143.630859375,
+              -3410
+            ]
+          },
+          {
+            "id": "1ffbff36-da0c-4854-8cb4-88ad31e64f99",
+            "name": "bboxes",
+            "type": "BOUNDING_BOX",
+            "linkIds": [
+              255
+            ],
+            "pos": [
+              -2143.630859375,
+              -3390
+            ]
+          },
+          {
+            "id": "67b7f4c7-cec0-4e00-b154-23cc1abf880e",
+            "name": "positive_coords",
+            "type": "STRING",
+            "linkIds": [
+              256
+            ],
+            "pos": [
+              -2143.630859375,
+              -3370
+            ]
+          },
+          {
+            "id": "b090a498-2bde-46b9-9554-18501401d687",
+            "name": "negative_coords",
+            "type": "STRING",
+            "linkIds": [
+              257
+            ],
+            "pos": [
+              -2143.630859375,
+              -3350
+            ]
+          },
+          {
+            "id": "1a76dfcf-ce95-46af-bba5-c42160c683dd",
+            "name": "threshold",
+            "type": "FLOAT",
+            "linkIds": [
+              261
+            ],
+            "pos": [
+              -2143.630859375,
+              -3330
+            ]
+          },
+          {
+            "id": "999523fa-c476-4c53-80c3-0a2f554d18ab",
+            "name": "refine_iterations",
+            "type": "INT",
+            "linkIds": [
+              262
+            ],
+            "pos": [
+              -2143.630859375,
+              -3310
+            ]
+          },
+          {
+            "id": "d2371011-7fe5-4a39-b0c1-df2e0bbd6ece",
+            "name": "individual_masks",
+            "type": "BOOLEAN",
+            "linkIds": [
+              263
+            ],
+            "pos": [
+              -2143.630859375,
+              -3290
+            ]
+          },
+          {
+            "id": "675a8b37-17db-48d1-853c-2fe5d6a74582",
+            "name": "ckpt_name",
+            "type": "COMBO",
+            "linkIds": [
+              273
+            ],
+            "pos": [
+              -2143.630859375,
+              -3270
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "ff50da09-1e59-4a58-9b7f-be1a00aa5913",
+            "name": "masks",
+            "type": "MASK",
+            "linkIds": [
+              231
+            ],
+            "localized_name": "masks",
+            "pos": [
+              -1030,
+              -3490
+            ]
+          },
+          {
+            "id": "8f622e40-8528-4078-b7d3-147e9f872194",
+            "name": "bboxes",
+            "type": "BOUNDING_BOX",
+            "linkIds": [
+              232
+            ],
+            "localized_name": "bboxes",
+            "pos": [
+              -1030,
+              -3470
+            ]
+          },
+          {
+            "id": "6c9924ec-f0fa-4509-83ea-8f97f5889bcc",
+            "name": "audio",
+            "type": "AUDIO",
+            "linkIds": [
+              259
+            ],
+            "pos": [
+              -1030,
+              -3450
+            ]
+          },
+          {
+            "id": "82c1cddc-ab11-44eb-9e2f-1a5c7ea5645b",
+            "name": "fps",
+            "type": "FLOAT",
+            "linkIds": [
+              260
+            ],
+            "pos": [
+              -1030,
+              -3430
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 125,
+            "type": "CLIPTextEncode",
+            "pos": [
+              -2010,
+              -3040
+            ],
+            "size": [
+              400,
+              200
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 240
+              },
+              {
+                "localized_name": "text",
+                "name": "text",
+                "type": "STRING",
+                "widget": {
+                  "name": "text"
+                },
+                "link": 254
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "links": [
+                  200
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CLIPTextEncode",
+              "cnr_id": "comfy-core",
+              "ver": "0.19.3",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              ""
+            ]
+          },
+          {
+            "id": 126,
+            "type": "SAM3_Detect",
+            "pos": [
+              -1520,
+              -3520
+            ],
+            "size": [
+              270,
+              290
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "model",
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 237
+              },
+              {
+                "label": "image",
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 253
+              },
+              {
+                "label": "conditioning",
+                "localized_name": "conditioning",
+                "name": "conditioning",
+                "shape": 7,
+                "type": "CONDITIONING",
+                "link": 200
+              },
+              {
+                "label": "bboxes",
+                "localized_name": "bboxes",
+                "name": "bboxes",
+                "shape": 7,
+                "type": "BOUNDING_BOX",
+                "link": 255
+              },
+              {
+                "label": "positive_coords",
+                "localized_name": "positive_coords",
+                "name": "positive_coords",
+                "shape": 7,
+                "type": "STRING",
+                "link": 256
+              },
+              {
+                "label": "negative_coords",
+                "localized_name": "negative_coords",
+                "name": "negative_coords",
+                "shape": 7,
+                "type": "STRING",
+                "link": 257
+              },
+              {
+                "localized_name": "threshold",
+                "name": "threshold",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "threshold"
+                },
+                "link": 261
+              },
+              {
+                "localized_name": "refine_iterations",
+                "name": "refine_iterations",
+                "type": "INT",
+                "widget": {
+                  "name": "refine_iterations"
+                },
+                "link": 262
+              },
+              {
+                "localized_name": "individual_masks",
+                "name": "individual_masks",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "individual_masks"
+                },
+                "link": 263
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "masks",
+                "name": "masks",
+                "type": "MASK",
+                "links": [
+                  231
+                ]
+              },
+              {
+                "localized_name": "bboxes",
+                "name": "bboxes",
+                "type": "BOUNDING_BOX",
+                "links": [
+                  232
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "SAM3_Detect",
+              "cnr_id": "comfy-core",
+              "ver": "0.19.3",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              0.5,
+              2,
+              false
+            ]
+          },
+          {
+            "id": 127,
+            "type": "CheckpointLoaderSimple",
+            "pos": [
+              -1970,
+              -3310
+            ],
+            "size": [
+              330,
+              160
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "ckpt_name",
+                "name": "ckpt_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "ckpt_name"
+                },
+                "link": 273
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  237
+                ]
+              },
+              {
+                "localized_name": "CLIP",
+                "name": "CLIP",
+                "type": "CLIP",
+                "links": [
+                  240
+                ]
+              },
+              {
+                "localized_name": "VAE",
+                "name": "VAE",
+                "type": "VAE",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CheckpointLoaderSimple",
+              "cnr_id": "comfy-core",
+              "ver": "0.19.3",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "models": [
+                {
+                  "name": "sam3.1_multiplex_fp16.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/sam3.1/resolve/main/checkpoints/sam3.1_multiplex_fp16.safetensors",
+                  "directory": "checkpoints"
+                }
+              ]
+            },
+            "widgets_values": [
+              "sam3.1_multiplex_fp16.safetensors"
+            ]
+          },
+          {
+            "id": 128,
+            "type": "GetVideoComponents",
+            "pos": [
+              -1910,
+              -3540
+            ],
+            "size": [
+              230,
+              120
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "video",
+                "name": "video",
+                "type": "VIDEO",
+                "link": 252
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "links": [
+                  253
+                ]
+              },
+              {
+                "localized_name": "audio",
+                "name": "audio",
+                "type": "AUDIO",
+                "links": [
+                  259
+                ]
+              },
+              {
+                "localized_name": "fps",
+                "name": "fps",
+                "type": "FLOAT",
+                "links": [
+                  260
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetVideoComponents",
+              "cnr_id": "comfy-core",
+              "ver": "0.19.3",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            }
+          },
+          {
+            "id": 129,
+            "type": "Note",
+            "pos": [
+              -1980,
+              -2790
+            ],
+            "size": [
+              370,
+              250
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [],
+            "title": "Note: Prompt format",
+            "properties": {},
+            "widgets_values": [
+              "Max tokens for this model is only 32, to separately prompt multiple subjects you can separate prompts with comma, and set the max amount of objects detected for each prompt with :N\n\nFor example above test prompt finds 2 cakes, one apron, 4 window panels"
+            ],
+            "color": "#432",
+            "bgcolor": "#653"
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 237,
+            "origin_id": 127,
+            "origin_slot": 0,
+            "target_id": 126,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 200,
+            "origin_id": 125,
+            "origin_slot": 0,
+            "target_id": 126,
+            "target_slot": 2,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 240,
+            "origin_id": 127,
+            "origin_slot": 1,
+            "target_id": 125,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 231,
+            "origin_id": 126,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "MASK"
+          },
+          {
+            "id": 232,
+            "origin_id": 126,
+            "origin_slot": 1,
+            "target_id": -20,
+            "target_slot": 1,
+            "type": "BOUNDING_BOX"
+          },
+          {
+            "id": 252,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 128,
+            "target_slot": 0,
+            "type": "VIDEO"
+          },
+          {
+            "id": 253,
+            "origin_id": 128,
+            "origin_slot": 0,
+            "target_id": 126,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 254,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 125,
+            "target_slot": 1,
+            "type": "STRING"
+          },
+          {
+            "id": 255,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 126,
+            "target_slot": 3,
+            "type": "BOUNDING_BOX"
+          },
+          {
+            "id": 256,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 126,
+            "target_slot": 4,
+            "type": "STRING"
+          },
+          {
+            "id": 257,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 126,
+            "target_slot": 5,
+            "type": "STRING"
+          },
+          {
+            "id": 259,
+            "origin_id": 128,
+            "origin_slot": 1,
+            "target_id": -20,
+            "target_slot": 2,
+            "type": "AUDIO"
+          },
+          {
+            "id": 260,
+            "origin_id": 128,
+            "origin_slot": 2,
+            "target_id": -20,
+            "target_slot": 3,
+            "type": "FLOAT"
+          },
+          {
+            "id": 261,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 126,
+            "target_slot": 6,
+            "type": "FLOAT"
+          },
+          {
+            "id": 262,
+            "origin_id": -10,
+            "origin_slot": 6,
+            "target_id": 126,
+            "target_slot": 7,
+            "type": "INT"
+          },
+          {
+            "id": 263,
+            "origin_id": -10,
+            "origin_slot": 7,
+            "target_id": 126,
+            "target_slot": 8,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 273,
+            "origin_id": -10,
+            "origin_slot": 8,
+            "target_id": 127,
+            "target_slot": 0,
+            "type": "COMBO"
+          }
+        ],
+        "extra": {},
+        "category": "Conditioning & Preprocessors/Segmentation & Mask",
+        "description": "Segments video into temporally consistent masks using Meta SAM3 from text or interactive prompts."
+      }
+    ]
+  },
+  "extra": {}
+}

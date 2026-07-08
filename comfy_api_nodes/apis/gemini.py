@@ -67,6 +67,7 @@ class GeminiPart(BaseModel):
     inlineData: GeminiInlineData | None = Field(None)
     fileData: GeminiFileData | None = Field(None)
     text: str | None = Field(None)
+    thought: bool | None = Field(None)
 
 
 class GeminiTextPart(BaseModel):
@@ -107,13 +108,20 @@ class GeminiVideoMetadata(BaseModel):
     startOffset: GeminiOffset | None = Field(None)
 
 
+class GeminiThinkingConfig(BaseModel):
+    includeThoughts: bool | None = Field(None)
+    thinkingLevel: str = Field(...)
+
+
 class GeminiGenerationConfig(BaseModel):
-    maxOutputTokens: int | None = Field(None, ge=16, le=8192)
+    maxOutputTokens: int | None = Field(None, ge=16, le=65536)
     seed: int | None = Field(None)
     stopSequences: list[str] | None = Field(None)
     temperature: float | None = Field(None, ge=0.0, le=2.0)
     topK: int | None = Field(None, ge=1)
     topP: float | None = Field(None, ge=0.0, le=1.0)
+    thinkingConfig: GeminiThinkingConfig | None = Field(None)
+    responseModalities: list[str] | None = Field(None)
 
 
 class GeminiImageOutputOptions(BaseModel):
@@ -125,11 +133,6 @@ class GeminiImageConfig(BaseModel):
     aspectRatio: str | None = Field(None)
     imageSize: str | None = Field(None)
     imageOutputOptions: GeminiImageOutputOptions = Field(default_factory=GeminiImageOutputOptions)
-
-
-class GeminiThinkingConfig(BaseModel):
-    includeThoughts: bool | None = Field(None)
-    thinkingLevel: str = Field(...)
 
 
 class GeminiImageGenerationConfig(GeminiGenerationConfig):

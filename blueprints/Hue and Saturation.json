@@ -1,1 +1,760 @@
-{"revision": 0, "last_node_id": 11, "last_link_id": 0, "nodes": [{"id": 11, "type": "c64f83e9-aa5d-4031-89f1-0704e39299fe", "pos": [870, -220], "size": [250, 178], "flags": {}, "order": 2, "mode": 0, "inputs": [{"label": "image", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": null}], "outputs": [{"label": "IMAGE", "localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": []}], "title": "Hue and Saturation", "properties": {"proxyWidgets": [["2", "choice"], ["4", "value"], ["5", "value"], ["6", "value"], ["7", "value"], ["3", "choice"]]}, "widgets_values": []}], "links": [], "version": 0.4, "definitions": {"subgraphs": [{"id": "c64f83e9-aa5d-4031-89f1-0704e39299fe", "version": 1, "state": {"lastGroupId": 0, "lastNodeId": 10, "lastLinkId": 11, "lastRerouteId": 0}, "revision": 0, "config": {}, "name": "Hue and Saturation", "inputNode": {"id": -10, "bounding": [360, -176, 120, 60]}, "outputNode": {"id": -20, "bounding": [1410, -176, 120, 60]}, "inputs": [{"id": "a5aae7ea-b511-4045-b5da-94101e269cd7", "name": "images.image0", "type": "IMAGE", "linkIds": [10], "localized_name": "images.image0", "label": "image", "pos": [460, -156]}], "outputs": [{"id": "30b72604-69b3-4944-b253-a9099bbd73a9", "name": "IMAGE0", "type": "IMAGE", "linkIds": [8], "localized_name": "IMAGE0", "label": "IMAGE", "pos": [1430, -156]}], "widgets": [], "nodes": [{"id": 3, "type": "CustomCombo", "pos": [540, -240], "size": [270, 150], "flags": {}, "order": 0, "mode": 0, "inputs": [{"label": "color_space", "localized_name": "choice", "name": "choice", "type": "COMBO", "widget": {"name": "choice"}, "link": null}], "outputs": [{"localized_name": "STRING", "name": "STRING", "type": "STRING", "links": null}, {"localized_name": "INDEX", "name": "INDEX", "type": "INT", "links": [2]}], "properties": {"Node name for S&R": "CustomCombo"}, "widgets_values": ["HSL", 0, "HSL", "HSB/HSV", ""]}, {"id": 2, "type": "CustomCombo", "pos": [540, -580], "size": [270, 294], "flags": {}, "order": 1, "mode": 0, "inputs": [{"label": "mode", "localized_name": "choice", "name": "choice", "type": "COMBO", "widget": {"name": "choice"}, "link": null}], "outputs": [{"localized_name": "STRING", "name": "STRING", "type": "STRING", "links": null}, {"localized_name": "INDEX", "name": "INDEX", "type": "INT", "links": [1]}], "properties": {"Node name for S&R": "CustomCombo"}, "widgets_values": ["Master", 0, "Master", "Reds", "Yellows", "Greens", "Cyans", "Blues", "Magentas", "Colorize", ""]}, {"id": 7, "type": "PrimitiveFloat", "pos": [540, 260], "size": [270, 58], "flags": {}, "order": 2, "mode": 0, "inputs": [{"label": "overlap", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [6]}], "properties": {"Node name for S&R": "PrimitiveFloat", "min": 0, "max": 100, "precision": 1, "step": 1}, "widgets_values": [50]}, {"id": 6, "type": "PrimitiveFloat", "pos": [540, 160], "size": [270, 58], "flags": {}, "order": 3, "mode": 0, "inputs": [{"label": "brightness", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [5]}], "properties": {"Node name for S&R": "PrimitiveFloat", "min": -100, "max": 100, "precision": 1, "step": 1, "display": "gradientslider", "gradient_stops": [{"offset": 0, "color": [0, 0, 0]}, {"offset": 1, "color": [255, 255, 255]}]}, "widgets_values": [0]}, {"id": 5, "type": "PrimitiveFloat", "pos": [540, 60], "size": [270, 58], "flags": {}, "order": 4, "mode": 0, "inputs": [{"label": "saturation", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [4]}], "properties": {"Node name for S&R": "PrimitiveFloat", "min": -100, "max": 100, "precision": 1, "step": 1, "display": "gradientslider", "gradient_stops": [{"offset": 0, "color": [128, 128, 128]}, {"offset": 1, "color": [255, 0, 0]}]}, "widgets_values": [0]}, {"id": 4, "type": "PrimitiveFloat", "pos": [540, -40], "size": [270, 58], "flags": {}, "order": 5, "mode": 0, "inputs": [{"label": "hue", "localized_name": "value", "name": "value", "type": "FLOAT", "widget": {"name": "value"}, "link": null}], "outputs": [{"localized_name": "FLOAT", "name": "FLOAT", "type": "FLOAT", "links": [3]}], "properties": {"Node name for S&R": "PrimitiveFloat", "min": -180, "max": 180, "precision": 1, "step": 1, "display": "gradientslider", "gradient_stops": [{"offset": 0, "color": [255, 0, 0]}, {"offset": 0.16666666666666666, "color": [255, 255, 0]}, {"offset": 0.3333333333333333, "color": [0, 255, 0]}, {"offset": 0.5, "color": [0, 255, 255]}, {"offset": 0.6666666666666666, "color": [0, 0, 255]}, {"offset": 0.8333333333333334, "color": [255, 0, 255]}, {"offset": 1, "color": [255, 0, 0]}]}, "widgets_values": [0]}, {"id": 1, "type": "GLSLShader", "pos": [880, -300], "size": [470, 292], "flags": {}, "order": 6, "mode": 0, "inputs": [{"label": "image0", "localized_name": "images.image0", "name": "images.image0", "type": "IMAGE", "link": 10}, {"label": "image1", "localized_name": "images.image1", "name": "images.image1", "shape": 7, "type": "IMAGE", "link": null}, {"label": "u_float0", "localized_name": "floats.u_float0", "name": "floats.u_float0", "shape": 7, "type": "FLOAT", "link": 3}, {"label": "u_float1", "localized_name": "floats.u_float1", "name": "floats.u_float1", "shape": 7, "type": "FLOAT", "link": 4}, {"label": "u_float2", "localized_name": "floats.u_float2", "name": "floats.u_float2", "shape": 7, "type": "FLOAT", "link": 5}, {"label": "u_float3", "localized_name": "floats.u_float3", "name": "floats.u_float3", "shape": 7, "type": "FLOAT", "link": 6}, {"label": "u_float4", "localized_name": "floats.u_float4", "name": "floats.u_float4", "shape": 7, "type": "FLOAT", "link": null}, {"label": "u_int0", "localized_name": "ints.u_int0", "name": "ints.u_int0", "shape": 7, "type": "INT", "link": 1}, {"label": "u_int1", "localized_name": "ints.u_int1", "name": "ints.u_int1", "shape": 7, "type": "INT", "link": 2}, {"label": "u_int2", "localized_name": "ints.u_int2", "name": "ints.u_int2", "shape": 7, "type": "INT", "link": null}, {"localized_name": "fragment_shader", "name": "fragment_shader", "type": "STRING", "widget": {"name": "fragment_shader"}, "link": null}, {"localized_name": "size_mode", "name": "size_mode", "type": "COMFY_DYNAMICCOMBO_V3", "widget": {"name": "size_mode"}, "link": null}], "outputs": [{"localized_name": "IMAGE0", "name": "IMAGE0", "type": "IMAGE", "links": [8]}, {"localized_name": "IMAGE1", "name": "IMAGE1", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE2", "name": "IMAGE2", "type": "IMAGE", "links": null}, {"localized_name": "IMAGE3", "name": "IMAGE3", "type": "IMAGE", "links": null}], "properties": {"Node name for S&R": "GLSLShader"}, "widgets_values": ["#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform int u_int0;      // Mode: 0=Master, 1=Reds, 2=Yellows, 3=Greens, 4=Cyans, 5=Blues, 6=Magentas, 7=Colorize\nuniform int u_int1;      // Color Space: 0=HSL, 1=HSB/HSV\nuniform float u_float0;  // Hue (-180 to 180)\nuniform float u_float1;  // Saturation (-100 to 100)\nuniform float u_float2;  // Lightness/Brightness (-100 to 100)\nuniform float u_float3;  // Overlap (0 to 100) - feathering between adjacent color ranges\n\nin vec2 v_texCoord;\nout vec4 fragColor;\n\n// Color range modes\nconst int MODE_MASTER   = 0;\nconst int MODE_RED      = 1;\nconst int MODE_YELLOW   = 2;\nconst int MODE_GREEN    = 3;\nconst int MODE_CYAN     = 4;\nconst int MODE_BLUE     = 5;\nconst int MODE_MAGENTA  = 6;\nconst int MODE_COLORIZE = 7;\n\n// Color space modes\nconst int COLORSPACE_HSL = 0;\nconst int COLORSPACE_HSB = 1;\n\nconst float EPSILON = 0.0001;\n\n//=============================================================================\n// RGB <-> HSL Conversions\n//=============================================================================\n\nvec3 rgb2hsl(vec3 c) {\n    float maxC = max(max(c.r, c.g), c.b);\n    float minC = min(min(c.r, c.g), c.b);\n    float delta = maxC - minC;\n\n    float h = 0.0;\n    float s = 0.0;\n    float l = (maxC + minC) * 0.5;\n\n    if (delta > EPSILON) {\n        s = l < 0.5\n            ? delta / (maxC + minC)\n            : delta / (2.0 - maxC - minC);\n\n        if (maxC == c.r) {\n            h = (c.g - c.b) / delta + (c.g < c.b ? 6.0 : 0.0);\n        } else if (maxC == c.g) {\n            h = (c.b - c.r) / delta + 2.0;\n        } else {\n            h = (c.r - c.g) / delta + 4.0;\n        }\n        h /= 6.0;\n    }\n\n    return vec3(h, s, l);\n}\n\nfloat hue2rgb(float p, float q, float t) {\n    t = fract(t);\n    if (t < 1.0/6.0) return p + (q - p) * 6.0 * t;\n    if (t < 0.5)       return q;\n    if (t < 2.0/3.0)   return p + (q - p) * (2.0/3.0 - t) * 6.0;\n    return p;\n}\n\nvec3 hsl2rgb(vec3 hsl) {\n    if (hsl.y < EPSILON) return vec3(hsl.z);\n\n    float q = hsl.z < 0.5\n        ? hsl.z * (1.0 + hsl.y)\n        : hsl.z + hsl.y - hsl.z * hsl.y;\n    float p = 2.0 * hsl.z - q;\n\n    return vec3(\n        hue2rgb(p, q, hsl.x + 1.0/3.0),\n        hue2rgb(p, q, hsl.x),\n        hue2rgb(p, q, hsl.x - 1.0/3.0)\n    );\n}\n\nvec3 rgb2hsb(vec3 c) {\n    float maxC = max(max(c.r, c.g), c.b);\n    float minC = min(min(c.r, c.g), c.b);\n    float delta = maxC - minC;\n\n    float h = 0.0;\n    float s = (maxC > EPSILON) ? delta / maxC : 0.0;\n    float b = maxC;\n\n    if (delta > EPSILON) {\n        if (maxC == c.r) {\n            h = (c.g - c.b) / delta + (c.g < c.b ? 6.0 : 0.0);\n        } else if (maxC == c.g) {\n            h = (c.b - c.r) / delta + 2.0;\n        } else {\n            h = (c.r - c.g) / delta + 4.0;\n        }\n        h /= 6.0;\n    }\n\n    return vec3(h, s, b);\n}\n\nvec3 hsb2rgb(vec3 hsb) {\n    vec3 rgb = clamp(abs(mod(hsb.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);\n    return hsb.z * mix(vec3(1.0), rgb, hsb.y);\n}\n\n//=============================================================================\n// Color Range Weight Calculation\n//=============================================================================\n\nfloat hueDistance(float a, float b) {\n    float d = abs(a - b);\n    return min(d, 1.0 - d);\n}\n\nfloat getHueWeight(float hue, float center, float overlap) {\n    float baseWidth = 1.0 / 6.0;\n    float feather = baseWidth * overlap;\n\n    float d = hueDistance(hue, center);\n\n    float inner = baseWidth * 0.5;\n    float outer = inner + feather;\n\n    return 1.0 - smoothstep(inner, outer, d);\n}\n\nfloat getModeWeight(float hue, int mode, float overlap) {\n    if (mode == MODE_MASTER || mode == MODE_COLORIZE) return 1.0;\n\n    if (mode == MODE_RED) {\n        return max(\n            getHueWeight(hue, 0.0, overlap),\n            getHueWeight(hue, 1.0, overlap)\n        );\n    }\n\n    float center = float(mode - 1) / 6.0;\n    return getHueWeight(hue, center, overlap);\n}\n\n//=============================================================================\n// Adjustment Functions\n//=============================================================================\n\nfloat adjustLightness(float l, float amount) {\n    return amount > 0.0\n        ? l + (1.0 - l) * amount\n        : l + l * amount;\n}\n\nfloat adjustBrightness(float b, float amount) {\n    return clamp(b + amount, 0.0, 1.0);\n}\n\nfloat adjustSaturation(float s, float amount) {\n    return amount > 0.0\n        ? s + (1.0 - s) * amount\n        : s + s * amount;\n}\n\nvec3 colorize(vec3 rgb, float hue, float sat, float light) {\n    float lum = dot(rgb, vec3(0.299, 0.587, 0.114));\n    float l = adjustLightness(lum, light);\n\n    vec3 hsl = vec3(fract(hue), clamp(sat, 0.0, 1.0), clamp(l, 0.0, 1.0));\n    return hsl2rgb(hsl);\n}\n\n//=============================================================================\n// Main\n//=============================================================================\n\nvoid main() {\n    vec4 original = texture(u_image0, v_texCoord);\n\n    float hueShift   = u_float0 / 360.0;   // -180..180 -> -0.5..0.5\n    float satAmount  = u_float1 / 100.0;   // -100..100 -> -1..1\n    float lightAmount= u_float2 / 100.0;   // -100..100 -> -1..1\n    float overlap    = u_float3 / 100.0;   // 0..100 -> 0..1\n\n    vec3 result;\n\n    if (u_int0 == MODE_COLORIZE) {\n        result = colorize(original.rgb, hueShift, satAmount, lightAmount);\n        fragColor = vec4(result, original.a);\n        return;\n    }\n\n    vec3 hsx = (u_int1 == COLORSPACE_HSL)\n        ? rgb2hsl(original.rgb)\n        : rgb2hsb(original.rgb);\n\n    float weight = getModeWeight(hsx.x, u_int0, overlap);\n\n    if (u_int0 != MODE_MASTER && hsx.y < EPSILON) {\n        weight = 0.0;\n    }\n\n    if (weight > EPSILON) {\n        float h = fract(hsx.x + hueShift * weight);\n        float s = clamp(adjustSaturation(hsx.y, satAmount * weight), 0.0, 1.0);\n        float v = (u_int1 == COLORSPACE_HSL)\n            ? clamp(adjustLightness(hsx.z, lightAmount * weight), 0.0, 1.0)\n            : clamp(adjustBrightness(hsx.z, lightAmount * weight), 0.0, 1.0);\n\n        vec3 adjusted = vec3(h, s, v);\n        result = (u_int1 == COLORSPACE_HSL)\n            ? hsl2rgb(adjusted)\n            : hsb2rgb(adjusted);\n    } else {\n        result = original.rgb;\n    }\n\n    fragColor = vec4(result, original.a);\n}\n", "from_input"]}], "groups": [], "links": [{"id": 3, "origin_id": 4, "origin_slot": 0, "target_id": 1, "target_slot": 2, "type": "FLOAT"}, {"id": 4, "origin_id": 5, "origin_slot": 0, "target_id": 1, "target_slot": 3, "type": "FLOAT"}, {"id": 5, "origin_id": 6, "origin_slot": 0, "target_id": 1, "target_slot": 4, "type": "FLOAT"}, {"id": 6, "origin_id": 7, "origin_slot": 0, "target_id": 1, "target_slot": 5, "type": "FLOAT"}, {"id": 1, "origin_id": 2, "origin_slot": 1, "target_id": 1, "target_slot": 7, "type": "INT"}, {"id": 2, "origin_id": 3, "origin_slot": 1, "target_id": 1, "target_slot": 8, "type": "INT"}, {"id": 10, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 0, "type": "IMAGE"}, {"id": 8, "origin_id": 1, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "IMAGE"}], "extra": {"workflowRendererVersion": "LG"}, "category": "Image Tools/Color adjust"}]}}
+{
+  "revision": 0,
+  "last_node_id": 11,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 11,
+      "type": "c64f83e9-aa5d-4031-89f1-0704e39299fe",
+      "pos": [
+        870,
+        -220
+      ],
+      "size": [
+        250,
+        178
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "image",
+          "localized_name": "images.image0",
+          "name": "images.image0",
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "IMAGE",
+          "localized_name": "IMAGE0",
+          "name": "IMAGE0",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "title": "Hue and Saturation",
+      "properties": {
+        "proxyWidgets": [
+          [
+            "2",
+            "choice"
+          ],
+          [
+            "4",
+            "value"
+          ],
+          [
+            "5",
+            "value"
+          ],
+          [
+            "6",
+            "value"
+          ],
+          [
+            "7",
+            "value"
+          ],
+          [
+            "3",
+            "choice"
+          ]
+        ]
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "c64f83e9-aa5d-4031-89f1-0704e39299fe",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 10,
+          "lastLinkId": 11,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Hue and Saturation",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            360,
+            -176,
+            120,
+            60
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            1410,
+            -176,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "a5aae7ea-b511-4045-b5da-94101e269cd7",
+            "name": "images.image0",
+            "type": "IMAGE",
+            "linkIds": [
+              10
+            ],
+            "localized_name": "images.image0",
+            "label": "image",
+            "pos": [
+              460,
+              -156
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "30b72604-69b3-4944-b253-a9099bbd73a9",
+            "name": "IMAGE0",
+            "type": "IMAGE",
+            "linkIds": [
+              8
+            ],
+            "localized_name": "IMAGE0",
+            "label": "IMAGE",
+            "pos": [
+              1430,
+              -156
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 3,
+            "type": "CustomCombo",
+            "pos": [
+              540,
+              -240
+            ],
+            "size": [
+              270,
+              150
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "color_space",
+                "localized_name": "choice",
+                "name": "choice",
+                "type": "COMBO",
+                "widget": {
+                  "name": "choice"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": null
+              },
+              {
+                "localized_name": "INDEX",
+                "name": "INDEX",
+                "type": "INT",
+                "links": [
+                  2
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CustomCombo"
+            },
+            "widgets_values": [
+              "HSL",
+              0,
+              "HSL",
+              "HSB/HSV",
+              ""
+            ]
+          },
+          {
+            "id": 2,
+            "type": "CustomCombo",
+            "pos": [
+              540,
+              -580
+            ],
+            "size": [
+              270,
+              294
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "mode",
+                "localized_name": "choice",
+                "name": "choice",
+                "type": "COMBO",
+                "widget": {
+                  "name": "choice"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": null
+              },
+              {
+                "localized_name": "INDEX",
+                "name": "INDEX",
+                "type": "INT",
+                "links": [
+                  1
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CustomCombo"
+            },
+            "widgets_values": [
+              "Master",
+              0,
+              "Master",
+              "Reds",
+              "Yellows",
+              "Greens",
+              "Cyans",
+              "Blues",
+              "Magentas",
+              "Colorize",
+              ""
+            ]
+          },
+          {
+            "id": 7,
+            "type": "PrimitiveFloat",
+            "pos": [
+              540,
+              260
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "overlap",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  6
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": 0,
+              "max": 100,
+              "precision": 1,
+              "step": 1
+            },
+            "widgets_values": [
+              50
+            ]
+          },
+          {
+            "id": 6,
+            "type": "PrimitiveFloat",
+            "pos": [
+              540,
+              160
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "brightness",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  5
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": -100,
+              "max": 100,
+              "precision": 1,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    0,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    255,
+                    255,
+                    255
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 5,
+            "type": "PrimitiveFloat",
+            "pos": [
+              540,
+              60
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "saturation",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  4
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": -100,
+              "max": 100,
+              "precision": 1,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    128,
+                    128,
+                    128
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    255,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 4,
+            "type": "PrimitiveFloat",
+            "pos": [
+              540,
+              -40
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "hue",
+                "localized_name": "value",
+                "name": "value",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": [
+                  3
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "PrimitiveFloat",
+              "min": -180,
+              "max": 180,
+              "precision": 1,
+              "step": 1,
+              "display": "gradientslider",
+              "gradient_stops": [
+                {
+                  "offset": 0,
+                  "color": [
+                    255,
+                    0,
+                    0
+                  ]
+                },
+                {
+                  "offset": 0.16666666666666666,
+                  "color": [
+                    255,
+                    255,
+                    0
+                  ]
+                },
+                {
+                  "offset": 0.3333333333333333,
+                  "color": [
+                    0,
+                    255,
+                    0
+                  ]
+                },
+                {
+                  "offset": 0.5,
+                  "color": [
+                    0,
+                    255,
+                    255
+                  ]
+                },
+                {
+                  "offset": 0.6666666666666666,
+                  "color": [
+                    0,
+                    0,
+                    255
+                  ]
+                },
+                {
+                  "offset": 0.8333333333333334,
+                  "color": [
+                    255,
+                    0,
+                    255
+                  ]
+                },
+                {
+                  "offset": 1,
+                  "color": [
+                    255,
+                    0,
+                    0
+                  ]
+                }
+              ]
+            },
+            "widgets_values": [
+              0
+            ]
+          },
+          {
+            "id": 1,
+            "type": "GLSLShader",
+            "pos": [
+              880,
+              -300
+            ],
+            "size": [
+              470,
+              292
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "image0",
+                "localized_name": "images.image0",
+                "name": "images.image0",
+                "type": "IMAGE",
+                "link": 10
+              },
+              {
+                "label": "image1",
+                "localized_name": "images.image1",
+                "name": "images.image1",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "label": "u_float0",
+                "localized_name": "floats.u_float0",
+                "name": "floats.u_float0",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 3
+              },
+              {
+                "label": "u_float1",
+                "localized_name": "floats.u_float1",
+                "name": "floats.u_float1",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 4
+              },
+              {
+                "label": "u_float2",
+                "localized_name": "floats.u_float2",
+                "name": "floats.u_float2",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 5
+              },
+              {
+                "label": "u_float3",
+                "localized_name": "floats.u_float3",
+                "name": "floats.u_float3",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": 6
+              },
+              {
+                "label": "u_float4",
+                "localized_name": "floats.u_float4",
+                "name": "floats.u_float4",
+                "shape": 7,
+                "type": "FLOAT",
+                "link": null
+              },
+              {
+                "label": "u_int0",
+                "localized_name": "ints.u_int0",
+                "name": "ints.u_int0",
+                "shape": 7,
+                "type": "INT",
+                "link": 1
+              },
+              {
+                "label": "u_int1",
+                "localized_name": "ints.u_int1",
+                "name": "ints.u_int1",
+                "shape": 7,
+                "type": "INT",
+                "link": 2
+              },
+              {
+                "label": "u_int2",
+                "localized_name": "ints.u_int2",
+                "name": "ints.u_int2",
+                "shape": 7,
+                "type": "INT",
+                "link": null
+              },
+              {
+                "localized_name": "fragment_shader",
+                "name": "fragment_shader",
+                "type": "STRING",
+                "widget": {
+                  "name": "fragment_shader"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "size_mode",
+                "name": "size_mode",
+                "type": "COMFY_DYNAMICCOMBO_V3",
+                "widget": {
+                  "name": "size_mode"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE0",
+                "name": "IMAGE0",
+                "type": "IMAGE",
+                "links": [
+                  8
+                ]
+              },
+              {
+                "localized_name": "IMAGE1",
+                "name": "IMAGE1",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE2",
+                "name": "IMAGE2",
+                "type": "IMAGE",
+                "links": null
+              },
+              {
+                "localized_name": "IMAGE3",
+                "name": "IMAGE3",
+                "type": "IMAGE",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GLSLShader"
+            },
+            "widgets_values": [
+              "#version 300 es\nprecision highp float;\n\nuniform sampler2D u_image0;\nuniform int u_int0;      // Mode: 0=Master, 1=Reds, 2=Yellows, 3=Greens, 4=Cyans, 5=Blues, 6=Magentas, 7=Colorize\nuniform int u_int1;      // Color Space: 0=HSL, 1=HSB/HSV\nuniform float u_float0;  // Hue (-180 to 180)\nuniform float u_float1;  // Saturation (-100 to 100)\nuniform float u_float2;  // Lightness/Brightness (-100 to 100)\nuniform float u_float3;  // Overlap (0 to 100) - feathering between adjacent color ranges\n\nin vec2 v_texCoord;\nout vec4 fragColor;\n\n// Color range modes\nconst int MODE_MASTER   = 0;\nconst int MODE_RED      = 1;\nconst int MODE_YELLOW   = 2;\nconst int MODE_GREEN    = 3;\nconst int MODE_CYAN     = 4;\nconst int MODE_BLUE     = 5;\nconst int MODE_MAGENTA  = 6;\nconst int MODE_COLORIZE = 7;\n\n// Color space modes\nconst int COLORSPACE_HSL = 0;\nconst int COLORSPACE_HSB = 1;\n\nconst float EPSILON = 0.0001;\n\n//=============================================================================\n// RGB <-> HSL Conversions\n//=============================================================================\n\nvec3 rgb2hsl(vec3 c) {\n    float maxC = max(max(c.r, c.g), c.b);\n    float minC = min(min(c.r, c.g), c.b);\n    float delta = maxC - minC;\n\n    float h = 0.0;\n    float s = 0.0;\n    float l = (maxC + minC) * 0.5;\n\n    if (delta > EPSILON) {\n        s = l < 0.5\n            ? delta / (maxC + minC)\n            : delta / (2.0 - maxC - minC);\n\n        if (maxC == c.r) {\n            h = (c.g - c.b) / delta + (c.g < c.b ? 6.0 : 0.0);\n        } else if (maxC == c.g) {\n            h = (c.b - c.r) / delta + 2.0;\n        } else {\n            h = (c.r - c.g) / delta + 4.0;\n        }\n        h /= 6.0;\n    }\n\n    return vec3(h, s, l);\n}\n\nfloat hue2rgb(float p, float q, float t) {\n    t = fract(t);\n    if (t < 1.0/6.0) return p + (q - p) * 6.0 * t;\n    if (t < 0.5)       return q;\n    if (t < 2.0/3.0)   return p + (q - p) * (2.0/3.0 - t) * 6.0;\n    return p;\n}\n\nvec3 hsl2rgb(vec3 hsl) {\n    if (hsl.y < EPSILON) return vec3(hsl.z);\n\n    float q = hsl.z < 0.5\n        ? hsl.z * (1.0 + hsl.y)\n        : hsl.z + hsl.y - hsl.z * hsl.y;\n    float p = 2.0 * hsl.z - q;\n\n    return vec3(\n        hue2rgb(p, q, hsl.x + 1.0/3.0),\n        hue2rgb(p, q, hsl.x),\n        hue2rgb(p, q, hsl.x - 1.0/3.0)\n    );\n}\n\nvec3 rgb2hsb(vec3 c) {\n    float maxC = max(max(c.r, c.g), c.b);\n    float minC = min(min(c.r, c.g), c.b);\n    float delta = maxC - minC;\n\n    float h = 0.0;\n    float s = (maxC > EPSILON) ? delta / maxC : 0.0;\n    float b = maxC;\n\n    if (delta > EPSILON) {\n        if (maxC == c.r) {\n            h = (c.g - c.b) / delta + (c.g < c.b ? 6.0 : 0.0);\n        } else if (maxC == c.g) {\n            h = (c.b - c.r) / delta + 2.0;\n        } else {\n            h = (c.r - c.g) / delta + 4.0;\n        }\n        h /= 6.0;\n    }\n\n    return vec3(h, s, b);\n}\n\nvec3 hsb2rgb(vec3 hsb) {\n    vec3 rgb = clamp(abs(mod(hsb.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);\n    return hsb.z * mix(vec3(1.0), rgb, hsb.y);\n}\n\n//=============================================================================\n// Color Range Weight Calculation\n//=============================================================================\n\nfloat hueDistance(float a, float b) {\n    float d = abs(a - b);\n    return min(d, 1.0 - d);\n}\n\nfloat getHueWeight(float hue, float center, float overlap) {\n    float baseWidth = 1.0 / 6.0;\n    float feather = baseWidth * overlap;\n\n    float d = hueDistance(hue, center);\n\n    float inner = baseWidth * 0.5;\n    float outer = inner + feather;\n\n    return 1.0 - smoothstep(inner, outer, d);\n}\n\nfloat getModeWeight(float hue, int mode, float overlap) {\n    if (mode == MODE_MASTER || mode == MODE_COLORIZE) return 1.0;\n\n    if (mode == MODE_RED) {\n        return max(\n            getHueWeight(hue, 0.0, overlap),\n            getHueWeight(hue, 1.0, overlap)\n        );\n    }\n\n    float center = float(mode - 1) / 6.0;\n    return getHueWeight(hue, center, overlap);\n}\n\n//=============================================================================\n// Adjustment Functions\n//=============================================================================\n\nfloat adjustLightness(float l, float amount) {\n    return amount > 0.0\n        ? l + (1.0 - l) * amount\n        : l + l * amount;\n}\n\nfloat adjustBrightness(float b, float amount) {\n    return clamp(b + amount, 0.0, 1.0);\n}\n\nfloat adjustSaturation(float s, float amount) {\n    return amount > 0.0\n        ? s + (1.0 - s) * amount\n        : s + s * amount;\n}\n\nvec3 colorize(vec3 rgb, float hue, float sat, float light) {\n    float lum = dot(rgb, vec3(0.299, 0.587, 0.114));\n    float l = adjustLightness(lum, light);\n\n    vec3 hsl = vec3(fract(hue), clamp(sat, 0.0, 1.0), clamp(l, 0.0, 1.0));\n    return hsl2rgb(hsl);\n}\n\n//=============================================================================\n// Main\n//=============================================================================\n\nvoid main() {\n    vec4 original = texture(u_image0, v_texCoord);\n\n    float hueShift   = u_float0 / 360.0;   // -180..180 -> -0.5..0.5\n    float satAmount  = u_float1 / 100.0;   // -100..100 -> -1..1\n    float lightAmount= u_float2 / 100.0;   // -100..100 -> -1..1\n    float overlap    = u_float3 / 100.0;   // 0..100 -> 0..1\n\n    vec3 result;\n\n    if (u_int0 == MODE_COLORIZE) {\n        result = colorize(original.rgb, hueShift, satAmount, lightAmount);\n        fragColor = vec4(result, original.a);\n        return;\n    }\n\n    vec3 hsx = (u_int1 == COLORSPACE_HSL)\n        ? rgb2hsl(original.rgb)\n        : rgb2hsb(original.rgb);\n\n    float weight = getModeWeight(hsx.x, u_int0, overlap);\n\n    if (u_int0 != MODE_MASTER && hsx.y < EPSILON) {\n        weight = 0.0;\n    }\n\n    if (weight > EPSILON) {\n        float h = fract(hsx.x + hueShift * weight);\n        float s = clamp(adjustSaturation(hsx.y, satAmount * weight), 0.0, 1.0);\n        float v = (u_int1 == COLORSPACE_HSL)\n            ? clamp(adjustLightness(hsx.z, lightAmount * weight), 0.0, 1.0)\n            : clamp(adjustBrightness(hsx.z, lightAmount * weight), 0.0, 1.0);\n\n        vec3 adjusted = vec3(h, s, v);\n        result = (u_int1 == COLORSPACE_HSL)\n            ? hsl2rgb(adjusted)\n            : hsb2rgb(adjusted);\n    } else {\n        result = original.rgb;\n    }\n\n    fragColor = vec4(result, original.a);\n}\n",
+              "from_input"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 3,
+            "origin_id": 4,
+            "origin_slot": 0,
+            "target_id": 1,
+            "target_slot": 2,
+            "type": "FLOAT"
+          },
+          {
+            "id": 4,
+            "origin_id": 5,
+            "origin_slot": 0,
+            "target_id": 1,
+            "target_slot": 3,
+            "type": "FLOAT"
+          },
+          {
+            "id": 5,
+            "origin_id": 6,
+            "origin_slot": 0,
+            "target_id": 1,
+            "target_slot": 4,
+            "type": "FLOAT"
+          },
+          {
+            "id": 6,
+            "origin_id": 7,
+            "origin_slot": 0,
+            "target_id": 1,
+            "target_slot": 5,
+            "type": "FLOAT"
+          },
+          {
+            "id": 1,
+            "origin_id": 2,
+            "origin_slot": 1,
+            "target_id": 1,
+            "target_slot": 7,
+            "type": "INT"
+          },
+          {
+            "id": 2,
+            "origin_id": 3,
+            "origin_slot": 1,
+            "target_id": 1,
+            "target_slot": 8,
+            "type": "INT"
+          },
+          {
+            "id": 10,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 1,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 8,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Image Tools/Color adjust",
+        "description": "Adjusts hue, saturation, and lightness of an image using a real-time GPU fragment shader."
+      }
+    ]
+  }
+}

@@ -1,0 +1,714 @@
+{
+  "revision": 0,
+  "last_node_id": 251,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 251,
+      "type": "609e1fd1-b731-4b78-89ac-d19b1156b025",
+      "pos": [
+        -1490,
+        130
+      ],
+      "size": [
+        230,
+        164
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "source_image",
+          "name": "source_image",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "columns",
+          "name": "columns",
+          "type": "INT",
+          "widget": {
+            "name": "columns"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "rows",
+          "name": "rows",
+          "type": "INT",
+          "widget": {
+            "name": "rows"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "tiles",
+          "name": "tiles",
+          "type": "IMAGE",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "228",
+            "value"
+          ],
+          [
+            "252",
+            "value"
+          ]
+        ],
+        "cnr_id": "comfy-core",
+        "ver": "0.20.1",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [],
+      "title": "Split Image Grid to Tiles"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "609e1fd1-b731-4b78-89ac-d19b1156b025",
+        "version": 1,
+        "state": {
+          "lastGroupId": 9,
+          "lastNodeId": 252,
+          "lastLinkId": 429,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Split Image Grid to Tiles",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -1690,
+            260,
+            128,
+            108
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            -510,
+            590,
+            128,
+            68
+          ]
+        },
+        "inputs": [
+          {
+            "id": "866ac798-cfbc-450a-b755-e704f86404d9",
+            "name": "source_image",
+            "type": "IMAGE",
+            "linkIds": [
+              386,
+              389
+            ],
+            "localized_name": "source_image",
+            "pos": [
+              -1586,
+              284
+            ]
+          },
+          {
+            "id": "bc37b1f8-8ab2-4f19-bd00-75d4fbc4feb3",
+            "name": "columns",
+            "type": "INT",
+            "linkIds": [
+              427
+            ],
+            "localized_name": "columns",
+            "pos": [
+              -1586,
+              304
+            ]
+          },
+          {
+            "id": "d45915da-e848-43dd-9ccc-e3161e9c99d9",
+            "name": "rows",
+            "type": "INT",
+            "linkIds": [
+              428
+            ],
+            "localized_name": "rows",
+            "pos": [
+              -1586,
+              324
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "18bc780f-064b-4038-87c6-67dba71deb08",
+            "name": "tiles",
+            "type": "IMAGE",
+            "linkIds": [
+              394
+            ],
+            "localized_name": "tiles",
+            "shape": 6,
+            "pos": [
+              -486,
+              614
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 225,
+            "type": "SplitImageToTileList",
+            "pos": [
+              -1010,
+              620
+            ],
+            "size": [
+              290,
+              170
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 386
+              },
+              {
+                "localized_name": "tile_width",
+                "name": "tile_width",
+                "type": "INT",
+                "widget": {
+                  "name": "tile_width"
+                },
+                "link": 403
+              },
+              {
+                "localized_name": "tile_height",
+                "name": "tile_height",
+                "type": "INT",
+                "widget": {
+                  "name": "tile_height"
+                },
+                "link": 404
+              },
+              {
+                "localized_name": "overlap",
+                "name": "overlap",
+                "type": "INT",
+                "widget": {
+                  "name": "overlap"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "shape": 6,
+                "type": "IMAGE",
+                "links": [
+                  394
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "SplitImageToTileList",
+              "cnr_id": "comfy-core",
+              "ver": "0.20.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              1024,
+              1024,
+              0
+            ]
+          },
+          {
+            "id": 231,
+            "type": "ComfyMathExpression",
+            "pos": [
+              -1080,
+              330
+            ],
+            "size": [
+              370,
+              190
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "a",
+                "localized_name": "values.a",
+                "name": "values.a",
+                "type": "FLOAT,INT,BOOLEAN",
+                "link": 390
+              },
+              {
+                "label": "b",
+                "localized_name": "values.b",
+                "name": "values.b",
+                "shape": 7,
+                "type": "FLOAT,INT,BOOLEAN",
+                "link": 429
+              },
+              {
+                "label": "c",
+                "localized_name": "values.c",
+                "name": "values.c",
+                "shape": 7,
+                "type": "FLOAT,INT,BOOLEAN",
+                "link": null
+              },
+              {
+                "localized_name": "expression",
+                "name": "expression",
+                "type": "STRING",
+                "widget": {
+                  "name": "expression"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": null
+              },
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  404
+                ]
+              },
+              {
+                "localized_name": "BOOL",
+                "name": "BOOL",
+                "type": "BOOLEAN",
+                "links": null
+              }
+            ],
+            "title": "Math Expression （Height）",
+            "properties": {
+              "Node name for S&R": "ComfyMathExpression",
+              "cnr_id": "comfy-core",
+              "ver": "0.18.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "ue_properties": {
+                "widget_ue_connectable": {},
+                "version": "7.7",
+                "input_ue_unconnectable": {}
+              }
+            },
+            "widgets_values": [
+              "max(1, (int(a) + int(b) - 1) // int(b))"
+            ]
+          },
+          {
+            "id": 229,
+            "type": "ComfyMathExpression",
+            "pos": [
+              -1090,
+              -30
+            ],
+            "size": [
+              370,
+              190
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "a",
+                "localized_name": "values.a",
+                "name": "values.a",
+                "type": "FLOAT,INT,BOOLEAN",
+                "link": 387
+              },
+              {
+                "label": "b",
+                "localized_name": "values.b",
+                "name": "values.b",
+                "shape": 7,
+                "type": "FLOAT,INT,BOOLEAN",
+                "link": 388
+              },
+              {
+                "label": "c",
+                "localized_name": "values.c",
+                "name": "values.c",
+                "shape": 7,
+                "type": "FLOAT,INT,BOOLEAN",
+                "link": null
+              },
+              {
+                "localized_name": "expression",
+                "name": "expression",
+                "type": "STRING",
+                "widget": {
+                  "name": "expression"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "FLOAT",
+                "name": "FLOAT",
+                "type": "FLOAT",
+                "links": null
+              },
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  403
+                ]
+              },
+              {
+                "localized_name": "BOOL",
+                "name": "BOOL",
+                "type": "BOOLEAN",
+                "links": null
+              }
+            ],
+            "title": "Math Expression （Width）",
+            "properties": {
+              "Node name for S&R": "ComfyMathExpression",
+              "cnr_id": "comfy-core",
+              "ver": "0.18.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "ue_properties": {
+                "widget_ue_connectable": {},
+                "version": "7.7",
+                "input_ue_unconnectable": {}
+              }
+            },
+            "widgets_values": [
+              "max(1, (int(a) + int(b) - 1) // int(b))"
+            ]
+          },
+          {
+            "id": 228,
+            "type": "PrimitiveInt",
+            "pos": [
+              -1380,
+              90
+            ],
+            "size": [
+              230,
+              110
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "INT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 427
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  388
+                ]
+              }
+            ],
+            "title": "Int (grid columns)",
+            "properties": {
+              "Node name for S&R": "Int (grid columns)",
+              "cnr_id": "comfy-core",
+              "ver": "0.18.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "ue_properties": {
+                "widget_ue_connectable": {},
+                "version": "7.7",
+                "input_ue_unconnectable": {}
+              }
+            },
+            "widgets_values": [
+              2,
+              "fixed"
+            ]
+          },
+          {
+            "id": 230,
+            "type": "GetImageSize",
+            "pos": [
+              -1380,
+              290
+            ],
+            "size": [
+              230,
+              100
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 389
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "width",
+                "name": "width",
+                "type": "INT",
+                "links": [
+                  387
+                ]
+              },
+              {
+                "localized_name": "height",
+                "name": "height",
+                "type": "INT",
+                "links": [
+                  390
+                ]
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GetImageSize",
+              "cnr_id": "comfy-core",
+              "ver": "0.18.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "ue_properties": {
+                "widget_ue_connectable": {},
+                "version": "7.7",
+                "input_ue_unconnectable": {}
+              }
+            }
+          },
+          {
+            "id": 252,
+            "type": "PrimitiveInt",
+            "pos": [
+              -1380,
+              470
+            ],
+            "size": [
+              230,
+              110
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "value",
+                "name": "value",
+                "type": "INT",
+                "widget": {
+                  "name": "value"
+                },
+                "link": 428
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "INT",
+                "name": "INT",
+                "type": "INT",
+                "links": [
+                  429
+                ]
+              }
+            ],
+            "title": "Int (grid rows)",
+            "properties": {
+              "Node name for S&R": "Int (grid rows)",
+              "cnr_id": "comfy-core",
+              "ver": "0.18.1",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65,
+              "ue_properties": {
+                "widget_ue_connectable": {},
+                "version": "7.7",
+                "input_ue_unconnectable": {}
+              }
+            },
+            "widgets_values": [
+              3,
+              "fixed"
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 403,
+            "origin_id": 229,
+            "origin_slot": 1,
+            "target_id": 225,
+            "target_slot": 1,
+            "type": "INT"
+          },
+          {
+            "id": 404,
+            "origin_id": 231,
+            "origin_slot": 1,
+            "target_id": 225,
+            "target_slot": 2,
+            "type": "INT"
+          },
+          {
+            "id": 390,
+            "origin_id": 230,
+            "origin_slot": 1,
+            "target_id": 231,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 387,
+            "origin_id": 230,
+            "origin_slot": 0,
+            "target_id": 229,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 388,
+            "origin_id": 228,
+            "origin_slot": 0,
+            "target_id": 229,
+            "target_slot": 1,
+            "type": "INT"
+          },
+          {
+            "id": 386,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 225,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 389,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 230,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 394,
+            "origin_id": 225,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 427,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 228,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 428,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 252,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 429,
+            "origin_id": 252,
+            "origin_slot": 0,
+            "target_id": 231,
+            "target_slot": 1,
+            "type": "INT"
+          }
+        ],
+        "extra": {},
+        "category": "Image Tools/Crop",
+        "description": "Splits an image into a configurable columns×rows grid of equal tiles for tiled generation or processing."
+      }
+    ]
+  },
+  "extra": {}
+}

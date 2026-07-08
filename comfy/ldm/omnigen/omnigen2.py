@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 from comfy.ldm.lightricks.model import Timesteps
 from comfy.ldm.flux.layers import EmbedND
+from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.modules.attention import optimized_attention_masked
 import comfy.model_management
 import comfy.ldm.common_dit
@@ -17,13 +18,11 @@ def apply_rotary_emb(x, freqs_cis):
     if x.shape[1] == 0:
         return x
 
-    t_ = x.reshape(*x.shape[:-1], -1, 1, 2)
-    t_out = freqs_cis[..., 0] * t_[..., 0] + freqs_cis[..., 1] * t_[..., 1]
-    return t_out.reshape(*x.shape).to(dtype=x.dtype)
+    return apply_rope1(x, freqs_cis)
 
 
 def swiglu(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return F.silu(x) * y
+    return F.silu(x, inplace=True).mul_(y)
 
 
 class TimestepEmbedding(nn.Module):

@@ -1,1 +1,785 @@
-{"id": "8fe311ec-2147-47a8-b618-7bd6fb6d4f9d", "revision": 0, "last_node_id": 23, "last_link_id": 24, "nodes": [{"id": 19, "type": "feb7d184-edf3-4851-9fd6-57a92c00ec42", "pos": [277.7327250391088, 256.4066470374603], "size": [340, 70], "flags": {}, "order": 0, "mode": 0, "inputs": [{"localized_name": "image", "name": "image", "type": "IMAGE", "link": null}, {"name": "ckpt_name", "type": "COMBO", "widget": {"name": "ckpt_name"}, "link": null}], "outputs": [{"localized_name": "MESH", "name": "MESH", "type": "MESH", "links": []}], "properties": {"proxyWidgets": [["-1", "ckpt_name"]], "cnr_id": "comfy-core", "ver": "0.3.65"}, "widgets_values": ["hunyuan_3d_v2.1.safetensors"]}], "links": [], "groups": [], "definitions": {"subgraphs": [{"id": "feb7d184-edf3-4851-9fd6-57a92c00ec42", "version": 1, "state": {"lastGroupId": 2, "lastNodeId": 23, "lastLinkId": 24, "lastRerouteId": 0}, "revision": 0, "config": {}, "name": "local-Image to Model (Hunyuan3d 2.1)", "inputNode": {"id": -10, "bounding": [-138.94803619384766, -392.62060546875, 120, 80]}, "outputNode": {"id": -20, "bounding": [1090, -310, 120, 60]}, "inputs": [{"id": "ab9b5b83-88f9-4698-954d-93f644bd07aa", "name": "image", "type": "IMAGE", "linkIds": [21], "localized_name": "image", "pos": [-38.948036193847656, -372.62060546875]}, {"id": "e15b0ba4-b5fe-41eb-9266-006ce1f1cf79", "name": "ckpt_name", "type": "COMBO", "linkIds": [23], "pos": [-38.948036193847656, -352.62060546875]}], "outputs": [{"id": "c8744662-e812-49b3-8bc8-744d557db6d6", "name": "MESH", "type": "MESH", "linkIds": [11], "localized_name": "MESH", "pos": [1110, -290]}], "widgets": [], "nodes": [{"id": 7, "type": "KSampler", "pos": [760, -510], "size": [270, 262], "flags": {}, "order": 4, "mode": 0, "inputs": [{"localized_name": "model", "name": "model", "type": "MODEL", "link": 19}, {"localized_name": "positive", "name": "positive", "type": "CONDITIONING", "link": 5}, {"localized_name": "negative", "name": "negative", "type": "CONDITIONING", "link": 6}, {"localized_name": "latent_image", "name": "latent_image", "type": "LATENT", "link": 7}, {"localized_name": "seed", "name": "seed", "type": "INT", "widget": {"name": "seed"}, "link": null}, {"localized_name": "steps", "name": "steps", "type": "INT", "widget": {"name": "steps"}, "link": null}, {"localized_name": "cfg", "name": "cfg", "type": "FLOAT", "widget": {"name": "cfg"}, "link": null}, {"localized_name": "sampler_name", "name": "sampler_name", "type": "COMBO", "widget": {"name": "sampler_name"}, "link": null}, {"localized_name": "scheduler", "name": "scheduler", "type": "COMBO", "widget": {"name": "scheduler"}, "link": null}, {"localized_name": "denoise", "name": "denoise", "type": "FLOAT", "widget": {"name": "denoise"}, "link": null}], "outputs": [{"localized_name": "LATENT", "name": "LATENT", "type": "LATENT", "links": [8]}], "properties": {"cnr_id": "comfy-core", "ver": "0.3.59", "Node name for S&R": "KSampler"}, "widgets_values": [894796671366012, "randomize", 30, 5, "euler", "normal", 1]}, {"id": 13, "type": "CLIPVisionEncode", "pos": [450, -410], "size": [270, 80], "flags": {}, "order": 7, "mode": 0, "inputs": [{"localized_name": "clip_vision", "name": "clip_vision", "type": "CLIP_VISION", "link": 20}, {"localized_name": "image", "name": "image", "type": "IMAGE", "link": 21}, {"localized_name": "crop", "name": "crop", "type": "COMBO", "widget": {"name": "crop"}, "link": null}], "outputs": [{"localized_name": "CLIP_VISION_OUTPUT", "name": "CLIP_VISION_OUTPUT", "type": "CLIP_VISION_OUTPUT", "links": [22]}], "properties": {"cnr_id": "comfy-core", "ver": "0.3.59", "Node name for S&R": "CLIPVisionEncode"}, "widgets_values": ["center"]}, {"id": 6, "type": "Hunyuan3Dv2Conditioning", "pos": [510, -280], "size": [217.82578125, 46], "flags": {}, "order": 3, "mode": 0, "inputs": [{"localized_name": "clip_vision_output", "name": "clip_vision_output", "type": "CLIP_VISION_OUTPUT", "link": 22}], "outputs": [{"localized_name": "positive", "name": "positive", "type": "CONDITIONING", "links": [5]}, {"localized_name": "negative", "name": "negative", "type": "CONDITIONING", "links": [6]}], "properties": {"cnr_id": "comfy-core", "ver": "0.3.59", "Node name for S&R": "Hunyuan3Dv2Conditioning"}, "widgets_values": []}, {"id": 4, "type": "EmptyLatentHunyuan3Dv2", "pos": [450, -180], "size": [270, 82], "flags": {}, "order": 0, "mode": 0, "inputs": [{"localized_name": "resolution", "name": "resolution", "type": "INT", "widget": {"name": "resolution"}, "link": null}, {"localized_name": "batch_size", "name": "batch_size", "type": "INT", "widget": {"name": "batch_size"}, "link": null}], "outputs": [{"localized_name": "LATENT", "name": "LATENT", "type": "LATENT", "links": [7]}], "properties": {"cnr_id": "comfy-core", "ver": "0.3.59", "Node name for S&R": "EmptyLatentHunyuan3Dv2"}, "widgets_values": [4096, 1]}, {"id": 9, "type": "VoxelToMesh", "pos": [760, -40], "size": [270, 82], "flags": {}, "order": 6, "mode": 0, "inputs": [{"localized_name": "voxel", "name": "voxel", "type": "VOXEL", "link": 10}, {"localized_name": "algorithm", "name": "algorithm", "type": "COMBO", "widget": {"name": "algorithm"}, "link": null}, {"localized_name": "threshold", "name": "threshold", "type": "FLOAT", "widget": {"name": "threshold"}, "link": null}], "outputs": [{"localized_name": "MESH", "name": "MESH", "type": "MESH", "links": [11]}], "properties": {"cnr_id": "comfy-core", "ver": "0.3.59", "Node name for S&R": "VoxelToMesh"}, "widgets_values": ["surface net", 0.6]}, {"id": 8, "type": "VAEDecodeHunyuan3D", "pos": [760, -200], "size": [270, 102], "flags": {}, "order": 5, "mode": 0, "inputs": [{"localized_name": "samples", "name": "samples", "type": "LATENT", "link": 8}, {"localized_name": "vae", "name": "vae", "type": "VAE", "link": 18}, {"localized_name": "num_chunks", "name": "num_chunks", "type": "INT", "widget": {"name": "num_chunks"}, "link": null}, {"localized_name": "octree_resolution", "name": "octree_resolution", "type": "INT", "widget": {"name": "octree_resolution"}, "link": null}], "outputs": [{"localized_name": "VOXEL", "name": "VOXEL", "type": "VOXEL", "links": [10]}], "properties": {"cnr_id": "comfy-core", "ver": "0.3.59", "Node name for S&R": "VAEDecodeHunyuan3D"}, "widgets_values": [8000, 256]}, {"id": 1, "type": "ImageOnlyCheckpointLoader", "pos": [60, -510], "size": [356.0005859375, 100], "flags": {}, "order": 1, "mode": 0, "inputs": [{"localized_name": "ckpt_name", "name": "ckpt_name", "type": "COMBO", "widget": {"name": "ckpt_name"}, "link": 23}], "outputs": [{"localized_name": "MODEL", "name": "MODEL", "type": "MODEL", "links": [16]}, {"localized_name": "CLIP_VISION", "name": "CLIP_VISION", "type": "CLIP_VISION", "links": [20]}, {"localized_name": "VAE", "name": "VAE", "type": "VAE", "links": [18]}], "properties": {"cnr_id": "comfy-core", "ver": "0.3.59", "Node name for S&R": "ImageOnlyCheckpointLoader", "models": [{"name": "hunyuan_3d_v2.1.safetensors", "url": "https://huggingface.co/Comfy-Org/hunyuan3D_2.1_repackaged/resolve/main/hunyuan_3d_v2.1.safetensors", "directory": "checkpoints"}]}, "widgets_values": ["hunyuan_3d_v2.1.safetensors"]}, {"id": 3, "type": "ModelSamplingAuraFlow", "pos": [450, -510], "size": [270, 58], "flags": {}, "order": 2, "mode": 0, "inputs": [{"localized_name": "model", "name": "model", "type": "MODEL", "link": 16}, {"localized_name": "shift", "name": "shift", "type": "FLOAT", "widget": {"name": "shift"}, "link": null}], "outputs": [{"localized_name": "MODEL", "name": "MODEL", "type": "MODEL", "links": [19]}], "properties": {"cnr_id": "comfy-core", "ver": "0.3.59", "Node name for S&R": "ModelSamplingAuraFlow"}, "widgets_values": [1]}], "groups": [], "links": [{"id": 16, "origin_id": 1, "origin_slot": 0, "target_id": 3, "target_slot": 0, "type": "MODEL"}, {"id": 19, "origin_id": 3, "origin_slot": 0, "target_id": 7, "target_slot": 0, "type": "MODEL"}, {"id": 5, "origin_id": 6, "origin_slot": 0, "target_id": 7, "target_slot": 1, "type": "CONDITIONING"}, {"id": 6, "origin_id": 6, "origin_slot": 1, "target_id": 7, "target_slot": 2, "type": "CONDITIONING"}, {"id": 7, "origin_id": 4, "origin_slot": 0, "target_id": 7, "target_slot": 3, "type": "LATENT"}, {"id": 8, "origin_id": 7, "origin_slot": 0, "target_id": 8, "target_slot": 0, "type": "LATENT"}, {"id": 18, "origin_id": 1, "origin_slot": 2, "target_id": 8, "target_slot": 1, "type": "VAE"}, {"id": 10, "origin_id": 8, "origin_slot": 0, "target_id": 9, "target_slot": 0, "type": "VOXEL"}, {"id": 20, "origin_id": 1, "origin_slot": 1, "target_id": 13, "target_slot": 0, "type": "CLIP_VISION"}, {"id": 22, "origin_id": 13, "origin_slot": 0, "target_id": 6, "target_slot": 0, "type": "CLIP_VISION_OUTPUT"}, {"id": 21, "origin_id": -10, "origin_slot": 0, "target_id": 13, "target_slot": 1, "type": "IMAGE"}, {"id": 11, "origin_id": 9, "origin_slot": 0, "target_id": -20, "target_slot": 0, "type": "MESH"}, {"id": 23, "origin_id": -10, "origin_slot": 1, "target_id": 1, "target_slot": 0, "type": "COMBO"}], "extra": {"workflowRendererVersion": "LG"}, "category": "3D/Image to 3D Model"}]}, "config": {}, "extra": {"ds": {"scale": 0.620921323059155, "offset": [1636.2881100217016, 965.23503257945]}, "workflowRendererVersion": "LG"}, "version": 0.4}
+{
+  "id": "8fe311ec-2147-47a8-b618-7bd6fb6d4f9d",
+  "revision": 0,
+  "last_node_id": 23,
+  "last_link_id": 24,
+  "nodes": [
+    {
+      "id": 19,
+      "type": "feb7d184-edf3-4851-9fd6-57a92c00ec42",
+      "pos": [
+        277.7327250391088,
+        256.4066470374603
+      ],
+      "size": [
+        340,
+        70
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "ckpt_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "ckpt_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "MESH",
+          "name": "MESH",
+          "type": "MESH",
+          "links": []
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "-1",
+            "ckpt_name"
+          ]
+        ],
+        "cnr_id": "comfy-core",
+        "ver": "0.3.65"
+      },
+      "widgets_values": [
+        "hunyuan_3d_v2.1.safetensors"
+      ]
+    }
+  ],
+  "links": [],
+  "groups": [],
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "feb7d184-edf3-4851-9fd6-57a92c00ec42",
+        "version": 1,
+        "state": {
+          "lastGroupId": 2,
+          "lastNodeId": 23,
+          "lastLinkId": 24,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Image to 3D Model (Hunyuan3d 2.1)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            -138.94803619384766,
+            -392.62060546875,
+            120,
+            80
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            1090,
+            -310,
+            120,
+            60
+          ]
+        },
+        "inputs": [
+          {
+            "id": "ab9b5b83-88f9-4698-954d-93f644bd07aa",
+            "name": "image",
+            "type": "IMAGE",
+            "linkIds": [
+              21
+            ],
+            "localized_name": "image",
+            "pos": [
+              -38.948036193847656,
+              -372.62060546875
+            ]
+          },
+          {
+            "id": "e15b0ba4-b5fe-41eb-9266-006ce1f1cf79",
+            "name": "ckpt_name",
+            "type": "COMBO",
+            "linkIds": [
+              23
+            ],
+            "pos": [
+              -38.948036193847656,
+              -352.62060546875
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "c8744662-e812-49b3-8bc8-744d557db6d6",
+            "name": "MESH",
+            "type": "MESH",
+            "linkIds": [
+              11
+            ],
+            "localized_name": "MESH",
+            "pos": [
+              1110,
+              -290
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 7,
+            "type": "KSampler",
+            "pos": [
+              760,
+              -510
+            ],
+            "size": [
+              270,
+              262
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 19
+              },
+              {
+                "localized_name": "positive",
+                "name": "positive",
+                "type": "CONDITIONING",
+                "link": 5
+              },
+              {
+                "localized_name": "negative",
+                "name": "negative",
+                "type": "CONDITIONING",
+                "link": 6
+              },
+              {
+                "localized_name": "latent_image",
+                "name": "latent_image",
+                "type": "LATENT",
+                "link": 7
+              },
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "steps",
+                "name": "steps",
+                "type": "INT",
+                "widget": {
+                  "name": "steps"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "cfg",
+                "name": "cfg",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "cfg"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "sampler_name",
+                "name": "sampler_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "sampler_name"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "scheduler",
+                "name": "scheduler",
+                "type": "COMBO",
+                "widget": {
+                  "name": "scheduler"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "denoise",
+                "name": "denoise",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "denoise"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "links": [
+                  8
+                ]
+              }
+            ],
+            "properties": {
+              "cnr_id": "comfy-core",
+              "ver": "0.3.59",
+              "Node name for S&R": "KSampler"
+            },
+            "widgets_values": [
+              894796671366012,
+              "randomize",
+              30,
+              5,
+              "euler",
+              "normal",
+              1
+            ]
+          },
+          {
+            "id": 13,
+            "type": "CLIPVisionEncode",
+            "pos": [
+              450,
+              -410
+            ],
+            "size": [
+              270,
+              80
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip_vision",
+                "name": "clip_vision",
+                "type": "CLIP_VISION",
+                "link": 20
+              },
+              {
+                "localized_name": "image",
+                "name": "image",
+                "type": "IMAGE",
+                "link": 21
+              },
+              {
+                "localized_name": "crop",
+                "name": "crop",
+                "type": "COMBO",
+                "widget": {
+                  "name": "crop"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CLIP_VISION_OUTPUT",
+                "name": "CLIP_VISION_OUTPUT",
+                "type": "CLIP_VISION_OUTPUT",
+                "links": [
+                  22
+                ]
+              }
+            ],
+            "properties": {
+              "cnr_id": "comfy-core",
+              "ver": "0.3.59",
+              "Node name for S&R": "CLIPVisionEncode"
+            },
+            "widgets_values": [
+              "center"
+            ]
+          },
+          {
+            "id": 6,
+            "type": "Hunyuan3Dv2Conditioning",
+            "pos": [
+              510,
+              -280
+            ],
+            "size": [
+              217.82578125,
+              46
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip_vision_output",
+                "name": "clip_vision_output",
+                "type": "CLIP_VISION_OUTPUT",
+                "link": 22
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "positive",
+                "name": "positive",
+                "type": "CONDITIONING",
+                "links": [
+                  5
+                ]
+              },
+              {
+                "localized_name": "negative",
+                "name": "negative",
+                "type": "CONDITIONING",
+                "links": [
+                  6
+                ]
+              }
+            ],
+            "properties": {
+              "cnr_id": "comfy-core",
+              "ver": "0.3.59",
+              "Node name for S&R": "Hunyuan3Dv2Conditioning"
+            },
+            "widgets_values": []
+          },
+          {
+            "id": 4,
+            "type": "EmptyLatentHunyuan3Dv2",
+            "pos": [
+              450,
+              -180
+            ],
+            "size": [
+              270,
+              82
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "resolution",
+                "name": "resolution",
+                "type": "INT",
+                "widget": {
+                  "name": "resolution"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "widget": {
+                  "name": "batch_size"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "links": [
+                  7
+                ]
+              }
+            ],
+            "properties": {
+              "cnr_id": "comfy-core",
+              "ver": "0.3.59",
+              "Node name for S&R": "EmptyLatentHunyuan3Dv2"
+            },
+            "widgets_values": [
+              4096,
+              1
+            ]
+          },
+          {
+            "id": 9,
+            "type": "VoxelToMesh",
+            "pos": [
+              760,
+              -40
+            ],
+            "size": [
+              270,
+              82
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "voxel",
+                "name": "voxel",
+                "type": "VOXEL",
+                "link": 10
+              },
+              {
+                "localized_name": "algorithm",
+                "name": "algorithm",
+                "type": "COMBO",
+                "widget": {
+                  "name": "algorithm"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "threshold",
+                "name": "threshold",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "threshold"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MESH",
+                "name": "MESH",
+                "type": "MESH",
+                "links": [
+                  11
+                ]
+              }
+            ],
+            "properties": {
+              "cnr_id": "comfy-core",
+              "ver": "0.3.59",
+              "Node name for S&R": "VoxelToMesh"
+            },
+            "widgets_values": [
+              "surface net",
+              0.6
+            ]
+          },
+          {
+            "id": 8,
+            "type": "VAEDecodeHunyuan3D",
+            "pos": [
+              760,
+              -200
+            ],
+            "size": [
+              270,
+              102
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "samples",
+                "name": "samples",
+                "type": "LATENT",
+                "link": 8
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 18
+              },
+              {
+                "localized_name": "num_chunks",
+                "name": "num_chunks",
+                "type": "INT",
+                "widget": {
+                  "name": "num_chunks"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "octree_resolution",
+                "name": "octree_resolution",
+                "type": "INT",
+                "widget": {
+                  "name": "octree_resolution"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "VOXEL",
+                "name": "VOXEL",
+                "type": "VOXEL",
+                "links": [
+                  10
+                ]
+              }
+            ],
+            "properties": {
+              "cnr_id": "comfy-core",
+              "ver": "0.3.59",
+              "Node name for S&R": "VAEDecodeHunyuan3D"
+            },
+            "widgets_values": [
+              8000,
+              256
+            ]
+          },
+          {
+            "id": 1,
+            "type": "ImageOnlyCheckpointLoader",
+            "pos": [
+              60,
+              -510
+            ],
+            "size": [
+              356.0005859375,
+              100
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "ckpt_name",
+                "name": "ckpt_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "ckpt_name"
+                },
+                "link": 23
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  16
+                ]
+              },
+              {
+                "localized_name": "CLIP_VISION",
+                "name": "CLIP_VISION",
+                "type": "CLIP_VISION",
+                "links": [
+                  20
+                ]
+              },
+              {
+                "localized_name": "VAE",
+                "name": "VAE",
+                "type": "VAE",
+                "links": [
+                  18
+                ]
+              }
+            ],
+            "properties": {
+              "cnr_id": "comfy-core",
+              "ver": "0.3.59",
+              "Node name for S&R": "ImageOnlyCheckpointLoader",
+              "models": [
+                {
+                  "name": "hunyuan_3d_v2.1.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/hunyuan3D_2.1_repackaged/resolve/main/hunyuan_3d_v2.1.safetensors",
+                  "directory": "checkpoints"
+                }
+              ]
+            },
+            "widgets_values": [
+              "hunyuan_3d_v2.1.safetensors"
+            ]
+          },
+          {
+            "id": 3,
+            "type": "ModelSamplingAuraFlow",
+            "pos": [
+              450,
+              -510
+            ],
+            "size": [
+              270,
+              58
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 16
+              },
+              {
+                "localized_name": "shift",
+                "name": "shift",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "shift"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  19
+                ]
+              }
+            ],
+            "properties": {
+              "cnr_id": "comfy-core",
+              "ver": "0.3.59",
+              "Node name for S&R": "ModelSamplingAuraFlow"
+            },
+            "widgets_values": [
+              1
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 16,
+            "origin_id": 1,
+            "origin_slot": 0,
+            "target_id": 3,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 19,
+            "origin_id": 3,
+            "origin_slot": 0,
+            "target_id": 7,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 5,
+            "origin_id": 6,
+            "origin_slot": 0,
+            "target_id": 7,
+            "target_slot": 1,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 6,
+            "origin_id": 6,
+            "origin_slot": 1,
+            "target_id": 7,
+            "target_slot": 2,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 7,
+            "origin_id": 4,
+            "origin_slot": 0,
+            "target_id": 7,
+            "target_slot": 3,
+            "type": "LATENT"
+          },
+          {
+            "id": 8,
+            "origin_id": 7,
+            "origin_slot": 0,
+            "target_id": 8,
+            "target_slot": 0,
+            "type": "LATENT"
+          },
+          {
+            "id": 18,
+            "origin_id": 1,
+            "origin_slot": 2,
+            "target_id": 8,
+            "target_slot": 1,
+            "type": "VAE"
+          },
+          {
+            "id": 10,
+            "origin_id": 8,
+            "origin_slot": 0,
+            "target_id": 9,
+            "target_slot": 0,
+            "type": "VOXEL"
+          },
+          {
+            "id": 20,
+            "origin_id": 1,
+            "origin_slot": 1,
+            "target_id": 13,
+            "target_slot": 0,
+            "type": "CLIP_VISION"
+          },
+          {
+            "id": 22,
+            "origin_id": 13,
+            "origin_slot": 0,
+            "target_id": 6,
+            "target_slot": 0,
+            "type": "CLIP_VISION_OUTPUT"
+          },
+          {
+            "id": 21,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 13,
+            "target_slot": 1,
+            "type": "IMAGE"
+          },
+          {
+            "id": 11,
+            "origin_id": 9,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "MESH"
+          },
+          {
+            "id": 23,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 1,
+            "target_slot": 0,
+            "type": "COMBO"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "3D/Image to 3D Model",
+        "description": "Generates 3D mesh models from a single input image using Hunyuan3D 2.0/2.1."
+      }
+    ]
+  },
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.620921323059155,
+      "offset": [
+        1636.2881100217016,
+        965.23503257945
+      ]
+    },
+    "workflowRendererVersion": "LG"
+  },
+  "version": 0.4
+}

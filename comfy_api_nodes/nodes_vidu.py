@@ -38,7 +38,7 @@ async def execute_task(
     cls: type[IO.ComfyNode],
     vidu_endpoint: str,
     payload: TaskCreationRequest | TaskExtendCreationRequest | TaskMultiFrameCreationRequest,
-    max_poll_attempts: int = 320,
+    max_poll_attempts: int = 480,
 ) -> list[TaskResult]:
     task_creation_response = await sync_op(
         cls,
@@ -71,7 +71,7 @@ class ViduTextToVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="ViduTextToVideoNode",
             display_name="Vidu Text To Video Generation",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Generate video from a text prompt",
             inputs=[
                 IO.Combo.Input("model", options=["viduq1"], tooltip="Model name"),
@@ -169,7 +169,7 @@ class ViduImageToVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="ViduImageToVideoNode",
             display_name="Vidu Image To Video Generation",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Generate video from image and optional prompt",
             inputs=[
                 IO.Combo.Input("model", options=["viduq1"], tooltip="Model name"),
@@ -273,7 +273,7 @@ class ViduReferenceVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="ViduReferenceVideoNode",
             display_name="Vidu Reference To Video Generation",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Generate video from multiple images and a prompt",
             inputs=[
                 IO.Combo.Input("model", options=["viduq1"], tooltip="Model name"),
@@ -388,7 +388,7 @@ class ViduStartEndToVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="ViduStartEndToVideoNode",
             display_name="Vidu Start End To Video Generation",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Generate a video from start and end frames and a prompt",
             inputs=[
                 IO.Combo.Input("model", options=["viduq1"], tooltip="Model name"),
@@ -492,7 +492,7 @@ class Vidu2TextToVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="Vidu2TextToVideoNode",
             display_name="Vidu2 Text-to-Video Generation",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Generate video from a text prompt",
             inputs=[
                 IO.Combo.Input("model", options=["viduq2"]),
@@ -584,7 +584,7 @@ class Vidu2ImageToVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="Vidu2ImageToVideoNode",
             display_name="Vidu2 Image-to-Video Generation",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Generate a video from an image and an optional prompt.",
             inputs=[
                 IO.Combo.Input("model", options=["viduq2-pro-fast", "viduq2-pro", "viduq2-turbo"]),
@@ -714,7 +714,7 @@ class Vidu2ReferenceVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="Vidu2ReferenceVideoNode",
             display_name="Vidu2 Reference-to-Video Generation",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Generate a video from multiple reference images and a prompt.",
             inputs=[
                 IO.Combo.Input("model", options=["viduq2"]),
@@ -849,7 +849,7 @@ class Vidu2StartEndToVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="Vidu2StartEndToVideoNode",
             display_name="Vidu2 Start/End Frame-to-Video Generation",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Generate a video from a start frame, an end frame, and a prompt.",
             inputs=[
                 IO.Combo.Input("model", options=["viduq2-pro-fast", "viduq2-pro", "viduq2-turbo"]),
@@ -969,7 +969,7 @@ class ViduExtendVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="ViduExtendVideoNode",
             display_name="Vidu Video Extension",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Extend an existing video by generating additional frames.",
             inputs=[
                 IO.DynamicCombo.Input(
@@ -1097,7 +1097,6 @@ class ViduExtendVideoNode(IO.ComfyNode):
                 video_url=await upload_video_to_comfyapi(cls, video, wait_label="Uploading video"),
                 images=[image_url] if image_url else None,
             ),
-            max_poll_attempts=480,
         )
         return IO.NodeOutput(await download_url_to_video_output(results[0].url))
 
@@ -1139,7 +1138,7 @@ class ViduMultiFrameVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="ViduMultiFrameVideoNode",
             display_name="Vidu Multi-Frame Video Generation",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Generate a video with multiple keyframe transitions.",
             inputs=[
                 IO.Combo.Input("model", options=["viduq2-pro", "viduq2-turbo"]),
@@ -1285,7 +1284,7 @@ class Vidu3TextToVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="Vidu3TextToVideoNode",
             display_name="Vidu Q3 Text-to-Video Generation",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Generate video from a text prompt.",
             inputs=[
                 IO.DynamicCombo.Input(
@@ -1430,7 +1429,7 @@ class Vidu3ImageToVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="Vidu3ImageToVideoNode",
             display_name="Vidu Q3 Image-to-Video Generation",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Generate a video from an image and an optional prompt.",
             inputs=[
                 IO.DynamicCombo.Input(
@@ -1572,7 +1571,7 @@ class Vidu3StartEndToVideoNode(IO.ComfyNode):
         return IO.Schema(
             node_id="Vidu3StartEndToVideoNode",
             display_name="Vidu Q3 Start/End Frame-to-Video Generation",
-            category="api node/video/Vidu",
+            category="partner/video/Vidu",
             description="Generate a video from a start frame, an end frame, and a prompt.",
             inputs=[
                 IO.DynamicCombo.Input(

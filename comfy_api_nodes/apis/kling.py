@@ -149,3 +149,59 @@ class MotionControlRequest(BaseModel):
     character_orientation: str = Field(...)
     mode: str = Field(..., description="'pro' or 'std'")
     model_name: str = Field(...)
+
+
+class Kling3TurboSettings(BaseModel):
+    resolution: str = Field("720p", description="'720p' or '1080p'")
+    aspect_ratio: str | None = Field(None, description="'16:9'/'9:16'/'1:1'; text-to-video only")
+    duration: int = Field(5, description="3-15 second")
+
+
+class Kling3TurboText2VideoRequest(BaseModel):
+    prompt: str = Field(..., description="<=3072 chars; may use multi-shot 'shot n, m, words; ...'")
+    settings: Kling3TurboSettings | None = Field(None)
+
+
+class Kling3TurboContent(BaseModel):
+    type: str = Field(..., description="'prompt' or 'first_frame'")
+    text: str | None = Field(None, description="for type=prompt; <=2500 chars")
+    url: str | None = Field(None, description="for type=first_frame")
+
+
+class Kling3TurboImage2VideoRequest(BaseModel):
+    contents: list[Kling3TurboContent] = Field(..., description="prompt + first_frame materials")
+    settings: Kling3TurboSettings | None = Field(None)
+
+
+class Kling3TurboCreateData(BaseModel):
+    id: str | None = Field(None, description="Task ID")
+    status: str | None = Field(None)
+    message: str | None = Field(None)
+
+
+class Kling3TurboCreateResponse(BaseModel):
+    code: int | None = Field(None)
+    message: str | None = Field(None)
+    request_id: str | None = Field(None)
+    data: Kling3TurboCreateData | None = Field(None)
+
+
+class Kling3TurboOutput(BaseModel):
+    type: str | None = Field(None, description="'video', 'image', 'audio', ...")
+    id: str | None = Field(None)
+    url: str | None = Field(None)
+    duration: str | None = Field(None)
+
+
+class Kling3TurboTaskData(BaseModel):
+    id: str | None = Field(None)
+    status: str | None = Field(None, description="submitted | processing | succeeded | failed")
+    message: str | None = Field(None)
+    outputs: list[Kling3TurboOutput] | None = Field(None)
+
+
+class Kling3TurboQueryResponse(BaseModel):
+    code: int | None = Field(None)
+    message: str | None = Field(None)
+    request_id: str | None = Field(None)
+    data: list[Kling3TurboTaskData] | None = Field(None)

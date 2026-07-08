@@ -67,7 +67,7 @@ class InternalRoutes:
                 (entry for entry in os.scandir(directory) if is_visible_file(entry)),
                 key=lambda entry: -entry.stat().st_mtime
             )
-            return web.json_response([entry.name for entry in sorted_files], status=200)
+            return web.json_response([f"{entry.name} [{directory_type}]" for entry in sorted_files], status=200)
 
 
     def get_app(self):
