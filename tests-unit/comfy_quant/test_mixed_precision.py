@@ -17,7 +17,8 @@ if not has_gpu():
     args.cpu = True
 
 from comfy import ops
-from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor
+from comfy.model_patcher import ModelPatcher
+from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor, TensorCoreFP8E4M3Layout
 import comfy.utils
 
 
@@ -443,6 +444,36 @@ class TestMixedPrecisionOps(unittest.TestCase):
         self.assertEqual(saved_conf["convrot_groupsize"], 256)
         self.assertEqual(saved_conf["linear_dtype"], "int8")
         self.assertNotIn("quant_group_size", saved_conf)
+
+    def test_get_key_patches_skips_only_quantized_weight_pieces(self):
+        operations = ops.mixed_precision_ops(compute_dtype=torch.float32)
+        model = torch.nn.Module()
+        model.linear = operations.Linear(4, 4, bias=False, device="cpu")
+        qdata, params = TensorCoreFP8E4M3Layout.quantize(
+            torch.ones(4, 4), scale="recalculate"
+        )
+        model.linear.quant_format = "float8_e4m3fn"
+        model.linear.layout_type = "TensorCoreFP8E4M3Layout"
+        model.linear.weight = torch.nn.Parameter(
+            QuantizedTensor(qdata, model.linear.layout_type, params),
+            requires_grad=False,
+        )
+        model.linear.input_scale = torch.nn.Parameter(
+            torch.tensor(0.125), requires_grad=False
+        )
+        model.linear_alias = model.linear
+
+        patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+
+        self.assertEqual(
+            set(patcher.get_key_patches()),
+            {
+                "linear.weight",
+                "linear.input_scale",
+                "linear_alias.weight",
+                "linear_alias.input_scale",
+            },
+        )
 
 if __name__ == "__main__":
     unittest.main()
