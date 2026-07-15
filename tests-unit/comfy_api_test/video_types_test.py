@@ -5,10 +5,13 @@ import os
 import av
 import io
 from fractions import Fraction
+import numpy as np
+
 from comfy_api.input_impl.video_types import VideoFromFile, VideoFromComponents
-from comfy_api.util.video_types import VideoComponents
+from comfy_api.util.video_types import VideoComponents, VideoContainer, VideoCodec
 from comfy_api.input.basic_types import AudioInput
 from av.error import InvalidDataError
+from av.codec import CodecContext
 
 EPSILON = 0.0001
 
@@ -237,3 +240,70 @@ def test_duration_consistency(video_components):
     manual_duration = float(components.images.shape[0] / components.frame_rate)
 
     assert duration == pytest.approx(manual_duration)
+
+
+def _make_webm_vp9_with_alpha(width=32, height=32, frames=5, fps=10) -> bytes:
+    buf = io.BytesIO()
+    with av.open(buf, mode="w", format="webm") as container:
+        stream = container.add_stream("libvpx-vp9", rate=fps)
+        stream.width = width
+        stream.height = height
+        stream.pix_fmt = "yuva420p"
+        for i in range(frames):
+            rgba = np.zeros((height, width, 4), dtype=np.uint8)
+            rgba[..., 0] = 200
+            rgba[..., 1] = 50 + i * 30
+            rgba[..., 2] = 80
+            rgba[..., 3] = (i + 1) * 50
+            frame = av.VideoFrame.from_ndarray(rgba, format="rgba")
+            frame = frame.reformat(format="yuva420p")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+    return buf.getvalue()
+
+
+def _per_frame_alpha_means_libvpx(source) -> list:
+    means = []
+    with av.open(source, mode="r") as container:
+        stream = container.streams.video[0]
+        decoder = CodecContext.create("libvpx-vp9", "r")
+        for packet in container.demux(stream):
+            for frame in decoder.decode(packet):
+                rgba = frame.to_ndarray(format="rgba")
+                means.append(float(rgba[..., 3].mean()))
+        try:
+            for frame in decoder.decode(None):
+                rgba = frame.to_ndarray(format="rgba")
+                means.append(float(rgba[..., 3].mean()))
+        except EOFError:
+            pass
+    return means
+
+
+def test_video_from_file_save_to_bytesio_stream_copies_vp9_alpha():
+    """VideoFromFile.save_to(BytesIO, format=AUTO, codec=AUTO) stream-copies the source
+    container/codec without re-encoding, so a WebM/VP9 file with an alpha plane
+    round-trips unchanged. Note: this covers ONLY the in-memory BytesIO path. Saving
+    to a .mp4 file (SaveVideo's default extension) muxes VP9 into MP4 and drops the
+    alpha plane -- intentionally not covered here; see PR notes."""
+    raw = _make_webm_vp9_with_alpha()
+    original_means = _per_frame_alpha_means_libvpx(io.BytesIO(raw))
+    assert len(original_means) > 0, "test fixture failed to produce frames"
+    assert original_means == sorted(original_means), (
+        "test fixture alpha did not encode as monotonically increasing"
+    )
+
+    video = VideoFromFile(io.BytesIO(raw))
+    out_buf = io.BytesIO()
+    video.save_to(out_buf, format=VideoContainer.AUTO, codec=VideoCodec.AUTO)
+
+    out_buf.seek(0)
+    saved_means = _per_frame_alpha_means_libvpx(out_buf)
+
+    assert len(saved_means) == len(original_means)
+    for original, saved in zip(original_means, saved_means):
+        assert original == pytest.approx(saved, abs=EPSILON), (
+            f"alpha lost across stream-copy round-trip: {original} -> {saved}"
+        )
