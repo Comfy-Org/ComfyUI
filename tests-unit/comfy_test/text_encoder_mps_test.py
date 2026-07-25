@@ -8,9 +8,14 @@ stay on the CPU because MPS cannot cast float8 dtypes.
 import pytest
 import torch
 
-import comfy.model_management as mm
-import comfy.ops
-import comfy.sd
+from comfy.cli_args import args as cli_args
+
+if not (torch.cuda.is_available() or torch.backends.mps.is_available()):
+    cli_args.cpu = True
+
+import comfy.model_management as mm  # noqa: E402
+import comfy.ops  # noqa: E402
+import comfy.sd  # noqa: E402
 
 mps_only = pytest.mark.skipif(
     not (torch.backends.mps.is_available() and mm.is_device_mps(mm.get_torch_device())),
@@ -24,13 +29,15 @@ LARGE_PARAM_COUNT = 2 * 1024 * 1024 * 1024
 
 
 class DummyTokenizer:
-    def __init__(self, embedding_directory=None, tokenizer_data={}):
+    def __init__(self, embedding_directory=None, tokenizer_data=None):
         pass
 
 
 class DummyTEModel(torch.nn.Module):
-    def __init__(self, device=None, dtype=None, model_options={}):
+    def __init__(self, device=None, dtype=None, model_options=None):
         super().__init__()
+        if model_options is None:
+            model_options = {}
         operations = model_options.get("custom_operations", comfy.ops.manual_cast)
         self.linear = operations.Linear(8, 8, dtype=dtype, device=device)
         self.dtypes = set([dtype])
@@ -43,7 +50,10 @@ class DummyTEModel(torch.nn.Module):
         return self.linear(x)
 
 
-def make_clip(dtype, state_dict=[], clip_class=DummyTEModel):
+def make_clip(dtype, state_dict=None, clip_class=DummyTEModel):
+    if state_dict is None:
+        state_dict = []
+
     class Target:
         params = {}
         clip = clip_class
@@ -122,7 +132,7 @@ class TestTextEncoderDeviceMPS:
         # A secondary declared dtype (e.g. dtype_llama) can be fp8 while the
         # primary dtype is fp16.
         class MixedDtypeTEModel(DummyTEModel):
-            def __init__(self, device=None, dtype=None, model_options={}):
+            def __init__(self, device=None, dtype=None, model_options=None):
                 super().__init__(device=device, dtype=dtype, model_options=model_options)
                 self.dtypes = set([dtype, fp8_dtype])
 
@@ -135,8 +145,8 @@ class TestTextEncoderDeviceMPS:
         # If a torch release adds fp8 casts on MPS, supports_cast() can be
         # updated to let fp8 text encoders onto the GPU (pytorch#132624).
         assert not mm.supports_cast(mm.get_torch_device(), fp8_dtype)
-        t = torch.zeros(4, dtype=fp8_dtype, device="mps")
         with pytest.raises((RuntimeError, TypeError)):
+            t = torch.zeros(4, dtype=fp8_dtype, device="mps")
             t.to(torch.float16)
 
 
