@@ -40,6 +40,7 @@ from comfy_execution.graph import (
     get_input_info,
 )
 from comfy_execution.graph_utils import GraphBuilder, is_link
+from comfy_execution.node_inputs import get_finalized_inputs, is_v3_node
 from comfy_execution.validation import LoopValidationError, validate_loops, validate_node_input
 from comfy_execution.progress import get_progress_state, reset_progress_state, add_progress_handler, WebUIProgressHandler
 from comfy_execution.utils import CurrentNodeContext
@@ -161,12 +162,12 @@ class CacheSet:
 SENSITIVE_EXTRA_DATA_KEYS = ("auth_token_comfy_org", "api_key_comfy_org")
 
 def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=None, extra_data={}):
-    is_v3 = issubclass(class_def, _ComfyNodeInternal)
+    is_v3 = is_v3_node(class_def)
     v3_data: io.V3Data = {}
     hidden_inputs_v3 = {}
     valid_inputs = class_def.INPUT_TYPES()
     if is_v3:
-        valid_inputs, hidden, v3_data = _io.get_finalized_class_inputs(valid_inputs, inputs)
+        valid_inputs, hidden, v3_data = get_finalized_inputs(class_def, inputs, valid_inputs)
     input_data_all = {}
     missing_keys = {}
     for x in inputs:
@@ -877,10 +878,9 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
     v3_data = None
     validate_function_inputs = []
     validate_has_kwargs = False
-    if issubclass(obj_class, _ComfyNodeInternal):
+    if is_v3_node(obj_class):
         obj_class: _io._ComfyNodeBaseInternal
-        class_inputs = obj_class.INPUT_TYPES()
-        class_inputs, _, v3_data = _io.get_finalized_class_inputs(class_inputs, inputs)
+        class_inputs, _, v3_data = get_finalized_inputs(obj_class, inputs)
         validate_function_name = "validate_inputs"
         validate_function = first_real_override(obj_class, validate_function_name)
     else:
