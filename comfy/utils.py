@@ -1471,24 +1471,47 @@ def detect_layer_quantization(state_dict, prefix):
             return {"mixed_ops": True}
     return None
 
-def _resolve_quant_metadata_layer_key(state_dict, layer_key, model_prefix):
-    # Metadata layer keys may use the full diffusion-model prefix or the
-    # already-stripped form, so resolve them against the state dict.
-    if "{}.weight".format(layer_key) in state_dict:
-        return layer_key
-    if model_prefix:
-        if layer_key.startswith(model_prefix):
-            candidate = layer_key[len(model_prefix):]
-        else:
-            candidate = "{}{}".format(model_prefix, layer_key)
-        if "{}.weight".format(candidate) in state_dict:
-            return candidate
-    parts = layer_key.split(".")
-    for i in range(1, len(parts)):
-        candidate = ".".join(parts[i:])
-        if "{}.weight".format(candidate) in state_dict and "{}.comfy_quant".format(candidate) in state_dict:
-            return candidate
-    return layer_key
+def _resolve_quant_metadata_layer_keys(state_dict, layers, model_prefix):
+    resolved = {}
+    unresolved = []
+    for layer_key in layers:
+        candidates = []
+        if "{}.weight".format(layer_key) in state_dict:
+            candidates.append(layer_key)
+
+        if model_prefix:
+            if layer_key.startswith(model_prefix):
+                candidate = layer_key[len(model_prefix):]
+            else:
+                candidate = "{}{}".format(model_prefix, layer_key)
+            if "{}.weight".format(candidate) in state_dict and candidate not in candidates:
+                candidates.append(candidate)
+
+        if len(candidates) == 1:
+            resolved[layer_key] = candidates[0]
+        elif not candidates:
+            unresolved.append(layer_key)
+
+    if unresolved:
+        wrapper_resolutions = []
+        for wrapper in ("model.diffusion_model.", "model.model.", "model.", "net."):
+            if not all(k.startswith(wrapper) for k in unresolved):
+                continue
+            candidate_resolution = {k: k[len(wrapper):] for k in unresolved}
+            if all("{}.weight".format(k) in state_dict for k in candidate_resolution.values()):
+                wrapper_resolutions.append(candidate_resolution)
+        if len(wrapper_resolutions) == 1:
+            resolved.update(wrapper_resolutions[0])
+
+    targets = {}
+    for source, target in resolved.items():
+        targets.setdefault(target, []).append(source)
+    conflicts = {
+        target
+        for target, sources in targets.items()
+        if any(layers[source] != layers[sources[0]] for source in sources[1:])
+    }
+    return {source: target for source, target in resolved.items() if target not in conflicts}
 
 def convert_old_quants(state_dict, model_prefix="", metadata={}):
     if metadata is None:
@@ -1545,8 +1568,11 @@ def convert_old_quants(state_dict, model_prefix="", metadata={}):
 
     if quant_metadata is not None:
         layers = quant_metadata["layers"]
+        resolved_keys = _resolve_quant_metadata_layer_keys(state_dict, layers, model_prefix)
         for k, v in layers.items():
-            resolved_key = _resolve_quant_metadata_layer_key(state_dict, k, model_prefix)
+            resolved_key = resolved_keys.get(k)
+            if resolved_key is None:
+                continue
             marker_key = "{}.comfy_quant".format(resolved_key)
             marker = torch.tensor(list(json.dumps(v).encode('utf-8')), dtype=torch.uint8)
             if marker_key not in state_dict or not torch.equal(state_dict[marker_key], marker):

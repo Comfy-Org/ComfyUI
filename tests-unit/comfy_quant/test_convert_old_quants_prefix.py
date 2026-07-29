@@ -16,6 +16,7 @@ if not has_gpu():
 
 from comfy import ops
 from comfy.quant_ops import QuantizedTensor
+import comfy.model_detection
 import comfy.utils
 
 
@@ -235,6 +236,221 @@ class TestConvertOldQuantsPrefixAware(unittest.TestCase):
         self.assertIsInstance(model.layer1.weight, QuantizedTensor)
         self.assertEqual(model.layer1.weight._layout_cls, "TensorCoreFP8E4M3Layout")
         self.assertEqual(model.layer1.weight._params.scale.item(), 2.0)
+
+
+class TestResidualPrefixPoisoning(unittest.TestCase):
+    def test_real_world_aligned_prefixes_remain_unchanged(self):
+        for prefix in ("", "model.", "model.diffusion_model."):
+            with self.subTest(prefix=prefix):
+                layer = f"{prefix}block"
+                sd = {f"{layer}.weight": torch.empty(1)}
+                metadata = {
+                    "_quantization_metadata": json.dumps({
+                        "layers": {layer: {"format": "nvfp4"}}
+                    })
+                }
+
+                sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
+
+                self.assertIn(f"{layer}.comfy_quant", sd)
+
+    def test_prefixed_metadata_with_unprefixed_weights_survives_loader_flow(self):
+        for metadata_prefix in ("model.diffusion_model.", "model.model.", "model.", "net."):
+            for num_layers in (1, 5, 6, 10):
+                with self.subTest(metadata_prefix=metadata_prefix, num_layers=num_layers):
+                    sd = {}
+                    layers = {}
+                    for i in range(num_layers):
+                        sd[f"block{i}.weight"] = torch.randn(4, 4, dtype=torch.float32).to(torch.float8_e4m3fn)
+                        sd[f"block{i}.weight_scale"] = torch.tensor(1.0)
+                        layers[f"{metadata_prefix}block{i}"] = {"format": "float8_e4m3fn"}
+                    metadata = {"_quantization_metadata": json.dumps({"layers": layers})}
+
+                    sd, metadata = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
+                    prefix = comfy.model_detection.unet_prefix_from_state_dict(sd)
+                    temp_sd = comfy.utils.state_dict_prefix_replace(sd, {prefix: ""}, filter_keys=True)
+                    if temp_sd:
+                        sd = temp_sd
+                        sd, metadata = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
+
+                    self.assertEqual(sum(k.endswith(".weight") for k in sd), num_layers)
+                    for i in range(num_layers):
+                        self.assertIn(f"block{i}.comfy_quant", sd)
+                        self.assertNotIn(f"{metadata_prefix}block{i}.comfy_quant", sd)
+
+    def test_unique_weight_suffix_resolves_without_model_prefix(self):
+        sd = {"block.weight": torch.empty(1)}
+        metadata = {
+            "_quantization_metadata": json.dumps({
+                "layers": {"model.diffusion_model.block": {"format": "nvfp4"}}
+            })
+        }
+
+        sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
+
+        self.assertIn("block.comfy_quant", sd)
+        self.assertNotIn("model.diffusion_model.block.comfy_quant", sd)
+
+    def test_known_wrapper_does_not_overwrite_shorter_layer(self):
+        stale_marker = torch.tensor(
+            list(json.dumps({"format": "nvfp4"}).encode("utf-8")),
+            dtype=torch.uint8,
+        )
+        sd = {
+            "foo.bar.weight": torch.empty(1),
+            "bar.weight": torch.empty(1),
+            "bar.comfy_quant": stale_marker,
+        }
+        metadata = {
+            "_quantization_metadata": json.dumps({
+                "layers": {"model.foo.bar": {"format": "float8_e4m3fn"}}
+            })
+        }
+
+        sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
+
+        self.assertIs(sd["bar.comfy_quant"], stale_marker)
+        self.assertEqual(marker_json(sd, "foo.bar.comfy_quant"), {"format": "float8_e4m3fn"})
+        self.assertNotIn("model.foo.bar.comfy_quant", sd)
+
+    def test_multiple_metadata_layers_cannot_collapse_to_one_weight(self):
+        sd = {"block.weight": torch.empty(1)}
+        metadata = {
+            "_quantization_metadata": json.dumps({
+                "layers": {
+                    "model.a.block": {"format": "nvfp4"},
+                    "model.b.block": {"format": "float8_e4m3fn"},
+                }
+            })
+        }
+
+        sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
+
+        self.assertFalse(any(k.endswith(".comfy_quant") for k in sd))
+
+    def test_direct_and_known_wrapper_layers_can_coexist(self):
+        sd = {
+            "direct.weight": torch.empty(1),
+            "wrapped.weight": torch.empty(1),
+        }
+        metadata = {
+            "_quantization_metadata": json.dumps({
+                "layers": {
+                    "direct": {"format": "nvfp4"},
+                    "model.diffusion_model.wrapped": {"format": "float8_e4m3fn"},
+                }
+            })
+        }
+
+        sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
+
+        self.assertIn("direct.comfy_quant", sd)
+        self.assertIn("wrapped.comfy_quant", sd)
+
+    def test_direct_and_wrapper_collision_is_rejected(self):
+        sd = {"block.weight": torch.empty(1)}
+        metadata = {
+            "_quantization_metadata": json.dumps({
+                "layers": {
+                    "block": {"format": "nvfp4"},
+                    "model.diffusion_model.block": {"format": "float8_e4m3fn"},
+                }
+            })
+        }
+
+        sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
+
+        self.assertNotIn("block.comfy_quant", sd)
+
+    def test_direct_and_model_prefix_targets_are_not_guessed(self):
+        sd = {
+            "block.weight": torch.empty(1),
+            "model.diffusion_model.block.weight": torch.empty(1),
+        }
+        metadata = {
+            "_quantization_metadata": json.dumps({
+                "layers": {"block": {"format": "nvfp4"}}
+            })
+        }
+
+        sd, _ = comfy.utils.convert_old_quants(
+            sd,
+            "model.diffusion_model.",
+            metadata=metadata,
+        )
+
+        self.assertFalse(any(k.endswith(".comfy_quant") for k in sd))
+
+    def test_equivalent_full_and_stripped_metadata_aliases_are_coalesced(self):
+        prefix = "model.diffusion_model."
+        layer_config = {"format": "nvfp4"}
+        sd = {f"{prefix}block.weight": torch.empty(1)}
+        metadata = {
+            "_quantization_metadata": json.dumps({
+                "layers": {
+                    "block": layer_config,
+                    f"{prefix}block": layer_config,
+                }
+            })
+        }
+
+        sd, _ = comfy.utils.convert_old_quants(sd, prefix, metadata=metadata)
+
+        self.assertEqual(marker_json(sd, f"{prefix}block.comfy_quant"), layer_config)
+
+    def test_unmatched_metadata_does_not_create_orphan_marker(self):
+        sd = {"present.weight": torch.empty(1)}
+        metadata = {
+            "_quantization_metadata": json.dumps({
+                "layers": {"model.diffusion_model.missing": {"format": "nvfp4"}}
+            })
+        }
+
+        sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
+
+        self.assertEqual(set(sd), {"present.weight"})
+
+    def test_partial_payload_does_not_accept_one_accidental_metadata_match(self):
+        sd = {
+            "vocoder.weight": torch.empty(1),
+            "block7.weight": torch.empty(1),
+        }
+        layers = {
+            f"model.diffusion_model.block{i}": {"format": "nvfp4"}
+            for i in range(8)
+        }
+        metadata = {"_quantization_metadata": json.dumps({"layers": layers})}
+
+        sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
+
+        self.assertFalse(any(k.endswith(".comfy_quant") for k in sd))
+
+    def test_existing_marker_without_file_metadata_is_unchanged(self):
+        marker = torch.tensor(
+            list(json.dumps({"format": "nvfp4"}).encode("utf-8")),
+            dtype=torch.uint8,
+        )
+        sd = {
+            "block.weight": torch.empty(1),
+            "block.comfy_quant": marker,
+        }
+
+        sd, _ = comfy.utils.convert_old_quants(sd, "", metadata={})
+
+        self.assertIs(sd["block.comfy_quant"], marker)
+
+    def test_unprefixed_legacy_scaled_fp8_is_unchanged(self):
+        sd = {
+            "scaled_fp8": torch.tensor([0.0], dtype=torch.float32),
+            "block.weight": torch.randn(4, 4, dtype=torch.float32).to(torch.float8_e4m3fn),
+            "block.scale_weight": torch.tensor(2.0),
+        }
+
+        sd, _ = comfy.utils.convert_old_quants(sd, "", metadata={})
+
+        self.assertNotIn("scaled_fp8", sd)
+        self.assertIn("block.weight_scale", sd)
+        self.assertEqual(marker_json(sd, "block.comfy_quant"), {"format": "float8_e4m3fn"})
 
 
 if __name__ == "__main__":
