@@ -25,13 +25,13 @@ from app.assets.database.queries.records import (
 )
 from app.assets.helpers import normalize_tags, to_stored_hash
 from app.assets.services.file_utils import get_mtime_ns, get_size_and_mtime_ns
-from app.assets.services.image_dimensions import extract_image_dimensions
 from app.assets.services.lookup import (
     claim_qualified_content,
     lookup_for_from_hash,
     lookup_for_view,
     refresh_qualified_content,
 )
+from app.assets.services.media_metadata import extract_media_metadata
 from app.assets.services.metadata_extract import extract_file_metadata
 from app.assets.services.path_utils import (
     compute_loader_path,
@@ -65,8 +65,8 @@ def _extract_system_metadata_sync(
 ) -> dict[str, Any]:
     """Extract ``system_metadata`` at registration time (S29/D8).
 
-    Mirrors the ``scanner.enrich`` pass: tier-1/tier-2 file metadata plus image
-    dimensions for image MIME types, so records carry metadata at creation
+    Mirrors the ``scanner.enrich`` pass: tier-1/tier-2 file metadata plus media
+    metadata for image and video MIME types, so records carry metadata at creation
     instead of waiting for the background enrich pass to fill it.
     """
     metadata = extract_file_metadata(
@@ -75,10 +75,9 @@ def _extract_system_metadata_sync(
         relative_filename=compute_loader_path(locator),
     )
     system_metadata = metadata.to_user_metadata()
-    if mime_type and mime_type.startswith("image/"):
-        dims = extract_image_dimensions(locator, mime_type=mime_type)
-        if dims:
-            system_metadata.update(dims)
+    dims = extract_media_metadata(locator, mime_type=mime_type)
+    if dims:
+        system_metadata.update(dims)
     return system_metadata
 
 
