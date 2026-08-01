@@ -19,6 +19,9 @@ from comfy.quant_ops import QuantizedTensor
 import comfy.model_detection
 import comfy.utils
 
+def quant_metadata(layers):
+    return {"_quantization_metadata": json.dumps({"layers": layers})}
+
 
 def marker_json(state_dict, key):
     """Decode a `<key>.comfy_quant` marker tensor back into its layer_conf dict."""
@@ -55,7 +58,7 @@ class TestConvertOldQuantsPrefixAware(unittest.TestCase):
         out_sd, _ = comfy.utils.convert_old_quants(
             state_dict,
             model_prefix="model.diffusion_model.",
-            metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
+            metadata=quant_metadata(layer_quant_config),
         )
         self.assertIn("model.diffusion_model.proj_in.comfy_quant", out_sd)
         self.assertNotIn("proj_in.comfy_quant", out_sd)
@@ -72,7 +75,7 @@ class TestConvertOldQuantsPrefixAware(unittest.TestCase):
         out_sd, _ = comfy.utils.convert_old_quants(
             state_dict,
             model_prefix="model.diffusion_model.",
-            metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
+            metadata=quant_metadata(layer_quant_config),
         )
         # Before the fix this would have blindly written
         # "model.diffusion_model.proj_in.comfy_quant", which never matches
@@ -92,7 +95,7 @@ class TestConvertOldQuantsPrefixAware(unittest.TestCase):
         out_sd, _ = comfy.utils.convert_old_quants(
             state_dict,
             model_prefix="model.diffusion_model.",
-            metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
+            metadata=quant_metadata(layer_quant_config),
         )
         # Zero behavior change vs. today: direct match succeeds immediately,
         # key is written exactly as it always was.
@@ -111,7 +114,7 @@ class TestConvertOldQuantsPrefixAware(unittest.TestCase):
         out_sd, _ = comfy.utils.convert_old_quants(
             state_dict,
             model_prefix="",
-            metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
+            metadata=quant_metadata(layer_quant_config),
         )
         self.assertIn("proj_in.comfy_quant", out_sd)
 
@@ -154,9 +157,7 @@ class TestConvertOldQuantsPrefixAware(unittest.TestCase):
             ("stripped", "proj_in"),
         ):
             with self.subTest(convention=convention):
-                metadata = {"_quantization_metadata": json.dumps(
-                    {"layers": {layer_key: {"format": "float8_e4m3fn"}}}
-                )}
+                metadata = quant_metadata({layer_key: {"format": "float8_e4m3fn"}})
                 sd = {
                     "model.diffusion_model.proj_in.weight": torch.randn(4, 4, dtype=torch.float32).to(torch.float8_e4m3fn),
                     "model.diffusion_model.proj_in.weight_scale": torch.tensor(1.0),
@@ -183,7 +184,7 @@ class TestConvertOldQuantsPrefixAware(unittest.TestCase):
     # ---- extra: repeated calls with identical inputs don't duplicate/clobber ----
     def test_marker_write_is_idempotent(self):
         layer_quant_config = {"proj_in": {"format": "float8_e4m3fn"}}
-        metadata = {"_quantization_metadata": json.dumps({"layers": layer_quant_config})}
+        metadata = quant_metadata(layer_quant_config)
         state_dict = {
             "proj_in.weight": torch.randn(4, 4, dtype=torch.float32).to(torch.float8_e4m3fn),
             "proj_in.weight_scale": torch.tensor(1.0),
@@ -208,7 +209,7 @@ class TestConvertOldQuantsPrefixAware(unittest.TestCase):
         out_sd, _ = comfy.utils.convert_old_quants(
             state_dict,
             model_prefix="",
-            metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
+            metadata=quant_metadata(layer_quant_config),
         )
         self.assertEqual(marker_json(out_sd, "proj_in.comfy_quant"), {"format": "float8_e4m3fn"})
         self.assertIsNot(old_marker, out_sd["proj_in.comfy_quant"])
@@ -228,7 +229,7 @@ class TestConvertOldQuantsPrefixAware(unittest.TestCase):
         state_dict, _ = comfy.utils.convert_old_quants(
             state_dict,
             model_prefix="model.diffusion_model.",
-            metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
+            metadata=quant_metadata(layer_quant_config),
         )
         model = SimpleModel(operations=ops.mixed_precision_ops({}))
         model.load_state_dict(state_dict, strict=False)
@@ -244,11 +245,7 @@ class TestResidualPrefixPoisoning(unittest.TestCase):
             with self.subTest(prefix=prefix):
                 layer = f"{prefix}block"
                 sd = {f"{layer}.weight": torch.empty(1)}
-                metadata = {
-                    "_quantization_metadata": json.dumps({
-                        "layers": {layer: {"format": "nvfp4"}}
-                    })
-                }
+                metadata = quant_metadata({layer: {"format": "nvfp4"}})
 
                 sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
 
@@ -264,7 +261,7 @@ class TestResidualPrefixPoisoning(unittest.TestCase):
                         sd[f"block{i}.weight"] = torch.randn(4, 4, dtype=torch.float32).to(torch.float8_e4m3fn)
                         sd[f"block{i}.weight_scale"] = torch.tensor(1.0)
                         layers[f"{metadata_prefix}block{i}"] = {"format": "float8_e4m3fn"}
-                    metadata = {"_quantization_metadata": json.dumps({"layers": layers})}
+                    metadata = quant_metadata(layers)
 
                     sd, metadata = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
                     prefix = comfy.model_detection.unet_prefix_from_state_dict(sd)
@@ -280,11 +277,7 @@ class TestResidualPrefixPoisoning(unittest.TestCase):
 
     def test_unique_weight_suffix_resolves_without_model_prefix(self):
         sd = {"block.weight": torch.empty(1)}
-        metadata = {
-            "_quantization_metadata": json.dumps({
-                "layers": {"model.diffusion_model.block": {"format": "nvfp4"}}
-            })
-        }
+        metadata = quant_metadata({"model.diffusion_model.block": {"format": "nvfp4"}})
 
         sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
 
@@ -301,11 +294,7 @@ class TestResidualPrefixPoisoning(unittest.TestCase):
             "bar.weight": torch.empty(1),
             "bar.comfy_quant": stale_marker,
         }
-        metadata = {
-            "_quantization_metadata": json.dumps({
-                "layers": {"model.foo.bar": {"format": "float8_e4m3fn"}}
-            })
-        }
+        metadata = quant_metadata({"model.foo.bar": {"format": "float8_e4m3fn"}})
 
         sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
 
@@ -315,14 +304,10 @@ class TestResidualPrefixPoisoning(unittest.TestCase):
 
     def test_multiple_metadata_layers_cannot_collapse_to_one_weight(self):
         sd = {"block.weight": torch.empty(1)}
-        metadata = {
-            "_quantization_metadata": json.dumps({
-                "layers": {
-                    "model.a.block": {"format": "nvfp4"},
-                    "model.b.block": {"format": "float8_e4m3fn"},
-                }
-            })
-        }
+        metadata = quant_metadata({
+            "model.a.block": {"format": "nvfp4"},
+            "model.b.block": {"format": "float8_e4m3fn"},
+        })
 
         sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
 
@@ -333,14 +318,10 @@ class TestResidualPrefixPoisoning(unittest.TestCase):
             "direct.weight": torch.empty(1),
             "wrapped.weight": torch.empty(1),
         }
-        metadata = {
-            "_quantization_metadata": json.dumps({
-                "layers": {
-                    "direct": {"format": "nvfp4"},
-                    "model.diffusion_model.wrapped": {"format": "float8_e4m3fn"},
-                }
-            })
-        }
+        metadata = quant_metadata({
+            "direct": {"format": "nvfp4"},
+            "model.diffusion_model.wrapped": {"format": "float8_e4m3fn"},
+        })
 
         sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
 
@@ -349,14 +330,10 @@ class TestResidualPrefixPoisoning(unittest.TestCase):
 
     def test_direct_and_wrapper_collision_is_rejected(self):
         sd = {"block.weight": torch.empty(1)}
-        metadata = {
-            "_quantization_metadata": json.dumps({
-                "layers": {
-                    "block": {"format": "nvfp4"},
-                    "model.diffusion_model.block": {"format": "float8_e4m3fn"},
-                }
-            })
-        }
+        metadata = quant_metadata({
+            "block": {"format": "nvfp4"},
+            "model.diffusion_model.block": {"format": "float8_e4m3fn"},
+        })
 
         sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
 
@@ -367,11 +344,7 @@ class TestResidualPrefixPoisoning(unittest.TestCase):
             "block.weight": torch.empty(1),
             "model.diffusion_model.block.weight": torch.empty(1),
         }
-        metadata = {
-            "_quantization_metadata": json.dumps({
-                "layers": {"block": {"format": "nvfp4"}}
-            })
-        }
+        metadata = quant_metadata({"block": {"format": "nvfp4"}})
 
         sd, _ = comfy.utils.convert_old_quants(
             sd,
@@ -385,14 +358,10 @@ class TestResidualPrefixPoisoning(unittest.TestCase):
         prefix = "model.diffusion_model."
         layer_config = {"format": "nvfp4"}
         sd = {f"{prefix}block.weight": torch.empty(1)}
-        metadata = {
-            "_quantization_metadata": json.dumps({
-                "layers": {
-                    "block": layer_config,
-                    f"{prefix}block": layer_config,
-                }
-            })
-        }
+        metadata = quant_metadata({
+            "block": layer_config,
+            f"{prefix}block": layer_config,
+        })
 
         sd, _ = comfy.utils.convert_old_quants(sd, prefix, metadata=metadata)
 
@@ -400,11 +369,7 @@ class TestResidualPrefixPoisoning(unittest.TestCase):
 
     def test_unmatched_metadata_does_not_create_orphan_marker(self):
         sd = {"present.weight": torch.empty(1)}
-        metadata = {
-            "_quantization_metadata": json.dumps({
-                "layers": {"model.diffusion_model.missing": {"format": "nvfp4"}}
-            })
-        }
+        metadata = quant_metadata({"model.diffusion_model.missing": {"format": "nvfp4"}})
 
         sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
 
@@ -419,7 +384,7 @@ class TestResidualPrefixPoisoning(unittest.TestCase):
             f"model.diffusion_model.block{i}": {"format": "nvfp4"}
             for i in range(8)
         }
-        metadata = {"_quantization_metadata": json.dumps({"layers": layers})}
+        metadata = quant_metadata(layers)
 
         sd, _ = comfy.utils.convert_old_quants(sd, "", metadata=metadata)
 
