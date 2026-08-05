@@ -655,6 +655,171 @@ class TestNormalizeHistoryItem:
             'extra_data': {'create_time': 1234567890, 'client_id': 'abc'},
         }
 
+    def test_missing_status(self):
+        history_item = {
+            'prompt': (
+                5,
+                'prompt-without-status',
+                {'nodes': {}},
+                {'create_time': 100},
+                [],
+            ),
+            'status': None,
+            'outputs': {},
+        }
+
+        job = normalize_history_item('prompt-without-status', history_item)
+
+        assert job['status'] == 'completed'
+        assert 'completion_status' not in job
+
+    def test_partial_success_metadata_and_errors(self):
+        node_error = {
+            'prompt_id': 'prompt-partial',
+            'node_id': '2',
+            'node_type': 'TestSyncError',
+            'exception_message': 'failed',
+            'exception_type': 'RuntimeError',
+            'traceback': [],
+            'current_inputs': {},
+            'current_outputs': [],
+            'timestamp': 200,
+        }
+        history_item = {
+            'prompt': (
+                5,
+                'prompt-partial',
+                {'nodes': {}},
+                {'create_time': 100},
+                ['3', '4'],
+            ),
+            'status': {
+                'status_str': 'success',
+                'completed': True,
+                'execution_summary': {
+                    'completion_status': 'partial_success',
+                    'has_errors': True,
+                    'execution_error_count': 1,
+                },
+                'messages': [
+                    ('execution_start', {'prompt_id': 'prompt-partial', 'timestamp': 150}),
+                    ('execution_node_error', node_error),
+                    ('execution_success', {
+                        'prompt_id': 'prompt-partial',
+                        'completion_status': 'partial_success',
+                        'has_errors': True,
+                        'execution_error_count': 1,
+                        'timestamp': 300,
+                    }),
+                ],
+            },
+            'outputs': {'4': {'images': [{'filename': 'survived.png'}]}},
+        }
+
+        job = normalize_history_item('prompt-partial', history_item, include_outputs=True)
+
+        assert job['status'] == 'completed'
+        assert job['completion_status'] == 'partial_success'
+        assert job['has_errors'] is True
+        assert job['execution_error_count'] == 1
+        assert job['execution_errors'] == [node_error]
+        assert job['outputs']['4']['images'] == [{'filename': 'survived.png'}]
+
+    def test_failed_job_with_node_errors_keeps_the_error_count(self):
+        node_errors = [
+            {
+                'prompt_id': 'prompt-all-failed',
+                'node_id': node_id,
+                'node_type': 'TestSyncError',
+                'exception_message': 'failed',
+                'exception_type': 'RuntimeError',
+                'traceback': [],
+                'current_inputs': {},
+                'timestamp': 200 + index,
+            }
+            for index, node_id in enumerate(('2', '3'))
+        ]
+        history_item = {
+            'prompt': (
+                5,
+                'prompt-all-failed',
+                {'nodes': {}},
+                {'create_time': 100},
+                ['4', '5'],
+            ),
+            'status': {
+                'status_str': 'error',
+                'completed': False,
+                'execution_summary': {
+                    'has_errors': True,
+                    'execution_error_count': 2,
+                },
+                'messages': [
+                    ('execution_start', {'prompt_id': 'prompt-all-failed', 'timestamp': 150}),
+                    ('execution_node_error', node_errors[0]),
+                    ('execution_node_error', node_errors[1]),
+                    ('execution_error', {
+                        'prompt_id': 'prompt-all-failed',
+                        'node_id': '3',
+                        'node_type': 'TestSyncError',
+                        'exception_message': 'failed',
+                        'exception_type': 'RuntimeError',
+                        'traceback': [],
+                        'timestamp': 300,
+                    }),
+                ],
+            },
+            'outputs': {},
+        }
+
+        job = normalize_history_item('prompt-all-failed', history_item, include_outputs=True)
+
+        assert job['status'] == 'failed'
+        assert 'completion_status' not in job
+        assert job['has_errors'] is True
+        assert job['execution_error_count'] == 2
+        assert job['execution_errors'] == node_errors
+        assert job['execution_error']['node_id'] == '3'
+
+    def test_interrupted_job_after_node_errors_keeps_the_error_count(self):
+        node_error = {
+            'prompt_id': 'prompt-interrupted',
+            'node_id': '2',
+            'node_type': 'TestSyncError',
+            'exception_message': 'failed',
+            'exception_type': 'RuntimeError',
+            'traceback': [],
+            'current_inputs': {},
+            'timestamp': 200,
+        }
+        history_item = {
+            'prompt': (
+                6,
+                'prompt-interrupted',
+                {'nodes': {}},
+                {'create_time': 100},
+                ['4'],
+            ),
+            'status': {
+                'status_str': 'error',
+                'completed': False,
+                'messages': [
+                    ('execution_start', {'prompt_id': 'prompt-interrupted', 'timestamp': 150}),
+                    ('execution_node_error', node_error),
+                    ('execution_interrupted', {'prompt_id': 'prompt-interrupted', 'timestamp': 300}),
+                ],
+            },
+            'outputs': {},
+        }
+
+        job = normalize_history_item('prompt-interrupted', history_item, include_outputs=True)
+
+        assert job['status'] == 'cancelled'
+        assert 'completion_status' not in job
+        assert job['has_errors'] is True
+        assert job['execution_error_count'] == 1
+        assert job['execution_errors'] == [node_error]
+
     def test_include_outputs_normalizes_3d_strings(self):
         """Detail view should transform string 3D filenames into file output dicts."""
         history_item = {

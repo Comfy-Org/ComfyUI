@@ -60,6 +60,7 @@ class Executor:
         self.history_result = {}
         self.success = True
         self.status_messages = []
+        self.execution_summary = None
 
     def execute(self, *args, **kwargs) -> None:
         return None

@@ -281,6 +281,41 @@ class TestAsyncNodes:
             # Verify the sync error was caught even though async was running
             assert 'prompt_id' in e.args[0]
 
+    def test_async_sibling_completes_after_error(self, client: ComfyClient, builder: GraphBuilder):
+        g = builder
+        image = g.node("StubImage", content="BLACK", height=32, width=32, batch_size=1)
+        error_node = g.node("TestAsyncError", value=image.out(0), error_after=0.05)
+        sleep_node = g.node("TestSleep", value=image.out(0), seconds=0.1)
+        g.node("PreviewImage", images=error_node.out(0))
+        successful_output = g.node("SaveImage", images=sleep_node.out(0))
+
+        result = client.run(g, node_failure_policy="continue_independent")
+
+        assert result.did_run(error_node)
+        assert result.did_run(sleep_node)
+        assert result.was_executed(successful_output)
+        assert len(result.get_images(successful_output)) == 1
+        assert result.execution_success['completion_status'] == 'partial_success'
+        assert result.node_errors[0]['node_id'] == error_node.id
+
+    def test_async_sibling_completes_after_multiple_errors(self, client: ComfyClient, builder: GraphBuilder):
+        g = builder
+        image = g.node("StubImage", content="BLACK", height=32, width=32, batch_size=1)
+        error1 = g.node("TestAsyncError", value=image.out(0), error_after=0.02)
+        error2 = g.node("TestAsyncError", value=image.out(0), error_after=0.04)
+        sleep_node = g.node("TestSleep", value=image.out(0), seconds=0.06)
+        g.node("PreviewImage", images=error1.out(0))
+        g.node("PreviewImage", images=error2.out(0))
+        successful_output = g.node("SaveImage", images=sleep_node.out(0))
+
+        result = client.run(g, node_failure_policy="continue_independent")
+
+        assert {error['node_id'] for error in result.node_errors} == {error1.id, error2.id}
+        assert result.did_run(sleep_node)
+        assert result.was_executed(successful_output)
+        assert result.execution_success['completion_status'] == 'partial_success'
+        assert result.execution_success['execution_error_count'] == 2
+
     # Edge Cases
 
     def test_async_with_execution_blocker(self, client: ComfyClient, builder: GraphBuilder):

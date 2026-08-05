@@ -18,6 +18,7 @@ class NodeState(Enum):
     Running = "running"
     Finished = "finished"
     Error = "error"
+    Blocked = "blocked"
 
 
 class NodeProgressState(TypedDict):
@@ -62,6 +63,10 @@ class ProgressHandler(ABC):
     def finish_handler(self, node_id: str, state: NodeProgressState, prompt_id: str):
         """Called when a node finishes processing"""
         pass
+
+    def finish_batch_handler(self, node_ids: list[str], states: Dict[str, NodeProgressState], prompt_id: str):
+        for node_id in node_ids:
+            self.finish_handler(node_id, states[node_id], prompt_id)
 
     def reset(self):
         """Called when the progress registry is reset"""
@@ -234,6 +239,11 @@ class WebUIProgressHandler(ProgressHandler):
         if self.registry:
             self._send_progress_state(prompt_id, self.registry.nodes)
 
+    @override
+    def finish_batch_handler(self, node_ids: list[str], states: Dict[str, NodeProgressState], prompt_id: str):
+        if self.registry:
+            self._send_progress_state(prompt_id, self.registry.nodes)
+
 class ProgressRegistry:
     """
     Registry that maintains node progress state and notifies registered handlers.
@@ -302,16 +312,31 @@ class ProgressRegistry:
                     node_id, value, max_value, entry, self.prompt_id, image
                 )
 
-    def finish_progress(self, node_id: str) -> None:
-        """Finish progress tracking for a node"""
+    def _finish_progress(self, node_id: str, state: NodeState) -> None:
         entry = self.ensure_entry(node_id)
-        entry["state"] = NodeState.Finished
+        entry["state"] = state
         entry["value"] = entry["max"]
 
-        # Notify all enabled handlers
         for handler in self.handlers.values():
             if handler.enabled:
                 handler.finish_handler(node_id, entry, self.prompt_id)
+
+    def finish_progress(self, node_id: str) -> None:
+        """Finish progress tracking for a node"""
+        self._finish_progress(node_id, NodeState.Finished)
+
+    def error_progress(self, node_id: str) -> None:
+        self._finish_progress(node_id, NodeState.Error)
+
+    def block_progress(self, node_ids: list[str]) -> None:
+        for node_id in node_ids:
+            entry = self.ensure_entry(node_id)
+            entry["state"] = NodeState.Blocked
+            entry["value"] = entry["max"]
+
+        for handler in self.handlers.values():
+            if handler.enabled:
+                handler.finish_batch_handler(node_ids, self.nodes, self.prompt_id)
 
     def reset_handlers(self) -> None:
         """Reset all handlers"""
