@@ -219,10 +219,14 @@ def normalize_history_item(prompt_id: str, history_item: dict, include_outputs: 
     previewable_outputs_count = count_previewable_outputs(outputs)
 
     execution_error = None
+    execution_errors = []
     execution_start_time = None
     execution_end_time = None
+    execution_success = None
     was_interrupted = False
+    execution_summary = {}
     if status_info:
+        execution_summary = status_info.get('execution_summary') or {}
         messages = status_info.get('messages', [])
         for entry in messages:
             if isinstance(entry, (list, tuple)) and len(entry) >= 2:
@@ -232,10 +236,22 @@ def normalize_history_item(prompt_id: str, history_item: dict, include_outputs: 
                         execution_start_time = event_data.get('timestamp')
                     elif event_name in ('execution_success', 'execution_error', 'execution_interrupted'):
                         execution_end_time = event_data.get('timestamp')
-                        if event_name == 'execution_error':
+                        if event_name == 'execution_success':
+                            execution_success = event_data
+                        elif event_name == 'execution_error':
                             execution_error = event_data
                         elif event_name == 'execution_interrupted':
                             was_interrupted = True
+                    elif event_name == 'execution_node_error':
+                        execution_errors.append(event_data)
+
+    completion_status = execution_summary.get('completion_status')
+    if completion_status is None and execution_success is not None:
+        completion_status = execution_success.get('completion_status', 'success')
+    if completion_status is None and status_str == 'success':
+        completion_status = 'success'
+    has_errors = execution_summary.get('has_errors', bool(execution_errors)) if completion_status is not None else None
+    execution_error_count = execution_summary.get('execution_error_count', len(execution_errors)) if completion_status is not None else None
 
     if status_str == 'success':
         status = JobStatus.COMPLETED
@@ -252,6 +268,9 @@ def normalize_history_item(prompt_id: str, history_item: dict, include_outputs: 
         'execution_start_time': execution_start_time,
         'execution_end_time': execution_end_time,
         'execution_error': execution_error,
+        'completion_status': completion_status,
+        'has_errors': has_errors,
+        'execution_error_count': execution_error_count,
         'outputs_count': outputs_count,
         'previewable_outputs_count': previewable_outputs_count,
         'preview_output': preview_output,
@@ -261,6 +280,7 @@ def normalize_history_item(prompt_id: str, history_item: dict, include_outputs: 
     if include_outputs:
         job['outputs'] = normalize_outputs(outputs)
         job['execution_status'] = status_info
+        job['execution_errors'] = execution_errors
         job['workflow'] = {
             'prompt': prompt,
             'extra_data': extra_data,

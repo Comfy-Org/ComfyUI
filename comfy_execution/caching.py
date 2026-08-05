@@ -213,6 +213,11 @@ class BasicCache:
         cache_key = self.cache_key_set.get_data_key(node_id)
         self.cache[cache_key] = value
 
+    def remove_local(self, node_id):
+        if not self.initialized:
+            return
+        self.cache.pop(self.cache_key_set.get_data_key(node_id), None)
+
     async def _set_immediate(self, node_id, value):
         assert self.initialized
         cache_key = self.cache_key_set.get_data_key(node_id)
@@ -403,6 +408,11 @@ class HierarchicalCache(BasicCache):
         assert cache is not None
         BasicCache.set_local(cache, node_id, value)
 
+    def remove_local(self, node_id):
+        cache = self._get_cache_for(node_id)
+        if cache is not None:
+            BasicCache.remove_local(cache, node_id)
+
     async def ensure_subcache_for(self, node_id, children_ids):
         cache = self._get_cache_for(node_id)
         assert cache is not None
@@ -432,6 +442,9 @@ class NullCache:
         pass
 
     def set_local(self, node_id, value):
+        pass
+
+    def remove_local(self, node_id):
         pass
 
     async def ensure_subcache_for(self, node_id, children_ids):
@@ -479,6 +492,14 @@ class LRUCache(BasicCache):
     def set_local(self, node_id, value):
         self._mark_used(node_id)
         BasicCache.set_local(self, node_id, value)
+
+    def remove_local(self, node_id):
+        if not self.initialized:
+            return
+        cache_key = self.cache_key_set.get_data_key(node_id)
+        self.cache.pop(cache_key, None)
+        self.used_generation.pop(cache_key, None)
+        self.children.pop(cache_key, None)
 
     async def ensure_subcache_for(self, node_id, children_ids):
         # Just uses subcaches for tracking 'live' nodes
@@ -547,6 +568,11 @@ class RAMPressureCache(LRUCache):
     def set_local(self, node_id, value):
         self.timestamps[self.cache_key_set.get_data_key(node_id)] = time.time()
         super().set_local(node_id, value)
+
+    def remove_local(self, node_id):
+        if self.initialized:
+            self.timestamps.pop(self.cache_key_set.get_data_key(node_id), None)
+        super().remove_local(node_id)
 
     def ram_release(self, target, free_active=False, min_entry_size=0):
         if virtual_memory_available() >= target:
