@@ -168,7 +168,7 @@ class TopologicalSort:
                     _, _, input_info = self.get_input_info(unique_id, input_name)
                     is_lazy = input_info is not None and "lazy" in input_info and input_info["lazy"]
                     if (include_lazy or not is_lazy):
-                        if not self.is_cached(from_node_id):
+                        if not self.is_cached(from_node_id) and not self.is_unavailable(from_node_id):
                             node_ids.append(from_node_id)
                         links.append((from_node_id, from_socket, unique_id))
 
@@ -196,6 +196,9 @@ class TopologicalSort:
     def is_cached(self, node_id):
         return False
 
+    def is_unavailable(self, node_id):
+        return False
+
     def get_ready_nodes(self):
         return [node_id for node_id in self.pendingNodes if self.blockCount[node_id] == 0]
 
@@ -221,9 +224,15 @@ class ExecutionList(TopologicalSort):
         self.staged_node_id = None
         self.execution_cache = {}
         self.execution_cache_listeners = {}
+        self.unavailable = set()
+        self.newly_unavailable = []
+        self.failed_expansions = set()
 
     def is_cached(self, node_id):
         return self.output_cache.get_local(node_id) is not None
+
+    def is_unavailable(self, node_id):
+        return node_id in self.unavailable
 
     def cache_link(self, from_node_id, to_node_id, from_socket=None):
         if to_node_id not in self.execution_cache:
@@ -255,8 +264,80 @@ class ExecutionList(TopologicalSort):
                     self.output_link_callback(value.outputs[from_socket])
 
     def add_strong_link(self, from_node_id, from_socket, to_node_id):
+        if from_node_id in self.unavailable:
+            self.newly_unavailable.append(to_node_id)
+            return
         super().add_strong_link(from_node_id, from_socket, to_node_id)
         self.cache_link(from_node_id, to_node_id, from_socket)
+
+    def add_node(self, node_unique_id, include_lazy=False, subgraph_nodes=None):
+        if self.is_unavailable(node_unique_id):
+            return
+        super().add_node(node_unique_id, include_lazy, subgraph_nodes)
+
+    def add_external_block(self, node_id):
+        if node_id not in self.blockCount and self.is_unavailable(node_id):
+            return lambda value=None: None
+        return super().add_external_block(node_id)
+
+    def release_external_block(self, node_id, value=None):
+        if node_id in self.blockCount or not self.is_unavailable(node_id):
+            super().release_external_block(node_id, value)
+
+    def drain_newly_unavailable(self):
+        result, self.newly_unavailable = self.newly_unavailable, []
+        return result
+
+    def count_strong_blocks(self):
+        result = {}
+        for blocked_nodes in self.blocking.values():
+            for node_id in blocked_nodes:
+                result[node_id] = result.get(node_id, 0) + 1
+        return result
+
+    def is_stalled(self):
+        return self.externalBlocks > 0 and len(self.get_ready_nodes()) == 0
+
+    def get_externally_blocked_nodes(self):
+        strong_blocks = self.count_strong_blocks()
+        return [node_id for node_id in self.pendingNodes if self.blockCount[node_id] > strong_blocks.get(node_id, 0)]
+
+    def make_unavailable(self, node_id):
+        removed = []
+        stack = [node_id]
+        while stack:
+            current = stack.pop()
+            if current in self.unavailable:
+                continue
+            self.unavailable.add(current)
+            removed.append(current)
+            stack.extend(self.blocking.get(current, ()))
+            parent_id = self.dynprompt.get_parent_node_id(current)
+            while parent_id is not None:
+                self.failed_expansions.add(parent_id)
+                parent_id = self.dynprompt.get_parent_node_id(parent_id)
+        removed_ids = set(removed)
+        strong_blocks = self.count_strong_blocks()
+        for removed_id in removed:
+            if removed_id in self.pendingNodes:
+                self.externalBlocks -= self.blockCount[removed_id] - strong_blocks.get(removed_id, 0)
+        for from_node_id, blocked_nodes in self.blocking.items():
+            if from_node_id not in removed_ids:
+                for removed_id in removed_ids.intersection(blocked_nodes):
+                    del blocked_nodes[removed_id]
+        for removed_id in removed:
+            if removed_id in self.pendingNodes:
+                del self.pendingNodes[removed_id]
+                del self.blockCount[removed_id]
+                del self.blocking[removed_id]
+            self.execution_cache.pop(removed_id, None)
+            self.execution_cache_listeners.pop(removed_id, None)
+            self.externalBlockResults.pop(removed_id, None)
+        for listeners in self.execution_cache_listeners.values():
+            listeners.difference_update({listener for listener in listeners if listener[0] in removed_ids})
+        if self.staged_node_id in removed_ids:
+            self.staged_node_id = None
+        return removed
 
     def inhibit_nodes(self, node_ids):
         """Remove pending nodes selected by the currently executing control node."""
