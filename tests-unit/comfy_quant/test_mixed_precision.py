@@ -16,7 +16,7 @@ from comfy.cli_args import args
 if not has_gpu():
     args.cpu = True
 
-from comfy import ops
+from comfy import hooks, ops
 from comfy.model_patcher import ModelPatcher
 from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor, TensorCoreFP8E4M3Layout
 import comfy.utils
@@ -445,7 +445,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
         self.assertEqual(saved_conf["linear_dtype"], "int8")
         self.assertNotIn("quant_group_size", saved_conf)
 
-    def test_get_key_patches_skips_only_quantized_weight_pieces(self):
+    def test_hook_patches_skip_only_quantized_weight_pieces(self):
         operations = ops.mixed_precision_ops(compute_dtype=torch.float32)
         model = torch.nn.Module()
         model.linear = operations.Linear(4, 4, bias=False, device="cpu")
@@ -462,8 +462,32 @@ class TestMixedPrecisionOps(unittest.TestCase):
             torch.tensor(0.125), requires_grad=False
         )
         model.linear_alias = model.linear
+        model.patch_target = torch.nn.Linear(4, 4, bias=False)
+        torch.nn.init.zeros_(model.patch_target.weight)
 
         patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+        weight = model.linear.weight
+        input_scale = model.linear.input_scale
+        hook = hooks.WeightHook()
+        hook.need_weight_init = False
+        hook.weights = {
+            "patch_target.weight": (torch.ones_like(model.patch_target.weight),)
+        }
+        hook_group = hooks.HookGroup()
+        hook_group.add(hook)
+        patcher.register_all_hook_patches(
+            hook_group, hooks.create_target_dict(hooks.EnumWeightTarget.Model)
+        )
+        patcher.patch_hooks(hook_group)
+
+        self.assertIs(model.linear.weight, weight)
+        self.assertIs(model.linear.input_scale, input_scale)
+        self.assertTrue(
+            torch.equal(
+                model.patch_target.weight,
+                torch.ones_like(model.patch_target.weight),
+            )
+        )
 
         self.assertEqual(
             set(patcher.get_key_patches()),
@@ -472,6 +496,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
                 "linear.input_scale",
                 "linear_alias.weight",
                 "linear_alias.input_scale",
+                "patch_target.weight",
             },
         )
 
