@@ -1,5 +1,6 @@
 import unittest
 import unittest.mock
+from unittest import mock
 import torch
 import sys
 import os
@@ -690,6 +691,154 @@ class TestMixedPrecisionOps(unittest.TestCase):
         patcher.patch_hooks(None)
         self.assertIs(model.linear.weight, original_param)
         torch.testing.assert_close(model.linear.weight, original)
+
+    def _make_hook_cache_model(self):
+        model = torch.nn.Module()
+        model.first = torch.nn.Linear(4, 4, bias=False)
+        model.second = torch.nn.Linear(4, 4, bias=False)
+        model.control = torch.nn.Parameter(torch.zeros(1))
+        torch.nn.init.zeros_(model.first.weight)
+        torch.nn.init.zeros_(model.second.weight)
+        return model
+
+    def _make_hook_group(self, weights):
+        hook = hooks.WeightHook()
+        hook.need_weight_init = False
+        hook.weights = weights
+        group = hooks.HookGroup()
+        group.add(hook)
+        return group
+
+    def test_hook_cache_budget_disables_entire_group(self):
+        model = self._make_hook_cache_model()
+        group = self._make_hook_group(
+            {
+                "first.weight": (torch.ones(4, 4),),
+                "second.weight": (torch.full((4, 4), 2.0),),
+            }
+        )
+        patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+        patcher.register_all_hook_patches(
+            group, hooks.create_target_dict(hooks.EnumWeightTarget.Model)
+        )
+
+        with (
+            mock.patch("comfy.model_management.get_free_memory", return_value=200),
+            mock.patch(
+                "comfy.model_management.minimum_inference_memory", return_value=0
+            ),
+        ):
+            for _ in range(2):
+                patcher.patch_hooks(group)
+                torch.testing.assert_close(
+                    model.first.weight, torch.ones_like(model.first.weight)
+                )
+                torch.testing.assert_close(
+                    model.second.weight,
+                    torch.full_like(model.second.weight, 2.0),
+                )
+                self.assertEqual(
+                    set(patcher.hook_backup),
+                    {"first.weight", "second.weight"},
+                )
+                self.assertNotIn(group, patcher.cached_hook_patches)
+
+                patcher.patch_hooks(None)
+                torch.testing.assert_close(
+                    model.first.weight, torch.zeros_like(model.first.weight)
+                )
+                torch.testing.assert_close(
+                    model.second.weight, torch.zeros_like(model.second.weight)
+                )
+                self.assertEqual(patcher.hook_backup, {})
+                self.assertEqual(patcher.cached_hook_patches, {})
+
+    def test_hook_cache_budget_caches_complete_groups(self):
+        model = self._make_hook_cache_model()
+        group_a = self._make_hook_group(
+            {"first.weight": (torch.ones(4, 4),)}
+        )
+        group_b = self._make_hook_group(
+            {"second.weight": (torch.full((4, 4), 2.0),)}
+        )
+        all_hooks = hooks.HookGroup()
+        all_hooks.add(group_a.hooks[0])
+        all_hooks.add(group_b.hooks[0])
+        patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+        patcher.register_all_hook_patches(
+            all_hooks, hooks.create_target_dict(hooks.EnumWeightTarget.Model)
+        )
+
+        with (
+            mock.patch("comfy.model_management.get_free_memory", return_value=1024),
+            mock.patch(
+                "comfy.model_management.minimum_inference_memory", return_value=0
+            ),
+        ):
+            patcher.patch_hooks(group_a)
+            self.assertEqual(
+                set(patcher.cached_hook_patches[group_a]), {"first.weight"}
+            )
+            torch.testing.assert_close(
+                model.first.weight, torch.ones_like(model.first.weight)
+            )
+
+            patcher.patch_hooks(group_b)
+            self.assertEqual(
+                set(patcher.cached_hook_patches[group_b]), {"second.weight"}
+            )
+            torch.testing.assert_close(
+                model.first.weight, torch.zeros_like(model.first.weight)
+            )
+            torch.testing.assert_close(
+                model.second.weight, torch.full_like(model.second.weight, 2.0)
+            )
+
+            patcher.patch_hooks(None)
+            torch.testing.assert_close(
+                model.second.weight, torch.zeros_like(model.second.weight)
+            )
+
+            for _ in range(2):
+                patcher.patch_hooks(group_a)
+                torch.testing.assert_close(
+                    model.first.weight, torch.ones_like(model.first.weight)
+                )
+                patcher.patch_hooks(None)
+                torch.testing.assert_close(
+                    model.first.weight, torch.zeros_like(model.first.weight)
+                )
+
+    def test_hook_cache_budget_leaves_min_vram_unchanged(self):
+        model = self._make_hook_cache_model()
+        group = self._make_hook_group(
+            {
+                "first.weight": (torch.ones(4, 4),),
+                "second.weight": (torch.full((4, 4), 2.0),),
+            }
+        )
+        patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+        patcher.set_hook_mode(hooks.EnumHookMode.MinVram)
+        patcher.register_all_hook_patches(
+            group, hooks.create_target_dict(hooks.EnumWeightTarget.Model)
+        )
+
+        patcher.patch_hooks(group)
+        torch.testing.assert_close(
+            model.first.weight, torch.ones_like(model.first.weight)
+        )
+        torch.testing.assert_close(
+            model.second.weight, torch.full_like(model.second.weight, 2.0)
+        )
+        self.assertNotIn(group, patcher.cached_hook_patches)
+
+        patcher.patch_hooks(None)
+        torch.testing.assert_close(
+            model.first.weight, torch.zeros_like(model.first.weight)
+        )
+        torch.testing.assert_close(
+            model.second.weight, torch.zeros_like(model.second.weight)
+        )
 
 if __name__ == "__main__":
     unittest.main()
