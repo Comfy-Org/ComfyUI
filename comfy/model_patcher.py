@@ -394,6 +394,7 @@ class ModelPatcher:
         self.forced_hooks: Optional[comfy.hooks.HookGroup] = None  # NOTE: only used for CLIP at this time
         self.is_clip = False
         self.hook_mode = comfy.hooks.EnumHookMode.MaxSpeed
+        self._hook_async_offload_disabled = False
 
         self.cached_patcher_init: tuple[Callable, tuple] | tuple[Callable, tuple, int] | None = None
         self.is_multigpu_base_clone = False
@@ -1664,6 +1665,9 @@ class ModelPatcher:
             self.current_hooks = hooks
 
     def patch_cached_hook_weights(self, cached_weights: dict, key: str, memory_counter: MemoryCounter):
+        _, set_func, _ = get_key_weight(self.model, key)
+        if set_func is None:
+            self._disable_async_offload_for_hooks()
         if key not in self.hook_backup:
             weight: torch.Tensor = comfy.utils.get_attr(self.model, key)
             target_device = self.offload_device
@@ -1678,12 +1682,28 @@ class ModelPatcher:
         self.cached_hook_patches.clear()
         self.patch_hooks(None)
 
+    def _disable_async_offload_for_hooks(self):
+        if self._hook_async_offload_disabled:
+            return
+        # Hook writeback changes prepared weight storage after model loading.
+        # Keep this delegate's transfers synchronous and honor its model dtypes.
+        for module in self.model.modules():
+            if hasattr(module, "comfy_cast_weights"):
+                module.comfy_disable_async_offload = True
+                for param_name, param in module.named_parameters(recurse=False):
+                    model_dtype = getattr(module, param_name + "_comfy_model_dtype", None)
+                    if model_dtype is not None and param.dtype != model_dtype:
+                        module.comfy_cast_weights = True
+        self._hook_async_offload_disabled = True
+
     def patch_hook_weight_to_device(self, hooks: comfy.hooks.HookGroup, combined_patches: dict, key: str, original_weights: dict, memory_counter: MemoryCounter):
         if key not in combined_patches:
             return
 
         weight, set_func, convert_func = get_key_weight(self.model, key)
         weight: torch.Tensor
+        if set_func is None:
+            self._disable_async_offload_for_hooks()
         if key not in self.hook_backup:
             target_device = self.offload_device
             if self.hook_mode == comfy.hooks.EnumHookMode.MaxSpeed:

@@ -1,5 +1,6 @@
 import unittest
 import unittest.mock
+from unittest import mock
 import torch
 import sys
 import os
@@ -499,6 +500,87 @@ class TestMixedPrecisionOps(unittest.TestCase):
                 "patch_target.weight",
             },
         )
+
+    def test_hook_targets_disable_async_offload(self):
+        model = torch.nn.Module()
+        model.linear = ops.disable_weight_init.Linear(
+            4, 4, bias=False, device="cpu", dtype=torch.bfloat16
+        )
+        model.other = ops.disable_weight_init.Linear(
+            4, 4, bias=False, device="cpu", dtype=torch.bfloat16
+        )
+        model.linear.weight = torch.nn.Parameter(
+            model.linear.weight.float(), requires_grad=False
+        )
+        model.other.weight = torch.nn.Parameter(
+            model.other.weight.float(), requires_grad=False
+        )
+        model.linear.weight_comfy_model_dtype = torch.bfloat16
+        model.other.weight_comfy_model_dtype = torch.bfloat16
+        model.control = torch.nn.Parameter(torch.zeros(1))
+        torch.nn.init.zeros_(model.linear.weight)
+        patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+
+        hook = hooks.WeightHook()
+        hook.need_weight_init = False
+        hook.weights = {
+            "linear.weight": (
+                torch.zeros_like(model.linear.weight),
+            )
+        }
+        group = hooks.HookGroup()
+        group.add(hook)
+        patcher.register_all_hook_patches(
+            group, hooks.create_target_dict(hooks.EnumWeightTarget.Model)
+        )
+
+        patcher.patch_hooks(group)
+        self.assertTrue(model.linear.comfy_disable_async_offload)
+        self.assertTrue(model.other.comfy_disable_async_offload)
+        self.assertTrue(model.linear.comfy_cast_weights)
+        self.assertTrue(model.other.comfy_cast_weights)
+        output = model.linear(torch.zeros(1, 4, dtype=torch.bfloat16))
+        self.assertEqual(output.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(output).all())
+        patcher.patch_hooks(None)
+
+        model.linear.comfy_disable_async_offload = False
+        model.other.comfy_disable_async_offload = False
+        patcher._hook_async_offload_disabled = False
+        patcher.patch_hooks(group)
+        self.assertTrue(model.linear.comfy_disable_async_offload)
+        self.assertTrue(model.other.comfy_disable_async_offload)
+        patcher.patch_hooks(None)
+
+    def test_cast_weight_honors_async_offload_disable(self):
+        linear = ops.disable_weight_init.Linear(
+            4, 4, bias=False, device="cpu", dtype=torch.float32
+        )
+        target = torch.device("cpu", 1)
+
+        linear.comfy_disable_async_offload = True
+        with mock.patch(
+            "comfy.model_management.get_offload_stream", return_value=None
+        ) as get_offload_stream:
+            ops.cast_bias_weight(
+                linear,
+                dtype=torch.float32,
+                device=target,
+                offloadable=True,
+            )
+        get_offload_stream.assert_not_called()
+
+        linear.comfy_disable_async_offload = False
+        with mock.patch(
+            "comfy.model_management.get_offload_stream", return_value=None
+        ) as get_offload_stream:
+            ops.cast_bias_weight(
+                linear,
+                dtype=torch.float32,
+                device=target,
+                offloadable=True,
+            )
+        get_offload_stream.assert_called_once_with(target)
 
 if __name__ == "__main__":
     unittest.main()
