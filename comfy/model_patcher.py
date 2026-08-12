@@ -388,8 +388,8 @@ class ModelPatcher:
 
         self.hook_patches: dict[comfy.hooks._HookRef] = {}
         self.hook_patches_backup: dict[comfy.hooks._HookRef] = None
-        self.hook_backup: dict[str, tuple[torch.Tensor, torch.device]] = {}
-        self.cached_hook_patches: dict[comfy.hooks.HookGroup, dict[str, torch.Tensor]] = {}
+        self.hook_backup: dict[str, tuple[torch.Tensor, torch.device, bool]] = {}
+        self.cached_hook_patches: dict[comfy.hooks.HookGroup, dict[str, tuple[torch.Tensor, torch.device]]] = {}
         self.current_hooks: Optional[comfy.hooks.HookGroup] = None
         self.forced_hooks: Optional[comfy.hooks.HookGroup] = None  # NOTE: only used for CLIP at this time
         self.is_clip = False
@@ -1664,15 +1664,20 @@ class ModelPatcher:
             self.current_hooks = hooks
 
     def patch_cached_hook_weights(self, cached_weights: dict, key: str, memory_counter: MemoryCounter):
+        weight, set_func, _ = get_key_weight(self.model, key)
+        inplace_update = set_func is None
         if key not in self.hook_backup:
-            weight: torch.Tensor = comfy.utils.get_attr(self.model, key)
             target_device = self.offload_device
             if self.hook_mode == comfy.hooks.EnumHookMode.MaxSpeed:
                 used = memory_counter.use(weight)
                 if used:
                     target_device = weight.device
-            self.hook_backup[key] = (weight.to(device=target_device, copy=True), weight.device)
-        comfy.utils.copy_to_param(self.model, key, cached_weights[key][0].to(device=cached_weights[key][1]))
+            self.hook_backup[key] = (weight.to(device=target_device, copy=True), weight.device, inplace_update)
+        cached_weight = cached_weights[key][0].to(device=cached_weights[key][1])
+        if inplace_update:
+            comfy.utils.copy_to_param(self.model, key, cached_weight)
+        else:
+            comfy.utils.set_attr_param(self.model, key, cached_weight)
 
     def clear_cached_hook_weights(self):
         self.cached_hook_patches.clear()
@@ -1684,13 +1689,14 @@ class ModelPatcher:
 
         weight, set_func, convert_func = get_key_weight(self.model, key)
         weight: torch.Tensor
+        inplace_update = set_func is None
         if key not in self.hook_backup:
             target_device = self.offload_device
             if self.hook_mode == comfy.hooks.EnumHookMode.MaxSpeed:
                 used = memory_counter.use(weight)
                 if used:
                     target_device = weight.device
-            self.hook_backup[key] = (weight.to(device=target_device, copy=True), weight.device)
+            self.hook_backup[key] = (weight.to(device=target_device, copy=True), weight.device, inplace_update)
         # TODO: properly handle LowVramPatch, if it ends up an issue
         temp_weight = comfy.model_management.cast_to_device(weight, weight.device, torch.float32, copy=True)
         if convert_func is not None:
@@ -1704,7 +1710,8 @@ class ModelPatcher:
             out_weight = comfy.float.stochastic_rounding(out_weight, weight.dtype, seed=comfy.utils.string_to_seed(key))
             comfy.utils.copy_to_param(self.model, key, out_weight)
         else:
-            set_func(out_weight, inplace_update=True, seed=comfy.utils.string_to_seed(key))
+            out_weight = set_func(out_weight, inplace_update=False, seed=comfy.utils.string_to_seed(key), return_weight=True)
+            comfy.utils.set_attr_param(self.model, key, out_weight)
         if self.hook_mode == comfy.hooks.EnumHookMode.MaxSpeed:
             # TODO: disable caching if not enough system RAM to do so
             target_device = self.offload_device
@@ -1726,11 +1733,21 @@ class ModelPatcher:
             if whitelist_keys_set:
                 for k in keys:
                     if k in whitelist_keys_set:
-                        comfy.utils.copy_to_param(self.model, k, self.hook_backup[k][0].to(device=self.hook_backup[k][1]))
+                        weight, device, inplace_update = self.hook_backup[k]
+                        weight = weight.to(device=device)
+                        if inplace_update:
+                            comfy.utils.copy_to_param(self.model, k, weight)
+                        else:
+                            comfy.utils.set_attr_param(self.model, k, weight)
                         self.hook_backup.pop(k)
             else:
                 for k in keys:
-                    comfy.utils.copy_to_param(self.model, k, self.hook_backup[k][0].to(device=self.hook_backup[k][1]))
+                    weight, device, inplace_update = self.hook_backup[k]
+                    weight = weight.to(device=device)
+                    if inplace_update:
+                        comfy.utils.copy_to_param(self.model, k, weight)
+                    else:
+                        comfy.utils.set_attr_param(self.model, k, weight)
 
                 self.hook_backup.clear()
                 self.current_hooks = None
