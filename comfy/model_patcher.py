@@ -1338,6 +1338,9 @@ class ModelPatcher:
             callback(self, unpatch_all)
         return self.model
 
+    def finalize_model_unload(self):
+        pass
+
     def current_loaded_device(self):
         return self.model.device
 
@@ -2200,6 +2203,10 @@ class ModelPatcherDynamic(ModelPatcher):
             self.partially_unload(None, 1e32)
             for m in self.model.modules():
                 move_weight_functions(m, device_to)
+
+    def finalize_model_unload(self):
+        # A loaded Dynamic model owns the ordinary model kept for Hook reuse.
+        self.non_dynamic_delegate_model = None
 
     def partially_load(self, device_to, extra_memory=0, force_patch_weights=False):
         assert not force_patch_weights #See above
