@@ -52,7 +52,7 @@ def extract_video_metadata(
             if stream.duration is not None and stream.time_base is not None:
                 duration = float(stream.duration * stream.time_base)
             elif container.duration is not None:
-                duration = float(container.duration * av.time_base)
+                duration = float(container.duration / av.time_base)
             frame_count = stream.frames or None
             if frame_count is None and duration is not None and fps is not None:
                 frame_count = round(duration * fps)
