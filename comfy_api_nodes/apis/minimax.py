@@ -161,9 +161,27 @@ class Hailuo03TaskCreationRequest(BaseModel):
         ..., min_length=1
     )
     resolution: str = Field(...)
-    duration: int = Field(..., ge=5, le=15)
+    duration: int = Field(..., ge=4, le=15)
     ratio: str | None = Field(None)
     seed: int | None = Field(None, ge=0, le=4294967295)
+    aigc_watermark: bool | None = Field(None)
+
+
+class Hailuo03ContextIRRequest(BaseModel):
+    model: str = Field(...)
+    content: list[Hailuo03TextContent | Hailuo03ImageContent | Hailuo03VideoContent | Hailuo03AudioContent] = Field(
+        ..., min_length=1
+    )
+    duration: int = Field(..., ge=4, le=15)
+    ratio: str | None = Field(None)
+
+
+class Hailuo03RegenerationRequest(BaseModel):
+    model: str = Field(...)
+    content: list[Hailuo03TextContent | Hailuo03ImageContent | Hailuo03VideoContent | Hailuo03AudioContent] = Field(
+        ..., min_length=1
+    )
+    resolution: str = Field(...)
     aigc_watermark: bool | None = Field(None)
 
 
@@ -178,6 +196,7 @@ class Hailuo03TaskError(BaseModel):
 
 class Hailuo03TaskContent(BaseModel):
     url: str | None = Field(None)
+    prompt: str | None = Field(None)
 
 
 class Hailuo03TaskUsage(BaseModel):

@@ -16,6 +16,7 @@ import comfy.text_encoders.genmo
 import comfy.text_encoders.lt
 import comfy.text_encoders.hunyuan_video
 import comfy.text_encoders.minimax
+import comfy.text_encoders.minimax_music
 import comfy.text_encoders.cosmos
 import comfy.text_encoders.lumina2
 import comfy.text_encoders.wan
@@ -2200,6 +2201,28 @@ class ACEStep15(supported_models_base.BASE):
 
         return supported_models_base.ClipTarget(comfy.text_encoders.ace15.ACE15Tokenizer, comfy.text_encoders.ace15.te(**detect))
 
+class MiniMaxMusic3(supported_models_base.BASE):
+    unet_config = {
+        "audio_model": "minimax_music3",
+    }
+
+    latent_format = comfy.latent_formats.MiniMaxMusic3
+    memory_usage_factor = 2.0
+    supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+    sampling_settings = {"multiplier": 1.0}
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.MiniMaxMusic3(self, device=device)
+
+    def model_type(self, state_dict, prefix=""):
+        return model_base.ModelType.FLOW
+
+    def clip_target(self, state_dict={}):
+        detect = comfy.text_encoders.minimax_music.detect_merged_config(state_dict, self.text_encoder_key_prefix[0])
+        target = supported_models_base.ClipTarget(comfy.text_encoders.minimax_music.MiniMaxMusic3Tokenizer, comfy.text_encoders.minimax_music.MiniMaxMusic3TEModel)
+        target.params["projection_config"] = detect
+        return target
+
 
 class LongCatImage(supported_models_base.BASE):
     unet_config = {
@@ -2494,6 +2517,7 @@ models = [
     ChromaRadiance,
     ACEStep,
     ACEStep15,
+    MiniMaxMusic3,
     Omnigen2,
     Boogu,
     MageFlow,

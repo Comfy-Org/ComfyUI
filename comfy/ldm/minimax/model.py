@@ -91,6 +91,18 @@ def _video_t_grid(n, origin):
     return float(origin) + torch.cat([torch.zeros(1, dtype=torch.float64), spans[:-1].cumsum(0)])
 
 
+def _ref_t_span(blk):
+    # time-axis span a reference block occupies ahead of the target streams
+    kind = blk["kind"]
+    if kind == "image":
+        return 1.0
+    if kind == "audio":
+        return float(blk["ref_audio_t"])
+    if kind in ("video", "video_audio"):
+        return max(float(blk["ref_audio_t"]), sum(_video_t_spans(blk["latent_t"])))
+    return 0.0
+
+
 def _audio_grid(cursor, t, w_low, w_high):
     # channel-major stereo rows: t advances per latent frame, w pinned to the grid extremes per stereo channel, h stays 0
     g = torch.zeros(t * 2, 3, dtype=torch.float64)
@@ -288,7 +300,7 @@ class FinalLayer(nn.Module):
 class PackedLayout:
     """Static packed-sequence structure for one shape/conditioning signature."""
 
-    def __init__(self, text_len, latent_t, latent_h, latent_w, audio_t, keyframes=None, refs=None, frame_count=None):
+    def __init__(self, text_len, latent_t, latent_h, latent_w, audio_t, keyframes=None, refs=None):
         frame, w_grid = _frame_grid(latent_h, latent_w)
         frame_rows = frame.shape[0]
 
@@ -299,29 +311,37 @@ class PackedLayout:
 
         img_pos, img_update = [], []
         audio_pos, audio_update = [], []
-        cursor = text_len
         row = text_len
 
-        if keyframes:
-            # fl2va: keyframe cond rows right after text, sharing the target spatial grid
-            for kf in keyframes:
-                pixel_index = kf["resolved_frame_index"]
-                if pixel_index == 0:
-                    cond_t = float(text_len)
-                elif frame_count is not None and pixel_index == frame_count - 1:
-                    cond_t = float(text_len) + sum(_video_t_spans(latent_t)) - FRAME_RESCALE
-                else:
-                    raise ValueError("only first/last keyframe anchors are supported")
-                g = torch.empty(frame_rows, 3, dtype=torch.float64)
-                g[:, 0] = cond_t
-                g[:, 1:] = frame
-                segments.append(("cond", frame_rows))
-                pos.append(g)
-                img_pos.append(torch.arange(row, row + frame_rows))
-                img_update.append(torch.zeros(frame_rows, dtype=torch.bool))
-                row += frame_rows
-
         target_audio_w = (float(w_grid[0]), float(w_grid[-1]))
+        # refs pack between text and the targets, so the target timeline starts after their spans
+        cursor = float(text_len)
+        for blk in refs or ():
+            cursor += _ref_t_span(blk)
+
+        if keyframes:
+            # fl2va: keyframe cond rows right after text, sharing the target spatial grid;
+            # anchors count from the target timeline origin, FRAME_RESCALE per pixel frame, 1.0 per audio latent frame
+            for kf in keyframes:
+                cond_t = cursor + FRAME_RESCALE * kf["resolved_frame_index"]
+                video_latent = kf.get("latent")
+                if video_latent is not None:
+                    vt = video_latent.shape[2]
+                    n = vt * frame_rows
+                    segments.append(("cond", n))
+                    pos.append(_video_grid(vt, frame, cond_t))
+                    img_pos.append(torch.arange(row, row + n))
+                    img_update.append(torch.zeros(n, dtype=torch.bool))
+                    row += n
+                audio_latent = kf.get("audio_latent")
+                if audio_latent is not None:
+                    rt = audio_latent.shape[-1]
+                    segments.append(("cond_audio", rt * 2))
+                    pos.append(_audio_grid(cond_t, rt, *target_audio_w))
+                    audio_pos.append(torch.arange(row, row + rt * 2))
+                    audio_update.append(torch.zeros(rt * 2, dtype=torch.bool))
+                    row += rt * 2
+
         if refs:
             cursor = float(text_len)
             for blk in refs:
@@ -389,7 +409,7 @@ class PackedLayout:
         self.audio_update = torch.cat(audio_update)
         self.signature = (text_len, latent_t, latent_h, latent_w, audio_t)
         # contiguous segment table (start, stop, kind)
-        # kinds: text / cond / ref_img / ref_audio / audio / video
+        # kinds: text / cond / cond_audio / ref_img / ref_audio / audio / video
         # the packed sequence is uniform per segment in (modality tag, timestep class),
         # except the text span (tag runs resolved at forward time from the presentation tags)
         seg_abs = []
@@ -529,8 +549,7 @@ class MiniMaxH3Model(nn.Module):
         if layout is None or layout.signature != (text_len, latent_t, lat_h, lat_w, audio_t):
             layout = PackedLayout(text_len, latent_t, lat_h, lat_w, audio_t,
                                   keyframes=payload.get("keyframes"),
-                                  refs=payload.get("refs"),
-                                  frame_count=payload.get("frame_count"))
+                                  refs=payload.get("refs"))
 
         # model_base passes model_sampling.timestep(sigma) = sigma * 1000
         shift_v = float(transformer_options.get("minimax_h3_sigma_shift_video", self.sigma_shift_video))
@@ -543,14 +562,14 @@ class MiniMaxH3Model(nn.Module):
         vis_aug = float(payload.get("visual_cond_noise_aug", VISUAL_COND_TIMESTEP))
         aud_aug = float(payload.get("audio_cond_noise_aug", AUDIO_COND_TIMESTEP))
         has_vis_cond = any(k in ("cond", "ref_img") for _, _, k in layout.segments)
-        has_aud_cond = any(k == "ref_audio" for _, _, k in layout.segments)
+        has_aud_cond = any(k in ("cond_audio", "ref_audio") for _, _, k in layout.segments)
         seg_t = {"text": t_v, "video": t_v, "audio": t_a,
                  "cond": max(t_v, vis_aug), "ref_img": max(t_v, vis_aug),
-                 "ref_audio": max(t_a, aud_aug)}
+                 "cond_audio": max(t_a, aud_aug), "ref_audio": max(t_a, aud_aug)}
         unique_t = sorted({t_v, t_a} | ({seg_t["cond"]} if has_vis_cond else set())
                           | ({seg_t["ref_audio"]} if has_aud_cond else set()))
         t_row = {t: i for i, t in enumerate(unique_t)}
-        seg_tag = {"text": 1, "video": 0, "audio": 2, "cond": 0, "ref_img": 0, "ref_audio": 2}
+        seg_tag = {"text": 1, "video": 0, "audio": 2, "cond": 0, "ref_img": 0, "cond_audio": 2, "ref_audio": 2}
 
         text_tags = payload.get("text_token_tags")
         mod_segments = []

@@ -10,6 +10,7 @@ import comfy.ldm.lumina.controlnet
 import comfy.ldm.supir.supir_modules
 import comfy.ldm.anima.lllite
 import comfy.ldm.wan.uni3c
+import comfy.ldm.lightricks.duration_head
 from comfy.ldm.wan.model_multitalk import WanMultiTalkAttentionBlock, MultiTalkAudioProjModel
 from comfy_api.latest import io
 from comfy.ldm.supir.supir_patch import SUPIRPatch
@@ -296,6 +297,10 @@ class ModelPatchLoader:
                     device=comfy.model_management.unet_offload_device(),
                     dtype=dtype,
                     operations=comfy.ops.manual_cast)
+        elif any(k.endswith("duration_head.attention_pooler.query_tokens") for k in sd) or "attention_pooler.query_tokens" in sd:
+            sd = comfy.ldm.lightricks.duration_head.normalize_state_dict(sd)
+            sd = {k: v.float() for k, v in sd.items()}  # tiny head, keep fp32
+            model = comfy.ldm.lightricks.duration_head.DurationHead()
         elif "audio_proj.proj1.weight" in sd:
             model = MultiTalkModelPatch(
                     audio_window=5, context_tokens=32, vae_scale=4,

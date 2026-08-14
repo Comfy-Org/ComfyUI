@@ -29,7 +29,7 @@ class PreviewAny():
             value = str(source)
         elif source is not None:
             try:
-                value = json.dumps(source, indent=4)
+                value = json.dumps(source, indent=4, ensure_ascii=False)
             except Exception:
                 try:
                     value = str(source)

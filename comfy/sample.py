@@ -37,6 +37,11 @@ def prepare_noise(latent_image, seed, noise_inds=None):
 
     return noises
 
+def prepare_empty_noise(latent_image):
+    if latent_image.is_nested:
+        return comfy.nested_tensor.NestedTensor([torch.zeros_like(t, device="cpu") for t in latent_image.unbind()])
+    return torch.zeros_like(latent_image, device="cpu")
+
 def fix_empty_latent_channels(model, latent_image, downscale_ratio_spacial=None, downscale_ratio_temporal=None):
     if latent_image.is_nested:
         return latent_image

@@ -314,12 +314,17 @@ class CLIPVisionModelProjection(torch.nn.Module):
         if "projection_dim" in config_dict:
             self.visual_projection = operations.Linear(config_dict["hidden_size"], config_dict["projection_dim"], bias=False)
         else:
-            self.visual_projection = lambda a: a
+            self.visual_projection = torch.nn.Identity()
 
         if "llava3" == config_dict.get("projector_type", None):
             self.multi_modal_projector = LlavaProjector(config_dict["hidden_size"], 4096, dtype, device, operations)
         else:
             self.multi_modal_projector = None
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        if "{}visual_projection.weight".format(prefix) not in state_dict:
+            self.visual_projection = torch.nn.Identity()
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def forward(self, *args, **kwargs):
         x = self.vision_model(*args, **kwargs)

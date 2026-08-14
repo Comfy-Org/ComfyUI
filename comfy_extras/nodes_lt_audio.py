@@ -173,7 +173,7 @@ class LTXAVTextEncoderLoader(io.ComfyNode):
             node_id="LTXAVTextEncoderLoader",
             display_name="Load LTXV Audio Text Encoder",
             category="model/loaders",
-            description="Recipes:\nltxav: gemma 3 12B",
+            description="Recipes:\nltxav: gemma 3 12B or matching gemma 4 model",
             inputs=[
                 io.Combo.Input(
                     "text_encoder",

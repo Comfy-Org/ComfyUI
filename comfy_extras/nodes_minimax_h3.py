@@ -20,6 +20,7 @@ import comfy.model_sampling
 import comfy.nested_tensor
 import comfy.utils
 import node_helpers
+from comfy.ldm.minimax.model import FRAME_PER_TOKEN, FRAME_RESCALE
 from comfy_api.latest import ComfyExtension, io
 
 CANVAS_MULTIPLE = 32
@@ -65,6 +66,16 @@ def _resize(image, width, height, crop):
     samples = image[..., :3].movedim(-1, 1)
     samples = comfy.utils.common_upscale(samples, width, height, "lanczos", crop)
     return samples.movedim(1, -1)
+
+
+def _encode_ref_audio(audio_vae, audio):
+    waveform = audio["waveform"]  # [B, C, L]
+    sr = audio["sample_rate"]
+    vae_sr = getattr(audio_vae, "audio_sample_rate", 32000)
+    if sr != vae_sr:
+        waveform = torchaudio.functional.resample(waveform, sr, vae_sr)
+    z = audio_vae.encode(waveform[:1].movedim(1, -1))  # [1, 32, 2, T]
+    return z, z.shape[-1]
 
 
 def _empty_av_latent(width, height, length, batch_size=1):
@@ -144,11 +155,85 @@ class MiniMaxH3ImageToVideo(io.ComfyNode):
         if keyframes:
             for kf in keyframes:
                 kf["latent"] = vae.encode(kf.pop("image"))
-            cond = node_helpers.conditioning_set_values(cond, {
-                "minimax_keyframes": keyframes,
-                "minimax_frame_count": frame_count,
-            })
+            cond = node_helpers.conditioning_set_values(cond, {"minimax_keyframes": keyframes})
         return io.NodeOutput(cond, latent)
+
+
+class MiniMaxH3AddGuide(io.ComfyNode):
+    """Anchor image and/or audio guides at an arbitrary pixel frame of the target video."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3AddGuide",
+            display_name="Add Guide for MiniMax H3",
+            category="model/conditioning/minimax",
+            description="Anchor an image, a short clip, audio, or a clip with its soundtrack at any frame of a MiniMax H3 video. Chain several nodes to anchor several frames.",
+            inputs=[
+                io.Conditioning.Input("positive"),
+                io.Vae.Input("vae", optional=True, tooltip="Video VAE, needed when an image is connected."),
+                io.Vae.Input("audio_vae", optional=True, tooltip="Audio VAE, needed when an audio is connected."),
+                io.Latent.Input("latent"),
+                io.Image.Input("image", optional=True, tooltip="Image or video frames to anchor. Multi-frame batches are anchored as a clip and cropped down to the model's valid clip lengths: 5, 22, 39... (17k + 5) frames. Batches shorter than 5 frames use only the first image."),
+                io.Audio.Input("audio", optional=True,
+                               tooltip="Soundtrack to anchor starting at the same frame index, cropped to the video's remaining duration."),
+                io.Int.Input("frame_idx", default=0, min=-9999, max=9999,
+                             tooltip="Frame index to anchor the image or the clip's first frame at. Negative values are counted from the end of the video."),
+            ],
+            outputs=[io.Conditioning.Output(display_name="positive")],
+        )
+
+    @classmethod
+    def execute(cls, positive, latent, frame_idx, vae=None, audio_vae=None, image=None, audio=None) -> io.NodeOutput:
+        samples = latent["samples"]
+        if not samples.is_nested or len(samples.tensors) != 2 or samples.tensors[0].ndim != 5 or samples.tensors[0].shape[1] != 24:
+            raise ValueError("MiniMaxH3AddGuide expects a MiniMax H3 AV latent")
+        if image is None and audio is None:
+            raise ValueError("MiniMaxH3AddGuide needs an image or an audio to anchor")
+        video = samples.tensors[0]
+        height = video.shape[3] * 16
+        width = video.shape[4] * 16
+        frame_count = sum(FRAME_PER_TOKEN[k % 5] for k in range(video.shape[2]))
+
+        guide_frames = 1
+        if image is not None:
+            if vae is None:
+                raise ValueError("anchoring guide frames needs the vae input")
+            guide_frames = image.shape[0]
+            if guide_frames < 5:
+                guide_frames = 1
+            else:
+                while guide_frames % 17 != 5:
+                    guide_frames -= 1
+
+        resolved_frame_index = frame_idx if frame_idx >= 0 else frame_count + frame_idx
+        if resolved_frame_index < 0 or resolved_frame_index + guide_frames > frame_count:
+            if guide_frames == 1:
+                raise ValueError("frame_idx {} is outside the video's {} frames".format(frame_idx, frame_count))
+            raise ValueError("a {} frame guide clip at frame_idx {} does not fit in the video's {} frames".format(
+                guide_frames, frame_idx, frame_count))
+
+        keyframe = {"resolved_frame_index": resolved_frame_index}
+        if image is not None:
+            frames = _resize(image[:guide_frames], width, height, "center")
+            keyframe["latent"] = vae.encode(frames)
+
+        if audio is not None:
+            if audio_vae is None:
+                raise ValueError("anchoring guide audio needs the audio_vae input")
+            audio_latent, audio_rt = _encode_ref_audio(audio_vae, audio)
+            # the streams share one time axis: FRAME_RESCALE per pixel frame, 1.0 per audio latent frame
+            max_rt = math.floor(samples.tensors[1].shape[-1] - FRAME_RESCALE * resolved_frame_index)
+            if max_rt < 1:
+                raise ValueError("frame_idx {} is past the end of the video's audio track".format(frame_idx))
+            if audio_rt > max_rt:
+                audio_latent = audio_latent[..., :max_rt].clone()
+            keyframe["audio_latent"] = audio_latent
+
+        keyframes = list(positive[0][1].get("minimax_keyframes", []))
+        keyframes.append(keyframe)
+        positive = node_helpers.conditioning_set_values(positive, {"minimax_keyframes": keyframes})
+        return io.NodeOutput(positive)
 
 
 class MiniMaxH3ReferenceToVideo(io.ComfyNode):
@@ -197,16 +282,6 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
             outputs=[io.Conditioning.Output(display_name="positive"), io.Latent.Output()],
         )
 
-    @staticmethod
-    def _encode_ref_audio(audio_vae, audio):
-        waveform = audio["waveform"]  # [B, C, L]
-        sr = audio["sample_rate"]
-        vae_sr = getattr(audio_vae, "audio_sample_rate", 32000)
-        if sr != vae_sr:
-            waveform = torchaudio.functional.resample(waveform, sr, vae_sr)
-        z = audio_vae.encode(waveform[:1].movedim(1, -1))  # [1, 32, 2, T]
-        return z, z.shape[-1]
-
     @classmethod
     def execute(cls, clip, vae, audio_vae, prompt, width, height, length, ref_image_size="match",
                 ref_images=None, ref_videos=None, ref_video_audios=None, ref_audios=None) -> io.NodeOutput:
@@ -254,7 +329,7 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
             z = vae.encode(frames)
             audio_latent, ref_audio_t = (None, 0)
             if soundtrack is not None:
-                audio_latent, ref_audio_t = cls._encode_ref_audio(audio_vae, soundtrack)
+                audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, soundtrack)
                 # the soundtrack gets its own <Audio j> label, emitted before <Video k>
                 ref_items.append({"type": "audio"})
             # Qwen sees the video at 2 fps with timestamps
@@ -269,7 +344,7 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
         for audio in (ref_audios or {}).values():
             if audio is None:
                 continue
-            audio_latent, ref_audio_t = cls._encode_ref_audio(audio_vae, audio)
+            audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, audio)
             ref_items.append({"type": "audio"})
             ref_blocks.append({"kind": "audio", "ref_audio_t": ref_audio_t, "audio_latent": audio_latent})
 
@@ -329,6 +404,7 @@ class MiniMaxH3Extension(ComfyExtension):
         return [
             EmptyMiniMaxH3LatentAV,
             MiniMaxH3ImageToVideo,
+            MiniMaxH3AddGuide,
             MiniMaxH3ReferenceToVideo,
             MiniMaxH3SigmaShift,
             ]

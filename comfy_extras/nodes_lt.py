@@ -2,11 +2,14 @@ import nodes
 import node_helpers
 import torch
 import torchaudio
+import comfy.ldm.lightricks.duration_head
 import comfy.model_management
 import comfy.model_sampling
 import comfy.samplers
 import comfy.utils
+import logging
 import math
+import re
 import numpy as np
 import av
 from io import BytesIO
@@ -934,6 +937,243 @@ class LTXVReferenceAudio(io.ComfyNode):
         return io.NodeOutput(m, positive, negative)
 
 
+class LTXVSpatioTemporalGuidance(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXVSpatioTemporalGuidance",
+            display_name="LTXV Spatio-Temporal Guidance (STG)",
+            category="advanced/guidance",
+            description="Runs one extra pass per step with the self-attention of the selected blocks degraded to a value-passthrough, "
+                        "then guides away from it - improving spatial detail and motion coherence.",
+            inputs=[
+                io.Model.Input("model"),
+                io.Float.Input("scale", default=1.0, min=0.0, max=100.0, step=0.01, round=0.01),
+                io.String.Input("blocks", default="29", tooltip="Comma-separated transformer block indices to perturb."),
+                io.Float.Input("start_percent", default=0.0, min=0.0, max=1.0, step=0.001, advanced=True),
+                io.Float.Input("end_percent", default=1.0, min=0.0, max=1.0, step=0.001, advanced=True),
+            ],
+            outputs=[io.Model.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, scale, blocks, start_percent, end_percent) -> io.NodeOutput:
+        block_set = frozenset(int(b) for b in re.findall(r"\d+", blocks))
+
+        m = model.clone()
+        model_sampling = m.get_model_object("model_sampling")
+        sigma_start = model_sampling.percent_to_sigma(start_percent)
+        sigma_end = model_sampling.percent_to_sigma(end_percent)
+
+        def post_cfg_function(args):
+            if scale == 0 or not block_set:
+                return args["denoised"]
+
+            sigma_ = args["sigma"][0].item()
+            if sigma_ > sigma_start or sigma_ < sigma_end:
+                return args["denoised"]
+
+            cond_pred = args["cond_denoised"]
+            cond = args["cond"]
+            cfg_result = args["denoised"]
+            x = args["input"]
+
+            model_options = args["model_options"].copy()
+            transformer_options = model_options.get("transformer_options", {}).copy()
+            transformer_options["stg_self_attn_blocks"] = block_set
+            model_options["transformer_options"] = transformer_options
+
+            (perturbed,) = comfy.samplers.calc_cond_batch(args["model"], [cond], x, args["sigma"], model_options)
+
+            return cfg_result + (cond_pred - perturbed) * scale
+
+        m.set_model_sampler_post_cfg_function(post_cfg_function)
+        return io.NodeOutput(m)
+
+
+class LTXVModalityGuidance(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXVModalityGuidance",
+            display_name="LTXV Modality Guidance (A/V coupling)",
+            category="advanced/guidance",
+            description="Cross-modal (audio-video) guidance for LTXV-AV. Runs one extra forward "
+                        "pass per step with the a2v/v2a cross-attention severed, then pushes the "
+                        "result toward the coupled prediction - strengthening audio-visual sync "
+                        "(e.g. lip-sync). Reference default modality_scale is 3.0. Stacks with the "
+                        "dual-CFG guider and STG. Set to 1.0 to disable (no extra pass).",
+            inputs=[
+                io.Model.Input("model"),
+                io.Float.Input("modality_scale", default=3.0, min=1.0, max=100.0, step=0.1, round=0.01),
+                io.Float.Input("start_percent", default=0.0, min=0.0, max=1.0, step=0.001, advanced=True),
+                io.Float.Input("end_percent", default=1.0, min=0.0, max=1.0, step=0.001, advanced=True),
+            ],
+            outputs=[io.Model.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, modality_scale, start_percent, end_percent) -> io.NodeOutput:
+        m = model.clone()
+        model_sampling = m.get_model_object("model_sampling")
+        sigma_start = model_sampling.percent_to_sigma(start_percent)
+        sigma_end = model_sampling.percent_to_sigma(end_percent)
+
+        def post_cfg_function(args):
+            if math.isclose(modality_scale, 1.0):
+                return args["denoised"]
+
+            sigma_ = args["sigma"][0].item()
+            if sigma_ > sigma_start or sigma_ < sigma_end:
+                return args["denoised"]
+
+            cond_pred = args["cond_denoised"]
+            cond = args["cond"]
+            cfg_result = args["denoised"]
+            x = args["input"]
+
+            # Extra pass with audio-video cross-attention severed (both directions)
+            model_options = args["model_options"].copy()
+            transformer_options = model_options.get("transformer_options", {}).copy()
+            transformer_options["a2v_cross_attn"] = False
+            transformer_options["v2a_cross_attn"] = False
+            model_options["transformer_options"] = transformer_options
+
+            (mod_pred,) = comfy.samplers.calc_cond_batch(
+                args["model"], [cond], x, args["sigma"], model_options
+            )
+
+            # (modality_scale - 1) * (cond - uncond_modality), per the reference guider.
+            return cfg_result + (cond_pred - mod_pred) * (modality_scale - 1.0)
+
+        m.set_model_sampler_post_cfg_function(post_cfg_function)
+        return io.NodeOutput(m)
+
+
+class Guider_LTXAVDualCFG(comfy.samplers.CFGGuider):
+    """CFG guider that applies separate guidance scales to the video and audio
+    modalities of a packed LTXV-AV latent.
+    """
+
+    def set_conds(self, positive, negative):
+        self.inner_set_conds({"positive": positive, "negative": negative})
+
+    def set_cfg(self, video_cfg, audio_cfg):
+        self.video_cfg = video_cfg
+        self.audio_cfg = audio_cfg
+        self.cfg = max(video_cfg, audio_cfg)
+
+    def sample(self, noise, latent_image, *args, **kwargs):
+        # Capture the video/audio split from the nested latent before it is packed.
+        self._v_numel = None
+        if getattr(latent_image, "is_nested", False):
+            parts = latent_image.unbind()
+            if len(parts) >= 2:
+                self._v_numel = math.prod(parts[0].shape[1:])
+        return super().sample(noise, latent_image, *args, **kwargs)
+
+    def predict_noise(self, x, timestep, model_options={}, seed=None):
+        v = getattr(self, "_v_numel", None)
+        if v is None or math.isclose(self.video_cfg, self.audio_cfg):
+            # Not an AV latent, or equal scales: fall back to standard single-CFG.
+            self.cfg = self.video_cfg
+            return super().predict_noise(x, timestep, model_options, seed)
+
+        video_cfg, audio_cfg = self.video_cfg, self.audio_cfg
+
+        def dual_cfg(args):
+            # Noise-space: cond = x - cond_pred, uncond = x - uncond_pred; the
+            # returned tensor is subtracted from x by cfg_function.
+            cond, uncond = args["cond"], args["uncond"]
+            out = uncond + (cond - uncond) * video_cfg
+            out[..., v:] = uncond[..., v:] + (cond[..., v:] - uncond[..., v:]) * audio_cfg
+            return out
+
+        # disable_cfg1_optimization so the uncond pass always runs even if one of the two scales is 1.0.
+        model_options = {**model_options, "sampler_cfg_function": dual_cfg, "disable_cfg1_optimization": True}
+        return super().predict_noise(x, timestep, model_options, seed)
+
+
+class LTXVDualCFGGuider(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXVDualCFGGuider",
+            display_name="LTXV Dual CFG Guider",
+            category="model/sampling/guiders",
+            description="Separate CFG scales for the video and audio modalities of a packed LTXV-AV latent.",
+            inputs=[
+                io.Model.Input("model"),
+                io.Conditioning.Input("positive"),
+                io.Conditioning.Input("negative"),
+                io.Float.Input("video_cfg", default=3.0, min=0.0, max=100.0, step=0.1, round=0.01),
+                io.Float.Input("audio_cfg", default=7.0, min=0.0, max=100.0, step=0.1, round=0.01),
+            ],
+            outputs=[io.Guider.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, positive, negative, video_cfg, audio_cfg) -> io.NodeOutput:
+        guider = Guider_LTXAVDualCFG(model)
+        guider.set_conds(positive, negative)
+        guider.set_cfg(video_cfg, audio_cfg)
+        return io.NodeOutput(guider)
+
+
+class LTXVDurationPredictor(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXVDurationPredictor",
+            display_name="LTXV Duration Predictor",
+            category="conditioning/video_models",
+            description="Predicts the natural shot duration for a prompt using the LTX 2.4 duration "
+                        "head (loaded with ModelPatchLoader), and snaps it to the VAE's 8k+1 frame grid.",
+            search_aliases=["auto duration", "duration head", "num_frames"],
+            inputs=[
+                io.Model.Input("model"),
+                io.Conditioning.Input("positive"),
+                io.Custom("MODEL_PATCH").Input("duration_head",
+                                               tooltip="LTX 2.4 duration head loaded with ModelPatchLoader."),
+                io.Float.Input("frame_rate", default=24.0, min=1.0, max=120.0, step=0.01),
+                io.Float.Input("min_seconds", default=1.0, min=0.5, max=120.0, step=0.1),
+                io.Float.Input("max_seconds", default=20.0, min=0.5, max=120.0, step=0.1),
+            ],
+            outputs=[
+                io.Int.Output(display_name="num_frames"),
+                io.Float.Output(display_name="seconds", tooltip="Raw (unclamped) predicted duration."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model, positive, duration_head, frame_rate, min_seconds, max_seconds) -> io.NodeOutput:
+        dm = model.model.diffusion_model
+        head = duration_head.model
+        if not isinstance(head, comfy.ldm.lightricks.duration_head.DurationHead):
+            raise ValueError("The connected model_patch is not an LTX duration head.")
+
+        context = positive[0][0]
+        meta = positive[0][1]
+        if context.shape[0] != 1:
+            context = context[:1]
+
+        # Run the caption connectors exactly the way sampling does.
+        comfy.model_management.load_models_gpu([model, duration_head])
+        device = model.load_device
+        head = head.to(device)
+        with torch.no_grad():
+            context = context.to(device=device, dtype=model.model.get_dtype_inference())
+            processed = dm.preprocess_text_embeds(context, unprocessed=meta.get("unprocessed_ltxav_embeds", False))
+            video_tokens = processed[..., :dm.cross_attention_dim].float()
+            audio_tokens = processed[..., dm.cross_attention_dim:].float()
+            seconds = float(head(video_tokens, audio_tokens)[0])
+
+        num_frames = comfy.ldm.lightricks.duration_head.seconds_to_num_frames(
+            seconds, frame_rate, min_seconds, max_seconds)
+        logging.info("LTXV duration head predicted %.2fs -> %d frames @ %.2f fps", seconds, num_frames, frame_rate)
+        return io.NodeOutput(num_frames, seconds)
+
+
 class LtxvExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -951,6 +1191,10 @@ class LtxvExtension(ComfyExtension):
             LTXVConcatAVLatent,
             LTXVSeparateAVLatent,
             LTXVReferenceAudio,
+            LTXVDualCFGGuider,
+            LTXVModalityGuidance,
+            LTXVSpatioTemporalGuidance,
+            LTXVDurationPredictor,
         ]
 
 

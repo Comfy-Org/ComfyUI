@@ -957,6 +957,11 @@ class ACEAudio15(LatentFormat):
     latent_dimensions = 1
     temporal_downscale_ratio = 1764
 
+class MiniMaxMusic3(LatentFormat):
+    latent_channels = 128
+    latent_dimensions = 1
+    temporal_downscale_ratio = 512
+
 class ChromaRadiance(LatentFormat):
     latent_channels = 3
     spacial_downscale_ratio = 1

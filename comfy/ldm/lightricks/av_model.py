@@ -96,6 +96,8 @@ class BasicAVTransformerBlock(nn.Module):
         attn_precision=None,
         apply_gated_attention=False,
         cross_attention_adaln=False,
+        ff_bias=True,
+        audio_ff_bias=True,
         dtype=None,
         device=None,
         operations=None,
@@ -178,10 +180,10 @@ class BasicAVTransformerBlock(nn.Module):
         )
 
         self.ff = FeedForward(
-            v_dim, dim_out=v_dim, glu=True, dtype=dtype, device=device, operations=operations
+            v_dim, dim_out=v_dim, glu=True, ff_bias=ff_bias, dtype=dtype, device=device, operations=operations
         )
         self.audio_ff = FeedForward(
-            a_dim, dim_out=a_dim, glu=True, dtype=dtype, device=device, operations=operations
+            a_dim, dim_out=a_dim, glu=True, ff_bias=audio_ff_bias, dtype=dtype, device=device, operations=operations
         )
 
         num_ada_params = ADALN_CROSS_ATTN_PARAMS_COUNT if cross_attention_adaln else ADALN_BASE_PARAMS_COUNT
@@ -413,12 +415,16 @@ class LTXAVModel(LTXVModel):
         apply_gated_attention=False,
         caption_proj_before_connector=False,
         cross_attention_adaln=False,
+        ff_bias=True,
+        audio_ff_bias=True,
+        use_prompt_adaln_single=True,
         dtype=None,
         device=None,
         operations=None,
         **kwargs,
     ):
         # Store audio-specific parameters
+        self.audio_ff_bias = audio_ff_bias
         self.audio_in_channels = audio_in_channels
         self.audio_cross_attention_dim = audio_cross_attention_dim
         self.audio_attention_head_dim = audio_attention_head_dim
@@ -451,6 +457,8 @@ class LTXAVModel(LTXVModel):
             timestep_scale_multiplier=timestep_scale_multiplier,
             caption_proj_before_connector=caption_proj_before_connector,
             cross_attention_adaln=cross_attention_adaln,
+            ff_bias=ff_bias,
+            use_prompt_adaln_single=use_prompt_adaln_single,
             dtype=dtype,
             device=device,
             operations=operations,
@@ -475,7 +483,7 @@ class LTXAVModel(LTXVModel):
             operations=self.operations,
         )
 
-        if self.cross_attention_adaln:
+        if self.cross_attention_adaln and self.use_prompt_adaln_single:
             self.audio_prompt_adaln_single = AdaLayerNormSingle(
                 self.audio_inner_dim,
                 embedding_coefficient=2,
@@ -606,6 +614,8 @@ class LTXAVModel(LTXVModel):
                     a_context_dim=self.audio_cross_attention_dim,
                     apply_gated_attention=self.apply_gated_attention,
                     cross_attention_adaln=self.cross_attention_adaln,
+                    ff_bias=self.ff_bias,
+                    audio_ff_bias=self.audio_ff_bias,
                     dtype=dtype,
                     device=device,
                     operations=self.operations,
@@ -924,9 +934,15 @@ class LTXAVModel(LTXVModel):
         blocks_replace = patches_replace.get("dit", {})
         prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.transformer_blocks), vx.device, transformer_options)
 
+        # Blocks whose self-attention should be perturbed to a value-passthrough (STG).
+        stg_self_attn_blocks = transformer_options.get("stg_self_attn_blocks", ())
+
         # Process transformer blocks
         for i, block in enumerate(self.transformer_blocks):
             comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, vx.device, block)
+            block_transformer_options = transformer_options
+            if i in stg_self_attn_blocks:
+                block_transformer_options = {**transformer_options, "stg_skip_self_attn": True}
             if ("double_block", i) in blocks_replace:
 
                 def block_wrap(args):
@@ -969,7 +985,7 @@ class LTXAVModel(LTXVModel):
                         "a_cross_scale_shift_timestep": av_ca_audio_scale_shift_timestep,
                         "v_cross_gate_timestep": av_ca_a2v_gate_noise_timestep,
                         "a_cross_gate_timestep": av_ca_v2a_gate_noise_timestep,
-                        "transformer_options": transformer_options,
+                        "transformer_options": block_transformer_options,
                         "self_attention_mask": self_attention_mask,
                         "v_prompt_timestep": v_prompt_timestep,
                         "a_prompt_timestep": a_prompt_timestep,
@@ -993,7 +1009,7 @@ class LTXAVModel(LTXVModel):
                     a_cross_scale_shift_timestep=av_ca_audio_scale_shift_timestep,
                     v_cross_gate_timestep=av_ca_a2v_gate_noise_timestep,
                     a_cross_gate_timestep=av_ca_v2a_gate_noise_timestep,
-                    transformer_options=transformer_options,
+                    transformer_options=block_transformer_options,
                     self_attention_mask=self_attention_mask,
                     v_prompt_timestep=v_prompt_timestep,
                     a_prompt_timestep=a_prompt_timestep,
