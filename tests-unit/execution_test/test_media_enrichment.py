@@ -1,17 +1,22 @@
 """Tests for enrich_output_with_media_metadata in comfy_execution/media_enrichment.py."""
-import mimetypes
 import os
+import shutil
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from utils.mime_types import init_mime_types
+
 # Initialize the mimetypes registry before any test patches os.path.isfile —
 # its lazy init consults os.path.isfile to pick candidate files, and a
-# patched-True isfile makes it try to open files that don't exist.
-mimetypes.init()
+# patched-True isfile makes it try to open files that don't exist. Use the
+# project initializer, not mimetypes.init(), which would wipe the custom
+# registrations other test modules rely on.
+init_mime_types()
 
 # Platform-appropriate absolute base. tempfile.gettempdir() returns C:\... on
 # Windows and /tmp on POSIX, so containment via commonpath behaves naturally.
-_DEFAULT_BASE = os.path.join(__import__("tempfile").gettempdir(), "media-enrichment-test-base")
+_DEFAULT_BASE = os.path.join(tempfile.gettempdir(), "media-enrichment-test-base")
 
 _VIDEO_META = {
     "kind": "video",
@@ -23,25 +28,25 @@ _VIDEO_META = {
 }
 
 
-def _mocked_modules(*, extract=None, directory=_DEFAULT_BASE):
-    return {
-        "folder_paths": MagicMock(get_directory_by_type=MagicMock(return_value=directory)),
-        "app.assets.services.media_metadata": MagicMock(
-            extract_media_metadata=extract or MagicMock(return_value=dict(_VIDEO_META)),
-        ),
-    }
+import comfy_execution.media_enrichment as media_enrichment
+
+
+def _folder_paths_mock(directory=_DEFAULT_BASE):
+    return MagicMock(get_directory_by_type=MagicMock(return_value=directory))
 
 
 def _call(output_ui, *, extract=None, file_exists=True, directory=_DEFAULT_BASE):
     extract_mock = extract or MagicMock(return_value=dict(_VIDEO_META))
-    mocked = _mocked_modules(extract=extract_mock, directory=directory)
+    extractor_module = MagicMock(extract_media_metadata=extract_mock)
 
-    # Only os.path.isfile is patched — abspath/join must run natively so the
+    # folder_paths is bound at media_enrichment module scope, so it is patched
+    # as an attribute; the extractor is looked up lazily via sys.modules. Only
+    # os.path.isfile is patched — abspath/join must run natively so the
     # containment check sees real platform paths.
-    with patch.dict("sys.modules", mocked), \
+    with patch.object(media_enrichment, "folder_paths", _folder_paths_mock(directory)), \
+         patch.dict("sys.modules", {"app.assets.services.media_metadata": extractor_module}), \
          patch("os.path.isfile", return_value=file_exists):
-        import comfy_execution.media_enrichment as mod
-        return mod.enrich_output_with_media_metadata(output_ui), extract_mock
+        return media_enrichment.enrich_output_with_media_metadata(output_ui), extract_mock
 
 
 class TestEnrichOutputWithMediaMetadata(unittest.TestCase):
@@ -117,15 +122,11 @@ class TestEnrichOutputWithMediaMetadata(unittest.TestCase):
 
     def test_extractor_unavailable_returns_unchanged(self):
         output = {"images": [{"filename": "a.mp4", "subfolder": "", "type": "output"}]}
-        mocked = {
-            "folder_paths": MagicMock(get_directory_by_type=MagicMock(return_value=_DEFAULT_BASE)),
-            # A None sys.modules entry makes the lazy import raise ImportError.
-            "app.assets.services.media_metadata": None,
-        }
-        with patch.dict("sys.modules", mocked), \
+        # A None sys.modules entry makes the lazy import raise ImportError.
+        with patch.object(media_enrichment, "folder_paths", _folder_paths_mock()), \
+             patch.dict("sys.modules", {"app.assets.services.media_metadata": None}), \
              patch("os.path.isfile", return_value=True):
-            import comfy_execution.media_enrichment as mod
-            result = mod.enrich_output_with_media_metadata(output)
+            result = media_enrichment.enrich_output_with_media_metadata(output)
         self.assertNotIn("metadata", result["images"][0])
 
     def test_extractor_import_failure_beyond_importerror_degrades(self):
@@ -134,15 +135,29 @@ class TestEnrichOutputWithMediaMetadata(unittest.TestCase):
                 raise RuntimeError("dependency init failed")
 
         output = {"images": [{"filename": "a.mp4", "subfolder": "", "type": "output"}]}
-        mocked = {
-            "folder_paths": MagicMock(get_directory_by_type=MagicMock(return_value=_DEFAULT_BASE)),
-            "app.assets.services.media_metadata": ExplodingModule(),
-        }
-        with patch.dict("sys.modules", mocked), \
+        with patch.object(media_enrichment, "folder_paths", _folder_paths_mock()), \
+             patch.dict("sys.modules", {"app.assets.services.media_metadata": ExplodingModule()}), \
              patch("os.path.isfile", return_value=True):
-            import comfy_execution.media_enrichment as mod
-            result = mod.enrich_output_with_media_metadata(output)
+            result = media_enrichment.enrich_output_with_media_metadata(output)
         self.assertNotIn("metadata", result["images"][0])
+
+    def test_missing_subfolder_key_defaults_to_base_dir(self):
+        output = {"images": [{"filename": "clip.mp4", "type": "output"}]}
+        result, _ = _call(output)
+        self.assertIn("metadata", result["images"][0])
+
+    def test_falsy_non_string_subfolder_skipped(self):
+        output = {
+            "images": [
+                {"filename": "a.mp4", "subfolder": None, "type": "output"},
+                {"filename": "b.mp4", "subfolder": False, "type": "output"},
+                {"filename": "c.mp4", "subfolder": 0, "type": "output"},
+            ]
+        }
+        result, extract_mock = _call(output)
+        for entry in result["images"]:
+            self.assertNotIn("metadata", entry)
+        extract_mock.assert_not_called()
 
     def test_non_string_fields_skipped(self):
         output = {
@@ -158,9 +173,6 @@ class TestEnrichOutputWithMediaMetadata(unittest.TestCase):
         extract_mock.assert_not_called()
 
     def test_symlink_escape_rejected_real_fs(self):
-        import shutil
-        import tempfile
-
         root = tempfile.mkdtemp(prefix="media-enrichment-symlink-")
         try:
             base = os.path.join(root, "output")
@@ -168,18 +180,19 @@ class TestEnrichOutputWithMediaMetadata(unittest.TestCase):
             secret = os.path.join(root, "secret.txt")
             with open(secret, "w") as f:
                 f.write("outside")
-            os.symlink(secret, os.path.join(base, "clip.mp4"))
+            try:
+                os.symlink(secret, os.path.join(base, "clip.mp4"))
+            except OSError as e:
+                self.skipTest(f"cannot create symlinks on this platform: {e}")
             inside = os.path.join(base, "real.mp4")
             with open(inside, "w") as f:
                 f.write("inside")
 
-            mocked = {"folder_paths": MagicMock(get_directory_by_type=MagicMock(return_value=base))}
             # No isfile patching — this test runs against the real filesystem.
-            with patch.dict("sys.modules", mocked):
-                import comfy_execution.media_enrichment as mod
-                escaped = mod.resolve_output_entry_path(
+            with patch.object(media_enrichment, "folder_paths", _folder_paths_mock(base)):
+                escaped = media_enrichment.resolve_output_entry_path(
                     {"filename": "clip.mp4", "subfolder": "", "type": "output"})
-                contained = mod.resolve_output_entry_path(
+                contained = media_enrichment.resolve_output_entry_path(
                     {"filename": "real.mp4", "subfolder": "", "type": "output"})
             self.assertIsNone(escaped, "symlink pointing outside the base must be rejected")
             self.assertEqual(contained, os.path.realpath(inside))

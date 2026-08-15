@@ -9,14 +9,18 @@ import pytest
 from app.assets.services.media_metadata import extract_media_metadata
 from app.assets.services.video_metadata import extract_video_metadata
 
-av = pytest.importorskip("av")
 
-
-def _make_mp4(
-    path: Path, width: int = 64, height: int = 48, frames: int = 12, fps: int = 8
+def _make_video(
+    path: Path,
+    width: int = 64,
+    height: int = 48,
+    frames: int = 12,
+    fps: int = 8,
+    codec: str = "libx264",
 ) -> Path:
+    av = pytest.importorskip("av")
     with av.open(str(path), "w") as container:
-        stream = container.add_stream("libx264", rate=fps)
+        stream = container.add_stream(codec, rate=fps)
         stream.width = width
         stream.height = height
         stream.pix_fmt = "yuv420p"
@@ -29,6 +33,12 @@ def _make_mp4(
         for packet in stream.encode():
             container.mux(packet)
     return path
+
+
+def _make_mp4(
+    path: Path, width: int = 64, height: int = 48, frames: int = 12, fps: int = 8
+) -> Path:
+    return _make_video(path, width=width, height=height, frames=frames, fps=fps)
 
 
 class TestExtractVideoMetadata:
@@ -79,6 +89,15 @@ class TestExtractVideoMetadata:
 
         assert result is None
 
+    def test_webm_duration_from_container_without_frame_count(self, tmp_path: Path):
+        f = _make_video(tmp_path / "clip.webm", frames=12, fps=8, codec="libvpx-vp9")
+
+        result = extract_video_metadata(str(f), mime_type="video/webm")
+
+        assert result is not None
+        assert result["duration"] == pytest.approx(12 / 8, abs=0.2)
+        assert "frame_count" not in result
+
 
 class TestExtractMediaMetadata:
     def test_dispatches_video_mime_to_video_extractor(self, tmp_path: Path):
@@ -90,7 +109,7 @@ class TestExtractMediaMetadata:
         assert result["kind"] == "video"
 
     def test_dispatches_image_mime_to_image_extractor(self, tmp_path: Path):
-        from PIL import Image
+        Image = pytest.importorskip("PIL.Image")
 
         f = tmp_path / "img.png"
         Image.new("RGB", (32, 16)).save(f, format="PNG")
@@ -136,3 +155,38 @@ class TestIngestStoresVideoMetadata:
         assert meta["height"] == 48
         assert meta["frame_count"] == 12
         assert meta["fps"] == pytest.approx(8.0)
+
+    def test_register_existing_asset_backfills_metadata_from_sibling(
+        self, mock_create_session, temp_dir: Path, session
+    ):
+        from app.assets.database.models import AssetReference
+        from app.assets.services.ingest import (
+            _ingest_file_from_path,
+            _register_existing_asset,
+        )
+
+        f = _make_mp4(temp_dir / "clip.mp4", width=64, height=48)
+        _ingest_file_from_path(
+            abs_path=str(f),
+            asset_hash="blake3:videosibling",
+            size_bytes=f.stat().st_size,
+            mtime_ns=1234567890000000000,
+            mime_type="video/mp4",
+        )
+
+        result = _register_existing_asset(
+            asset_hash="blake3:videosibling",
+            name="copy.mp4",
+            mime_type="video/mp4",
+        )
+
+        assert result.created is True
+        session.expire_all()
+        ref = session.query(AssetReference).filter_by(name="copy.mp4").one()
+        meta = ref.system_metadata or {}
+        assert meta["kind"] == "video"
+        assert meta["width"] == 64
+        assert meta["height"] == 48
+        assert meta["frame_count"] == 12
+        assert meta["fps"] == pytest.approx(8.0)
+        assert "duration" in meta

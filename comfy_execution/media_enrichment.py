@@ -12,6 +12,8 @@ import logging
 import mimetypes
 import os
 
+import folder_paths
+
 
 def resolve_output_entry_path(entry) -> str | None:
     """Resolve a file-type output entry to an absolute path inside its base dir.
@@ -21,12 +23,10 @@ def resolve_output_entry_path(entry) -> str | None:
     folder-type base directory (symlinks are resolved before the containment
     check), and paths with no file on disk.
     """
-    import folder_paths
-
     if not isinstance(entry, dict) or "filename" not in entry or "type" not in entry:
         return None
     filename = entry["filename"]
-    subfolder = entry.get("subfolder") or ""
+    subfolder = entry.get("subfolder", "")
     if not isinstance(filename, str) or not isinstance(subfolder, str) or not isinstance(entry["type"], str):
         return None
     base = folder_paths.get_directory_by_type(entry["type"])
