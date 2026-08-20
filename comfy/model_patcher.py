@@ -1656,20 +1656,30 @@ class ModelPatcher:
                     patch_keys = []
                     for key in relevant_patches:
                         if key not in model_sd_keys:
-                            logging.warning(f"Cached hook would not patch. Key does not exist in model: {key}")
+                            logging.warning(f"Hook could not patch. Key does not exist in model: {key}")
                             continue
                         patch_keys.append(key)
                     cache_entries = None
+                    cache_on_device = False
                     if memory_counter is not None and patch_keys:
                         cache_required = 0
                         for key in patch_keys:
                             weight, _, _ = get_key_weight(self.model, key)
                             cache_required += weight.nelement() * weight.element_size() * 2
-                        if memory_counter.is_useable(cache_required):
+                        cache_on_device = memory_counter.is_useable(cache_required)
+                        if cache_on_device:
                             cache_entries = {}
+                        else:
+                            offload_memory_counter = MemoryCounter(
+                                initial=comfy.model_management.get_free_memory(self.offload_device),
+                                minimum=comfy.model_management.minimum_inference_memory()*2,
+                            )
+                            if offload_memory_counter.is_useable(cache_required):
+                                cache_entries = {}
                     for key in patch_keys:
                         self.patch_hook_weight_to_device(hooks=hooks, combined_patches=relevant_patches, key=key, original_weights=original_weights,
-                                                            memory_counter=memory_counter, cache_entries=cache_entries)
+                                                            memory_counter=memory_counter, cache_entries=cache_entries,
+                                                            cache_on_device=cache_on_device)
                     if cache_entries is not None and len(cache_entries) == len(patch_keys):
                         self.cached_hook_patches[hooks] = cache_entries
             else:
@@ -1697,7 +1707,7 @@ class ModelPatcher:
         self.patch_hooks(None)
 
     def patch_hook_weight_to_device(self, hooks: comfy.hooks.HookGroup, combined_patches: dict, key: str, original_weights: dict,
-                                    memory_counter: MemoryCounter, cache_entries: dict=None):
+                                    memory_counter: MemoryCounter, cache_entries: dict=None, cache_on_device: bool=False):
         if key not in combined_patches:
             return
 
@@ -1706,7 +1716,7 @@ class ModelPatcher:
         inplace_update = set_func is None
         if key not in self.hook_backup:
             target_device = self.offload_device
-            if cache_entries is not None:
+            if cache_entries is not None and cache_on_device:
                 used = memory_counter.use(weight)
                 if used:
                     target_device = weight.device
@@ -1728,10 +1738,11 @@ class ModelPatcher:
             comfy.utils.set_attr_param(self.model, key, out_weight)
         if cache_entries is not None:
             target_device = self.offload_device
-            used = memory_counter.use(weight)
-            if used:
+            if cache_on_device:
+                if not memory_counter.use(weight):
+                    return
                 target_device = weight.device
-                cache_entries[key] = (out_weight.to(device=target_device, copy=False), weight.device)
+            cache_entries[key] = (out_weight.to(device=target_device, copy=False), weight.device)
         del temp_weight
         del out_weight
         del weight

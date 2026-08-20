@@ -526,7 +526,15 @@ class TestMixedPrecisionOps(unittest.TestCase):
             hook_group, hooks.create_target_dict(hooks.EnumWeightTarget.Model)
         )
 
-        patcher.patch_hooks(hook_group)
+        with (
+            mock.patch(
+                "comfy.model_management.get_free_memory", return_value=1 << 30
+            ),
+            mock.patch(
+                "comfy.model_management.minimum_inference_memory", return_value=0
+            ),
+        ):
+            patcher.patch_hooks(hook_group)
         patched = model.linear.weight.dequantize().clone()
         self.assertIsInstance(model.linear.weight, QuantizedTensor)
         torch.testing.assert_close(patched, original + 1)
@@ -574,13 +582,29 @@ class TestMixedPrecisionOps(unittest.TestCase):
             all_hooks, hooks.create_target_dict(hooks.EnumWeightTarget.Model)
         )
 
-        patcher.patch_hooks(groups[0])
+        with (
+            mock.patch(
+                "comfy.model_management.get_free_memory", return_value=1 << 30
+            ),
+            mock.patch(
+                "comfy.model_management.minimum_inference_memory", return_value=0
+            ),
+        ):
+            patcher.patch_hooks(groups[0])
         first = model.linear.weight.dequantize().clone()
         torch.testing.assert_close(first, original + 1)
         self.assertIsNot(model.linear.weight, original_param)
         torch.testing.assert_close(original_param.dequantize(), original)
 
-        patcher.patch_hooks(groups[1])
+        with (
+            mock.patch(
+                "comfy.model_management.get_free_memory", return_value=1 << 30
+            ),
+            mock.patch(
+                "comfy.model_management.minimum_inference_memory", return_value=0
+            ),
+        ):
+            patcher.patch_hooks(groups[1])
         second = model.linear.weight.dequantize().clone()
         torch.testing.assert_close(second, original + 2)
         self.assertIsNot(model.linear.weight, original_param)
@@ -635,7 +659,15 @@ class TestMixedPrecisionOps(unittest.TestCase):
             group, hooks.create_target_dict(hooks.EnumWeightTarget.Model)
         )
 
-        patcher.patch_hooks(group)
+        with (
+            mock.patch(
+                "comfy.model_management.get_free_memory", return_value=1 << 30
+            ),
+            mock.patch(
+                "comfy.model_management.minimum_inference_memory", return_value=0
+            ),
+        ):
+            patcher.patch_hooks(group)
         patched = model.linear.weight.dequantize().clone()
         self.assertIsNot(model.linear.weight, original_param)
         self.assertIsInstance(model.linear.weight, QuantizedTensor)
@@ -752,6 +784,51 @@ class TestMixedPrecisionOps(unittest.TestCase):
                 )
                 self.assertEqual(patcher.hook_backup, {})
                 self.assertEqual(patcher.cached_hook_patches, {})
+
+    def test_hook_cache_budget_spills_complete_group_to_ram(self):
+        model = self._make_hook_cache_model()
+        group = self._make_hook_group(
+            {
+                "first.weight": (torch.ones(4, 4),),
+                "second.weight": (torch.full((4, 4), 2.0),),
+            }
+        )
+        patcher = ModelPatcher(
+            model, torch.device("cuda"), torch.device("cpu")
+        )
+        patcher.register_all_hook_patches(
+            group, hooks.create_target_dict(hooks.EnumWeightTarget.Model)
+        )
+
+        def free_memory(device):
+            return 200 if device.type == "cuda" else 1024
+
+        with (
+            mock.patch(
+                "comfy.model_management.get_free_memory",
+                side_effect=free_memory,
+            ),
+            mock.patch(
+                "comfy.model_management.minimum_inference_memory", return_value=0
+            ),
+        ):
+            patcher.patch_hooks(group)
+
+        self.assertEqual(
+            set(patcher.cached_hook_patches[group]),
+            {"first.weight", "second.weight"},
+        )
+        for weight, original_device in patcher.cached_hook_patches[group].values():
+            self.assertEqual(weight.device.type, "cpu")
+            self.assertEqual(original_device.type, "cpu")
+
+        patcher.patch_hooks(None)
+        torch.testing.assert_close(
+            model.first.weight, torch.zeros_like(model.first.weight)
+        )
+        torch.testing.assert_close(
+            model.second.weight, torch.zeros_like(model.second.weight)
+        )
 
     def test_hook_cache_budget_caches_complete_groups(self):
         model = self._make_hook_cache_model()
