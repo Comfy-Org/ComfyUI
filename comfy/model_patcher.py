@@ -32,6 +32,7 @@ import tqdm
 import comfy.float
 import comfy.hooks
 import comfy.lora
+import comfy.memory_management
 import comfy.model_management
 import comfy.ops
 import comfy.patcher_extension
@@ -287,7 +288,7 @@ class MemoryCounter:
         # TODO: add a safe limit besides 0
 
     def use(self, weight: torch.Tensor):
-        weight_size = weight.nelement() * weight.element_size()
+        weight_size = comfy.memory_management.vram_aligned_size(weight)
         if self.is_useable(weight_size):
             self.decrement(weight_size)
             return True
@@ -1665,7 +1666,7 @@ class ModelPatcher:
                         cache_required = 0
                         for key in patch_keys:
                             weight, _, _ = get_key_weight(self.model, key)
-                            cache_required += weight.nelement() * weight.element_size() * 2
+                            cache_required += comfy.memory_management.vram_aligned_size(weight) * 2
                         cache_on_device = memory_counter.is_useable(cache_required)
                         if cache_on_device:
                             cache_entries = {}

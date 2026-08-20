@@ -801,7 +801,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
         )
 
         def free_memory(device):
-            return 200 if device.type == "cuda" else 1024
+            return 200 if device.type == "cuda" else 8192
 
         with (
             mock.patch(
@@ -847,7 +847,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
         )
 
         with (
-            mock.patch("comfy.model_management.get_free_memory", return_value=1024),
+            mock.patch("comfy.model_management.get_free_memory", return_value=8192),
             mock.patch(
                 "comfy.model_management.minimum_inference_memory", return_value=0
             ),
