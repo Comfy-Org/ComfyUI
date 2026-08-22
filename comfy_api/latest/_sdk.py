@@ -485,15 +485,56 @@ def _looks_like_tensor(v: Any) -> bool:
     return type(v).__name__ == "Tensor" and hasattr(v, "shape")
 
 
+def _is_plain_data(v: Any) -> bool:
+    """Whether a value can cross a process boundary as data.
+
+    Deliberately a whitelist. Everything else is a live engine object — a
+    ModelPatcher, a conditioning list holding tensors, a VAE — and handing one
+    to an out-of-process node is either impossible (it will not serialize) or
+    exactly what the boundary exists to prevent.
+    """
+    if v is None or isinstance(v, (str, bool, int, float, bytes)):
+        return True
+    if isinstance(v, (list, tuple)):
+        return all(_is_plain_data(x) for x in v)
+    if isinstance(v, dict):
+        return all(isinstance(k, str) and _is_plain_data(x) for k, x in v.items())
+    return False
+
+
+#: Live engine objects a node may receive, by the ref type that stands in for
+#: them. Detection is duck-typed because these classes live in `comfy.*`, which
+#: this module must not import.
+def _ref_type_for(v: Any) -> tuple[type, str]:
+    if _looks_like_tensor(v):
+        return ImageRef, "IMAGE"
+    if isinstance(v, dict) and "samples" in v:
+        return LatentRef, "LATENT"
+    if hasattr(v, "model_options") and hasattr(v, "load_device"):
+        return ModelRef, "MODEL"          # ModelPatcher
+    if hasattr(v, "encode_from_tokens") or hasattr(v, "tokenize"):
+        return ClipRef, "CLIP"
+    if hasattr(v, "decode") and hasattr(v, "encode"):
+        return VaeRef, "VAE"
+    return CondRef, "CONDITIONING"        # conditioning lists and anything else
+
+
 async def wrap_inputs(resolver: "RefResolver", inputs: dict) -> dict:
+    """Replace live engine objects with refs before a node sees them.
+
+    An SDK_REFS node is handed handles, never the objects themselves, so the
+    same node body works in-process and out-of-process. The rule is by
+    capability rather than by an enumerated type list: if a value cannot cross
+    as data, it becomes a handle. That is what lets a node take a MODEL or a
+    CONDITIONING — which are live engine objects — and still run in a guest.
+    """
     out = {}
     for k, v in inputs.items():
-        if _looks_like_tensor(v):
-            out[k] = ImageRef._wrap(await resolver.create("IMAGE", v))
-        elif isinstance(v, dict) and "samples" in v:
-            out[k] = LatentRef._wrap(await resolver.create("LATENT", v))
-        else:
+        if _is_plain_data(v):
             out[k] = v
+            continue
+        ref_cls, kind = _ref_type_for(v)
+        out[k] = ref_cls._wrap(await resolver.create(kind, v))
     return out
 
 
