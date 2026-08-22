@@ -192,6 +192,10 @@ class _RuntimeScope:
     def __exit__(self, *exc: Any) -> None:
         _active_runtime.reset(self._token)
 
+    @property
+    def runtime(self) -> Runtime:
+        return self._runtime
+
 
 def bind_runtime(
     refs: "RefResolver", ctx: "Context", ops: "OpsProvider" = None
@@ -218,6 +222,11 @@ class ExecutionPlan:
     node_type: str
     tier: str = "default"  # overlay reads manifest tier; OSS is always "default"
     permissions: tuple[str, ...] = ()
+    # Work-unit payload for out-of-process backends: import spec of the node's
+    # defining module and the (ref-wrapped) inputs. Populated by the execution
+    # seam for SDK_REFS nodes; in-process dispatch ignores them.
+    node_module: str = ""
+    inputs: Optional[dict] = None
 
 
 @runtime_checkable
@@ -226,10 +235,13 @@ class ExecutionBackend(Protocol):
         self,
         plan: ExecutionPlan,
         local_call: Callable[[], Awaitable["NodeOutput"]],
+        runtime: Optional[Runtime] = None,
     ) -> "NodeOutput":
         """Run the node. Default just awaits ``local_call`` (in-process). The
         overlay routes ``tier == 'sandbox'`` nodes to a guest process instead,
-        and calls ``local_call`` only for nodes that stay local."""
+        and calls ``local_call`` only for nodes that stay local. ``runtime`` is
+        the host-side binding (refs/ctx/ops) for this node so an out-of-process
+        backend can serve brokered guest calls against the same ref table."""
         ...
 
 
@@ -416,6 +428,7 @@ class InProcessExecutionBackend:
         self,
         plan: ExecutionPlan,
         local_call: Callable[[], Awaitable["NodeOutput"]],
+        runtime: Optional[Runtime] = None,
     ) -> "NodeOutput":
         return await local_call()
 

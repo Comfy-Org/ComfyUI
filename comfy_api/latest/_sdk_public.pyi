@@ -138,6 +138,9 @@ class ExecutionPlan:
     node_type: str
     tier: str
     permissions: tuple[str, ...]
+    # Work-unit payload for out-of-process backends (set for SDK_REFS nodes).
+    node_module: str
+    inputs: Optional[dict]
     def __init__(
         self,
         prompt_id: str,
@@ -145,6 +148,8 @@ class ExecutionPlan:
         node_type: str,
         tier: str = ...,
         permissions: tuple[str, ...] = ...,
+        node_module: str = ...,
+        inputs: Optional[dict] = ...,
     ) -> None: ...
 
 @runtime_checkable
@@ -154,9 +159,28 @@ class RefResolver(Protocol):
     async def release(self, ref: Ref) -> None: ...
 
 @runtime_checkable
+class OpsProvider(Protocol):
+    """Engine-side operations on assets — implements the preferred interface."""
+
+    async def invert(self, image: ImageRef) -> ImageRef: ...
+    async def scale(self, image: ImageRef, factor: float) -> ImageRef: ...
+
+class Runtime:
+    """Per-node host binding: the ref table, brokered ctx, and ops the node
+    executes against. Handed to ``ExecutionBackend.dispatch`` so out-of-process
+    backends can broker guest calls against the same table."""
+
+    refs: RefResolver
+    ctx: Context
+    ops: OpsProvider
+
+@runtime_checkable
 class ExecutionBackend(Protocol):
     async def dispatch(
-        self, plan: ExecutionPlan, local_call: Callable[[], Awaitable[Any]]
+        self,
+        plan: ExecutionPlan,
+        local_call: Callable[[], Awaitable[Any]],
+        runtime: Optional[Runtime] = ...,
     ) -> Any: ...
 
 @runtime_checkable
@@ -166,11 +190,13 @@ class CtxProvider(Protocol):
 class _Providers:
     execution_backend: ExecutionBackend
     ctx_provider: CtxProvider
+    ops_provider: OpsProvider
     ref_resolver_factory: Callable[[], RefResolver]
     @property
     def overlay_active(self) -> bool: ...
     def register_execution_backend(self, impl: ExecutionBackend) -> None: ...
     def register_ctx_provider(self, impl: CtxProvider) -> None: ...
+    def register_ops_provider(self, impl: OpsProvider) -> None: ...
     def register_ref_resolver_factory(
         self, factory: Callable[[], RefResolver]
     ) -> None: ...
