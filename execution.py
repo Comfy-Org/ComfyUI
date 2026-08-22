@@ -303,11 +303,18 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                 # invocation scope below so it is correct for the concurrent
                 # async-task path too.
                 from comfy_api.latest import _sdk as _comfy_sdk
+                # A node declares the host capabilities it needs; the backend
+                # decides whether to grant them. Declaring is not granting — an
+                # out-of-process backend still gates each one at the wire, and a
+                # registry manifest can narrow the set further. Nodes that
+                # declare nothing (the overwhelming majority) get nothing.
+                _sdk_perms = getattr(type_obj, "SDK_PERMISSIONS", ()) or ()
                 _sdk_plan = _comfy_sdk.ExecutionPlan(
                     prompt_id=str(prompt_id),
                     node_id=str(unique_id),
                     node_type=getattr(type_obj, "__name__", "node"),
                     node_module=getattr(type_obj, "__module__", "") or "",
+                    permissions=tuple(_sdk_perms),
                 )
                 _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
                 _sdk_runtime = _comfy_sdk.bind_runtime(
