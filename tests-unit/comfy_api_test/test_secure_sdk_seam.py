@@ -20,6 +20,10 @@ from comfy_api.v0_0_3 import io
 
 
 class _InvertAsync(io.ComfyNode):
+    # SDK asset node: receives an ImageRef, transforms via an engine-side op,
+    # never touches a buffer.
+    SDK_REFS = True
+
     @classmethod
     def define_schema(cls):
         return io.Schema(
@@ -31,23 +35,23 @@ class _InvertAsync(io.ComfyNode):
     async def execute(cls, image):
         ctx = sdk.ctx()
         await ctx.progress.update(0.0, 1.0)
-        ref = await sdk.ImageRef.from_tensor(image)
-        t = await ref.tensor()
+        out = await image.invert()   # operation on the asset
         await ctx.progress.update(1.0, 1.0)
-        return io.NodeOutput(1.0 - t)
+        return io.NodeOutput(out)
 
 
-class _ScaleSync(io.ComfyNode):
+class _ScaleSyncLegacy(io.ComfyNode):
+    # Legacy (non-SDK) v3 node: sync execute, receives a raw tensor. Confirms
+    # the sync dispatch branch + that non-SDK nodes are unaffected by the seam.
     @classmethod
     def define_schema(cls):
         return io.Schema(
-            node_id="_TestScaleSync", category="test",
+            node_id="_TestScaleSyncLegacy", category="test",
             inputs=[io.Image.Input("image")], outputs=[io.Image.Output()],
         )
 
     @classmethod
     def execute(cls, image):
-        # sync execute -> exercises the non-coroutine dispatch branch
         return io.NodeOutput(image * 0.5)
 
 
@@ -77,9 +81,9 @@ def test_async_sdk_node_inverts_through_real_engine():
     assert torch.allclose(got, 1.0 - img)
 
 
-def test_sync_sdk_node_scales_through_real_engine():
+def test_legacy_sync_node_scales_through_real_engine():
     img = torch.rand(1, 8, 8, 3)
-    got = _output_of(_ScaleSync, img)
+    got = _output_of(_ScaleSyncLegacy, img)
     assert torch.allclose(got, img * 0.5)
 
 
@@ -107,6 +111,6 @@ if __name__ == "__main__":
     # Runnable without pytest.
     test_default_backend_is_in_process()
     test_async_sdk_node_inverts_through_real_engine()
-    test_sync_sdk_node_scales_through_real_engine()
+    test_legacy_sync_node_scales_through_real_engine()
     test_overlay_backend_intercepts_dispatch()
     print("PASS: all secure-SDK seam checks")
