@@ -93,13 +93,19 @@ class TensorRef(_TypedRef):
 class ImageRef(TensorRef):
     KIND = "IMAGE"
 
-    # --- PREFERRED INTERFACE: operations on the asset. The heavy compute runs
-    #     engine-side (trusted plane); the node never receives a buffer. ---- #
+    # --- PREFERRED INTERFACE: operations on the asset, by name. The heavy
+    #     compute runs engine-side (trusted plane); the node never receives a
+    #     buffer. `op` is generic dispatch — core ships a tiny built-in set and
+    #     an overlay can extend the vocabulary without changing this contract.
+    async def op(self, name: str, **params: Any) -> "ImageRef":
+        return await current_runtime().ops.apply(name, self, params)
+
+    # Convenience wrappers over the two built-in primitives.
     async def invert(self) -> "ImageRef":
-        return await current_runtime().ops.invert(self)
+        return await self.op("invert")
 
     async def scale(self, factor: float) -> "ImageRef":
-        return await current_runtime().ops.scale(self, factor)
+        return await self.op("scale", factor=factor)
 
 
 class MaskRef(TensorRef):
@@ -254,10 +260,13 @@ class CtxProvider(Protocol):
 class OpsProvider(Protocol):
     """Engine-side operations on assets — the preferred node interface. The
     node passes/receives refs; the buffer math happens here, on the trusted
-    plane (in-process default) or in the engine (overlay)."""
+    plane (in-process default) or in the engine (overlay). Dispatch is generic
+    (``apply(op, image, params)``) so the op vocabulary is data, not API
+    surface: an overlay adds ops without changing this contract, and a node
+    can probe ``supports(op)`` to choose a fallback (e.g. the ``raw`` tier)."""
 
-    async def invert(self, image: "ImageRef") -> "ImageRef": ...
-    async def scale(self, image: "ImageRef", factor: float) -> "ImageRef": ...
+    async def apply(self, op: str, image: "ImageRef", params: dict) -> "ImageRef": ...
+    def supports(self, op: str) -> bool: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -409,16 +418,49 @@ class InProcessCtxProvider:
         )
 
 
+class OpNotSupported(NotImplementedError):
+    """Raised by ``apply`` for an op this provider does not implement. Carries
+    the capability name so a node can decide to fall back (e.g. to ``raw``)."""
+
+    def __init__(self, op: str) -> None:
+        self.op = op
+        self.capability = f"ops.{op}"
+        super().__init__(
+            f"op {op!r} is not supported by this ops provider "
+            f"(capability: {self.capability})"
+        )
+
+
 class InProcessOps:
     """Default operations. Runs in the trusted process; uses the real buffers
     via the resolver but never hands them to the node. Kept torch-free (tensor
-    arithmetic works on the resolved objects directly)."""
+    arithmetic works on the resolved objects directly). The op set is a
+    registry: core ships two primitives; ``register_op`` extends it (an overlay
+    subclasses or registers richer ops)."""
 
-    async def invert(self, image: "ImageRef") -> "ImageRef":
+    def __init__(self) -> None:
+        self._ops: dict[str, Callable[..., Awaitable["ImageRef"]]] = {
+            "invert": self._invert,
+            "scale": self._scale,
+        }
+
+    def register_op(self, name: str, fn: Callable[..., Awaitable["ImageRef"]]) -> None:
+        self._ops[name] = fn
+
+    def supports(self, op: str) -> bool:
+        return op in self._ops
+
+    async def apply(self, op: str, image: "ImageRef", params: dict) -> "ImageRef":
+        fn = self._ops.get(op)
+        if fn is None:
+            raise OpNotSupported(op)
+        return await fn(image, **params)
+
+    async def _invert(self, image: "ImageRef") -> "ImageRef":
         t = await current_runtime().refs.resolve(image)
         return ImageRef._wrap(await current_runtime().refs.create("IMAGE", 1.0 - t))  # type: ignore[return-value]
 
-    async def scale(self, image: "ImageRef", factor: float) -> "ImageRef":
+    async def _scale(self, image: "ImageRef", factor: float) -> "ImageRef":
         t = await current_runtime().refs.resolve(image)
         return ImageRef._wrap(await current_runtime().refs.create("IMAGE", t * factor))  # type: ignore[return-value]
 
