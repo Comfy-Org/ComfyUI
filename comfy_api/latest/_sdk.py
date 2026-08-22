@@ -506,7 +506,19 @@ async def unwrap_outputs(resolver: "RefResolver", node_output: Any) -> Any:
         resolved.append(await resolver.resolve(a) if isinstance(a, Ref) else a)
     from ._io import NodeOutput
 
-    return NodeOutput(*resolved)
+    # Rebuilding the NodeOutput must preserve everything that is not a result.
+    # Dropping `ui` here silently made every SDK_REFS node unable to be an
+    # output node: ComfyUI only sends the `executed` event that carries results
+    # to the frontend for nodes returning ui data, so a PreviewImage-style node
+    # would run correctly and then display nothing. `expand` and
+    # `block_execution` matter for the same reason — they are node output, not
+    # node results, and resolving refs has no business discarding them.
+    return NodeOutput(
+        *resolved,
+        ui=getattr(node_output, "ui", None),
+        expand=getattr(node_output, "expand", None),
+        block_execution=getattr(node_output, "block_execution", None),
+    )
 
 
 # --------------------------------------------------------------------------- #
