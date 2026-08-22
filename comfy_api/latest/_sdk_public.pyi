@@ -44,10 +44,16 @@ class TensorRef(Ref):
     async def raw(self) -> Any: ...
 
 class ImageRef(TensorRef):
-    """IMAGE asset. Preferred interface = operations; the buffer stays engine-side."""
+    """IMAGE asset. Preferred interface = operations; the buffer stays engine-side.
+
+    ``op`` is generic, UNTYPED dispatch — the transport seam. The overlay adds
+    ops to the vocabulary as data. Node authors call statically-typed wrappers
+    from the secure lib (e.g. ``comfy_secure_sdk.ops.desaturate(...)``) rather
+    than passing op-name strings here directly."""
     KIND: str
-    async def invert(self) -> "ImageRef": ...
-    async def scale(self, factor: float) -> "ImageRef": ...
+    async def op(self, name: str, **params: Any) -> "ImageRef": ...
+    async def invert(self) -> "ImageRef": ...     # built-in primitive
+    async def scale(self, factor: float) -> "ImageRef": ...  # built-in primitive
 
 class MaskRef(TensorRef):
     """MASK asset."""
@@ -160,10 +166,15 @@ class RefResolver(Protocol):
 
 @runtime_checkable
 class OpsProvider(Protocol):
-    """Engine-side operations on assets — implements the preferred interface."""
+    """Engine-side operations on assets. Generic dispatch: the op vocabulary is
+    data, extensible by an overlay without changing this contract."""
 
-    async def invert(self, image: ImageRef) -> ImageRef: ...
-    async def scale(self, image: ImageRef, factor: float) -> ImageRef: ...
+    async def apply(self, op: str, image: ImageRef, params: dict) -> ImageRef: ...
+    def supports(self, op: str) -> bool: ...
+
+class OpNotSupported(NotImplementedError):
+    op: str
+    capability: str
 
 class Runtime:
     """Per-node host binding: the ref table, brokered ctx, and ops the node

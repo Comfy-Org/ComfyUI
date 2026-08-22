@@ -42,5 +42,6 @@ __all__ = [
     "RefResolver",
     "ExecutionBackend",
     "ExecutionPlan",
+    "OpNotSupported",
     "providers",
 ]
