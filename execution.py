@@ -307,6 +307,7 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                     prompt_id=str(prompt_id),
                     node_id=str(unique_id),
                     node_type=getattr(type_obj, "__name__", "node"),
+                    node_module=getattr(type_obj, "__module__", "") or "",
                 )
                 _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
                 _sdk_runtime = _comfy_sdk.bind_runtime(
@@ -318,6 +319,9 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                 _sdk_refs_mode = getattr(type_obj, "SDK_REFS", False)
                 if _sdk_refs_mode:
                     inputs = await _comfy_sdk.wrap_inputs(_sdk_refs, inputs)
+                    # Ship the work unit on the plan so an out-of-process
+                    # backend can execute without local_call.
+                    _sdk_plan.inputs = inputs
             # V1
             else:
                 f = getattr(obj, func)
@@ -342,7 +346,9 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                         return f(**inputs)
 
             if _sdk_plan is not None:
-                result = await _comfy_sdk.providers.execution_backend.dispatch(_sdk_plan, local_call)
+                result = await _comfy_sdk.providers.execution_backend.dispatch(
+                    _sdk_plan, local_call, _sdk_runtime.runtime
+                )
                 # Resolve output refs back to real objects for downstream nodes.
                 if _sdk_refs_mode:
                     if isinstance(result, asyncio.Task):
