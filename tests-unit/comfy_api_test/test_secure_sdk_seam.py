@@ -91,8 +91,8 @@ def test_overlay_backend_intercepts_dispatch():
     calls = []
 
     class _FakeOverlayBackend:
-        async def dispatch(self, plan, local_call):
-            calls.append((plan.node_id, plan.node_type))
+        async def dispatch(self, plan, local_call, runtime=None):
+            calls.append((plan, runtime))
             return await local_call()  # delegate -> behavior preserved
 
     original = sdk.providers.execution_backend
@@ -102,7 +102,13 @@ def test_overlay_backend_intercepts_dispatch():
         got = _output_of(_InvertAsync, img)
         assert torch.allclose(got, 1.0 - img)   # still correct
         assert len(calls) == 1                    # overlay saw the real dispatch
-        assert calls[0][1] == "_InvertAsync"
+        plan, runtime = calls[0]
+        assert plan.node_type == "_InvertAsync"
+        # Work-unit payload: an out-of-process backend gets the module spec,
+        # the ref-wrapped inputs, and the host runtime to broker against.
+        assert plan.node_module == _InvertAsync.__module__
+        assert isinstance(plan.inputs["image"], sdk.ImageRef)
+        assert runtime is not None and runtime.refs is not None
     finally:
         sdk.providers.execution_backend = original
 
