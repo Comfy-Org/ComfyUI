@@ -308,10 +308,16 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                     node_id=str(unique_id),
                     node_type=getattr(type_obj, "__name__", "node"),
                 )
+                _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
                 _sdk_runtime = _comfy_sdk.bind_runtime(
-                    _comfy_sdk.providers.ref_resolver_factory(),
+                    _sdk_refs,
                     _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
+                    _comfy_sdk.providers.ops_provider,
                 )
+                # SDK nodes see assets (refs), not buffers: wrap heavy inputs.
+                _sdk_refs_mode = getattr(type_obj, "SDK_REFS", False)
+                if _sdk_refs_mode:
+                    inputs = await _comfy_sdk.wrap_inputs(_sdk_refs, inputs)
             # V1
             else:
                 f = getattr(obj, func)
@@ -337,6 +343,11 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
 
             if _sdk_plan is not None:
                 result = await _comfy_sdk.providers.execution_backend.dispatch(_sdk_plan, local_call)
+                # Resolve output refs back to real objects for downstream nodes.
+                if _sdk_refs_mode:
+                    if isinstance(result, asyncio.Task):
+                        result = await result
+                    result = await _comfy_sdk.unwrap_outputs(_sdk_refs, result)
             else:
                 result = await local_call()
             results.append(result)

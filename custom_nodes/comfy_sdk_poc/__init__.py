@@ -1,15 +1,19 @@
 """POC custom node authored against the v0_0_3 custom-node SDK.
 
-Demonstrates the SDK in real execution: the node uses ``ctx`` for progress and
-round-trips its image through a ref (``ImageRef.from_tensor`` / ``.tensor()``).
-In-process (OSS) that ref is zero-copy; under the overlay the same code runs in
-an isolated guest with a shm/CUDA-IPC ref — unchanged."""
+The node receives its image as an ``ImageRef`` (an asset handle), NOT a buffer,
+and transforms it through an engine-side operation (``image.invert()``). It
+never imports torch and never touches a raw tensor. In-process (OSS) the
+operation runs on the trusted plane; under the overlay the same code runs in an
+isolated guest and the op RPCs to the engine — unchanged."""
 from __future__ import annotations
 
 from comfy_api.v0_0_3 import ComfyExtension, io, sdk
 
 
 class SandboxInvert(io.ComfyNode):
+    # Opt in to the SDK asset model: execute() receives refs, not buffers.
+    SDK_REFS = True
+
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
@@ -21,19 +25,12 @@ class SandboxInvert(io.ComfyNode):
         )
 
     @classmethod
-    async def execute(cls, image) -> io.NodeOutput:
+    async def execute(cls, image) -> io.NodeOutput:  # image: sdk.ImageRef
         ctx = sdk.ctx()
         await ctx.progress.update(0.0, 1.0)
-
-        # Ref round-trip: create a ref from the input, materialize it, invert.
-        # In-process this is the real tensor (zero-copy); isolated it is a
-        # shm/CUDA-IPC handle mapped into this process.
-        ref = await sdk.ImageRef.from_tensor(image)
-        t = await ref.tensor()
-        out = 1.0 - t
-
+        out = await image.invert()  # engine-side op on the asset; no buffer here
         await ctx.progress.update(1.0, 1.0)
-        return io.NodeOutput(out)
+        return io.NodeOutput(out)  # returns an ImageRef; the engine resolves it
 
 
 class PocExtension(ComfyExtension):
