@@ -279,6 +279,8 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
             if pre_execute_cb is not None and index is not None:
                 pre_execute_cb(index)
             # V3
+            _sdk_plan = None
+            _sdk_runtime = None
             if isinstance(obj, _ComfyNodeInternal) or (is_class(obj) and issubclass(obj, _ComfyNodeInternal)):
                 # if is just a class, then assign no state, just create clone
                 if is_class(obj):
@@ -294,25 +296,50 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                 # in case of dynamic inputs, restructure inputs to expected nested dict
                 if v3_data is not None:
                     inputs = _io.build_nested_inputs(inputs, v3_data)
+                # Custom-node SDK seam: build a per-node ExecutionPlan + bind a
+                # ctx and ref resolver from the active providers. Default
+                # providers are in-process (behavior-preserving); the overlay
+                # swaps them for the isolated engine. Binding happens inside the
+                # invocation scope below so it is correct for the concurrent
+                # async-task path too.
+                from comfy_api.latest import _sdk as _comfy_sdk
+                _sdk_plan = _comfy_sdk.ExecutionPlan(
+                    prompt_id=str(prompt_id),
+                    node_id=str(unique_id),
+                    node_type=getattr(type_obj, "__name__", "node"),
+                )
+                _sdk_runtime = _comfy_sdk.bind_runtime(
+                    _comfy_sdk.providers.ref_resolver_factory(),
+                    _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
+                )
             # V1
             else:
                 f = getattr(obj, func)
-            if inspect.iscoroutinefunction(f):
-                async def async_wrapper(f, prompt_id, unique_id, list_index, args):
-                    with CurrentNodeContext(prompt_id, unique_id, list_index):
-                        return await f(**args)
-                task = asyncio.create_task(async_wrapper(f, prompt_id, unique_id, index, args=inputs))
-                # Give the task a chance to execute without yielding
-                await asyncio.sleep(0)
-                if task.done():
-                    result = task.result()
-                    results.append(result)
+
+            def _invoke_scope():
+                import contextlib
+                return _sdk_runtime if _sdk_runtime is not None else contextlib.nullcontext()
+
+            async def local_call():
+                if inspect.iscoroutinefunction(f):
+                    async def async_wrapper(f, prompt_id, unique_id, list_index, args):
+                        with CurrentNodeContext(prompt_id, unique_id, list_index), _invoke_scope():
+                            return await f(**args)
+                    task = asyncio.create_task(async_wrapper(f, prompt_id, unique_id, index, args=inputs))
+                    # Give the task a chance to execute without yielding
+                    await asyncio.sleep(0)
+                    if task.done():
+                        return task.result()
+                    return task
                 else:
-                    results.append(task)
+                    with CurrentNodeContext(prompt_id, unique_id, index), _invoke_scope():
+                        return f(**inputs)
+
+            if _sdk_plan is not None:
+                result = await _comfy_sdk.providers.execution_backend.dispatch(_sdk_plan, local_call)
             else:
-                with CurrentNodeContext(prompt_id, unique_id, index):
-                    result = f(**inputs)
-                results.append(result)
+                result = await local_call()
+            results.append(result)
         else:
             results.append(execution_block)
 
