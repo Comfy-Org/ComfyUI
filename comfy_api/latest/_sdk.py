@@ -76,16 +76,30 @@ class _TypedRef(Ref):
 class TensorRef(_TypedRef):
     KIND = "TENSOR"
 
-    async def tensor(self) -> "torch.Tensor":
+    # --- RAW ESCAPE HATCH (permissioned, discouraged) -------------------- #
+    # `raw()` returns the underlying buffer object. It is NOT the preferred
+    # interface: prefer operations on the asset (see ImageRef below). Raw
+    # access requires the `raw`/`tensor.read` capability and forces a node to
+    # the dedicated tier under the overlay. The SDK contract does not depend on
+    # torch; the return is deliberately untyped (Any) here.
+    async def raw(self) -> Any:
         return await current_runtime().refs.resolve(self)
 
     @classmethod
-    async def from_tensor(cls, t: "torch.Tensor") -> "TensorRef":
-        return cls._wrap(await current_runtime().refs.create(cls.KIND, t))  # type: ignore[return-value]
+    async def _from_raw(cls, obj: Any) -> "TensorRef":
+        return cls._wrap(await current_runtime().refs.create(cls.KIND, obj))  # type: ignore[return-value]
 
 
 class ImageRef(TensorRef):
     KIND = "IMAGE"
+
+    # --- PREFERRED INTERFACE: operations on the asset. The heavy compute runs
+    #     engine-side (trusted plane); the node never receives a buffer. ---- #
+    async def invert(self) -> "ImageRef":
+        return await current_runtime().ops.invert(self)
+
+    async def scale(self, factor: float) -> "ImageRef":
+        return await current_runtime().ops.scale(self, factor)
 
 
 class MaskRef(TensorRef):
@@ -142,6 +156,7 @@ class AssetRef(_TypedRef):
 class Runtime:
     refs: "RefResolver"
     ctx: "Context"
+    ops: "OpsProvider" = None  # engine-side operations (the preferred interface)
 
 
 _active_runtime: "contextvars.ContextVar[Optional[Runtime]]" = contextvars.ContextVar(
@@ -178,8 +193,10 @@ class _RuntimeScope:
         _active_runtime.reset(self._token)
 
 
-def bind_runtime(refs: "RefResolver", ctx: "Context") -> _RuntimeScope:
-    return _RuntimeScope(Runtime(refs=refs, ctx=ctx))
+def bind_runtime(
+    refs: "RefResolver", ctx: "Context", ops: "OpsProvider" = None
+) -> _RuntimeScope:
+    return _RuntimeScope(Runtime(refs=refs, ctx=ctx, ops=ops))
 
 
 # --------------------------------------------------------------------------- #
@@ -219,6 +236,16 @@ class ExecutionBackend(Protocol):
 @runtime_checkable
 class CtxProvider(Protocol):
     def build(self, plan: ExecutionPlan) -> "Context": ...
+
+
+@runtime_checkable
+class OpsProvider(Protocol):
+    """Engine-side operations on assets — the preferred node interface. The
+    node passes/receives refs; the buffer math happens here, on the trusted
+    plane (in-process default) or in the engine (overlay)."""
+
+    async def invert(self, image: "ImageRef") -> "ImageRef": ...
+    async def scale(self, image: "ImageRef", factor: float) -> "ImageRef": ...
 
 
 # --------------------------------------------------------------------------- #
@@ -370,6 +397,20 @@ class InProcessCtxProvider:
         )
 
 
+class InProcessOps:
+    """Default operations. Runs in the trusted process; uses the real buffers
+    via the resolver but never hands them to the node. Kept torch-free (tensor
+    arithmetic works on the resolved objects directly)."""
+
+    async def invert(self, image: "ImageRef") -> "ImageRef":
+        t = await current_runtime().refs.resolve(image)
+        return ImageRef._wrap(await current_runtime().refs.create("IMAGE", 1.0 - t))  # type: ignore[return-value]
+
+    async def scale(self, image: "ImageRef", factor: float) -> "ImageRef":
+        t = await current_runtime().refs.resolve(image)
+        return ImageRef._wrap(await current_runtime().refs.create("IMAGE", t * factor))  # type: ignore[return-value]
+
+
 class InProcessExecutionBackend:
     async def dispatch(
         self,
@@ -380,12 +421,47 @@ class InProcessExecutionBackend:
 
 
 # --------------------------------------------------------------------------- #
+# Input/output ref marshaling for SDK nodes (those declaring ``SDK_REFS``).
+# Heavy inputs become refs before execute(); output refs resolve back to real
+# objects for downstream (legacy) nodes. This is what makes execute() see
+# assets, not buffers. Under the overlay this happens at the process boundary.
+# --------------------------------------------------------------------------- #
+def _looks_like_tensor(v: Any) -> bool:
+    return type(v).__name__ == "Tensor" and hasattr(v, "shape")
+
+
+async def wrap_inputs(resolver: "RefResolver", inputs: dict) -> dict:
+    out = {}
+    for k, v in inputs.items():
+        if _looks_like_tensor(v):
+            out[k] = ImageRef._wrap(await resolver.create("IMAGE", v))
+        elif isinstance(v, dict) and "samples" in v:
+            out[k] = LatentRef._wrap(await resolver.create("LATENT", v))
+        else:
+            out[k] = v
+    return out
+
+
+async def unwrap_outputs(resolver: "RefResolver", node_output: Any) -> Any:
+    args = getattr(node_output, "result", None)
+    if not args:
+        return node_output
+    resolved = []
+    for a in args:
+        resolved.append(await resolver.resolve(a) if isinstance(a, Ref) else a)
+    from ._io import NodeOutput
+
+    return NodeOutput(*resolved)
+
+
+# --------------------------------------------------------------------------- #
 # Provider registry — the seam the overlay attaches to.
 # --------------------------------------------------------------------------- #
 class Providers:
     def __init__(self) -> None:
         self.execution_backend: ExecutionBackend = InProcessExecutionBackend()
         self.ctx_provider: CtxProvider = InProcessCtxProvider()
+        self.ops_provider: OpsProvider = InProcessOps()
         self.ref_resolver_factory: Callable[[], RefResolver] = InProcessRefResolver
         self._overlay_name: Optional[str] = None
 
@@ -397,6 +473,10 @@ class Providers:
     def register_ctx_provider(self, impl: CtxProvider) -> None:
         logger.info("SDK: ctx provider -> %s", type(impl).__name__)
         self.ctx_provider = impl
+
+    def register_ops_provider(self, impl: OpsProvider) -> None:
+        logger.info("SDK: ops provider -> %s", type(impl).__name__)
+        self.ops_provider = impl
 
     def register_ref_resolver_factory(self, factory: Callable[[], RefResolver]) -> None:
         logger.info("SDK: ref resolver -> %s", getattr(factory, "__name__", factory))

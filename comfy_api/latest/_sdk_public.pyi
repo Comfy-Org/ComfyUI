@@ -19,14 +19,17 @@ authoritative.
 """
 from typing import Any, Awaitable, Callable, Optional, Protocol, TypeVar, runtime_checkable
 
-import torch
+# NOTE: the contract deliberately does NOT import torch or any backend module.
+# Node code has no direct access to torch/CUDA/filesystem; it works through
+# refs, operations, and ctx — all brokered.
 
 # =========================================================================== #
 # 1. NODE-AUTHOR SURFACE
 # =========================================================================== #
 
-# --- Refs: opaque, typed resource handles. A ref never exposes the buffer; in
-#     process it is zero-copy, under the overlay it is a shm/CUDA-IPC handle. --- #
+# --- Refs: opaque, typed asset handles. A ref never exposes the buffer. The
+#     PREFERRED interface is operations on the asset (below); raw buffer access
+#     is a permissioned escape hatch. --- #
 class Ref:
     kind: str
     id: str
@@ -35,16 +38,19 @@ _T = TypeVar("_T", bound="TensorRef")
 
 class TensorRef(Ref):
     KIND: str
-    async def tensor(self) -> torch.Tensor: ...
-    @classmethod
-    async def from_tensor(cls: type[_T], t: torch.Tensor) -> _T: ...
+    # RAW ESCAPE HATCH — permissioned (`raw`/`tensor.read`), discouraged; forces
+    # the dedicated tier under the overlay. Return is untyped by design (the
+    # contract does not depend on torch).
+    async def raw(self) -> Any: ...
 
 class ImageRef(TensorRef):
-    """IMAGE — torch.Tensor [B,H,W,C]."""
+    """IMAGE asset. Preferred interface = operations; the buffer stays engine-side."""
     KIND: str
+    async def invert(self) -> "ImageRef": ...
+    async def scale(self, factor: float) -> "ImageRef": ...
 
 class MaskRef(TensorRef):
-    """MASK — torch.Tensor."""
+    """MASK asset."""
     KIND: str
 
 _L = TypeVar("_L", bound="LatentRef")
