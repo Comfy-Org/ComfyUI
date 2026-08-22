@@ -55,15 +55,53 @@ class _ScaleSyncLegacy(io.ComfyNode):
         return io.NodeOutput(image * 0.5)
 
 
-async def _run(node_cls, image):
+class _InvertWithUi(io.ComfyNode):
+    # An SDK asset node that is ALSO an output node. Rebuilding its NodeOutput
+    # to resolve refs must not discard what is not a result.
+    SDK_REFS = True
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="_TestInvertWithUi", category="test",
+            inputs=[io.Image.Input("image")], outputs=[io.Image.Output()],
+            is_output_node=True,
+        )
+
+    @classmethod
+    async def execute(cls, image):
+        out = await image.invert()
+        return io.NodeOutput(out, ui={"text": ["hello"]})
+
+
+async def _run_full(node_cls, image):
     import execution
 
     results = await execution._async_map_node_over_list(
         prompt_id="p", unique_id="1", obj=node_cls,
         input_data_all={"image": [image]}, func=node_cls.FUNCTION, v3_data=None,
     )
-    out = results[0]
+    return results[0]
+
+
+async def _run(node_cls, image):
+    out = await _run_full(node_cls, image)
     return out.result[0]
+
+
+def test_sdk_node_keeps_its_ui_output():
+    """Resolving output refs must preserve `ui`.
+
+    `unwrap_outputs` rebuilds the NodeOutput to swap refs back for real
+    objects. Rebuilding it from results alone dropped `ui`, which made every
+    SDK_REFS node unable to be an output node: ComfyUI only emits the
+    `executed` event that carries results to the frontend for nodes returning
+    ui data, so such a node ran correctly and then displayed nothing.
+    """
+    img = torch.rand(1, 8, 8, 3)
+    out = asyncio.run(_run_full(_InvertWithUi, img))
+    assert torch.allclose(out.result[0], 1.0 - img), "pixels wrong"
+    assert out.ui == {"text": ["hello"]}, f"ui was dropped: {out.ui!r}"
 
 
 def _output_of(node_cls, image):
