@@ -5,6 +5,7 @@ import logging
 
 from comfy import model_management
 from comfy.utils import ProgressBar
+from comfy.cli_args import args
 from .ldm.models.autoencoder import AutoencoderKL, AutoencodingEngine
 from .ldm.cascade.stage_a import StageA
 from .ldm.cascade.stage_c_coder import StageC_coder
@@ -489,7 +490,9 @@ class VAE:
         if not is_seedvr2_vae and 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys(): #diffusers format
             sd = diffusers_convert.convert_vae_state_dict(sd)
 
-        if model_management.is_amd():
+        if args.vae_kl_mem_ratio is not None:
+            VAE_KL_MEM_RATIO = args.vae_kl_mem_ratio
+        elif model_management.is_amd():
             VAE_KL_MEM_RATIO = 2.73
         else:
             VAE_KL_MEM_RATIO = 1.0
