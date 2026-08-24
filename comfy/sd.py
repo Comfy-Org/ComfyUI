@@ -493,7 +493,7 @@ class VAE:
         if args.vae_kl_mem_ratio is not None:
             VAE_KL_MEM_RATIO = args.vae_kl_mem_ratio
         elif model_management.is_amd():
-            VAE_KL_MEM_RATIO = 2.73
+            VAE_KL_MEM_RATIO = 1.3
         else:
             VAE_KL_MEM_RATIO = 1.0
 
