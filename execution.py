@@ -353,14 +353,24 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                         return f(**inputs)
 
             if _sdk_plan is not None:
-                result = await _comfy_sdk.providers.execution_backend.dispatch(
-                    _sdk_plan, local_call, _sdk_runtime.runtime
-                )
-                # Resolve output refs back to real objects for downstream nodes.
-                if _sdk_refs_mode:
-                    if isinstance(result, asyncio.Task):
-                        result = await result
-                    result = await _comfy_sdk.unwrap_outputs(_sdk_refs, result)
+                try:
+                    result = await _comfy_sdk.providers.execution_backend.dispatch(
+                        _sdk_plan, local_call, _sdk_runtime.runtime
+                    )
+                    # Resolve output refs back to real objects for downstream nodes.
+                    if _sdk_refs_mode:
+                        if isinstance(result, asyncio.Task):
+                            result = await result
+                        result = await _comfy_sdk.unwrap_outputs(_sdk_refs, result)
+                finally:
+                    # The table holds this node's inputs and every intermediate
+                    # it created — for image or latent work, the largest
+                    # allocation in the process. Released here rather than left
+                    # to collection, and in `finally` because the path that most
+                    # needs it is the one where the node raised or its guest
+                    # died: that is exactly when nothing else is going to run.
+                    if _sdk_refs_mode:
+                        _sdk_refs.clear()
             else:
                 result = await local_call()
             results.append(result)
