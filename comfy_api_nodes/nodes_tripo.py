@@ -15,7 +15,6 @@ from comfy_api_nodes.apis.tripo import (
     TripoP1ImageToModelRequest,
     TripoP1MultiviewToModelRequest,
     TripoP1TextToModelRequest,
-    TripoRefineModelRequest,
     TripoStyle,
     TripoTaskResponse,
     TripoTaskStatus,
@@ -598,46 +597,6 @@ class TripoTextureNode(IO.ComfyNode):
             ),
         )
         return await poll_until_finished(cls, response, average_duration=80)
-
-
-class TripoRefineNode(IO.ComfyNode):
-
-    @classmethod
-    def define_schema(cls):
-        return IO.Schema(
-            node_id="TripoRefineNode",
-            display_name="Tripo: Refine Draft model",
-            category="partner/3d/Tripo",
-            description="Refine a draft model created by v1.4 Tripo models only.",
-            inputs=[
-                IO.Custom("MODEL_TASK_ID").Input("model_task_id", tooltip="Must be a v1.4 Tripo model"),
-            ],
-            outputs=[
-                IO.String.Output(display_name="model_file"),  # for backward compatibility only
-                IO.Custom("MODEL_TASK_ID").Output(display_name="model task_id"),
-                IO.File3DGLB.Output(display_name="GLB"),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
-            is_api_node=True,
-            is_output_node=True,
-            price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.3, "format": {"approximate": true}}""",
-            ),
-        )
-
-    @classmethod
-    async def execute(cls, model_task_id) -> IO.NodeOutput:
-        response = await sync_op(
-            cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
-            response_model=TripoTaskResponse,
-            data=TripoRefineModelRequest(draft_model_task_id=model_task_id),
-        )
-        return await poll_until_finished(cls, response, average_duration=240)
 
 
 class TripoRigNode(IO.ComfyNode):
@@ -1390,7 +1349,6 @@ class TripoExtension(ComfyExtension):
             TripoP1MultiviewToModelNode,
             TripoImportModelNode,
             TripoTextureNode,
-            TripoRefineNode,
             TripoRigNode,
             TripoRetargetNode,
             TripoConversionNode,

@@ -593,6 +593,8 @@ if __name__ == "__main__":
 
     if sys.version_info.major == 3 and sys.version_info.minor < 10:
         logging.warning("WARNING: You are using a python version older than 3.10, please upgrade to a newer one. 3.12 and above is recommended.")
+    if sys.version_info.major == 3 and sys.version_info.minor == 10:
+        logging.warning("WARNING: Python 3.10 will be EOL on October 31 2026, please consider upgrading to a newer version.")
 
     if args.disable_dynamic_vram:
         logging.warning(

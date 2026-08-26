@@ -8,7 +8,6 @@ class TripoModelVersion(str, Enum):
     v3_1_20260211 = "v3.1-20260211"
     v3_0_20250812 = "v3.0-20250812"
     v2_5_20250123 = "v2.5-20250123"
-    v2_0_20240919 = "v2.0-20240919"
     v1_4_20240625 = "v1.4-20240625"
 
 
@@ -39,7 +38,6 @@ class TripoTaskType(str, Enum):
     IMAGE_TO_MODEL = "image_to_model"
     MULTIVIEW_TO_MODEL = "multiview_to_model"
     TEXTURE_MODEL = "texture_model"
-    REFINE_MODEL = "refine_model"
     ANIMATE_PRERIGCHECK = "animate_prerigcheck"
     ANIMATE_RIG = "animate_rig"
     ANIMATE_RETARGET = "animate_retarget"
@@ -228,11 +226,6 @@ class TripoTextureModelRequest(BaseModel):
         description="Optional guidance for texturing. Required in practice for imported models, "
         "which carry no source image to infer texture from.",
     )
-
-
-class TripoRefineModelRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.REFINE_MODEL, description="Type of task")
-    draft_model_task_id: str = Field(..., description="The task ID of the draft model")
 
 
 class TripoAnimateRigRequest(BaseModel):
