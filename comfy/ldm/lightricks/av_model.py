@@ -265,11 +265,15 @@ class BasicAVTransformerBlock(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         run_vx = transformer_options.get("run_vx", True)
         run_ax = transformer_options.get("run_ax", True)
+        video_scale = getattr(self, "video_scale", 1.0)
+        audio_scale = getattr(self, "audio_scale", 1.0)
+        audio_to_video_scale = getattr(self, "audio_to_video_scale", 1.0)
+        video_to_audio_scale = getattr(self, "video_to_audio_scale", 1.0)
 
         vx, ax = x
-        run_ax = run_ax and ax.numel() > 0
-        run_a2v = run_vx and transformer_options.get("a2v_cross_attn", True) and ax.numel() > 0
-        run_v2a = run_ax and transformer_options.get("v2a_cross_attn", True)
+        run_ax = run_ax and ax.numel() > 0 and audio_scale != 0.0
+        run_a2v = run_vx and transformer_options.get("a2v_cross_attn", True) and ax.numel() > 0 and audio_to_video_scale != 0.0
+        run_v2a = run_ax and transformer_options.get("v2a_cross_attn", True) and video_to_audio_scale != 0.0
 
         # video
         if run_vx:
@@ -284,12 +288,16 @@ class BasicAVTransformerBlock(nn.Module):
             del norm_vx
             # video cross-attention
             vgate_msa = self.get_ada_values(self.scale_shift_table, vx.shape[0], v_timestep, slice(2, 3))[0]
-            vx.addcmul_(attn1_out, vgate_msa)
+            vx.addcmul_(attn1_out, vgate_msa, value=video_scale)
             del vgate_msa, attn1_out
-            vx.add_(self._apply_text_cross_attention(
-                vx, v_context, self.attn2, self.scale_shift_table,
-                getattr(self, 'prompt_scale_shift_table', None),
-                v_timestep, v_prompt_timestep, attention_mask, transformer_options,)
+            vx.add_(
+                self._apply_text_cross_attention(
+                    vx, v_context, self.attn2, self.scale_shift_table,
+                    getattr(self, 'prompt_scale_shift_table', None),
+                    v_timestep, v_prompt_timestep, attention_mask,
+                    transformer_options,
+                ),
+                alpha=video_scale,
             )
 
         # audio
@@ -302,12 +310,17 @@ class BasicAVTransformerBlock(nn.Module):
             del norm_ax
             # audio cross-attention
             agate_msa = self.get_ada_values(self.audio_scale_shift_table, ax.shape[0], a_timestep, slice(2, 3))[0]
-            ax.addcmul_(attn1_out, agate_msa)
+            ax.addcmul_(attn1_out, agate_msa, value=audio_scale)
             del agate_msa, attn1_out
-            ax.add_(self._apply_text_cross_attention(
-                ax, a_context, self.audio_attn2, self.audio_scale_shift_table,
-                getattr(self, 'audio_prompt_scale_shift_table', None),
-                a_timestep, a_prompt_timestep, attention_mask, transformer_options,)
+            ax.add_(
+                self._apply_text_cross_attention(
+                    ax, a_context, self.audio_attn2,
+                    self.audio_scale_shift_table,
+                    getattr(self, 'audio_prompt_scale_shift_table', None),
+                    a_timestep, a_prompt_timestep, attention_mask,
+                    transformer_options,
+                ),
+                alpha=audio_scale,
             )
 
         # video - audio cross attention.
@@ -332,7 +345,7 @@ class BasicAVTransformerBlock(nn.Module):
                 del vx_scaled, ax_scaled
 
                 gate_out_a2v = self.get_ada_values(self.scale_shift_table_a2v_ca_video[4:, :], vx.shape[0], v_cross_gate_timestep)[0]
-                vx.addcmul_(a2v_out, gate_out_a2v)
+                vx.addcmul_(a2v_out, gate_out_a2v, value=audio_to_video_scale)
                 del gate_out_a2v, a2v_out
 
             # video to audio cross attention
@@ -353,7 +366,7 @@ class BasicAVTransformerBlock(nn.Module):
                 del ax_scaled, vx_scaled
 
                 gate_out_v2a = self.get_ada_values(self.scale_shift_table_a2v_ca_audio[4:, :], ax.shape[0], a_cross_gate_timestep)[0]
-                ax.addcmul_(v2a_out, gate_out_v2a)
+                ax.addcmul_(v2a_out, gate_out_v2a, value=video_to_audio_scale)
                 del gate_out_v2a, v2a_out
 
 
@@ -370,7 +383,7 @@ class BasicAVTransformerBlock(nn.Module):
             del vx_scaled
 
             vgate_mlp = self.get_ada_values(self.scale_shift_table, vx.shape[0], v_timestep, slice(5, 6))[0]
-            vx.addcmul_(ff_out, vgate_mlp)
+            vx.addcmul_(ff_out, vgate_mlp, value=video_scale)
             del vgate_mlp, ff_out
 
         # audio feedforward
@@ -383,7 +396,7 @@ class BasicAVTransformerBlock(nn.Module):
             del ax_scaled
 
             agate_mlp = self.get_ada_values(self.audio_scale_shift_table, ax.shape[0], a_timestep, slice(5, 6))[0]
-            ax.addcmul_(ff_out, agate_mlp)
+            ax.addcmul_(ff_out, agate_mlp, value=audio_scale)
             del agate_mlp, ff_out
 
         return vx, ax
