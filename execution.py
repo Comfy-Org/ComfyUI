@@ -309,11 +309,14 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                 # registry manifest can narrow the set further. Nodes that
                 # declare nothing (the overwhelming majority) get nothing.
                 _sdk_perms = getattr(type_obj, "SDK_PERMISSIONS", ()) or ()
+                _sdk_refs_mode = bool(getattr(type_obj, "SDK_REFS", False))
                 _sdk_plan = _comfy_sdk.ExecutionPlan(
                     prompt_id=str(prompt_id),
                     node_id=str(unique_id),
                     node_type=getattr(type_obj, "__name__", "node"),
                     node_module=getattr(type_obj, "__module__", "") or "",
+                    inputs=inputs,
+                    input_mode="refs" if _sdk_refs_mode else "values",
                     method=func,
                     permissions=tuple(_sdk_perms),
                     prompt=getattr(class_clone.hidden, "prompt", None),
@@ -327,7 +330,6 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                     _comfy_sdk.providers.ops_provider,
                 )
                 # SDK nodes see assets (refs), not buffers: wrap heavy inputs.
-                _sdk_refs_mode = getattr(type_obj, "SDK_REFS", False)
                 if _sdk_refs_mode:
                     inputs = await _comfy_sdk.wrap_inputs(_sdk_refs, inputs)
                     # Ship the work unit on the plan so an out-of-process
@@ -361,11 +363,12 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                     result = await _comfy_sdk.providers.execution_backend.dispatch(
                         _sdk_plan, local_call, _sdk_runtime.runtime
                     )
-                    # Resolve output refs back to real objects for downstream nodes.
-                    if _sdk_refs_mode:
-                        if isinstance(result, asyncio.Task):
-                            result = await result
-                        result = await _comfy_sdk.unwrap_outputs(_sdk_refs, result)
+                    # A sandbox backend returns refs in both modes: explicit-ref
+                    # nodes create them directly, while compatibility-mode V2
+                    # nodes have their ordinary outputs wrapped by the guest.
+                    if isinstance(result, asyncio.Task):
+                        result = await result
+                    result = await _comfy_sdk.unwrap_outputs(_sdk_refs, result)
                 finally:
                     # The table holds this node's inputs and every intermediate
                     # it created — for image or latent work, the largest
@@ -373,8 +376,7 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                     # to collection, and in `finally` because the path that most
                     # needs it is the one where the node raised or its guest
                     # died: that is exactly when nothing else is going to run.
-                    if _sdk_refs_mode:
-                        _sdk_refs.clear()
+                    _sdk_refs.clear()
             else:
                 result = await local_call()
             results.append(result)
