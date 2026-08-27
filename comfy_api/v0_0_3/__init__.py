@@ -4,9 +4,10 @@ from comfy_api.latest import (
     InputImpl as InputImpl_latest,
     Types as Types_latest,
 )
+import importlib
 from typing import Type, TYPE_CHECKING
 from comfy_api.internal.async_to_sync import create_sync_class
-from comfy_api.latest import io, ui, sdk, IO, UI, ComfyExtension  # noqa: F401
+from comfy_api.latest import io, sdk, IO, ComfyExtension  # noqa: F401
 
 
 class ComfyAPIAdapter_v0_0_3(ComfyAPI_latest):
@@ -34,6 +35,16 @@ if TYPE_CHECKING:
 
     ComfyAPISync: Type[ComfyAPISyncStub]
 ComfyAPISync = create_sync_class(ComfyAPIAdapter_v0_0_3)
+
+
+def __getattr__(name: str):
+    if name in {"ui", "UI"}:
+        latest = importlib.import_module("comfy_api.latest")
+        module = getattr(latest, name)
+        globals()["ui"] = module
+        globals()["UI"] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "ComfyAPI",
