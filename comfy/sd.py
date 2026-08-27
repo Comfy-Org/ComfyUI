@@ -2308,6 +2308,26 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
     return (model_patcher, clip, vae, clipvision)
 
 
+def _apply_model_operation_options(
+    model_config, model_options, unet_dtype, manual_cast_dtype,
+):
+    custom_operations = model_options.get("custom_operations")
+    if custom_operations is not None:
+        model_config.custom_operations = custom_operations
+        return
+    if not model_options.get("cublas_ops", False):
+        return
+    if model_config.custom_operations is not None:
+        return
+
+    import comfy.ops
+
+    if (comfy.ops.CUBLAS_IS_AVAILABLE
+            and unet_dtype == torch.float16
+            and manual_cast_dtype in (None, torch.float16)):
+        model_config.custom_operations = comfy.ops.cublas_ops
+
+
 def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable_dynamic=False):
     """
     Loads a UNet diffusion model from a state dictionary, supporting both diffusers and regular formats.
@@ -2318,6 +2338,8 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
             - dtype: Override model data type
             - custom_operations: Custom model operations
             - fp8_optimizations: Enable FP8 optimizations
+            - cublas_ops: Select cublas linear operations when the model dtype
+              and host support them
 
     Returns:
         ModelPatcher: A wrapped model instance that handles device management and weight loading.
@@ -2388,8 +2410,8 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
         manual_cast_dtype = model_management.unet_manual_cast(unet_dtype, load_device, model_config.supported_inference_dtypes)
     model_config.set_inference_dtype(unet_dtype, manual_cast_dtype, device=load_device)
 
-    if custom_operations is not None:
-        model_config.custom_operations = custom_operations
+    _apply_model_operation_options(
+        model_config, model_options, unet_dtype, manual_cast_dtype)
 
     if model_options.get("fp8_optimizations", False):
         model_config.optimizations["fp8"] = True

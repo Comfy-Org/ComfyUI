@@ -314,7 +314,11 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                     node_id=str(unique_id),
                     node_type=getattr(type_obj, "__name__", "node"),
                     node_module=getattr(type_obj, "__module__", "") or "",
+                    method=func,
                     permissions=tuple(_sdk_perms),
+                    prompt=getattr(class_clone.hidden, "prompt", None),
+                    extra_pnginfo=getattr(
+                        class_clone.hidden, "extra_pnginfo", None),
                 )
                 _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
                 _sdk_runtime = _comfy_sdk.bind_runtime(

@@ -71,6 +71,57 @@ def _remove_sensitive_from_queue(queue: list) -> list:
     return [item[:5] for item in queue]
 
 
+def _diffusion_model_choices() -> list[str]:
+    names = [
+        *folder_paths.get_filename_list("diffusion_models"),
+        *(
+            name for name in folder_paths.get_filename_list("text_encoders")
+            if isinstance(name, str) and "connector" in name.lower()
+        ),
+    ]
+    choices = []
+    seen = set()
+    for name in names:
+        if not isinstance(name, str):
+            continue
+        logical = name.replace("\\", "/")
+        if (not logical or "\x00" in logical or logical.startswith("/")
+                or (len(logical) > 1 and logical[1] == ":")
+                or any(part == ".." for part in logical.split("/"))
+                or logical in seen):
+            continue
+        seen.add(logical)
+        choices.append(logical)
+    return choices
+
+
+def _gguf_model_choices(include_connectors: bool = False) -> list[str]:
+    try:
+        names = list(folder_paths.get_filename_list("unet_gguf"))
+    except KeyError:
+        names = []
+    if include_connectors:
+        names.extend(
+            name for name in folder_paths.get_filename_list("text_encoders")
+            if isinstance(name, str) and "connector" in name.lower()
+        )
+        names.append("none")
+    choices = []
+    seen = set()
+    for name in names:
+        if not isinstance(name, str):
+            continue
+        logical = name.replace("\\", "/")
+        if (not logical or "\x00" in logical or logical.startswith("/")
+                or (len(logical) > 1 and logical[1] == ":")
+                or any(part == ".." for part in logical.split("/"))
+                or logical in seen):
+            continue
+        seen.add(logical)
+        choices.append(logical)
+    return choices
+
+
 async def send_socket_catch_exception(function, message):
     try:
         await function(message)
@@ -345,6 +396,18 @@ class PromptServer():
 
             return web.json_response(model_types)
 
+        @routes.get("/models/diffusion_models/choices")
+        async def get_diffusion_model_choices(request):
+            return web.json_response(_diffusion_model_choices())
+
+        @routes.get("/models/gguf/choices")
+        async def get_gguf_model_choices(request):
+            return web.json_response(_gguf_model_choices())
+
+        @routes.get("/models/gguf/extra_choices")
+        async def get_gguf_extra_model_choices(request):
+            return web.json_response(_gguf_model_choices(True))
+
         @routes.get("/models/{folder}")
         async def get_models(request):
             folder = request.match_info.get("folder", None)
@@ -352,6 +415,15 @@ class PromptServer():
                 return web.Response(status=404)
             files = folder_paths.get_filename_list(folder)
             return web.json_response(files)
+
+        @routes.get("/models/vae/choices")
+        async def get_vae_choices(request):
+            return web.json_response(nodes.VAELoader.vae_list(nodes.VAELoader))
+
+        @routes.get("/models/vae_approx/choices")
+        async def get_vae_approx_choices(request):
+            return web.json_response(
+                ["none", *folder_paths.get_filename_list("vae_approx")])
 
         @routes.get("/extensions")
         async def get_extensions(request):
