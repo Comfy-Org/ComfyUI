@@ -760,17 +760,23 @@ class ExecutionPlan:
     node_type: str
     tier: str = "default"  # overlay reads manifest tier; OSS is always "default"
     permissions: tuple[str, ...] = ()
-    # Work-unit payload for out-of-process backends: import spec of the node's
-    # defining module and the (ref-wrapped) inputs. Populated by the execution
-    # seam for SDK_REFS nodes; in-process dispatch ignores them.
+    # Work-unit payload for out-of-process backends. ``refs`` means the node
+    # explicitly consumes SDK handles; ``values`` means the backend may wrap
+    # for transport and the guest must materialize those handles before
+    # invoking the unchanged V2 body. In-process dispatch ignores the payload.
     node_module: str = ""
     inputs: Optional[dict] = None
+    input_mode: str = "refs"
     prompt: Any = None
     extra_pnginfo: Any = None
     method: str = "execute"
 
     def __post_init__(self) -> None:
         self.method = _normalize_v2_node_method(self.method)
+        if self.input_mode not in {"refs", "values"}:
+            raise ValueError(
+                f"V2 node input mode {self.input_mode!r} is not allowed; "
+                f"expected 'refs' or 'values'")
 
 
 @runtime_checkable
