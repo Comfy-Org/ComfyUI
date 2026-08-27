@@ -27,8 +27,15 @@ if TYPE_CHECKING:
     from comfy_api.input import VideoInput, CurveInput as CurveInput_
 from comfy_api.internal import (_ComfyNodeInternal, _NodeOutputInternal, classproperty, copy_class, first_real_override, is_class,
     prune_dict, shallow_clone_class)
-from comfy_execution.graph_utils import ExecutionBlocker
 from ._util import MESH, VOXEL, SPLAT, SVG as _SVG, File3D
+
+
+def _is_execution_blocker(value: Any) -> bool:
+    try:
+        from comfy_execution.graph_utils import ExecutionBlocker
+    except ImportError:
+        return False
+    return isinstance(value, ExecutionBlocker)
 
 
 class FolderType(str, Enum):
@@ -2059,7 +2066,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
             to_return = NodeOutput(*to_return)
         elif isinstance(to_return, dict):
             to_return = NodeOutput.from_dict(to_return)
-        elif isinstance(to_return, ExecutionBlocker):
+        elif _is_execution_blocker(to_return):
             to_return = NodeOutput(block_execution=to_return.message)
         else:
             raise Exception(f"Invalid return type from node: {type(to_return)}")
@@ -2079,7 +2086,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
             to_return = NodeOutput(*to_return)
         elif isinstance(to_return, dict):
             to_return = NodeOutput.from_dict(to_return)
-        elif isinstance(to_return, ExecutionBlocker):
+        elif _is_execution_blocker(to_return):
             to_return = NodeOutput(block_execution=to_return.message)
         else:
             raise Exception(f"Invalid return type from node: {type(to_return)}")
@@ -2362,7 +2369,7 @@ class NodeOutput(_NodeOutputInternal):
         expand = None
         if "result" in data:
             result = data["result"]
-            if isinstance(result, ExecutionBlocker):
+            if _is_execution_blocker(result):
                 return cls(block_execution=result.message)
             args = result
         if "ui" in data:
