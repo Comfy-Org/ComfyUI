@@ -2445,7 +2445,15 @@ class NodeReplace:
         }
 
 
+# The canvas ceiling `nodes.py` has always published. Republished here because
+# schema code is where it is used (input min/max bounds) and `nodes` is a host
+# module a sandboxed pack cannot import. Same value by definition, not by sync:
+# 16384 is frozen into every workflow that ever serialized a bound.
+MAX_RESOLUTION = 16384
+
+
 __all__ = [
+    "MAX_RESOLUTION",
     "FolderType",
     "UploadType",
     "RemoteOptions",
