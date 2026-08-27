@@ -2,7 +2,7 @@ from __future__ import annotations
 import torch
 
 import comfy.utils
-from comfy.patcher_extension import WrappersMP
+from comfy.patcher_extension import CallbacksMP, WrappersMP
 from typing import TYPE_CHECKING, Callable, Optional
 if TYPE_CHECKING:
     from comfy.model_patcher import ModelPatcher
@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 COMPILE_KEY = "torch.compile"
 TORCH_COMPILE_KWARGS = "torch_compile_kwargs"
+TORCH_COMPILE_KEYS = "torch_compile_keys"
 
 
 def apply_torch_compile_factory(compiled_module_dict: dict[str, Callable]) -> Callable:
@@ -41,6 +42,8 @@ def set_torch_compile_wrapper(model: ModelPatcher, backend: str, options: Option
     '''
     # clear out any other torch.compile wrappers
     model.remove_wrappers_with_key(WrappersMP.APPLY_MODEL, COMPILE_KEY)
+    model.remove_callbacks_with_key(
+        CallbacksMP.ON_DEEPCLONE_MULTIGPU, COMPILE_KEY)
     # if no keys, default to 'diffusion_model'
     if not keys:
         keys = ["diffusion_model"]
@@ -67,3 +70,24 @@ def set_torch_compile_wrapper(model: ModelPatcher, backend: str, options: Option
     model.add_wrapper_with_key(WrappersMP.APPLY_MODEL, COMPILE_KEY, wrapper_func)
     # keep compile kwargs for reference
     model.model_options[TORCH_COMPILE_KWARGS] = compile_kwargs
+    model.model_options[TORCH_COMPILE_KEYS] = list(keys)
+
+    def compile_multigpu_clone(_source, clone):
+        refresh_torch_compile_wrapper(clone)
+
+    model.add_callback_with_key(
+        CallbacksMP.ON_DEEPCLONE_MULTIGPU,
+        COMPILE_KEY,
+        compile_multigpu_clone,
+    )
+
+
+def refresh_torch_compile_wrapper(model: ModelPatcher) -> None:
+    compile_kwargs = model.model_options.get(TORCH_COMPILE_KWARGS)
+    if compile_kwargs is None:
+        return
+    set_torch_compile_wrapper(
+        model,
+        keys=model.model_options.get(TORCH_COMPILE_KEYS),
+        **compile_kwargs,
+    )

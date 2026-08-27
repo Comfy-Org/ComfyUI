@@ -67,6 +67,92 @@ total_vram = 0
 in_training = False
 training_fp8_bwd = False
 
+_NO_BACKEND_FLAG = object()
+
+
+class _ModelBackendFlagCoordinator:
+    def __init__(self, getter, setter):
+        self._getter = getter
+        self._setter = setter
+        self._condition = threading.Condition(threading.RLock())
+        self._readers = 0
+        self._owner = None
+        self._baseline = _NO_BACKEND_FLAG
+
+    @contextmanager
+    def scope(self, desired=_NO_BACKEND_FLAG):
+        thread_id = threading.get_ident()
+        shared = desired is _NO_BACKEND_FLAG
+        nested = False
+        previous = _NO_BACKEND_FLAG
+
+        with self._condition:
+            if self._owner == thread_id:
+                nested = True
+                previous = self._getter()
+                target = self._baseline if shared else desired
+                self._setter(target)
+            elif shared:
+                while self._owner is not None:
+                    self._condition.wait()
+                self._readers += 1
+            else:
+                while self._owner is not None or self._readers:
+                    self._condition.wait()
+                self._owner = thread_id
+                self._baseline = self._getter()
+                self._setter(desired)
+
+        try:
+            yield
+        finally:
+            with self._condition:
+                if nested:
+                    self._setter(previous)
+                elif shared:
+                    self._readers -= 1
+                    if not self._readers:
+                        self._condition.notify_all()
+                else:
+                    self._setter(self._baseline)
+                    self._baseline = _NO_BACKEND_FLAG
+                    self._owner = None
+                    self._condition.notify_all()
+
+
+_fp16_accumulation_coordinator = None
+_fp16_accumulation_init_lock = threading.Lock()
+
+
+def _get_fp16_accumulation_coordinator():
+    global _fp16_accumulation_coordinator
+    if _fp16_accumulation_coordinator is None:
+        with _fp16_accumulation_init_lock:
+            if _fp16_accumulation_coordinator is None:
+                _fp16_accumulation_coordinator = _ModelBackendFlagCoordinator(
+                    lambda: torch.backends.cuda.matmul.allow_fp16_accumulation,
+                    lambda value: setattr(
+                        torch.backends.cuda.matmul,
+                        "allow_fp16_accumulation",
+                        value,
+                    ),
+                )
+    return _fp16_accumulation_coordinator
+
+
+@contextmanager
+def model_backend_flags(transformer_options):
+    flags = transformer_options.get("model_backend_flags", {})
+    desired = flags.get("allow_fp16_accumulation", _NO_BACKEND_FLAG)
+    if not hasattr(torch.backends.cuda.matmul, "allow_fp16_accumulation"):
+        if desired is not _NO_BACKEND_FLAG:
+            raise RuntimeError(
+                "this torch build has no matmul.allow_fp16_accumulation")
+        yield
+        return
+    with _get_fp16_accumulation_coordinator().scope(desired):
+        yield
+
 
 def get_supported_float8_types():
     float8_types = []
