@@ -338,6 +338,37 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
             # V1
             else:
                 f = getattr(obj, func)
+                type_obj = obj if is_class(obj) else type(obj)
+                if func == getattr(type_obj, "FUNCTION", None):
+                    _legacy_method = "execute"
+                elif func == "VALIDATE_INPUTS":
+                    _legacy_method = "validate_inputs"
+                elif func == "IS_CHANGED":
+                    _legacy_method = "fingerprint_inputs"
+                elif func == "check_lazy_status":
+                    _legacy_method = "check_lazy_status"
+                else:
+                    raise ValueError(
+                        f"legacy node method {func!r} has no sandbox mapping")
+
+                from comfy_api.latest import _sdk as _comfy_sdk
+                _sdk_plan = _comfy_sdk.ExecutionPlan(
+                    prompt_id=str(prompt_id),
+                    node_id=str(unique_id),
+                    node_type=getattr(type_obj, "__name__", "node"),
+                    node_module=getattr(type_obj, "__module__", "") or "",
+                    inputs=inputs,
+                    input_mode="values",
+                    method=_legacy_method,
+                    permissions=tuple(
+                        getattr(type_obj, "SDK_PERMISSIONS", ()) or ()),
+                )
+                _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
+                _sdk_runtime = _comfy_sdk.bind_runtime(
+                    _sdk_refs,
+                    _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
+                    _comfy_sdk.providers.ops_provider,
+                )
 
             def _invoke_scope():
                 import contextlib
