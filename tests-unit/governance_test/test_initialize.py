@@ -21,6 +21,8 @@ def governed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(governance, "GOVERNANCE_REQUIRED", True, raising=False)
     monkeypatch.setattr(governance, "_POLICY_PATH", policy_path, raising=False)
     monkeypatch.setattr(governance, "_EXTRA_MODEL_PATHS_CONFIG_PATH", tmp_path / "extra_model_paths.yaml", raising=False)
+    monkeypatch.setattr(governance, "_policy", None, raising=False)
+    monkeypatch.setattr(governance, "_disabled_nodes", frozenset(), raising=False)
     monkeypatch.setattr(args, "disabled_nodes_config", None)
     monkeypatch.setattr(args, "extra_model_paths_config", None)
     return policy_path
@@ -186,6 +188,36 @@ def test_initialize_does_not_gate_on_capability_version(
     governance.initialize()
 
 
+@pytest.mark.parametrize("active_forms", [["model"], ["customNode", "model"], ["unknownForm"]])
+def test_initialize_exits_on_form_this_build_cannot_enforce(
+    governed: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    active_forms: list[str],
+) -> None:
+    governed.write_bytes(b"signed policy")
+    monkeypatch.setattr(governance, "verify_and_load", lambda envelope_bytes: {"activeForms": active_forms}, raising=False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        governance.initialize()
+
+    _assert_policy_exit(exc_info, caplog.text)
+    assert governance._policy is None
+
+
+def test_initialize_applies_policy_limited_to_enforced_forms(
+    governed: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    governed.write_bytes(b"signed policy")
+    policy = {"activeForms": ["nodeId"], "disabledNodes": ["SomeNode"]}
+    monkeypatch.setattr(governance, "verify_and_load", lambda envelope_bytes: policy, raising=False)
+
+    governance.initialize()
+
+    assert governance._disabled_nodes == frozenset({"SomeNode"})
+
+
 def test_manager_import_waits_until_after_governance(tmp_path: Path) -> None:
     sentinel_path = tmp_path / "manager-imported"
     manager_package = tmp_path / "comfyui_manager"
@@ -223,7 +255,7 @@ def test_governed_main_rejects_cli_extra_model_paths(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert POLICY_MESSAGE in result.stdout + result.stderr
-    assert "Adding extra search path checkpoints" in result.stdout + result.stderr
+    assert "Adding extra search path checkpoints" not in result.stdout + result.stderr
 
 
 def test_governed_main_rejects_applied_default_extra_model_paths(tmp_path: Path) -> None:
@@ -243,7 +275,7 @@ def test_governed_main_rejects_applied_default_extra_model_paths(tmp_path: Path)
 
     assert result.returncode != 0
     assert POLICY_MESSAGE in result.stdout + result.stderr
-    assert "Adding extra search path checkpoints" in result.stdout + result.stderr
+    assert "Adding extra search path checkpoints" not in result.stdout + result.stderr
 
 
 def test_governance_failure_precedes_prestartup_scripts(tmp_path: Path) -> None:
