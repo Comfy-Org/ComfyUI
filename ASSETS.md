@@ -17,7 +17,6 @@ Docker Compose 会挂载仓库根目录下的 `custom_nodes/` 和 `models/`，�
 | `ComfyUI-RMBG` | [1038lab/ComfyUI-RMBG](https://github.com/1038lab/ComfyUI-RMBG) |
 | `ComfyUI-See-through` | [jtydhr88/ComfyUI-See-through](https://github.com/jtydhr88/ComfyUI-See-through) |
 | `ComfyUI-SeedVR2_VideoUpscaler` | [numz/ComfyUI-SeedVR2_VideoUpscaler](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler) |
-| `ComfyUI-WanVideoWrapper` | [kijai/ComfyUI-WanVideoWrapper](https://github.com/kijai/ComfyUI-WanVideoWrapper) |
 | `ComfyUI-layerdiffuse` | [huchenlei/ComfyUI-layerdiffuse](https://github.com/huchenlei/ComfyUI-layerdiffuse) |
 | `ComfyUI-segment-anything-2` | [kijai/ComfyUI-segment-anything-2](https://github.com/kijai/ComfyUI-segment-anything-2) |
 | `ComfyUI_Comfyroll_CustomNodes` | [Suzie1/ComfyUI_Comfyroll_CustomNodes](https://github.com/Suzie1/ComfyUI_Comfyroll_CustomNodes) |
@@ -50,7 +49,6 @@ ComfyUI-MatAnyone https://github.com/FuouM/ComfyUI-MatAnyone.git
 ComfyUI-RMBG https://github.com/1038lab/ComfyUI-RMBG.git
 ComfyUI-See-through https://github.com/jtydhr88/ComfyUI-See-through.git
 ComfyUI-SeedVR2_VideoUpscaler https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler.git
-ComfyUI-WanVideoWrapper https://github.com/kijai/ComfyUI-WanVideoWrapper.git
 ComfyUI-layerdiffuse https://github.com/huchenlei/ComfyUI-layerdiffuse.git
 ComfyUI-segment-anything-2 https://github.com/kijai/ComfyUI-segment-anything-2.git
 ComfyUI_Comfyroll_CustomNodes https://github.com/Suzie1/ComfyUI_Comfyroll_CustomNodes.git
