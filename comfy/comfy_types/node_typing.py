@@ -115,6 +115,8 @@ class InputTypeOptions(TypedDict):
     """Declares that this input uses lazy evaluation"""
     rawLink: NotRequired[bool]
     """When a link exists, rather than receiving the evaluated value, you will receive the link (i.e. `["nodeId", <outputIndex>]`). Designed for node expansion."""
+    nonNavigable: NotRequired[bool]
+    """Excludes this input's link from dependency graph traversal and static cycle detection. Intended for lazy inputs whose value is handled out of band."""
     tooltip: NotRequired[str]
     """Tooltip for the input (or widget), shown on pointer hover"""
     socketless: NotRequired[bool]

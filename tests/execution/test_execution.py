@@ -25,6 +25,7 @@ def run_warmup(client, prefix="warmup"):
 class RunResult:
     def __init__(self, prompt_id: str):
         self.outputs: Dict[str,Dict] = {}
+        self.executed_outputs: Dict[str,list[Dict]] = {}
         self.runs: Dict[str,bool] = {}
         self.cached: Dict[str,bool] = {}
         self.prompt_id: str = prompt_id
@@ -154,6 +155,10 @@ class ComfyClient:
                     result.runs[data['node']] = True
                 elif message['type'] == 'execution_error':
                     raise Exception(message['data'])
+                elif message['type'] == 'executed':
+                    data = message['data']
+                    if data['prompt_id'] == prompt_id:
+                        result.executed_outputs.setdefault(data['node'], []).append(data['output'])
                 elif message['type'] == 'execution_cached':
                     if message['data']['prompt_id'] == prompt_id:
                         cached_nodes = message['data'].get('nodes', [])
@@ -501,6 +506,21 @@ class TestExecution:
             expected = 255 // (2 ** iterations)
             assert numpy.array(result_image).min() == expected and numpy.array(result_image).max() == expected, "Image should be grey"
             assert result.did_run(is_changed)
+
+    def test_looped_save_image_accumulates_history_and_streams_previews(self, client: ComfyClient, builder: GraphBuilder):
+        g = builder
+        iterations = 3
+        loop = g.node("Loop", mode="simple", **{"mode.num_iterations": iterations})
+        width = g.node("TestIntMathOperation", a=loop.out(0), b=32, operation="add")
+        image = g.node("StubImage", content="BLACK", height=32, width=width.out(0), batch_size=1)
+        output = g.node("SaveImage", images=image.out(0))
+
+        result = client.run(g)
+
+        assert len(result.get_output(output)["images"]) == iterations
+        previews = result.executed_outputs[output.id]
+        assert len(previews) == iterations
+        assert all(len(preview["images"]) == 1 for preview in previews)
 
     def test_mixed_expansion_returns(self, client: ComfyClient, builder: GraphBuilder):
         g = builder

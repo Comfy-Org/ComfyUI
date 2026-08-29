@@ -10,6 +10,7 @@ import kornia
 
 import comfy.utils
 import comfy.model_management
+from comfy.nested_tensor import NestedTensor
 from comfy_extras.nodes_latent import reshape_latent_to
 import node_helpers
 from comfy_api.latest import ComfyExtension, io
@@ -665,6 +666,167 @@ class BatchImagesMasksLatentsNode(io.ComfyNode):
         return io.NodeOutput(batched)
 
 
+def _batch_list_dimension(value):
+    if isinstance(value, dict):
+        samples = value["samples"]
+        return 2 if isinstance(samples, NestedTensor) or samples.ndim == 5 else 0
+    return 0
+
+
+def _batch_list_slice(value, dimension, start=None, end=None):
+    index = (slice(None),) * dimension + (slice(start, end),)
+    if not isinstance(value, dict):
+        return value[index]
+
+    result = value.copy()
+    samples = value["samples"]
+    if isinstance(samples, NestedTensor):
+        result["samples"] = NestedTensor(tensor[index] for tensor in samples.tensors)
+    else:
+        result["samples"] = samples[index]
+
+    noise_mask = value.get("noise_mask")
+    if isinstance(noise_mask, NestedTensor):
+        result["noise_mask"] = NestedTensor(tensor[index] for tensor in noise_mask.tensors)
+    elif noise_mask is not None and noise_mask.ndim == samples.ndim:
+        result["noise_mask"] = noise_mask[index]
+    return result
+
+
+def _batch_list_concat(values, dimension):
+    if not isinstance(values[0], dict):
+        return torch.cat(values, dim=dimension)
+
+    result = values[0].copy()
+    samples = [value["samples"] for value in values]
+    if isinstance(samples[0], NestedTensor):
+        result["samples"] = NestedTensor(
+            torch.cat(tensors, dim=dimension) for tensors in zip(*(sample.tensors for sample in samples))
+        )
+    else:
+        result["samples"] = torch.cat(samples, dim=dimension)
+
+    result.pop("noise_mask", None)
+    noise_masks = [value.get("noise_mask") for value in values]
+    if all(isinstance(mask, NestedTensor) for mask in noise_masks):
+        result["noise_mask"] = NestedTensor(
+            torch.cat(tensors, dim=dimension) for tensors in zip(*(mask.tensors for mask in noise_masks))
+        )
+    elif all(torch.is_tensor(mask) and mask.ndim == sample.ndim for mask, sample in zip(noise_masks, samples)):
+        result["noise_mask"] = torch.cat(noise_masks, dim=dimension)
+    return result
+
+
+def _batch_list_frame_count(value, dimension):
+    samples = value["samples"] if isinstance(value, dict) else value
+    if isinstance(samples, NestedTensor):
+        samples = samples.tensors[0]
+    return samples.shape[dimension]
+
+
+def _batch_list_blend(previous, current, dimension, overlap, smooth):
+    previous_tail = _batch_list_slice(previous, dimension, start=-overlap)
+    current_head = _batch_list_slice(current, dimension, end=overlap)
+    previous_base = _batch_list_slice(previous, dimension, end=-overlap)
+    current_rest = _batch_list_slice(current, dimension, start=overlap)
+
+    previous_samples = previous_tail["samples"] if isinstance(previous_tail, dict) else previous_tail
+    current_samples = current_head["samples"] if isinstance(current_head, dict) else current_head
+    sample_pairs = (
+        zip(previous_samples.tensors, current_samples.tensors)
+        if isinstance(previous_samples, NestedTensor)
+        else [(previous_samples, current_samples)]
+    )
+    blended_samples = []
+    for previous_sample, current_sample in sample_pairs:
+        weight = torch.linspace(0, 1, overlap, device=previous_sample.device, dtype=previous_sample.dtype)
+        if smooth:
+            weight = weight * weight * (3 - 2 * weight)
+        weight = weight.reshape([1] * dimension + [overlap] + [1] * (previous_sample.ndim - dimension - 1))
+        blended_samples.append(previous_sample * (1 - weight) + current_sample.to(previous_sample) * weight)
+
+    if isinstance(previous_tail, dict):
+        blended = previous_tail.copy()
+        blended["samples"] = NestedTensor(blended_samples) if isinstance(previous_samples, NestedTensor) else blended_samples[0]
+    else:
+        blended = blended_samples[0]
+    return _batch_list_concat([previous_base, blended, current_rest], dimension)
+
+
+class MergeBatchListNode(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        matchtype = io.MatchType.Template("input", allowed_types=[io.Image, io.Mask, io.Latent])
+
+        def overlap_frames():
+            return io.Int.Input(
+                "overlap_frames",
+                default=8,
+                min=1,
+                max=0xffffffffffffffff,
+                tooltip="Number of overlapping frames at each join.",
+            )
+
+        return io.Schema(
+            node_id="MergeBatchList",
+            display_name="Merge Batch List",
+            category="advanced/batching",
+            description="Merge a list of image, mask, or latent batches, optionally removing or blending overlaps between them.",
+            search_aliases=["combine batch list", "concatenate list", "crossfade batches", "merge chunks"],
+            is_input_list=True,
+            inputs=[
+                io.MatchType.Input("inputs", matchtype),
+                io.DynamicCombo.Input(
+                    "overlap",
+                    tooltip="Concatenate unchanged, remove overlaps from their starts or ends, or crossfade them at each join.",
+                    options=[
+                        io.DynamicCombo.Option("disabled", []),
+                        io.DynamicCombo.Option("start", [overlap_frames()]),
+                        io.DynamicCombo.Option("end", [overlap_frames()]),
+                        io.DynamicCombo.Option("fade_linear", [overlap_frames()]),
+                        io.DynamicCombo.Option("fade_smooth", [overlap_frames()]),
+                    ],
+                ),
+            ],
+            outputs=[io.MatchType.Output(matchtype, id="merged_output", is_output_list=False)],
+        )
+
+    @classmethod
+    def execute(cls, inputs, overlap):
+        if not inputs:
+            raise ValueError("Merge Batch List requires at least one input")
+
+        mode = overlap.get("overlap", "disabled")
+        if isinstance(mode, list):
+            mode = mode[0]
+        overlap_frames = overlap.get("overlap_frames", 0)
+        if isinstance(overlap_frames, list):
+            overlap_frames = overlap_frames[0]
+        dimension = _batch_list_dimension(inputs[0])
+
+        if mode == "disabled" or overlap_frames <= 0:
+            return io.NodeOutput(_batch_list_concat(inputs, dimension))
+
+        if mode == "start":
+            inputs = [inputs[0]] + [
+                _batch_list_slice(input, dimension, start=overlap_frames) for input in inputs[1:]
+            ]
+        elif mode == "end":
+            inputs = [
+                _batch_list_slice(input, dimension, end=-overlap_frames) for input in inputs[:-1]
+            ] + [inputs[-1]]
+        else:
+            overlap_frames = min(overlap_frames, min(_batch_list_frame_count(input, dimension) for input in inputs) - 1)
+            if overlap_frames <= 0:
+                return io.NodeOutput(_batch_list_concat(inputs, dimension))
+            result = inputs[0]
+            for input in inputs[1:]:
+                result = _batch_list_blend(result, input, dimension, overlap_frames, mode == "fade_smooth")
+            return io.NodeOutput(result)
+
+        return io.NodeOutput(_batch_list_concat(inputs, dimension))
+
+
 class ColorTransfer(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -901,6 +1063,7 @@ class PostProcessingExtension(ComfyExtension):
             BatchImagesNode,
             BatchMasksNode,
             BatchLatentsNode,
+            MergeBatchListNode,
             ColorTransfer,
             # BatchImagesMasksLatentsNode,
         ]

@@ -3,11 +3,16 @@ import av
 import torch
 import folder_paths
 import json
+import math
+import numpy as np
 from typing import Optional
 from typing_extensions import override
 from fractions import Fraction
 from comfy_api.latest import ComfyExtension, io, ui, Input, InputImpl, Types
 from comfy.cli_args import args
+
+ACCUMULATE_SAVE_VIDEO_STATES = {}
+ACCUMULATE_SAVE_VIDEO_PROMPT = None
 
 class SaveWEBM(io.ComfyNode):
     @classmethod
@@ -202,6 +207,156 @@ class SaveVideo(io.ComfyNode):
         return io.NodeOutput(video, ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]))
 
 
+class AccumulateSaveVideo(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="AccumulateSaveVideo",
+            search_aliases=["accumulate video", "export accumulated video"],
+            display_name="Accumulate Save Video",
+            category="video",
+            description="Encodes video chunks across executions and saves when last is true.",
+            inputs=[
+                io.Video.Input("video", tooltip="The video chunk to append."),
+                io.String.Input("filename_prefix", default="video/ComfyUI"),
+                io.Combo.Input("format", options=Types.VideoContainer.as_input(), default="auto"),
+                io.Combo.Input("codec", options=Types.VideoCodec.as_input(), default="auto"),
+                io.Boolean.Input("last", default=False),
+                io.Audio.Input("complete_audio", optional=True, tooltip="Optional complete audio track to write once at finalization."),
+            ],
+            hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo, io.Hidden.unique_id, io.Hidden.dynprompt],
+            is_output_node=True,
+        )
+
+    @classmethod
+    def execute(cls, video: Input.Video, filename_prefix, format: str, codec, last: bool, complete_audio: Optional[Input.Audio] = None) -> io.NodeOutput:
+        global ACCUMULATE_SAVE_VIDEO_PROMPT
+        if ACCUMULATE_SAVE_VIDEO_PROMPT is not cls.hidden.dynprompt:
+            for state in ACCUMULATE_SAVE_VIDEO_STATES.values():
+                state["output"].close()
+                if os.path.exists(state["path"]):
+                    os.remove(state["path"])
+            ACCUMULATE_SAVE_VIDEO_STATES.clear()
+            ACCUMULATE_SAVE_VIDEO_PROMPT = cls.hidden.dynprompt
+
+        node_id = cls.hidden.unique_id or "default"
+        components = video.get_components()
+        state = ACCUMULATE_SAVE_VIDEO_STATES.get(node_id)
+        if state is None:
+            if Types.VideoContainer(format) not in (Types.VideoContainer.AUTO, Types.VideoContainer.MP4):
+                raise ValueError("Only MP4 format is supported for now")
+            if Types.VideoCodec(codec) not in (Types.VideoCodec.AUTO, Types.VideoCodec.H264):
+                raise ValueError("Only H264 codec is supported for now")
+
+            width, height = video.get_dimensions()
+            full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
+                filename_prefix, folder_paths.get_output_directory(), width, height
+            )
+            file = f"{filename}_{counter:05}_.{Types.VideoContainer.get_extension(format)}"
+            path = os.path.join(full_output_folder, file)
+            metadata = None
+            if not args.disable_metadata:
+                metadata = {}
+                if cls.hidden.extra_pnginfo is not None:
+                    metadata.update(cls.hidden.extra_pnginfo)
+                if cls.hidden.prompt is not None:
+                    metadata["prompt"] = cls.hidden.prompt
+                if len(metadata) == 0:
+                    metadata = None
+
+            extra_kwargs = {"format": Types.VideoContainer(format).value} if Types.VideoContainer(format) != Types.VideoContainer.AUTO else {}
+            output = av.open(path, mode="w", options={"movflags": "use_metadata_tags"}, **extra_kwargs)
+            if metadata is not None:
+                for key, value in metadata.items():
+                    output.metadata[key] = json.dumps(value)
+
+            frame_rate = Fraction(round(components.frame_rate * 1000), 1000)
+            is_10bit = video.get_bit_depth() >= 10
+            pix_fmt = "yuv420p10le" if is_10bit else "yuv420p"
+            video_stream = output.add_stream("h264", rate=frame_rate)
+            video_stream.width = width
+            video_stream.height = height
+            video_stream.pix_fmt = pix_fmt
+
+            audio = complete_audio or components.audio
+            audio_stream = None
+            audio_sample_rate = 1
+            if audio:
+                audio_sample_rate = int(audio["sample_rate"])
+                channels = audio["waveform"].shape[1]
+                layout = {1: "mono", 2: "stereo", 6: "5.1"}.get(channels, "stereo")
+                audio_stream = output.add_stream("aac", rate=audio_sample_rate, layout=layout)
+
+            state = ACCUMULATE_SAVE_VIDEO_STATES[node_id] = {
+                "path": path,
+                "file": file,
+                "subfolder": subfolder,
+                "output": output,
+                "video_stream": video_stream,
+                "audio_stream": audio_stream,
+                "audio_sample_rate": audio_sample_rate,
+                "frame_rate": frame_rate,
+                "frame_count": 0,
+                "is_10bit": is_10bit,
+                "pix_fmt": pix_fmt,
+                "complete_audio": complete_audio,
+                "audio_chunks": [],
+            }
+
+        try:
+            for image in components.images:
+                if state["is_10bit"]:
+                    image = (image.float() * 65535).clamp(0, 65535).cpu().numpy().astype(np.uint16)
+                    frame = av.VideoFrame.from_ndarray(image, format="rgb48le")
+                else:
+                    image = (image * 255).clamp(0, 255).byte().cpu().numpy()
+                    frame = av.VideoFrame.from_ndarray(image, format="rgb24")
+                frame = frame.reformat(format=state["pix_fmt"])
+                for packet in state["video_stream"].encode(frame):
+                    state["output"].mux(packet)
+                state["frame_count"] += 1
+
+            if state["complete_audio"] is None and complete_audio is not None:
+                state["complete_audio"] = complete_audio
+            if state["complete_audio"] is None and components.audio:
+                state["audio_chunks"].append(components.audio["waveform"][0])
+
+            if not last:
+                return io.NodeOutput()
+
+            for packet in state["video_stream"].encode(None):
+                state["output"].mux(packet)
+            audio = complete_audio or state["complete_audio"]
+            if audio is None and state["audio_chunks"]:
+                audio = {
+                    "sample_rate": state["audio_sample_rate"],
+                    "waveform": torch.cat(state["audio_chunks"], dim=1).unsqueeze(0),
+                }
+            if state["audio_stream"] and audio:
+                waveform = audio["waveform"][0, :, :math.ceil((state["audio_sample_rate"] / state["frame_rate"]) * state["frame_count"])]
+                layout = {1: "mono", 2: "stereo", 6: "5.1"}.get(waveform.shape[0], "stereo")
+                frame = av.AudioFrame.from_ndarray(waveform.float().cpu().contiguous().numpy(), format="fltp", layout=layout)
+                frame.sample_rate = state["audio_sample_rate"]
+                frame.pts = 0
+                for packet in state["audio_stream"].encode(frame):
+                    state["output"].mux(packet)
+                for packet in state["audio_stream"].encode(None):
+                    state["output"].mux(packet)
+            state["output"].close()
+            ACCUMULATE_SAVE_VIDEO_STATES.pop(node_id, None)
+            return io.NodeOutput(ui=ui.PreviewVideo([ui.SavedResult(state["file"], state["subfolder"], io.FolderType.output)]))
+        except Exception:
+            state["output"].close()
+            ACCUMULATE_SAVE_VIDEO_STATES.pop(node_id, None)
+            if os.path.exists(state["path"]):
+                os.remove(state["path"])
+            raise
+
+    @classmethod
+    def fingerprint_inputs(cls, **kwargs):
+        return float("NaN")
+
+
 class CreateVideo(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -376,6 +531,7 @@ class VideoExtension(ComfyExtension):
         return [
             SaveWEBM,
             SaveVideo,
+            AccumulateSaveVideo,
             CreateVideo,
             GetVideoComponents,
             LoadVideo,

@@ -205,6 +205,8 @@ def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=
                 hidden_inputs_v3[io.Hidden.api_key_comfy_org] = extra_data.get("api_key_comfy_org", None)
             if io.Hidden.comfy_usage_source.name in hidden:
                 hidden_inputs_v3[io.Hidden.comfy_usage_source] = extra_data.get("comfy_usage_source", None)
+            if io.Hidden.execution_list.name in hidden:
+                hidden_inputs_v3[io.Hidden.execution_list] = execution_list
     else:
         if "hidden" in valid_inputs:
             h = valid_inputs["hidden"]
@@ -213,6 +215,8 @@ def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=
                     input_data_all[x] = [dynprompt.get_original_prompt() if dynprompt is not None else {}]
                 if h[x] == "DYNPROMPT":
                     input_data_all[x] = [dynprompt]
+                if h[x] == "EXECUTION_LIST":
+                    input_data_all[x] = [execution_list]
                 if h[x] == "EXTRA_PNGINFO":
                     input_data_all[x] = [extra_data.get('extra_pnginfo', None)]
                 if h[x] == "UNIQUE_ID":
@@ -560,11 +564,33 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                     unblock()
                 asyncio.create_task(await_completion())
                 return (ExecutionResult.PENDING, None, None)
+            if execution_list.is_staged_node_deferred():
+                cache_entry = CacheEntry(ui=None, outputs=output_data)
+                execution_list.cache_deferred_output(unique_id, cache_entry)
+                return (ExecutionResult.PENDING, None, None)
         if len(output_ui) > 0:
             # Enrich at output-processing time (not in the send path) so assets
             # are registered even when no client is connected, and the asset id
             # flows into ui_outputs and the cache alongside the raw entries.
             output_ui = enrich_output_with_assets(output_ui)
+            history_output_ui = output_ui
+            previous_ui = ui_outputs.get(unique_id)
+            if previous_ui is not None:
+                # Looped nodes reuse their ID. Accumulate saved files in history,
+                # while output_ui remains iteration-local for the live preview.
+                previous_output = previous_ui["output"]
+                history_output_ui = dict(output_ui)
+                for key, entries in output_ui.items():
+                    previous_entries = previous_output.get(key)
+                    if (
+                        isinstance(entries, list)
+                        and isinstance(previous_entries, list)
+                        and all(
+                            isinstance(entry, dict) and "filename" in entry and "type" in entry
+                            for entry in entries
+                        )
+                    ):
+                        history_output_ui[key] = previous_entries + entries
             ui_outputs[unique_id] = {
                 "meta": {
                     "node_id": unique_id,
@@ -572,7 +598,7 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                     "parent_node": parent_node_id,
                     "real_node_id": real_node_id,
                 },
-                "output": output_ui
+                "output": history_output_ui
             }
             if server.client_id is not None:
                 server.send_sync("executed", { "node": unique_id, "display_node": display_node_id, "output": output_ui, "prompt_id": prompt_id }, server.client_id)
@@ -609,6 +635,7 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                 execution_list.cache_link(node_id, unique_id)
             for link in new_output_links:
                 execution_list.add_strong_link(link[0], link[1], unique_id)
+            execution_list.inherit_projected_nodes(unique_id, new_node_ids)
             pending_subgraph_results[unique_id] = cached_outputs
             return (ExecutionResult.PENDING, None, None)
 
@@ -786,7 +813,10 @@ class PromptExecutor:
                         break
 
                     assert node_id is not None, "Node ID should not be None at this point"
-                    result, error, ex = await execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_node_outputs)
+                    if execution_list.is_spent_node(node_id):
+                        result, error, ex = ExecutionResult.SUCCESS, None, None
+                    else:
+                        result, error, ex = await execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_node_outputs)
                     self.success = result != ExecutionResult.FAILURE
                     if result == ExecutionResult.FAILURE:
                         self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
@@ -948,6 +978,8 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                     }
                 }
                 errors.append(error)
+                continue
+            if extra_info.get("nonNavigable", False):
                 continue
             try:
                 visiting.append(unique_id)
