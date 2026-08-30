@@ -370,6 +370,113 @@ class VideoSlice(io.ComfyNode):
         )
 
 
+class ResampledVideo(Input.Video):
+    """Lazy view of a source video retimed to a new frame rate by duplicating or dropping frames."""
+
+    def __init__(self, video: Input.Video, frame_rate: Fraction):
+        self.__video = video
+        self.__frame_rate = frame_rate
+
+    def __output_frame_count(self, source_count: int, source_rate: Fraction) -> int:
+        if source_count == 0:
+            return 0
+        if source_rate <= 0:
+            raise ValueError("Video frame rate must be positive")
+        return max(1, round(source_count * self.__frame_rate / source_rate))
+
+    def get_components(self) -> Types.VideoComponents:
+        components = self.__video.get_components()
+        source_count = components.images.shape[0]
+        count = self.__output_frame_count(source_count, components.frame_rate)
+        step = float(components.frame_rate / self.__frame_rate)
+        # Nearest source frame per output tick, ties toward the earlier frame so
+        # integer up/down ratios duplicate or drop frames uniformly.
+        indices = (torch.arange(count, dtype=torch.float64) * step - 0.5).ceil().long().clamp_(min=0, max=max(source_count - 1, 0))
+        return Types.VideoComponents(
+            images=components.images[indices],
+            frame_rate=self.__frame_rate,
+            audio=components.audio,
+            metadata=components.metadata,
+            alpha=components.alpha[indices] if components.alpha is not None else None,
+        )
+
+    def get_frame_rate(self) -> Fraction:
+        return self.__frame_rate
+
+    def get_frame_count(self) -> int:
+        return self.__output_frame_count(self.__video.get_frame_count(), self.__video.get_frame_rate())
+
+    def get_duration(self) -> float:
+        return float(Fraction(self.get_frame_count()) / self.__frame_rate)
+
+    def get_dimensions(self) -> tuple[int, int]:
+        return self.__video.get_dimensions()
+
+    def get_bit_depth(self) -> int:
+        return self.__video.get_bit_depth()
+
+    def get_active_trim_window(self) -> tuple[float, float]:
+        return self.__video.get_active_trim_window()
+
+    def save_to(
+        self,
+        path,
+        format: Types.VideoContainer = Types.VideoContainer.AUTO,
+        codec: Types.VideoCodec = Types.VideoCodec.AUTO,
+        metadata: Optional[dict] = None,
+        bit_depth: int | None = None,
+        crf: float | None = None,
+    ):
+        return InputImpl.VideoFromComponents(
+            self.get_components(), bit_depth=self.__video.get_bit_depth()
+        ).save_to(path, format=format, codec=codec, metadata=metadata, bit_depth=bit_depth, crf=crf)
+
+    def as_trimmed(
+        self,
+        start_time: float | None = None,
+        duration: float | None = None,
+        strict_duration: bool = False,
+    ) -> Optional[Input.Video]:
+        trimmed = self.__video.as_trimmed(start_time, duration, strict_duration=strict_duration)
+        if trimmed is None:
+            return None
+        return ResampledVideo(trimmed, self.__frame_rate)
+
+
+class ResampleVideoFrameRate(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ResampleVideoFrameRate",
+            display_name="Resample Video Frame Rate",
+            search_aliases=["force rate", "change fps", "framerate", "retime video"],
+            category="video",
+            essentials_category="Video Tools",
+            description="Changes the frame rate of a video by duplicating or dropping frames, keeping the duration and audio unchanged.",
+            inputs=[
+                io.Video.Input("video", tooltip="The video to resample."),
+                io.Float.Input(
+                    "fps",
+                    default=24.0,
+                    min=0.01,
+                    max=1000.0,
+                    step=0.01,
+                    tooltip="Frame rate to resample the video to. Frames are duplicated or dropped to keep the clip duration.",
+                ),
+            ],
+            outputs=[
+                io.Video.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, video: Input.Video, fps: float) -> io.NodeOutput:
+        frame_rate = Fraction(fps)
+        if video.get_frame_rate() == frame_rate:
+            return io.NodeOutput(video)
+        return io.NodeOutput(ResampledVideo(video, frame_rate))
+
+
 class VideoExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -380,6 +487,7 @@ class VideoExtension(ComfyExtension):
             GetVideoComponents,
             LoadVideo,
             VideoSlice,
+            ResampleVideoFrameRate,
         ]
 
 async def comfy_entrypoint() -> VideoExtension:
