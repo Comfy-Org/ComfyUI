@@ -168,6 +168,19 @@ class ClosureRef(_TypedRef):
         """
         return await current_runtime().ctx.closures.create_sampler(self)
 
+    async def attach_model_clip(
+        self, model: "ModelRef", clip: "ClipRef",
+    ) -> tuple["ModelRef", "ClipRef"]:
+        """Attach one future-CLIP closure to a matching MODEL/CLIP pair.
+
+        The operation is deliberately atomic: the host selects the canonical
+        model family, clones both values, and installs matching typed markers
+        so a doubled CLIP representation can never be paired with an ordinary
+        model (or vice versa).
+        """
+        return await current_runtime().ctx.closures.attach_model_clip(
+            self, model, clip)
+
 
 class LatentOperationRef(_TypedRef):
     """Handle to a host-owned LATENT_OPERATION callable."""
@@ -2507,6 +2520,9 @@ class ClosuresDomain(Protocol):
     async def create_sampler(
         self, closure: ClosureRef,
     ) -> SamplerRef: ...
+    async def attach_model_clip(
+        self, closure: ClosureRef, model: ModelRef, clip: ClipRef,
+    ) -> tuple[ModelRef, ClipRef]: ...
 
 
 class Context(Protocol):
@@ -8333,11 +8349,590 @@ class _InProcessClosures:
             "post_cfg", "pre_cfg", "conditioning_selection",
             "conditioning_preprocess",
             "model_input_block", "model_middle_block", "model_output_block",
+            "regional_attention",
         }:
             raise ValueError(
                 "this node closure kind cannot attach to a model")
         model_obj = await current_runtime().refs.resolve(model)
         fn = entry["fn"]
+        if kind == "regional_attention":
+            import math
+            import torch
+            from comfy.model_base import (
+                Anima, BaseModel, CosmosPredict2, SDXL, SDXLRefiner,
+            )
+
+            if not hasattr(model_obj, "clone") or not hasattr(
+                model_obj, "get_model_object"
+            ):
+                raise TypeError(
+                    "regional attention requires a canonical MODEL patcher")
+            base_model = getattr(model_obj, "model", None)
+            model_type = type(base_model)
+            canonical_family = (
+                model_type is BaseModel
+                or issubclass(model_type, (SDXL, SDXLRefiner))
+            )
+            cosmos_family = issubclass(model_type, (Anima, CosmosPredict2))
+            if not (canonical_family or cosmos_family):
+                raise TypeError(
+                    "regional attention supports canonical SD/SDXL UNet and "
+                    "Anima/Cosmos Predict2 models")
+            has_negpip = bool(
+                getattr(model_obj, "model_options", {}).get("ppm_negpip"))
+            diffusion = model_obj.get_model_object("diffusion_model")
+            if canonical_family:
+                attention_sites = sum(
+                    1 for _name, module in diffusion.named_modules()
+                    if getattr(module, "attn2", None) is not None
+                )
+            else:
+                from comfy.ldm.cosmos.predict2 import Attention as CosmosAttention
+
+                attention_sites = sum(
+                    1 for name, module in diffusion.named_modules()
+                    if isinstance(module, CosmosAttention)
+                    and "cross_attn" in name
+                )
+            if not 1 <= attention_sites <= 256:
+                raise TypeError(
+                    "canonical UNet regional attention requires 1..256 "
+                    "cross-attention sites")
+            captures = entry.get("captures", {})
+            base_conditioning = captures.get("base_conditioning")
+            conditionings = list(captures.get("conditionings", ()))
+            masks = list(captures.get("masks", ()))
+            if len(conditionings) > 31 or len(masks) != len(conditionings) + 1:
+                raise ValueError(
+                    "regional attention needs one base mask and one mask per "
+                    "extra conditioning, with at most 32 regions")
+
+            def conditioning_row(value, label):
+                if not isinstance(value, list) or not value:
+                    raise TypeError(
+                        f"{label} must contain at least one conditioning row")
+                row = value[0]
+                if not (
+                    isinstance(row, (list, tuple))
+                    and len(row) == 2
+                    and isinstance(row[0], torch.Tensor)
+                    and row[0].ndim == 3
+                    and row[0].shape[0] == 1
+                    and isinstance(row[1], dict)
+                ):
+                    raise TypeError(
+                        f"{label} does not have a canonical conditioning row")
+                strength = row[1].get("strength", 1.0)
+                if (
+                    isinstance(strength, bool)
+                    or not isinstance(strength, (int, float))
+                    or not math.isfinite(float(strength))
+                ):
+                    raise TypeError(f"{label} strength must be finite")
+                return row[0], float(strength)
+
+            _base_tensor, base_strength = conditioning_row(
+                base_conditioning, "base_conditioning")
+            rows = [
+                conditioning_row(value, f"conditionings[{index}]")
+                for index, value in enumerate(conditionings)
+            ]
+            conditioning_tensors = [row[0] for row in rows]
+            strengths = [row[1] for row in rows]
+            for index, mask in enumerate(masks):
+                if not (
+                    isinstance(mask, torch.Tensor)
+                    and mask.ndim == 3
+                    and torch.is_floating_point(mask)
+                ):
+                    raise TypeError(
+                        f"masks[{index}] must be a floating [B,H,W] tensor")
+            if any(tuple(mask.shape) != tuple(masks[0].shape)
+                   for mask in masks[1:]):
+                raise ValueError(
+                    "regional attention masks must have identical shapes")
+
+            prepared = False
+            prepared_device = None
+            prepared_dtype = None
+            state_key = f"secure_regional_attention_{id(fn)}"
+
+            def call(*args):
+                result = fn(*args)
+                if isinstance(result, Awaitable):
+                    raise TypeError(
+                        "regional-attention closures must be synchronous")
+                return result
+
+            def prepare(query):
+                nonlocal prepared, prepared_device, prepared_dtype
+                if prepared:
+                    if (
+                        str(query.device) != prepared_device
+                        or query.dtype != prepared_dtype
+                    ):
+                        raise TypeError(
+                            "regional attention device/dtype changed after "
+                            "preparation")
+                    return
+                result = call(
+                    "prepare",
+                    [value.to(query) for value in conditioning_tensors],
+                    strengths,
+                    base_strength,
+                    [value.to(query) for value in masks],
+                )
+                if result is not None:
+                    raise TypeError(
+                        "regional attention prepare must return None")
+                prepared_device = str(query.device)
+                prepared_dtype = query.dtype
+                prepared = True
+
+            def validate(actual, shape, original, label):
+                if not (
+                    isinstance(actual, torch.Tensor)
+                    and tuple(actual.shape) == tuple(shape)
+                    and actual.dtype == original.dtype
+                    and str(actual.device) == str(original.device)
+                ):
+                    raise TypeError(
+                        f"regional attention {label} must preserve its "
+                        "contracted shape, dtype, and device")
+
+            if cosmos_family:
+                import comfy.patcher_extension
+                from comfy.ldm.cosmos.predict2 import Attention as CosmosAttention
+                from comfy.sampler_helpers import convert_cond
+                from comfy.samplers import process_conds
+
+                if not all(hasattr(model_obj, name) for name in (
+                    "add_wrapper_with_key", "add_object_patch",
+                )):
+                    raise TypeError(
+                        "Anima/Cosmos MODEL does not expose its canonical "
+                        "wrapper and object-patch hooks")
+                converted = [convert_cond(value)[0] for value in conditionings]
+                key_prefix = f"secure_regional_attention_{id(fn)}"
+                conds_key = f"{key_prefix}_conditionings"
+                negpip_masks_key = f"{key_prefix}_negpip_masks"
+                shape_key = f"{key_prefix}_activation_shape"
+                wrapper_key = f"{key_prefix}_wrapper"
+
+                def prepare_cosmos(values, latent):
+                    if len(values) != len(conditionings):
+                        raise TypeError(
+                            "Anima/Cosmos conditioning preparation changed the "
+                            "declared region count")
+                    reference = values[0] if values else latent
+                    if not (
+                        isinstance(reference, torch.Tensor)
+                        and torch.is_floating_point(reference)
+                    ):
+                        raise TypeError(
+                            "Anima/Cosmos regional attention preparation needs "
+                            "floating tensors")
+                    projected = [value.to(reference) for value in values]
+                    result = call(
+                        "prepare_cosmos", projected,
+                        [value.to(reference) for value in masks],
+                    )
+                    if result is not None:
+                        raise TypeError(
+                            "regional attention Cosmos prepare must return None")
+                    return projected
+
+                def sample_wrapper(executor, *args, **kwargs):
+                    if len(args) < 7:
+                        raise TypeError(
+                            "Anima/Cosmos sampler wrapper received an invalid "
+                            "call shape")
+                    guider, extra_options = args[0], args[2]
+                    noise, latent_image, denoise_mask = args[4:7]
+                    if not (
+                        isinstance(extra_options, dict)
+                        and isinstance(latent_image, torch.Tensor)
+                    ):
+                        raise TypeError(
+                            "Anima/Cosmos sampler wrapper received invalid state")
+                    prepared_conds = []
+                    if converted:
+                        seed = extra_options.get("seed")
+                        if isinstance(seed, bool) or not isinstance(seed, int):
+                            raise TypeError(
+                                "Anima/Cosmos sampling seed must be an integer")
+                        processed = process_conds(
+                            guider.inner_model,
+                            noise,
+                            {"positive": converted},
+                            latent_image.device,
+                            latent_image,
+                            denoise_mask,
+                            seed,
+                            latent_shapes=[latent_image.shape],
+                        )["positive"]
+                        prepared_negpip_masks = []
+                        for item in processed:
+                            model_conds = item.get("model_conds", {})
+                            wrapper = model_conds.get("c_crossattn")
+                            tensor = getattr(wrapper, "cond", None)
+                            if not (
+                                isinstance(tensor, torch.Tensor)
+                                and tensor.ndim == 3
+                                and tensor.shape[0] == 1
+                            ):
+                                raise TypeError(
+                                    "Anima/Cosmos processed conditioning is "
+                                    "not a canonical cross-attention tensor")
+                            prepared_conds.append(tensor)
+                            mask_wrapper = model_conds.get(
+                                "c_ppm_negpip_mask")
+                            if mask_wrapper is not None:
+                                mask = getattr(mask_wrapper, "cond", None)
+                                if not (
+                                    isinstance(mask, torch.Tensor)
+                                    and mask.ndim == 3
+                                    and mask.shape[0] == 1
+                                    and mask.shape[2] == 1
+                                ):
+                                    raise TypeError(
+                                        "Anima/Cosmos processed NegPiP mask is "
+                                        "not a canonical token sidecar")
+                                prepared_negpip_masks.append(mask)
+                        if prepared_negpip_masks and len(
+                            prepared_negpip_masks
+                        ) != len(prepared_conds):
+                            raise TypeError(
+                                "Anima/Cosmos regional NegPiP needs one sign "
+                                "mask per extra conditioning")
+                    prepared_conds = prepare_cosmos(
+                        prepared_conds, latent_image)
+                    model_options = extra_options.get("model_options")
+                    if not isinstance(model_options, dict):
+                        raise TypeError(
+                            "Anima/Cosmos sampling has no model options")
+                    transformer_options = dict(
+                        model_options.get("transformer_options", {}))
+                    transformer_options[conds_key] = prepared_conds
+                    if prepared_negpip_masks:
+                        transformer_options[negpip_masks_key] = [
+                            value.to(latent_image)
+                            for value in prepared_negpip_masks
+                        ]
+                    model_options["transformer_options"] = transformer_options
+                    return executor(*args, **kwargs)
+
+                def diffusion_wrapper(executor, *args, **kwargs):
+                    if not args or not isinstance(args[0], torch.Tensor):
+                        raise TypeError(
+                            "Anima/Cosmos diffusion wrapper needs a latent tensor")
+                    patch_spatial = getattr(
+                        executor.class_obj, "patch_spatial", None)
+                    if (
+                        isinstance(patch_spatial, bool)
+                        or not isinstance(patch_spatial, int)
+                        or not 1 <= patch_spatial <= 64
+                    ):
+                        raise TypeError(
+                            "Anima/Cosmos patch_spatial must be in 1..64")
+                    latent = args[0]
+                    if any(int(value) % patch_spatial
+                           for value in latent.shape[-2:]):
+                        raise ValueError(
+                            "Anima/Cosmos latent dimensions must be divisible "
+                            "by patch_spatial")
+                    options = dict(kwargs.get("transformer_options", {}))
+                    activation_shape = list(latent.shape)
+                    activation_shape[-2] //= patch_spatial
+                    activation_shape[-1] //= patch_spatial
+                    options[shape_key] = tuple(activation_shape)
+                    kwargs["transformer_options"] = options
+                    return executor(*args, **kwargs)
+
+                def forward_wrapper(previous_forward):
+                    def wrapped(
+                        query, context=None, rope_emb=None,
+                        transformer_options=None,
+                    ):
+                        options = dict(transformer_options or {})
+                        groups = options.get("cond_or_uncond")
+                        if not (
+                            isinstance(groups, (list, tuple))
+                            and 1 <= len(groups) <= 16
+                            and all(type(item) is int and item in {0, 1}
+                                    for item in groups)
+                            and isinstance(query, torch.Tensor)
+                            and query.ndim == 3
+                            and query.shape[0] % len(groups) == 0
+                        ):
+                            raise TypeError(
+                                "Anima/Cosmos regional attention received "
+                                "invalid cond/uncond groups")
+                        prepared_conds = options.get(conds_key, [])
+                        if context is None:
+                            expanded_query, expanded_context = query, None
+                            merge_groups = list(groups)
+                        else:
+                            if not (
+                                isinstance(context, torch.Tensor)
+                                and context.ndim == 3
+                                and context.dtype == query.dtype
+                                and str(context.device) == str(query.device)
+                            ):
+                                raise TypeError(
+                                    "Anima/Cosmos context must match query")
+                            batch = query.shape[0] // len(groups)
+                            region_count = len(prepared_conds) + 1
+                            output_batch = batch * sum(
+                                1 if group == 1 else region_count
+                                for group in groups)
+                            token_lengths = [
+                                int(value.shape[1]) for value in prepared_conds
+                            ]
+                            shapes = (
+                                (output_batch, int(query.shape[1]),
+                                 int(query.shape[2])),
+                                (output_batch,
+                                 math.lcm(int(context.shape[1]), *token_lengths),
+                                 int(context.shape[2])),
+                            )
+                            if any(shape[0] * shape[1] > 131072
+                                   for shape in shapes):
+                                raise ValueError(
+                                    "Anima/Cosmos regional attention expansion "
+                                    "exceeds 131072 token positions")
+                            main_negpip_mask = options.get("ppm_negpip_mask")
+                            extra_negpip_masks = options.get(negpip_masks_key)
+                            composed_negpip = (
+                                main_negpip_mask is not None
+                                or extra_negpip_masks is not None
+                            )
+                            if composed_negpip:
+                                if not (
+                                    isinstance(main_negpip_mask, torch.Tensor)
+                                    and main_negpip_mask.ndim == 3
+                                    and main_negpip_mask.shape[2] == 1
+                                    and isinstance(extra_negpip_masks, list)
+                                    and len(extra_negpip_masks)
+                                    == len(prepared_conds)
+                                    and all(
+                                        isinstance(value, torch.Tensor)
+                                        and value.ndim == 3
+                                        and value.shape[0] == 1
+                                        and value.shape[2] == 1
+                                        and value.dtype == main_negpip_mask.dtype
+                                        and str(value.device)
+                                        == str(main_negpip_mask.device)
+                                        for value in extra_negpip_masks
+                                    )
+                                ):
+                                    raise TypeError(
+                                        "Anima/Cosmos regional NegPiP sidecars "
+                                        "are incomplete or incompatible")
+                                mask_shape = (
+                                    output_batch,
+                                    math.lcm(
+                                        int(main_negpip_mask.shape[1]),
+                                        *(int(value.shape[1])
+                                          for value in extra_negpip_masks),
+                                    ),
+                                    1,
+                                )
+                                if mask_shape[0] * mask_shape[1] > 131072:
+                                    raise ValueError(
+                                        "Anima/Cosmos regional NegPiP mask "
+                                        "expansion exceeds 131072 positions")
+                                result = call(
+                                    "pre_cosmos_negpip", query, context,
+                                    list(groups), main_negpip_mask,
+                                    extra_negpip_masks)
+                            else:
+                                result = call(
+                                    "pre_cosmos", query, context, list(groups))
+                            expected_items = 3 if composed_negpip else 2
+                            if not (
+                                isinstance(result, tuple)
+                                and len(result) == expected_items
+                            ):
+                                raise TypeError(
+                                    "Anima/Cosmos regional attention pre returned "
+                                    "the wrong tensor tuple")
+                            validate(result[0], shapes[0], query, "query")
+                            validate(result[1], shapes[1], context, "context")
+                            if composed_negpip:
+                                validate(
+                                    result[2], mask_shape, main_negpip_mask,
+                                    "NegPiP sign mask")
+                                options["ppm_negpip_mask"] = result[2]
+                                expanded_query, expanded_context = result[:2]
+                            else:
+                                expanded_query, expanded_context = result
+                            merge_groups = []
+                            for group in groups:
+                                merge_groups.extend(
+                                    [1] if group == 1
+                                    else [0] * region_count)
+                        output = previous_forward(
+                            expanded_query, expanded_context, rope_emb, options)
+                        activation_shape = options.get(shape_key)
+                        if not (
+                            isinstance(output, torch.Tensor)
+                            and output.ndim == 3
+                            and isinstance(activation_shape, (list, tuple))
+                            and len(activation_shape) >= 2
+                            and math.prod(activation_shape[-2:])
+                            == output.shape[1]
+                        ):
+                            raise TypeError(
+                                "Anima/Cosmos attention output or geometry is "
+                                "invalid")
+                        expected_shape = (
+                            int(query.shape[0]), int(output.shape[1]),
+                            int(output.shape[2]),
+                        )
+                        merged = call(
+                            "post", output, merge_groups,
+                            list(activation_shape))
+                        validate(
+                            merged, expected_shape, output, "blended output")
+                        return merged
+
+                    return wrapped
+
+                patched = model_obj.clone()
+                patched.add_wrapper_with_key(
+                    comfy.patcher_extension.WrappersMP.SAMPLER_SAMPLE,
+                    wrapper_key,
+                    sample_wrapper,
+                )
+                patched.add_wrapper_with_key(
+                    comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,
+                    wrapper_key,
+                    diffusion_wrapper,
+                )
+                for block_name, module in diffusion.named_modules():
+                    if not (
+                        isinstance(module, CosmosAttention)
+                        and "cross_attn" in block_name
+                    ):
+                        continue
+                    path = f"diffusion_model.{block_name}.forward"
+                    patched.add_object_patch(
+                        path,
+                        forward_wrapper(model_obj.get_model_object(path)),
+                    )
+                return ModelRef._wrap(await current_runtime().refs.create(
+                    "MODEL", patched))
+
+            def attn2_patch(query, key, value, extra_options):
+                if not (
+                    isinstance(query, torch.Tensor)
+                    and isinstance(key, torch.Tensor)
+                    and isinstance(value, torch.Tensor)
+                    and query.ndim == key.ndim == value.ndim == 3
+                    and query.dtype == key.dtype == value.dtype
+                    and str(query.device) == str(key.device) == str(value.device)
+                ):
+                    raise TypeError(
+                        "regional attention requires rank-3 tensors with a "
+                        "shared dtype and device")
+                cond_or_uncond = extra_options.get("cond_or_uncond")
+                if not (
+                    isinstance(cond_or_uncond, (list, tuple))
+                    and 1 <= len(cond_or_uncond) <= 16
+                    and all(type(item) is int and item in {0, 1}
+                            for item in cond_or_uncond)
+                    and query.shape[0] % len(cond_or_uncond) == 0
+                ):
+                    raise TypeError(
+                        "regional attention received invalid cond/uncond groups")
+                prepare(query)
+                batch = query.shape[0] // len(cond_or_uncond)
+                region_count = len(conditionings) + 1
+                output_batch = batch * sum(
+                    1 if group == 1 else region_count
+                    for group in cond_or_uncond
+                )
+                token_lengths = []
+                for tensor in conditioning_tensors:
+                    length = int(tensor.shape[1])
+                    if has_negpip:
+                        if length % 2:
+                            raise ValueError(
+                                "regional NegPiP conditioning needs an even "
+                                "interleaved token count")
+                        length //= 2
+                    token_lengths.append(length)
+                shapes = (
+                    (output_batch, int(query.shape[1]), int(query.shape[2])),
+                    (output_batch,
+                     math.lcm(int(key.shape[1]), *token_lengths),
+                     int(key.shape[2])),
+                    (output_batch,
+                     math.lcm(int(value.shape[1]), *token_lengths),
+                     int(value.shape[2])),
+                )
+                if any(shape[0] * shape[1] > 131072 for shape in shapes):
+                    raise ValueError(
+                        "regional attention expansion exceeds 131072 token "
+                        "positions")
+                result = call(
+                    "pre", query, key, value,
+                    list(cond_or_uncond), has_negpip)
+                if not isinstance(result, tuple) or len(result) != 3:
+                    raise TypeError(
+                        "regional attention pre must return a tensor triple")
+                for actual, shape, original, label in zip(
+                    result, shapes, (query, key, value),
+                    ("query", "key", "value"), strict=True,
+                ):
+                    validate(actual, shape, original, label)
+                merge_groups = []
+                for group in cond_or_uncond:
+                    merge_groups.extend(
+                        [1] if group == 1 else [0] * region_count)
+                if state_key in extra_options:
+                    raise RuntimeError(
+                        "regional attention pre was invoked twice for one site")
+                extra_options[state_key] = {
+                    "merge_groups": merge_groups,
+                    "original_batch": int(query.shape[0]),
+                }
+                return result
+
+            def attn2_output_patch(output, extra_options):
+                if not isinstance(output, torch.Tensor) or output.ndim != 3:
+                    raise TypeError(
+                        "regional attention output must be rank-3")
+                state = extra_options.pop(state_key, None)
+                if not isinstance(state, dict):
+                    raise RuntimeError(
+                        "regional attention post has no matching pre phase")
+                activation_shape = extra_options.get("activations_shape")
+                if not (
+                    isinstance(activation_shape, (list, tuple))
+                    and len(activation_shape) >= 2
+                    and all(type(value) is int and value > 0
+                            for value in activation_shape[-2:])
+                    and math.prod(activation_shape[-2:]) == output.shape[1]
+                ):
+                    raise TypeError(
+                        "regional attention has invalid activation geometry")
+                expected_shape = (
+                    state["original_batch"], int(output.shape[1]),
+                    int(output.shape[2]),
+                )
+                result = call(
+                    "post", output, state["merge_groups"],
+                    list(activation_shape))
+                validate(result, expected_shape, output, "blended output")
+                return result
+
+            patched = model_obj.clone()
+            patched.set_model_attn2_patch(attn2_patch)
+            patched.set_model_attn2_output_patch(attn2_output_patch)
+            return ModelRef._wrap(await current_runtime().refs.create(
+                "MODEL", patched))
         if kind in {
             "model_input_block", "model_middle_block", "model_output_block",
         }:
@@ -8640,6 +9235,317 @@ class _InProcessClosures:
         )
         return ModelRef._wrap(await current_runtime().refs.create(
             "MODEL", patched))
+
+    async def attach_model_clip(
+        self, closure: ClosureRef, model: ModelRef, clip: ClipRef,
+    ) -> tuple[ModelRef, ClipRef]:
+        """Default in-process adapter for a future CLIP weight closure."""
+        import math
+        import torch
+        from comfy import model_management
+        import comfy.conds
+        import comfy.patcher_extension
+        from comfy.model_base import Anima, BaseModel, Flux, SDXL, SDXLRefiner
+        from comfy.sd1_clip import gen_empty_tokens
+
+        if not isinstance(closure, ClosureRef):
+            raise TypeError("closure must be a typed CLOSURE ref")
+        if not isinstance(model, ModelRef):
+            raise TypeError("model must be a typed MODEL ref")
+        if not isinstance(clip, ClipRef):
+            raise TypeError("clip must be a typed CLIP ref")
+        entry = await current_runtime().refs.resolve(closure)
+        if entry.get("kind") != "clip_token_weight_encoder":
+            raise ValueError(
+                "only clip_token_weight_encoder closures can attach a "
+                "MODEL/CLIP pair")
+        model_obj = await current_runtime().refs.resolve(model)
+        clip_obj = await current_runtime().refs.resolve(clip)
+        if not callable(getattr(model_obj, "clone", None)):
+            raise TypeError("NegPiP requires a cloneable MODEL")
+        if not callable(getattr(clip_obj, "clone", None)):
+            raise TypeError("NegPiP requires a cloneable CLIP")
+        patched_model = model_obj.clone()
+        patched_clip = clip_obj.clone()
+        patcher = getattr(patched_clip, "patcher", None)
+        clip_model = getattr(patcher, "model", None)
+        if (
+            patcher is None
+            or clip_model is None
+            or not callable(getattr(patcher, "add_object_patch", None))
+        ):
+            raise TypeError("NegPiP requires a canonical CLIP component patcher")
+        model_options = getattr(patched_model, "model_options", None)
+        clip_options = getattr(patcher, "model_options", None)
+        if not isinstance(model_options, dict) or not isinstance(
+            clip_options, dict
+        ):
+            raise TypeError("NegPiP needs canonical model option mappings")
+        model_marked = bool(model_options.get("ppm_negpip"))
+        clip_marked = bool(clip_options.get("ppm_negpip"))
+        if model_marked != clip_marked:
+            raise TypeError("NegPiP refuses a half-patched MODEL/CLIP pair")
+        components = [
+            name for name in (
+                "clip_g", "clip_l", "t5xxl", "llama", "qwen3_06b",
+            )
+            if hasattr(clip_model, name)
+        ]
+
+        async def store_pair():
+            refs = current_runtime().refs
+            return (
+                ModelRef._wrap(await refs.create("MODEL", patched_model)),
+                ClipRef._wrap(await refs.create("CLIP", patched_clip)),
+            )
+
+        if not components or model_marked:
+            return await store_pair()
+        base_model = getattr(patched_model, "model", None)
+        model_type = type(base_model)
+        canonical_family = (
+            model_type is BaseModel
+            or issubclass(model_type, (SDXL, SDXLRefiner))
+        )
+        anima_family = issubclass(model_type, Anima)
+        if issubclass(model_type, Flux):
+            raise ValueError(
+                "NegPiP's FLUX full-forward replacement is unmaintained "
+                "upstream and is not admitted by the bounded V2 adapter")
+        if not (canonical_family or anima_family):
+            return await store_pair()
+        fn = entry["fn"]
+
+        def call(*args):
+            result = fn(*args)
+            if isinstance(result, Awaitable):
+                raise TypeError("NegPiP closures must be synchronous")
+            return result
+
+        if canonical_family:
+            def validate_pairs(token_weight_pairs):
+                if not isinstance(token_weight_pairs, list) or len(
+                    token_weight_pairs
+                ) > 2048:
+                    raise ValueError("NegPiP needs at most 2048 token sections")
+                tokens, weights = [], []
+                total = 0
+                has_weights = False
+                max_length = 0
+                for section_index, section in enumerate(token_weight_pairs):
+                    if not isinstance(section, list) or not 1 <= len(
+                        section
+                    ) <= 4096:
+                        raise ValueError(
+                            f"NegPiP token section {section_index} needs "
+                            "1..4096 entries")
+                    total += len(section)
+                    if total > 131072:
+                        raise ValueError(
+                            "NegPiP token input exceeds 131072 positions")
+                    section_tokens, section_weights = [], []
+                    for entry_index, pair in enumerate(section):
+                        if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+                            raise TypeError(
+                                f"NegPiP token entry {section_index}:"
+                                f"{entry_index} must contain token and weight")
+                        weight = pair[1]
+                        if (
+                            isinstance(weight, bool)
+                            or not isinstance(weight, (int, float))
+                            or not math.isfinite(float(weight))
+                        ):
+                            raise ValueError("NegPiP token weights must be finite")
+                        section_tokens.append(pair[0])
+                        section_weights.append(float(weight))
+                        has_weights = has_weights or float(weight) != 1.0
+                    tokens.append(section_tokens)
+                    weights.append(section_weights)
+                    max_length = max(max_length, len(section_tokens))
+                return tokens, weights, has_weights, max_length
+
+            def make_encoder(target):
+                def encode_token_weights(token_weight_pairs):
+                    tokens, weights, has_weights, max_length = validate_pairs(
+                        token_weight_pairs)
+                    sections = len(tokens)
+                    empty_index = None
+                    if has_weights or sections == 0:
+                        generator = getattr(target, "gen_empty_tokens", None)
+                        tokens.append(
+                            generator(target.special_tokens, max_length)
+                            if callable(generator)
+                            else gen_empty_tokens(target.special_tokens, max_length)
+                        )
+                        empty_index = len(tokens) - 1
+                    output = target.encode(tokens)
+                    if not isinstance(output, (list, tuple)) or len(output) < 2:
+                        raise TypeError("NegPiP base encoder returned invalid data")
+                    encoded, pooled = output[:2]
+                    if not (
+                        isinstance(encoded, torch.Tensor)
+                        and encoded.ndim == 3
+                        and encoded.shape[0] == len(tokens)
+                    ):
+                        raise TypeError("NegPiP base encoder returned invalid rows")
+                    if any(len(row) != encoded.shape[1] for row in weights):
+                        raise ValueError(
+                            "NegPiP token rows do not match encoded sequence length")
+                    expected_shape = (
+                        (1, int(encoded.shape[1]), int(encoded.shape[2]))
+                        if sections == 0
+                        else (
+                            1,
+                            sections * int(encoded.shape[1]) * 2,
+                            int(encoded.shape[2]),
+                        )
+                    )
+                    result = call("encode", encoded, weights, empty_index)
+                    if not (
+                        isinstance(result, torch.Tensor)
+                        and tuple(result.shape) == expected_shape
+                        and result.dtype == encoded.dtype
+                        and str(result.device) == str(encoded.device)
+                    ):
+                        raise TypeError(
+                            "NegPiP encode changed shape, dtype, or device")
+                    intermediate = model_management.intermediate_device()
+                    first_pooled = (
+                        pooled[0:1].to(device=intermediate)
+                        if isinstance(pooled, torch.Tensor)
+                        else pooled
+                    )
+                    returned = (result.to(device=intermediate), first_pooled)
+                    if len(output) > 2:
+                        if not isinstance(output[2], dict):
+                            raise TypeError("NegPiP encoder extras must be a mapping")
+                        extras = {}
+                        for name, value in output[2].items():
+                            if name == "attention_mask":
+                                if not isinstance(value, torch.Tensor):
+                                    raise TypeError(
+                                        "NegPiP attention mask must be a tensor")
+                                value = value[:sections].flatten().unsqueeze(0)
+                                value = value.to(device=intermediate)
+                            extras[name] = value
+                        returned = returned + (extras,)
+                    return returned
+
+                return encode_token_weights
+
+            for component in components:
+                target = getattr(clip_model, component)
+                patcher.add_object_patch(
+                    f"{component}.encode_token_weights", make_encoder(target))
+
+            def attn2_negpip(query, key, value, _extra_options):
+                if not (
+                    isinstance(query, torch.Tensor)
+                    and isinstance(key, torch.Tensor)
+                    and isinstance(value, torch.Tensor)
+                    and query.ndim == key.ndim == value.ndim == 3
+                    and key.shape[1] % 2 == 0
+                    and value.shape[1] % 2 == 0
+                ):
+                    raise TypeError(
+                        "NegPiP attention needs even interleaved key/value rows")
+                return query, key[:, 0::2], value[:, 1::2]
+
+            if not callable(
+                getattr(patched_model, "set_model_attn2_patch", None)
+            ):
+                raise TypeError("NegPiP MODEL has no cross-attention hook")
+            patched_model.set_model_attn2_patch(attn2_negpip)
+
+        if anima_family:
+            if not all(callable(getattr(patched_model, name, None)) for name in (
+                "get_model_object", "add_object_patch", "add_wrapper_with_key",
+                "set_model_attn2_patch",
+            )):
+                raise TypeError("Anima NegPiP MODEL lacks canonical patcher hooks")
+            previous_extra_conds = patched_model.get_model_object("extra_conds")
+            if not callable(previous_extra_conds):
+                raise TypeError("Anima extra_conds is not callable")
+
+            def extra_conds(**kwargs):
+                weights = kwargs.get("t5xxl_weights")
+                sign_mask = None
+                if weights is not None:
+                    if not (
+                        isinstance(weights, torch.Tensor)
+                        and weights.ndim == 1
+                        and torch.is_floating_point(weights)
+                        and 1 <= weights.numel() <= 131072
+                        and bool(torch.isfinite(weights).all())
+                    ):
+                        raise TypeError(
+                            "Anima NegPiP weights must be a finite 1-D tensor")
+                    absolute, sign_mask = call(
+                        "anima_weights", weights, 512, None)
+                    mask_length = max(int(weights.numel()), 512)
+                    if not (
+                        isinstance(absolute, torch.Tensor)
+                        and tuple(absolute.shape) == tuple(weights.shape)
+                        and absolute.dtype == weights.dtype
+                        and str(absolute.device) == str(weights.device)
+                        and isinstance(sign_mask, torch.Tensor)
+                        and tuple(sign_mask.shape) == (1, mask_length, 1)
+                        and sign_mask.dtype == torch.int32
+                        and str(sign_mask.device) == str(weights.device)
+                        and bool(((sign_mask == 1) | (sign_mask == -1)).all())
+                    ):
+                        raise TypeError(
+                            "Anima NegPiP weight projection violated its contract")
+                    kwargs["t5xxl_weights"] = absolute
+                output = previous_extra_conds(**kwargs)
+                if not isinstance(output, dict):
+                    raise TypeError("Anima extra_conds must return a mapping")
+                if sign_mask is not None:
+                    output["c_ppm_negpip_mask"] = comfy.conds.CONDRegular(
+                        sign_mask)
+                return output
+
+            def diffusion_wrapper(executor, *args, **kwargs):
+                if len(args) < 3 or not isinstance(args[2], torch.Tensor):
+                    raise TypeError(
+                        "Anima NegPiP diffusion wrapper needs context tensor")
+                sign_mask = kwargs.get("c_ppm_negpip_mask")
+                options = dict(kwargs.get("transformer_options", {}))
+                if sign_mask is not None:
+                    if not isinstance(sign_mask, torch.Tensor):
+                        raise TypeError("Anima NegPiP sidecar must be a tensor")
+                    options["ppm_negpip_mask"] = sign_mask.to(args[2])
+                kwargs["transformer_options"] = options
+                return executor(*args, **kwargs)
+
+            def anima_attn2(query, key, value, pe=None, attn_mask=None,
+                            extra_options=None):
+                sign_mask = (extra_options or {}).get("ppm_negpip_mask")
+                if sign_mask is not None:
+                    if not (
+                        isinstance(sign_mask, torch.Tensor)
+                        and sign_mask.ndim == 3
+                        and sign_mask.shape[0] in {1, value.shape[0]}
+                        and sign_mask.shape[1] == value.shape[1]
+                        and sign_mask.shape[2] == 1
+                        and str(sign_mask.device) == str(value.device)
+                    ):
+                        raise TypeError(
+                            "Anima NegPiP sign mask does not match values")
+                    value = value * sign_mask
+                return {"q": query, "k": key, "v": value, "pe": pe}
+
+            patched_model.add_object_patch("extra_conds", extra_conds)
+            patched_model.add_wrapper_with_key(
+                comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,
+                f"secure_negpip_{id(fn)}",
+                diffusion_wrapper,
+            )
+            patched_model.set_model_attn2_patch(anima_attn2)
+
+        model_options["ppm_negpip"] = True
+        clip_options["ppm_negpip"] = True
+        return await store_pair()
 
     async def attach_sampler(
         self, closure: ClosureRef, sampler: SamplerRef, *,
