@@ -823,6 +823,8 @@ class PromptServer():
             overrides = get_environment_overrides()
             if overrides:
                 features.update(overrides)
+            from comfy_api.latest import sdk
+            features.update(sdk.providers.frontend_runtime_config)
             return web.json_response(features)
 
         @routes.get("/prompt")
