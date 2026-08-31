@@ -1416,6 +1416,41 @@ class BoundingBoxes(ComfyTypeIO):
                 self.default = []
 
 
+@comfytype(io_type="VIDEO_EDIT")
+class VideoEdit(ComfyTypeIO):
+    class VideoTrimSection(TypedDict):
+        start_time: float
+        duration: float
+
+    class VideoCropSection(TypedDict):
+        x: int
+        y: int
+        width: int
+        height: int
+
+    class VideoEditDict(TypedDict, total=False):
+        trim: 'VideoEdit.VideoTrimSection'
+        crop: 'VideoEdit.VideoCropSection'
+    Type = VideoEditDict
+
+    class Input(WidgetInput):
+        def __init__(self, id: str, display_name: str=None, optional=False, tooltip: str=None,
+                     socketless: bool=True, default: dict=None, features: list[str]=None, advanced: bool=None):
+            super().__init__(id, display_name, optional, tooltip, None, default, socketless, None, None, None, None, advanced)
+            self.features = features if features is not None else ["trim", "crop"]
+            if default is None:
+                self.default = {}
+                if "trim" in self.features:
+                    self.default["trim"] = {"start_time": 0.0, "duration": 0.0}
+                if "crop" in self.features:
+                    self.default["crop"] = {"x": 0, "y": 0, "width": 0, "height": 0}
+
+        def as_dict(self):
+            return super().as_dict() | prune_dict({
+                "features": self.features,
+            })
+
+
 @comfytype(io_type="HISTOGRAM")
 class Histogram(ComfyTypeIO):
     """A histogram represented as a list of bin counts."""
@@ -2493,5 +2528,6 @@ __all__ = [
     "Curve",
     "Histogram",
     "Range",
+    "VideoEdit",
     "NodeReplace",
 ]

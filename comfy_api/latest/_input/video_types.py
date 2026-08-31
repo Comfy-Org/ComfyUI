@@ -4,7 +4,7 @@ from fractions import Fraction
 from typing import Optional, Union, IO
 import io
 import av
-from .._util import VideoContainer, VideoCodec, VideoComponents
+from .._util import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
 
 class VideoInput(ABC):
     """
@@ -31,12 +31,15 @@ class VideoInput(ABC):
         bit_depth: int | None = None,
         crf: float | None = None,
         color_space: str | None = None,
+        preset: str | None = None,
     ):
         """
         Abstract method to save the video input to a file.
 
         bit_depth selects the encoded bit depth; None keeps the video's native depth.
         crf selects the H.264 or AV1 constant rate factor; None uses the encoder default.
+        preset selects the H.264 encoder speed/compression trade-off (e.g. "ultrafast");
+        None uses the encoder default. Ignored for other codecs.
         color_space="sRGB" selects SDR BT.709/sRGB, "HDR" selects BT.2020/HLG, and "HDR PQ"
         selects BT.2020/PQ. Bit depth is selected independently.
         Tensor-created videos default to sRGB when color_space is None. Loaded videos keep matching recognized native color
@@ -62,6 +65,45 @@ class VideoInput(ABC):
             A new VideoInput, or None if the result would have negative duration
         """
         pass
+
+    def as_cropped(
+        self,
+        x: int = 0,
+        y: int = 0,
+        width: int = 0,
+        height: int = 0,
+    ) -> VideoInput:
+        """
+        Create a new VideoInput spatially cropped to the given pixel rectangle.
+
+        The rectangle is clamped to the frame and even-aligned for encoder
+        compatibility. An empty or full-frame rectangle returns the input
+        unchanged.
+
+        Default implementation materializes the video via get_components();
+        subclasses should override with lazier strategies when possible.
+        """
+        components = self.get_components()
+        rect = normalize_crop_rect(
+            x, y, width, height, components.images.shape[2], components.images.shape[1]
+        )
+        if rect is None:
+            return self
+        from .._input_impl.video_types import VideoFromComponents
+
+        cx, cy, cw, ch = rect
+        return VideoFromComponents(
+            VideoComponents(
+                images=components.images[:, cy:cy + ch, cx:cx + cw, :].clone(),
+                audio=components.audio,
+                frame_rate=components.frame_rate,
+                metadata=components.metadata,
+                alpha=components.alpha[:, cy:cy + ch, cx:cx + cw].clone()
+                if components.alpha is not None
+                else None,
+            ),
+            bit_depth=self.get_bit_depth(),
+        )
 
     def get_stream_source(self) -> Union[str, io.BytesIO]:
         """
