@@ -20,7 +20,7 @@ MAX_VOLUMES = 64
 MAX_ACCELERATORS = 64
 MAX_LABEL_LENGTH = 128
 MAX_NAME_LENGTH = 256
-MAX_BYTES = 2**63 - 1
+MAX_BYTES = 2**53 - 1
 
 _cache_lock = threading.Lock()
 _cached_at = -math.inf

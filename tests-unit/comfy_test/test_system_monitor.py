@@ -134,3 +134,8 @@ def test_missing_optional_sensors_are_null():
     assert accelerator["name"] == "Fallback GPU"
     assert accelerator["utilization_percent"] is None
     assert accelerator["temperature_c"] is None
+
+
+def test_byte_totals_fit_the_cross_language_safe_integer_contract():
+    assert system_monitor._bytes(2**63) == 2**53 - 1
+    assert system_monitor._bytes(-1) == 0
