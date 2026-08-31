@@ -26,9 +26,11 @@ import asyncio
 import contextvars
 import logging
 import os
+import re
 import sys
 import threading
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -37,11 +39,16 @@ from typing import (
     Callable,
     Optional,
     Protocol,
+    Sequence,
     runtime_checkable,
 )
 
 from ._profiling import InProcessProfiling
 from ._preview_override import InProcessPreviewOverride
+from ._anima import InProcessAnima
+from ._civitai import InProcessCivitai
+from ._ollama import InProcessOllama
+from ._llama_cpp import InProcessLlamaCpp
 
 if TYPE_CHECKING:  # keep this module import-safe / torch-free at import time
     import torch
@@ -91,6 +98,17 @@ class Ref:
         """
         await current_runtime().refs.release(self)
 
+    async def describe(self, max_value_chars: int = 32768) -> dict[str, Any]:
+        """Return a bounded, inert description of this opaque value.
+
+        The host projects only canonical kind/type, collection length, tensor
+        shape, and a short redacted summary.  It never calls arbitrary object
+        ``repr``, iteration, properties, or methods, and never exposes model
+        weights, tensor values, paths, or the underlying host object.
+        """
+        return await current_runtime().ops.apply(
+            "ref.describe", self, {"max_value_chars": max_value_chars})
+
 
 class _TypedRef(Ref):
     KIND: str = "ANY"
@@ -98,6 +116,63 @@ class _TypedRef(Ref):
     @classmethod
     def _wrap(cls, ref: Ref) -> "Ref":
         return cls(kind=cls.KIND, id=ref.id)
+
+
+class ClosureRef(_TypedRef):
+    """Handle to a retained node closure (D21).
+
+    A pack function the host invokes at a declared sampling phase, for the
+    rest of the prompt. The handle is what a node passes on — typically to
+    ``ModelRef.patch("attach_closure", ...)`` — and carries no authority by
+    itself: the host resolves it against the registry entry owning both the
+    closure id and its validated captures, and releases both together at the
+    prompt boundary.
+    """
+
+    KIND = "CLOSURE"
+
+    async def attach_model(self, model: "ModelRef") -> "ModelRef":
+        """Attach this closure to its declared canonical model phase.
+
+        The host validates the closure kind, clones the model, and installs
+        ComfyUI's matching pre- or post-CFG hook; the pack's function remains
+        in its sandbox.
+        """
+        return await current_runtime().ctx.closures.attach_model(self, model)
+
+    async def wrap_sampler(
+        self, sampler: "SamplerRef", *,
+        start_percent: Optional[float] = None,
+        end_percent: Optional[float] = None,
+    ) -> "SamplerRef":
+        """Wrap a sampler's model calls with a ``model_sigma`` closure."""
+        return await current_runtime().ctx.closures.attach_sampler(
+            self,
+            sampler,
+            start_percent=start_percent,
+            end_percent=end_percent,
+        )
+
+    async def as_latent_operation(self) -> "LatentOperationRef":
+        """Expose a ``latent_operation`` closure as LATENT_OPERATION."""
+        return await current_runtime().ctx.closures.create_latent_operation(
+            self)
+
+    async def as_sampler(self) -> "SamplerRef":
+        """Expose a ``custom_sampler`` closure as a host-owned SAMPLER.
+
+        The pack closure owns only the integration loop. During one sampling
+        invocation the host supplies a narrow broker for denoise, noise,
+        preview, and model-schedule projections; the broker is dead as soon as
+        that invocation returns.
+        """
+        return await current_runtime().ctx.closures.create_sampler(self)
+
+
+class LatentOperationRef(_TypedRef):
+    """Handle to a host-owned LATENT_OPERATION callable."""
+
+    KIND = "LATENT_OPERATION"
 
 
 class ValueRef(_TypedRef):
@@ -112,6 +187,19 @@ class ValueRef(_TypedRef):
     @classmethod
     async def from_value(cls, v: Any) -> "Ref":
         return cls._wrap(await current_runtime().refs.create(cls.KIND, v))
+
+
+class InterpolationStatesRef(_TypedRef):
+    """A frame-interpolation skip policy projected from another pack."""
+
+    KIND = "INTERPOLATION_STATES"
+
+    async def skip_mask(self, pair_count: int) -> list[bool]:
+        """Return which source-frame pairs must not be interpolated."""
+        return await current_runtime().ops.apply(
+            "interpolation_states.skip_mask", self,
+            {"pair_count": pair_count},
+        )
 
 
 class TensorRef(_TypedRef):
@@ -141,20 +229,128 @@ class ImageRef(TensorRef):
     async def op(self, name: str, **params: Any) -> "ImageRef":
         return await current_runtime().ops.apply(name, self, params)
 
-    # Convenience wrappers over the two built-in primitives.
+    # Convenience wrappers over the built-in image primitives.
     async def invert(self) -> "ImageRef":
         return await self.op("invert")
 
     async def scale(self, factor: float) -> "ImageRef":
         return await self.op("scale", factor=factor)
 
+    async def rgb(self) -> "ImageRef":
+        """Return the first three channels of an image as an opaque ref."""
+        return await self.op("image.rgb")
+
+    async def to_device(self, device: str = "auto") -> "ImageRef":
+        """Clone this image onto a named ComfyUI-managed device.
+
+        The device lookup and tensor move happen on the trusted plane.  Guests
+        choose only ``auto``, ``cpu``, or ``gpu`` and never receive a device
+        object or a raw tensor.
+        """
+        return await self.op("image.to_device", device=str(device))
+
+    async def spatial_shape(self) -> tuple[int, int]:
+        """Return image height and width without exposing its pixel buffer."""
+        result = await self.op("image.spatial_shape")
+        return int(result[0]), int(result[1])
+
+    async def batch_size(self) -> int:
+        """Return the number of images without exposing their pixel buffers."""
+        return int(await self.op("image.batch_size"))
+
+    async def select_batch(self, indices: list[int]) -> "ImageRef":
+        """Select an ordered, bounded set of images from a BHWC batch."""
+        return await self.op("image.select_batch", indices=list(indices))
+
 
 class MaskRef(TensorRef):
     KIND = "MASK"
 
+    async def grow(
+        self, amount: int, tapered_corners: bool = False,
+    ) -> "MaskRef":
+        """Dilate or erode a mask through core's canonical morphology node."""
+        return await current_runtime().ops.apply(
+            "mask.grow", self, {
+                "amount": int(amount),
+                "tapered_corners": bool(tapered_corners),
+            })
+
 
 class LatentRef(ValueRef):
     KIND = "LATENT"
+
+    @classmethod
+    async def empty(
+        cls, width: int, height: int, batch_size: int = 1,
+        channels: int = 4,
+        spatial_downscale_ratio: Optional[int] = None,
+    ) -> "LatentRef":
+        """Create a bounded zero latent without granting raw tensor access."""
+        return await current_runtime().ops.apply(
+            "latent.empty", None, {
+                "width": int(width),
+                "height": int(height),
+                "batch_size": int(batch_size),
+                "channels": int(channels),
+                "spatial_downscale_ratio": spatial_downscale_ratio,
+            })
+
+    async def repeat_batch(self, amount: int) -> "LatentRef":
+        """Repeat a latent through core's canonical batch operation."""
+        return await current_runtime().ops.apply(
+            "latent.repeat_batch", self, {"amount": int(amount)})
+
+    async def noise_mask(self) -> Optional["MaskRef"]:
+        """Return the latent's optional noise mask as an opaque mask ref."""
+        return await current_runtime().ops.apply(
+            "latent.noise_mask", self, {})
+
+    async def spatial_shape(self) -> tuple[int, int]:
+        """Return the latent sample height and width without exposing buffers."""
+        result = await current_runtime().ops.apply(
+            "latent.spatial_shape", self, {})
+        return int(result[0]), int(result[1])
+
+    async def resize(
+        self, width: int, height: int, method: str = "bilinear",
+    ) -> "LatentRef":
+        """Resize latent spatial cells with ComfyUI's canonical interpolators."""
+        return await current_runtime().ops.apply(
+            "latent.resize", self, {
+                "width": int(width),
+                "height": int(height),
+                "method": str(method),
+            })
+
+    async def random_noise(
+        self, seed: int, source: str = "cpu", batch_size: Optional[int] = None,
+    ) -> TensorRef:
+        """Generate latent-shaped noise with a host-owned CPU/GPU RNG.
+
+        RNG placement is an engine concern, especially for CUDA's distinct
+        sequence. Higher-level variation mixing remains node-pack code.
+        """
+        return await current_runtime().ops.apply(
+            "latent.random_noise", self, {
+                "seed": int(seed),
+                "source": str(source),
+                "batch_size": batch_size,
+            })
+
+    async def composite(
+        self, source: "LatentRef", *, x: int = 0, y: int = 0,
+        resize_source: bool = False, mask: Optional["MaskRef"] = None,
+    ) -> "LatentRef":
+        """Composite a source latent using core's bounded latent operation."""
+        return await current_runtime().ops.apply(
+            "latent.composite", self, {
+                "source": source,
+                "x": int(x),
+                "y": int(y),
+                "resize_source": bool(resize_source),
+                "mask": mask,
+            })
 
     async def minimax_h3_token_count(
         self, conditioning: "CondRef",
@@ -197,17 +393,161 @@ class CondRef(ValueRef):
         return await current_runtime().ops.apply("cond.concat", self,
                                                  {"other": other})
 
+    async def zero_out(self) -> "CondRef":
+        """Zero embeddings while preserving the conditioning structure."""
+        return await current_runtime().ops.apply("cond.zero_out", self, {})
+
+    async def with_timestep_range(
+        self, start: float, end: float,
+    ) -> "CondRef":
+        """Clone conditioning with a normalized sampling-percent range."""
+        return await current_runtime().ops.apply(
+            "cond.with_timestep_range", self, {
+                "start": float(start),
+                "end": float(end),
+            })
+
+    async def with_metadata(
+        self, *, width: Optional[int] = None,
+        height: Optional[int] = None,
+        crop_w: Optional[int] = None,
+        crop_h: Optional[int] = None,
+        target_width: Optional[int] = None,
+        target_height: Optional[int] = None,
+    ) -> "CondRef":
+        """Attach closed, scalar micro-conditioning metadata.
+
+        This deliberately exposes only the six conventional SDXL-style size
+        fields. Embeddings and arbitrary conditioning dictionaries remain
+        host-owned.
+        """
+        return await current_runtime().ops.apply(
+            "cond.with_metadata", self, {
+                "width": width,
+                "height": height,
+                "crop_w": crop_w,
+                "crop_h": crop_h,
+                "target_width": target_width,
+                "target_height": target_height,
+            })
+
+    async def has_spatial_metadata(self) -> bool:
+        """Whether tile-relative conditioning must be cropped per image."""
+        return bool(await current_runtime().ops.apply(
+            "cond.has_spatial_metadata", self, {}))
+
+    async def with_mask(
+        self, mask: MaskRef, strength: float = 1.0,
+        set_area_to_bounds: bool = False,
+    ) -> "CondRef":
+        """Attach core conditioning-mask metadata without exposing tensors."""
+        return await current_runtime().ops.apply(
+            "cond.with_mask", self, {
+                "mask": mask,
+                "strength": float(strength),
+                "set_area_to_bounds": bool(set_area_to_bounds),
+            })
+
+    async def with_clip_vision_output(
+        self, output: "ClipVisionOutputRef",
+    ) -> "CondRef":
+        """Attach one opaque CLIP-vision result to every conditioning row.
+
+        The vision features remain host-owned.  This is the typed equivalent
+        of setting ComfyUI's conventional ``clip_vision_output`` conditioning
+        metadata key; prompt/layout policy stays with the calling node.
+        """
+        return await current_runtime().ops.apply(
+            "cond.with_clip_vision_output", self, {"output": output})
+
+    async def with_concat_latent(
+        self, model: "ModelRef", latent: "LatentRef",
+        extra_latent: Optional["LatentRef"] = None,
+    ) -> "CondRef":
+        """Attach model-formatted latent ``c_concat`` conditioning.
+
+        This is the small reusable operation used by inpainting and layered
+        diffusion models.  The guest chooses opaque latents; model-specific
+        latent-format conversion stays in the trusted process.
+        """
+        return await current_runtime().ops.apply(
+            "cond.with_concat_latent", self, {
+                "model": model,
+                "latent": latent,
+                "extra_latent": extra_latent,
+            })
+
+    async def spatial_crop(
+        self, *, x: int, y: int, width: int, height: int,
+        source_width: int, source_height: int,
+        target_width: Optional[int] = None,
+        target_height: Optional[int] = None,
+    ) -> "CondRef":
+        """Crop 2D spatial conditioning to a latent-space window.
+
+        Embeddings stay unchanged. Area prompts, masks, GLIGEN regions, and
+        host-owned ControlNet/T2I hints are intersected with the requested
+        window so tiled samplers can remain ordinary pack-side orchestration.
+        Coordinates and dimensions use latent pixels.
+        """
+        return await current_runtime().ops.apply(
+            "cond.spatial_crop", self, {
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+                "source_width": source_width,
+                "source_height": source_height,
+                "target_width": target_width,
+                "target_height": target_height,
+            })
+
 
 class GuiderRef(_TypedRef):
     """Opaque handle to a host-owned sampling guider."""
 
     KIND = "GUIDER"
 
+    async def spatial_crop_inputs(
+        self, *, regions: list[tuple[int, int, int, int]],
+        source_width: int, source_height: int,
+        target_width: int, target_height: int,
+    ) -> "GuiderRef":
+        """Clone this guider and crop model-owned spatial inputs for tiles.
+
+        ``regions`` are pixel-space ``(left, top, right, bottom)`` rectangles
+        on the source canvas; each result is resized to the target tile size.
+        Only model patches that explicitly implement the core spatial-input
+        protocol are changed; the guider policy stays opaque and otherwise
+        unchanged.
+        """
+        return await current_runtime().ops.apply(
+            "sampling.spatial_crop_inputs", self, {
+                "regions": regions,
+                "source_width": source_width,
+                "source_height": source_height,
+                "target_width": target_width,
+                "target_height": target_height,
+            })
+
 
 class SamplerRef(_TypedRef):
     """Opaque handle to a host-owned sampler."""
 
     KIND = "SAMPLER"
+
+    @classmethod
+    async def named(
+        cls, name: str, *, eta: Optional[float] = None,
+        ge_gamma: Optional[float] = None,
+    ) -> "SamplerRef":
+        """Select a core sampler with its small, validated option set."""
+        return await current_runtime().ops.apply(
+            "sampler.named", None, {
+                "name": str(name),
+                "eta": eta,
+                "ge_gamma": ge_gamma,
+            })
 
     @classmethod
     async def self_refine_video(
@@ -224,6 +564,27 @@ class SamplerRef(_TypedRef):
                 "seed": seed,
                 "verbose": verbose,
             })
+
+
+class SigmasRef(_TypedRef):
+    """Opaque one-dimensional host-owned sampling schedule."""
+
+    KIND = "SIGMAS"
+
+    async def steps(self) -> int:
+        """Return the number of sampling intervals in this schedule.
+
+        This exposes one bounded scalar (`len(sigmas) - 1`), not the schedule
+        tensor. Custom-sampler nodes need it to call the generic sampling
+        service without inventing a step count or materializing SIGMAS.
+        """
+        return int(await current_runtime().ops.apply(
+            "sigmas.steps", self, {}))
+
+    async def value_at(self, index: int) -> float:
+        """Return one finite scalar from a bounded sampling schedule."""
+        return float(await current_runtime().ops.apply(
+            "sigmas.value_at", self, {"index": int(index)}))
 
 
 class WeightDiffCursorRef(_TypedRef):
@@ -265,6 +626,18 @@ class ControlNetWeightsRef(_TypedRef):
                 "weights": weights,
                 "uncond_multiplier": uncond_multiplier,
                 "extras": {} if extras is None else extras,
+            })
+        return result[0], result[1]
+
+    @classmethod
+    async def scaled_soft(
+        cls, base_multiplier: float = 0.825,
+        uncond_multiplier: float = 1.0,
+    ) -> tuple["ControlNetWeightsRef", "TimestepKeyframeRef"]:
+        result = await current_runtime().ops.apply(
+            "advanced_control.scaled_soft_weights", None, {
+                "base_multiplier": base_multiplier,
+                "uncond_multiplier": uncond_multiplier,
             })
         return result[0], result[1]
 
@@ -313,6 +686,49 @@ class ModelRef(_TypedRef):
         return await current_runtime().ops.apply(
             "model.patch", self, {"transform": transform, "params": params})
 
+    async def ground_image(
+        self, image: ImageRef, conditioning: CondRef, *,
+        threshold: float = 0.5, refine_iterations: int = 2,
+        individual_masks: bool = True, max_detections: int = 64,
+    ) -> tuple[MaskRef, list[list[dict[str, float]]]]:
+        """Text-ground objects in an image with a compatible vision MODEL.
+
+        This is the generic intent exposed by SAM3/SAM3.1: conditioning and
+        pixels remain host-owned, while the caller receives bounded masks and
+        box data. Prompt construction and any layout policy stay pack-side.
+        """
+        result = await current_runtime().ops.apply(
+            "model.ground_image", self, {
+                "image": image,
+                "conditioning": conditioning,
+                "threshold": float(threshold),
+                "refine_iterations": int(refine_iterations),
+                "individual_masks": individual_masks,
+                "max_detections": int(max_detections),
+            })
+        return result[0], result[1]
+
+    async def spatial_crop_inputs(
+        self, *, regions: list[tuple[int, int, int, int]],
+        source_width: int, source_height: int,
+        target_width: int, target_height: int,
+    ) -> "ModelRef":
+        """Clone the model with model-owned spatial inputs cropped to tiles.
+
+        This is a small tiling primitive, not an upscaler implementation. The
+        caller owns tile selection, target size, and orchestration; core only
+        asks each model patch that declares spatial-input support to crop its
+        own data.
+        """
+        return await current_runtime().ops.apply(
+            "sampling.spatial_crop_inputs", self, {
+                "regions": regions,
+                "source_width": source_width,
+                "source_height": source_height,
+                "target_width": target_width,
+                "target_height": target_height,
+            })
+
     async def transforms(self) -> list[dict]:
         """Return the transforms supported by the active host."""
         return await current_runtime().ops.apply("model.transforms", self, {})
@@ -321,9 +737,58 @@ class ModelRef(_TypedRef):
         return float(await current_runtime().ops.apply(
             "model.latent_scale_factor", self, {}))
 
+    async def is_flow(self) -> bool:
+        """Whether the model uses ComfyUI's FLOW model family."""
+        return bool(await current_runtime().ops.apply(
+            "model.is_flow", self, {}))
+
+    async def family(self) -> str:
+        """Return the model's canonical base family, or ``unknown``."""
+        return str(await current_runtime().ops.apply(
+            "model.family", self, {}))
+
+    async def unet_context_dim(self) -> Optional[int]:
+        """Return a model's scalar UNet context dimension when published."""
+        result = await current_runtime().ops.apply(
+            "model.unet_context_dim", self, {})
+        return None if result is None else int(result)
+
+    async def is_zero_terminal_snr(self) -> bool:
+        """Whether the model's sampling schedule uses zero terminal SNR."""
+        return bool(await current_runtime().ops.apply(
+            "model.is_zero_terminal_snr", self, {}))
+
+    async def sigma_for_percent(
+        self, percent: float, actual_endpoints: bool = False,
+    ) -> float:
+        """Project one sampling percentage through the model's schedule."""
+        return float(await current_runtime().ops.apply(
+            "model.sigma_for_percent", self, {
+                "percent": float(percent),
+                "actual_endpoints": bool(actual_endpoints),
+            }))
+
+    async def sampling_sigma_delta(
+        self, *, steps: int, sampler_name: str, scheduler: str,
+        start_step: int, end_step: int, denoise: float = 1.0,
+        sigma_schedule: Optional[dict] = None,
+    ) -> float:
+        """Return one bounded scheduler delta in latent-value units."""
+        return float(await current_runtime().ops.apply(
+            "model.sampling_sigma_delta", self, {
+                "steps": int(steps),
+                "sampler_name": str(sampler_name),
+                "scheduler": str(scheduler),
+                "start_step": int(start_step),
+                "end_step": int(end_step),
+                "denoise": float(denoise),
+                "sigma_schedule": sigma_schedule,
+            }))
+
     async def scheduled_cfg_guider(
         self, positive: "CondRef", negative: "CondRef", cfg: float,
-        start_percent: float, end_percent: float,
+        start_percent: float = 0.0, end_percent: float = 1.0, *,
+        bounds: Optional[dict] = None,
     ) -> "GuiderRef":
         return await current_runtime().ops.apply(
             "guider.scheduled_cfg", self, {
@@ -332,6 +797,7 @@ class ModelRef(_TypedRef):
                 "cfg": cfg,
                 "start_percent": start_percent,
                 "end_percent": end_percent,
+                "bounds": bounds,
             })
 
     async def lora_weight_differences(
@@ -342,6 +808,24 @@ class ModelRef(_TypedRef):
                 "original": original,
                 "include_bias": bool(include_bias),
             })
+
+    async def apply_lora(
+        self, asset: "AssetRef", clip: Optional["ClipRef"],
+        strength_model: float, strength_clip: float,
+    ) -> tuple["ModelRef", Optional["ClipRef"]]:
+        """Apply one resolved LoRA without exposing model weights or paths.
+
+        ``asset`` must have been resolved from the host's ``loras`` catalogue.
+        The trusted implementation confines its path again before loading it.
+        """
+        result = await current_runtime().ops.apply(
+            "model.apply_lora", self, {
+                "asset": asset,
+                "clip": clip,
+                "strength_model": strength_model,
+                "strength_clip": strength_clip,
+            })
+        return result[0], result[1]
 
     async def apply_dit_block_lora(
         self, asset: "AssetRef", strength_model: float,
@@ -378,6 +862,52 @@ class ModelRef(_TypedRef):
 class ClipRef(_TypedRef):
     KIND = "CLIP"
 
+    async def set_last_layer(self, stop_at_clip_layer: int) -> "ClipRef":
+        """Clone this CLIP and stop encoding at a bounded hidden layer."""
+        return await current_runtime().ops.apply(
+            "clip.set_last_layer", self,
+            {"stop_at_clip_layer": int(stop_at_clip_layer)},
+        )
+
+    async def with_attention_impl(self, mode: str) -> "ClipRef":
+        """Clone this encoder with one host-registered attention function."""
+        return await current_runtime().ops.apply(
+            "clip.with_attention_impl", self, {"mode": str(mode)})
+
+    async def describe_tokens(self, tokens: dict) -> dict:
+        """Describe bounded token IDs without exposing tokenizer objects.
+
+        The result mirrors the token component/chunk structure. Each entry is
+        ``{"id": int, "text": str, "special": bool}``; token weights stay
+        in the caller's original token dictionary.
+        """
+        return await current_runtime().ops.apply(
+            "clip.describe_tokens", self, {"tokens": tokens})
+
+    async def scale_attention_weights(
+        self, *, clip_l: Optional[list[float]] = None,
+        clip_g: Optional[list[float]] = None,
+        t5xxl: Optional[list[float]] = None,
+        query: bool = True, key: bool = True,
+        value: bool = True, output: bool = True,
+    ) -> "ClipRef":
+        """Scale selected CLIP/T5 attention projection weights.
+
+        The guest supplies only bounded per-layer numbers and four projection
+        switches. State-dict discovery and patching stay on the trusted plane;
+        neither weights nor arbitrary key patterns cross the boundary.
+        """
+        return await current_runtime().ops.apply(
+            "clip.scale_attention_weights", self, {
+                "clip_l": clip_l,
+                "clip_g": clip_g,
+                "t5xxl": t5xxl,
+                "query": bool(query),
+                "key": bool(key),
+                "value": bool(value),
+                "output": bool(output),
+            })
+
     async def tokenize(self, text: str, **kwargs: Any) -> dict:
         """Mirrors ``clip.tokenize``, including its per-model kwargs.
 
@@ -406,6 +936,22 @@ class ClipRef(_TypedRef):
             "clip.encode_from_tokens_scheduled", self,
             {"tokens": tokens, "add_dict": add_dict})
 
+    async def encode_token_weights_component(
+        self, component: str, tokens: list,
+    ) -> tuple[TensorRef, Optional[TensorRef]]:
+        """Encode token-weight pairs with one named CLIP component.
+
+        This is the narrow seam needed by prompt-weight algorithms which do
+        their own embedding arithmetic.  The guest receives embeddings, never
+        text-encoder modules or weights.  ``component`` is limited to the
+        conventional ``l`` and ``g`` encoders used by SD1/SDXL.
+        """
+        result = await current_runtime().ops.apply(
+            "clip.encode_token_weights_component", self,
+            {"component": str(component), "tokens": tokens},
+        )
+        return result[0], result[1]
+
     async def encode(self, text: str) -> "CondRef":
         """The two steps above in one call, for the common case.
 
@@ -416,6 +962,41 @@ class ClipRef(_TypedRef):
         return await current_runtime().ops.apply("clip.encode", self,
                                                  {"text": text})
 
+    async def generate_text(
+        self, prompt: str, image: Optional[ImageRef] = None,
+        video: Optional[ImageRef] = None,
+        max_length: int = 256, do_sample: bool = False,
+        temperature: float = 1.0, top_k: Optional[int] = 50,
+        top_p: float = 0.95, min_p: float = 0.0,
+        repetition_penalty: float = 1.0, seed: Optional[int] = None,
+        presence_penalty: float = 0.0, thinking: bool = False,
+        use_default_template: bool = True, num_beams: int = 1,
+    ) -> str:
+        """Generate bounded text with a canonical Comfy text encoder.
+
+        Image-conditioned token dictionaries may contain host tensors, so the
+        tokenize/generate/decode sequence stays one opaque operation. Prompt
+        construction and higher-level captioning policy remain pack-side.
+        """
+        return str(await current_runtime().ops.apply(
+            "clip.generate_text", self, {
+                "prompt": str(prompt),
+                "image": image,
+                "video": video,
+                "max_length": int(max_length),
+                "do_sample": bool(do_sample),
+                "temperature": float(temperature),
+                "top_k": None if top_k is None else int(top_k),
+                "top_p": float(top_p),
+                "min_p": float(min_p),
+                "repetition_penalty": float(repetition_penalty),
+                "seed": seed,
+                "presence_penalty": float(presence_penalty),
+                "thinking": bool(thinking),
+                "use_default_template": bool(use_default_template),
+                "num_beams": int(num_beams),
+            }))
+
     async def lora_weight_differences(
         self, original: "ClipRef", include_bias: bool = False,
     ) -> "WeightDiffCursorRef":
@@ -424,6 +1005,35 @@ class ClipRef(_TypedRef):
                 "original": original,
                 "include_bias": bool(include_bias),
             })
+
+
+class LlamaCppModelRef(_TypedRef):
+    """Opaque vendor-owned llama.cpp chat/VLM session."""
+
+    KIND = "LLAMA_CPP_MODEL"
+
+    async def generate(
+        self, system: str, prompt: str,
+        image: Optional[ImageRef] = None,
+        video: Optional[ImageRef] = None,
+        max_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        repetition_penalty: float = 1.0,
+        seed: int = 1,
+    ) -> str:
+        return str(await current_context().integrations.llama_cpp.generate(
+            self,
+            system=system,
+            prompt=prompt,
+            image=image,
+            video=video,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            seed=seed,
+        ))
 
 
 class GligenRef(_TypedRef):
@@ -445,9 +1055,61 @@ class GligenRef(_TypedRef):
 class VaeRef(_TypedRef):
     KIND = "VAE"
 
+    async def latent_layout(self) -> dict[str, Optional[int]]:
+        """Return the VAE's bounded latent channel/compression metadata."""
+        return dict(await current_runtime().ops.apply(
+            "vae.latent_layout", self, {}))
+
     async def decode(self, latent: "LatentRef") -> "ImageRef":
         return await current_runtime().ops.apply("vae.decode", self,
                                                  {"latent": latent})
+
+    async def decode_tensor(self, latent: "LatentRef") -> "TensorRef":
+        """Decode to an opaque BHWC tensor without assuming RGB channels.
+
+        This is the raw-tier counterpart to :meth:`decode`.  It exists for
+        pack-owned post-processing of VAEs whose decoded representation is not
+        yet an IMAGE (for example, a channel-packed upscale VAE).  The model
+        and decode stay host-owned; reading the returned tensor still requires
+        the ordinary ``raw`` capability.
+        """
+        return await current_runtime().ops.apply(
+            "vae.decode_tensor", self, {"latent": latent})
+
+    async def decode_tiled(
+        self, latent: "LatentRef", tile_size: int = 512,
+        overlap: int = 64, temporal_size: int = 64,
+        temporal_overlap: int = 8,
+    ) -> "ImageRef":
+        """Decode through ComfyUI's bounded, pixel-sized tiled operation.
+
+        This mirrors the intent of core's ``VAEDecodeTiled`` node: spatial and
+        temporal compression are derived from the host VAE, so a guest never
+        needs to assume a latent compression ratio. Model state and execution
+        remain on the trusted plane; the guest receives only an image handle.
+        """
+        return await current_runtime().ops.apply("vae.decode_tiled", self, {
+            "latent": latent,
+            "tile_size": int(tile_size),
+            "overlap": int(overlap),
+            "temporal_size": int(temporal_size),
+            "temporal_overlap": int(temporal_overlap),
+        })
+
+    async def decode_tensor_tiled(
+        self, latent: "LatentRef", tile_size: int = 512,
+        overlap: int = 64, temporal_size: int = 64,
+        temporal_overlap: int = 8,
+    ) -> "TensorRef":
+        """Tiled :meth:`decode_tensor` with the canonical VAE tile options."""
+        return await current_runtime().ops.apply(
+            "vae.decode_tensor_tiled", self, {
+                "latent": latent,
+                "tile_size": int(tile_size),
+                "overlap": int(overlap),
+                "temporal_size": int(temporal_size),
+                "temporal_overlap": int(temporal_overlap),
+            })
 
     async def encode(self, image: "ImageRef") -> "LatentRef":
         """Mirrors ``vae.encode`` exactly. The caller owns any channel slicing.
@@ -459,6 +1121,33 @@ class VaeRef(_TypedRef):
         """
         return await current_runtime().ops.apply("vae.encode", self,
                                                  {"image": image})
+
+    async def encode_for_inpaint(
+        self, image: "ImageRef", mask: "MaskRef", grow_mask_by: int = 6,
+    ) -> "LatentRef":
+        """Run core VAEEncodeForInpaint with a bounded mask grow amount."""
+        return await current_runtime().ops.apply(
+            "vae.encode_for_inpaint", self, {
+                "image": image,
+                "mask": mask,
+                "grow_mask_by": int(grow_mask_by),
+            })
+
+    async def encode_inpaint_conditioning(
+        self, image: "ImageRef", mask: "MaskRef",
+        positive: "CondRef", negative: "CondRef",
+        noise_mask: bool = True,
+    ) -> tuple["CondRef", "CondRef", "LatentRef"]:
+        """Run core InpaintModelConditioning without exposing model tensors."""
+        result = await current_runtime().ops.apply(
+            "vae.encode_inpaint_conditioning", self, {
+                "image": image,
+                "mask": mask,
+                "positive": positive,
+                "negative": negative,
+                "noise_mask": bool(noise_mask),
+            })
+        return result[0], result[1], result[2]
 
     async def encode_tiled(
         self, image: "ImageRef", tile_x: Optional[int] = None,
@@ -545,6 +1234,13 @@ class VaeRef(_TypedRef):
 class ClipVisionOutputRef(_TypedRef):
     KIND = "CLIP_VISION_OUTPUT"
 
+    async def concat(
+        self, other: "ClipVisionOutputRef",
+    ) -> "ClipVisionOutputRef":
+        """Concatenate opaque penultimate vision tokens along their token axis."""
+        return await current_runtime().ops.apply(
+            "clip_vision_output.concat", self, {"other": other})
+
     async def image_embeds(self) -> TensorRef:
         return await current_runtime().ops.apply(
             "clip_vision_output.image_embeds", self, {})
@@ -563,6 +1259,46 @@ class ClipVisionRef(_TypedRef):
 
 class ControlNetRef(_TypedRef):
     KIND = "CONTROL_NET"
+
+    async def apply(
+        self, positive: CondRef, negative: CondRef, image: ImageRef,
+        strength: float = 1.0, start_percent: float = 0.0,
+        end_percent: float = 1.0, vae: Optional[VaeRef] = None,
+    ) -> tuple[CondRef, CondRef]:
+        """Apply this ControlNet while all referenced data stays host-owned."""
+        return await current_runtime().ops.apply(
+            "controlnet.apply", self, {
+                "positive": positive,
+                "negative": negative,
+                "image": image,
+                "strength": strength,
+                "start_percent": start_percent,
+                "end_percent": end_percent,
+                "vae": vae,
+            })
+
+    async def apply_advanced(
+        self, positive: CondRef, negative: CondRef, image: ImageRef,
+        strength: float = 1.0, start_percent: float = 0.0,
+        end_percent: float = 1.0, vae: Optional[VaeRef] = None,
+        mask: Optional[MaskRef] = None,
+        timestep_keyframe: Optional[TimestepKeyframeRef] = None,
+        weights: Optional[ControlNetWeightsRef] = None,
+    ) -> tuple[CondRef, CondRef]:
+        """Apply Advanced-ControlNet scheduling, weights, and effect masks."""
+        return await current_runtime().ops.apply(
+            "controlnet.apply_advanced", self, {
+                "positive": positive,
+                "negative": negative,
+                "image": image,
+                "strength": strength,
+                "start_percent": start_percent,
+                "end_percent": end_percent,
+                "vae": vae,
+                "mask": mask,
+                "timestep_keyframe": timestep_keyframe,
+                "weights": weights,
+            })
 
     async def with_union_type(self, type_number: Optional[int]) -> "ControlNetRef":
         return await current_runtime().ops.apply(
@@ -598,6 +1334,22 @@ class StyleModelRef(_TypedRef):
 class ClipSegRef(_TypedRef):
     KIND = "CLIPSEGMODEL"
 
+    async def predict_mask(
+        self, images: ImageRef, text: str,
+        use_accelerator: bool = True,
+    ) -> MaskRef:
+        """Return native-resolution sigmoid CLIPSeg predictions.
+
+        This is the narrow inference primitive for nodes that own their own
+        thresholding and morphology.  Model weights remain host-side.
+        """
+        return await current_runtime().ops.apply(
+            "clipseg.predict_mask", self, {
+                "images": images,
+                "text": str(text),
+                "use_accelerator": bool(use_accelerator),
+            })
+
     async def segment(
         self, images: ImageRef, text: str, threshold: float = 0.5,
         binary_mask: bool = True, combine_mask: bool = False,
@@ -621,13 +1373,453 @@ class ClipSegRef(_TypedRef):
         return result[0], result[1]
 
 
+class ImageClassifierRef(_TypedRef):
+    KIND = "IMAGE_CLASSIFIER"
+
+    async def classify(
+        self, images: ImageRef, use_accelerator: bool = True,
+        top_k: int = 5,
+    ) -> list[list[dict[str, Any]]]:
+        """Classify a host-side image batch and return bounded label scores."""
+        return await current_runtime().ops.apply(
+            "image_classifier.classify", self, {
+                "images": images,
+                "use_accelerator": bool(use_accelerator),
+                "top_k": int(top_k),
+            })
+
+    async def predict_scores(
+        self, images: ImageRef,
+    ) -> "ClassifierScoresRef":
+        """Run a multi-label classifier and retain its score matrix host-side."""
+        return await current_runtime().ops.apply(
+            "image_classifier.predict_scores", self, {"images": images})
+
+
+class ClassifierScoresRef(_TypedRef):
+    """Opaque bounded batch-by-class scores from an image classifier."""
+
+    KIND = "CLASSIFIER_SCORES"
+
+    async def shape(self) -> tuple[int, int]:
+        result = await current_runtime().ops.apply(
+            "classifier_scores.shape", self, {})
+        return int(result[0]), int(result[1])
+
+    async def select_above(
+        self, batch_index: int, start: int, end: int, threshold: float,
+        offset: int = 0, limit: int = 512,
+    ) -> dict[str, Any]:
+        """Page score/index pairs above a threshold in one class range."""
+        return await current_runtime().ops.apply(
+            "classifier_scores.select_above", self, {
+                "batch_index": int(batch_index),
+                "start": int(start),
+                "end": int(end),
+                "threshold": float(threshold),
+                "offset": int(offset),
+                "limit": int(limit),
+            })
+
+
+class SemanticSegmentationRef(_TypedRef):
+    """Opaque fixed-architecture semantic segmentation model."""
+
+    KIND = "SEMANTIC_SEGMENTATION_MODEL"
+
+    async def mask(
+        self, image: ImageRef, classes: list[int],
+    ) -> MaskRef:
+        """Return the union of selected semantic class IDs as a mask."""
+        return await current_runtime().ops.apply(
+            "semantic_segmentation.mask", self, {
+                "image": image,
+                "classes": list(classes),
+            })
+
+
+class MattingModelRef(_TypedRef):
+    """Opaque fixed-architecture image matting model."""
+
+    KIND = "MATTING_MODEL"
+
+    async def refine(
+        self, image: ImageRef, trimap: MaskRef,
+        max_megapixels: float = 2.0,
+    ) -> MaskRef:
+        """Refine a coarse trimap into an alpha mask."""
+        return await current_runtime().ops.apply(
+            "matting.refine", self, {
+                "image": image,
+                "trimap": trimap,
+                "max_megapixels": float(max_megapixels),
+            })
+
+
+class VqaModelRef(_TypedRef):
+    """Opaque visual question-answering model."""
+
+    KIND = "VQA_MODEL"
+
+    async def answer(
+        self, image: ImageRef, question: str,
+        max_new_tokens: int = 32,
+    ) -> str:
+        return str(await current_runtime().ops.apply(
+            "vqa.answer", self, {
+                "image": image,
+                "question": str(question),
+                "max_new_tokens": int(max_new_tokens),
+            }))
+
+
+class OnnxDetectorRef(_TypedRef):
+    KIND = "ONNX_DETECTOR"
+
+    async def detect(self, image: ImageRef) -> list[dict[str, Any]]:
+        """Run a catalogued ONNX object detector on one host-side image."""
+        return await current_runtime().ops.apply(
+            "onnx_detector.detect", self, {"image": image})
+
+
+class ObjectDetectorRef(_TypedRef):
+    KIND = "OBJECT_DETECTOR"
+
+    async def detect(
+        self, image: ImageRef, threshold: float = 0.5,
+        class_name: str = "all", max_detections: int = 100,
+    ) -> list[list[dict[str, Any]]]:
+        return await current_runtime().ops.apply(
+            "object_detector.detect", self, {
+                "image": image,
+                "threshold": float(threshold),
+                "class_name": str(class_name),
+                "max_detections": int(max_detections),
+            })
+
+
+class ImagePreprocessorRef(_TypedRef):
+    """Opaque host-created image preprocessor with one bounded operation."""
+
+    KIND = "IMAGE_PREPROCESSOR"
+
+    async def apply(
+        self, image: ImageRef, mask: Optional[MaskRef] = None,
+    ) -> ImageRef:
+        return await current_runtime().ops.apply(
+            "image_preprocessor.apply", self, {
+                "image": image,
+                "mask": mask,
+            })
+
+
+class InpaintModelRef(_TypedRef):
+    """Opaque prompt-free image inpainting model."""
+
+    KIND = "INPAINT_MODEL"
+
+    async def inpaint(
+        self, image: ImageRef, mask: MaskRef,
+    ) -> ImageRef:
+        """Fill the masked image region while keeping model weights host-side."""
+        return await current_runtime().ops.apply(
+            "inpaint_model.inpaint", self, {
+                "image": image,
+                "mask": mask,
+            })
+
+
+class BackgroundRemovalModelRef(_TypedRef):
+    """Opaque ComfyUI background-removal model."""
+
+    KIND = "BACKGROUND_REMOVAL_MODEL"
+
+    async def mask(self, image: ImageRef) -> MaskRef:
+        """Generate a foreground alpha mask through core's canonical model."""
+        return await current_runtime().ops.apply(
+            "background_removal.mask", self, {"image": image})
+
+
+class BrushNetRef(_TypedRef):
+    """Opaque BrushNet weights loaded by the canonical host extension.
+
+    The pack keeps ownership of its pipeline dictionary and orchestration.  A
+    guest can only ask the host to apply the already-loaded model to typed
+    inputs; neither the live BrushNet object nor its tensors cross the wire.
+    """
+
+    KIND = "BRUSHNET_MODEL"
+
+    async def apply(
+        self, model: ModelRef, vae: VaeRef, image: ImageRef, mask: MaskRef,
+        positive: CondRef, negative: CondRef, scale: float = 1.0,
+        start_step: int = 0, end_step: int = 10000,
+    ) -> tuple[ModelRef, CondRef, CondRef, LatentRef]:
+        return await current_runtime().ops.apply(
+            "brushnet.apply", self, {
+                "model": model,
+                "vae": vae,
+                "image": image,
+                "mask": mask,
+                "positive": positive,
+                "negative": negative,
+                "scale": float(scale),
+                "start_step": int(start_step),
+                "end_step": int(end_step),
+            })
+
+
+class PowerPaintRef(_TypedRef):
+    """Opaque PowerPaint model and token-extended CLIP pipeline."""
+
+    KIND = "POWERPAINT_MODEL"
+
+    async def apply(
+        self, model: ModelRef, vae: VaeRef, image: ImageRef, mask: MaskRef,
+        positive: CondRef, negative: CondRef, fitting: float = 1.0,
+        function: str = "text guided", scale: float = 1.0,
+        start_step: int = 0, end_step: int = 10000,
+        save_memory: str = "none",
+    ) -> tuple[ModelRef, CondRef, CondRef, LatentRef]:
+        return await current_runtime().ops.apply(
+            "powerpaint.apply", self, {
+                "model": model,
+                "vae": vae,
+                "image": image,
+                "mask": mask,
+                "positive": positive,
+                "negative": negative,
+                "fitting": float(fitting),
+                "function": str(function),
+                "scale": float(scale),
+                "start_step": int(start_step),
+                "end_step": int(end_step),
+                "save_memory": str(save_memory),
+            })
+
+
+class TransparentVaeDecoderRef(_TypedRef):
+    """Opaque canonical decoder for Layer Diffusion transparency weights."""
+
+    KIND = "TRANSPARENT_VAE_DECODER"
+
+    async def decode(
+        self, latent: LatentRef, image: ImageRef, frames: int = 1,
+        sub_batch_size: int = 16,
+    ) -> tuple[ImageRef, MaskRef]:
+        """Return a consistent RGBA batch and decoded alpha masks.
+
+        For interleaved multi-frame Layer Diffusion batches, only the first
+        frame in each group is transparency-decoded; the other RGB frames are
+        returned with an opaque alpha channel.
+        """
+        result = await current_runtime().ops.apply(
+            "transparent_vae_decoder.decode", self, {
+                "latent": latent,
+                "image": image,
+                "frames": int(frames),
+                "sub_batch_size": int(sub_batch_size),
+            })
+        return result[0], result[1]
+
+
+class IpAdapterEmbedsRef(_TypedRef):
+    """Opaque image embeddings produced by a host IP-Adapter encoder."""
+
+    KIND = "IPADAPTER_EMBEDS"
+
+    async def combine(
+        self,
+        others: list["IpAdapterEmbedsRef"],
+        method: str = "concat",
+    ) -> "IpAdapterEmbedsRef":
+        return await current_runtime().ops.apply(
+            "ipadapter_embeds.combine", self, {
+                "others": list(others),
+                "method": str(method),
+            })
+
+
+class IpAdapterRef(_TypedRef):
+    """Opaque, host-created IP-Adapter pipeline.
+
+    The pipeline's models and loader objects remain in the trusted process.
+    Guest code may only request the fixed model-application operation below;
+    crop selection and pack-specific orchestration stay in the guest.
+    """
+
+    KIND = "IPADAPTER_PIPE"
+
+    async def apply(
+        self,
+        model: ModelRef,
+        image: ImageRef,
+        negative_image: Optional[ImageRef] = None,
+        attn_mask: Optional[MaskRef] = None,
+        style_image: Optional[ImageRef] = None,
+        composition_image: Optional[ImageRef] = None,
+        weight: float = 0.7,
+        weight_type: str = "channel penalty",
+        start_percent: float = 0.0,
+        end_percent: float = 1.0,
+        combine_embeds: str = "concat",
+        weight_faceidv2: float = 1.0,
+        embeds_scaling: str = "V only",
+        unfold_batch: bool = False,
+        layer_weights: Optional[str] = None,
+        weight_style: float = 1.0,
+        weight_composition: float = 1.0,
+        expand_style: bool = False,
+    ) -> ModelRef:
+        """Apply this pipeline to a model using bounded image inputs."""
+        return await current_runtime().ops.apply(
+            "ipadapter.apply", self, {
+                "model": model,
+                "image": image,
+                "negative_image": negative_image,
+                "attn_mask": attn_mask,
+                "style_image": style_image,
+                "composition_image": composition_image,
+                "weight": float(weight),
+                "weight_type": str(weight_type),
+                "start_percent": float(start_percent),
+                "end_percent": float(end_percent),
+                "combine_embeds": str(combine_embeds),
+                "weight_faceidv2": float(weight_faceidv2),
+                "embeds_scaling": str(embeds_scaling),
+                "unfold_batch": bool(unfold_batch),
+                "layer_weights": layer_weights,
+                "weight_style": float(weight_style),
+                "weight_composition": float(weight_composition),
+                "expand_style": bool(expand_style),
+            })
+
+    async def apply_tiled(
+        self,
+        model: ModelRef,
+        image: ImageRef,
+        negative_image: Optional[ImageRef] = None,
+        attn_mask: Optional[MaskRef] = None,
+        weight: float = 0.7,
+        weight_type: str = "linear",
+        start_percent: float = 0.0,
+        end_percent: float = 1.0,
+        combine_embeds: str = "concat",
+        embeds_scaling: str = "V only",
+        sharpening: float = 0.0,
+        unfold_batch: bool = False,
+    ) -> tuple[ModelRef, ImageRef, MaskRef]:
+        """Apply the canonical tiled IP-Adapter operation."""
+        result = await current_runtime().ops.apply(
+            "ipadapter.apply_tiled", self, {
+                "model": model,
+                "image": image,
+                "negative_image": negative_image,
+                "attn_mask": attn_mask,
+                "weight": float(weight),
+                "weight_type": str(weight_type),
+                "start_percent": float(start_percent),
+                "end_percent": float(end_percent),
+                "combine_embeds": str(combine_embeds),
+                "embeds_scaling": str(embeds_scaling),
+                "sharpening": float(sharpening),
+                "unfold_batch": bool(unfold_batch),
+            })
+        return result[0], result[1], result[2]
+
+    async def encode(
+        self,
+        image: ImageRef,
+        weight: float = 1.0,
+        mask: Optional[MaskRef] = None,
+    ) -> tuple[IpAdapterEmbedsRef, IpAdapterEmbedsRef]:
+        """Encode one image into positive and negative IP-Adapter embeddings."""
+        result = await current_runtime().ops.apply(
+            "ipadapter.encode", self, {
+                "image": image,
+                "weight": float(weight),
+                "mask": mask,
+            })
+        return result[0], result[1]
+
+    async def apply_embeds(
+        self,
+        model: ModelRef,
+        positive: IpAdapterEmbedsRef,
+        negative: Optional[IpAdapterEmbedsRef] = None,
+        attn_mask: Optional[MaskRef] = None,
+        weight: float = 1.0,
+        weight_type: str = "linear",
+        start_percent: float = 0.0,
+        end_percent: float = 1.0,
+        embeds_scaling: str = "V only",
+    ) -> ModelRef:
+        """Apply already encoded image embeddings to a model."""
+        return await current_runtime().ops.apply(
+            "ipadapter.apply_embeds", self, {
+                "model": model,
+                "positive": positive,
+                "negative": negative,
+                "attn_mask": attn_mask,
+                "weight": float(weight),
+                "weight_type": str(weight_type),
+                "start_percent": float(start_percent),
+                "end_percent": float(end_percent),
+                "embeds_scaling": str(embeds_scaling),
+            })
+
+
+class SamModelRef(_TypedRef):
+    KIND = "SAM_MODEL"
+
+    async def segment(
+        self,
+        image: ImageRef,
+        boxes: list[Optional[list[float]]],
+        point_coords: Optional[list[list[list[float]]]] = None,
+        point_labels: Optional[list[list[int]]] = None,
+        multimask_output: bool = True,
+    ) -> tuple[MaskRef, list[list[float]]]:
+        """Segment one host-side image from bounded boxes and point hints.
+
+        The returned mask tensor is QxMxHxW, where Q is the query count and M
+        is the number of masks per query. Model weights and predictor objects
+        never enter the guest.
+        """
+        result = await current_runtime().ops.apply(
+            "sam.segment", self, {
+                "image": image,
+                "boxes": boxes,
+                "point_coords": point_coords,
+                "point_labels": point_labels,
+                "multimask_output": bool(multimask_output),
+            })
+        return result[0], result[1]
+
+    async def segment_video(
+        self, frames: ImageRef, boxes: list[list[float]],
+    ) -> MaskRef:
+        """Propagate frame-zero boxes through a host-side SAM2 video batch.
+
+        The returned mask logits are QxFxHxW. Model state and predictor
+        internals remain on the trusted plane; callers own thresholding and
+        conversion into their pack-specific segment representation.
+        """
+        return await current_runtime().ops.apply(
+            "sam.segment_video", self, {
+                "frames": frames,
+                "boxes": boxes,
+            })
+
+
 class UpscaleModelRef(_TypedRef):
     KIND = "UPSCALE_MODEL"
 
     async def upscale(
         self, images: ImageRef, per_batch: int = 16,
         downscale_ratio: float = 1.0, downscale_method: str = "lanczos",
-        precision: str = "float32",
+        precision: str = "float32", tile_size: Optional[int] = None,
+        channels_last: bool = False,
     ) -> ImageRef:
         return await current_runtime().ops.apply(
             "upscale_model.upscale", self, {
@@ -636,6 +1828,8 @@ class UpscaleModelRef(_TypedRef):
                 "downscale_ratio": float(downscale_ratio),
                 "downscale_method": str(downscale_method),
                 "precision": str(precision),
+                "tile_size": None if tile_size is None else int(tile_size),
+                "channels_last": bool(channels_last),
             })
 
 
@@ -742,6 +1936,52 @@ _V2_NODE_METHOD_ALIASES = {
 }
 
 
+@dataclass(frozen=True)
+class HuggingFaceWeight:
+    """A public Hugging Face weight file required by a node.
+
+    Nodes declare these in ``SDK_REQUIRED_WEIGHTS``. The secure host reviews
+    the declaration from the sealed pack manifest and installs the file before
+    ``execute`` runs. An ``on_demand`` declaration is instead an allowlisted
+    conditional dependency which the node explicitly requests when selected.
+    ``catalogue_name`` is the stable name to pass to model loaders; it is never
+    a filesystem path.
+    """
+
+    repo_id: str
+    filename: str
+    folder: str
+    revision: str = "main"
+    sha256: Optional[str] = None
+    on_demand: bool = False
+
+    def __post_init__(self) -> None:
+        repo_id = _InProcessModels._hf_repo_id(self.repo_id)
+        filename, extension = _InProcessModels._hf_weight_filename(
+            self.filename)
+        revision = _InProcessModels._hf_revision(self.revision)
+        sha256 = _InProcessModels._hf_sha256(self.sha256)
+        if extension == ".onnx" and sha256 is None:
+            raise ValueError("Hugging Face ONNX weights require a sha256 pin")
+        if type(self.on_demand) is not bool:
+            raise TypeError("Hugging Face weight on_demand must be a bool")
+        if not isinstance(self.folder, str):
+            raise TypeError("Hugging Face weight folder must be a string")
+        if self.folder not in _InProcessModels._HF_WEIGHT_FOLDERS:
+            raise ValueError(
+                "Hugging Face weights must target a known model catalogue")
+        object.__setattr__(self, "repo_id", repo_id)
+        object.__setattr__(self, "filename", filename)
+        object.__setattr__(self, "revision", revision)
+        object.__setattr__(self, "sha256", sha256)
+
+    @property
+    def catalogue_name(self) -> str:
+        return (
+            f"huggingface/{self.repo_id}/{self.revision}/{self.filename}"
+        )
+
+
 def _normalize_v2_node_method(method: str) -> str:
     method = _V2_NODE_METHOD_ALIASES.get(method, method)
     if method not in _V2_NODE_METHODS:
@@ -760,6 +2000,7 @@ class ExecutionPlan:
     node_type: str
     tier: str = "default"  # overlay reads manifest tier; OSS is always "default"
     permissions: tuple[str, ...] = ()
+    required_weights: tuple[HuggingFaceWeight, ...] = ()
     # Work-unit payload for out-of-process backends. ``refs`` means the node
     # explicitly consumes SDK handles; ``values`` means the backend may wrap
     # for transport and the guest must materialize those handles before
@@ -769,10 +2010,20 @@ class ExecutionPlan:
     input_mode: str = "refs"
     prompt: Any = None
     extra_pnginfo: Any = None
+    dynamic_prompt: Any = None
     method: str = "execute"
 
     def __post_init__(self) -> None:
         self.method = _normalize_v2_node_method(self.method)
+        self.required_weights = tuple(self.required_weights or ())
+        if not all(isinstance(item, HuggingFaceWeight)
+                   for item in self.required_weights):
+            raise TypeError(
+                "required_weights must contain HuggingFaceWeight declarations")
+        self.permissions = tuple(self.permissions or ())
+        if (self.required_weights
+                and "models.download" not in self.permissions):
+            self.permissions += ("models.download",)
         if self.input_mode not in {"refs", "values"}:
             raise ValueError(
                 f"V2 node input mode {self.input_mode!r} is not allowed; "
@@ -824,14 +2075,29 @@ class OpsProvider(Protocol):
 # --------------------------------------------------------------------------- #
 class AssetsDomain(Protocol):
     async def resolve(self, folder: str, name: str) -> AssetRef: ...
+    async def exists(self, folder: str, name: str) -> bool: ...
+    async def delete_input(self, name: str) -> bool: ...
     async def path(self, ref: AssetRef) -> str: ...
     async def list(
         self, folder: str, prefix: str = "", recursive: bool = True,
     ) -> list[str]: ...
+    async def latest(
+        self, folder: str, prefix: str = "", suffix: str = "",
+    ) -> Optional[str]: ...
+    async def size(self, ref: AssetRef) -> int: ...
+    async def digest(
+        self, ref: AssetRef, algorithm: str = "sha256",
+    ) -> str: ...
+    async def read_range(
+        self, ref: AssetRef, offset: int = 0,
+        length: int = 8 * 1024 * 1024,
+    ) -> bytes: ...
     async def read_bytes(self, ref: AssetRef) -> bytes: ...
     async def load_state_dict(
         self, ref: AssetRef, return_metadata: bool = False,
     ) -> Any: ...
+    async def load_image(self, ref: AssetRef) -> ImageRef: ...
+    async def load_latent(self, ref: AssetRef) -> LatentRef: ...
 
 
 class ProgressDomain(Protocol):
@@ -845,6 +2111,13 @@ class ScratchDomain(Protocol):
 
 class EventsDomain(Protocol):
     async def emit(self, event: str, data: dict) -> None: ...
+
+
+class InteractionDomain(Protocol):
+    async def request(
+        self, kind: str, payload: Any, *, reuse_last: bool = False,
+        remember: bool = False, timeout: float = 540.0,
+    ) -> Any: ...
 
 
 class StorageDomain(Protocol):
@@ -882,6 +2155,11 @@ class OutputDomain(Protocol):
         subfolder: str = "", compress_level: int = 4,
         caption: Optional[str] = None,
         caption_extension: str = ".txt",
+        save_metadata: bool = True,
+        extra_metadata: Optional[dict[str, Any]] = None,
+        image_format: str = "png", quality: int = 95,
+        filenames: Optional[list[str]] = None,
+        lossless: bool = False, optimize: bool = False,
     ) -> dict: ...
     async def save_images_with_alpha(
         self, images: ImageRef, mask: MaskRef,
@@ -892,6 +2170,18 @@ class OutputDomain(Protocol):
         self, text: str, filename_prefix: str = "text",
         subfolder: str = "", extension: str = ".txt",
     ) -> str: ...
+    async def write_text(
+        self, text: str, filename: str, folder: str = "output",
+        mode: str = "overwrite", insert_newline: bool = False,
+    ) -> str: ...
+    async def save_workflow_json(
+        self, filename: str, mode: str = "new_only",
+    ) -> str: ...
+    async def save_latent(
+        self, latent: LatentRef,
+        filename_prefix: str = "latents/LatentSender",
+        preview_method: str = "Latent2RGB-SDXL",
+    ) -> dict: ...
     async def save_state_dict(
         self, state_dict: ValueRef, filename_prefix: str,
         metadata: Optional[dict[str, str]] = None,
@@ -904,17 +2194,164 @@ class OutputDomain(Protocol):
         self, images: ImageRef, audio: Optional[AudioRef] = None,
         fps: float = 25.0, filename_prefix: str = "video/ComfyUI",
         format: str = "auto", codec: str = "auto",
+        encoder_options: Optional[dict[str, Any]] = None,
+        loop_count: int = 0, bit_depth: int = 8,
+        save_output: bool = True, save_metadata: bool = True,
+    ) -> dict: ...
+    async def save_animation(
+        self, images: ImageRef, fps: float = 8.0,
+        filename_prefix: str = "animation/ComfyUI",
+        format: str = "webp", loop_count: int = 0,
+        lossless: bool = True, quality: int = 90,
+        save_output: bool = True,
+    ) -> dict: ...
+    async def save_image_sequence(
+        self, images: ImageRef,
+        filename_prefix: str = "sequence/ComfyUI",
+        format: str = "png", bit_depth: int = 8,
+        save_output: bool = True,
     ) -> dict: ...
 
 
 class GraphDomain(Protocol):
+    async def current_node_id(self) -> str: ...
+    async def input_label(
+        self, input_name: str, default: str = "",
+    ) -> str: ...
+    async def expand_nodes(
+        self, nodes: list[dict[str, Any]], outputs: list[dict[str, Any]],
+    ) -> dict[str, Any]: ...
+    async def expand_loop(
+        self, flow: Any, values: list[Any],
+    ) -> dict[str, Any]: ...
     async def widget_values(
         self, node_id: int | str = 0, node_title: str = "",
-        linked_input: str = "any_input",
+        node_name: str = "", linked_input: str = "any_input",
+    ) -> dict[str, Any]: ...
+    async def block(self, reason: Optional[str] = None) -> Any: ...
+
+
+class ExecutionDomain(Protocol):
+    async def interrupt(self) -> bool: ...
+
+
+class CivitaiDomain(Protocol):
+    """Bounded read-only projection of the Civitai public model API."""
+
+    async def search_models(
+        self, username: str, query: Optional[str] = None,
+        limit: int = 20, nsfw: bool = False,
+    ) -> dict[str, Any]: ...
+    async def model_version(
+        self, model_version_id: int,
+    ) -> dict[str, Any]: ...
+    async def model_version_by_hash(
+        self, hash_value: str, refresh: bool = False,
     ) -> dict[str, Any]: ...
 
 
+class OllamaDomain(Protocol):
+    """Bounded Ollama vendor API; endpoint is loopback or an admin profile."""
+
+    async def list_models(self, endpoint: str) -> list[str]: ...
+    async def generate(
+        self, endpoint: str, model: str, system: str, prompt: str,
+        images: Optional[ImageRef] = None,
+        context: Optional[list[int]] = None, think: bool = False,
+        options: Optional[dict[str, Any]] = None, keep_alive: int = 5,
+        keep_alive_unit: str = "minutes",
+        format: str | dict[str, Any] = "",
+        timeout_seconds: float = 600.0,
+    ) -> dict[str, Any]: ...
+    async def chat(
+        self, endpoint: str, model: str,
+        messages: list[dict[str, Any]], images: Optional[ImageRef] = None,
+        think: bool = False, options: Optional[dict[str, Any]] = None,
+        keep_alive: int = 5, keep_alive_unit: str = "minutes",
+        format: str | dict[str, Any] = "", timeout_seconds: float = 600.0,
+        tools: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]: ...
+
+
+class LlmDomain(Protocol):
+    """Provider-neutral bounded chat and function-tool contract."""
+
+    async def chat(
+        self, provider: str, profile: str, model: str,
+        messages: list[dict[str, Any]], *,
+        tools: Optional[list[dict[str, Any]]] = None,
+        temperature: float = 0.8, max_tokens: int = 512,
+        thinking: bool = False,
+        response_format: str | dict[str, Any] = "",
+        timeout_seconds: float = 600.0,
+        vendor_options: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]: ...
+
+
+class WebSearchDomain(Protocol):
+    """Fixed-profile web search with bounded normalized results."""
+
+    async def search(
+        self, query: str, *, provider_profile: str = "duckduckgo",
+        limit: int = 5,
+        vendor_options: Optional[dict[str, Any]] = None,
+    ) -> list[dict[str, str]]: ...
+
+
+class LlamaCppDomain(Protocol):
+    """Bounded llama.cpp vendor adapter over managed GGUF weights."""
+
+    async def load_chat_model(
+        self, model_weight: str, mmproj_weight: Optional[str] = None, *,
+        family: str = "qwen3_vl", device: str = "auto",
+        context_length: int = 8192, batch_size: int = 512,
+        gpu_layers: int = -1, image_max_tokens: int = 4096,
+        top_k: int = 0, pool_size: int = 4_194_304,
+        cache: bool = True,
+    ) -> LlamaCppModelRef: ...
+    async def generate(
+        self, model: LlamaCppModelRef, system: str, prompt: str,
+        image: Optional[ImageRef] = None,
+        video: Optional[ImageRef] = None,
+        max_tokens: int = 512, temperature: float = 0.7,
+        top_p: float = 0.9, repetition_penalty: float = 1.0,
+        seed: int = 1,
+    ) -> str: ...
+
+
+class WanVideoDomain(Protocol):
+    """Bounded metadata for WanVideo vendor-owned opaque model handles."""
+
+    async def transformer_dim(self, model: Ref) -> int: ...
+
+
+class AnimaDomain(Protocol):
+    """Vendor-specific Anima model adapters."""
+
+    async def apply_lllite(
+        self, model: ModelRef, weights: AssetRef, image: ImageRef, *,
+        strength: float = 1.0, start_percent: float = 0.0,
+        end_percent: float = 1.0, preserve_wrapper: bool = True,
+    ) -> ModelRef: ...
+
+
+class IntegrationsDomain(Protocol):
+    """Vendor pass-throughs with vendor-shaped, less-stable contracts."""
+
+    anima: AnimaDomain
+    civitai: CivitaiDomain
+    llm: LlmDomain
+    llama_cpp: LlamaCppDomain
+    ollama: OllamaDomain
+    wanvideo: WanVideoDomain
+    web: WebSearchDomain
+
+
 class ModelsDomain(Protocol):
+    async def download_huggingface_weights(
+        self, repo_id: str, filename: str, folder: str,
+        revision: str = "main", sha256: Optional[str] = None,
+    ) -> str: ...
     async def list_diffusion_models(
         self, include_connectors: bool = False,
     ) -> list[str]: ...
@@ -932,14 +2369,86 @@ class ModelsDomain(Protocol):
         dequant_dtype: str = "default", patch_dtype: str = "default",
         patch_on_device: bool = False,
     ) -> ModelRef: ...
+    async def load_gguf_text_encoders(
+        self, names: Sequence[str], clip_type: str,
+    ) -> ClipRef: ...
+    async def list_controlnet(self) -> list[str]: ...
+    async def load_controlnet(
+        self, name: str, model: Optional[ModelRef] = None,
+    ) -> ControlNetRef: ...
+    async def load_advanced_controlnet(
+        self, name: str, model: Optional[ModelRef] = None,
+        timestep_keyframe: Optional[TimestepKeyframeRef] = None,
+    ) -> ControlNetRef: ...
+    async def load_controlnet_plusplus(
+        self, name: str, control_type: str = "none",
+    ) -> ControlNetRef: ...
     async def list_vae(self) -> list[str]: ...
     async def load_vae(
         self, name: str, device: str = "default",
         weight_dtype: str = "default",
     ) -> VaeRef: ...
+    async def load_upscale_model(self, name: str) -> UpscaleModelRef: ...
+    async def load_clip_vision(self, model: str) -> ClipVisionRef: ...
+    async def load_text_encoder(
+        self, model: str, model_type: str,
+        device: str = "default",
+    ) -> ClipRef: ...
+    async def load_language_model(
+        self, weights: list[str], family: str,
+        device: str = "default", cache: bool = True,
+    ) -> ClipRef: ...
+    async def load_ipadapter(
+        self, model: str, clip_vision: ClipVisionRef,
+    ) -> IpAdapterRef: ...
+    async def load_brushnet(
+        self, model: str, dtype: str = "float16",
+    ) -> BrushNetRef: ...
+    async def load_powerpaint(
+        self, model: str, base_clip: str, powerpaint_clip: str,
+        dtype: str = "float16",
+    ) -> PowerPaintRef: ...
+    async def load_transparent_vae_decoder(
+        self, model: str, family: str,
+    ) -> TransparentVaeDecoderRef: ...
     async def load_clipseg(self, model: str) -> ClipSegRef: ...
+    async def load_image_classifier(
+        self, model: str, architecture: str, labels: list[str],
+    ) -> ImageClassifierRef: ...
+    async def load_onnx_image_classifier(
+        self, model: str, input_layout: str = "NHWC",
+        channel_order: str = "BGR", resize_mode: str = "fit_pad",
+        input_scale: float = 255.0,
+        pad_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        mean: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        std: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        activation: str = "identity", resize_filter: str = "lanczos",
+    ) -> ImageClassifierRef: ...
+    async def load_segformer(
+        self, model: str, variant: str, num_labels: int,
+    ) -> SemanticSegmentationRef: ...
+    async def load_vitmatte(
+        self, model: str, variant: str,
+    ) -> MattingModelRef: ...
+    async def load_vqa(
+        self, model: str, architecture: str,
+        precision: str = "fp16", device: str = "cuda",
+    ) -> VqaModelRef: ...
+    async def load_inpaint_model(
+        self, model: str, architecture: str = "big-lama",
+    ) -> InpaintModelRef: ...
+    async def load_background_removal_model(
+        self, model: str,
+    ) -> BackgroundRemovalModelRef: ...
+    async def load_onnx_detector(self, model: str) -> OnnxDetectorRef: ...
+    async def load_object_detector(self, model: str) -> ObjectDetectorRef: ...
+    async def load_sam(
+        self, model: str, architecture: str = "vit_b",
+        device_mode: str = "AUTO",
+    ) -> SamModelRef: ...
     async def generate_text(
         self, generator: str, input_text: str, max_new_tokens: int = 128,
+        weight: Optional[str] = None,
     ) -> str: ...
     async def memory_cleanup(
         self, empty_cache: bool = True, collect_cycles: bool = True,
@@ -975,6 +2484,31 @@ class PreviewOverrideDomain(Protocol):
     ) -> ImageRef: ...
 
 
+class SystemDomain(Protocol):
+    async def stats(self) -> dict[str, Any]: ...
+    async def monitor(self) -> dict[str, Any]: ...
+
+
+class ClosuresDomain(Protocol):
+    async def retain(
+        self, kind: str, fn: Callable, *, captures: Optional[dict] = None,
+    ) -> ClosureRef: ...
+    async def attach_model(
+        self, closure: ClosureRef, model: ModelRef,
+    ) -> ModelRef: ...
+    async def attach_sampler(
+        self, closure: ClosureRef, sampler: SamplerRef, *,
+        start_percent: Optional[float] = None,
+        end_percent: Optional[float] = None,
+    ) -> SamplerRef: ...
+    async def create_latent_operation(
+        self, closure: ClosureRef,
+    ) -> LatentOperationRef: ...
+    async def create_sampler(
+        self, closure: ClosureRef,
+    ) -> SamplerRef: ...
+
+
 class Context(Protocol):
     assets: AssetsDomain
     progress: ProgressDomain
@@ -985,9 +2519,16 @@ class Context(Protocol):
     ui: UiDomain
     output: OutputDomain
     graph: GraphDomain
+    execution: ExecutionDomain
+    integrations: IntegrationsDomain
     models: ModelsDomain
     profiling: ProfilingDomain
     preview_override: PreviewOverrideDomain
+    system: SystemDomain
+    closures: ClosuresDomain
+    interact: InteractionDomain
+    sample: Any
+    unsample: Any
     # Declared for the contract; overlay/full-SDK implement. Stubbed in OSS
     # default until wired: models, sample, serve, secrets, net.
 
@@ -1058,6 +2599,12 @@ class InProcessRefResolver:
 
 class _InProcessAssets:
     _LIST_MAX = 4096
+    _SCAN_MAX = 100000
+    _DIGEST_CACHE_MAX = 256
+    _DIGEST_CACHE: "OrderedDict[tuple[Any, ...], str]" = OrderedDict()
+    _DIGEST_LOCK = threading.Lock()
+    _IMAGE_FILE_MAX = 64 * 1024 * 1024
+    _IMAGE_PIXELS_MAX = 67_108_864
 
     @staticmethod
     def _confined_path(base: str, name: str, folder: str) -> str:
@@ -1117,6 +2664,32 @@ class _InProcessAssets:
                     f"no {folder} asset named {name!r}")
         return AssetRef._wrap(await current_runtime().refs.create("ASSET", full))  # type: ignore[return-value]
 
+    async def exists(self, folder: str, name: str) -> bool:
+        import folder_paths
+
+        standard_folders = {
+            "input": folder_paths.get_input_directory,
+            "output": folder_paths.get_output_directory,
+            "temp": folder_paths.get_temp_directory,
+        }
+        if folder in standard_folders:
+            return os.path.isfile(self._confined_path(
+                standard_folders[folder](), name, folder))
+        return any(
+            os.path.isfile(self._confined_path(root, name, folder))
+            for root in folder_paths.get_folder_paths(folder)
+        )
+
+    async def delete_input(self, name: str) -> bool:
+        import folder_paths
+
+        path = self._confined_path(
+            folder_paths.get_input_directory(), name, "input")
+        if not os.path.isfile(path):
+            return False
+        os.remove(path)
+        return True
+
     async def path(self, ref: AssetRef) -> str:
         return await current_runtime().refs.resolve(ref)
 
@@ -1125,7 +2698,12 @@ class _InProcessAssets:
     ) -> list[str]:
         import folder_paths
 
-        if folder != "input":
+        managed_folders = {
+            "input": folder_paths.get_input_directory,
+            "output": folder_paths.get_output_directory,
+            "temp": folder_paths.get_temp_directory,
+        }
+        if folder not in managed_folders:
             names = sorted(
                 str(name).replace("\\", "/")
                 for name in folder_paths.get_filename_list(folder))
@@ -1149,12 +2727,13 @@ class _InProcessAssets:
                     f"asset catalogue exceeds {self._LIST_MAX} names")
             return names
 
-        base = os.path.realpath(os.path.abspath(
-            folder_paths.get_input_directory()))
-        directory = self._confined_path(base, prefix, "input")
+        base = os.path.realpath(os.path.abspath(managed_folders[folder]()))
+        directory = self._confined_path(base, prefix, folder)
+        if not os.path.exists(directory):
+            return []
         if not os.path.isdir(directory):
-            raise FileNotFoundError(
-                f"no input asset directory named {prefix!r}")
+            raise NotADirectoryError(
+                f"{folder} asset prefix {prefix!r} is not a directory")
 
         names: list[str] = []
         for root, directories, files in os.walk(
@@ -1173,15 +2752,142 @@ class _InProcessAssets:
                 names.append(os.path.relpath(full, base).replace(os.sep, "/"))
                 if len(names) > self._LIST_MAX:
                     raise ValueError(
-                        f"input asset catalogue exceeds {self._LIST_MAX} names")
+                        f"{folder} asset catalogue exceeds "
+                        f"{self._LIST_MAX} names")
             if not recursive:
                 break
         return sorted(names)
+
+    async def latest(
+        self, folder: str, prefix: str = "", suffix: str = "",
+    ) -> Optional[str]:
+        """Newest logical file in one managed user-media directory.
+
+        This exposes neither paths nor a general stat primitive.  It exists
+        for nodes whose behavior is specifically "reuse the latest output".
+        """
+        import folder_paths
+
+        roots = {
+            "input": folder_paths.get_input_directory,
+            "output": folder_paths.get_output_directory,
+            "temp": folder_paths.get_temp_directory,
+        }
+        if folder not in roots:
+            raise ValueError("latest is limited to input, output, and temp assets")
+        base = os.path.realpath(os.path.abspath(roots[folder]()))
+        logical_prefix = str(prefix or "").replace("\\", "/").lstrip("/")
+        if logical_prefix.startswith(folder + "/"):
+            logical_prefix = logical_prefix[len(folder) + 1:]
+        if ("\x00" in logical_prefix
+                or any(part == ".." for part in logical_prefix.split("/"))):
+            raise ValueError("asset prefix escapes the managed directory")
+        suffix_value = str(suffix or "")
+        if (len(suffix_value) > 256 or "\x00" in suffix_value
+                or "/" in suffix_value or "\\" in suffix_value):
+            raise ValueError("asset suffix must be a filename suffix")
+
+        newest: Optional[tuple[int, str]] = None
+        examined = 0
+        for root, directories, files in os.walk(base, followlinks=False):
+            directories.sort()
+            files.sort()
+            for filename in files:
+                examined += 1
+                if examined > self._SCAN_MAX:
+                    raise ValueError(
+                        f"managed directory exceeds {self._SCAN_MAX} files")
+                full = os.path.realpath(os.path.join(root, filename))
+                try:
+                    confined = os.path.commonpath((base, full)) == base
+                except ValueError:
+                    confined = False
+                if not confined or not os.path.isfile(full):
+                    continue
+                logical = os.path.relpath(full, base).replace(os.sep, "/")
+                if (not logical.startswith(logical_prefix)
+                        or not logical.endswith(suffix_value)):
+                    continue
+                candidate = (os.stat(full).st_mtime_ns, logical)
+                if newest is None or candidate > newest:
+                    newest = candidate
+        return newest[1] if newest is not None else None
 
     async def read_bytes(self, ref: AssetRef) -> bytes:
         path = await self.path(ref)
         with open(path, "rb") as file:
             return file.read()
+
+    async def size(self, ref: AssetRef) -> int:
+        path = await self.path(ref)
+        return int(os.path.getsize(path))
+
+    async def digest(
+        self, ref: AssetRef, algorithm: str = "sha256",
+    ) -> str:
+        """Hash a managed asset without returning its path or loading it whole.
+
+        The cache key is the opened file's identity, so a replacement or edit
+        invalidates the entry.  Only SHA-256 is exposed initially: the point is
+        stable model identity, not a general cryptography surface.
+        """
+        if algorithm != "sha256":
+            raise ValueError("asset digest algorithm must be sha256")
+        path = await self.path(ref)
+        if not isinstance(path, (str, os.PathLike)):
+            raise TypeError("ASSET ref does not contain a managed file")
+
+        def compute() -> str:
+            import hashlib
+
+            with open(path, "rb") as stream:
+                before = os.fstat(stream.fileno())
+                key = (
+                    os.path.realpath(os.fspath(path)), before.st_dev,
+                    before.st_ino, before.st_size, before.st_mtime_ns,
+                    before.st_ctime_ns, algorithm,
+                )
+                with self._DIGEST_LOCK:
+                    cached = self._DIGEST_CACHE.get(key)
+                    if cached is not None:
+                        self._DIGEST_CACHE.move_to_end(key)
+                        return cached
+                hasher = hashlib.sha256()
+                for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                    hasher.update(chunk)
+                after = os.fstat(stream.fileno())
+                if (
+                    before.st_dev, before.st_ino, before.st_size,
+                    before.st_mtime_ns, before.st_ctime_ns,
+                ) != (
+                    after.st_dev, after.st_ino, after.st_size,
+                    after.st_mtime_ns, after.st_ctime_ns,
+                ):
+                    raise RuntimeError("asset changed while its digest was computed")
+                value = hasher.hexdigest()
+            with self._DIGEST_LOCK:
+                self._DIGEST_CACHE[key] = value
+                self._DIGEST_CACHE.move_to_end(key)
+                while len(self._DIGEST_CACHE) > self._DIGEST_CACHE_MAX:
+                    self._DIGEST_CACHE.popitem(last=False)
+            return value
+
+        return await asyncio.to_thread(compute)
+
+    async def read_range(
+        self, ref: AssetRef, offset: int = 0,
+        length: int = 8 * 1024 * 1024,
+    ) -> bytes:
+        start = int(offset)
+        count = int(length)
+        if start != offset or start < 0:
+            raise ValueError("asset range offset must be a non-negative integer")
+        if count != length or not 1 <= count <= 16 * 1024 * 1024:
+            raise ValueError("asset range length must be in [1, 16 MiB]")
+        path = await self.path(ref)
+        with open(path, "rb") as file:
+            file.seek(start)
+            return file.read(count)
 
     async def load_state_dict(
         self, ref: AssetRef, return_metadata: bool = False,
@@ -1191,6 +2897,58 @@ class _InProcessAssets:
         path = await self.path(ref)
         return comfy.utils.load_torch_file(
             path, safe_load=True, return_metadata=bool(return_metadata))
+
+    async def load_image(self, ref: AssetRef) -> ImageRef:
+        import numpy as np
+        import torch
+        from PIL import Image, ImageOps
+
+        path = await self.path(ref)
+        if os.path.getsize(path) > self._IMAGE_FILE_MAX:
+            raise ValueError("image asset exceeds the encoded size limit")
+
+        def decode():
+            with Image.open(path) as source:
+                source.seek(0)
+                image = ImageOps.exif_transpose(source)
+                width, height = image.size
+                if (
+                    width < 1 or height < 1
+                    or width * height > self._IMAGE_PIXELS_MAX
+                ):
+                    raise ValueError("image asset dimensions exceed the limit")
+                rgb = image.convert("RGB")
+                rgb.load()
+                return np.asarray(rgb, dtype=np.float32).copy()
+
+        array = await asyncio.to_thread(decode)
+        pixels = torch.from_numpy(array).div_(255.0).unsqueeze(0)
+        return ImageRef._wrap(await current_runtime().refs.create(
+            "IMAGE", pixels))  # type: ignore[return-value]
+
+    async def load_latent(self, ref: AssetRef) -> LatentRef:
+        """Load ComfyUI's safetensors-backed ``.latent`` format.
+
+        This deliberately does not accept pickle or image containers.  A
+        legacy ``.latent.png`` may still be decoded by a sandboxed node, but
+        no image/EXIF/ZIP parser is moved into the trusted plane for it.
+        """
+        import torch
+        from safetensors.torch import load_file
+
+        path = await self.path(ref)
+        if not str(path).lower().endswith(".latent"):
+            raise ValueError("latent assets must use the safe .latent format")
+        value = load_file(path, device="cpu")
+        if not isinstance(value, dict) or "latent_tensor" not in value:
+            raise ValueError("latent asset has no latent_tensor")
+        tensor = value["latent_tensor"]
+        if not isinstance(tensor, torch.Tensor) or tensor.ndim not in (4, 5):
+            raise ValueError("latent_tensor must be a 4D or 5D tensor")
+        multiplier = 1.0 if "latent_format_version_0" in value else 1.0 / 0.18215
+        result = {"samples": tensor.float() * multiplier}
+        return LatentRef._wrap(await current_runtime().refs.create(
+            "LATENT", result))  # type: ignore[return-value]
 
 
 def _load_sdk_diffusion_model(
@@ -1229,49 +2987,86 @@ class _TextGeneratorEntry:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def _load_fixed_text_generator(generator: str) -> _TextGeneratorEntry:
+def _load_fixed_text_generator(
+    generator: str, weight_path: str,
+) -> _TextGeneratorEntry:
     if generator != "superprompt-v1":
         raise ValueError(
             f"text generator {generator!r} is not in the trusted catalogue")
+    if (not isinstance(weight_path, str)
+            or not weight_path.lower().endswith(".safetensors")
+            or not os.path.isfile(weight_path)):
+        raise ValueError(
+            "text generator 'superprompt-v1' requires a SafeTensors weight")
     try:
-        import folder_paths
         import comfy.model_management
-        from transformers import T5ForConditionalGeneration, T5Tokenizer
+        from safetensors.torch import load_file
+        from transformers import (
+            T5Config,
+            T5ForConditionalGeneration,
+            T5TokenizerFast,
+        )
     except ImportError as exc:
         raise RuntimeError(
             "text generator 'superprompt-v1' requires the transformers "
-            "and sentencepiece packages") from exc
+            "and safetensors packages") from exc
 
-    root = os.path.abspath(os.path.join(
-        folder_paths.models_dir, "text_generation"))
-    checkpoint = os.path.abspath(os.path.join(root, "superprompt-v1"))
-    if os.path.commonpath((root, checkpoint)) != root:
-        raise RuntimeError("fixed text-generator catalogue escaped its root")
-    if not os.path.exists(checkpoint):
-        try:
-            from huggingface_hub import snapshot_download
-        except ImportError as exc:
-            raise RuntimeError(
-                "text generator 'superprompt-v1' requires huggingface_hub "
-                "to install its fixed checkpoint") from exc
-        os.makedirs(root, exist_ok=True)
-        snapshot_download(
-            repo_id="roborovski/superprompt-v1",
-            local_dir=checkpoint,
-            local_dir_use_symlinks=False,
+    # SuperPrompt is a fine-tuned flan-t5-small model. Construct its fixed
+    # architecture here so repository config can never become executable or
+    # policy-bearing input to the trusted process.
+    config = T5Config(
+        vocab_size=32128,
+        d_model=512,
+        d_kv=64,
+        d_ff=1024,
+        num_layers=8,
+        num_decoder_layers=8,
+        num_heads=6,
+        relative_attention_num_buckets=32,
+        relative_attention_max_distance=128,
+        dropout_rate=0.1,
+        layer_norm_epsilon=1e-6,
+        initializer_factor=1.0,
+        feed_forward_proj="gated-gelu",
+        is_encoder_decoder=True,
+        use_cache=True,
+        pad_token_id=0,
+        eos_token_id=1,
+        decoder_start_token_id=0,
+        tie_word_embeddings=False,
+    )
+    # Some Transformers releases normalize this legacy field back to True in
+    # T5Config.__init__. SuperPrompt stores a distinct learned lm_head, so set
+    # it explicitly before model construction to prevent destructive tying.
+    config.tie_word_embeddings = False
+    model = T5ForConditionalGeneration(config)
+    state = load_file(weight_path, device="cpu")
+    shared = state.get("shared.weight")
+    if shared is None:
+        raise ValueError("SuperPrompt weights have no shared embedding")
+    # SafeTensors deliberately stores the shared T5 embedding only once.
+    # Restore the two state-dict aliases before performing a strict load.
+    state["encoder.embed_tokens.weight"] = shared
+    state["decoder.embed_tokens.weight"] = shared
+    model.load_state_dict(state, strict=True)
+
+    tokenizer_root = os.path.realpath(os.path.join(
+        os.path.dirname(__file__), "..", "..", "comfy",
+        "text_encoders", "t5_tokenizer"))
+    tokenizer_file = os.path.join(tokenizer_root, "tokenizer.json")
+    if not os.path.isfile(tokenizer_file):
+        raise RuntimeError("ComfyUI's bundled T5 tokenizer is unavailable")
+    tokenizer = T5TokenizerFast(
+        tokenizer_file=tokenizer_file,
+        model_max_length=512,
+        pad_token="<pad>",
+        eos_token="</s>",
+        unk_token="<unk>",
         )
 
     device = comfy.model_management.get_torch_device()
-    try:
-        tokenizer = T5Tokenizer.from_pretrained(
-            "google/flan-t5-small", legacy=False)
-        model = T5ForConditionalGeneration.from_pretrained(
-            checkpoint, device_map=device)
-    except ImportError as exc:
-        raise RuntimeError(
-            "text generator 'superprompt-v1' requires the transformers "
-            "and sentencepiece packages") from exc
     model.to(device)
+    model.eval()
     return _TextGeneratorEntry(tokenizer, model, device)
 
 
@@ -1280,25 +3075,41 @@ class _TextGeneratorCache:
         if max_entries < 1:
             raise ValueError("text generator cache must hold at least one entry")
         self.max_entries = max_entries
-        self._entries: dict[str, _TextGeneratorEntry] = {}
+        self._entries: dict[tuple[Any, ...], _TextGeneratorEntry] = {}
         self._lock = threading.Lock()
         self.loads = 0
         self.hits = 0
         self.evictions = 0
 
-    def _entry(self, generator: str) -> _TextGeneratorEntry:
+    @staticmethod
+    def _key(generator: str, weight_path: str) -> tuple[Any, ...]:
+        status = os.stat(weight_path)
+        return (
+            generator,
+            os.path.realpath(weight_path),
+            status.st_dev,
+            status.st_ino,
+            status.st_size,
+            status.st_mtime_ns,
+            status.st_ctime_ns,
+        )
+
+    def _entry(
+        self, generator: str, weight_path: str,
+    ) -> _TextGeneratorEntry:
+        key = self._key(generator, weight_path)
         with self._lock:
-            entry = self._entries.get(generator)
+            entry = self._entries.get(key)
             if entry is not None:
                 self.hits += 1
                 return entry
-            entry = _load_fixed_text_generator(generator)
+            entry = _load_fixed_text_generator(generator, weight_path)
             self.loads += 1
             while len(self._entries) >= self.max_entries:
                 _, evicted = self._entries.popitem()
                 self._release(evicted)
                 self.evictions += 1
-            self._entries[generator] = entry
+            self._entries[key] = entry
             return entry
 
     @staticmethod
@@ -1307,11 +3118,12 @@ class _TextGeneratorCache:
             entry.model.to("cpu")
 
     def generate(
-        self, generator: str, input_text: str, max_new_tokens: int,
+        self, generator: str, weight_path: str, input_text: str,
+        max_new_tokens: int,
     ) -> str:
         import torch
 
-        entry = self._entry(generator)
+        entry = self._entry(generator, weight_path)
         with entry.lock, torch.inference_mode():
             input_ids = entry.tokenizer(
                 input_text, return_tensors="pt").input_ids.to(entry.device)
@@ -1342,6 +3154,1676 @@ class _TextGeneratorCache:
 
 
 _TEXT_GENERATOR_CACHE = _TextGeneratorCache()
+
+
+@dataclass
+class _InpaintModelEntry:
+    model: Any
+    architecture: str
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def bundle(self) -> dict[str, Any]:
+        return {
+            "secure_kind": f"image_inpaint.{self.architecture}",
+            "model": self.model,
+            "architecture": self.architecture,
+            "lock": self.lock,
+        }
+
+
+def _load_inpaint_model_weight(
+    path: str, architecture: str,
+) -> _InpaintModelEntry:
+    import torch
+    import comfy.ops
+    from comfy.ldm.lama import BigLamaGenerator
+    from safetensors.torch import load_file
+
+    if architecture != "big-lama":
+        raise ValueError(
+            f"inpaint architecture {architecture!r} is not supported")
+    state = load_file(path, device="cpu")
+    if not state:
+        raise ValueError("Big-LaMa SafeTensors file contains no weights")
+    if any(not key.startswith("generator.") for key in state):
+        raise ValueError("Big-LaMa weights contain an unexpected key prefix")
+    floating_dtypes = {
+        value.dtype for value in state.values()
+        if isinstance(value, torch.Tensor) and value.is_floating_point()
+    }
+    if floating_dtypes != {torch.float32}:
+        raise ValueError("Big-LaMa weights must use float32")
+    state = {
+        key.removeprefix("generator."): value
+        for key, value in state.items()
+    }
+    with torch.device("meta"):
+        model = BigLamaGenerator(comfy.ops.disable_weight_init)
+    model.load_state_dict(state, strict=True, assign=True)
+    model.eval()
+    return _InpaintModelEntry(model=model, architecture=architecture)
+
+
+class _InpaintModelCache:
+    def __init__(self, max_entries: int = 1) -> None:
+        self.max_entries = max_entries
+        self._entries: dict[tuple[Any, ...], _InpaintModelEntry] = {}
+        self._lock = threading.Lock()
+        self.loads = 0
+        self.hits = 0
+
+    @staticmethod
+    def _key(path: str, architecture: str) -> tuple[Any, ...]:
+        status = os.stat(path)
+        return (
+            os.path.realpath(path), architecture,
+            status.st_dev, status.st_ino, status.st_size,
+            status.st_mtime_ns, status.st_ctime_ns,
+        )
+
+    def get(self, path: str, architecture: str) -> _InpaintModelEntry:
+        key = self._key(path, architecture)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                self.hits += 1
+                return entry
+            entry = _load_inpaint_model_weight(path, architecture)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                _key, evicted = self._entries.popitem()
+                with evicted.lock:
+                    evicted.model.to("cpu")
+            self._entries[key] = entry
+            return entry
+
+    def clear(self) -> int:
+        with self._lock:
+            entries = list(self._entries.values())
+            self._entries.clear()
+        for entry in entries:
+            with entry.lock:
+                entry.model.to("cpu")
+        return len(entries)
+
+
+_INPAINT_MODEL_CACHE = _InpaintModelCache()
+
+
+@dataclass
+class _ClipSegEntry:
+    model: Any
+    processor: Any
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def bundle(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "processor": self.processor,
+            "lock": self.lock,
+        }
+
+
+def _load_clipseg_weight(path: str) -> _ClipSegEntry:
+    """Build the one supported CLIPSeg architecture from one SafeTensors file.
+
+    The architecture and image-processing configuration are trusted code, and
+    the CLIP tokenizer vocabulary is bundled with ComfyUI.  No model config,
+    tokenizer, processor, or executable file is fetched from the model repo.
+    """
+    import torch
+    from safetensors.torch import load_file
+    from transformers import (
+        CLIPSegConfig,
+        CLIPSegForImageSegmentation,
+        CLIPSegProcessor,
+        CLIPSegTextConfig,
+        CLIPSegVisionConfig,
+        CLIPTokenizer,
+        ViTImageProcessor,
+    )
+
+    state = load_file(path, device="cpu")
+    if not state:
+        raise ValueError("CLIPSeg SafeTensors file contains no weights")
+    floating_dtypes = {
+        value.dtype for value in state.values()
+        if isinstance(value, torch.Tensor) and value.is_floating_point()
+    }
+    if len(floating_dtypes) != 1:
+        raise ValueError("CLIPSeg weights must use one floating-point dtype")
+    dtype = next(iter(floating_dtypes))
+    if dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise ValueError("CLIPSeg weights use an unsupported dtype")
+
+    text_config = CLIPSegTextConfig(
+        hidden_act="quick_gelu",
+        hidden_size=512,
+        intermediate_size=2048,
+        num_attention_heads=8,
+        num_hidden_layers=12,
+        max_position_embeddings=77,
+        vocab_size=49408,
+        bos_token_id=0,
+        eos_token_id=2,
+        pad_token_id=1,
+    )
+    vision_config = CLIPSegVisionConfig(
+        hidden_act="quick_gelu",
+        hidden_size=768,
+        intermediate_size=3072,
+        num_attention_heads=12,
+        num_hidden_layers=12,
+        image_size=224,
+        patch_size=16,
+        num_channels=3,
+    )
+    config = CLIPSegConfig(
+        text_config=text_config,
+        vision_config=vision_config,
+        projection_dim=512,
+        reduce_dim=64,
+        extract_layers=(3, 6, 9),
+        conditional_layer=0,
+        decoder_attention_dropout=0.0,
+        decoder_hidden_act="quick_gelu",
+        decoder_intermediate_size=2048,
+        decoder_num_attention_heads=4,
+        use_complex_transposed_convolution=True,
+    )
+    model = CLIPSegForImageSegmentation(config).to(dtype=dtype)
+
+    # Transformers versions disagree on whether these deterministic buffers
+    # are serialized.  They are arange-derived, not learned model weights.
+    for key in (
+        "clip.text_model.embeddings.position_ids",
+        "clip.vision_model.embeddings.position_ids",
+    ):
+        state.pop(key, None)
+    model.load_state_dict(state, strict=True)
+    model.eval()
+
+    tokenizer_root = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "..", "..", "comfy", "sd1_tokenizer"))
+    vocab_file = os.path.join(tokenizer_root, "vocab.json")
+    merges_file = os.path.join(tokenizer_root, "merges.txt")
+    if not os.path.isfile(vocab_file) or not os.path.isfile(merges_file):
+        raise RuntimeError("ComfyUI's bundled CLIP tokenizer is unavailable")
+    tokenizer = CLIPTokenizer(
+        vocab_file=vocab_file,
+        merges_file=merges_file,
+        bos_token="<|startoftext|>",
+        eos_token="<|endoftext|>",
+        unk_token="<|endoftext|>",
+        pad_token="<|endoftext|>",
+        model_max_length=77,
+    )
+    image_processor = ViTImageProcessor(
+        do_resize=True,
+        size={"height": 352, "width": 352},
+        resample=2,
+        do_rescale=True,
+        rescale_factor=1.0 / 255.0,
+        do_normalize=True,
+        image_mean=(0.485, 0.456, 0.406),
+        image_std=(0.229, 0.224, 0.225),
+    )
+    processor = CLIPSegProcessor(
+        image_processor=image_processor,
+        tokenizer=tokenizer,
+    )
+    return _ClipSegEntry(model=model, processor=processor)
+
+
+class _ClipSegCache:
+    """Cache loaded CLIPSeg weights by immutable file identity."""
+
+    def __init__(self, max_entries: int = 2) -> None:
+        self.max_entries = max_entries
+        self._entries: dict[tuple[Any, ...], _ClipSegEntry] = {}
+        self._lock = threading.Lock()
+        self.loads = 0
+        self.hits = 0
+
+    @staticmethod
+    def _key(path: str) -> tuple[Any, ...]:
+        status = os.stat(path)
+        return (
+            os.path.realpath(path),
+            status.st_dev,
+            status.st_ino,
+            status.st_size,
+            status.st_mtime_ns,
+            status.st_ctime_ns,
+        )
+
+    def get(self, path: str) -> _ClipSegEntry:
+        key = self._key(path)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                self.hits += 1
+                return entry
+            entry = _load_clipseg_weight(path)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                _key, evicted = self._entries.popitem()
+                with evicted.lock:
+                    evicted.model.to("cpu")
+            self._entries[key] = entry
+            return entry
+
+    def clear(self) -> int:
+        with self._lock:
+            entries = list(self._entries.values())
+            self._entries.clear()
+        for entry in entries:
+            with entry.lock:
+                entry.model.to("cpu")
+        return len(entries)
+
+
+_CLIPSEG_CACHE = _ClipSegCache()
+
+
+@dataclass
+class _ImageClassifierEntry:
+    model: Any
+    processor: Any
+    architecture: str
+    num_labels: int
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _load_image_classifier_weight(
+    path: str, architecture: str,
+) -> _ImageClassifierEntry:
+    """Build one closed image-classifier architecture from SafeTensors."""
+    import torch
+    from safetensors.torch import load_file
+    from transformers import (
+        BeitConfig,
+        BeitForImageClassification,
+        BeitImageProcessor,
+        ConvNextImageProcessor,
+        ResNetConfig,
+        ResNetForImageClassification,
+        ViTConfig,
+        ViTForImageClassification,
+        ViTImageProcessor,
+    )
+
+    state = load_file(path, device="cpu")
+    if not state:
+        raise ValueError("classifier SafeTensors file contains no weights")
+    heads = {
+        "vit-base-patch16-224": "classifier.weight",
+        "beit-base-patch16-224": "classifier.weight",
+        "resnet-50-224": "classifier.1.weight",
+    }
+    if architecture not in heads:
+        raise ValueError("image classifier architecture is not supported")
+    head = state.get(heads[architecture])
+    if not isinstance(head, torch.Tensor) or head.ndim != 2:
+        raise ValueError("classifier weights have no compatible output head")
+    num_labels = int(head.shape[0])
+    if not 1 <= num_labels <= 10_000:
+        raise ValueError("classifier output count is outside the safe range")
+    floating_dtypes = {
+        value.dtype for value in state.values()
+        if isinstance(value, torch.Tensor) and value.is_floating_point()
+    }
+    if len(floating_dtypes) != 1:
+        raise ValueError("classifier weights must use one floating-point dtype")
+    dtype = next(iter(floating_dtypes))
+    if dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise ValueError("classifier weights use an unsupported dtype")
+
+    if architecture == "vit-base-patch16-224":
+        config = ViTConfig(
+            num_labels=num_labels,
+            attention_probs_dropout_prob=0.0,
+            encoder_stride=16,
+            hidden_act="gelu",
+            hidden_dropout_prob=0.0,
+            hidden_size=768,
+            image_size=224,
+            initializer_range=0.02,
+            intermediate_size=3072,
+            layer_norm_eps=1e-12,
+            num_attention_heads=12,
+            num_channels=3,
+            num_hidden_layers=12,
+            patch_size=16,
+            qkv_bias=True,
+        )
+        model = ViTForImageClassification(config)
+        processor = ViTImageProcessor(
+            do_resize=True,
+            size={"height": 224, "width": 224},
+            resample=2,
+            do_rescale=True,
+            rescale_factor=1.0 / 255.0,
+            do_normalize=True,
+            image_mean=(0.5, 0.5, 0.5),
+            image_std=(0.5, 0.5, 0.5),
+        )
+    elif architecture == "beit-base-patch16-224":
+        config = BeitConfig(
+            num_labels=num_labels,
+            attention_probs_dropout_prob=0.0,
+            drop_path_rate=0.1,
+            hidden_act="gelu",
+            hidden_dropout_prob=0.0,
+            hidden_size=768,
+            image_size=224,
+            initializer_range=0.02,
+            intermediate_size=3072,
+            layer_norm_eps=1e-12,
+            layer_scale_init_value=0.1,
+            num_attention_heads=12,
+            num_channels=3,
+            num_hidden_layers=12,
+            patch_size=16,
+            use_absolute_position_embeddings=False,
+            use_mask_token=False,
+            use_mean_pooling=True,
+            use_relative_position_bias=True,
+            use_shared_relative_position_bias=False,
+        )
+        model = BeitForImageClassification(config)
+        processor = BeitImageProcessor(
+            do_resize=True,
+            size={"height": 224, "width": 224},
+            resample=2,
+            do_rescale=True,
+            rescale_factor=1.0 / 255.0,
+            do_normalize=True,
+            do_center_crop=False,
+            crop_size={"height": 224, "width": 224},
+            do_reduce_labels=False,
+            image_mean=(0.5, 0.5, 0.5),
+            image_std=(0.5, 0.5, 0.5),
+        )
+    else:
+        config = ResNetConfig(
+            num_labels=num_labels,
+            depths=[3, 4, 6, 3],
+            downsample_in_first_stage=False,
+            embedding_size=64,
+            hidden_act="relu",
+            hidden_sizes=[256, 512, 1024, 2048],
+            layer_type="bottleneck",
+            num_channels=3,
+            out_features=["stage4"],
+            out_indices=[4],
+        )
+        model = ResNetForImageClassification(config)
+        processor = ConvNextImageProcessor(
+            do_resize=True,
+            size={"shortest_edge": 224},
+            resample=3,
+            do_rescale=True,
+            rescale_factor=1.0 / 255.0,
+            do_normalize=True,
+            image_mean=(0.485, 0.456, 0.406),
+            image_std=(0.229, 0.224, 0.225),
+        )
+
+    model = model.to(dtype=dtype)
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    return _ImageClassifierEntry(
+        model=model,
+        processor=processor,
+        architecture=architecture,
+        num_labels=num_labels,
+    )
+
+
+class _ImageClassifierCache:
+    def __init__(self, max_entries: int = 3) -> None:
+        self.max_entries = max_entries
+        self._entries: dict[tuple[Any, ...], _ImageClassifierEntry] = {}
+        self._lock = threading.Lock()
+        self.loads = 0
+        self.hits = 0
+
+    @staticmethod
+    def _key(path: str, architecture: str) -> tuple[Any, ...]:
+        status = os.stat(path)
+        return (
+            os.path.realpath(path), architecture,
+            status.st_dev, status.st_ino, status.st_size,
+            status.st_mtime_ns, status.st_ctime_ns,
+        )
+
+    def get(self, path: str, architecture: str) -> _ImageClassifierEntry:
+        key = self._key(path, architecture)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                self.hits += 1
+                return entry
+            entry = _load_image_classifier_weight(path, architecture)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                _key, evicted = self._entries.popitem()
+                with evicted.lock:
+                    evicted.model.to("cpu")
+            self._entries[key] = entry
+            return entry
+
+    def clear(self) -> int:
+        with self._lock:
+            entries = list(self._entries.values())
+            self._entries.clear()
+        for entry in entries:
+            with entry.lock:
+                entry.model.to("cpu")
+        return len(entries)
+
+
+_IMAGE_CLASSIFIER_CACHE = _ImageClassifierCache()
+
+
+@dataclass
+class _TextEncoderEntry:
+    clip: Any
+    model_type: str
+    device: str
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _load_text_encoder_weight(
+    path: str, model_type: str, device: str,
+) -> _TextEncoderEntry:
+    import torch
+    import comfy.sd
+    import folder_paths
+
+    enum_name = model_type.replace("-", "_").upper()
+    clip_type = comfy.sd.CLIPType.__members__.get(enum_name)
+    if clip_type is None:
+        raise ValueError(f"unknown Comfy text-encoder type {model_type!r}")
+    model_options = {}
+    if device == "cpu":
+        model_options["load_device"] = torch.device("cpu")
+        model_options["offload_device"] = torch.device("cpu")
+    clip = comfy.sd.load_clip(
+        ckpt_paths=[path],
+        embedding_directory=folder_paths.get_folder_paths("embeddings"),
+        clip_type=clip_type,
+        model_options=model_options,
+    )
+    if not callable(getattr(clip, "tokenize", None)):
+        raise ValueError("the selected weight is not a Comfy text encoder")
+    return _TextEncoderEntry(
+        clip=clip, model_type=model_type, device=device)
+
+
+class _TextEncoderCache:
+    def __init__(self, max_entries: int = 2) -> None:
+        self.max_entries = max_entries
+        self._entries: OrderedDict[tuple[Any, ...], _TextEncoderEntry] = (
+            OrderedDict())
+        self._lock = threading.Lock()
+        self.loads = 0
+        self.hits = 0
+
+    @staticmethod
+    def _key(
+        path: str, model_type: str, device: str,
+    ) -> tuple[Any, ...]:
+        status = os.stat(path)
+        return (
+            os.path.realpath(path), model_type, device,
+            status.st_dev, status.st_ino, status.st_size,
+            status.st_mtime_ns, status.st_ctime_ns,
+        )
+
+    def get(
+        self, path: str, model_type: str, device: str,
+    ) -> _TextEncoderEntry:
+        key = self._key(path, model_type, device)
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            if entry is not None:
+                self.hits += 1
+                self._entries[key] = entry
+                return entry
+            entry = _load_text_encoder_weight(path, model_type, device)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                self._entries.popitem(last=False)
+            self._entries[key] = entry
+            return entry
+
+    def clear(self) -> int:
+        with self._lock:
+            count = len(self._entries)
+            self._entries.clear()
+        return count
+
+
+_TEXT_ENCODER_CACHE = _TextEncoderCache()
+
+
+_QWEN_LANGUAGE_FAMILIES = frozenset({
+    "qwen3_vl_2b",
+    "qwen3_vl_4b",
+    "qwen3_vl_8b",
+    "qwen3_vl_32b",
+    "qwen2_5_vl_3b",
+    "qwen2_5_vl_7b",
+    "qwen3_0_6b",
+    "qwen3_4b",
+})
+
+
+def _dequant_qwen_block_fp8(state_dict: dict[str, Any]) -> None:
+    """Materialize official Qwen per-128 block FP8 weights safely.
+
+    Native Comfy text encoders do not yet consume the official
+    ``weight_scale_inv`` layout.  Dequantizing once during the trusted load
+    preserves model semantics without exposing a low-level quantization API to
+    node packs.
+    """
+    import torch
+
+    scale_keys = [
+        key for key in state_dict if key.endswith(".weight_scale_inv")
+    ]
+    for scale_key in scale_keys:
+        weight_key = scale_key[:-len("_scale_inv")]
+        weight = state_dict.get(weight_key)
+        scale = state_dict.get(scale_key)
+        if not isinstance(weight, torch.Tensor) or not isinstance(scale, torch.Tensor):
+            raise ValueError("Qwen FP8 scale is missing its tensor weight")
+        if weight.ndim != 2 or scale.ndim != 2:
+            raise ValueError("Qwen FP8 block weights must be two-dimensional")
+        expected = (
+            (weight.shape[0] + 127) // 128,
+            (weight.shape[1] + 127) // 128,
+        )
+        if tuple(scale.shape) != expected:
+            raise ValueError(
+                f"Qwen FP8 scale shape {tuple(scale.shape)} does not match "
+                f"weight shape {tuple(weight.shape)}")
+        # Materialize one 128-row block at a time.  Expanding every block
+        # scale to a full FP32 matrix would transiently add several copies of
+        # a 32B model's largest weights and can OOM before Comfy can offload.
+        dequantized = torch.empty(
+            weight.shape, device=weight.device, dtype=torch.bfloat16)
+        for row_block in range(scale.shape[0]):
+            start = row_block * 128
+            end = min(start + 128, weight.shape[0])
+            row_scale = scale[row_block].float().repeat_interleave(128)
+            row_scale = row_scale[:weight.shape[1]].unsqueeze(0)
+            dequantized[start:end].copy_(
+                (weight[start:end].float() * row_scale).to(torch.bfloat16))
+        state_dict[weight_key] = dequantized
+        del state_dict[scale_key]
+
+
+def _load_qwen_language_model(
+    paths: tuple[str, ...], family: str, device: str,
+) -> _TextEncoderEntry:
+    import torch
+    import comfy.sd
+    import comfy.text_encoders.hunyuan_video
+    import comfy.text_encoders.qwen3vl
+    import comfy.text_encoders.qwen_image
+    import comfy.text_encoders.qwen_generation
+    import comfy.utils
+    import folder_paths
+
+    state_dict: dict[str, Any] = {}
+    parameters = 0
+    for path in paths:
+        shard, metadata = comfy.utils.load_torch_file(
+            path, safe_load=True, return_metadata=True)
+        shard, _ = comfy.utils.convert_old_quants(
+            shard, model_prefix="", metadata=metadata)
+        duplicate = state_dict.keys() & shard.keys()
+        if duplicate:
+            raise ValueError(
+                f"Qwen SafeTensor shards contain duplicate key "
+                f"{next(iter(duplicate))!r}")
+        state_dict.update(shard)
+        parameters += comfy.utils.calculate_parameters(shard)
+
+    _dequant_qwen_block_fp8(state_dict)
+    normalized = {}
+    for key, value in state_dict.items():
+        if key.startswith("model.language_model."):
+            key = "model." + key[len("model.language_model."):]
+        elif key.startswith("model.visual."):
+            key = "visual." + key[len("model.visual."):]
+        elif key.startswith("lm_head."):
+            key = "model.lm_head." + key[len("lm_head."):]
+        normalized[key] = value
+    state_dict = normalized
+
+    class Target:
+        params = {}
+
+    detect_options = comfy.text_encoders.hunyuan_video.llama_detect(state_dict)
+    model_options = {}
+    if device == "cpu":
+        model_options["load_device"] = torch.device("cpu")
+        model_options["offload_device"] = torch.device("cpu")
+    has_lm_head = "model.lm_head.weight" in state_dict
+    internal_family = (
+        family.replace("qwen3_vl_", "qwen3vl_", 1)
+        if family.startswith("qwen3_vl_")
+        else family
+    )
+    model_options[f"{internal_family}_model_config"] = {
+        "lm_head": has_lm_head,
+    }
+
+    if family.startswith("qwen3_vl_"):
+        Target.clip = comfy.text_encoders.qwen3vl.te(
+            **detect_options, model_type=internal_family)
+        Target.tokenizer = comfy.text_encoders.qwen3vl.generation_tokenizer(
+            model_type=internal_family)
+    elif family.startswith("qwen2_5_vl_"):
+        Target.clip = comfy.text_encoders.qwen_image.vl_te(
+            **detect_options, model_type=family)
+        Target.tokenizer = comfy.text_encoders.qwen_image.vl_tokenizer(
+            model_type=family)
+    else:
+        Target.clip = comfy.text_encoders.qwen_generation.te(
+            **detect_options, model_type=family)
+        Target.tokenizer = comfy.text_encoders.qwen_generation.tokenizer(
+            model_type=family)
+
+    clip = comfy.sd.CLIP(
+        Target,
+        embedding_directory=folder_paths.get_folder_paths("embeddings"),
+        parameters=parameters,
+        state_dict=[state_dict],
+        model_options=model_options,
+    )
+    if not callable(getattr(clip, "generate", None)):
+        raise ValueError("the selected Qwen weights do not support generation")
+    return _TextEncoderEntry(
+        clip=clip, model_type=family, device=device)
+
+
+class _LanguageModelCache:
+    def __init__(self, max_entries: int = 1) -> None:
+        self.max_entries = max_entries
+        self._entries: OrderedDict[tuple[Any, ...], _TextEncoderEntry] = (
+            OrderedDict())
+        self._lock = threading.Lock()
+        self.loads = 0
+        self.hits = 0
+
+    @staticmethod
+    def _key(
+        paths: tuple[str, ...], family: str, device: str,
+    ) -> tuple[Any, ...]:
+        files = []
+        for path in paths:
+            status = os.stat(path)
+            files.append((
+                os.path.realpath(path), status.st_dev, status.st_ino,
+                status.st_size, status.st_mtime_ns, status.st_ctime_ns,
+            ))
+        return family, device, tuple(files)
+
+    def get(
+        self, paths: tuple[str, ...], family: str, device: str,
+        cache: bool,
+    ) -> _TextEncoderEntry:
+        if not cache:
+            self.loads += 1
+            return _load_qwen_language_model(paths, family, device)
+        key = self._key(paths, family, device)
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            if entry is not None:
+                self.hits += 1
+                self._entries[key] = entry
+                return entry
+            entry = _load_qwen_language_model(paths, family, device)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                self._entries.popitem(last=False)
+            self._entries[key] = entry
+            return entry
+
+    def clear(self) -> int:
+        with self._lock:
+            count = len(self._entries)
+            self._entries.clear()
+        return count
+
+
+_LANGUAGE_MODEL_CACHE = _LanguageModelCache()
+
+
+@dataclass
+class _SegformerEntry:
+    model: Any
+    variant: str
+    num_labels: int
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _load_segformer_weight(
+    path: str, variant: str, num_labels: int,
+) -> _SegformerEntry:
+    try:
+        from safetensors.torch import load_file
+        from transformers import SegformerConfig, SegformerForSemanticSegmentation
+    except ImportError as exc:
+        raise RuntimeError(
+            "SegFormer semantic segmentation requires transformers and "
+            "safetensors") from exc
+
+    depths = {
+        "b2": [3, 4, 6, 3],
+        "b3": [3, 4, 18, 3],
+        "b5": [3, 6, 40, 3],
+    }.get(variant)
+    if depths is None:
+        raise ValueError("SegFormer variant must be b2, b3, or b5")
+    config = SegformerConfig(
+        num_labels=num_labels,
+        num_channels=3,
+        depths=depths,
+        hidden_sizes=[64, 128, 320, 512],
+        decoder_hidden_size=768,
+        patch_sizes=[7, 3, 3, 3],
+        strides=[4, 2, 2, 2],
+        num_attention_heads=[1, 2, 5, 8],
+        mlp_ratios=[4, 4, 4, 4],
+        sr_ratios=[8, 4, 2, 1],
+        hidden_act="gelu",
+        hidden_dropout_prob=0.0,
+        attention_probs_dropout_prob=0.0,
+        classifier_dropout_prob=0.1,
+        drop_path_rate=0.1,
+        reshape_last_stage=True,
+        semantic_loss_ignore_index=255,
+    )
+    model = SegformerForSemanticSegmentation(config)
+    state = load_file(path, device="cpu")
+    model_state = model.state_dict()
+    if set(state) != set(model_state):
+        try:
+            from transformers.conversion_mapping import (
+                get_model_conversion_mapping,
+            )
+            from transformers.core_model_loading import (
+                WeightRenaming,
+                rename_source_key,
+            )
+        except ImportError as exc:
+            raise ValueError(
+                "SegFormer weights do not match the installed Transformers "
+                "version") from exc
+        conversions = get_model_conversion_mapping(
+            model, add_legacy=False)
+        if not conversions or any(
+            not isinstance(item, WeightRenaming) for item in conversions
+        ):
+            raise ValueError(
+                "SegFormer checkpoint conversion is not a pure key rename")
+        converted = {}
+        for key, value in state.items():
+            renamed, _pattern = rename_source_key(
+                key, conversions, [], model.base_model_prefix, model_state)
+            if renamed in converted:
+                raise ValueError(
+                    "SegFormer checkpoint conversion produced duplicate keys")
+            converted[renamed] = value
+        state = converted
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    model.to("cpu")
+    return _SegformerEntry(
+        model=model, variant=variant, num_labels=num_labels)
+
+
+class _SegformerCache:
+    def __init__(self, max_entries: int = 2) -> None:
+        self.max_entries = max_entries
+        self._entries: OrderedDict[tuple[Any, ...], _SegformerEntry] = (
+            OrderedDict())
+        self._lock = threading.Lock()
+        self.loads = 0
+        self.hits = 0
+
+    @staticmethod
+    def _key(
+        path: str, variant: str, num_labels: int,
+    ) -> tuple[Any, ...]:
+        status = os.stat(path)
+        return (
+            os.path.realpath(path), variant, num_labels,
+            status.st_dev, status.st_ino, status.st_size,
+            status.st_mtime_ns, status.st_ctime_ns,
+        )
+
+    def get(
+        self, path: str, variant: str, num_labels: int,
+    ) -> _SegformerEntry:
+        key = self._key(path, variant, num_labels)
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            if entry is not None:
+                self.hits += 1
+                self._entries[key] = entry
+                return entry
+            entry = _load_segformer_weight(path, variant, num_labels)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                _old_key, old = self._entries.popitem(last=False)
+                with old.lock:
+                    old.model.to("cpu")
+            self._entries[key] = entry
+            return entry
+
+    def clear(self) -> int:
+        with self._lock:
+            entries = list(self._entries.values())
+            self._entries.clear()
+        for entry in entries:
+            with entry.lock:
+                entry.model.to("cpu")
+        return len(entries)
+
+
+_SEGFORMER_CACHE = _SegformerCache()
+
+
+@dataclass
+class _VitMatteEntry:
+    model: Any
+    variant: str
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _load_vitmatte_weight(path: str, variant: str) -> _VitMatteEntry:
+    try:
+        from transformers import (
+            VitDetConfig,
+            VitMatteConfig,
+            VitMatteForImageMatting,
+        )
+    except ImportError as exc:
+        raise RuntimeError("ViTMatte requires Transformers") from exc
+    import torch
+    import comfy.utils
+
+    parameters = {
+        "small": (384, 6),
+        "base": (768, 12),
+    }
+    if variant not in parameters:
+        raise ValueError("ViTMatte variant must be small or base")
+    hidden_size, attention_heads = parameters[variant]
+    backbone = VitDetConfig(
+        hidden_size=hidden_size,
+        num_attention_heads=attention_heads,
+        image_size=512,
+        num_channels=4,
+        _out_features=["stage12"],
+        _out_indices=[12],
+        residual_block_indices=[2, 5, 8, 11],
+        use_relative_position_embeddings=True,
+        window_block_indices=[0, 1, 3, 4, 6, 7, 9, 10],
+        window_size=14,
+    )
+    config = VitMatteConfig(
+        backbone_config=backbone,
+        hidden_size=hidden_size,
+        convstream_hidden_sizes=[48, 96, 192],
+        fusion_hidden_sizes=[256, 128, 64, 32],
+    )
+    state = comfy.utils.load_torch_file(path, safe_load=True)
+    if (
+        not isinstance(state, dict)
+        or not state
+        or any(
+            not isinstance(key, str) or not isinstance(value, torch.Tensor)
+            for key, value in state.items()
+        )
+    ):
+        raise ValueError("ViTMatte weights must contain only tensors")
+    model = VitMatteForImageMatting(config)
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    model.to("cpu")
+    return _VitMatteEntry(model=model, variant=variant)
+
+
+class _VitMatteCache:
+    def __init__(self, max_entries: int = 2) -> None:
+        self.max_entries = max_entries
+        self._entries: OrderedDict[tuple[Any, ...], _VitMatteEntry] = (
+            OrderedDict())
+        self._lock = threading.Lock()
+        self.loads = 0
+        self.hits = 0
+
+    @staticmethod
+    def _key(path: str, variant: str) -> tuple[Any, ...]:
+        status = os.stat(path)
+        return (
+            os.path.realpath(path), variant,
+            status.st_dev, status.st_ino, status.st_size,
+            status.st_mtime_ns, status.st_ctime_ns,
+        )
+
+    def get(self, path: str, variant: str) -> _VitMatteEntry:
+        key = self._key(path, variant)
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            if entry is not None:
+                self.hits += 1
+                self._entries[key] = entry
+                return entry
+            entry = _load_vitmatte_weight(path, variant)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                _old_key, old = self._entries.popitem(last=False)
+                with old.lock:
+                    old.model.to("cpu")
+            self._entries[key] = entry
+            return entry
+
+    def clear(self) -> int:
+        with self._lock:
+            entries = list(self._entries.values())
+            self._entries.clear()
+        for entry in entries:
+            with entry.lock:
+                entry.model.to("cpu")
+        return len(entries)
+
+
+_VITMATTE_CACHE = _VitMatteCache()
+
+
+@dataclass
+class _VqaEntry:
+    model: Any
+    tokenizer: Any
+    architecture: str
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+@dataclass
+class _VqaModelValue:
+    entry: _VqaEntry
+    precision: str
+    device: str
+
+
+def _load_vqa_weight(path: str, architecture: str) -> _VqaEntry:
+    try:
+        from transformers import (
+            BertTokenizer,
+            BlipConfig,
+            BlipForQuestionAnswering,
+        )
+    except ImportError as exc:
+        raise RuntimeError("BLIP visual question answering requires Transformers") from exc
+    import torch
+    import comfy.utils
+
+    if architecture not in {
+        "blip-vqa-base", "blip-vqa-capfilt-large",
+    }:
+        raise ValueError("unknown BLIP VQA architecture")
+    text_config = {
+        "attention_probs_dropout_prob": 0.0,
+        "bos_token_id": 30522,
+        "encoder_hidden_size": 768,
+        "eos_token_id": 2,
+        "hidden_act": "gelu",
+        "hidden_dropout_prob": 0.0,
+        "hidden_size": 768,
+        "initializer_range": 0.02,
+        "intermediate_size": 3072,
+        "is_decoder": True,
+        "layer_norm_eps": 1e-12,
+        "max_position_embeddings": 512,
+        "num_attention_heads": 12,
+        "num_hidden_layers": 12,
+        "pad_token_id": 0,
+        "projection_dim": 768,
+        "sep_token_id": 102,
+        "use_cache": True,
+        "vocab_size": 30524,
+    }
+    vision_config = {
+        "attention_dropout": 0.0,
+        "dropout": 0.0,
+        "hidden_act": "gelu",
+        "hidden_size": 768,
+        "image_size": 384,
+        "initializer_range": 0.02,
+        "intermediate_size": 3072,
+        "layer_norm_eps": 1e-5,
+        "num_attention_heads": 12,
+        "num_channels": 3,
+        "num_hidden_layers": 12,
+        "patch_size": 16,
+        "projection_dim": 512,
+    }
+    config = BlipConfig(
+        text_config=text_config,
+        vision_config=vision_config,
+        projection_dim=512,
+        image_text_hidden_size=256,
+    )
+    state = comfy.utils.load_torch_file(path, safe_load=True)
+    if (
+        not isinstance(state, dict)
+        or not state
+        or any(
+            not isinstance(key, str) or not isinstance(value, torch.Tensor)
+            for key, value in state.items()
+        )
+    ):
+        raise ValueError("BLIP VQA weights must contain only tensors")
+    model = BlipForQuestionAnswering(config)
+    incompatible = model.load_state_dict(state, strict=False)
+    allowed_missing = {"text_decoder.cls.predictions.decoder.bias"}
+    allowed_unexpected = {
+        "text_decoder.bert.embeddings.position_ids",
+        "text_encoder.embeddings.position_ids",
+    }
+    if (
+        set(incompatible.missing_keys) - allowed_missing
+        or set(incompatible.unexpected_keys) - allowed_unexpected
+    ):
+        raise ValueError("BLIP VQA weights do not match the fixed architecture")
+    model.eval()
+    model.to("cpu")
+    vocab = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "comfy", "text_encoders", "blip_tokenizer", "vocab.txt",
+    )
+    if not os.path.isfile(vocab):
+        raise RuntimeError("the bundled BLIP tokenizer vocabulary is unavailable")
+    tokenizer = BertTokenizer(vocab=vocab, do_lower_case=True)
+    if len(tokenizer) != 30522:
+        raise RuntimeError("the bundled BLIP tokenizer vocabulary is invalid")
+    return _VqaEntry(
+        model=model, tokenizer=tokenizer, architecture=architecture)
+
+
+class _VqaCache:
+    def __init__(self, max_entries: int = 1) -> None:
+        self.max_entries = max_entries
+        self._entries: OrderedDict[tuple[Any, ...], _VqaEntry] = OrderedDict()
+        self._lock = threading.Lock()
+        self.loads = 0
+        self.hits = 0
+
+    @staticmethod
+    def _key(path: str, architecture: str) -> tuple[Any, ...]:
+        status = os.stat(path)
+        return (
+            os.path.realpath(path), architecture,
+            status.st_dev, status.st_ino, status.st_size,
+            status.st_mtime_ns, status.st_ctime_ns,
+        )
+
+    def get(self, path: str, architecture: str) -> _VqaEntry:
+        key = self._key(path, architecture)
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            if entry is not None:
+                self.hits += 1
+                self._entries[key] = entry
+                return entry
+            entry = _load_vqa_weight(path, architecture)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                _old_key, old = self._entries.popitem(last=False)
+                with old.lock:
+                    old.model.to("cpu")
+            self._entries[key] = entry
+            return entry
+
+    def clear(self) -> int:
+        with self._lock:
+            entries = list(self._entries.values())
+            self._entries.clear()
+        for entry in entries:
+            with entry.lock:
+                entry.model.to("cpu")
+        return len(entries)
+
+
+_VQA_CACHE = _VqaCache()
+
+
+def _validate_onnx_weight_file(path: str) -> None:
+    """Admit only one self-contained graph made from standard ONNX domains."""
+    try:
+        import onnx
+    except ImportError as exc:
+        raise RuntimeError(
+            "ONNX model validation requires the onnx package") from exc
+
+    maximum = int(os.environ.get(
+        "COMFY_SECURE_ONNX_WEIGHT_MAX", str(4 * 1024 * 1024 * 1024)))
+    size = os.path.getsize(path)
+    if maximum <= 0 or not 1 <= size <= maximum:
+        raise ValueError("ONNX model file is outside the configured size limit")
+    try:
+        model = onnx.load(path, load_external_data=False)
+    except Exception as exc:
+        raise ValueError("download is not a valid ONNX model") from exc
+
+    if model.functions or model.training_info:
+        raise ValueError("ONNX model functions and training graphs are not allowed")
+    allowed_domains = {"", "ai.onnx", "ai.onnx.ml"}
+    # Exporters commonly leave unused provider-specific opset declarations in
+    # otherwise standard graphs. They carry no executable behavior; enforce
+    # the domain boundary on every actual node below.
+    if any(
+        not isinstance(item.domain, str) or len(item.domain) > 256
+        or not 1 <= item.version <= 2**31 - 1
+        for item in model.opset_import
+    ):
+        raise ValueError("ONNX model has an invalid operator-set declaration")
+
+    node_count = 0
+    tensor_count = 0
+    graph_count = 0
+
+    def check_tensor(tensor: Any) -> None:
+        nonlocal tensor_count
+        tensor_count += 1
+        if tensor_count > 200_000:
+            raise ValueError("ONNX model has too many tensors")
+        if (tensor.data_location == onnx.TensorProto.EXTERNAL
+                or len(tensor.external_data)):
+            raise ValueError("external ONNX tensor data is not allowed")
+        if len(tensor.dims) > 16 or any(
+                dimension < 0 or dimension > 2**31 - 1
+                for dimension in tensor.dims):
+            raise ValueError("ONNX tensor dimensions are invalid")
+
+    def check_graph(graph: Any) -> None:
+        nonlocal graph_count, node_count
+        graph_count += 1
+        if graph_count > 1024:
+            raise ValueError("ONNX model has too many nested graphs")
+        for tensor in graph.initializer:
+            check_tensor(tensor)
+        for sparse in graph.sparse_initializer:
+            check_tensor(sparse.values)
+            check_tensor(sparse.indices)
+        for node in graph.node:
+            node_count += 1
+            if node_count > 200_000:
+                raise ValueError("ONNX model has too many operators")
+            if node.domain not in allowed_domains:
+                raise ValueError(
+                    "ONNX model uses a non-standard operator domain")
+            if not node.op_type or len(node.op_type) > 128:
+                raise ValueError("ONNX model contains an invalid operator")
+            for attribute in node.attribute:
+                if attribute.HasField("t"):
+                    check_tensor(attribute.t)
+                for tensor in attribute.tensors:
+                    check_tensor(tensor)
+                if attribute.HasField("g"):
+                    check_graph(attribute.g)
+                for nested in attribute.graphs:
+                    check_graph(nested)
+
+    check_graph(model.graph)
+    if node_count == 0 or tensor_count == 0:
+        raise ValueError("ONNX model contains no executable weighted graph")
+    try:
+        onnx.checker.check_model(model, full_check=False)
+    except Exception as exc:
+        raise ValueError("ONNX model failed structural validation") from exc
+
+
+@dataclass
+class _OnnxImageClassifierEntry:
+    session: Any
+    input_name: str
+    output_name: str
+    input_height: int
+    input_width: int
+    class_count: int
+    input_layouts: frozenset[str]
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _load_onnx_image_classifier(path: str) -> _OnnxImageClassifierEntry:
+    _validate_onnx_weight_file(path)
+    try:
+        import onnxruntime as ort
+    except ImportError as exc:
+        raise RuntimeError(
+            "ONNX image classification requires onnxruntime") from exc
+
+    options = ort.SessionOptions()
+    options.log_severity_level = 3
+    available = set(ort.get_available_providers())
+    providers = [
+        provider for provider in (
+            "CUDAExecutionProvider", "CPUExecutionProvider")
+        if provider in available
+    ]
+    if not providers:
+        raise RuntimeError("ONNX Runtime has no supported execution provider")
+    try:
+        session = ort.InferenceSession(
+            path, sess_options=options, providers=providers)
+    except Exception as exc:
+        raise ValueError("ONNX image classifier could not be loaded") from exc
+    inputs = session.get_inputs()
+    outputs = session.get_outputs()
+    if len(inputs) != 1 or len(outputs) != 1:
+        raise ValueError("ONNX image classifier must have one input and output")
+    model_input = inputs[0]
+    model_output = outputs[0]
+    if model_input.type != "tensor(float)" or model_output.type not in {
+        "tensor(float)", "tensor(float16)", "tensor(double)",
+    }:
+        raise ValueError("ONNX image classifier must use floating-point tensors")
+    input_shape = model_input.shape
+    output_shape = model_output.shape
+    if len(input_shape) != 4 or len(output_shape) != 2:
+        raise ValueError("ONNX image classifier has an invalid tensor rank")
+
+    # WD-style NHWC and common NCHW models are both admitted.  The selected
+    # layout is checked again when the loader binds preprocessing options.
+    nhwc = input_shape[3] == 3
+    nchw = input_shape[1] == 3
+    if not nhwc and not nchw:
+        raise ValueError("ONNX image classifier must consume three channels")
+    if nhwc and nchw:
+        raise ValueError("ONNX classifier channel layout is ambiguous")
+    height = input_shape[1] if nhwc else input_shape[2]
+    width = input_shape[2] if nhwc else input_shape[3]
+    class_count = output_shape[1]
+    if (type(height) is not int or type(width) is not int
+            or not 1 <= height <= 4096 or not 1 <= width <= 4096):
+        raise ValueError("ONNX classifier spatial dimensions must be fixed")
+    if type(class_count) is not int or not 1 <= class_count <= 16_384:
+        raise ValueError("ONNX classifier output count is outside the safe range")
+    return _OnnxImageClassifierEntry(
+        session=session,
+        input_name=model_input.name,
+        output_name=model_output.name,
+        input_height=height,
+        input_width=width,
+        class_count=class_count,
+        input_layouts=frozenset(
+            layout for layout, valid in (("NHWC", nhwc), ("NCHW", nchw))
+            if valid),
+    )
+
+
+class _OnnxImageClassifierCache:
+    def __init__(self, max_entries: int = 3) -> None:
+        self.max_entries = max_entries
+        self._entries: OrderedDict[tuple[Any, ...], _OnnxImageClassifierEntry] = (
+            OrderedDict())
+        self._lock = threading.Lock()
+        self.loads = 0
+        self.hits = 0
+
+    @staticmethod
+    def _key(path: str) -> tuple[Any, ...]:
+        status = os.stat(path)
+        return (
+            os.path.realpath(path), status.st_dev, status.st_ino,
+            status.st_size, status.st_mtime_ns, status.st_ctime_ns,
+        )
+
+    def get(self, path: str) -> _OnnxImageClassifierEntry:
+        key = self._key(path)
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            if entry is not None:
+                self.hits += 1
+                self._entries[key] = entry
+                return entry
+            entry = _load_onnx_image_classifier(path)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                self._entries.popitem(last=False)
+            self._entries[key] = entry
+            return entry
+
+    def clear(self) -> int:
+        with self._lock:
+            count = len(self._entries)
+            self._entries.clear()
+        return count
+
+
+_ONNX_IMAGE_CLASSIFIER_CACHE = _OnnxImageClassifierCache()
+
+
+@dataclass
+class _OnnxDetectorEntry:
+    model: Any
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _load_onnx_detector(path: str) -> _OnnxDetectorEntry:
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("ONNX detection requires OpenCV DNN") from exc
+    return _OnnxDetectorEntry(cv2.dnn.readNetFromONNX(path))
+
+
+class _OnnxDetectorCache:
+    def __init__(self, max_entries: int = 2) -> None:
+        self.max_entries = max_entries
+        self._entries: dict[tuple[Any, ...], _OnnxDetectorEntry] = {}
+        self._lock = threading.Lock()
+        self.loads = 0
+        self.hits = 0
+
+    @staticmethod
+    def _key(path: str) -> tuple[Any, ...]:
+        status = os.stat(path)
+        return (
+            os.path.realpath(path), status.st_dev, status.st_ino,
+            status.st_size, status.st_mtime_ns, status.st_ctime_ns,
+        )
+
+    def get(self, path: str) -> _OnnxDetectorEntry:
+        key = self._key(path)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                self.hits += 1
+                return entry
+            entry = _load_onnx_detector(path)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                self._entries.popitem()
+            self._entries[key] = entry
+            return entry
+
+    def clear(self) -> int:
+        with self._lock:
+            count = len(self._entries)
+            self._entries.clear()
+        return count
+
+
+_ONNX_DETECTOR_CACHE = _OnnxDetectorCache()
+
+
+@dataclass
+class _SamEntry:
+    model: Any
+    architecture: str
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _load_sam_weight(path: str, architecture: str) -> _SamEntry:
+    try:
+        from safetensors.torch import load_file
+        from segment_anything import sam_model_registry
+    except ImportError as exc:
+        raise RuntimeError(
+            "SAM models require segment-anything and safetensors") from exc
+    if architecture not in {"vit_b", "vit_l", "vit_h"}:
+        raise ValueError("SAM architecture must be vit_b, vit_l, or vit_h")
+    constructor = sam_model_registry.get(architecture)
+    if constructor is None:
+        raise RuntimeError(
+            f"segment-anything does not provide {architecture!r}")
+    model = constructor(checkpoint=None)
+    state = load_file(path, device="cpu")
+    model.load_state_dict(state, strict=True)
+    model.eval()
+    model.to("cpu")
+    return _SamEntry(model=model, architecture=architecture)
+
+
+class _SamCache:
+    def __init__(self, max_entries: int = 2) -> None:
+        self.max_entries = max_entries
+        self._entries: dict[tuple[Any, ...], _SamEntry] = {}
+        self._lock = threading.Lock()
+        self.loads = 0
+        self.hits = 0
+
+    @staticmethod
+    def _key(path: str, architecture: str) -> tuple[Any, ...]:
+        status = os.stat(path)
+        return (
+            os.path.realpath(path), architecture,
+            status.st_dev, status.st_ino, status.st_size,
+            status.st_mtime_ns, status.st_ctime_ns,
+        )
+
+    def get(self, path: str, architecture: str) -> _SamEntry:
+        key = self._key(path, architecture)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                self.hits += 1
+                return entry
+            entry = _load_sam_weight(path, architecture)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                _key, evicted = self._entries.popitem()
+                with evicted.lock:
+                    evicted.model.to("cpu")
+            self._entries[key] = entry
+            return entry
+
+    def clear(self) -> int:
+        with self._lock:
+            entries = list(self._entries.values())
+            self._entries.clear()
+        for entry in entries:
+            with entry.lock:
+                entry.model.to("cpu")
+        return len(entries)
+
+
+_SAM_CACHE = _SamCache()
+
+
+_SAM2_CONFIGS = {
+    "sam2_hiera_tiny": "configs/sam2/sam2_hiera_t.yaml",
+    "sam2_hiera_small": "configs/sam2/sam2_hiera_s.yaml",
+    "sam2_hiera_base_plus": "configs/sam2/sam2_hiera_b+.yaml",
+    "sam2_hiera_large": "configs/sam2/sam2_hiera_l.yaml",
+    "sam2.1_hiera_tiny": "configs/sam2.1/sam2.1_hiera_t.yaml",
+    "sam2.1_hiera_small": "configs/sam2.1/sam2.1_hiera_s.yaml",
+    "sam2.1_hiera_base_plus": "configs/sam2.1/sam2.1_hiera_b+.yaml",
+    "sam2.1_hiera_large": "configs/sam2.1/sam2.1_hiera_l.yaml",
+}
+
+
+def _load_sam2_weight(path: str, architecture: str) -> _SamEntry:
+    try:
+        from safetensors.torch import load_file
+        from sam2.build_sam import build_sam2_video_predictor
+    except ImportError as exc:
+        raise RuntimeError(
+            "SAM2 models require sam2 and safetensors") from exc
+    config = _SAM2_CONFIGS.get(architecture)
+    if config is None:
+        raise ValueError("unknown SAM2 architecture")
+    model = build_sam2_video_predictor(
+        config, ckpt_path=None, device="cpu")
+    model.load_state_dict(load_file(path, device="cpu"), strict=True)
+    model.eval()
+    return _SamEntry(model=model, architecture=architecture)
+
+
+class _Sam2Cache(_SamCache):
+    def get(self, path: str, architecture: str) -> _SamEntry:
+        key = self._key(path, architecture)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                self.hits += 1
+                return entry
+            entry = _load_sam2_weight(path, architecture)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                _key, evicted = self._entries.popitem()
+                with evicted.lock:
+                    evicted.model.to("cpu")
+            self._entries[key] = entry
+            return entry
+
+
+_SAM2_CACHE = _Sam2Cache(max_entries=1)
+
+
+@dataclass
+class _TransparentVaeDecoderEntry:
+    decoder: Any
+    family: str
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def _load_transparent_vae_decoder_weight(
+    path: str, family: str,
+) -> _TransparentVaeDecoderEntry:
+    import nodes
+    import comfy.model_management
+    import comfy.utils
+
+    node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get(
+        "LayeredDiffusionDecode")
+    module = (
+        None if node_class is None
+        else sys.modules.get(getattr(node_class, "__module__", ""))
+    )
+    decoder_class = getattr(module, "TransparentVAEDecoder", None)
+    if not callable(decoder_class):
+        raise RuntimeError(
+            "transparent VAE decoding requires the host-installed canonical "
+            "ComfyUI-layerdiffuse extension")
+    state = comfy.utils.load_torch_file(path, safe_load=True)
+    if not isinstance(state, dict) or not state:
+        raise ValueError(
+            "transparent VAE decoder weights must be a non-empty SafeTensor "
+            "state dict")
+    import torch
+    if any(
+        not isinstance(key, str) or not isinstance(value, torch.Tensor)
+        for key, value in state.items()
+    ):
+        raise ValueError(
+            "transparent VAE decoder weights must contain only tensors")
+    decoder = decoder_class(
+        state,
+        device=comfy.model_management.get_torch_device(),
+        dtype=(
+            torch.float16
+            if comfy.model_management.should_use_fp16()
+            else torch.float32
+        ),
+    )
+    return _TransparentVaeDecoderEntry(decoder=decoder, family=family)
+
+
+class _TransparentVaeDecoderCache:
+    def __init__(self, max_entries: int = 2) -> None:
+        self.max_entries = max_entries
+        self._entries: OrderedDict[
+            tuple[Any, ...], _TransparentVaeDecoderEntry
+        ] = OrderedDict()
+        self._lock = threading.Lock()
+        self.loads = 0
+        self.hits = 0
+
+    @staticmethod
+    def _key(path: str, family: str) -> tuple[Any, ...]:
+        status = os.stat(path)
+        return (
+            os.path.realpath(path), family,
+            status.st_dev, status.st_ino, status.st_size,
+            status.st_mtime_ns, status.st_ctime_ns,
+        )
+
+    def get(self, path: str, family: str) -> _TransparentVaeDecoderEntry:
+        key = self._key(path, family)
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            if entry is not None:
+                self.hits += 1
+                self._entries[key] = entry
+                return entry
+            entry = _load_transparent_vae_decoder_weight(path, family)
+            self.loads += 1
+            while len(self._entries) >= self.max_entries:
+                self._entries.popitem(last=False)
+            self._entries[key] = entry
+            return entry
+
+    def clear(self) -> int:
+        with self._lock:
+            count = len(self._entries)
+            self._entries.clear()
+        return count
+
+
+_TRANSPARENT_VAE_DECODER_CACHE = _TransparentVaeDecoderCache()
+
+
+def _advanced_control_module(relative: str):
+    """Resolve a fixed module from the installed Advanced-ControlNet pack.
+
+    Resolution is anchored to one of that pack's registered node classes; no
+    guest-controlled module name or path participates in the import.
+    """
+    import importlib
+    import nodes
+
+    mappings = getattr(nodes, "NODE_CLASS_MAPPINGS", {})
+    for node_id in (
+        "ACN_AdvancedControlNetApply",
+        "ACN_ControlNet++LoaderSingle",
+        "ACN_ScaledSoftControlNetWeights",
+        "ControlNetLoaderAdvanced",
+        "ScaledSoftControlNetWeights",
+    ):
+        node_class = mappings.get(node_id)
+        module_name = getattr(node_class, "__module__", "")
+        parts = module_name.split(".")
+        if "adv_control" not in parts:
+            continue
+        base = ".".join(parts[:parts.index("adv_control") + 1])
+        return importlib.import_module(f"{base}.{relative}")
+    for base in ("ComfyUI-Advanced-ControlNet.adv_control", "adv_control"):
+        try:
+            package = importlib.import_module(base)
+        except ModuleNotFoundError:
+            continue
+        candidate = getattr(package, relative, None)
+        if candidate is not None:
+            return candidate
+        try:
+            return importlib.import_module(f"{base}.{relative}")
+        except ModuleNotFoundError:
+            continue
+    raise RuntimeError(
+        "this operation requires the host-installed "
+        "ComfyUI-Advanced-ControlNet extension")
 
 
 def _fixed_gguf_node_module():
@@ -1390,15 +4872,358 @@ def _fixed_gguf_node_module():
 
 
 class _InProcessModels:
-    _CLIPSEG_MODELS = frozenset({
-        "Kijai/clipseg-rd64-refined-fp16",
-        "CIDAS/clipseg-rd64-refined",
+    _HF_ENDPOINT = "https://huggingface.co"
+    _HF_PYTORCH_WEIGHT_EXTENSIONS = frozenset({
+        ".bin", ".ckpt", ".patch", ".pt", ".pth",
     })
+    _HF_WEIGHT_EXTENSIONS = frozenset({
+        ".safetensors", ".sft", ".gguf", ".onnx",
+        *_HF_PYTORCH_WEIGHT_EXTENSIONS,
+    })
+    _HF_WEIGHT_FOLDERS = frozenset({
+        "audio_encoders",
+        "background_removal",
+        "checkpoints",
+        "clip_vision",
+        "controlnet",
+        "detection",
+        "diffusion_models",
+        "embeddings",
+        "frame_interpolation",
+        "geometry_estimation",
+        "gligen",
+        "hypernetworks",
+        "ipadapter",
+        "inpaint",
+        "latent_upscale_models",
+        "loras",
+        "model_patches",
+        "optical_flow",
+        "onnx",
+        "photomaker",
+        "sams",
+        "semantic_segmentation",
+        "style_models",
+        "text_encoders",
+        "unet_gguf",
+        "upscale_models",
+        "vae",
+        "vae_approx",
+    })
+    _HF_DOWNLOAD_LOCK = threading.Lock()
+    _HF_VERIFIED_WEIGHTS: dict[
+        str, tuple[int, int, int, int, int, Optional[str]]
+    ] = {}
+
     _WEIGHT_DTYPES = frozenset({
         "default", "fp8_e4m3fn", "fp8_e4m3fn_fast", "fp8_e5m2",
         "fp16", "bf16", "fp32",
     })
     _COMPUTE_DTYPES = frozenset({"default", "fp16", "bf16", "fp32"})
+
+    @staticmethod
+    def _hf_repo_id(repo_id: str) -> str:
+        import re
+
+        if not isinstance(repo_id, str):
+            raise TypeError("Hugging Face repo_id must be a string")
+        if len(repo_id) > 96 or repo_id.startswith(("http:", "https:")):
+            raise ValueError("Hugging Face repo_id must name a model repository")
+        parts = repo_id.split("/")
+        component = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+        if (len(parts) not in (1, 2)
+                or any(not component.fullmatch(part) for part in parts)
+                or any(part.endswith(("-", ".")) for part in parts)
+                or "--" in repo_id or ".." in repo_id
+                or repo_id.endswith(".git")):
+            raise ValueError("Hugging Face repo_id must name a model repository")
+        return repo_id
+
+    @classmethod
+    def _hf_weight_filename(cls, filename: str) -> tuple[str, str]:
+        import re
+
+        if not isinstance(filename, str):
+            raise TypeError("Hugging Face weight filename must be a string")
+        logical = filename.replace("\\", "/")
+        parts = logical.split("/")
+        component = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+        if (not logical or len(logical) > 1024 or logical.startswith("/")
+                or any(len(part) > 255 or not component.fullmatch(part)
+                       for part in parts)):
+            raise ValueError(
+                "Hugging Face weight filename must be a confined repository path")
+        extension = os.path.splitext(parts[-1])[1].lower()
+        if extension not in cls._HF_WEIGHT_EXTENSIONS:
+            raise ValueError(
+                "Hugging Face downloads are limited to .safetensors, .sft, "
+                ".gguf, validated .onnx, and restricted PyTorch "
+                "tensor-archive weights")
+        return logical, extension
+
+    @staticmethod
+    def _hf_revision(revision: str) -> str:
+        import re
+
+        if not isinstance(revision, str):
+            raise TypeError("Hugging Face revision must be a string")
+        if (not revision or len(revision) > 200
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", revision)
+                or revision.endswith("/")
+                or any(part in ("", ".", "..")
+                       for part in revision.split("/"))):
+            raise ValueError("Hugging Face revision is invalid")
+        return revision
+
+    @staticmethod
+    def _hf_sha256(sha256: Optional[str]) -> Optional[str]:
+        import re
+
+        if sha256 is None:
+            return None
+        if not isinstance(sha256, str) or not re.fullmatch(
+                r"[0-9a-fA-F]{64}", sha256):
+            raise ValueError("Hugging Face weight sha256 must be 64 hex digits")
+        return sha256.lower()
+
+    @classmethod
+    def _hf_weight_destination(
+        cls, folder: str, repo_id: str, revision: str,
+        filename: str, extension: str,
+    ) -> tuple[str, str]:
+        import folder_paths
+
+        if not isinstance(folder, str) or folder not in cls._HF_WEIGHT_FOLDERS:
+            raise ValueError(
+                "Hugging Face weights must target a known model catalogue")
+        registered = folder_paths.folder_names_and_paths.get(folder)
+        if registered is None or not registered[0]:
+            raise ValueError(f"model catalogue {folder!r} is not registered")
+        extensions = {str(value).lower() for value in registered[1]}
+        if extension not in extensions:
+            raise ValueError(
+                f"model catalogue {folder!r} does not accept {extension} weights")
+
+        root = os.path.realpath(os.path.abspath(registered[0][0]))
+        os.makedirs(root, exist_ok=True)
+        logical = f"huggingface/{repo_id}/{revision}/{filename}"
+        destination = _InProcessAssets._confined_path(root, logical, folder)
+        return logical, destination
+
+    @staticmethod
+    def _verify_weight_file(path: str, extension: str) -> None:
+        if extension in (".safetensors", ".sft"):
+            from safetensors import safe_open
+
+            try:
+                with safe_open(path, framework="pt", device="cpu") as weights:
+                    keys = list(weights.keys())
+            except Exception as exc:
+                raise ValueError("download is not a valid SafeTensors weight file") from exc
+            if not keys:
+                raise ValueError("SafeTensors file contains no weights")
+            return
+
+        if extension == ".onnx":
+            _validate_onnx_weight_file(path)
+            return
+
+        if extension in _InProcessModels._HF_PYTORCH_WEIGHT_EXTENSIONS:
+            import collections.abc
+            import torch
+
+            try:
+                value = torch.load(
+                    path, map_location="cpu", mmap=True, weights_only=True)
+            except Exception as exc:
+                raise ValueError(
+                    "download is not a restricted PyTorch weight archive"
+                ) from exc
+
+            tensors = 0
+            entries = 0
+            stack = [value]
+            seen: set[int] = set()
+            while stack:
+                item = stack.pop()
+                entries += 1
+                if entries > 10_000_000:
+                    raise ValueError("PyTorch weight archive is too complex")
+                if isinstance(item, torch.Tensor):
+                    tensors += 1
+                    continue
+                if item is None or isinstance(
+                    item, (bool, int, float, str, bytes)
+                ):
+                    continue
+                identity = id(item)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                if isinstance(item, collections.abc.Mapping):
+                    stack.extend(item.keys())
+                    stack.extend(item.values())
+                    continue
+                if isinstance(item, (list, tuple)):
+                    stack.extend(item)
+                    continue
+                raise ValueError(
+                    "PyTorch weight archive contains non-weight objects")
+            if tensors == 0:
+                raise ValueError("PyTorch weight archive contains no tensors")
+            return
+
+        import struct
+
+        with open(path, "rb") as file:
+            header = file.read(24)
+        if len(header) != 24 or header[:4] != b"GGUF":
+            raise ValueError("download is not a supported GGUF weight file")
+        version = struct.unpack("<I", header[4:8])[0]
+        tensor_count, metadata_count = struct.unpack("<QQ", header[8:24])
+        if (version not in (2, 3) or not 1 <= tensor_count <= 10_000_000
+                or metadata_count > 10_000_000):
+            raise ValueError("download is not a supported GGUF weight file")
+
+    @staticmethod
+    def _file_sha256(path: str) -> str:
+        import hashlib
+
+        digest = hashlib.sha256()
+        with open(path, "rb") as file:
+            for chunk in iter(lambda: file.read(8 * 1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _weight_identity(path: str) -> tuple[int, int, int, int, int]:
+        status = os.stat(path)
+        return (
+            status.st_dev,
+            status.st_ino,
+            status.st_size,
+            status.st_mtime_ns,
+            status.st_ctime_ns,
+        )
+
+    @classmethod
+    def _download_huggingface_weights(
+        cls, repo_id: str, filename: str, folder: str,
+        revision: str, sha256: Optional[str],
+    ) -> str:
+        import inspect
+        import shutil
+        import tempfile
+
+        repo_id = cls._hf_repo_id(repo_id)
+        filename, extension = cls._hf_weight_filename(filename)
+        revision = cls._hf_revision(revision)
+        sha256 = cls._hf_sha256(sha256)
+        if extension == ".onnx" and sha256 is None:
+            raise ValueError("Hugging Face ONNX weights require a sha256 pin")
+        logical, destination = cls._hf_weight_destination(
+            folder, repo_id, revision, filename, extension)
+
+        request = {
+            "repo_id": repo_id,
+            "filename": filename,
+            "repo_type": "model",
+            "revision": revision,
+            "endpoint": cls._HF_ENDPOINT,
+            "token": False,
+        }
+
+        with cls._HF_DOWNLOAD_LOCK:
+            if os.path.isfile(destination):
+                try:
+                    identity = cls._weight_identity(destination)
+                except OSError:
+                    identity = None
+                if identity is not None:
+                    cached = cls._HF_VERIFIED_WEIGHTS.get(destination)
+                    if (cached is not None and cached[:5] == identity
+                            and (sha256 is None or cached[5] == sha256)):
+                        return logical
+                    try:
+                        cls._verify_weight_file(destination, extension)
+                        digest_matches = (
+                            sha256 is None
+                            or cls._file_sha256(destination) == sha256)
+                    except (OSError, ValueError):
+                        digest_matches = False
+                    if digest_matches:
+                        cls._HF_VERIFIED_WEIGHTS[destination] = (
+                            *identity, sha256)
+                        return logical
+
+            try:
+                from huggingface_hub import hf_hub_download
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Hugging Face weight downloads require "
+                    "huggingface_hub") from exc
+            if "dry_run" not in inspect.signature(
+                    hf_hub_download).parameters:
+                raise RuntimeError(
+                    "huggingface_hub is too old for bounded weight downloads")
+
+            max_bytes = int(os.environ.get(
+                "COMFY_SECURE_HF_WEIGHT_MAX",
+                str(64 * 1024 * 1024 * 1024)))
+            if max_bytes <= 0:
+                raise RuntimeError(
+                    "COMFY_SECURE_HF_WEIGHT_MAX must be positive")
+            info = hf_hub_download(**request, dry_run=True)
+            size = getattr(info, "file_size", None)
+            if type(size) is not int or size <= 0:
+                raise RuntimeError("Hugging Face did not report a valid weight size")
+            if size > max_bytes:
+                raise ValueError(
+                    f"Hugging Face weight is {size} bytes, over the "
+                    f"{max_bytes} byte limit")
+            source = os.path.realpath(str(hf_hub_download(**request)))
+            if not os.path.isfile(source) or os.path.getsize(source) != size:
+                raise RuntimeError("Hugging Face weight download is incomplete")
+
+            parent = os.path.dirname(destination)
+            os.makedirs(parent, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=".hf-weight-", suffix=extension, dir=parent)
+            os.close(descriptor)
+            try:
+                shutil.copyfile(source, temporary)
+                cls._verify_weight_file(temporary, extension)
+                if sha256 is not None and cls._file_sha256(temporary) != sha256:
+                    raise ValueError("Hugging Face weight sha256 does not match")
+                os.chmod(temporary, 0o644)
+                os.replace(temporary, destination)
+                cls._HF_VERIFIED_WEIGHTS[destination] = (
+                    *cls._weight_identity(destination), sha256)
+            finally:
+                try:
+                    os.unlink(temporary)
+                except FileNotFoundError:
+                    pass
+        return logical
+
+    async def download_huggingface_weights(
+        self, repo_id: str, filename: str, folder: str,
+        revision: str = "main", sha256: Optional[str] = None,
+    ) -> str:
+        """Install one public Hugging Face weight file.
+
+        SafeTensors/SFT, GGUF, and standard self-contained ONNX graphs are
+        parsed structurally. PyTorch archives are
+        admitted only when the restricted ``weights_only`` unpickler proves
+        that the object graph is a tensor container. No URL, endpoint, token,
+        destination path, or custom/external ONNX graph is accepted. ONNX
+        downloads additionally require a SHA-256 pin. A valid installed file
+        is reused without a network request. The returned value is a logical
+        catalogue name, never a path.
+        """
+        return await asyncio.to_thread(
+            self._download_huggingface_weights,
+            repo_id, filename, folder, revision, sha256)
 
     @staticmethod
     def _model_name(name: str, field: str = "name") -> str:
@@ -1498,6 +5323,22 @@ class _InProcessModels:
             await self._ref("CLIP", ClipRef, clip),
             await self._ref("VAE", VaeRef, vae),
         )
+
+    async def load_upscale_model(self, name: str) -> UpscaleModelRef:
+        import folder_paths
+        import comfy.utils
+        from spandrel import ImageModelDescriptor, ModelLoader
+
+        logical = self._model_name(name)
+        path = folder_paths.get_full_path_or_raise("upscale_models", logical)
+        state = comfy.utils.load_torch_file(path, safe_load=True)
+        if "module.layers.0.residual_group.blocks.0.norm1.weight" in state:
+            state = comfy.utils.state_dict_prefix_replace(
+                state, {"module.": ""})
+        model = ModelLoader().load_from_state_dict(state).eval()
+        if not isinstance(model, ImageModelDescriptor):
+            raise ValueError("upscale model must be a single-image model")
+        return await self._ref("UPSCALE_MODEL", UpscaleModelRef, model)
 
     async def load_diffusion_model(
         self, name: str, extra_name: Optional[str] = None,
@@ -1628,6 +5469,171 @@ class _InProcessModels:
         model.patch_on_device = patch_on_device
         return await self._ref("MODEL", ModelRef, model)
 
+    async def load_gguf_text_encoders(
+        self, names: Sequence[str], clip_type: str,
+    ) -> ClipRef:
+        """Load one to four GGUF-quantized text encoders as a single CLIP.
+
+        The text-encoder counterpart of ``load_gguf_model``. GGUF is a
+        quantization container, not a vendor format, and loading a quantized
+        text encoder is the same basic host operation as loading a quantized
+        diffusion model — so this is a primitive, not pack support. The pack
+        keeps its own catalogue presentation and node shapes; the host owns
+        file resolution, the custom operations, and the patcher.
+
+        ``names`` may mix ``.gguf`` files and ordinary state dicts, which is
+        what the two-, three- and four-encoder loaders exist for.
+        """
+        import comfy.model_management
+        import comfy.sd
+        import comfy.utils
+        import folder_paths
+
+        if isinstance(names, str) or not isinstance(names, (list, tuple)):
+            raise TypeError("names must be a sequence of catalogue names")
+        # One per loader variant: CLIP, Dual, Triple, Quadruple. An unbounded
+        # list would let one request pin arbitrarily many encoders.
+        if not 1 <= len(names) <= 4:
+            raise ValueError(
+                f"expected 1 to 4 text encoders, got {len(names)}")
+
+        # Strict, unlike core's in-process CLIPLoader, which falls back to
+        # STABLE_DIFFUSION for an unknown type string. In-process that is a
+        # convenience; for a guest-facing primitive it would silently build a
+        # different model than the caller asked for.
+        if not isinstance(clip_type, str) or not clip_type:
+            raise TypeError("clip_type must be a string")
+        resolved_type = getattr(
+            comfy.sd.CLIPType, clip_type.upper().replace("-", "_"), None)
+        if resolved_type is None:
+            raise ValueError(f"unknown CLIP type {clip_type!r}")
+
+        catalogue = set(folder_paths.get_filename_list("text_encoders"))
+        for folder in ("clip", "clip_gguf"):
+            try:
+                catalogue.update(folder_paths.get_filename_list(folder))
+            except KeyError:
+                continue
+
+        state_dicts = []
+        for index, name in enumerate(names):
+            logical = self._model_name(name, f"names[{index}]")
+            if logical not in catalogue:
+                raise ValueError(
+                    f"unknown text encoder catalogue name {logical!r}")
+            path = folder_paths.get_full_path_or_raise(
+                "clip_gguf" if logical.endswith(".gguf") else "text_encoders",
+                logical)
+            if logical.endswith(".gguf"):
+                gguf = _fixed_gguf_node_module()
+                if not hasattr(gguf, "gguf_clip_loader"):
+                    raise RuntimeError(
+                        "the installed ComfyUI-GGUF extension is "
+                        "incompatible: missing gguf_clip_loader")
+                state_dicts.append(gguf.gguf_clip_loader(path))
+            else:
+                state = comfy.utils.load_torch_file(path, safe_load=True)
+                if "scaled_fp8" in state:
+                    # Upstream's own guard: scaled FP8 needs different custom
+                    # operations and only one set can be active.
+                    raise ValueError(
+                        f"{logical!r} is scaled FP8, which cannot be mixed "
+                        "with GGUF text encoders")
+                state_dicts.append(state)
+
+        gguf = _fixed_gguf_node_module()
+        clip = comfy.sd.load_text_encoder_state_dicts(
+            clip_type=resolved_type,
+            state_dicts=state_dicts,
+            model_options={
+                "custom_operations": gguf.GGMLOps,
+                "initial_device":
+                    comfy.model_management.text_encoder_offload_device(),
+            },
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+        )
+        clip.patcher = gguf.GGUFModelPatcher.clone(clip.patcher)
+        return await self._ref("CLIP", ClipRef, clip)
+
+    async def list_controlnet(self) -> list[str]:
+        import folder_paths
+
+        result = []
+        seen = set()
+        for name in folder_paths.get_filename_list("controlnet"):
+            try:
+                logical = self._model_name(name)
+            except (TypeError, ValueError):
+                continue
+            if logical not in seen:
+                seen.add(logical)
+                result.append(logical)
+        return result
+
+    async def load_controlnet(
+        self, name: str, model: Optional[ModelRef] = None,
+    ) -> ControlNetRef:
+        import comfy.controlnet
+        import folder_paths
+
+        logical = self._model_name(name)
+        path = folder_paths.get_full_path_or_raise("controlnet", logical)
+        model_value = (
+            None if model is None
+            else await current_runtime().refs.resolve(model))
+        control_net = comfy.controlnet.load_controlnet(path, model_value)
+        if control_net is None:
+            raise RuntimeError(
+                "the selected file does not contain a valid ControlNet model")
+        return ControlNetRef._wrap(await current_runtime().refs.create(
+            "CONTROL_NET", control_net))  # type: ignore[return-value]
+
+    async def load_advanced_controlnet(
+        self, name: str, model: Optional[ModelRef] = None,
+        timestep_keyframe: Optional[TimestepKeyframeRef] = None,
+    ) -> ControlNetRef:
+        import folder_paths
+
+        logical = self._model_name(name)
+        path = folder_paths.get_full_path_or_raise("controlnet", logical)
+        rt = current_runtime()
+        model_value = None if model is None else await rt.refs.resolve(model)
+        keyframe_value = (
+            None if timestep_keyframe is None
+            else await rt.refs.resolve(timestep_keyframe))
+        control = _advanced_control_module("control")
+        control_net = control.load_controlnet(
+            path, keyframe_value, model_value)
+        if control_net is None:
+            raise RuntimeError(
+                "the selected file does not contain a valid ControlNet model")
+        if control.is_advanced_controlnet(control_net):
+            control_net.verify_all_weights()
+        return ControlNetRef._wrap(await rt.refs.create(
+            "CONTROL_NET", control_net))  # type: ignore[return-value]
+
+    async def load_controlnet_plusplus(
+        self, name: str, control_type: str = "none",
+    ) -> ControlNetRef:
+        import folder_paths
+
+        choices = {
+            "openpose", "depth", "hed/pidi/scribble/ted",
+            "canny/lineart/mlsd", "normal", "segment", "tile",
+            "inpaint/outpaint", "none",
+        }
+        if control_type not in choices:
+            raise ValueError(
+                f"unknown ControlNet++ control type {control_type!r}")
+        logical = self._model_name(name)
+        path = folder_paths.get_full_path_or_raise("controlnet", logical)
+        plusplus = _advanced_control_module("control_plusplus")
+        control_net = plusplus.load_controlnetplusplus(path)
+        control_net.single_control_type = control_type
+        control_net.verify_control_type(logical)
+        return ControlNetRef._wrap(await current_runtime().refs.create(
+            "CONTROL_NET", control_net))  # type: ignore[return-value]
+
     async def list_vae(self) -> list[str]:
         import nodes
 
@@ -1687,6 +5693,251 @@ class _InProcessModels:
                 (vae_path, metadata, devices[device]))
         return VaeRef._wrap(await current_runtime().refs.create("VAE", vae))  # type: ignore[return-value]
 
+    async def load_clip_vision(self, model: str) -> ClipVisionRef:
+        import comfy.clip_vision
+        import folder_paths
+
+        model = self._model_name(model, "CLIP-Vision weight")
+        if not model.lower().endswith((".safetensors", ".sft")):
+            raise ValueError("CLIP-Vision weights must use SafeTensors")
+        path = folder_paths.get_full_path_or_raise("clip_vision", model)
+        value = await asyncio.to_thread(comfy.clip_vision.load, path)
+        if value is None:
+            raise ValueError("the selected weight is not a CLIP-Vision model")
+        return ClipVisionRef._wrap(await current_runtime().refs.create(
+            "CLIP_VISION", value))  # type: ignore[return-value]
+
+    async def load_text_encoder(
+        self, model: str, model_type: str,
+        device: str = "default",
+    ) -> ClipRef:
+        import comfy.sd
+        import folder_paths
+
+        model = self._model_name(model, "text-encoder weight")
+        if not model.lower().endswith((".safetensors", ".sft")):
+            raise ValueError("text-encoder weights must use SafeTensors")
+        model_type = str(model_type).replace("-", "_").lower()
+        if model_type.upper() not in comfy.sd.CLIPType.__members__:
+            raise ValueError(
+                f"unknown Comfy text-encoder type {model_type!r}")
+        device = str(device)
+        if device not in {"default", "cpu"}:
+            raise ValueError("text-encoder device must be default or cpu")
+        path = folder_paths.get_full_path_or_raise("text_encoders", model)
+        entry = await asyncio.to_thread(
+            _TEXT_ENCODER_CACHE.get, path, model_type, device)
+        setattr(entry.clip, "_secure_text_generation_lock", entry.lock)
+        return ClipRef._wrap(await current_runtime().refs.create(
+            "CLIP", entry.clip))  # type: ignore[return-value]
+
+    async def load_language_model(
+        self, weights: list[str], family: str,
+        device: str = "default", cache: bool = True,
+    ) -> ClipRef:
+        import folder_paths
+
+        if not isinstance(weights, (list, tuple)):
+            raise TypeError("language-model weights must be a list")
+        if not 1 <= len(weights) <= 16:
+            raise ValueError("language models require 1 to 16 weight shards")
+        logical_weights = []
+        seen = set()
+        for item in weights:
+            logical = self._model_name(item, "language-model weight")
+            if not logical.lower().endswith((".safetensors", ".sft")):
+                raise ValueError(
+                    "language-model weights must use SafeTensors")
+            if logical in seen:
+                raise ValueError("language-model weight shards must be unique")
+            seen.add(logical)
+            logical_weights.append(logical)
+        family = str(family).lower()
+        if family not in _QWEN_LANGUAGE_FAMILIES:
+            raise ValueError(f"unsupported language-model family {family!r}")
+        device = str(device)
+        if device not in {"default", "cpu"}:
+            raise ValueError("language-model device must be default or cpu")
+        if type(cache) is not bool:
+            raise TypeError("language-model cache must be a boolean")
+        paths = tuple(
+            folder_paths.get_full_path_or_raise("text_encoders", logical)
+            for logical in logical_weights
+        )
+        entry = await asyncio.to_thread(
+            _LANGUAGE_MODEL_CACHE.get, paths, family, device, cache)
+        setattr(entry.clip, "_secure_text_generation_lock", entry.lock)
+        setattr(entry.clip, "_secure_language_family", family)
+        return ClipRef._wrap(await current_runtime().refs.create(
+            "CLIP", entry.clip))  # type: ignore[return-value]
+
+    async def load_ipadapter(
+        self, model: str, clip_vision: ClipVisionRef,
+    ) -> IpAdapterRef:
+        import folder_paths
+        import nodes
+
+        model = self._model_name(model, "IP-Adapter weight")
+        if not model.lower().endswith((".safetensors", ".sft")):
+            raise ValueError("IP-Adapter weights must use SafeTensors")
+        folder_paths.get_full_path_or_raise("ipadapter", model)
+        node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get(
+            "IPAdapterModelLoader")
+        if node_class is None:
+            raise RuntimeError(
+                "IP-Adapter loading requires the host-installed "
+                "ComfyUI IPAdapter Plus extension")
+        result = await asyncio.to_thread(
+            node_class().load_ipadapter_model, model)
+        if (not isinstance(result, (tuple, list)) or not result
+                or not isinstance(result[0], dict)
+                or not isinstance(result[0].get("ip_adapter"), dict)
+                or not result[0]["ip_adapter"]):
+            raise ValueError("the selected weight is not an IP-Adapter model")
+        vision = await current_runtime().refs.resolve(clip_vision)
+        value = {
+            "secure_kind": "ipadapter.pipeline",
+            "ipadapter": result[0],
+            "clip_vision": vision,
+        }
+        return IpAdapterRef._wrap(await current_runtime().refs.create(
+            "IPADAPTER_PIPE", value))  # type: ignore[return-value]
+
+    async def load_brushnet(
+        self, model: str, dtype: str = "float16",
+    ) -> BrushNetRef:
+        import folder_paths
+        import nodes
+
+        model = self._model_name(model, "BrushNet weight")
+        if not model.lower().endswith((".safetensors", ".sft")):
+            raise ValueError("BrushNet weights must use SafeTensors")
+        if dtype not in {"float16", "bfloat16", "float32", "float64"}:
+            raise ValueError(
+                "BrushNet dtype must be float16, bfloat16, float32, or float64")
+        folder_paths.get_full_path_or_raise("inpaint", model)
+        node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get(
+            "BrushNetLoader")
+        if node_class is None:
+            raise RuntimeError(
+                "BrushNet loading requires the host-installed canonical "
+                "ComfyUI-BrushNet extension")
+        result = await asyncio.to_thread(
+            node_class().brushnet_loading, model, dtype)
+        if (not isinstance(result, (tuple, list)) or len(result) != 1
+                or not isinstance(result[0], dict)
+                or result[0].get("brushnet") is None
+                or not isinstance(result[0].get("SDXL"), bool)
+                or not isinstance(result[0].get("PP"), bool)
+                or result[0].get("dtype") is None):
+            raise ValueError(
+                "the canonical BrushNet loader returned an invalid model")
+        if result[0]["PP"]:
+            raise ValueError(
+                "the selected weight is PowerPaint, not a BrushNet model")
+        return BrushNetRef._wrap(await current_runtime().refs.create(
+            "BRUSHNET_MODEL", result[0]))  # type: ignore[return-value]
+
+    async def load_powerpaint(
+        self, model: str, base_clip: str, powerpaint_clip: str,
+        dtype: str = "float16",
+    ) -> PowerPaintRef:
+        import folder_paths
+        import nodes
+
+        model = self._model_name(model, "PowerPaint weight")
+        base_clip = self._model_name(base_clip, "base CLIP weight")
+        powerpaint_clip = self._model_name(
+            powerpaint_clip, "PowerPaint CLIP weight")
+        for label, value in (
+            ("PowerPaint", model),
+            ("base CLIP", base_clip),
+            ("PowerPaint CLIP", powerpaint_clip),
+        ):
+            if not value.lower().endswith((".safetensors", ".sft")):
+                raise ValueError(f"{label} weights must use SafeTensors")
+        if dtype not in {"float16", "bfloat16", "float32", "float64"}:
+            raise ValueError(
+                "PowerPaint dtype must be float16, bfloat16, float32, or "
+                "float64")
+        model_path = folder_paths.get_full_path_or_raise("inpaint", model)
+        base_path = folder_paths.get_full_path_or_raise(
+            "text_encoders", base_clip)
+        clip_path = folder_paths.get_full_path_or_raise(
+            "inpaint", powerpaint_clip)
+        mappings = getattr(nodes, "NODE_CLASS_MAPPINGS", {})
+        brushnet_class = mappings.get("BrushNetLoader")
+        clip_class = mappings.get("PowerPaintCLIPLoader")
+        if brushnet_class is None or clip_class is None:
+            raise RuntimeError(
+                "PowerPaint loading requires the host-installed canonical "
+                "ComfyUI-BrushNet extension")
+
+        def load():
+            brushnet_loader = brushnet_class()
+            model_key = os.path.basename(model_path)
+            brushnet_loader.inpaint_files = {
+                model_key: os.path.dirname(model_path)}
+            model_result = brushnet_loader.brushnet_loading(model_key, dtype)
+
+            clip_loader = clip_class()
+            base_key = os.path.basename(base_path)
+            clip_key = os.path.basename(clip_path)
+            clip_loader.clip_files = {base_key: os.path.dirname(base_path)}
+            clip_loader.inpaint_files = {clip_key: os.path.dirname(clip_path)}
+            clip_result = clip_loader.ppclip_loading(base_key, clip_key)
+            return model_result, clip_result
+
+        model_result, clip_result = await asyncio.to_thread(load)
+        if (not isinstance(model_result, (tuple, list))
+                or len(model_result) != 1
+                or not isinstance(model_result[0], dict)
+                or model_result[0].get("brushnet") is None
+                or model_result[0].get("PP") is not True
+                or model_result[0].get("dtype") is None):
+            raise ValueError(
+                "the canonical loader did not return a PowerPaint model")
+        if (not isinstance(clip_result, (tuple, list))
+                or len(clip_result) != 1 or clip_result[0] is None):
+            raise ValueError(
+                "the canonical loader did not return a PowerPaint CLIP")
+        value = {
+            "secure_kind": "powerpaint.pipeline",
+            "powerpaint": model_result[0],
+            "clip": clip_result[0],
+        }
+        return PowerPaintRef._wrap(await current_runtime().refs.create(
+            "POWERPAINT_MODEL", value))  # type: ignore[return-value]
+
+    async def load_transparent_vae_decoder(
+        self, model: str, family: str,
+    ) -> TransparentVaeDecoderRef:
+        import folder_paths
+
+        model = self._model_name(model, "transparent VAE decoder weight")
+        if not model.lower().endswith((".safetensors", ".sft")):
+            raise ValueError(
+                "transparent VAE decoder weights must use SafeTensors")
+        family = str(family)
+        expected = {
+            "sd1": "layer_sd15_vae_transparent_decoder.safetensors",
+            "sdxl": "vae_transparent_decoder.safetensors",
+        }
+        if family not in expected:
+            raise ValueError(
+                "transparent VAE decoder family must be sd1 or sdxl")
+        if os.path.basename(model).lower() != expected[family].lower():
+            raise ValueError(
+                f"{family} transparent VAE decoding requires "
+                f"{expected[family]!r}")
+        path = folder_paths.get_full_path_or_raise("vae", model)
+        entry = await asyncio.to_thread(
+            _TRANSPARENT_VAE_DECODER_CACHE.get, path, family)
+        return TransparentVaeDecoderRef._wrap(
+            await current_runtime().refs.create(
+                "TRANSPARENT_VAE_DECODER", entry)
+        )  # type: ignore[return-value]
+
     async def memory_cleanup(
         self, empty_cache: bool = True, collect_cycles: bool = True,
         unload_all_models: bool = False,
@@ -1700,6 +5951,18 @@ class _InProcessModels:
         if bool(unload_all_models):
             comfy.model_management.unload_all_models()
             _TEXT_GENERATOR_CACHE.clear()
+            _INPAINT_MODEL_CACHE.clear()
+            _CLIPSEG_CACHE.clear()
+            _IMAGE_CLASSIFIER_CACHE.clear()
+            _ONNX_IMAGE_CLASSIFIER_CACHE.clear()
+            _TEXT_ENCODER_CACHE.clear()
+            _LANGUAGE_MODEL_CACHE.clear()
+            InProcessLlamaCpp().clear()
+            _SEGFORMER_CACHE.clear()
+            _VITMATTE_CACHE.clear()
+            _VQA_CACHE.clear()
+            _SAM_CACHE.clear()
+            _TRANSPARENT_VAE_DECODER_CACHE.clear()
         if bool(collect_cycles):
             gc.collect()
         after = int(comfy.model_management.get_free_memory())
@@ -1707,32 +5970,318 @@ class _InProcessModels:
 
     async def load_clipseg(self, model: str) -> ClipSegRef:
         import folder_paths
-        from transformers import CLIPSegForImageSegmentation, CLIPSegProcessor
 
-        model = str(model)
-        if model not in self._CLIPSEG_MODELS:
-            raise ValueError(
-                f"CLIPSeg model {model!r} is not in the trusted model catalogue")
-        root = os.path.abspath(os.path.join(folder_paths.models_dir, "clip_seg"))
-        checkpoint = os.path.abspath(os.path.join(root, os.path.basename(model)))
-        if os.path.commonpath((root, checkpoint)) != root:
-            raise ValueError("CLIPSeg model name escapes its catalogue")
-        if not os.path.exists(checkpoint):
-            from huggingface_hub import snapshot_download
-
-            snapshot_download(
-                repo_id=model, local_dir=checkpoint,
-                local_dir_use_symlinks=False)
-        value = {
-            "model": CLIPSegForImageSegmentation.from_pretrained(checkpoint),
-            "processor": CLIPSegProcessor.from_pretrained(checkpoint),
-        }
+        model = self._model_name(model, "CLIPSeg weight")
+        if not model.lower().endswith(".safetensors"):
+            raise ValueError("CLIPSeg weights must use SafeTensors")
+        path = folder_paths.get_full_path_or_raise("detection", model)
+        value = (await asyncio.to_thread(_CLIPSEG_CACHE.get, path)).bundle()
         return ClipSegRef._wrap(await current_runtime().refs.create(
             "CLIPSEGMODEL", value))  # type: ignore[return-value]
 
+    async def load_image_classifier(
+        self, model: str, architecture: str, labels: list[str],
+    ) -> ImageClassifierRef:
+        import folder_paths
+
+        model = self._model_name(model, "image classifier weight")
+        if not model.lower().endswith(".safetensors"):
+            raise ValueError("image classifier weights must use SafeTensors")
+        architecture = str(architecture)
+        if architecture not in {
+            "vit-base-patch16-224",
+            "beit-base-patch16-224",
+            "resnet-50-224",
+        }:
+            raise ValueError("image classifier architecture is not supported")
+        if not isinstance(labels, (list, tuple)):
+            raise TypeError("image classifier labels must be a list")
+        labels = tuple(str(label) for label in labels)
+        if (not labels or len(labels) > 10_000
+                or any(not label or len(label) > 256 for label in labels)):
+            raise ValueError("image classifier labels are invalid")
+        path = folder_paths.get_full_path_or_raise("detection", model)
+        entry = await asyncio.to_thread(
+            _IMAGE_CLASSIFIER_CACHE.get, path, architecture)
+        if len(labels) != entry.num_labels:
+            raise ValueError(
+                "image classifier labels do not match the weight output count")
+        value = {
+            "model": entry.model,
+            "processor": entry.processor,
+            "architecture": entry.architecture,
+            "labels": labels,
+            "lock": entry.lock,
+        }
+        return ImageClassifierRef._wrap(await current_runtime().refs.create(
+            "IMAGE_CLASSIFIER", value))  # type: ignore[return-value]
+
+    async def load_onnx_image_classifier(
+        self, model: str, input_layout: str = "NHWC",
+        channel_order: str = "BGR", resize_mode: str = "fit_pad",
+        input_scale: float = 255.0,
+        pad_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        mean: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        std: tuple[float, float, float] = (1.0, 1.0, 1.0),
+        activation: str = "identity", resize_filter: str = "lanczos",
+    ) -> ImageClassifierRef:
+        """Bind a self-contained standard ONNX image classifier.
+
+        Preprocessing is a closed, reusable transform.  Labels, category
+        ranges, thresholds, exclusions, and output formatting remain node
+        code; the host only retains and pages the numeric score matrix.
+        """
+        import math
+        import folder_paths
+
+        model = self._model_name(model, "ONNX image classifier")
+        if not model.lower().endswith(".onnx"):
+            raise ValueError("ONNX image classifiers must use .onnx files")
+        input_layout = str(input_layout).upper()
+        channel_order = str(channel_order).upper()
+        resize_mode = str(resize_mode).lower()
+        activation = str(activation).lower()
+        resize_filter = str(resize_filter).lower()
+        if input_layout not in {"NHWC", "NCHW"}:
+            raise ValueError("ONNX classifier layout must be NHWC or NCHW")
+        if channel_order not in {"RGB", "BGR"}:
+            raise ValueError("ONNX classifier channel order must be RGB or BGR")
+        if resize_mode not in {"fit_pad", "stretch"}:
+            raise ValueError("ONNX classifier resize mode is not supported")
+        if activation not in {"identity", "sigmoid", "softmax"}:
+            raise ValueError("ONNX classifier activation is not supported")
+        if resize_filter not in {"nearest", "bilinear", "bicubic", "lanczos"}:
+            raise ValueError("ONNX classifier resize filter is not supported")
+        input_scale = float(input_scale)
+        if not math.isfinite(input_scale) or not 0 < input_scale <= 65_535:
+            raise ValueError("ONNX classifier input scale is invalid")
+
+        def triple(
+            value: Any, field_name: str, *, nonzero: bool = False,
+            unit: bool = False,
+        ) -> tuple[float, float, float]:
+            if not isinstance(value, (list, tuple)) or len(value) != 3:
+                raise ValueError(
+                    f"ONNX classifier {field_name} must have three values")
+            result = tuple(float(item) for item in value)
+            if (any(not math.isfinite(item) or abs(item) > 1_000_000
+                    for item in result)
+                    or (nonzero and any(item == 0 for item in result))
+                    or (unit and any(not 0 <= item <= 1 for item in result))):
+                raise ValueError(f"ONNX classifier {field_name} is invalid")
+            return result  # type: ignore[return-value]
+
+        pad_color = triple(pad_color, "pad color", unit=True)
+        mean = triple(mean, "mean")
+        std = triple(std, "standard deviation", nonzero=True)
+        path = folder_paths.get_full_path_or_raise("onnx", model)
+        entry = await asyncio.to_thread(_ONNX_IMAGE_CLASSIFIER_CACHE.get, path)
+        if input_layout not in entry.input_layouts:
+            raise ValueError(
+                f"ONNX classifier tensor is not laid out as {input_layout}")
+        value = {
+            "secure_kind": "image_classifier.onnx",
+            "session": entry.session,
+            "input_name": entry.input_name,
+            "output_name": entry.output_name,
+            "input_height": entry.input_height,
+            "input_width": entry.input_width,
+            "class_count": entry.class_count,
+            "input_layout": input_layout,
+            "channel_order": channel_order,
+            "resize_mode": resize_mode,
+            "input_scale": input_scale,
+            "pad_color": pad_color,
+            "mean": mean,
+            "std": std,
+            "activation": activation,
+            "resize_filter": resize_filter,
+            "lock": entry.lock,
+        }
+        return ImageClassifierRef._wrap(await current_runtime().refs.create(
+            "IMAGE_CLASSIFIER", value))  # type: ignore[return-value]
+
+    async def load_segformer(
+        self, model: str, variant: str, num_labels: int,
+    ) -> SemanticSegmentationRef:
+        import folder_paths
+
+        model = self._model_name(model, "SegFormer weight")
+        if not model.lower().endswith((".safetensors", ".sft")):
+            raise ValueError("SegFormer weights must use SafeTensors")
+        variant = str(variant)
+        if variant not in {"b2", "b3", "b5"}:
+            raise ValueError("SegFormer variant must be b2, b3, or b5")
+        if (isinstance(num_labels, bool) or not isinstance(num_labels, int)
+                or not 1 <= num_labels <= 1024):
+            raise ValueError("SegFormer num_labels must be in [1, 1024]")
+        path = folder_paths.get_full_path_or_raise(
+            "semantic_segmentation", model)
+        entry = await asyncio.to_thread(
+            _SEGFORMER_CACHE.get, path, variant, num_labels)
+        return SemanticSegmentationRef._wrap(
+            await current_runtime().refs.create(
+                "SEMANTIC_SEGMENTATION_MODEL", entry)
+        )  # type: ignore[return-value]
+
+    async def load_vitmatte(
+        self, model: str, variant: str,
+    ) -> MattingModelRef:
+        import folder_paths
+
+        model = self._model_name(model, "ViTMatte weight")
+        if not model.lower().endswith((".safetensors", ".sft", ".bin")):
+            raise ValueError("ViTMatte weights must be SafeTensors or a weight-only bin")
+        variant = str(variant)
+        if variant not in {"small", "base"}:
+            raise ValueError("ViTMatte variant must be small or base")
+        path = folder_paths.get_full_path_or_raise("detection", model)
+        entry = await asyncio.to_thread(
+            _VITMATTE_CACHE.get, path, variant)
+        return MattingModelRef._wrap(await current_runtime().refs.create(
+            "MATTING_MODEL", entry))  # type: ignore[return-value]
+
+    async def load_vqa(
+        self, model: str, architecture: str,
+        precision: str = "fp16", device: str = "cuda",
+    ) -> VqaModelRef:
+        import folder_paths
+
+        model = self._model_name(model, "BLIP VQA weight")
+        if not model.lower().endswith((".safetensors", ".sft", ".bin")):
+            raise ValueError("BLIP VQA weights must be SafeTensors or a weight-only bin")
+        architecture = str(architecture)
+        if architecture not in {
+            "blip-vqa-base", "blip-vqa-capfilt-large",
+        }:
+            raise ValueError("unknown BLIP VQA architecture")
+        precision = str(precision)
+        if precision not in {"fp16", "fp32"}:
+            raise ValueError("BLIP VQA precision must be fp16 or fp32")
+        device = str(device)
+        if device not in {"cuda", "cpu"}:
+            raise ValueError("BLIP VQA device must be cuda or cpu")
+        path = folder_paths.get_full_path_or_raise("detection", model)
+        entry = await asyncio.to_thread(
+            _VQA_CACHE.get, path, architecture)
+        value = _VqaModelValue(
+            entry=entry, precision=precision, device=device)
+        return VqaModelRef._wrap(await current_runtime().refs.create(
+            "VQA_MODEL", value))  # type: ignore[return-value]
+
+    async def load_inpaint_model(
+        self, model: str, architecture: str = "big-lama",
+    ) -> InpaintModelRef:
+        import folder_paths
+
+        model = self._model_name(model, "image inpaint weight")
+        if not model.lower().endswith((".safetensors", ".sft")):
+            raise ValueError("image inpaint weights must use SafeTensors")
+        architecture = str(architecture)
+        if architecture != "big-lama":
+            raise ValueError("unknown image inpaint architecture")
+        path = folder_paths.get_full_path_or_raise("detection", model)
+        entry = await asyncio.to_thread(
+            _INPAINT_MODEL_CACHE.get, path, architecture)
+        return InpaintModelRef._wrap(await current_runtime().refs.create(
+            "INPAINT_MODEL", entry.bundle()))  # type: ignore[return-value]
+
+    async def load_background_removal_model(
+        self, model: str,
+    ) -> BackgroundRemovalModelRef:
+        import folder_paths
+        from comfy.bg_removal_model import load
+
+        model = self._model_name(model, "background-removal weight")
+        if not model.lower().endswith((".safetensors", ".sft")):
+            raise ValueError(
+                "background-removal weights must use SafeTensors")
+        path = folder_paths.get_full_path_or_raise(
+            "background_removal", model)
+        value = await asyncio.to_thread(load, path)
+        if value is None:
+            raise ValueError(
+                "the selected weight is not a supported ComfyUI "
+                "background-removal model")
+        bundle = {
+            "secure_kind": "background_removal.comfy",
+            "model": value,
+            "lock": threading.Lock(),
+        }
+        return BackgroundRemovalModelRef._wrap(
+            await current_runtime().refs.create(
+                "BACKGROUND_REMOVAL_MODEL", bundle)
+        )  # type: ignore[return-value]
+
+    async def load_onnx_detector(self, model: str) -> OnnxDetectorRef:
+        import folder_paths
+
+        model = self._model_name(model, "ONNX detector")
+        if not model.lower().endswith(".onnx"):
+            raise ValueError("ONNX detectors must use .onnx model files")
+        path = folder_paths.get_full_path_or_raise("onnx", model)
+        entry = await asyncio.to_thread(_ONNX_DETECTOR_CACHE.get, path)
+        value = {
+            "secure_kind": "onnx.object_detector",
+            "model": entry.model,
+            "lock": entry.lock,
+        }
+        return OnnxDetectorRef._wrap(await current_runtime().refs.create(
+            "ONNX_DETECTOR", value))  # type: ignore[return-value]
+
+    async def load_object_detector(self, model: str) -> ObjectDetectorRef:
+        import comfy.model_base
+
+        model = self._model_name(model, "object detector")
+        if not model.lower().endswith((".safetensors", ".sft")):
+            raise ValueError("object-detector weights must use SafeTensors")
+        model_ref = await self.load_diffusion_model(model)
+        patcher = await current_runtime().refs.resolve(model_ref)
+        if not isinstance(patcher.model, comfy.model_base.RT_DETR_v4):
+            raise ValueError(
+                "the selected weight is not a supported RT-DETR model")
+        value = {
+            "secure_kind": "object_detector.rt_detr",
+            "model": patcher,
+        }
+        return ObjectDetectorRef._wrap(await current_runtime().refs.create(
+            "OBJECT_DETECTOR", value))  # type: ignore[return-value]
+
+    async def load_sam(
+        self, model: str, architecture: str = "vit_b",
+        device_mode: str = "AUTO",
+    ) -> SamModelRef:
+        import folder_paths
+
+        model = self._model_name(model, "SAM weight")
+        if not model.lower().endswith((".safetensors", ".sft")):
+            raise ValueError("SAM weights must use SafeTensors")
+        architecture = str(architecture)
+        if architecture not in {"vit_b", "vit_l", "vit_h", *_SAM2_CONFIGS}:
+            raise ValueError("unknown SAM architecture")
+        device_mode = str(device_mode)
+        if device_mode not in {"AUTO", "Prefer GPU", "CPU"}:
+            raise ValueError("SAM device_mode must be AUTO, Prefer GPU, or CPU")
+        path = folder_paths.get_full_path_or_raise("sams", model)
+        is_sam2 = architecture in _SAM2_CONFIGS
+        cache = _SAM2_CACHE if is_sam2 else _SAM_CACHE
+        entry = await asyncio.to_thread(cache.get, path, architecture)
+        value = {
+            "secure_kind": "sam.v2" if is_sam2 else "sam.v1",
+            "model": entry.model,
+            "architecture": entry.architecture,
+            "device_mode": device_mode,
+            "lock": entry.lock,
+        }
+        return SamModelRef._wrap(await current_runtime().refs.create(
+            "SAM_MODEL", value))  # type: ignore[return-value]
+
     async def generate_text(
         self, generator: str, input_text: str, max_new_tokens: int = 128,
+        weight: Optional[str] = None,
     ) -> str:
+        import folder_paths
+
         if not isinstance(generator, str):
             raise TypeError("text generator must be a string")
         if generator != "superprompt-v1":
@@ -1746,9 +6295,17 @@ class _InProcessModels:
             raise TypeError("max_new_tokens must be an int")
         if not 1 <= max_new_tokens <= 4096:
             raise ValueError("max_new_tokens must be in [1, 4096]")
+        if weight is None:
+            raise ValueError(
+                "text generator 'superprompt-v1' requires a declared weight")
+        weight = self._model_name(weight, "weight")
+        if not weight.lower().endswith(".safetensors"):
+            raise ValueError("text generator weights must use SafeTensors")
+        weight_path = folder_paths.get_full_path_or_raise(
+            "text_encoders", weight)
         return await asyncio.to_thread(
             _TEXT_GENERATOR_CACHE.generate,
-            generator, input_text, max_new_tokens)
+            generator, weight_path, input_text, max_new_tokens)
 
 
 class _InProcessCapture:
@@ -1857,26 +6414,68 @@ class _InProcessCapture:
             "AUDIO", {"waveform": waveform, "sample_rate": sample_rate}))  # type: ignore[return-value]
 
 
+def _image_metadata_owner(
+    prompt: Any = None,
+    extra_pnginfo: Any = None,
+    *,
+    include_execution_metadata: bool = True,
+    extra_metadata: Optional[dict[str, Any]] = None,
+):
+    """Build the small object expected by ComfyUI's image save helpers.
+
+    The broker owns prompt/workflow injection. Nodes may add ordinary JSON
+    fields, but never receive the hidden execution metadata merely to save it
+    again.
+    """
+    import json
+    from types import SimpleNamespace
+
+    if extra_metadata is not None and not isinstance(extra_metadata, dict):
+        raise TypeError("extra image metadata must be a mapping")
+    try:
+        encoded = json.dumps(extra_metadata or {}, allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise ValueError("extra image metadata must be JSON-compatible") from error
+    if len(encoded.encode("utf-8")) > 1024 * 1024:
+        raise ValueError("extra image metadata exceeds 1 MiB")
+    normalized_extra = json.loads(encoded)
+
+    metadata = {}
+    if include_execution_metadata and isinstance(extra_pnginfo, dict):
+        metadata.update(extra_pnginfo)
+    metadata.update(normalized_extra)
+    hidden = SimpleNamespace(
+        prompt=prompt if include_execution_metadata else None,
+        extra_pnginfo=metadata or None,
+    )
+    return SimpleNamespace(hidden=hidden)
+
+
 class _InProcessUi:
+    def __init__(self, prompt: Any = None, extra_pnginfo: Any = None) -> None:
+        self._metadata_owner = _image_metadata_owner(prompt, extra_pnginfo)
+
     async def preview_images(self, images: ImageRef,
                              animated: bool = False) -> dict:
         from ._ui import PreviewImage
 
         value = await current_runtime().refs.resolve(images)
-        return PreviewImage(value, animated=animated).as_dict()
+        return PreviewImage(
+            value, animated=animated, cls=self._metadata_owner).as_dict()
 
     async def preview_mask(self, mask: MaskRef,
                            animated: bool = False) -> dict:
         from ._ui import PreviewMask
 
         value = await current_runtime().refs.resolve(mask)
-        return PreviewMask(value, animated=animated).as_dict()
+        return PreviewMask(
+            value, animated=animated, cls=self._metadata_owner).as_dict()
 
     async def preview_audio(self, audio: AudioRef) -> dict:
         from ._ui import PreviewAudio
 
         value = await current_runtime().refs.resolve(audio)
-        return PreviewAudio(value).as_dict()
+        return PreviewAudio(value, cls=self._metadata_owner).as_dict()
 
     async def preview_animation(
         self, images: ImageRef, fps: float = 8.0,
@@ -1896,7 +6495,8 @@ class _InProcessUi:
             random.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(5))
         result = ImageSaveHelper.save_animated_webp(
             value, filename_prefix=prefix, folder_type=FolderType.temp,
-            cls=None, fps=rate, lossless=False, quality=50, method=0)
+            cls=self._metadata_owner, fps=rate, lossless=False, quality=50,
+            method=0)
         return SavedImages(
             [result], is_animated=len(value) != 1).as_dict() | {
                 "text": [
@@ -2045,12 +6645,24 @@ class _InProcessOutput:
         ".txt", ".caption", ".json", ".yaml", ".yml", ".md", ".csv",
         ".tsv", ".xml", ".log", ".ini", ".toml",
     })
+    _STILL_FORMATS = {
+        "png": ("PNG", frozenset({".png"}), ".png"),
+        "jpg": ("JPEG", frozenset({".jpg", ".jpeg"}), ".jpg"),
+        "jpeg": ("JPEG", frozenset({".jpg", ".jpeg"}), ".jpg"),
+        "webp": ("WEBP", frozenset({".webp"}), ".webp"),
+        "j2k": ("JPEG2000", frozenset({".j2k", ".jp2"}), ".j2k"),
+        "jp2": ("JPEG2000", frozenset({".j2k", ".jp2"}), ".jp2"),
+        "gif": ("GIF", frozenset({".gif"}), ".gif"),
+        "tiff": ("TIFF", frozenset({".tiff"}), ".tiff"),
+        "bmp": ("BMP", frozenset({".bmp"}), ".bmp"),
+        "avif": ("AVIF", frozenset({".avif"}), ".avif"),
+    }
+    _IMAGE_BATCH_MAX = 4096
 
     def __init__(self, prompt: Any = None, extra_pnginfo: Any = None) -> None:
-        from types import SimpleNamespace
-
-        hidden = SimpleNamespace(prompt=prompt, extra_pnginfo=extra_pnginfo)
-        self._metadata_owner = SimpleNamespace(hidden=hidden)
+        self._prompt = prompt
+        self._extra_pnginfo = extra_pnginfo
+        self._metadata_owner = _image_metadata_owner(prompt, extra_pnginfo)
 
     @staticmethod
     def _prefix(filename_prefix: str, subfolder: str) -> str:
@@ -2080,23 +6692,251 @@ class _InProcessOutput:
                 f"choose one of {allowed}")
         return extension
 
+    @classmethod
+    def _still_format(cls, value: str) -> tuple[str, frozenset[str], str]:
+        key = str(value).lower()
+        result = cls._STILL_FORMATS.get(key)
+        if result is None:
+            allowed = ", ".join(cls._STILL_FORMATS)
+            raise ValueError(
+                f"still-image format {value!r} is not supported; "
+                f"choose one of {allowed}")
+        return result
+
+    @staticmethod
+    def _logical_output_target(
+        output_dir: str, filename: str, suffixes: frozenset[str],
+    ) -> tuple[str, str, str, str]:
+        """Validate one exact logical filename and resolve its confined target."""
+        logical = str(filename).replace("\\", "/")
+        if (
+            not logical or "\x00" in logical or logical.startswith("/")
+            or re.match(r"^[A-Za-z]:($|/)", logical)
+            or len(logical.encode("utf-8")) > 1024
+        ):
+            raise ValueError("image filename must be a bounded relative path")
+        parts = logical.split("/")
+        if (
+            len(parts) > 32
+            or any(part in {"", ".", ".."} for part in parts)
+            or any(len(part.encode("utf-8")) > 255 for part in parts)
+        ):
+            raise ValueError("image filename contains an unsafe path component")
+        suffix = os.path.splitext(parts[-1])[1].lower()
+        if suffix not in suffixes:
+            expected = ", ".join(sorted(suffixes))
+            raise ValueError(
+                f"image filename suffix {suffix!r} does not match "
+                f"the selected format ({expected})")
+
+        root = os.path.realpath(os.path.abspath(output_dir))
+        parent = os.path.realpath(os.path.join(root, *parts[:-1]))
+        try:
+            confined_parent = os.path.commonpath((root, parent)) == root
+        except ValueError:
+            confined_parent = False
+        if not confined_parent:
+            raise ValueError("image filename escapes the output directory")
+        os.makedirs(parent, exist_ok=True)
+        # Resolve once more after creation so an existing symlinked component
+        # cannot turn a relative name into ambient filesystem authority.
+        parent = os.path.realpath(os.path.join(root, *parts[:-1]))
+        target = os.path.realpath(os.path.join(parent, parts[-1]))
+        try:
+            confined_target = os.path.commonpath((root, target)) == root
+        except ValueError:
+            confined_target = False
+        if not confined_target:
+            raise ValueError("image filename escapes the output directory")
+        subfolder = "/".join(parts[:-1])
+        return target, logical, parts[-1], subfolder
+
+    @staticmethod
+    def _save_pil_exclusive(rendered: Any, target: str, format: str,
+                            options: dict[str, Any]) -> None:
+        """Encode beside the destination, then publish without overwriting."""
+        import tempfile
+
+        parent = os.path.dirname(target)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".comfy-image-", suffix=".tmp", dir=parent)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                rendered.save(stream, format=format, **options)
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, target)
+            except FileExistsError as error:
+                raise FileExistsError(
+                    f"output image already exists: "
+                    f"{os.path.basename(target)!r}") from error
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
     async def save_images(
         self, images: ImageRef, filename_prefix: str = "ComfyUI",
         subfolder: str = "", compress_level: int = 4,
         caption: Optional[str] = None,
         caption_extension: str = ".txt",
+        save_metadata: bool = True,
+        extra_metadata: Optional[dict[str, Any]] = None,
+        image_format: str = "png", quality: int = 95,
+        filenames: Optional[list[str]] = None,
+        lossless: bool = False, optimize: bool = False,
     ) -> dict:
+        import numpy as np
+        from PIL import Image as PILImage
         import folder_paths
         from ._io import FolderType
-        from ._ui import ImageSaveHelper, SavedImages
+        from ._ui import ImageSaveHelper, SavedImages, SavedResult
 
         value = await current_runtime().refs.resolve(images)
-        prefix = self._prefix(filename_prefix, subfolder)
+        if not hasattr(value, "ndim") or int(value.ndim) != 4:
+            raise TypeError("saved IMAGE must contain a BHWC tensor")
+        batch_size = int(value.shape[0])
+        if not 1 <= batch_size <= self._IMAGE_BATCH_MAX:
+            raise ValueError(
+                f"saved IMAGE batch must be in [1, {self._IMAGE_BATCH_MAX}]")
+        if int(value.shape[-1]) not in (1, 3, 4):
+            raise ValueError("saved IMAGE must have 1, 3, or 4 channels")
         level = int(compress_level)
         if not 0 <= level <= 9:
             raise ValueError("PNG compression level must be in [0, 9]")
-        results = ImageSaveHelper.save_images(
-            value, prefix, FolderType.output, self._metadata_owner, level)
+        pil_format, allowed_suffixes, default_suffix = self._still_format(
+            image_format)
+        quality = int(quality)
+        if not 1 <= quality <= 100:
+            raise ValueError("image quality must be in [1, 100]")
+        if type(lossless) is not bool or type(optimize) is not bool:
+            raise TypeError("lossless and optimize must be booleans")
+        metadata_owner = _image_metadata_owner(
+            self._prompt,
+            self._extra_pnginfo,
+            include_execution_metadata=bool(save_metadata),
+            extra_metadata=extra_metadata,
+        )
+        output_dir = folder_paths.get_output_directory()
+        requested: list[tuple[str, str, str, str]] = []
+        if filenames is not None:
+            if not isinstance(filenames, (list, tuple)):
+                raise TypeError("image filenames must be a sequence of strings")
+            if len(filenames) != batch_size:
+                raise ValueError(
+                    "image filenames length must equal the IMAGE batch size")
+            if any(not isinstance(name, str) for name in filenames):
+                raise TypeError("every image filename must be a string")
+            requested = [
+                self._logical_output_target(output_dir, name, allowed_suffixes)
+                for name in filenames
+            ]
+            targets = [entry[0] for entry in requested]
+            if len(set(targets)) != len(targets):
+                raise ValueError("image filenames must be unique within a batch")
+            if any(os.path.lexists(target) for target in targets):
+                raise FileExistsError("an exact output image already exists")
+        else:
+            prefix = self._prefix(filename_prefix, subfolder)
+            full_folder, filename, counter, saved_subfolder, _ = (
+                folder_paths.get_save_image_path(
+                    prefix, folder_paths.get_output_directory(),
+                    value[0].shape[1], value[0].shape[0]))
+            for batch_number in range(batch_size):
+                batch_name = filename.replace(
+                    "%batch_num%", str(batch_number))
+                file = f"{batch_name}_{counter:05}_{default_suffix}"
+                logical = (
+                    f"{str(saved_subfolder).replace(os.sep, '/')}/{file}"
+                    if saved_subfolder else file)
+                requested.append(self._logical_output_target(
+                    output_dir, logical, allowed_suffixes))
+                counter += 1
+
+        results = []
+        png_metadata = ImageSaveHelper._create_png_metadata(metadata_owner)
+        for image, (target, _logical, file, saved_subfolder) in zip(
+                value, requested):
+            array = np.clip(
+                255.0 * image.detach().cpu().numpy(), 0, 255
+            ).astype(np.uint8)
+            if array.shape[-1] == 1:
+                array = array[..., 0]
+            rendered = PILImage.fromarray(array)
+            options: dict[str, Any] = {}
+            if pil_format in {"JPEG", "JPEG2000"} and rendered.mode != "RGB":
+                rendered = rendered.convert("RGB")
+            if pil_format in {"PNG", "GIF"}:
+                if png_metadata is not None:
+                    options["pnginfo"] = png_metadata
+                options["optimize"] = optimize
+                if pil_format == "PNG":
+                    options["compress_level"] = level
+            elif pil_format == "JPEG":
+                options.update(
+                    quality=quality, optimize=optimize, subsampling=0)
+            elif pil_format in {"WEBP", "AVIF"}:
+                options.update(
+                    quality=quality, lossless=lossless, optimize=optimize)
+            elif pil_format == "JPEG2000":
+                options["irreversible"] = not lossless
+            elif pil_format == "TIFF":
+                options["optimize"] = optimize
+
+            if pil_format in {"WEBP", "AVIF", "JPEG2000", "TIFF"}:
+                exif = ImageSaveHelper._create_webp_metadata(
+                    rendered, metadata_owner)
+                if len(exif):
+                    options["exif"] = exif.tobytes()
+            if pil_format == "JPEG":
+                # JPEG has a hard one-segment EXIF ceiling. Trusted workflow
+                # data can legitimately exceed it, so degrade metadata without
+                # failing the user's image save: prompt first, then broker
+                # workflow/extra data, then pack metadata. PNG/WebP keep their
+                # full metadata behavior.
+                owners = [metadata_owner]
+                if bool(save_metadata):
+                    owners.extend((
+                        _image_metadata_owner(
+                            None,
+                            self._extra_pnginfo,
+                            include_execution_metadata=True,
+                            extra_metadata=extra_metadata,
+                        ),
+                        _image_metadata_owner(
+                            None,
+                            None,
+                            include_execution_metadata=False,
+                            extra_metadata=extra_metadata,
+                        ),
+                    ))
+                owners.append(None)
+                for owner in owners:
+                    try:
+                        jpeg_options = dict(options)
+                        if owner is not None:
+                            exif = ImageSaveHelper._create_webp_metadata(
+                                rendered.copy(), owner)
+                            if len(exif):
+                                jpeg_options["exif"] = exif.tobytes()
+                        self._save_pil_exclusive(
+                            rendered, target, pil_format, jpeg_options)
+                        break
+                    except ValueError as error:
+                        if "exif data is too long" not in str(error).lower():
+                            raise
+                else:  # the final no-EXIF attempt should make this unreachable
+                    raise RuntimeError("JPEG image could not be encoded")
+            else:
+                self._save_pil_exclusive(
+                    rendered, target, pil_format, options)
+            results.append(SavedResult(
+                file, saved_subfolder, FolderType.output))
         if caption is not None:
             extension = self._extension(caption_extension)
             output_dir = os.path.abspath(folder_paths.get_output_directory())
@@ -2175,6 +7015,195 @@ class _InProcessOutput:
         with open(target, "w", encoding="utf-8") as stream:
             stream.write(str(text))
         return os.path.join(saved_subfolder, file) if saved_subfolder else file
+
+    async def write_text(
+        self, text: str, filename: str, folder: str = "output",
+        mode: str = "overwrite", insert_newline: bool = False,
+    ) -> str:
+        """Write a specifically named text artifact inside output or temp."""
+        import folder_paths
+
+        roots = {
+            "output": folder_paths.get_output_directory,
+            "temp": folder_paths.get_temp_directory,
+        }
+        if folder not in roots:
+            raise ValueError("text writes are limited to output or temp")
+        if mode not in {"append", "overwrite", "new_only"}:
+            raise ValueError("text write mode must be append, overwrite, or new_only")
+        if not isinstance(insert_newline, bool):
+            raise TypeError("insert_newline must be a boolean")
+        value = str(text)
+        if len(value.encode("utf-8")) > 16 * 1024 * 1024:
+            raise ValueError("text output exceeds the 16 MiB limit")
+
+        relative = os.path.normpath(str(filename))
+        if (os.path.isabs(relative) or relative in ("", ".", os.pardir)
+                or relative.startswith(os.pardir + os.sep)):
+            raise ValueError("text filename must stay inside its output folder")
+        self._extension(os.path.splitext(relative)[1])
+        root = os.path.realpath(os.path.abspath(roots[folder]()))
+        target = os.path.realpath(os.path.abspath(os.path.join(root, relative)))
+        if os.path.commonpath((root, target)) != root:
+            raise ValueError("text filename escapes its output folder")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+
+        if mode == "new_only":
+            with open(target, "x", encoding="utf-8") as stream:
+                stream.write(value)
+        elif mode == "append":
+            has_content = os.path.isfile(target) and os.path.getsize(target) > 0
+            with open(target, "a", encoding="utf-8") as stream:
+                if has_content and insert_newline:
+                    stream.write("\n")
+                stream.write(value)
+        else:
+            with open(target, "w", encoding="utf-8") as stream:
+                stream.write(value)
+        return relative.replace(os.sep, "/")
+
+    async def save_workflow_json(
+        self, filename: str, mode: str = "new_only",
+    ) -> str:
+        """Write the broker-owned active workflow without revealing it.
+
+        The guest chooses only the confined logical output name and collision
+        mode.  Prompt/workflow metadata remains on the trusted side.
+        """
+        import json
+
+        if not isinstance(self._extra_pnginfo, dict):
+            raise ValueError("this execution has no workflow metadata")
+        workflow = self._extra_pnginfo.get("workflow")
+        if not isinstance(workflow, dict):
+            raise ValueError("this execution has no workflow object")
+        try:
+            encoded = json.dumps(
+                workflow, ensure_ascii=False, allow_nan=False, indent=2)
+        except (TypeError, ValueError) as error:
+            raise ValueError("workflow metadata is not JSON-compatible") from error
+        if not str(filename).lower().endswith(".json"):
+            raise ValueError("workflow sidecars must use the .json extension")
+        return await self.write_text(
+            encoded, filename=str(filename), folder="output", mode=str(mode))
+
+    @staticmethod
+    def _latent_preview(samples: Any, preview_method: str):
+        """Render the sender's identifying preview without loading a model."""
+        import numpy as np
+        import torch
+        from PIL import Image as PILImage
+        import comfy.latent_formats as latent_formats
+        from latent_preview import Latent2RGBPreviewer
+
+        formats = {
+            "Latent2RGB-FLUX.1": latent_formats.Flux,
+            "Latent2RGB-SDXL": latent_formats.SDXL,
+            "Latent2RGB-SD15": latent_formats.SD15,
+            "Latent2RGB-SD3": latent_formats.SD3,
+            "Latent2RGB-SD-X4": latent_formats.SD_X4,
+            "Latent2RGB-Playground-2.5": latent_formats.SDXL_Playground_2_5,
+            "Latent2RGB-SC-Prior": latent_formats.SC_Prior,
+            "Latent2RGB-SC-B": latent_formats.SC_B,
+            "Latent2RGB-LTXV": latent_formats.LTXV,
+            # Impact's upstream implementation falls back to a linear preview
+            # for these labels when no approximate decoder is wired.
+            "TAEF1": latent_formats.Flux,
+            "TAESDXL": latent_formats.SDXL,
+            "TAESD15": latent_formats.SD15,
+            "TAESD3": latent_formats.SD3,
+        }
+        constructor = formats.get(str(preview_method))
+        if constructor is None:
+            allowed = ", ".join(sorted(formats))
+            raise ValueError(
+                f"unknown latent preview method {preview_method!r}; "
+                f"choose one of {allowed}")
+        latent_format = constructor()
+        try:
+            previewer = Latent2RGBPreviewer(
+                latent_format.latent_rgb_factors,
+                getattr(latent_format, "latent_rgb_factors_bias", None),
+                getattr(latent_format, "latent_rgb_factors_reshape", None),
+            )
+            image = previewer.decode_latent_to_preview(samples)
+        except Exception:
+            # Some third-party latent shapes do not have a matching published
+            # matrix.  The preview is identification only; keep sharing the
+            # latent and render a bounded normalized RGB projection.
+            value = samples
+            if value.ndim == 5:
+                value = value[:, :, 0]
+            value = value[0].detach().float().cpu()
+            if value.shape[0] < 3:
+                value = value.expand(3, *value.shape[1:])
+            value = value[:3].movedim(0, -1)
+            low, high = value.amin(), value.amax()
+            value = (value - low) / (high - low) if high > low else value * 0
+            image = PILImage.fromarray(
+                value.mul(255).clamp(0, 255).to(torch.uint8).numpy())
+        minimum, maximum = min(image.size), max(image.size)
+        scale = min(1.0, 256.0 / max(1, maximum))
+        if minimum * scale < 128:
+            scale = 128.0 / max(1, minimum)
+        size = tuple(max(1, int(round(axis * scale))) for axis in image.size)
+        if size != image.size:
+            image = image.resize(size, resample=PILImage.Resampling.NEAREST)
+        array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+        return torch.from_numpy(array).unsqueeze(0)
+
+    async def save_latent(
+        self, latent: LatentRef,
+        filename_prefix: str = "latents/LatentSender",
+        preview_method: str = "Latent2RGB-SDXL",
+    ) -> dict:
+        """Save a temporary, safely loadable latent plus a visual preview."""
+        import os
+        import torch
+        import comfy.utils
+        import folder_paths
+        from ._io import FolderType
+        from ._ui import ImageSaveHelper, SavedImages
+
+        if not isinstance(latent, Ref) or latent.kind != "LATENT":
+            raise TypeError("save_latent requires a LATENT ref")
+        value = await current_runtime().refs.resolve(latent)
+        if not isinstance(value, dict) or "samples" not in value:
+            raise ValueError("latent value has no samples tensor")
+        samples = value["samples"]
+        if not isinstance(samples, torch.Tensor) or samples.ndim not in (4, 5):
+            raise ValueError("latent samples must be a 4D or 5D tensor")
+        prefix = self._prefix(filename_prefix, "")
+        temp_dir = folder_paths.get_temp_directory()
+        full_folder, filename, counter, subfolder, _ = (
+            folder_paths.get_save_image_path(prefix, temp_dir))
+        file = f"{filename}_{counter:05}_.latent"
+        target = os.path.abspath(os.path.join(full_folder, file))
+        temp_root = os.path.abspath(temp_dir)
+        if os.path.commonpath((temp_root, target)) != temp_root:
+            raise ValueError("latent target escapes the temp directory")
+        comfy.utils.save_torch_file({
+            "latent_tensor": samples.detach().contiguous().cpu(),
+            "latent_format_version_0": torch.tensor([]),
+        }, target)
+        artifact = {
+            "filename": file,
+            "subfolder": subfolder,
+            "type": "temp",
+        }
+        preview = self._latent_preview(samples, str(preview_method))
+        previews = ImageSaveHelper.save_images(
+            preview,
+            f"{prefix}_preview",
+            FolderType.temp,
+            self._metadata_owner,
+            4,
+        )
+        return {
+            "latents": [artifact],
+            "images": SavedImages(previews).as_dict()["images"],
+            "artifact": artifact,
+        }
 
     async def save_state_dict(
         self, state_dict: ValueRef, filename_prefix: str,
@@ -2262,41 +7291,349 @@ class _InProcessOutput:
         finally:
             await rt.refs.release(state_ref)
 
+    @staticmethod
+    def _media_pixels(value: Any, operation: str):
+        import torch
+
+        if (not isinstance(value, torch.Tensor) or value.ndim != 4
+                or len(value) == 0 or value.shape[-1] < 3):
+            raise TypeError(f"{operation} needs non-empty BHWC image frames")
+        return value
+
+    def _media_target(
+        self, pixels: Any, filename_prefix: str, extension: str,
+        save_output: bool,
+    ) -> tuple[str, str, str, Any]:
+        import folder_paths
+        from ._io import FolderType
+
+        extension = str(extension).lower().lstrip(".")
+        if not extension or not extension.isalnum():
+            raise ValueError("media extension must be alphanumeric")
+        folder_type = FolderType.output if bool(save_output) else FolderType.temp
+        output_dir = os.path.abspath(
+            folder_paths.get_output_directory()
+            if folder_type == FolderType.output
+            else folder_paths.get_temp_directory())
+        prefix = self._prefix(filename_prefix, "")
+        full_folder, filename, counter, subfolder, _ = (
+            folder_paths.get_save_image_path(
+                prefix, output_dir, pixels.shape[2], pixels.shape[1]))
+        while True:
+            file = f"{filename}_{counter:05}_.{extension}"
+            target = os.path.abspath(os.path.join(full_folder, file))
+            if os.path.commonpath((output_dir, target)) != output_dir:
+                raise ValueError("media target escapes its managed directory")
+            if not os.path.exists(target):
+                return target, file, subfolder, folder_type
+            counter += 1
+
+    def _media_metadata(self, enabled: bool = True) -> Optional[dict[str, Any]]:
+        from comfy.cli_args import args
+
+        if not enabled or args.disable_metadata:
+            return None
+        values = {}
+        if self._metadata_owner.hidden.extra_pnginfo is not None:
+            values.update(self._metadata_owner.hidden.extra_pnginfo)
+        if self._metadata_owner.hidden.prompt is not None:
+            values["prompt"] = self._metadata_owner.hidden.prompt
+        return values or None
+
+    async def save_animation(
+        self, images: ImageRef, fps: float = 8.0,
+        filename_prefix: str = "animation/ComfyUI",
+        format: str = "webp", loop_count: int = 0,
+        lossless: bool = True, quality: int = 90,
+        save_output: bool = True,
+    ) -> dict:
+        import json
+        import math
+
+        import numpy as np
+        from PIL import Image as PILImage
+        from ._ui import SavedImages, SavedResult
+
+        rate = float(fps)
+        if not math.isfinite(rate) or not 0.01 <= rate <= 1000.0:
+            raise ValueError("animation fps must be finite and in [0.01, 1000]")
+        loops = int(loop_count)
+        if loops != loop_count or not 0 <= loops <= 100:
+            raise ValueError("animation loop_count must be an integer in [0, 100]")
+        quality_value = int(quality)
+        if quality_value != quality or not 0 <= quality_value <= 100:
+            raise ValueError("animation quality must be an integer in [0, 100]")
+        image_format = str(format).lower()
+        if image_format not in ("gif", "webp"):
+            raise ValueError("animation format must be 'gif' or 'webp'")
+
+        pixels = self._media_pixels(
+            await current_runtime().refs.resolve(images), "save_animation")
+        target, file, subfolder, folder_type = self._media_target(
+            pixels, filename_prefix, image_format, bool(save_output))
+        frames = []
+        for value in pixels:
+            array = np.clip(
+                value.detach().cpu().float().numpy() * 255.0,
+                0, 255).astype(np.uint8)
+            frames.append(PILImage.fromarray(
+                array[..., :4] if array.shape[-1] >= 4 else array[..., :3],
+                mode="RGBA" if array.shape[-1] >= 4 else "RGB"))
+        kwargs: dict[str, Any] = {
+            "save_all": True,
+            "append_images": frames[1:],
+            "duration": max(1, round(1000.0 / rate)),
+            "loop": loops,
+        }
+        metadata = self._media_metadata()
+        if image_format == "gif":
+            kwargs["disposal"] = 2
+            if metadata is not None:
+                kwargs["comment"] = json.dumps(
+                    metadata, separators=(",", ":"), default=str
+                ).encode("utf-8")[:65500]
+        else:
+            kwargs.update({
+                "lossless": bool(lossless),
+                "quality": quality_value,
+                "method": 4,
+            })
+            if metadata is not None:
+                exif = frames[0].getexif()
+                exif[0x0110] = "prompt:" + json.dumps(
+                    metadata, separators=(",", ":"), default=str)
+                kwargs["exif"] = exif
+        try:
+            frames[0].save(target, format=image_format.upper(), **kwargs)
+        except BaseException:
+            try:
+                os.unlink(target)
+            except FileNotFoundError:
+                pass
+            raise
+        return SavedImages([
+            SavedResult(file, subfolder, folder_type),
+        ], is_animated=len(frames) > 1).as_dict()
+
+    async def save_image_sequence(
+        self, images: ImageRef,
+        filename_prefix: str = "sequence/ComfyUI",
+        format: str = "png", bit_depth: int = 8,
+        save_output: bool = True,
+    ) -> dict:
+        import av
+        import folder_paths
+        import numpy as np
+        from PIL import Image as PILImage
+        from ._io import FolderType
+        from ._ui import ImageSaveHelper, SavedImages, SavedResult
+
+        if str(format).lower() != "png":
+            raise ValueError("image-sequence format must be 'png'")
+        depth = int(bit_depth)
+        if depth != bit_depth or depth not in (8, 16):
+            raise ValueError("PNG sequence bit_depth must be 8 or 16")
+        pixels = self._media_pixels(
+            await current_runtime().refs.resolve(images),
+            "save_image_sequence")
+        folder_type = FolderType.output if bool(save_output) else FolderType.temp
+        output_dir = os.path.abspath(
+            folder_paths.get_output_directory()
+            if folder_type == FolderType.output
+            else folder_paths.get_temp_directory())
+        prefix = self._prefix(filename_prefix, "")
+        full_folder, filename, counter, subfolder, _ = (
+            folder_paths.get_save_image_path(
+                prefix, output_dir, pixels.shape[2], pixels.shape[1]))
+        while True:
+            stem = f"{filename}_{counter:05}_"
+            first_target = os.path.abspath(os.path.join(
+                full_folder, f"{stem}001.png"))
+            if os.path.commonpath((output_dir, first_target)) != output_dir:
+                raise ValueError("image sequence escapes its managed directory")
+            if not os.path.exists(first_target):
+                break
+            counter += 1
+        results = []
+        created = []
+        metadata = ImageSaveHelper._create_png_metadata(self._metadata_owner)
+        try:
+            for index, value in enumerate(pixels, 1):
+                file = f"{stem}{index:03d}.png"
+                target = os.path.abspath(os.path.join(full_folder, file))
+                if os.path.commonpath((output_dir, target)) != output_dir:
+                    raise ValueError("image sequence escapes its managed directory")
+                array = np.clip(
+                    value.detach().cpu().float().numpy()
+                    * (65535.0 if depth == 16 else 255.0),
+                    0, 65535 if depth == 16 else 255)
+                array = array[..., :3].astype(
+                    np.uint16 if depth == 16 else np.uint8)
+                if depth == 8:
+                    PILImage.fromarray(array, mode="RGB").save(
+                        target, pnginfo=metadata, compress_level=4)
+                else:
+                    with av.open(target, mode="w", format="image2") as output:
+                        stream = output.add_stream("png", rate=1)
+                        stream.width = int(array.shape[1])
+                        stream.height = int(array.shape[0])
+                        stream.pix_fmt = "rgb48be"
+                        frame = av.VideoFrame.from_ndarray(
+                            array, format="rgb48le")
+                        for packet in stream.encode(frame):
+                            output.mux(packet)
+                        for packet in stream.encode(None):
+                            output.mux(packet)
+                created.append(target)
+                results.append(SavedResult(file, subfolder, folder_type))
+        except BaseException:
+            for target in created:
+                try:
+                    os.unlink(target)
+                except FileNotFoundError:
+                    pass
+            raise
+        pattern = f"{stem}%03d.png"
+        return SavedImages(results).as_dict() | {"pattern": pattern}
+
     async def save_video(
         self, images: ImageRef, audio: Optional[AudioRef] = None,
         fps: float = 25.0, filename_prefix: str = "video/ComfyUI",
         format: str = "auto", codec: str = "auto",
+        encoder_options: Optional[dict[str, Any]] = None,
+        loop_count: int = 0, bit_depth: int = 8,
+        save_output: bool = True, save_metadata: bool = True,
     ) -> dict:
+        import json
         import math
         from fractions import Fraction
 
+        import av
+        import numpy as np
         import torch
-        import folder_paths
-        from comfy.cli_args import args
-        from ._input_impl.video_types import VideoFromComponents
-        from ._io import FolderType
         from ._ui import PreviewVideo, SavedResult
-        from ._util.video_types import (
-            VideoCodec, VideoComponents, VideoContainer,
-        )
 
         rate = float(fps)
         if not math.isfinite(rate) or not 0.0 < rate <= 999.0:
             raise ValueError("video fps must be finite and in (0, 999]")
-        try:
-            container_type = VideoContainer(str(format))
-        except ValueError as exc:
-            raise ValueError(f"unsupported video format {format!r}") from exc
-        try:
-            codec_type = VideoCodec(str(codec))
-        except ValueError as exc:
-            raise ValueError(f"unsupported video codec {codec!r}") from exc
+        loops = int(loop_count)
+        if loops != loop_count or not 0 <= loops <= 100:
+            raise ValueError("video loop_count must be an integer in [0, 100]")
+        depth = int(bit_depth)
+        if depth != bit_depth or depth not in (8, 16):
+            raise ValueError("video bit_depth must be 8 or 16")
+        if encoder_options is None:
+            options: dict[str, Any] = {}
+        elif type(encoder_options) is dict:
+            options = dict(encoder_options)
+        else:
+            raise TypeError("video encoder_options must be a dictionary")
+        allowed_option_names = frozenset({
+            "pixel_format", "crf", "bitrate_kbps", "profile", "level",
+            "coder", "context", "gop_size", "slices", "slice_crc",
+        })
+        unknown = set(options) - allowed_option_names
+        if unknown:
+            raise ValueError(
+                "unsupported video encoder option(s): "
+                + ", ".join(sorted(map(str, unknown))))
+
+        containers = {
+            "mp4": ("mp4", "mp4"),
+            "webm": ("webm", "webm"),
+            "mkv": ("matroska", "mkv"),
+            "matroska": ("matroska", "mkv"),
+            "mov": ("mov", "mov"),
+        }
+        codecs = {
+            "h264": ("libx264", {"mp4"}, "yuv420p", {"yuv420p", "yuv420p10le"}),
+            "hevc": ("libx265", {"mp4"}, "yuv420p10le", {"yuv420p", "yuv420p10le"}),
+            "av1": ("libsvtav1", {"webm"}, "yuv420p", {"yuv420p", "yuv420p10le"}),
+            "vp9": ("libvpx-vp9", {"webm"}, "yuv420p", {"yuv420p", "yuva420p"}),
+            "prores": ("prores_ks", {"mov"}, "yuv422p10le", {"yuv422p10le", "yuv444p10le", "yuva444p10le"}),
+            "ffv1": ("ffv1", {"mkv"}, "rgba64le", {
+                "rgba64le", "bgra", "yuv420p", "yuv422p", "yuv444p",
+                "yuva420p", "yuva422p", "yuva444p", "yuv420p10le",
+                "yuv422p10le", "yuv444p10le", "yuv420p12le",
+                "yuv422p12le", "yuv444p12le", "yuv420p14le",
+                "yuv422p14le", "yuv444p14le", "yuv420p16le",
+                "yuv422p16le", "yuv444p16le", "gray", "gray10le",
+                "gray12le", "gray16le",
+            }),
+            "h264_nvenc": ("h264_nvenc", {"mp4"}, "yuv420p", {"yuv420p", "p010le"}),
+            "hevc_nvenc": ("hevc_nvenc", {"mp4"}, "yuv420p", {"yuv420p", "p010le"}),
+            "av1_nvenc": ("av1_nvenc", {"mp4"}, "yuv420p", {"yuv420p", "p010le"}),
+        }
+        codec_name = str(codec).lower()
+        container_name = str(format).lower()
+        if codec_name == "auto":
+            codec_name = {
+                "webm": "vp9", "mkv": "ffv1", "matroska": "ffv1",
+                "mov": "prores",
+            }.get(container_name, "h264")
+        if codec_name not in codecs:
+            raise ValueError(f"unsupported video codec {codec!r}")
+        if container_name == "auto":
+            container_name = {
+                "av1": "webm", "vp9": "webm", "ffv1": "mkv",
+                "prores": "mov",
+            }.get(codec_name, "mp4")
+        if container_name not in containers:
+            raise ValueError(f"unsupported video format {format!r}")
+        av_codec, compatible, default_pixel_format, allowed_pixel_formats = (
+            codecs[codec_name])
+        normalized_container = "mkv" if container_name == "matroska" else container_name
+        if normalized_container not in compatible:
+            raise ValueError(
+                f"video codec {codec_name!r} is not valid in "
+                f"{normalized_container!r}")
+        pixel_format = str(options.get(
+            "pixel_format", default_pixel_format)).lower()
+        if pixel_format not in allowed_pixel_formats:
+            raise ValueError(
+                f"pixel format {pixel_format!r} is not permitted for "
+                f"codec {codec_name!r}")
+
+        def integer_option(name: str, minimum: int, maximum: int) -> Optional[int]:
+            if name not in options:
+                return None
+            value = int(options[name])
+            if value != options[name] or not minimum <= value <= maximum:
+                raise ValueError(
+                    f"video encoder option {name} must be an integer in "
+                    f"[{minimum}, {maximum}]")
+            return value
+
+        crf = integer_option("crf", 0, 100)
+        bitrate_kbps = integer_option("bitrate_kbps", 1, 999000)
+        profile = str(options.get("profile", ""))
+        if profile and codec_name != "prores":
+            raise ValueError("video profile is currently supported only for ProRes")
+        profile_values = {"lt": 1, "standard": 2, "hq": 3, "4444": 4, "4444xq": 5}
+        if profile and profile not in profile_values:
+            raise ValueError("unknown ProRes profile")
+        ffv1_names = {"level", "coder", "context", "gop_size", "slices", "slice_crc"}
+        if set(options) & ffv1_names and codec_name != "ffv1":
+            raise ValueError("FFV1 tuning options require the ffv1 codec")
+        level = integer_option("level", 0, 3)
+        coder = integer_option("coder", 0, 2)
+        context_model = integer_option("context", 0, 1)
+        gop_size = integer_option("gop_size", 1, 300)
+        slices = integer_option("slices", 1, 30)
+        if slices is not None and slices not in {4, 6, 9, 12, 16, 20, 24, 30}:
+            raise ValueError("FFV1 slices must be one of 4, 6, 9, 12, 16, 20, 24, 30")
+        slice_crc = None
+        if "slice_crc" in options:
+            if type(options["slice_crc"]) is not bool:
+                raise TypeError("FFV1 slice_crc must be a boolean")
+            slice_crc = options["slice_crc"]
 
         rt = current_runtime()
-        pixels = await rt.refs.resolve(images)
-        if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
-                or len(pixels) == 0 or pixels.shape[-1] < 3):
-            raise TypeError("save_video needs non-empty BHWC image frames")
+        pixels = self._media_pixels(
+            await rt.refs.resolve(images), "save_video")
+        total_frames = len(pixels) * (loops + 1)
+        if total_frames > 1_000_000:
+            raise ValueError("video output is limited to 1,000,000 encoded frames")
         audio_value = None
         if audio is not None:
             audio_value = await rt.refs.resolve(audio)
@@ -2305,36 +7642,137 @@ class _InProcessOutput:
                     or "sample_rate" not in audio_value):
                 raise TypeError("save_video audio must contain waveform and sample_rate")
 
-        prefix = self._prefix(filename_prefix, "")
-        output_dir = os.path.abspath(folder_paths.get_output_directory())
-        full_folder, filename, counter, subfolder, _ = (
-            folder_paths.get_save_image_path(
-                prefix, output_dir, pixels.shape[2], pixels.shape[1]))
-        file = (
-            f"{filename}_{counter:05}_."
-            f"{VideoContainer.get_extension(container_type)}")
-        target = os.path.abspath(os.path.join(full_folder, file))
-        if os.path.commonpath((output_dir, target)) != output_dir:
-            raise ValueError("video target escapes the output directory")
-
-        metadata = None
-        if not args.disable_metadata:
-            values = {}
-            if self._metadata_owner.hidden.extra_pnginfo is not None:
-                values.update(self._metadata_owner.hidden.extra_pnginfo)
-            if self._metadata_owner.hidden.prompt is not None:
-                values["prompt"] = self._metadata_owner.hidden.prompt
-            if values:
-                metadata = values
-        video = VideoFromComponents(VideoComponents(
-            images=pixels,
-            audio=audio_value,
-            frame_rate=Fraction(rate),
-        ))
+        av_format, extension = containers[container_name]
+        target, file, subfolder, folder_type = self._media_target(
+            pixels, filename_prefix, extension, bool(save_output))
+        metadata = self._media_metadata(bool(save_metadata))
         try:
-            video.save_to(
-                target, format=container_type, codec=codec_type,
-                metadata=metadata)
+            try:
+                av.codec.Codec(av_codec, "w")
+            except Exception as exc:
+                raise RuntimeError(
+                    f"video encoder {av_codec!r} is unavailable on this host"
+                ) from exc
+            open_options = (
+                {"movflags": "use_metadata_tags"}
+                if normalized_container == "mp4" else None)
+            with av.open(
+                target, mode="w", format=av_format,
+                options=open_options,
+            ) as output:
+                if metadata is not None:
+                    for key, value in metadata.items():
+                        # Match ComfyUI's VideoFromComponents contract: every
+                        # metadata value is a JSON value, including strings.
+                        output.metadata[str(key)] = json.dumps(
+                            value, default=str)
+                frame_rate = Fraction(round(rate * 1000), 1000)
+                video_stream = output.add_stream(av_codec, rate=frame_rate)
+                width = int(pixels.shape[2])
+                height = int(pixels.shape[1])
+                alignment = 2 if any(
+                    marker in pixel_format
+                    for marker in ("420", "422", "p010")) else 1
+                encoded_width = width + (-width % alignment)
+                encoded_height = height + (-height % alignment)
+                video_stream.width = encoded_width
+                video_stream.height = encoded_height
+                video_stream.pix_fmt = pixel_format
+                stream_options = {}
+                if crf is not None:
+                    stream_options["crf"] = str(crf)
+                if profile:
+                    stream_options["profile"] = str(profile_values[profile])
+                for name, value in (
+                    ("level", level), ("coder", coder),
+                    ("context", context_model), ("g", gop_size),
+                    ("slices", slices),
+                ):
+                    if value is not None:
+                        stream_options[name] = str(value)
+                if slice_crc is not None:
+                    stream_options["slicecrc"] = "1" if slice_crc else "0"
+                if stream_options:
+                    video_stream.options = stream_options
+                if bitrate_kbps is not None:
+                    video_stream.bit_rate = bitrate_kbps * 1000
+
+                audio_stream = None
+                waveform = None
+                if audio_value is not None:
+                    sample_rate = int(audio_value["sample_rate"])
+                    if not 8000 <= sample_rate <= 192000:
+                        raise ValueError("audio sample_rate must be in [8000, 192000]")
+                    waveform = audio_value["waveform"]
+                    if (not isinstance(waveform, torch.Tensor)
+                            or waveform.ndim != 3 or len(waveform) == 0):
+                        raise TypeError("audio waveform must have shape [batch, channels, samples]")
+                    waveform = waveform[0].detach().cpu().float()
+                    channels = int(waveform.shape[0])
+                    layouts = {
+                        1: "mono", 2: "stereo", 3: "3.0", 4: "quad",
+                        5: "5.0", 6: "5.1", 7: "6.1", 8: "7.1",
+                    }
+                    if channels not in layouts:
+                        raise ValueError("audio must contain between 1 and 8 channels")
+                    audio_codec = {
+                        "webm": "libopus", "mkv": "flac", "mov": "pcm_s16le",
+                    }.get(normalized_container, "aac")
+                    audio_stream = output.add_stream(
+                        audio_codec, rate=sample_rate, layout=layouts[channels])
+
+                wants_alpha = pixel_format.startswith(("rgba", "bgra", "yuva"))
+                for _cycle in range(loops + 1):
+                    for value in pixels:
+                        array = value.detach().cpu().float().numpy()
+                        if wants_alpha:
+                            if array.shape[-1] < 4:
+                                alpha = np.ones((*array.shape[:2], 1), dtype=array.dtype)
+                                array = np.concatenate((array[..., :3], alpha), axis=-1)
+                            else:
+                                array = array[..., :4]
+                        else:
+                            array = array[..., :3]
+                        if encoded_width != width or encoded_height != height:
+                            array = np.pad(
+                                array,
+                                ((0, encoded_height - height),
+                                 (0, encoded_width - width), (0, 0)),
+                                mode="edge")
+                        maximum = 65535.0 if depth == 16 else 255.0
+                        array = np.clip(array * maximum, 0, maximum).astype(
+                            np.uint16 if depth == 16 else np.uint8)
+                        source_format = (
+                            "rgba64le" if wants_alpha else "rgb48le"
+                        ) if depth == 16 else (
+                            "rgba" if wants_alpha else "rgb24")
+                        frame = av.VideoFrame.from_ndarray(
+                            np.ascontiguousarray(array), format=source_format)
+                        frame = frame.reformat(
+                            width=encoded_width, height=encoded_height,
+                            format=pixel_format)
+                        for packet in video_stream.encode(frame):
+                            output.mux(packet)
+                for packet in video_stream.encode(None):
+                    output.mux(packet)
+
+                if audio_stream is not None and waveform is not None:
+                    sample_rate = int(audio_value["sample_rate"])
+                    required = math.ceil(total_frames * sample_rate / rate)
+                    if waveform.shape[1] < required:
+                        waveform = torch.nn.functional.pad(
+                            waveform, (0, required - waveform.shape[1]))
+                    else:
+                        waveform = waveform[:, :required]
+                    audio_frame = av.AudioFrame.from_ndarray(
+                        waveform.contiguous().numpy(), format="fltp",
+                        layout=audio_stream.layout.name)
+                    audio_frame.sample_rate = sample_rate
+                    audio_frame.pts = 0
+                    for packet in audio_stream.encode(audio_frame):
+                        output.mux(packet)
+                    for packet in audio_stream.encode(None):
+                        output.mux(packet)
         except BaseException:
             try:
                 os.unlink(target)
@@ -2342,18 +7780,19 @@ class _InProcessOutput:
                 pass
             raise
         return PreviewVideo([
-            SavedResult(file, subfolder, FolderType.output),
+            SavedResult(file, subfolder, folder_type),
         ]).as_dict()
 
 
 class _InProcessGraph:
     def __init__(self, current_node_id: str, prompt: Any = None,
-                 extra_pnginfo: Any = None) -> None:
+                 extra_pnginfo: Any = None, dynamic_prompt: Any = None) -> None:
         self._current_node_id = str(current_node_id)
         self._prompt = prompt if isinstance(prompt, dict) else {}
         self._workflow = (
             extra_pnginfo.get("workflow", {})
             if isinstance(extra_pnginfo, dict) else {})
+        self._dynamic_prompt = dynamic_prompt
 
     def _prompt_key(self, node_id: int | str) -> Optional[str]:
         wanted = str(node_id)
@@ -2367,6 +7806,275 @@ class _InProcessGraph:
         matches = [key for key in self._prompt if key.rsplit(":", 1)[-1] == wanted]
         return matches[0] if len(matches) == 1 else None
 
+    async def current_node_id(self) -> str:
+        """Return only this execution's node id, never the surrounding prompt."""
+        return self._current_node_id
+
+    async def input_label(
+        self, input_name: str, default: str = "",
+    ) -> str:
+        """Return one display label from this node's workflow metadata."""
+        input_name = str(input_name)
+        default = str(default)
+        if len(input_name) > 256 or len(default) > 256:
+            raise ValueError("graph input names and labels are limited to 256 characters")
+        candidates = list(self._workflow.get("nodes", []))
+        definitions = self._workflow.get("definitions", {})
+        for subgraph in definitions.get("subgraphs", []):
+            candidates.extend(subgraph.get("nodes", []))
+        wanted = self._current_node_id.rsplit(":", 1)[-1]
+        matches = [
+            node for node in candidates
+            if str(node.get("id")) in {self._current_node_id, wanted}
+        ]
+        if len(matches) != 1:
+            return default
+        for slot in matches[0].get("inputs", []):
+            if slot.get("name") == input_name:
+                label = slot.get("label")
+                if isinstance(label, str) and len(label) <= 256:
+                    return label
+                return default
+        return default
+
+    def _require_dynamic_prompt(self):
+        if self._dynamic_prompt is None:
+            raise RuntimeError(
+                "graph expansion requires ComfyUI's active dynamic prompt")
+        return self._dynamic_prompt
+
+    @staticmethod
+    def _expansion_link(value: Any, created: dict[str, Any]) -> Any:
+        if isinstance(value, dict) and set(value) == {"node", "output"}:
+            node_id = str(value["node"])
+            if node_id not in created:
+                raise KeyError(f"expansion references unknown node {node_id!r}")
+            index = int(value["output"])
+            if not 0 <= index <= 1024:
+                raise ValueError("expansion output index is out of range")
+            return created[node_id].out(index)
+        if isinstance(value, dict):
+            return {
+                key: _InProcessGraph._expansion_link(item, created)
+                for key, item in value.items()
+            }
+        if isinstance(value, tuple):
+            return tuple(
+                _InProcessGraph._expansion_link(item, created)
+                for item in value)
+        return value
+
+    async def expand_nodes(
+        self, nodes: list[dict[str, Any]], outputs: list[dict[str, Any]], *,
+        _external_node_types: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
+        """Build a bounded declarative graph expansion.
+
+        Normal specs remain confined to the caller's pack namespace. A spec
+        with ``clone_input`` may clone only the producer already wired directly
+        to that named input on the current node. ``CreateList`` is the sole
+        core node allowed in an expansion; it is a side-effect-free collection
+        primitive and lets pack-side orchestration collect cloned outputs.
+
+        ``_external_node_types`` is a trusted-host policy input, not part of the
+        guest API.  The Secure Nodes transport fills it only from exact
+        ``graph.expand.external:<node type>`` declarations after verifying that
+        each used target is another converted-pack proxy.  Keeping the policy
+        here lets pack code retain orchestration while preventing it from
+        selecting arbitrary host or legacy nodes.
+        """
+        dynprompt = self._require_dynamic_prompt()
+        if not isinstance(nodes, list) or not 1 <= len(nodes) <= 128:
+            raise ValueError("graph expansion must contain 1..128 nodes")
+        if not isinstance(outputs, list) or len(outputs) > 128:
+            raise ValueError("graph expansion has too many outputs")
+        if (not isinstance(_external_node_types, frozenset)
+                or len(_external_node_types) > 64
+                or not all(
+                    isinstance(item, str)
+                    and 1 <= len(item) <= 256
+                    and "\x00" not in item
+                    for item in _external_node_types
+                )):
+            raise ValueError("external expansion policy is invalid")
+        current = dynprompt.get_node(self._current_node_id)
+        current_type = str(current.get("class_type", ""))
+        namespace = current_type.split(" ", 1)[0]
+        if not namespace:
+            raise ValueError("current node has no expansion namespace")
+
+        from comfy_execution.graph_utils import GraphBuilder, is_link
+
+        graph = GraphBuilder()
+        created: dict[str, Any] = {}
+        clones: dict[str, tuple[dict[str, Any], str]] = {}
+        for spec in nodes:
+            if not isinstance(spec, dict):
+                raise TypeError("expansion node specs must be dictionaries")
+            local_id = str(spec.get("id", ""))
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", local_id):
+                raise ValueError(
+                    "expansion node ids must be bounded local identifiers")
+            if local_id in created:
+                raise ValueError(f"duplicate expansion node id {local_id!r}")
+
+            clone_input = spec.get("clone_input")
+            if clone_input is not None:
+                if set(spec) != {"id", "clone_input"}:
+                    raise ValueError(
+                        "clone specs accept only id and clone_input")
+                clone_input = str(clone_input)
+                if not re.fullmatch(r"[A-Za-z0-9_.* -]{1,256}", clone_input):
+                    raise ValueError("invalid cloned input name")
+                source = current.get("inputs", {}).get(clone_input)
+                if not is_link(source):
+                    raise ValueError(
+                        f"current input {clone_input!r} is not a direct link")
+                source_id = str(source[0])
+                if source_id == self._current_node_id:
+                    raise ValueError("an expansion cannot clone its current node")
+                source_node = dynprompt.get_node(source_id)
+                class_type = str(source_node.get("class_type", ""))
+                if not class_type or len(class_type) > 256:
+                    raise ValueError("linked producer has an invalid node type")
+                clones[local_id] = (source_node, source_id)
+            else:
+                class_type = str(spec.get("class_type", ""))
+                if (
+                    len(class_type) > 256
+                    or (
+                        not class_type.startswith(namespace + " ")
+                        and class_type != "CreateList"
+                        and class_type not in _external_node_types
+                    )
+                ):
+                    raise ValueError(
+                        "expansions may create only their own pack nodes or "
+                        "host-approved converted-pack nodes")
+            created[local_id] = graph.node(class_type, local_id)
+
+        for spec in nodes:
+            local_id = str(spec["id"])
+            target = created[local_id]
+            if local_id in clones:
+                source_node, source_id = clones[local_id]
+                inputs = source_node.get("inputs", {})
+                if not isinstance(inputs, dict) or len(inputs) > 256:
+                    raise ValueError(
+                        "linked producer inputs must be a bounded mapping")
+                for name, value in inputs.items():
+                    target.set_input(str(name), value)
+                target.set_override_display_id(
+                    str(dynprompt.get_display_node_id(source_id)))
+                continue
+            inputs = spec.get("inputs", {})
+            if not isinstance(inputs, dict) or len(inputs) > 256:
+                raise ValueError("expansion node inputs must be a bounded mapping")
+            for name, value in inputs.items():
+                name = str(name)
+                if not re.fullmatch(r"[A-Za-z0-9_.* -]{1,256}", name):
+                    raise ValueError("invalid expansion input name")
+                target.set_input(name, self._expansion_link(value, created))
+
+        result = [self._expansion_link(item, created) for item in outputs]
+        return {"result": result, "expand": graph.finalize()}
+
+    async def expand_loop(
+        self, flow: Any, values: list[Any],
+    ) -> dict[str, Any]:
+        """Clone the bounded body between a loop opener and this closer."""
+        from comfy_execution.graph_utils import GraphBuilder, is_link
+
+        dynprompt = self._require_dynamic_prompt()
+        if not is_link(flow) or int(flow[1]) != 0:
+            raise ValueError("loop flow must be the opener's raw output-0 link")
+        if not isinstance(values, list) or not 1 <= len(values) <= 100:
+            raise ValueError("loop expansion requires 1..100 carried values")
+        open_node = str(flow[0])
+        close_node = self._current_node_id
+        upstream: dict[str, list[str]] = {}
+        parent_ids: list[str] = []
+
+        def explore_dependencies(node_id: str) -> None:
+            node_info = dynprompt.get_node(node_id)
+            for value in node_info.get("inputs", {}).values():
+                if not is_link(value):
+                    continue
+                parent_id = str(value[0])
+                display_id = str(dynprompt.get_display_node_id(parent_id))
+                display_node = dynprompt.get_node(display_id)
+                if display_node.get("class_type") not in {
+                    "easy forLoopEnd", "easy whileLoopEnd",
+                }:
+                    parent_ids.append(display_id)
+                if parent_id not in upstream:
+                    upstream[parent_id] = []
+                    explore_dependencies(parent_id)
+                upstream[parent_id].append(node_id)
+
+        explore_dependencies(close_node)
+        parent_set = set(parent_ids)
+        try:
+            import nodes as comfy_nodes
+            original = dynprompt.get_original_prompt()
+            for output_id, node_info in original.items():
+                node_class = comfy_nodes.NODE_CLASS_MAPPINGS.get(
+                    node_info.get("class_type"))
+                if not bool(getattr(node_class, "OUTPUT_NODE", False)):
+                    continue
+                for value in node_info.get("inputs", {}).values():
+                    if not is_link(value) or value[0] not in parent_set:
+                        continue
+                    for parent_id in tuple(upstream):
+                        display_id = str(dynprompt.get_display_node_id(parent_id))
+                        if display_id == value[0] and output_id not in upstream[parent_id]:
+                            child = str(output_id)
+                            if "." in parent_id:
+                                parts = parent_id.split(".")
+                                parts[-1] = child
+                                child = ".".join(parts)
+                            upstream[parent_id].append(child)
+        except (ImportError, KeyError, TypeError):
+            pass
+
+        contained: dict[str, bool] = {}
+
+        def collect(node_id: str) -> None:
+            for child_id in upstream.get(node_id, ()):
+                if child_id not in contained:
+                    contained[child_id] = True
+                    collect(child_id)
+
+        collect(open_node)
+        contained[open_node] = True
+        contained[close_node] = True
+        if len(contained) > 512:
+            raise ValueError("loop body exceeds the 512-node expansion limit")
+
+        graph = GraphBuilder()
+        clones: dict[str, Any] = {}
+        for node_id in contained:
+            original_node = dynprompt.get_node(node_id)
+            clone_id = "Recurse" if node_id == close_node else node_id
+            clone = graph.node(original_node["class_type"], clone_id)
+            clone.set_override_display_id(node_id)
+            clones[node_id] = clone
+        for node_id, clone in clones.items():
+            original_node = dynprompt.get_node(node_id)
+            for name, value in original_node.get("inputs", {}).items():
+                if is_link(value) and str(value[0]) in clones:
+                    clone.set_input(name, clones[str(value[0])].out(int(value[1])))
+                else:
+                    clone.set_input(name, value)
+        opener = clones[open_node]
+        for index, value in enumerate(values):
+            opener.set_input(f"initial_value{index}", value)
+        recurse = clones[close_node]
+        return {
+            "result": [recurse.out(index) for index in range(len(values))],
+            "expand": graph.finalize(),
+        }
+
     def _id_for_title(self, title: str) -> Optional[int | str]:
         candidates = list(self._workflow.get("nodes", []))
         definitions = self._workflow.get("definitions", {})
@@ -2376,15 +8084,40 @@ class _InProcessGraph:
                    if node.get("title") == title]
         return matches[0] if len(matches) == 1 else None
 
+    def _id_for_name(self, name: str) -> Optional[int | str]:
+        """Resolve the visible type, S&R name, or title of one workflow node."""
+        candidates = list(self._workflow.get("nodes", []))
+        definitions = self._workflow.get("definitions", {})
+        for subgraph in definitions.get("subgraphs", []):
+            candidates.extend(subgraph.get("nodes", []))
+        matches = []
+        for node in candidates:
+            visible_name = node.get("type")
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                search_name = properties.get("Node name for S&R")
+                if isinstance(search_name, str) and search_name:
+                    visible_name = search_name
+            if visible_name == name or node.get("title") == name:
+                matches.append(node.get("id"))
+        unique = list(dict.fromkeys(matches))
+        return unique[0] if len(unique) == 1 else None
+
     async def widget_values(
         self, node_id: int | str = 0, node_title: str = "",
-        linked_input: str = "any_input",
+        node_name: str = "", linked_input: str = "any_input",
     ) -> dict[str, Any]:
         target = None
+        if node_title and node_name:
+            raise ValueError("choose node_title or node_name, not both")
         if node_title:
             target = self._id_for_title(str(node_title))
             if target is None:
                 raise KeyError(f"no unique workflow node titled {node_title!r}")
+        elif node_name:
+            target = self._id_for_name(str(node_name))
+            if target is None:
+                raise KeyError(f"no unique workflow node named {node_name!r}")
         elif str(node_id) not in ("", "0"):
             target = node_id
         else:
@@ -2395,6 +8128,12 @@ class _InProcessGraph:
                     f"input {linked_input!r} on node {self._current_node_id} "
                     "is not linked")
             target = link[0]
+        if self._dynamic_prompt is not None:
+            target_id = str(target)
+            if self._dynamic_prompt.has_node(target_id):
+                values = self._dynamic_prompt.get_node(target_id).get("inputs")
+                if isinstance(values, dict):
+                    return dict(values)
         key = self._prompt_key(target)
         if key is None:
             raise KeyError(f"node {target!r} is not present in this prompt")
@@ -2402,6 +8141,16 @@ class _InProcessGraph:
         if not isinstance(values, dict):
             raise KeyError(f"node {target!r} has no prompt inputs")
         return dict(values)
+
+    async def block(self, reason: Optional[str] = None) -> Any:
+        """Return ComfyUI's branch-local execution blocker."""
+        from comfy_execution.graph_utils import ExecutionBlocker
+
+        if reason is not None and not isinstance(reason, str):
+            raise TypeError("execution blocker reason must be a string or None")
+        if isinstance(reason, str) and len(reason) > 4096:
+            raise ValueError("execution blocker reason exceeds 4096 characters")
+        return ExecutionBlocker(reason)
 
 
 class _InProcessProgress:
@@ -2412,8 +8161,40 @@ class _InProcessProgress:
                      preview: Optional[ImageRef] = None) -> None:
         from comfy.utils import ProgressBar  # lazy
 
+        preview_value = None
+        if preview is not None:
+            if not isinstance(preview, Ref) or preview.kind != "IMAGE":
+                raise TypeError("progress preview must be an IMAGE ref")
+            import numpy as np
+            import torch
+            from PIL import Image
+            from comfy.cli_args import args
+
+            image = torch.as_tensor(
+                await current_runtime().refs.resolve(preview)).detach()
+            if image.ndim == 4:
+                if image.shape[0] < 1:
+                    raise ValueError("progress preview image batch is empty")
+                image = image[0]
+            if image.ndim != 3 or image.shape[-1] not in (1, 3, 4):
+                raise ValueError(
+                    "progress preview must have HWC or BHWC image layout")
+            if image.shape[0] < 1 or image.shape[1] < 1:
+                raise ValueError("progress preview image is empty")
+            if image.numel() > 128 * 1024 * 1024:
+                raise ValueError("progress preview image is too large")
+            image = image.to(device="cpu", dtype=torch.float32)
+            image = torch.nan_to_num(image).clamp(0.0, 1.0)
+            array = (image * 255.0).round().to(torch.uint8).numpy()
+            if array.shape[-1] == 1:
+                array = np.squeeze(array, axis=-1)
+            preview_value = (
+                "PNG",
+                Image.fromarray(array),
+                args.preview_size,
+            )
         pb = ProgressBar(total, node_id=self._node_id)
-        pb.update_absolute(value, total)
+        pb.update_absolute(value, total, preview=preview_value)
 
 
 class _InProcessScratch:
@@ -2432,6 +8213,71 @@ class _InProcessEvents:
             inst.send_sync(event, data)
 
 
+class _InProcessExecution:
+    """Prompt-scoped execution control for nodes whose purpose is to stop."""
+
+    def __init__(self, prompt_id: str) -> None:
+        self._prompt_id = str(prompt_id)
+
+    async def interrupt(self) -> bool:
+        from server import PromptServer
+
+        instance = getattr(PromptServer, "instance", None)
+        queue = getattr(instance, "prompt_queue", None)
+        targeted = getattr(queue, "interrupt_if_running", None)
+        if callable(targeted):
+            return bool(targeted(self._prompt_id))
+
+        # Embedded/in-process hosts may not own a PromptQueue. In that case
+        # this context itself is the only active execution owner.
+        import nodes
+
+        nodes.interrupt_processing()
+        return True
+
+
+class _InProcessSystem:
+    async def stats(self) -> dict[str, Any]:
+        """Return the bounded resource totals already exposed by ComfyUI."""
+        import comfy.model_management as model_management
+
+        primary = model_management.get_torch_device()
+        cpu = model_management.torch.device("cpu")
+        devices = list(model_management.get_all_torch_devices())
+        if primary in devices:
+            devices = [primary, *(device for device in devices if device != primary)]
+        else:
+            devices.insert(0, primary)
+
+        entries = []
+        for device in devices:
+            total, torch_total = model_management.get_total_memory(
+                device, torch_total_too=True)
+            free, torch_free = model_management.get_free_memory(
+                device, torch_free_too=True)
+            entries.append({
+                "name": model_management.get_torch_device_name(device),
+                "type": device.type,
+                "index": device.index,
+                "vram_total": int(total),
+                "vram_free": int(free),
+                "torch_vram_total": int(torch_total),
+                "torch_vram_free": int(torch_free),
+            })
+        return {
+            "system": {
+                "ram_total": int(model_management.get_total_memory(cpu)),
+                "ram_free": int(model_management.get_free_memory(cpu)),
+            },
+            "devices": entries,
+        }
+
+    async def monitor(self) -> dict[str, Any]:
+        from comfy.system_monitor import get_system_monitor_snapshot
+
+        return get_system_monitor_snapshot()
+
+
 class _StubDomain:
     def __init__(self, name: str) -> None:
         self._name = name
@@ -2442,6 +8288,954 @@ class _StubDomain:
             f"implemented by the in-process default. Provided by the full SDK / "
             f"overlay."
         )
+
+
+class _InProcessClosures:
+    """Trusted/default execution of the same closed node-closure contract.
+
+    The isolated overlay supplies the prompt-scoped process boundary.  The
+    ordinary in-process SDK needs the author surface to remain functional too;
+    here the resolver owns the entry and the cloned model owns the callback,
+    matching normal ComfyUI custom-node lifetime.
+    """
+
+    async def retain(self, kind: str, fn: Callable, *, captures=None):
+        from . import _node_closures
+
+        if not callable(fn):
+            raise TypeError("a node closure needs a callable")
+        spec = _node_closures.get_kind(kind)
+        declared = spec.validate_captures(captures)
+        resolved = {}
+        for name, value in declared.items():
+            if isinstance(value, list):
+                resolved[name] = [
+                    await current_runtime().refs.resolve(item) for item in value
+                ]
+            elif value is not None:
+                resolved[name] = await current_runtime().refs.resolve(value)
+        return ClosureRef._wrap(await current_runtime().refs.create(
+            "CLOSURE", {
+                "kind": kind,
+                "fn": fn,
+                "captures": resolved,
+            },
+        ))
+
+    async def attach_model(self, closure: ClosureRef, model: ModelRef):
+        if not isinstance(closure, ClosureRef):
+            raise TypeError("closure must be a typed CLOSURE ref")
+        if not isinstance(model, ModelRef):
+            raise TypeError("model must be a typed MODEL ref")
+        entry = await current_runtime().refs.resolve(closure)
+        kind = entry.get("kind")
+        if kind not in {
+            "post_cfg", "pre_cfg", "conditioning_selection",
+            "conditioning_preprocess",
+            "model_input_block", "model_middle_block", "model_output_block",
+        }:
+            raise ValueError(
+                "this node closure kind cannot attach to a model")
+        model_obj = await current_runtime().refs.resolve(model)
+        fn = entry["fn"]
+        if kind in {
+            "model_input_block", "model_middle_block", "model_output_block",
+        }:
+            import torch
+            from comfy.ldm.modules.diffusionmodules.openaimodel import UNetModel
+
+            if not hasattr(model_obj, "clone") or not hasattr(
+                model_obj, "get_model_object"
+            ):
+                raise TypeError(
+                    "MODEL does not expose a canonical diffusion model")
+            diffusion = model_obj.get_model_object("diffusion_model")
+            if not isinstance(diffusion, UNetModel):
+                raise TypeError(
+                    "model block closures support only canonical 2D UNetModel")
+            input_count = len(diffusion.input_blocks)
+            output_count = len(diffusion.output_blocks)
+            if input_count + output_count + 1 > 256:
+                raise ValueError(
+                    "canonical UNet exposes more than 256 block hooks")
+            hook_names = {
+                "model_input_block": "set_model_input_block_patch",
+                "model_middle_block": "set_model_middle_block_after_patch",
+                "model_output_block": "set_model_output_block_patch",
+            }
+            hook_name = hook_names[kind]
+            if not hasattr(model_obj, hook_name):
+                raise TypeError(
+                    f"MODEL does not expose the canonical {kind} hook")
+
+            def block_metadata(options, phase, count):
+                sigmas = options.get("sigmas")
+                if not isinstance(sigmas, torch.Tensor) or sigmas.numel() < 1:
+                    raise TypeError("model block hook sigmas must be nonempty")
+                block = options.get("block")
+                if not (
+                    isinstance(block, tuple)
+                    and len(block) == 2
+                    and block[0] == phase
+                    and isinstance(block[1], int)
+                    and not isinstance(block[1], bool)
+                    and 0 <= block[1] < count
+                ):
+                    raise TypeError(
+                        f"model block hook has invalid {phase} block metadata")
+                return sigmas, int(block[1])
+
+            def validate(actual, expected):
+                if expected is None:
+                    if actual is not None:
+                        raise TypeError(
+                            f"{kind} node closure changed a None skip")
+                    return
+                if isinstance(expected, tuple):
+                    if not isinstance(actual, tuple) or len(actual) != len(expected):
+                        raise TypeError(
+                            f"{kind} node closure must preserve its tensor pair")
+                    for value, original in zip(
+                        actual, expected, strict=True
+                    ):
+                        validate(value, original)
+                    return
+                if not (
+                    isinstance(actual, torch.Tensor)
+                    and tuple(actual.shape) == tuple(expected.shape)
+                    and actual.dtype == expected.dtype
+                    and str(actual.device) == str(expected.device)
+                ):
+                    raise TypeError(
+                        f"{kind} node closure must preserve shape, dtype, "
+                        "and device")
+
+            def input_block(hidden, options):
+                sigmas, index = block_metadata(
+                    options, "input", input_count)
+                result = fn(hidden, sigmas, index)
+                if isinstance(result, Awaitable):
+                    raise TypeError(
+                        "model-block closures must be synchronous")
+                validate(result, hidden)
+                return result
+
+            def middle_block(args):
+                sigmas, index = block_metadata(
+                    args["transformer_options"], "middle", 1)
+                result = fn(args["h"], sigmas, index)
+                if isinstance(result, Awaitable):
+                    raise TypeError(
+                        "model-block closures must be synchronous")
+                validate(result, args["h"])
+                return {"h": result}
+
+            def output_block(hidden, skip, options):
+                sigmas, index = block_metadata(
+                    options, "output", output_count)
+                result = fn(hidden, skip, sigmas, index)
+                if isinstance(result, Awaitable):
+                    raise TypeError(
+                        "model-block closures must be synchronous")
+                validate(result, (hidden, skip))
+                return result
+
+            patched = model_obj.clone()
+            getattr(patched, hook_name)({
+                "model_input_block": input_block,
+                "model_middle_block": middle_block,
+                "model_output_block": output_block,
+            }[kind])
+            return ModelRef._wrap(await current_runtime().refs.create(
+                "MODEL", patched))
+
+        if kind == "conditioning_selection":
+            from comfy.samplers import calc_cond_batch
+
+            if not hasattr(model_obj, "clone") or not hasattr(
+                model_obj, "set_model_sampler_calc_cond_batch_function"
+            ):
+                raise TypeError(
+                    "MODEL does not expose conditional-batch selection")
+            patched = model_obj.clone()
+            previous = patched.model_options.get(
+                "sampler_calc_cond_batch_function")
+
+            def select_conditioning(args):
+                presence = [value is not None for value in args["conds"]]
+                sigma = args["sigma"]
+                if hasattr(sigma, "reshape"):
+                    sigma = sigma.reshape(-1)[0]
+                if hasattr(sigma, "item"):
+                    sigma = sigma.item()
+                selected = fn(presence, float(sigma))
+                if isinstance(selected, Awaitable):
+                    raise TypeError(
+                        "conditioning-selection closures must be synchronous")
+                if (
+                    not isinstance(selected, list)
+                    or len(selected) != len(presence)
+                    or not all(type(value) is bool for value in selected)
+                    or any(value and not original for value, original in zip(
+                        selected, presence, strict=True))
+                ):
+                    raise TypeError(
+                        "conditioning-selection closure returned invalid presence")
+                next_args = dict(args)
+                next_args["conds"] = [
+                    value if keep else None
+                    for value, keep in zip(args["conds"], selected, strict=True)
+                ]
+                if previous is not None:
+                    return previous(next_args)
+                return calc_cond_batch(
+                    next_args["model"], next_args["conds"],
+                    next_args["input"], next_args["sigma"],
+                    next_args["model_options"],
+                )
+
+            patched.set_model_sampler_calc_cond_batch_function(
+                select_conditioning)
+            return ModelRef._wrap(await current_runtime().refs.create(
+                "MODEL", patched))
+
+        if kind == "conditioning_preprocess":
+            import copy
+            import torch
+            from comfy.samplers import calc_cond_batch
+
+            if not hasattr(model_obj, "clone") or not hasattr(
+                model_obj, "set_model_sampler_calc_cond_batch_function"
+            ):
+                raise TypeError(
+                    "MODEL does not expose conditional-batch preprocessing")
+            patched = model_obj.clone()
+            previous = patched.model_options.get(
+                "sampler_calc_cond_batch_function")
+
+            def preprocess_conditioning(args):
+                conds = copy.deepcopy(args["conds"])
+                selected = []
+                for cond in conds:
+                    if cond is None:
+                        continue
+                    for item in cond:
+                        model_conds = item.get("model_conds", {})
+                        for key, wrapper in model_conds.items():
+                            if key not in {"c_concat", "c_crossattn"}:
+                                continue
+                            tensor = getattr(wrapper, "cond", None)
+                            if not isinstance(tensor, torch.Tensor) or not callable(
+                                getattr(wrapper, "_copy_with", None)
+                            ):
+                                raise TypeError(
+                                    "conditioning preprocessing requires canonical "
+                                    "tensor conditioning wrappers")
+                            selected.append((model_conds, key, wrapper, tensor))
+                if selected:
+                    tensors = [entry[3] for entry in selected]
+                    noises = [torch.randn_like(tensor) for tensor in tensors]
+                    result = fn(tensors, noises, args["sigma"])
+                    if isinstance(result, Awaitable):
+                        raise TypeError(
+                            "conditioning-preprocess closures must be synchronous")
+
+                    def validate(actual, expected):
+                        if not isinstance(actual, list) or len(actual) != len(expected):
+                            raise TypeError(
+                                "conditioning-preprocess closure must preserve the "
+                                "tensor list")
+                        for value, original in zip(
+                            actual, expected, strict=True
+                        ):
+                            if not (
+                                isinstance(value, torch.Tensor)
+                                and tuple(value.shape) == tuple(original.shape)
+                                and value.dtype == original.dtype
+                                and str(value.device) == str(original.device)
+                            ):
+                                raise TypeError(
+                                    "conditioning-preprocess closure must preserve "
+                                    "shape, dtype, and device")
+
+                    validate(result, tensors)
+                    for entry, value in zip(selected, result, strict=True):
+                        model_conds, key, wrapper, _tensor = entry
+                        model_conds[key] = wrapper._copy_with(value)
+
+                next_args = dict(args)
+                next_args["conds"] = conds
+                if previous is not None:
+                    return previous(next_args)
+                return calc_cond_batch(
+                    next_args["model"], next_args["conds"],
+                    next_args["input"], next_args["sigma"],
+                    next_args["model_options"],
+                )
+
+            patched.set_model_sampler_calc_cond_batch_function(
+                preprocess_conditioning)
+            return ModelRef._wrap(await current_runtime().refs.create(
+                "MODEL", patched))
+
+        hook_name = (
+            "set_model_sampler_post_cfg_function"
+            if kind == "post_cfg"
+            else "set_model_sampler_pre_cfg_function"
+        )
+        if not hasattr(model_obj, "clone") or not hasattr(model_obj, hook_name):
+            raise TypeError(
+                f"MODEL does not expose the canonical {kind.replace('_', '-')} hook")
+
+        def validate(actual, expected):
+            if isinstance(expected, (list, tuple)):
+                if not isinstance(actual, type(expected)) or len(actual) != len(expected):
+                    raise TypeError(
+                        f"{kind} node closure must preserve the prediction list")
+                for item, expected_item in zip(actual, expected, strict=True):
+                    validate(item, expected_item)
+                return
+            if not (
+                hasattr(actual, "shape")
+                and tuple(actual.shape) == tuple(expected.shape)
+                and getattr(actual, "dtype", None) == expected.dtype
+                and str(getattr(actual, "device", "")) == str(expected.device)
+            ):
+                raise TypeError(
+                    f"{kind} node closure must preserve shape, dtype, and device")
+
+        def post_cfg(args):
+            result = fn(
+                args["denoised"],
+                args.get("cond_denoised"),
+                args.get("uncond_denoised"),
+                args["input"],
+                args["sigma"],
+                float(args["cond_scale"]),
+            )
+            if isinstance(result, Awaitable):
+                raise TypeError(
+                    "tensor-phase node closures must be synchronous functions")
+            validate(result, args["denoised"])
+            return result
+
+        def pre_cfg(args):
+            expected = list(args["conds_out"])
+            result = fn(
+                args["input"],
+                expected,
+                [value is not None for value in args["conds"]],
+                args["sigma"],
+            )
+            if isinstance(result, Awaitable):
+                raise TypeError(
+                    "tensor-phase node closures must be synchronous functions")
+            validate(result, expected)
+            return result
+
+        patched = model_obj.clone()
+        getattr(patched, hook_name)(
+            post_cfg if kind == "post_cfg" else pre_cfg,
+            disable_cfg1_optimization=True,
+        )
+        return ModelRef._wrap(await current_runtime().refs.create(
+            "MODEL", patched))
+
+    async def attach_sampler(
+        self, closure: ClosureRef, sampler: SamplerRef, *,
+        start_percent=None, end_percent=None,
+    ):
+        import math
+        from comfy.samplers import KSAMPLER
+
+        if not isinstance(closure, ClosureRef):
+            raise TypeError("closure must be a typed CLOSURE ref")
+        if not isinstance(sampler, SamplerRef):
+            raise TypeError("sampler must be a typed SAMPLER ref")
+        entry = await current_runtime().refs.resolve(closure)
+        if entry.get("kind") != "model_sigma":
+            raise ValueError(
+                "only model_sigma node closures can wrap samplers")
+        sampler_obj = await current_runtime().refs.resolve(sampler)
+        for name, value in {
+            "start_percent": start_percent,
+            "end_percent": end_percent,
+        }.items():
+            if value is not None:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise TypeError(f"{name} must be numeric")
+                value = float(value)
+                if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                    raise ValueError(f"{name} must be finite and in [0, 1]")
+        if (start_percent is None) != (end_percent is None):
+            raise ValueError(
+                "start_percent and end_percent must be supplied together")
+        fn = entry["fn"]
+
+        def wrapped_sampler(model_fn, x, sigmas, **kwargs):
+            cfg = getattr(getattr(model_fn, "inner_model", None), "cfg", 1.0)
+            cfg = float(cfg) if isinstance(cfg, (int, float)) else 1.0
+            start_sigma = end_sigma = None
+            if start_percent is not None:
+                sampling = getattr(
+                    getattr(getattr(model_fn, "inner_model", None),
+                            "inner_model", None),
+                    "model_sampling", None,
+                )
+                if sampling is None or not hasattr(sampling, "percent_to_sigma"):
+                    raise TypeError(
+                        "sampler model does not expose percent-to-sigma projection")
+                start_sigma = round(float(
+                    sampling.percent_to_sigma(float(start_percent))), 4)
+                end_sigma = round(float(
+                    sampling.percent_to_sigma(float(end_percent))), 4)
+
+            def model_wrapper(latent, sigma, **extra_args):
+                adjusted = fn(
+                    sigma, sigmas, cfg, start_sigma, end_sigma)
+                if isinstance(adjusted, Awaitable):
+                    raise TypeError(
+                        "tensor-phase node closures must be synchronous functions")
+                if not (
+                    hasattr(adjusted, "shape")
+                    and tuple(adjusted.shape) == tuple(sigma.shape)
+                    and adjusted.dtype == sigma.dtype
+                    and str(adjusted.device) == str(sigma.device)
+                ):
+                    raise TypeError(
+                        "model_sigma node closure must preserve shape, dtype, "
+                        "and device")
+                return model_fn(latent, adjusted, **extra_args)
+
+            for name in ("inner_model", "sigmas"):
+                if hasattr(model_fn, name):
+                    setattr(model_wrapper, name, getattr(model_fn, name))
+            return sampler_obj.sampler_function(
+                model_wrapper,
+                x,
+                sigmas,
+                **kwargs,
+                **sampler_obj.extra_options,
+            )
+
+        value = KSAMPLER(wrapped_sampler)
+        return SamplerRef._wrap(await current_runtime().refs.create(
+            "SAMPLER", value))
+
+    async def create_latent_operation(self, closure: ClosureRef):
+        if not isinstance(closure, ClosureRef):
+            raise TypeError("closure must be a typed CLOSURE ref")
+        entry = await current_runtime().refs.resolve(closure)
+        if entry.get("kind") != "latent_operation":
+            raise ValueError(
+                "only latent_operation closures can create LATENT_OPERATION")
+        fn = entry["fn"]
+
+        def operation(latent, **_kwargs):
+            result = fn(latent)
+            if isinstance(result, Awaitable):
+                raise TypeError(
+                    "tensor-phase node closures must be synchronous functions")
+            if not (
+                hasattr(result, "shape")
+                and tuple(result.shape) == tuple(latent.shape)
+                and getattr(result, "dtype", None) == latent.dtype
+                and str(getattr(result, "device", "")) == str(latent.device)
+            ):
+                raise TypeError(
+                    "latent_operation closure must preserve shape, dtype, "
+                    "and device")
+            return result
+
+        return LatentOperationRef._wrap(
+            await current_runtime().refs.create("LATENT_OPERATION", operation))
+
+    async def create_sampler(self, closure: ClosureRef):
+        """Default in-process adapter for a pack-owned sampling loop."""
+        import math
+        import torch
+        import torch.nn.functional as functional
+        import comfy.model_patcher
+        import comfy.model_sampling
+        from comfy.k_diffusion.sampling import (
+            BrownianTreeNoiseSampler, default_noise_sampler,
+        )
+        from comfy.samplers import KSAMPLER
+
+        if not isinstance(closure, ClosureRef):
+            raise TypeError("closure must be a typed CLOSURE ref")
+        entry = await current_runtime().refs.resolve(closure)
+        if entry.get("kind") != "custom_sampler":
+            raise ValueError(
+                "only custom_sampler closures can create a SAMPLER")
+        fn = entry["fn"]
+
+        def sampler_function(model_fn, latent, sigmas, **kwargs):
+            if not (
+                isinstance(sigmas, torch.Tensor)
+                and torch.is_floating_point(sigmas)
+                and sigmas.ndim == 1
+                and 2 <= len(sigmas) <= 4097
+            ):
+                raise ValueError(
+                    "custom-sampler sigmas must be a finite floating-point, "
+                    "nonnegative, nonincreasing 2..4097 vector ending at zero")
+            sigma_values = sigmas.detach().to(
+                device="cpu", dtype=torch.float64)
+            if (
+                not torch.isfinite(sigma_values).all()
+                or bool((sigma_values < 0).any())
+                or bool((sigma_values[:-1] < sigma_values[1:]).any())
+                or not math.isclose(
+                    float(sigma_values[-1]), 0.0, abs_tol=1e-8)
+            ):
+                raise ValueError(
+                    "custom-sampler sigmas must be a finite floating-point, "
+                    "nonnegative, nonincreasing 2..4097 vector ending at zero")
+            if not (
+                isinstance(latent, torch.Tensor)
+                and torch.is_floating_point(latent)
+                and latent.ndim >= 3
+            ):
+                raise TypeError(
+                    "custom sampler needs a floating-point tensor latent")
+            extra_args = kwargs.get("extra_args")
+            if extra_args is None:
+                extra_args = {}
+            if not isinstance(extra_args, dict):
+                raise TypeError(
+                    "custom sampler received invalid host extra_args")
+            extra_args = dict(extra_args)
+            callback = kwargs.get("callback")
+            seed = extra_args.get("seed")
+            if seed is not None and (
+                isinstance(seed, bool)
+                or not isinstance(seed, int)
+                or not 0 <= seed <= (1 << 64) - 1
+            ):
+                raise ValueError(
+                    "custom-sampler seed must be an unsigned 64-bit integer")
+            get_sampling = getattr(
+                getattr(getattr(model_fn, "inner_model", None),
+                        "model_patcher", None),
+                "get_model_object", None,
+            )
+            if not callable(get_sampling):
+                raise TypeError(
+                    "custom sampler model does not expose model sampling")
+            model_sampling = get_sampling("model_sampling")
+
+            def validate_value(value, *, allow_resize=False):
+                if not (
+                    isinstance(value, torch.Tensor)
+                    and torch.is_floating_point(value)
+                    and value.dtype == latent.dtype
+                    and str(value.device) == str(latent.device)
+                ):
+                    raise TypeError(
+                        "custom-sampler latent changed type, dtype, or device")
+                shape = tuple(value.shape)
+                original = tuple(latent.shape)
+                if shape == original:
+                    return
+                if not allow_resize or (
+                    len(shape) != 4
+                    or len(original) != 4
+                    or shape[:2] != original[:2]
+                    or any(item < 1 for item in shape[2:])
+                    or shape[2] > original[2] * 2
+                    or shape[3] > original[3] * 2
+                    or shape[2] * shape[3] > original[2] * original[3] * 4
+                ):
+                    raise ValueError(
+                        "custom-sampler temporary resize is outside its bounds")
+
+            def validate_result(value, expected, name):
+                if not (
+                    isinstance(value, torch.Tensor)
+                    and torch.is_floating_point(value)
+                    and tuple(value.shape) == tuple(expected.shape)
+                    and value.dtype == expected.dtype
+                    and str(value.device) == str(expected.device)
+                ):
+                    raise TypeError(
+                        f"custom-sampler {name} must preserve shape, dtype, "
+                        "and device")
+
+            def scalar(value, name):
+                if isinstance(value, bool):
+                    raise TypeError(f"{name} must be numeric")
+                if hasattr(value, "numel"):
+                    if int(value.numel()) != 1:
+                        raise ValueError(
+                            f"{name} must contain exactly one value")
+                    value = value.detach().reshape(-1)[0].item()
+                try:
+                    result = float(value)
+                except (TypeError, ValueError) as error:
+                    raise TypeError(f"{name} must be numeric") from error
+                if not math.isfinite(result):
+                    raise ValueError(f"{name} must be finite")
+                return result
+
+            class Broker:
+                def __init__(self):
+                    self.denoise_count = 0
+                    self.noise_count = 0
+                    self.preview_count = 0
+                    self.schedule_count = 0
+                    self.last_denoise = None
+                    self.noise_samplers = {}
+
+                async def denoise(
+                    self, value, sigma, *, capture_uncond=False,
+                    resize_context=None,
+                ):
+                    if not isinstance(capture_uncond, bool):
+                        raise TypeError(
+                            "capture_uncond must be a boolean")
+                    if self.denoise_count >= 3 * (len(sigmas) - 1):
+                        raise RuntimeError(
+                            "custom sampler exceeded its denoise budget")
+                    sigma_value = scalar(sigma, "sigma")
+                    if sigma_value < 0:
+                        raise ValueError("custom-sampler sigma is invalid")
+                    mode = "none" if resize_context is None else str(
+                        resize_context)
+                    if mode not in {"none", "nearest-exact"}:
+                        raise ValueError("unsupported sampler resize context")
+                    validate_value(
+                        value, allow_resize=mode == "nearest-exact")
+                    call_args = dict(extra_args)
+
+                    def restore():
+                        return None
+
+                    if mode == "nearest-exact":
+                        target = tuple(value.shape[-2:])
+                        old_latent = getattr(model_fn, "latent_image", None)
+                        old_noise = getattr(model_fn, "noise", None)
+                        old_mask = call_args.get("denoise_mask")
+
+                        def resized(item):
+                            return (
+                                None if item is None else
+                                functional.interpolate(
+                                    item, size=target, mode=mode)
+                            )
+
+                        new_latent = resized(old_latent)
+                        new_noise = resized(old_noise)
+                        new_mask = resized(old_mask)
+                        try:
+                            model_fn.latent_image = new_latent
+                            model_fn.noise = new_noise
+                            if old_mask is not None:
+                                call_args["denoise_mask"] = new_mask
+                        except Exception:
+                            model_fn.latent_image = old_latent
+                            model_fn.noise = old_noise
+                            raise
+
+                        def restore():
+                            model_fn.latent_image = old_latent
+                            model_fn.noise = old_noise
+
+                    try:
+                        captured = [None]
+                        if capture_uncond:
+                            def capture(args):
+                                captured[0] = args.get("uncond_denoised")
+                                return args["denoised"]
+
+                            call_args["model_options"] = (
+                                comfy.model_patcher.
+                                set_model_options_post_cfg_function(
+                                    dict(call_args.get("model_options") or {}),
+                                    capture,
+                                    disable_cfg1_optimization=True,
+                                ))
+                        sigma_batch = torch.full(
+                            (int(value.shape[0]),),
+                            sigma_value,
+                            dtype=value.dtype,
+                            device=value.device,
+                        )
+                        denoised = model_fn(
+                            value, sigma_batch, **call_args)
+                    finally:
+                        restore()
+                    validate_result(denoised, value, "denoise result")
+                    if captured[0] is not None:
+                        validate_result(
+                            captured[0], value, "unconditional result")
+                    self.denoise_count += 1
+                    self.last_denoise = [value, denoised, False]
+                    return denoised, captured[0]
+
+                async def noise_like(
+                    self, value, *, kind="independent", step=0,
+                    sigma_from=0.0, sigma_to=0.0, purpose="sampler",
+                    noise_device=None, seeded=False,
+                ):
+                    if self.noise_count >= 4 * (len(sigmas) - 1):
+                        raise RuntimeError(
+                            "custom sampler exceeded its noise budget")
+                    validate_value(value)
+                    if not isinstance(kind, str) or kind not in {
+                        "independent", "ancestral", "brownian",
+                    }:
+                        raise ValueError(
+                            "unsupported custom-sampler noise kind")
+                    if isinstance(step, bool) or not isinstance(step, int):
+                        raise TypeError("custom-sampler noise step is invalid")
+                    if not 0 <= step < len(sigmas) - 1:
+                        raise ValueError(
+                            "custom-sampler noise step is out of range")
+                    if not isinstance(purpose, str) or not 1 <= len(purpose) <= 128:
+                        raise ValueError(
+                            "custom-sampler noise purpose is invalid")
+                    if noise_device not in {None, "cpu", "latent"}:
+                        raise ValueError(
+                            "custom-sampler noise device is invalid")
+                    if not isinstance(seeded, bool):
+                        raise TypeError(
+                            "custom-sampler seeded flag must be a boolean")
+                    sigma_from_value = scalar(sigma_from, "sigma_from")
+                    sigma_to_value = scalar(sigma_to, "sigma_to")
+                    if (
+                        sigma_from_value < 0
+                        or sigma_to_value < 0
+                    ):
+                        raise ValueError(
+                            "custom-sampler noise sigmas are invalid")
+                    if kind == "brownian":
+                        key = ("brownian", noise_device or "cpu")
+                        sampler = self.noise_samplers.get(key)
+                        if sampler is None:
+                            positive = sigmas[sigmas > 0]
+                            sampler = BrownianTreeNoiseSampler(
+                                latent,
+                                positive.min(),
+                                sigmas.max(),
+                                seed=seed,
+                                cpu=(noise_device or "cpu") == "cpu",
+                            )
+                            self.noise_samplers[key] = sampler
+                    else:
+                        key = ("default", bool(seeded))
+                        sampler = self.noise_samplers.get(key)
+                        if sampler is None:
+                            sampler = default_noise_sampler(
+                                latent, seed=seed if seeded else None)
+                            self.noise_samplers[key] = sampler
+                    result = sampler(
+                        sigma_from_value, sigma_to_value)
+                    validate_result(result, value, "noise result")
+                    self.noise_count += 1
+                    return result
+
+                async def preview(
+                    self, step, value, sigma, sigma_hat, denoised,
+                ):
+                    del value, denoised
+                    if isinstance(step, bool) or not isinstance(step, int):
+                        raise TypeError("custom-sampler preview step is invalid")
+                    if not 0 <= step < len(sigmas) - 1:
+                        raise ValueError(
+                            "custom-sampler preview step is out of range")
+                    sigma_value = scalar(sigma, "sigma")
+                    sigma_hat_value = scalar(sigma_hat, "sigma_hat")
+                    if sigma_value < 0 or sigma_hat_value < 0:
+                        raise ValueError(
+                            "custom-sampler preview sigmas are invalid")
+                    if self.last_denoise is None or self.last_denoise[2]:
+                        raise RuntimeError(
+                            "preview must follow one unpreviewed denoise")
+                    if self.preview_count >= 3 * (len(sigmas) - 1):
+                        raise RuntimeError(
+                            "custom sampler exceeded its preview budget")
+                    if callback is not None:
+                        callback({
+                            "x": self.last_denoise[0],
+                            "i": step,
+                            "sigma": sigma_value,
+                            "sigma_hat": sigma_hat_value,
+                            "denoised": self.last_denoise[1],
+                        })
+                    self.last_denoise[2] = True
+                    self.preview_count += 1
+
+                async def schedule_parameters(self, *, percent_offset=1e-4):
+                    if self.schedule_count >= 4:
+                        raise RuntimeError(
+                            "custom sampler exceeded its schedule budget")
+                    offset = scalar(percent_offset, "percent_offset")
+                    if not 1e-8 <= offset <= 0.1:
+                        raise ValueError("percent_offset is outside its bounds")
+                    is_const = isinstance(
+                        model_sampling, comfy.model_sampling.CONST)
+                    noise_scale = float(getattr(
+                        model_sampling, "noise_scale", 1.0))
+                    if not math.isfinite(noise_scale) or abs(noise_scale) > 1e6:
+                        raise ValueError(
+                            "model sampling noise_scale is outside its bounds")
+                    first_sigma = (
+                        float(model_sampling.percent_to_sigma(offset))
+                        if is_const else None
+                    )
+                    if first_sigma is not None and (
+                        not math.isfinite(first_sigma) or first_sigma < 0
+                    ):
+                        raise ValueError(
+                            "model sampling returned an invalid first sigma")
+                    self.schedule_count += 1
+                    return {
+                        "parameterization": "const" if is_const else "sigma",
+                        "noise_scale": noise_scale,
+                        "first_sigma": first_sigma,
+                    }
+
+            result = fn(Broker(), latent, sigmas)
+            if isinstance(result, Awaitable):
+                result = asyncio.run(result)
+            validate_value(result)
+            return result
+
+        return SamplerRef._wrap(await current_runtime().refs.create(
+            "SAMPLER", KSAMPLER(sampler_function)))
+
+
+class _InProcessWanVideo:
+    """Read one scheduler-relevant scalar from a WanVideo model patcher.
+
+    Scheduler construction and refinement remain untrusted pack code.  This
+    adapter only resolves the opaque ref and projects the fixed scalar that
+    WanVideo's CausVid schedule selects on.
+    """
+
+    async def transformer_dim(self, model: Ref) -> int:
+        if not isinstance(model, Ref) or model.kind not in {"MODEL", "OPAQUE"}:
+            raise TypeError("WanVideo model must be an opaque model ref")
+        value = await current_runtime().refs.resolve(model)
+        try:
+            dimension = value.model.diffusion_model.dim
+        except AttributeError as error:
+            raise ValueError(
+                "WanVideo model does not publish transformer dimension"
+            ) from error
+        if (isinstance(dimension, bool) or not isinstance(dimension, int)
+                or not 1 <= dimension <= 65_536):
+            raise ValueError("WanVideo transformer dimension is invalid")
+        return dimension
+
+
+class _InProcessLlm:
+    """Normalize common chat/tool semantics onto closed vendor adapters."""
+
+    @staticmethod
+    def _vendor_options(value: Any) -> tuple[int, str]:
+        if value is None:
+            return 5, "minutes"
+        if not isinstance(value, dict) or set(value) != {"ollama"}:
+            raise ValueError("LLM vendor_options must contain only ollama")
+        options = value["ollama"]
+        if not isinstance(options, dict) or not set(options) <= {
+            "keep_alive", "keep_alive_unit",
+        }:
+            raise ValueError("LLM Ollama vendor options are invalid")
+        return options.get("keep_alive", 5), options.get(
+            "keep_alive_unit", "minutes")
+
+    @staticmethod
+    def _messages(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list) or not 1 <= len(value) <= 256:
+            raise ValueError("LLM messages must contain 1 to 256 entries")
+        result = []
+        for message in value:
+            if not isinstance(message, dict):
+                raise ValueError("LLM message has an invalid shape")
+            role = message.get("role")
+            if role in {"system", "user"}:
+                if set(message) != {"role", "content"}:
+                    raise ValueError("LLM message has an invalid shape")
+                result.append(dict(message))
+                continue
+            if role == "assistant":
+                if (not {"role", "content"}.issubset(message)
+                        or not set(message) <= {
+                            "role", "content", "thinking", "tool_calls",
+                        }):
+                    raise ValueError("LLM assistant message has an invalid shape")
+                result.append(dict(message))
+                continue
+            if role == "tool":
+                if set(message) != {"role", "name", "content"}:
+                    raise ValueError("LLM tool message has an invalid shape")
+                result.append({
+                    "role": "tool",
+                    "tool_name": message["name"],
+                    "content": message["content"],
+                })
+                continue
+            raise ValueError("LLM message role is invalid")
+        return result
+
+    async def chat(
+        self, provider: str, profile: str, model: str,
+        messages: list[dict[str, Any]], *,
+        tools: Optional[list[dict[str, Any]]] = None,
+        temperature: float = 0.8, max_tokens: int = 512,
+        thinking: bool = False,
+        response_format: str | dict[str, Any] = "",
+        timeout_seconds: float = 600.0,
+        vendor_options: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        if provider != "ollama":
+            raise ValueError("LLM provider must be ollama")
+        if (isinstance(temperature, bool)
+                or type(temperature) not in {int, float}
+                or not 0.0 <= float(temperature) <= 10.0):
+            raise ValueError("LLM temperature must be in [0, 10]")
+        if (isinstance(max_tokens, bool) or not isinstance(max_tokens, int)
+                or not 1 <= max_tokens <= 32_768):
+            raise ValueError("LLM max_tokens must be in [1, 32768]")
+        if type(thinking) is not bool:
+            raise TypeError("LLM thinking must be a bool")
+        keep_alive, keep_alive_unit = self._vendor_options(vendor_options)
+        response = await InProcessOllama().chat(
+            endpoint=profile,
+            model=model,
+            messages=self._messages(messages),
+            think=thinking,
+            options={
+                "temperature": float(temperature),
+                "num_predict": max_tokens,
+            },
+            keep_alive=keep_alive,
+            keep_alive_unit=keep_alive_unit,
+            format=response_format,
+            timeout_seconds=timeout_seconds,
+            tools=tools,
+        )
+        result: dict[str, Any] = {
+            "content": response["response"],
+            "tool_calls": response.get("tool_calls", []),
+        }
+        if "thinking" in response:
+            result["thinking"] = response["thinking"]
+        return result
+
+
+@dataclass(frozen=True)
+class _InProcessIntegrations:
+    anima: Any = field(default_factory=InProcessAnima)
+    civitai: Any = field(default_factory=InProcessCivitai)
+    llm: Any = field(default_factory=_InProcessLlm)
+    llama_cpp: Any = field(default_factory=InProcessLlamaCpp)
+    ollama: Any = field(default_factory=InProcessOllama)
+    wanvideo: Any = field(default_factory=_InProcessWanVideo)
+    web: Any = field(default_factory=lambda: _StubDomain("integrations.web"))
 
 
 @dataclass
@@ -2455,10 +9249,16 @@ class InProcessContext:
     ui: Any
     output: Any
     graph: Any
+    execution: Any
+    integrations: Any
     models: Any
     profiling: Any
     preview_override: Any
+    system: Any
+    closures: Any
+    interact: Any
     sample: Any
+    unsample: Any
     serve: Any
     secrets: Any
     net: Any
@@ -2473,15 +9273,22 @@ class InProcessCtxProvider:
             events=_InProcessEvents(),
             storage=_StubDomain("storage"),
             capture=_InProcessCapture(),
-            ui=_InProcessUi(),
+            ui=_InProcessUi(plan.prompt, plan.extra_pnginfo),
             output=_InProcessOutput(plan.prompt, plan.extra_pnginfo),
             graph=_InProcessGraph(
-                plan.node_id, plan.prompt, plan.extra_pnginfo),
+                plan.node_id, plan.prompt, plan.extra_pnginfo,
+                plan.dynamic_prompt),
+            execution=_InProcessExecution(plan.prompt_id),
+            integrations=_InProcessIntegrations(),
             models=_InProcessModels(),
             profiling=InProcessProfiling(
                 f"in-process:{plan.node_module}", plan.node_id),
             preview_override=InProcessPreviewOverride(plan.node_id),
+            system=_InProcessSystem(),
+            closures=_InProcessClosures(),
+            interact=_StubDomain("interact"),
             sample=_StubDomain("sample"),
+            unsample=_StubDomain("unsample"),
             serve=_StubDomain("serve"),
             secrets=_StubDomain("secrets"),
             net=_StubDomain("net"),
@@ -2676,18 +9483,34 @@ class InProcessOps:
     """Default operations. Runs in the trusted process; uses the real buffers
     via the resolver but never hands them to the node. Kept torch-free (tensor
     arithmetic works on the resolved objects directly). The op set is a
-    registry: core ships two primitives; ``register_op`` extends it (an overlay
-    subclasses or registers richer ops)."""
+    registry: core ships a closed primitive set; ``register_op`` extends it
+    (an overlay subclasses or registers richer ops)."""
 
     def __init__(self) -> None:
         self._ops: dict[str, Callable[..., Awaitable["ImageRef"]]] = {
+            "ref.describe": self._ref_describe,
+            "interpolation_states.skip_mask":
+                self._interpolation_states_skip_mask,
             "invert": self._invert,
             "scale": self._scale,
+            "image.rgb": self._image_rgb,
+            "image.to_device": self._image_to_device,
+            "image.spatial_shape": self._image_spatial_shape,
+            "image.batch_size": self._image_batch_size,
+            "image.select_batch": self._image_select_batch,
+            "mask.grow": self._mask_grow,
             # Operations on live engine objects. These are what let a node
             # DECLARE a MODEL/CLIP/VAE input and still be sandboxable: the node
             # names the operation, the weights stay here.
             "vae.decode": self._vae_decode,
+            "vae.latent_layout": self._vae_latent_layout,
+            "vae.decode_tensor": self._vae_decode_tensor,
+            "vae.decode_tiled": self._vae_decode_tiled,
+            "vae.decode_tensor_tiled": self._vae_decode_tensor_tiled,
             "vae.encode": self._vae_encode,
+            "vae.encode_for_inpaint": self._vae_encode_for_inpaint,
+            "vae.encode_inpaint_conditioning":
+                self._vae_encode_inpaint_conditioning,
             "vae.encode_tiled": self._vae_encode_tiled,
             "vae.input_dtype": self._vae_input_dtype,
             "vae.encode_video": self._vae_encode_video,
@@ -2701,31 +9524,98 @@ class InProcessOps:
             "clip.tokenize": self._clip_tokenize,
             "clip.encode_from_tokens_scheduled":
                 self._clip_encode_from_tokens_scheduled,
+            "clip.encode_token_weights_component":
+                self._clip_encode_token_weights_component,
             "clip.encode": self._clip_encode,
+            "clip.set_last_layer": self._clip_set_last_layer,
+            "clip.with_attention_impl": self._clip_with_attention_impl,
+            "clip.describe_tokens": self._clip_describe_tokens,
+            "clip.generate_text": self._clip_generate_text,
             "gligen.apply_batched": self._gligen_apply_batched,
+            "latent.noise_mask": self._latent_noise_mask,
+            "latent.repeat_batch": self._latent_repeat_batch,
             "latent.minimax_h3_token_count":
                 self._latent_minimax_h3_token_count,
+            "latent.empty": self._latent_empty,
+            "sigmas.steps": self._sigmas_steps,
+            "sigmas.value_at": self._sigmas_value_at,
+            "sampler.named": self._sampler_named,
             "cond.sequence_length": self._cond_sequence_length,
             "cond.combine": self._cond_combine,
             "cond.concat": self._cond_concat,
+            "cond.zero_out": self._cond_zero_out,
+            "cond.with_timestep_range": self._cond_with_timestep_range,
+            "cond.with_metadata": self._cond_with_metadata,
+            "cond.has_spatial_metadata": self._cond_has_spatial_metadata,
+            "cond.with_mask": self._cond_with_mask,
+            "cond.with_clip_vision_output":
+                self._cond_with_clip_vision_output,
+            "cond.with_concat_latent": self._cond_with_concat_latent,
+            "cond.spatial_crop": self._cond_spatial_crop,
+            "latent.spatial_shape": self._latent_spatial_shape,
+            "latent.resize": self._latent_resize,
+            "latent.random_noise": self._latent_random_noise,
+            "latent.composite": self._latent_composite,
+            "clip.scale_attention_weights": self._clip_scale_attention_weights,
             "advanced_control.weights_from_list":
                 self._advanced_control_weights_from_list,
+            "advanced_control.scaled_soft_weights":
+                self._advanced_control_scaled_soft_weights,
             "lora.weight_differences": self._lora_weight_differences,
             "weight_diff.next": self._weight_diff_next,
+            "model.apply_lora": self._model_apply_lora,
             "model.apply_dit_block_lora": self._model_apply_dit_block_lora,
             "model.apply_ltx2_lora": self._model_apply_ltx2_lora,
+            "sampling.spatial_crop_inputs":
+                self._sampling_spatial_crop_inputs,
             "model.patch": self._model_patch,
+            "model.ground_image": self._model_ground_image,
             "model.transforms": self._model_transforms,
+            "model.is_flow": self._model_is_flow,
+            "model.family": self._model_family,
+            "model.unet_context_dim": self._model_unet_context_dim,
+            "model.is_zero_terminal_snr": self._model_is_zero_terminal_snr,
+            "model.sigma_for_percent": self._model_sigma_for_percent,
+            "model.sampling_sigma_delta": self._model_sampling_sigma_delta,
             "model.latent_scale_factor": self._model_latent_scale_factor,
             "guider.scheduled_cfg": self._guider_scheduled_cfg,
             "sampler.self_refine_video": self._sampler_self_refine_video,
             "clip_vision.encode_image": self._clip_vision_encode_image,
             "clip_vision_output.image_embeds":
                 self._clip_vision_output_image_embeds,
+            "clip_vision_output.concat": self._clip_vision_output_concat,
             "controlnet.with_union_type": self._controlnet_with_union_type,
+            "controlnet.apply": self._controlnet_apply,
+            "controlnet.apply_advanced": self._controlnet_apply_advanced,
             "controlnet.compile": self._controlnet_compile,
             "style_model.apply": self._style_model_apply,
+            "clipseg.predict_mask": self._clipseg_predict_mask,
             "clipseg.segment": self._clipseg_segment,
+            "image_classifier.classify": self._image_classifier_classify,
+            "image_classifier.predict_scores":
+                self._image_classifier_predict_scores,
+            "classifier_scores.shape": self._classifier_scores_shape,
+            "classifier_scores.select_above":
+                self._classifier_scores_select_above,
+            "semantic_segmentation.mask": self._semantic_segmentation_mask,
+            "matting.refine": self._matting_refine,
+            "vqa.answer": self._vqa_answer,
+            "onnx_detector.detect": self._onnx_detector_detect,
+            "object_detector.detect": self._object_detector_detect,
+            "inpaint_model.inpaint": self._inpaint_model_inpaint,
+            "background_removal.mask": self._background_removal_mask,
+            "brushnet.apply": self._brushnet_apply,
+            "powerpaint.apply": self._powerpaint_apply,
+            "transparent_vae_decoder.decode":
+                self._transparent_vae_decoder_decode,
+            "image_preprocessor.apply": self._image_preprocessor_apply,
+            "ipadapter.apply": self._ipadapter_apply,
+            "ipadapter.apply_tiled": self._ipadapter_apply_tiled,
+            "ipadapter.encode": self._ipadapter_encode,
+            "ipadapter.apply_embeds": self._ipadapter_apply_embeds,
+            "ipadapter_embeds.combine": self._ipadapter_embeds_combine,
+            "sam.segment": self._sam_segment,
+            "sam.segment_video": self._sam_segment_video,
             "upscale_model.upscale": self._upscale_model_upscale,
         }
 
@@ -2741,6 +9631,135 @@ class InProcessOps:
             raise OpNotSupported(op)
         return await fn(subject, **params)
 
+    async def _ref_describe(
+        self, ref: "Ref", max_value_chars: int = 32768,
+    ) -> dict[str, Any]:
+        """Project safe diagnostics without invoking behavior on the value."""
+        if (isinstance(max_value_chars, bool)
+                or not isinstance(max_value_chars, int)):
+            raise TypeError("ref description max_value_chars must be an integer")
+        if not 32 <= max_value_chars <= 32768:
+            raise ValueError(
+                "ref description max_value_chars must be in [32, 32768]")
+
+        value = await current_runtime().refs.resolve(ref)
+        kind = ref.kind[:128] if isinstance(ref.kind, str) else "UNKNOWN"
+        shape: list[int] | None = None
+        length: int | None = None
+        first: str | None = None
+        summary: str | None = None
+        type_name = f"opaque {kind}"
+
+        # Only exact, trusted structural cases are inspected.  In particular,
+        # do not use hasattr(), len(), iter(), str(), or repr() on an arbitrary
+        # host object: each can execute pack- or vendor-defined Python.
+        import torch
+
+        if isinstance(value, torch.Tensor):
+            shape = [int(item) for item in value.shape]
+            if shape:
+                length = shape[0]
+                first_shape = shape[1:]
+                first = f"<redacted tensor slice shape={first_shape}>"
+            type_name = "Tensor"
+            summary = (
+                f"<{kind} tensor shape={shape} dtype={value.dtype} "
+                f"device={value.device.type}>"
+            )
+        elif ref.kind == "LATENT" and type(value) is dict:
+            type_name = "Latent"
+            length = len(value)
+            first = "<latent field>" if value else None
+            samples = value.get("samples")
+            if isinstance(samples, torch.Tensor):
+                shape = [int(item) for item in samples.shape]
+            summary = f"<LATENT fields={length} shape={shape}>"
+        elif ref.kind == "CONDITIONING" and type(value) is list:
+            type_name = "Conditioning"
+            length = len(value)
+            first = "<conditioning row>" if value else None
+            summary = f"<CONDITIONING rows={length}>"
+        elif ref.kind == "VALUE":
+            exact = type(value)
+            if exact in {list, tuple, dict, str, bytes}:
+                type_name = exact.__name__
+                length = len(value)
+                first = "<redacted item>" if length else None
+                summary = f"<{type_name} length={length}>"
+            elif value is None or exact in {bool, int, float}:
+                type_name = "NoneType" if value is None else exact.__name__
+                summary = repr(value)
+            else:
+                type_name = "opaque VALUE"
+                summary = "<opaque VALUE>"
+        else:
+            summary = f"<opaque {kind}>"
+
+        truncated = len(summary) > max_value_chars
+        if truncated:
+            summary = summary[:max_value_chars - 1] + "…"
+        return {
+            "kind": kind,
+            "type": type_name,
+            "length": length,
+            "first": first,
+            "shape": shape,
+            "summary": summary,
+            "truncated": truncated,
+        }
+
+    async def _interpolation_states_skip_mask(
+        self, states: "InterpolationStatesRef", pair_count: int,
+    ) -> list[bool]:
+        """Project a foreign interpolation policy without invoking it.
+
+        ComfyUI-Frame-Interpolation represents this value as a small object
+        with two instance-data fields.  Treat those fields as data only: an
+        arbitrary method, property, iterator, or string conversion on the
+        foreign object must never execute in the trusted process.
+        """
+        if isinstance(pair_count, bool) or not isinstance(pair_count, int):
+            raise TypeError("interpolation pair_count must be an integer")
+        if not 1 <= pair_count <= 100_000:
+            raise ValueError("interpolation pair_count must be in [1, 100000]")
+
+        value = await current_runtime().refs.resolve(states)
+        try:
+            fields = object.__getattribute__(value, "__dict__")
+        except (AttributeError, TypeError) as error:
+            raise TypeError(
+                "INTERPOLATION_STATES must expose fixed instance data"
+            ) from error
+        if type(fields) is not dict:
+            raise TypeError(
+                "INTERPOLATION_STATES must expose fixed instance data")
+        if set(fields) != {"frame_indices", "is_skip_list"}:
+            raise TypeError(
+                "INTERPOLATION_STATES has an unsupported field layout")
+        indices = fields["frame_indices"]
+        skip_list = fields["is_skip_list"]
+        if type(indices) is not list:
+            raise TypeError("interpolation frame_indices must be a list")
+        if len(indices) > 100_000:
+            raise ValueError(
+                "interpolation frame_indices exceeds the 100000 item limit")
+        if type(skip_list) is not bool:
+            raise TypeError("interpolation is_skip_list must be a boolean")
+
+        selected: set[int] = set()
+        for index in indices:
+            if isinstance(index, bool) or not isinstance(index, int):
+                raise TypeError(
+                    "interpolation frame indices must be integers")
+            if index < 0:
+                raise ValueError(
+                    "interpolation frame indices must be non-negative")
+            if index < pair_count:
+                selected.add(index)
+        if skip_list:
+            return [index in selected for index in range(pair_count)]
+        return [index not in selected for index in range(pair_count)]
+
     async def _invert(self, image: "ImageRef") -> "ImageRef":
         t = await current_runtime().refs.resolve(image)
         return ImageRef._wrap(await current_runtime().refs.create("IMAGE", 1.0 - t))  # type: ignore[return-value]
@@ -2749,23 +9768,327 @@ class InProcessOps:
         t = await current_runtime().refs.resolve(image)
         return ImageRef._wrap(await current_runtime().refs.create("IMAGE", t * factor))  # type: ignore[return-value]
 
+    async def _image_rgb(self, image: "ImageRef") -> "ImageRef":
+        import torch
+
+        rt = current_runtime()
+        value = await rt.refs.resolve(image)
+        if not isinstance(value, torch.Tensor) or value.ndim < 3:
+            raise TypeError("IMAGE must contain a channel-last tensor")
+        if value.shape[-1] < 3:
+            raise ValueError("IMAGE must contain at least three channels")
+        return ImageRef._wrap(await rt.refs.create(
+            "IMAGE", value[..., :3]))  # type: ignore[return-value]
+
+    async def _image_to_device(
+        self, image: "ImageRef", device: str = "auto",
+    ) -> "ImageRef":
+        import torch
+        import comfy.model_management
+
+        choices = {
+            "auto": comfy.model_management.intermediate_device,
+            "gpu": comfy.model_management.get_torch_device,
+            "cpu": lambda: torch.device("cpu"),
+        }
+        if device not in choices:
+            raise ValueError("image device must be auto, cpu, or gpu")
+        rt = current_runtime()
+        value = await rt.refs.resolve(image)
+        result = value.clone().to(choices[device]())
+        torch.cuda.empty_cache()
+        return ImageRef._wrap(
+            await rt.refs.create("IMAGE", result)
+        )  # type: ignore[return-value]
+
+    async def _image_spatial_shape(
+        self, image: "ImageRef",
+    ) -> tuple[int, int]:
+        import torch
+
+        value = await current_runtime().refs.resolve(image)
+        if not isinstance(value, torch.Tensor) or value.ndim not in (3, 4):
+            raise TypeError("IMAGE must contain an HWC or BHWC tensor")
+        if value.shape[-1] not in (1, 3, 4):
+            raise ValueError("IMAGE must have 1, 3, or 4 channels")
+        return int(value.shape[-3]), int(value.shape[-2])
+
+    async def _image_batch_size(self, image: "ImageRef") -> int:
+        import torch
+
+        value = await current_runtime().refs.resolve(image)
+        if not isinstance(value, torch.Tensor) or value.ndim not in (3, 4):
+            raise TypeError("IMAGE must contain an HWC or BHWC tensor")
+        if value.shape[-1] not in (1, 3, 4):
+            raise ValueError("IMAGE must have 1, 3, or 4 channels")
+        batch = 1 if value.ndim == 3 else int(value.shape[0])
+        if not 1 <= batch <= 4096:
+            raise ValueError("IMAGE batch size must be in [1, 4096]")
+        return batch
+
+    async def _image_select_batch(
+        self, image: "ImageRef", indices: list[int],
+    ) -> "ImageRef":
+        import torch
+
+        if (
+            not isinstance(indices, list)
+            or not 1 <= len(indices) <= 4096
+            or any(isinstance(index, bool) or not isinstance(index, int)
+                   for index in indices)
+            or len(set(indices)) != len(indices)
+        ):
+            raise ValueError(
+                "image batch indices must be 1..4096 unique integers")
+        rt = current_runtime()
+        value = await rt.refs.resolve(image)
+        if (
+            not isinstance(value, torch.Tensor)
+            or value.ndim != 4
+            or value.shape[-1] not in (1, 3, 4)
+            or not 1 <= int(value.shape[0]) <= 4096
+        ):
+            raise TypeError("image batch selection requires a BHWC IMAGE")
+        if min(indices) < 0 or max(indices) >= int(value.shape[0]):
+            raise IndexError("image batch index is out of range")
+        selected = value[indices]
+        if selected.numel() > 268_435_456:
+            raise ValueError("selected image batch is too large")
+        return ImageRef._wrap(await rt.refs.create(
+            "IMAGE", selected))  # type: ignore[return-value]
+
+    async def _mask_grow(
+        self, mask: "MaskRef", amount: int,
+        tapered_corners: bool = False,
+    ) -> "MaskRef":
+        import torch
+        from comfy_extras.nodes_mask import GrowMask
+
+        if isinstance(amount, bool) or not isinstance(amount, int):
+            raise TypeError("mask grow amount must be an integer")
+        if not -512 <= amount <= 512:
+            raise ValueError("mask grow amount must be in [-512, 512]")
+        if type(tapered_corners) is not bool:
+            raise TypeError("mask tapered_corners must be a bool")
+        rt = current_runtime()
+        value = await rt.refs.resolve(mask)
+        if not isinstance(value, torch.Tensor) or value.ndim < 2:
+            raise TypeError("MASK must contain a tensor with spatial axes")
+        result = GrowMask.execute(
+            value.detach().cpu(), amount, tapered_corners).result[0]
+        return MaskRef._wrap(await rt.refs.create(
+            "MASK", result))  # type: ignore[return-value]
+
     # --- operations on live engine objects ------------------------------- #
     # Each resolves its handles to the real objects HERE, on the trusted plane,
     # runs core's own semantics, and returns a handle. A guest never holds the
     # model; it holds the name of what it wanted done.
 
+    @staticmethod
+    def _ensure_vae_current_defaults(value: Any) -> None:
+        """Normalize legacy VAE objects at the trusted API boundary.
+
+        Some external VAE loaders copied an older ComfyUI initializer instead
+        of calling the current base initializer.  Current encode/decode code
+        legitimately expects these two inert attributes.  Supplying their
+        canonical defaults only when absent keeps every VAE operation usable
+        without exposing or replacing the external loader's implementation.
+        """
+        for name, default in (
+            ("handles_tiling", False),
+            ("format_encoded", None),
+        ):
+            if not hasattr(value, name):
+                setattr(value, name, default)
+
+    @staticmethod
+    def _normalize_decoded_tensor(value: Any) -> Any:
+        import torch
+
+        if not isinstance(value, torch.Tensor):
+            raise TypeError("VAE decode must return a tensor")
+        if value.ndim == 5:
+            value = value.reshape(
+                -1, value.shape[-3], value.shape[-2], value.shape[-1])
+        if value.ndim != 4:
+            raise TypeError("VAE tensor decode must return BHWC or BTHWC")
+        if any(int(size) < 1 for size in value.shape):
+            raise ValueError("VAE tensor decode returned an empty dimension")
+        if int(value.shape[-1]) > 4096:
+            raise ValueError("VAE tensor decode has too many channels")
+        return value
+
+    @staticmethod
+    def _validate_vae_decode_tiles(
+        tile_size: int, overlap: int, temporal_size: int,
+        temporal_overlap: int,
+    ) -> None:
+        if not 64 <= tile_size <= 4096:
+            raise ValueError("VAE decode tile_size must be in [64, 4096]")
+        if not 0 <= overlap <= 4096:
+            raise ValueError("VAE decode overlap must be in [0, 4096]")
+        if not 8 <= temporal_size <= 4096:
+            raise ValueError(
+                "VAE decode temporal_size must be in [8, 4096]")
+        if not 4 <= temporal_overlap <= 4096:
+            raise ValueError(
+                "VAE decode temporal_overlap must be in [4, 4096]")
+
     async def _vae_decode(self, vae: "VaeRef", latent: "LatentRef") -> "ImageRef":
         rt = current_runtime()
         v = await rt.refs.resolve(vae)
+        self._ensure_vae_current_defaults(v)
         samples = await rt.refs.resolve(latent)
         return ImageRef._wrap(await rt.refs.create("IMAGE", v.decode(samples["samples"])))  # type: ignore[return-value]
+
+    async def _vae_latent_layout(
+        self, vae: "VaeRef",
+    ) -> dict[str, Optional[int]]:
+        value = await current_runtime().refs.resolve(vae)
+
+        channels = getattr(value, "latent_channels", None)
+        spatial_fn = getattr(value, "spacial_compression_encode", None)
+        if (
+            isinstance(channels, bool)
+            or not isinstance(channels, int)
+            or not 1 <= channels <= 4096
+            or not callable(spatial_fn)
+        ):
+            raise ValueError(
+                "VAE does not publish a bounded latent layout")
+        spatial = spatial_fn()
+        if (
+            isinstance(spatial, bool)
+            or not isinstance(spatial, int)
+            or not 1 <= spatial <= 256
+        ):
+            raise ValueError(
+                "VAE spatial compression must be an integer in [1, 256]")
+
+        temporal = None
+        temporal_fn = getattr(value, "temporal_compression_encode", None)
+        if callable(temporal_fn):
+            temporal = temporal_fn()
+            if (
+                isinstance(temporal, bool)
+                or not isinstance(temporal, int)
+                or not 1 <= temporal <= 256
+            ):
+                raise ValueError(
+                    "VAE temporal compression must be an integer in [1, 256]")
+        return {
+            "channels": channels,
+            "spatial_compression": spatial,
+            "temporal_compression": temporal,
+        }
+
+    async def _vae_decode_tensor(
+        self, vae: "VaeRef", latent: "LatentRef",
+    ) -> "TensorRef":
+        rt = current_runtime()
+        value = await rt.refs.resolve(vae)
+        self._ensure_vae_current_defaults(value)
+        latent_value = await rt.refs.resolve(latent)
+        decoded = self._normalize_decoded_tensor(
+            value.decode(latent_value["samples"]))
+        return TensorRef._wrap(await rt.refs.create(
+            "TENSOR", decoded))  # type: ignore[return-value]
+
+    async def _vae_decode_tiled(
+        self, vae: "VaeRef", latent: "LatentRef", tile_size: int = 512,
+        overlap: int = 64, temporal_size: int = 64,
+        temporal_overlap: int = 8,
+    ) -> "ImageRef":
+        from nodes import VAEDecodeTiled
+
+        self._validate_vae_decode_tiles(
+            tile_size, overlap, temporal_size, temporal_overlap)
+        rt = current_runtime()
+        value = await rt.refs.resolve(vae)
+        self._ensure_vae_current_defaults(value)
+        samples = await rt.refs.resolve(latent)
+        pixels = VAEDecodeTiled().decode(
+            value, samples, tile_size, overlap, temporal_size,
+            temporal_overlap)[0]
+        return ImageRef._wrap(await rt.refs.create(
+            "IMAGE", pixels))  # type: ignore[return-value]
+
+    async def _vae_decode_tensor_tiled(
+        self, vae: "VaeRef", latent: "LatentRef", tile_size: int = 512,
+        overlap: int = 64, temporal_size: int = 64,
+        temporal_overlap: int = 8,
+    ) -> "TensorRef":
+        from nodes import VAEDecodeTiled
+
+        self._validate_vae_decode_tiles(
+            tile_size, overlap, temporal_size, temporal_overlap)
+        rt = current_runtime()
+        value = await rt.refs.resolve(vae)
+        self._ensure_vae_current_defaults(value)
+        samples = await rt.refs.resolve(latent)
+        decoded = VAEDecodeTiled().decode(
+            value, samples, tile_size, overlap, temporal_size,
+            temporal_overlap)[0]
+        decoded = self._normalize_decoded_tensor(decoded)
+        return TensorRef._wrap(await rt.refs.create(
+            "TENSOR", decoded))  # type: ignore[return-value]
 
     async def _vae_encode(self, vae: "VaeRef", image: "ImageRef") -> "LatentRef":
         rt = current_runtime()
         v = await rt.refs.resolve(vae)
+        self._ensure_vae_current_defaults(v)
         pixels = await rt.refs.resolve(image)
         return LatentRef._wrap(await rt.refs.create(  # type: ignore[return-value]
             "LATENT", {"samples": v.encode(pixels)}))
+
+    async def _vae_encode_for_inpaint(
+        self, vae: "VaeRef", image: "ImageRef", mask: "MaskRef",
+        grow_mask_by: int = 6,
+    ) -> "LatentRef":
+        from nodes import VAEEncodeForInpaint
+
+        if (
+            isinstance(grow_mask_by, bool)
+            or not isinstance(grow_mask_by, int)
+            or not 0 <= grow_mask_by <= 64
+        ):
+            raise ValueError("inpaint mask growth must be an integer in [0, 64]")
+        rt = current_runtime()
+        vae_value = await rt.refs.resolve(vae)
+        self._ensure_vae_current_defaults(vae_value)
+        pixels = await rt.refs.resolve(image)
+        mask_value = await rt.refs.resolve(mask)
+        result = VAEEncodeForInpaint().encode(
+            vae_value, pixels, mask_value, grow_mask_by)[0]
+        return LatentRef._wrap(await rt.refs.create(
+            "LATENT", result))  # type: ignore[return-value]
+
+    async def _vae_encode_inpaint_conditioning(
+        self, vae: "VaeRef", image: "ImageRef", mask: "MaskRef",
+        positive: "CondRef", negative: "CondRef",
+        noise_mask: bool = True,
+    ) -> tuple["CondRef", "CondRef", "LatentRef"]:
+        from nodes import InpaintModelConditioning
+
+        if type(noise_mask) is not bool:
+            raise TypeError("inpaint noise_mask must be a bool")
+        rt = current_runtime()
+        values = await asyncio.gather(
+            rt.refs.resolve(positive),
+            rt.refs.resolve(negative),
+            rt.refs.resolve(image),
+            rt.refs.resolve(vae),
+            rt.refs.resolve(mask),
+        )
+        self._ensure_vae_current_defaults(values[3])
+        result = InpaintModelConditioning().encode(
+            values[0], values[1], values[2], values[3], values[4],
+            noise_mask)
+        return (
+            CondRef._wrap(await rt.refs.create("CONDITIONING", result[0])),
+            CondRef._wrap(await rt.refs.create("CONDITIONING", result[1])),
+            LatentRef._wrap(await rt.refs.create("LATENT", result[2])),
+        )  # type: ignore[return-value]
 
     async def _vae_encode_tiled(
         self, vae: "VaeRef", image: "ImageRef", tile_x=None, tile_y=None,
@@ -2773,6 +10096,7 @@ class InProcessOps:
     ) -> "LatentRef":
         rt = current_runtime()
         value = await rt.refs.resolve(vae)
+        self._ensure_vae_current_defaults(value)
         pixels = await rt.refs.resolve(image)
         kwargs = {
             key: item for key, item in {
@@ -2801,6 +10125,7 @@ class InProcessOps:
 
         rt = current_runtime()
         value = await rt.refs.resolve(vae)
+        self._ensure_vae_current_defaults(value)
         pixels = await rt.refs.resolve(image)
         if not isinstance(pixels, torch.Tensor) or pixels.ndim != 4:
             raise TypeError("VAE video encode needs BHWC image frames")
@@ -2828,6 +10153,7 @@ class InProcessOps:
 
         rt = current_runtime()
         value = await rt.refs.resolve(vae)
+        self._ensure_vae_current_defaults(value)
         latent_value = await rt.refs.resolve(latent)
         if not isinstance(latent_value, dict) or "samples" not in latent_value:
             raise TypeError("VAE video decode needs a LATENT with samples")
@@ -2884,6 +10210,7 @@ class InProcessOps:
     ) -> "AudioRef":
         rt = current_runtime()
         value = await rt.refs.resolve(vae)
+        self._ensure_vae_current_defaults(value)
         latent_value = await rt.refs.resolve(latent)
         if not isinstance(latent_value, dict) or "samples" not in latent_value:
             raise TypeError("VAE audio decode needs a LATENT with samples")
@@ -3116,12 +10443,416 @@ class InProcessOps:
         cond = c.encode_from_tokens_scheduled(tokens, add_dict=add_dict or {})
         return CondRef._wrap(await rt.refs.create("CONDITIONING", cond))  # type: ignore[return-value]
 
+    async def _clip_encode_token_weights_component(
+        self, clip: "ClipRef", component: str, tokens: list,
+    ) -> tuple[TensorRef, Optional[TensorRef]]:
+        import math
+
+        from comfy import model_management
+
+        if component not in {"l", "g"}:
+            raise ValueError("CLIP component must be 'l' or 'g'")
+        if not isinstance(tokens, list) or not 1 <= len(tokens) <= 2048:
+            raise ValueError("CLIP component tokens need 1..2048 chunks")
+        total = 0
+        for chunk_index, chunk in enumerate(tokens):
+            if not isinstance(chunk, list) or not 1 <= len(chunk) <= 4096:
+                raise ValueError(
+                    f"CLIP token chunk {chunk_index} needs 1..4096 entries")
+            total += len(chunk)
+            if total > 131072:
+                raise ValueError("CLIP component token input is too large")
+            for entry_index, entry in enumerate(chunk):
+                if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+                    raise TypeError(
+                        f"CLIP token entry {chunk_index}:{entry_index} must "
+                        "contain token and weight")
+                weight = entry[1]
+                if (isinstance(weight, bool)
+                        or not isinstance(weight, (int, float))
+                        or not math.isfinite(float(weight))):
+                    raise ValueError(
+                        f"CLIP token weight {chunk_index}:{entry_index} "
+                        "must be finite")
+
+        rt = current_runtime()
+        c = await rt.refs.resolve(clip)
+        stage = getattr(c, "cond_stage_model", None)
+        target = getattr(stage, f"clip_{component}", None)
+        if target is None:
+            raise ValueError(
+                f"this text encoder has no CLIP-{component.upper()} component")
+
+        stage.reset_clip_options()
+        if getattr(c, "layer_idx", None) is not None:
+            stage.set_clip_options({"layer": c.layer_idx})
+        c.load_model()
+        device = c.patcher.load_device
+        stage.set_clip_options({"execution_device": device})
+        with model_management.cuda_device_context(device):
+            output = target.encode_token_weights(tokens)
+        embedding, pooled = output[:2]
+        embedding = embedding.detach().to(device="cpu")
+        embedding_ref = TensorRef._wrap(
+            await rt.refs.create("TENSOR", embedding)
+        )
+        pooled_ref = None
+        if pooled is not None:
+            pooled_ref = TensorRef._wrap(await rt.refs.create(
+                "TENSOR", pooled.detach().to(device="cpu")
+            ))
+        return embedding_ref, pooled_ref
+
     async def _clip_encode(self, clip: "ClipRef", text: str) -> "CondRef":
         rt = current_runtime()
         c = await rt.refs.resolve(clip)
         tokens = c.tokenize(text)
         return CondRef._wrap(await rt.refs.create(  # type: ignore[return-value]
             "CONDITIONING", c.encode_from_tokens_scheduled(tokens)))
+
+    async def _clip_generate_text(
+        self, clip: "ClipRef", prompt: str,
+        image: Optional["ImageRef"] = None,
+        video: Optional["ImageRef"] = None,
+        max_length: int = 256, do_sample: bool = False,
+        temperature: float = 1.0, top_k: Optional[int] = 50,
+        top_p: float = 0.95, min_p: float = 0.0,
+        repetition_penalty: float = 1.0,
+        seed: Optional[int] = None, presence_penalty: float = 0.0,
+        thinking: bool = False, use_default_template: bool = True,
+        num_beams: int = 1,
+    ) -> str:
+        from contextlib import nullcontext
+        import math
+        import torch
+
+        prompt = str(prompt)
+        if len(prompt) > 32768:
+            raise ValueError("text-generation prompt exceeds 32768 characters")
+        if (isinstance(max_length, bool) or not isinstance(max_length, int)
+                or not 1 <= max_length <= 4096):
+            raise ValueError("text-generation max_length must be in [1, 4096]")
+        if (top_k is not None and (
+            isinstance(top_k, bool) or not isinstance(top_k, int)
+            or not 0 <= top_k <= 1000
+        )):
+            raise ValueError("text-generation top_k must be null or in [0, 1000]")
+        if (isinstance(num_beams, bool) or not isinstance(num_beams, int)
+                or not 1 <= num_beams <= 8):
+            raise ValueError("text-generation num_beams must be in [1, 8]")
+        if num_beams > 1 and do_sample:
+            raise ValueError("beam generation cannot also enable sampling")
+        if (seed is not None and (
+            isinstance(seed, bool) or not isinstance(seed, int)
+            or not 0 <= seed <= 0xFFFFFFFFFFFFFFFF
+        )):
+            raise ValueError("text-generation seed must be a uint64 or null")
+        values = {
+            "temperature": float(temperature),
+            "top_p": float(top_p),
+            "min_p": float(min_p),
+            "repetition_penalty": float(repetition_penalty),
+            "presence_penalty": float(presence_penalty),
+        }
+        if not all(math.isfinite(value) for value in values.values()):
+            raise ValueError("text-generation numeric options must be finite")
+        if not 0.0 < values["temperature"] <= 2.0:
+            raise ValueError("text-generation temperature must be in (0, 2]")
+        if not 0.0 <= values["top_p"] <= 1.0:
+            raise ValueError("text-generation top_p must be in [0, 1]")
+        if not 0.0 <= values["min_p"] <= 1.0:
+            raise ValueError("text-generation min_p must be in [0, 1]")
+        if not 0.0 < values["repetition_penalty"] <= 5.0:
+            raise ValueError(
+                "text-generation repetition_penalty must be in (0, 5]")
+        if not 0.0 <= values["presence_penalty"] <= 5.0:
+            raise ValueError(
+                "text-generation presence_penalty must be in [0, 5]")
+        if type(do_sample) is not bool or type(thinking) is not bool:
+            raise TypeError("text-generation switches must be booleans")
+        if type(use_default_template) is not bool:
+            raise TypeError("use_default_template must be a boolean")
+
+        rt = current_runtime()
+        c = await rt.refs.resolve(clip)
+        if (not callable(getattr(c, "tokenize", None))
+                or not callable(getattr(c, "generate", None))
+                or not callable(getattr(c, "decode", None))):
+            raise ValueError(
+                "the selected text encoder does not support generation")
+        pixels = None
+        if image is not None:
+            pixels = await rt.refs.resolve(image)
+            if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
+                    or pixels.shape[0] != 1 or pixels.shape[-1] < 3):
+                raise ValueError(
+                    "image-conditioned text generation needs one BHWC image")
+            height, width = map(int, pixels.shape[1:3])
+            if (height <= 0 or width <= 0
+                    or height * width > 268_435_456):
+                raise ValueError("text-generation image dimensions are invalid")
+        video_pixels = None
+        if video is not None:
+            video_pixels = await rt.refs.resolve(video)
+            if (not isinstance(video_pixels, torch.Tensor)
+                    or video_pixels.ndim != 4
+                    or not 1 <= video_pixels.shape[0] <= 64
+                    or video_pixels.shape[-1] < 3):
+                raise ValueError(
+                    "video-conditioned text generation needs 1 to 64 BHWC frames")
+            frames, height, width = map(int, video_pixels.shape[:3])
+            if (height <= 0 or width <= 0
+                    or frames * height * width > 268_435_456):
+                raise ValueError("text-generation video dimensions are invalid")
+
+        family = getattr(c, "_secure_language_family", None)
+        if top_k is None:
+            top_k = 20 if isinstance(family, str) and family.startswith("qwen3") else 50
+
+        model_lock = getattr(c, "_secure_text_generation_lock", None)
+        with model_lock if model_lock is not None else nullcontext():
+            tokens = c.tokenize(
+                prompt,
+                image=pixels,
+                video=video_pixels,
+                skip_template=not use_default_template,
+                min_length=1,
+                thinking=thinking,
+            )
+            generate_options = {
+                "do_sample": do_sample,
+                "max_length": max_length,
+                "temperature": values["temperature"],
+                "top_k": top_k,
+                "top_p": values["top_p"],
+                "min_p": values["min_p"],
+                "repetition_penalty": values["repetition_penalty"],
+                "seed": seed,
+                "presence_penalty": values["presence_penalty"],
+            }
+            if num_beams != 1:
+                generate_options["num_beams"] = num_beams
+            generated = c.generate(tokens, **generate_options)
+            result = c.decode(generated)
+        if not isinstance(result, str) or len(result) > 1_048_576:
+            raise RuntimeError("text encoder returned invalid generated text")
+        return result.strip()
+
+    async def _clip_scale_attention_weights(
+        self, clip: "ClipRef", clip_l=None, clip_g=None, t5xxl=None,
+        query: bool = True, key: bool = True,
+        value: bool = True, output: bool = True,
+    ) -> "ClipRef":
+        import math
+        import re
+
+        def scales(name, values, expected):
+            if values is None:
+                return None
+            if not isinstance(values, (list, tuple)) or len(values) != expected:
+                raise ValueError(
+                    f"{name} must contain exactly {expected} layer scales")
+            checked = []
+            for index, item in enumerate(values):
+                if (
+                    isinstance(item, bool)
+                    or not isinstance(item, (int, float))
+                    or not math.isfinite(float(item))
+                    or not 0.0 <= float(item) <= 5.0
+                ):
+                    raise ValueError(
+                        f"{name}[{index}] must be finite and in [0, 5]")
+                checked.append(float(item))
+            return checked
+
+        clip_l = scales("clip_l", clip_l, 12)
+        clip_g = scales("clip_g", clip_g, 32)
+        t5xxl = scales("t5xxl", t5xxl, 24)
+        switches = (query, key, value, output)
+        if any(not isinstance(item, bool) for item in switches):
+            raise TypeError("attention projection switches must be booleans")
+
+        rt = current_runtime()
+        source = await rt.refs.resolve(clip)
+        patched = source.clone()
+        state = patched.patcher.model_state_dict()
+
+        def selected(key_name, *, t5=False):
+            if t5:
+                return (
+                    (query and ".q." in key_name)
+                    or (key and ".k." in key_name)
+                    or (value and ".v." in key_name)
+                    or (output and ".o." in key_name)
+                )
+            return (
+                (query and "q_proj" in key_name)
+                or (key and "k_proj" in key_name)
+                or (value and "v_proj" in key_name)
+                or (output and "out_proj" in key_name)
+            )
+
+        dual_clip = clip_l is not None and clip_g is not None
+        for key_name in state:
+            layer_scales = None
+            layer = None
+            if "self_attn" in key_name:
+                match = re.search(r"\.layers\.(\d+)\.", key_name)
+                if match is not None:
+                    layer = int(match.group(1))
+                    if dual_clip:
+                        if "clip_l" in key_name:
+                            layer_scales = clip_l
+                        elif "clip_g" in key_name:
+                            layer_scales = clip_g
+                    else:
+                        layer_scales = clip_l if clip_l is not None else clip_g
+                is_selected = selected(key_name)
+            elif "SelfAttention" in key_name:
+                match = re.search(r"\.block\.(\d+)\.", key_name)
+                if match is not None:
+                    layer = int(match.group(1))
+                    layer_scales = t5xxl
+                is_selected = selected(key_name, t5=True)
+            else:
+                continue
+            if (
+                layer_scales is not None
+                and layer is not None
+                and layer < len(layer_scales)
+                and layer_scales[layer] != 1.0
+                and is_selected
+            ):
+                patched.add_patches(
+                    {key_name: (None,)}, 0.0, layer_scales[layer])
+
+        return ClipRef._wrap(
+            await rt.refs.create("CLIP", patched)
+        )  # type: ignore[return-value]
+
+    async def _clip_set_last_layer(
+        self, clip: "ClipRef", stop_at_clip_layer: int,
+    ) -> "ClipRef":
+        if isinstance(stop_at_clip_layer, bool):
+            raise TypeError("CLIP layer must be an integer")
+        layer = int(stop_at_clip_layer)
+        if not -24 <= layer <= -1:
+            raise ValueError("CLIP layer must be in [-24, -1]")
+        rt = current_runtime()
+        source = await rt.refs.resolve(clip)
+        output = source.clone()
+        output.clip_layer(layer)
+        return ClipRef._wrap(
+            await rt.refs.create("CLIP", output)
+        )  # type: ignore[return-value]
+
+    async def _clip_with_attention_impl(
+        self, clip: "ClipRef", mode: str,
+    ) -> "ClipRef":
+        from comfy.ldm.modules import attention as attn
+
+        if not isinstance(mode, str) or not 1 <= len(mode) <= 128:
+            raise ValueError("CLIP attention mode must be a bounded string")
+        try:
+            attention_function = attn.get_attention_function(mode)
+        except KeyError as error:
+            raise ValueError(
+                f"CLIP attention function {mode!r} is not registered"
+            ) from error
+        if not callable(attention_function):
+            raise TypeError("registered CLIP attention implementation is invalid")
+
+        rt = current_runtime()
+        source = await rt.refs.resolve(clip)
+        output = source.clone()
+        patcher = getattr(output, "patcher", None)
+        if patcher is None or not isinstance(
+            getattr(patcher, "model_options", None), dict
+        ):
+            raise TypeError("CLIP attention selection needs a valid patcher")
+
+        def override(_default, *args, **kwargs):
+            return attention_function(*args, **kwargs)
+
+        transformer_options = patcher.model_options.setdefault(
+            "transformer_options", {})
+        transformer_options = transformer_options.copy()
+        transformer_options["optimized_attention_override"] = override
+        patcher.model_options["transformer_options"] = transformer_options
+        return ClipRef._wrap(
+            await rt.refs.create("CLIP", output)
+        )  # type: ignore[return-value]
+
+    async def _clip_describe_tokens(
+        self, clip: "ClipRef", tokens: dict,
+    ) -> dict:
+        from comfy.sd1_clip import SDTokenizer
+
+        if not isinstance(tokens, dict) or not 1 <= len(tokens) <= 16:
+            raise ValueError("CLIP tokens need 1 to 16 components")
+        rt = current_runtime()
+        source = await rt.refs.resolve(clip)
+        tokenizer_root = getattr(source, "tokenizer", None)
+        tokenizers = [
+            value for value in vars(tokenizer_root).values()
+            if isinstance(value, SDTokenizer)
+        ] if tokenizer_root is not None else []
+        descriptions = {}
+        total = 0
+        for tokenizer in tokenizers:
+            key = str(tokenizer.embedding_key).replace("clip_", "")
+            if key not in tokens:
+                continue
+            chunks = tokens[key]
+            if not isinstance(chunks, list) or not 1 <= len(chunks) <= 2048:
+                raise ValueError(f"CLIP token component {key!r} is invalid")
+            special = {
+                value for value in (
+                    tokenizer.start_token,
+                    tokenizer.end_token,
+                    tokenizer.pad_token,
+                ) if isinstance(value, int)
+            }
+            inv_vocab = getattr(tokenizer, "inv_vocab", None)
+            if not isinstance(inv_vocab, dict):
+                raise TypeError(
+                    f"CLIP tokenizer {key!r} has no inverse vocabulary")
+            described_chunks = []
+            for chunk_index, chunk in enumerate(chunks):
+                if not isinstance(chunk, list) or len(chunk) > 4096:
+                    raise ValueError(
+                        f"CLIP token chunk {key!r}:{chunk_index} is invalid")
+                described = []
+                for entry_index, entry in enumerate(chunk):
+                    if (not isinstance(entry, (tuple, list)) or len(entry) < 1
+                            or isinstance(entry[0], bool)
+                            or not isinstance(entry[0], int)):
+                        raise TypeError(
+                            f"CLIP token {key!r}:{chunk_index}:"
+                            f"{entry_index} has an invalid ID")
+                    token_id = entry[0]
+                    token_text = inv_vocab.get(token_id)
+                    if not isinstance(token_text, str):
+                        raise ValueError(
+                            f"CLIP token {token_id} has no text description")
+                    if len(token_text.encode("utf-8")) > 1024:
+                        raise ValueError("CLIP token text exceeds 1024 bytes")
+                    described.append({
+                        "id": token_id,
+                        "text": token_text,
+                        "special": token_id in special,
+                    })
+                    total += 1
+                    if total > 32768:
+                        raise ValueError(
+                            "CLIP token descriptions exceed 32768 entries")
+                described_chunks.append(described)
+            descriptions[key] = described_chunks
+        missing = set(tokens) - set(descriptions)
+        if missing:
+            raise ValueError(
+                f"CLIP token components are not describable: {sorted(missing)}")
+        return descriptions
 
     async def _gligen_apply_batched(
         self, gligen: "GligenRef", conditioning: "CondRef", clip: "ClipRef",
@@ -3188,6 +10919,380 @@ class InProcessOps:
         a = await rt.refs.resolve(cond)
         b = await rt.refs.resolve(other)
         return CondRef._wrap(await rt.refs.create("CONDITIONING", a + b))  # type: ignore[return-value]
+
+    async def _cond_with_mask(
+        self, cond: "CondRef", mask: "MaskRef", strength: float = 1.0,
+        set_area_to_bounds: bool = False,
+    ) -> "CondRef":
+        import math
+        from nodes import ConditioningSetMask
+
+        strength = float(strength)
+        if not math.isfinite(strength) or not 0.0 <= strength <= 10.0:
+            raise ValueError(
+                "conditioning mask strength must be finite and in [0, 10]")
+        if type(set_area_to_bounds) is not bool:
+            raise TypeError("set_area_to_bounds must be a bool")
+        rt = current_runtime()
+        conditioning = await rt.refs.resolve(cond)
+        mask_value = await rt.refs.resolve(mask)
+        area = "mask bounds" if set_area_to_bounds else "default"
+        result = ConditioningSetMask().append(
+            conditioning, mask_value, area, strength)[0]
+        return CondRef._wrap(await rt.refs.create(
+            "CONDITIONING", result))  # type: ignore[return-value]
+
+    async def _cond_with_clip_vision_output(
+        self, cond: "CondRef", output: "ClipVisionOutputRef",
+    ) -> "CondRef":
+        import torch
+
+        rt = current_runtime()
+        conditioning = await rt.refs.resolve(cond)
+        vision = await rt.refs.resolve(output)
+        states = getattr(vision, "penultimate_hidden_states", None)
+        if (
+            not isinstance(conditioning, (list, tuple))
+            or not conditioning
+            or not isinstance(states, torch.Tensor)
+            or states.ndim < 2
+            or states.numel() < 1
+            or states.numel() > 268_435_456
+        ):
+            raise ValueError(
+                "clip-vision conditioning needs bounded conditioning and "
+                "penultimate hidden states")
+        result = []
+        for index, item in enumerate(conditioning):
+            if (
+                not isinstance(item, (list, tuple))
+                or len(item) != 2
+                or not isinstance(item[1], dict)
+            ):
+                raise TypeError(
+                    f"conditioning row {index} has an invalid shape")
+            metadata = item[1].copy()
+            metadata["clip_vision_output"] = vision
+            result.append([item[0], metadata])
+        return CondRef._wrap(await rt.refs.create(
+            "CONDITIONING", result))  # type: ignore[return-value]
+
+    async def _cond_with_concat_latent(
+        self, cond: "CondRef", model: "ModelRef", latent: "LatentRef",
+        extra_latent: Optional["LatentRef"] = None,
+    ) -> "CondRef":
+        import copy
+        import torch
+        from comfy.conds import CONDRegular
+
+        rt = current_runtime()
+        conditioning = await rt.refs.resolve(cond)
+        model_value = await rt.refs.resolve(model)
+        latent_value = await rt.refs.resolve(latent)
+        extra_value = (
+            None if extra_latent is None
+            else await rt.refs.resolve(extra_latent))
+        if not isinstance(conditioning, (list, tuple)) or not conditioning:
+            raise TypeError(
+                "concat-latent conditioning must contain embedding rows")
+
+        def samples(value: Any, name: str):
+            result = value.get("samples") if isinstance(value, dict) else None
+            if (
+                not isinstance(result, torch.Tensor)
+                or result.ndim != 4
+                or not 1 <= result.shape[0] <= 64
+                or not 1 <= result.shape[1] <= 64
+                or result.shape[2] <= 0
+                or result.shape[3] <= 0
+                or result.numel() > 268_435_456
+            ):
+                raise ValueError(
+                    f"{name} must contain a bounded BCHW latent tensor")
+            return result
+
+        tensors = [samples(latent_value, "latent")]
+        if extra_value is not None:
+            tensors.append(samples(extra_value, "extra_latent"))
+            if any(
+                tensor.shape[0] != tensors[0].shape[0]
+                or tensor.shape[2:] != tensors[0].shape[2:]
+                for tensor in tensors[1:]
+            ):
+                raise ValueError(
+                    "concat latents must share batch and spatial dimensions")
+        concat = torch.cat(tensors, dim=1)
+        latent_format = getattr(
+            getattr(model_value, "model", None), "latent_format", None)
+        process = getattr(latent_format, "process_in", None)
+        if not callable(process):
+            raise ValueError(
+                "the selected model has no latent-format converter")
+        formatted = process(concat)
+        if not isinstance(formatted, torch.Tensor):
+            raise TypeError("model latent-format conversion returned no tensor")
+
+        result = []
+        for index, row in enumerate(conditioning):
+            if (
+                not isinstance(row, (list, tuple))
+                or len(row) != 2
+                or not isinstance(row[1], dict)
+            ):
+                raise TypeError(
+                    f"conditioning row {index} has an invalid structure")
+            metadata = copy.copy(row[1])
+            model_conds = copy.copy(metadata.get("model_conds") or {})
+            model_conds["c_concat"] = CONDRegular(formatted)
+            metadata["model_conds"] = model_conds
+            result.append([row[0], metadata])
+        return CondRef._wrap(await rt.refs.create(
+            "CONDITIONING", result))  # type: ignore[return-value]
+
+    async def _cond_spatial_crop(
+        self, cond: "CondRef", x: int, y: int, width: int, height: int,
+        source_width: int, source_height: int,
+        target_width: Optional[int] = None,
+        target_height: Optional[int] = None,
+    ) -> "CondRef":
+        import torch
+        import torch.nn.functional as F
+
+        values = {
+            "x": x, "y": y, "width": width, "height": height,
+            "source_width": source_width, "source_height": source_height,
+        }
+        for name, value in values.items():
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"conditioning crop {name} must be an integer")
+        if not 1 <= source_width <= 16384 or not 1 <= source_height <= 16384:
+            raise ValueError(
+                "conditioning crop source dimensions must be in [1, 16384]")
+        if width < 1 or height < 1 or x < 0 or y < 0:
+            raise ValueError("conditioning crop window must be positive")
+        if x + width > source_width or y + height > source_height:
+            raise ValueError("conditioning crop window exceeds its source")
+        if (target_width is None) != (target_height is None):
+            raise ValueError(
+                "conditioning crop target width and height must be paired")
+        if target_width is not None and (
+            isinstance(target_width, bool)
+            or isinstance(target_height, bool)
+            or not isinstance(target_width, int)
+            or not isinstance(target_height, int)
+            or not 1 <= target_width <= 16384
+            or not 1 <= target_height <= 16384
+        ):
+            raise ValueError(
+                "conditioning crop target dimensions must be integers "
+                "in [1, 16384]")
+
+        rt = current_runtime()
+        source = await rt.refs.resolve(cond)
+        if not isinstance(source, (list, tuple)):
+            raise TypeError("conditioning must be a list of embedding rows")
+
+        def crop_spatial_tensor(value: Any) -> Any:
+            if not isinstance(value, torch.Tensor) or value.ndim < 2:
+                return value
+            full_height, full_width = value.shape[-2:]
+            if full_height <= 1 and full_width <= 1:
+                return value.clone()
+            left = round(x * full_width / source_width)
+            right = round((x + width) * full_width / source_width)
+            top = round(y * full_height / source_height)
+            bottom = round((y + height) * full_height / source_height)
+            left = min(max(0, left), full_width - 1)
+            top = min(max(0, top), full_height - 1)
+            right = min(full_width, max(left + 1, right))
+            bottom = min(full_height, max(top + 1, bottom))
+            cropped = value[..., top:bottom, left:right].clone()
+            if target_width is None:
+                return cropped
+            scaled_width = max(1, round(
+                target_width * full_width / source_width))
+            scaled_height = max(1, round(
+                target_height * full_height / source_height))
+            if tuple(cropped.shape[-2:]) == (scaled_height, scaled_width):
+                return cropped
+            original_dtype = cropped.dtype
+            leading = tuple(cropped.shape[:-2])
+            resized = F.interpolate(
+                cropped.reshape(-1, 1, *cropped.shape[-2:]).float(),
+                size=(scaled_height, scaled_width),
+                mode="bilinear", align_corners=False,
+            )
+            return resized.reshape(
+                *leading, scaled_height, scaled_width).to(
+                    dtype=original_dtype)
+
+        controls: dict[int, Any] = {}
+
+        def crop_control(control: Any) -> Any:
+            if control is None:
+                return None
+            identity = id(control)
+            if identity in controls:
+                return controls[identity]
+            copy_method = getattr(control, "copy", None)
+            if not callable(copy_method):
+                # Unknown conditioning extensions remain opaque. Core-owned
+                # ControlNet/T2I types all implement copy().
+                return control
+            clone = copy_method()
+            controls[identity] = clone
+            if hasattr(control, "cond_hint_original"):
+                clone.cond_hint_original = crop_spatial_tensor(
+                    control.cond_hint_original)
+            if hasattr(clone, "cond_hint"):
+                clone.cond_hint = None
+            if hasattr(clone, "control_input"):
+                clone.control_input = None
+            if hasattr(control, "extra_concat_orig"):
+                clone.extra_concat_orig = [
+                    crop_spatial_tensor(item)
+                    for item in control.extra_concat_orig
+                ]
+            previous = crop_control(
+                getattr(control, "previous_controlnet", None))
+            setter = getattr(clone, "set_previous_controlnet", None)
+            if callable(setter):
+                setter(previous)
+            elif hasattr(clone, "previous_controlnet"):
+                clone.previous_controlnet = previous
+            return clone
+
+        def resolve_area(area: Any) -> tuple[int, int, int, int] | None:
+            if not isinstance(area, (tuple, list)):
+                return None
+            if len(area) == 5 and area[0] == "percentage":
+                return (
+                    max(1, round(float(area[1]) * source_height)),
+                    max(1, round(float(area[2]) * source_width)),
+                    round(float(area[3]) * source_height),
+                    round(float(area[4]) * source_width),
+                )
+            if len(area) != 4:
+                return None
+            return tuple(int(item) for item in area)
+
+        def crop_area(area: Any) -> tuple[int, int, int, int] | None:
+            resolved = resolve_area(area)
+            if resolved is None:
+                return None
+            area_height, area_width, area_y, area_x = resolved
+            left = max(x, area_x)
+            top = max(y, area_y)
+            right = min(x + width, area_x + area_width)
+            bottom = min(y + height, area_y + area_height)
+            if right <= left or bottom <= top:
+                return ()  # type: ignore[return-value]
+            area = (bottom - top, right - left, top - y, left - x)
+            if target_width is None:
+                return area
+            area_height, area_width, area_y, area_x = area
+            return (
+                max(1, round(area_height * target_height / height)),
+                max(1, round(area_width * target_width / width)),
+                round(area_y * target_height / height),
+                round(area_x * target_width / width),
+            )
+
+        def crop_mask(mask: Any) -> Any:
+            tensor = torch.as_tensor(mask)
+            original_ndim = tensor.ndim
+            if original_ndim == 2:
+                tensor = tensor.unsqueeze(0)
+            if tensor.ndim == 3:
+                tensor = tensor.unsqueeze(1)
+            elif tensor.ndim != 4 or tensor.shape[1] != 1:
+                raise ValueError(
+                    "conditioning crop mask must be HW, BHW, or B1HW")
+            tensor = tensor.float()
+            if tuple(tensor.shape[-2:]) != (source_height, source_width):
+                tensor = F.interpolate(
+                    tensor, size=(source_height, source_width),
+                    mode="bilinear", align_corners=False)
+            tensor = tensor[..., y:y + height, x:x + width]
+            if target_width is not None and tuple(tensor.shape[-2:]) != (
+                target_height, target_width,
+            ):
+                tensor = F.interpolate(
+                    tensor, size=(target_height, target_width),
+                    mode="bilinear", align_corners=False)
+            if original_ndim == 2:
+                return tensor[0, 0]
+            if original_ndim == 3:
+                return tensor[:, 0]
+            return tensor
+
+        def crop_gligen_positions(positions: Any) -> Any:
+            if not isinstance(positions, (list, tuple)):
+                return positions
+            output = []
+            for position in positions:
+                if (
+                    isinstance(position, (list, tuple))
+                    and len(position) == 5
+                    and all(isinstance(item, (int, float))
+                            for item in position[1:])
+                ):
+                    embedding, item_height, item_width, item_y, item_x = position
+                    cropped = crop_area((
+                        item_height, item_width, item_y, item_x))
+                    if cropped:
+                        output.append((embedding, *cropped))
+                elif isinstance(position, (list, tuple)):
+                    output.append(crop_gligen_positions(position))
+                else:
+                    output.append(position)
+            return output
+
+        def has_gligen_position(positions: Any) -> bool:
+            if not isinstance(positions, (list, tuple)):
+                return False
+            if (
+                len(positions) == 5
+                and all(isinstance(item, (int, float))
+                        for item in positions[1:])
+            ):
+                return True
+            return any(has_gligen_position(item) for item in positions)
+
+        result = []
+        for row in source:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                raise TypeError(
+                    "conditioning rows must contain embedding and metadata")
+            metadata = dict(row[1])
+            if "area" in metadata:
+                cropped_area = crop_area(metadata["area"])
+                if not cropped_area:
+                    continue
+                metadata["area"] = cropped_area
+            if "mask" in metadata:
+                metadata["mask"] = crop_mask(metadata["mask"])
+                if not torch.any(metadata["mask"] != 0):
+                    continue
+            if "gligen" in metadata:
+                gligen = metadata["gligen"]
+                if isinstance(gligen, (list, tuple)) and len(gligen) == 3:
+                    positions = crop_gligen_positions(gligen[2])
+                    if has_gligen_position(positions):
+                        metadata["gligen"] = (
+                            gligen[0], gligen[1], positions)
+                    else:
+                        metadata.pop("gligen")
+            if "control" in metadata:
+                metadata["control"] = crop_control(metadata["control"])
+            if isinstance(metadata.get("reference_latents"), (list, tuple)):
+                metadata["reference_latents"] = [
+                    crop_spatial_tensor(item)
+                    for item in metadata["reference_latents"]
+                ]
+            result.append([row[0], metadata])
+        return CondRef._wrap(await rt.refs.create(  # type: ignore[return-value]
+            "CONDITIONING", result))
 
     async def _latent_minimax_h3_token_count(
         self, latent: "LatentRef", conditioning: "CondRef",
@@ -3291,6 +11396,87 @@ class InProcessOps:
             "breakdown": "\n".join(f"{key}: {value}" for key, value in parts),
         }
 
+    async def _sigmas_steps(self, sigmas: "SigmasRef") -> int:
+        import torch
+
+        value = await current_runtime().refs.resolve(sigmas)
+        if (not isinstance(value, torch.Tensor) or value.ndim != 1
+                or not 2 <= int(value.numel()) <= 10001
+                or not torch.isfinite(value).all()):
+            raise ValueError(
+                "SIGMAS must contain 2 to 10001 finite scalar values")
+        return int(value.numel()) - 1
+
+    async def _sigmas_value_at(
+        self, sigmas: "SigmasRef", index: int,
+    ) -> float:
+        import math
+        import torch
+
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise TypeError("SIGMAS index must be an integer")
+        value = await current_runtime().refs.resolve(sigmas)
+        if (not isinstance(value, torch.Tensor) or value.ndim != 1
+                or not 1 <= int(value.numel()) <= 10001
+                or not torch.isfinite(value).all()):
+            raise ValueError(
+                "SIGMAS must contain 1 to 10001 finite scalar values")
+        if not -int(value.numel()) <= index < int(value.numel()):
+            raise IndexError("SIGMAS index is outside the schedule")
+        result = float(value[index].item())
+        if not math.isfinite(result):
+            raise ValueError("SIGMAS value is not finite")
+        return result
+
+    async def _sampler_named(
+        self, _subject: Optional["Ref"], name: str,
+        eta: Optional[float] = None,
+        ge_gamma: Optional[float] = None,
+    ) -> "SamplerRef":
+        import math
+        import comfy.samplers
+
+        if not isinstance(name, str) or name not in comfy.samplers.SAMPLER_NAMES:
+            raise ValueError("unknown core sampler name")
+        supplied = {
+            key: value for key, value in {
+                "eta": eta,
+                "ge_gamma": ge_gamma,
+            }.items() if value is not None
+        }
+        allowed = {
+            "euler_ancestral_cfg_pp": {"eta"},
+            "gradient_estimation": {"ge_gamma"},
+            "gradient_estimation_cfg_pp": {"ge_gamma"},
+        }.get(name, set())
+        unknown = set(supplied) - allowed
+        if unknown:
+            raise ValueError(
+                f"sampler {name!r} does not accept options {sorted(unknown)}")
+        checked = {}
+        if eta is not None:
+            if isinstance(eta, bool) or not isinstance(eta, (int, float)):
+                raise TypeError("sampler eta must be numeric")
+            eta = float(eta)
+            if not math.isfinite(eta) or not 0.0 <= eta <= 100.0:
+                raise ValueError("sampler eta must be finite and in [0, 100]")
+            checked["eta"] = eta
+        if ge_gamma is not None:
+            if (isinstance(ge_gamma, bool)
+                    or not isinstance(ge_gamma, (int, float))):
+                raise TypeError("sampler ge_gamma must be numeric")
+            ge_gamma = float(ge_gamma)
+            if not math.isfinite(ge_gamma) or not 2.0 <= ge_gamma <= 5.0:
+                raise ValueError(
+                    "sampler ge_gamma must be finite and in [2, 5]")
+            checked["ge_gamma"] = ge_gamma
+        sampler = (
+            comfy.samplers.ksampler(name, checked)
+            if checked else comfy.samplers.sampler_object(name)
+        )
+        return SamplerRef._wrap(await current_runtime().refs.create(
+            "SAMPLER", sampler))  # type: ignore[return-value]
+
     async def _cond_sequence_length(self, cond: "CondRef") -> int:
         value = await current_runtime().refs.resolve(cond)
         if (
@@ -3304,6 +11490,86 @@ class InProcessOps:
             raise TypeError(
                 "conditioning must contain a sequence-shaped embedding")
         return int(value[0][0].shape[1])
+
+    async def _cond_zero_out(self, cond: "CondRef") -> "CondRef":
+        from nodes import ConditioningZeroOut
+
+        rt = current_runtime()
+        source = await rt.refs.resolve(cond)
+        result = ConditioningZeroOut().zero_out(source)[0]
+        return CondRef._wrap(await rt.refs.create(
+            "CONDITIONING", result))  # type: ignore[return-value]
+
+    async def _cond_with_timestep_range(
+        self, cond: "CondRef", start: float, end: float,
+    ) -> "CondRef":
+        import math
+        from nodes import ConditioningSetTimestepRange
+
+        start = float(start)
+        end = float(end)
+        if (not math.isfinite(start) or not math.isfinite(end)
+                or not 0.0 <= start <= end <= 1.0):
+            raise ValueError(
+                "conditioning timestep range must satisfy "
+                "0 <= start <= end <= 1")
+        rt = current_runtime()
+        source = await rt.refs.resolve(cond)
+        result = ConditioningSetTimestepRange().set_range(
+            source, start, end)[0]
+        return CondRef._wrap(await rt.refs.create(
+            "CONDITIONING", result))  # type: ignore[return-value]
+
+    async def _cond_with_metadata(
+        self, cond: "CondRef", width=None, height=None,
+        crop_w=None, crop_h=None, target_width=None, target_height=None,
+    ) -> "CondRef":
+        import node_helpers
+        from nodes import MAX_RESOLUTION
+
+        values = {
+            key: value for key, value in {
+                "width": width,
+                "height": height,
+                "crop_w": crop_w,
+                "crop_h": crop_h,
+                "target_width": target_width,
+                "target_height": target_height,
+            }.items() if value is not None
+        }
+        if not values:
+            raise ValueError("conditioning metadata needs at least one field")
+        for key, value in values.items():
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"conditioning metadata {key} must be an int")
+            if not 0 <= value <= MAX_RESOLUTION:
+                raise ValueError(
+                    f"conditioning metadata {key} is outside the host limit")
+        rt = current_runtime()
+        source = await rt.refs.resolve(cond)
+        result = node_helpers.conditioning_set_values(source, values)
+        return CondRef._wrap(await rt.refs.create(
+            "CONDITIONING", result))  # type: ignore[return-value]
+
+    async def _cond_has_spatial_metadata(self, cond: "CondRef") -> bool:
+        """Inspect metadata shape, never embeddings, for safe tile batching."""
+        value = await current_runtime().refs.resolve(cond)
+        if not isinstance(value, (list, tuple)):
+            raise TypeError("conditioning must be a list of embedding rows")
+        spatial_keys = {
+            "area", "mask", "gligen", "control", "reference_latents",
+        }
+        for index, row in enumerate(value):
+            if (
+                not isinstance(row, (list, tuple))
+                or len(row) < 2
+                or not isinstance(row[1], dict)
+            ):
+                raise TypeError(
+                    f"conditioning row {index} has an invalid structure")
+            if spatial_keys.intersection(row[1]):
+                return True
+        return False
 
     async def _cond_concat(self, cond: "CondRef", other: "CondRef") -> "CondRef":
         rt = current_runtime()
@@ -3322,7 +11588,6 @@ class InProcessOps:
         self, _subject: Optional["Ref"], weights: list,
         uncond_multiplier: float = 1.0, extras: Any = None,
     ) -> tuple["ControlNetWeightsRef", "TimestepKeyframeRef"]:
-        import importlib
         import math
 
         if not isinstance(weights, (list, tuple)):
@@ -3381,21 +11646,117 @@ class InProcessOps:
 
         validate_extra(checked_extras)
 
-        adv_control = importlib.import_module(
-            "ComfyUI-Advanced-ControlNet.adv_control")
-        control_weights = adv_control.utils.ControlWeights.controlnet(
+        utils = _advanced_control_module("utils")
+        control_weights = utils.ControlWeights.controlnet(
             weights_input=checked_weights,
             uncond_multiplier=multiplier,
             extras=checked_extras,
         )
-        keyframe = adv_control.utils.TimestepKeyframe(
+        keyframe = utils.TimestepKeyframe(
             control_weights=control_weights)
-        shortcut = adv_control.utils.TimestepKeyframeGroup.default(keyframe)
+        shortcut = utils.TimestepKeyframeGroup.default(keyframe)
         weights_ref = ControlNetWeightsRef._wrap(await rt.refs.create(
             "CONTROL_NET_WEIGHTS", control_weights))
         shortcut_ref = TimestepKeyframeRef._wrap(await rt.refs.create(
             "TIMESTEP_KEYFRAME", shortcut))
         return weights_ref, shortcut_ref
+
+    async def _advanced_control_scaled_soft_weights(
+        self, _subject: Optional["Ref"], base_multiplier: float = 0.825,
+        uncond_multiplier: float = 1.0,
+    ) -> tuple["ControlNetWeightsRef", "TimestepKeyframeRef"]:
+        import math
+
+        def multiplier(value: Any, field: str) -> float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{field} must be a number")
+            result = float(value)
+            if not math.isfinite(result) or not 0.0 <= result <= 1.0:
+                raise ValueError(f"{field} must be finite and in [0, 1]")
+            return result
+
+        base = multiplier(base_multiplier, "base_multiplier")
+        uncond = multiplier(uncond_multiplier, "uncond_multiplier")
+        utils = _advanced_control_module("utils")
+        control_weights = utils.ControlWeights.universal(
+            base_multiplier=base,
+            uncond_multiplier=uncond,
+            extras={},
+        )
+        shortcut = utils.TimestepKeyframeGroup.default(
+            utils.TimestepKeyframe(control_weights=control_weights))
+        rt = current_runtime()
+        return (
+            ControlNetWeightsRef._wrap(await rt.refs.create(
+                "CONTROL_NET_WEIGHTS", control_weights)),
+            TimestepKeyframeRef._wrap(await rt.refs.create(
+                "TIMESTEP_KEYFRAME", shortcut)),
+        )  # type: ignore[return-value]
+
+    async def _model_apply_lora(
+        self, model: "ModelRef", asset: "AssetRef",
+        clip: Optional["ClipRef"], strength_model: float,
+        strength_clip: float,
+    ) -> tuple["ModelRef", Optional["ClipRef"]]:
+        import math
+
+        import comfy.sd
+        import comfy.utils
+        import folder_paths
+
+        strengths = {}
+        for name, value in {
+            "strength_model": strength_model,
+            "strength_clip": strength_clip,
+        }.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a number")
+            checked = float(value)
+            if not math.isfinite(checked) or not -100.0 <= checked <= 100.0:
+                raise ValueError(f"{name} must be finite and in [-100, 100]")
+            strengths[name] = checked
+
+        if not isinstance(model, ModelRef) or model.kind != "MODEL":
+            raise TypeError("LoRA application needs a MODEL ref")
+        if not isinstance(asset, AssetRef) or asset.kind != "ASSET":
+            raise TypeError("LoRA application needs an ASSET ref")
+        if clip is not None and (
+                not isinstance(clip, ClipRef) or clip.kind != "CLIP"):
+            raise TypeError("clip must be a CLIP ref or None")
+        if clip is None and strengths["strength_clip"] != 0.0:
+            raise ValueError("strength_clip must be zero when clip is None")
+        if (strengths["strength_model"] == 0.0
+                and strengths["strength_clip"] == 0.0):
+            return model, clip
+
+        rt = current_runtime()
+        source_model = await rt.refs.resolve(model)
+        source_clip = None if clip is None else await rt.refs.resolve(clip)
+        path = await rt.refs.resolve(asset)
+        if not isinstance(path, (str, os.PathLike)):
+            raise TypeError("LoRA ASSET ref does not contain a path")
+        path = _InProcessAssets._confined_resolved_path(
+            path, folder_paths.get_folder_paths("loras"), "loras")
+        state_dict, metadata = comfy.utils.load_torch_file(
+            path, safe_load=True, return_metadata=True)
+        if not isinstance(state_dict, dict):
+            raise TypeError("LoRA asset must contain a state-dict mapping")
+
+        patched_model, patched_clip = comfy.sd.load_lora_for_models(
+            source_model,
+            source_clip,
+            state_dict,
+            strengths["strength_model"],
+            strengths["strength_clip"],
+            lora_metadata=metadata,
+        )
+        model_ref = ModelRef._wrap(await rt.refs.create(
+            "MODEL", patched_model))
+        clip_ref = None
+        if patched_clip is not None:
+            clip_ref = ClipRef._wrap(await rt.refs.create(
+                "CLIP", patched_clip))
+        return model_ref, clip_ref
 
     async def _model_apply_dit_block_lora(
         self, model: "ModelRef", asset: "AssetRef", strength_model: float,
@@ -3765,6 +12126,261 @@ class InProcessOps:
         value = await current_runtime().refs.resolve(model)
         return float(value.model.latent_format.scale_factor)
 
+    async def _latent_empty(
+        self, _source, width: int, height: int, batch_size: int = 1,
+        channels: int = 4,
+        spatial_downscale_ratio: Optional[int] = None,
+    ) -> "LatentRef":
+        import torch
+
+        values = {
+            "width": width,
+            "height": height,
+            "batch_size": batch_size,
+            "channels": channels,
+        }
+        if any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in values.values()
+        ):
+            raise TypeError("empty latent dimensions must be integers")
+        if (
+            spatial_downscale_ratio is not None
+            and (
+                isinstance(spatial_downscale_ratio, bool)
+                or not isinstance(spatial_downscale_ratio, int)
+            )
+        ):
+            raise TypeError("latent spatial downscale ratio must be an integer")
+        ratio = 8 if spatial_downscale_ratio is None else spatial_downscale_ratio
+        if (
+            not 64 <= width <= 16384
+            or not 64 <= height <= 16384
+            or not 1 <= ratio <= 128
+            or width % ratio
+            or height % ratio
+            or not 1 <= batch_size <= 64
+            or not 1 <= channels <= 128
+            or batch_size * channels * (width // ratio) * (height // ratio)
+            > 16_777_216
+        ):
+            raise ValueError("empty latent dimensions exceed the bounded range")
+        value = {
+            "samples": torch.zeros(
+                (batch_size, channels, height // ratio, width // ratio),
+                dtype=torch.float32,
+            )
+        }
+        if spatial_downscale_ratio is not None:
+            # Canonical legacy spelling used by ComfyUI latent dictionaries.
+            value["downscale_ratio_spacial"] = ratio
+        return LatentRef._wrap(await current_runtime().refs.create(
+            "LATENT", value))  # type: ignore[return-value]
+
+    async def _latent_spatial_shape(
+        self, latent: "LatentRef",
+    ) -> tuple[int, int]:
+        import torch
+
+        value = await current_runtime().refs.resolve(latent)
+        samples = value.get("samples") if isinstance(value, dict) else None
+        if not isinstance(samples, torch.Tensor) or samples.ndim < 4:
+            raise TypeError("LATENT must contain a sample tensor with spatial axes")
+        height, width = map(int, samples.shape[-2:])
+        if height <= 0 or width <= 0:
+            raise ValueError("LATENT spatial dimensions must be positive")
+        return height, width
+
+    async def _latent_resize(
+        self, latent: "LatentRef", width: int, height: int,
+        method: str = "bilinear",
+    ) -> "LatentRef":
+        from comfy.utils import common_upscale
+        import torch
+        import torch.nn.functional as F
+
+        if (
+            isinstance(width, bool) or not isinstance(width, int)
+            or isinstance(height, bool) or not isinstance(height, int)
+        ):
+            raise TypeError("latent resize dimensions must be integers")
+        if not 1 <= width <= 16_384 or not 1 <= height <= 16_384:
+            raise ValueError("latent resize dimensions must be in [1, 16384]")
+        methods = {"nearest-exact", "bilinear", "area", "bicubic", "bislerp"}
+        if method not in methods:
+            raise ValueError(f"unknown latent resize method {method!r}")
+
+        rt = current_runtime()
+        source = await rt.refs.resolve(latent)
+        if not isinstance(source, dict):
+            raise TypeError("LATENT must be a mapping")
+        samples = source.get("samples")
+        if not isinstance(samples, torch.Tensor) or samples.ndim < 4:
+            raise TypeError("LATENT must contain a sample tensor with spatial axes")
+        if samples.numel() // max(1, samples.shape[-2] * samples.shape[-1]) * width * height > 67_108_864:
+            raise ValueError("latent resize output exceeds the bounded tensor size")
+
+        result = dict(source)
+        result["samples"] = common_upscale(
+            samples, width, height, method, "disabled")
+        mask = source.get("noise_mask")
+        if isinstance(mask, torch.Tensor):
+            mask_value = mask
+            while mask_value.ndim < 4:
+                mask_value = mask_value.unsqueeze(1)
+            result["noise_mask"] = F.interpolate(
+                mask_value.float(), size=(height, width), mode="bilinear",
+                align_corners=False,
+            ).to(mask.dtype)
+        return LatentRef._wrap(await rt.refs.create(
+            "LATENT", result))  # type: ignore[return-value]
+
+    async def _latent_random_noise(
+        self, latent: "LatentRef", seed: int, source: str = "cpu",
+        batch_size: Optional[int] = None,
+    ) -> TensorRef:
+        import math
+        import numpy as np
+        import torch
+
+        from comfy import model_management
+
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise TypeError("noise seed must be an integer")
+        if not 0 <= seed <= 0xffffffffffffffff:
+            raise ValueError("noise seed must be in [0, 2**64 - 1]")
+        if source not in {"cpu", "gpu"}:
+            raise ValueError("noise source must be 'cpu' or 'gpu'")
+        rt = current_runtime()
+        value = await rt.refs.resolve(latent)
+        if not isinstance(value, dict) or "samples" not in value:
+            raise TypeError("LATENT ref has no samples")
+        samples = value["samples"]
+        if not isinstance(samples, torch.Tensor) or samples.ndim < 2:
+            raise TypeError("LATENT samples must be a batched tensor")
+        batch = int(samples.shape[0]) if batch_size is None else batch_size
+        if isinstance(batch, bool) or not isinstance(batch, int):
+            raise TypeError("noise batch_size must be an integer or None")
+        if not 1 <= batch <= int(samples.shape[0]):
+            raise ValueError("noise batch_size must fit the source latent")
+        shape = (batch, *samples.shape[1:])
+        if math.prod(shape) > 2_147_483_648:
+            raise ValueError("requested noise tensor is too large")
+        noise_indices = value.get("batch_index")
+        if noise_indices is not None:
+            if isinstance(noise_indices, torch.Tensor):
+                noise_indices = noise_indices.detach().cpu().tolist()
+            if not isinstance(noise_indices, (list, tuple)):
+                raise TypeError("latent batch_index must be a sequence")
+            noise_indices = list(noise_indices[:batch])
+            if len(noise_indices) != batch or any(
+                isinstance(index, bool) or not isinstance(index, (int, np.integer))
+                or not 0 <= int(index) <= 65_535
+                for index in noise_indices
+            ):
+                raise ValueError(
+                    "latent batch_index must contain one bounded non-negative "
+                    "integer per requested batch item"
+                )
+            noise_indices = [int(index) for index in noise_indices]
+        device = (
+            torch.device("cpu")
+            if source == "cpu"
+            else model_management.text_encoder_device()
+        )
+        generator = torch.Generator(device=device).manual_seed(seed)
+        source_samples = samples[:batch]
+        if source == "cpu":
+            # This is Comfy's canonical CPU stream (float32 generation followed
+            # by a dtype cast), but with a private generator so the operation
+            # does not mutate the trusted process's global RNG state.
+            from comfy.sample import prepare_noise_inner
+
+            noise = prepare_noise_inner(
+                source_samples, generator, noise_indices
+            )
+        elif noise_indices is None:
+            noise = torch.randn(
+                shape,
+                dtype=samples.dtype,
+                layout=samples.layout,
+                generator=generator,
+                device=device,
+            )
+        else:
+            unique, inverse = np.unique(noise_indices, return_inverse=True)
+            selected = []
+            for index in range(int(unique[-1]) + 1):
+                item = torch.randn(
+                    (1, *samples.shape[1:]),
+                    dtype=samples.dtype,
+                    layout=samples.layout,
+                    generator=generator,
+                    device=device,
+                )
+                if index in unique:
+                    selected.append(item)
+            noise = torch.cat([selected[index] for index in inverse], dim=0)
+        noise = noise.to(device="cpu")
+        return TensorRef._wrap(await rt.refs.create(
+            "TENSOR", noise))  # type: ignore[return-value]
+
+    async def _latent_noise_mask(
+        self, latent: "LatentRef",
+    ) -> Optional["MaskRef"]:
+        import torch
+
+        rt = current_runtime()
+        value = await rt.refs.resolve(latent)
+        mask = value.get("noise_mask") if isinstance(value, dict) else None
+        if mask is None:
+            return None
+        if not isinstance(mask, torch.Tensor) or mask.ndim < 2:
+            raise TypeError("LATENT noise_mask must be a tensor with spatial axes")
+        return MaskRef._wrap(await rt.refs.create(
+            "MASK", mask))  # type: ignore[return-value]
+
+    async def _latent_repeat_batch(
+        self, latent: "LatentRef", amount: int,
+    ) -> "LatentRef":
+        from nodes import RepeatLatentBatch
+
+        if isinstance(amount, bool) or not isinstance(amount, int):
+            raise TypeError("latent repeat amount must be an integer")
+        if not 1 <= amount <= 64:
+            raise ValueError("latent repeat amount must be in [1, 64]")
+        rt = current_runtime()
+        value = await rt.refs.resolve(latent)
+        result = RepeatLatentBatch().repeat(value, amount)[0]
+        return LatentRef._wrap(await rt.refs.create(
+            "LATENT", result))  # type: ignore[return-value]
+
+    async def _latent_composite(
+        self, latent: "LatentRef", source: "LatentRef", x: int = 0,
+        y: int = 0, resize_source: bool = False,
+        mask: Optional["MaskRef"] = None,
+    ) -> "LatentRef":
+        from comfy_extras.nodes_mask import LatentCompositeMasked
+
+        if (
+            isinstance(x, bool) or not isinstance(x, int)
+            or isinstance(y, bool) or not isinstance(y, int)
+        ):
+            raise TypeError("latent composite coordinates must be integers")
+        if not -131_072 <= x <= 131_072 or not -131_072 <= y <= 131_072:
+            raise ValueError("latent composite coordinates are out of range")
+        if type(resize_source) is not bool:
+            raise TypeError("latent composite resize_source must be a bool")
+        rt = current_runtime()
+        destination_value = await rt.refs.resolve(latent)
+        source_value = await rt.refs.resolve(source)
+        mask_value = None if mask is None else await rt.refs.resolve(mask)
+        result = LatentCompositeMasked.execute(
+            destination_value, source_value, x, y, resize_source,
+            mask_value).result[0]
+        return LatentRef._wrap(await rt.refs.create(
+            "LATENT", result))  # type: ignore[return-value]
+
     async def _clip_vision_encode_image(
         self, clip_vision: "ClipVisionRef", image: "ImageRef",
         crop: bool = True,
@@ -3784,6 +12400,41 @@ class InProcessOps:
         return TensorRef._wrap(await rt.refs.create(
             "TENSOR", value.image_embeds))  # type: ignore[return-value]
 
+    async def _clip_vision_output_concat(
+        self, output: "ClipVisionOutputRef",
+        other: "ClipVisionOutputRef",
+    ) -> "ClipVisionOutputRef":
+        import torch
+        import comfy.clip_vision
+
+        rt = current_runtime()
+        left = await rt.refs.resolve(output)
+        right = await rt.refs.resolve(other)
+        left_states = getattr(left, "penultimate_hidden_states", None)
+        right_states = getattr(right, "penultimate_hidden_states", None)
+        if (
+            not isinstance(left_states, torch.Tensor)
+            or not isinstance(right_states, torch.Tensor)
+            or left_states.ndim < 2
+            or right_states.ndim != left_states.ndim
+            or left_states.dtype != right_states.dtype
+            or left_states.device != right_states.device
+            or any(
+                left_states.shape[index] != right_states.shape[index]
+                for index in range(left_states.ndim)
+                if index != left_states.ndim - 2
+            )
+        ):
+            raise ValueError(
+                "CLIP-vision outputs must have compatible hidden states")
+        combined = torch.cat((left_states, right_states), dim=-2)
+        if combined.numel() < 1 or combined.numel() > 268_435_456:
+            raise ValueError("combined CLIP-vision output is too large")
+        result = comfy.clip_vision.Output()
+        result.penultimate_hidden_states = combined
+        return ClipVisionOutputRef._wrap(await rt.refs.create(
+            "CLIP_VISION_OUTPUT", result))  # type: ignore[return-value]
+
     async def _controlnet_with_union_type(
         self, control_net: "ControlNetRef", type_number=None,
     ) -> "ControlNetRef":
@@ -3794,6 +12445,172 @@ class InProcessOps:
         clone.set_extra_arg("control_type", selected)
         return ControlNetRef._wrap(await rt.refs.create(
             "CONTROL_NET", clone))  # type: ignore[return-value]
+
+    async def _controlnet_apply(
+        self, control_net: "ControlNetRef", positive: "CondRef",
+        negative: "CondRef", image: "ImageRef", strength: float = 1.0,
+        start_percent: float = 0.0, end_percent: float = 1.0,
+        vae: Optional["VaeRef"] = None,
+    ) -> tuple["CondRef", "CondRef"]:
+        import math
+
+        def finite_number(value: Any, field: str) -> float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"ControlNet {field} must be a number")
+            result = float(value)
+            if not math.isfinite(result):
+                raise ValueError(f"ControlNet {field} must be finite")
+            return result
+
+        strength = finite_number(strength, "strength")
+        start_percent = finite_number(start_percent, "start_percent")
+        end_percent = finite_number(end_percent, "end_percent")
+        if not -10.0 <= strength <= 10.0:
+            raise ValueError("ControlNet strength must be in [-10, 10]")
+        if not 0.0 <= start_percent <= end_percent <= 1.0:
+            raise ValueError(
+                "ControlNet percentages must satisfy "
+                "0 <= start_percent <= end_percent <= 1")
+        if strength == 0.0:
+            return positive, negative
+
+        rt = current_runtime()
+        source = await rt.refs.resolve(control_net)
+        positive_value = await rt.refs.resolve(positive)
+        negative_value = await rt.refs.resolve(negative)
+        pixels = await rt.refs.resolve(image)
+        vae_value = None if vae is None else await rt.refs.resolve(vae)
+        control_hint = pixels.movedim(-1, 1)
+        control_nets: dict[Any, Any] = {}
+        outputs = []
+        for conditioning in (positive_value, negative_value):
+            result = []
+            for item in conditioning:
+                metadata = item[1].copy()
+                previous = metadata.get("control")
+                if previous in control_nets:
+                    applied = control_nets[previous]
+                else:
+                    applied = source.copy().set_cond_hint(
+                        control_hint, strength,
+                        (start_percent, end_percent), vae=vae_value,
+                        extra_concat=[])
+                    applied.set_previous_controlnet(previous)
+                    control_nets[previous] = applied
+                metadata["control"] = applied
+                metadata["control_apply_to_uncond"] = False
+                result.append([item[0], metadata])
+            outputs.append(result)
+        return (
+            CondRef._wrap(await rt.refs.create(
+                "CONDITIONING", outputs[0])),
+            CondRef._wrap(await rt.refs.create(
+                "CONDITIONING", outputs[1])),
+        )  # type: ignore[return-value]
+
+    async def _controlnet_apply_advanced(
+        self, control_net: "ControlNetRef", positive: "CondRef",
+        negative: "CondRef", image: "ImageRef", strength: float = 1.0,
+        start_percent: float = 0.0, end_percent: float = 1.0,
+        vae: Optional["VaeRef"] = None,
+        mask: Optional["MaskRef"] = None,
+        timestep_keyframe: Optional["TimestepKeyframeRef"] = None,
+        weights: Optional["ControlNetWeightsRef"] = None,
+    ) -> tuple["CondRef", "CondRef"]:
+        import math
+
+        def finite_number(value: Any, field: str) -> float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"Advanced ControlNet {field} must be a number")
+            result = float(value)
+            if not math.isfinite(result):
+                raise ValueError(
+                    f"Advanced ControlNet {field} must be finite")
+            return result
+
+        strength = finite_number(strength, "strength")
+        start_percent = finite_number(start_percent, "start_percent")
+        end_percent = finite_number(end_percent, "end_percent")
+        if not -10.0 <= strength <= 10.0:
+            raise ValueError(
+                "Advanced ControlNet strength must be in [-10, 10]")
+        if not 0.0 <= start_percent <= end_percent <= 1.0:
+            raise ValueError(
+                "Advanced ControlNet percentages must satisfy "
+                "0 <= start_percent <= end_percent <= 1")
+        if strength == 0.0:
+            return positive, negative
+
+        rt = current_runtime()
+        source = await rt.refs.resolve(control_net)
+        positive_value = await rt.refs.resolve(positive)
+        negative_value = await rt.refs.resolve(negative)
+        pixels = await rt.refs.resolve(image)
+        vae_value = None if vae is None else await rt.refs.resolve(vae)
+        mask_value = None if mask is None else await rt.refs.resolve(mask)
+        keyframe_value = (
+            None if timestep_keyframe is None
+            else await rt.refs.resolve(timestep_keyframe))
+        weights_value = (
+            None if weights is None else await rt.refs.resolve(weights))
+        advanced = _advanced_control_module("control")
+        control_hint = pixels.movedim(-1, 1)
+        control_nets: dict[Any, Any] = {}
+        outputs = []
+        for conditioning in (positive_value, negative_value):
+            result = []
+            for item in conditioning:
+                metadata = item[1].copy()
+                previous = metadata.get("control")
+                if previous in control_nets:
+                    applied = control_nets[previous]
+                else:
+                    applied = advanced.convert_to_advanced(
+                        source.copy()).set_cond_hint(
+                            control_hint, strength,
+                            (start_percent, end_percent), vae_value)
+                    if advanced.is_advanced_controlnet(applied):
+                        applied.disarm()
+                        wrapper_type = advanced.AbstractPreprocWrapper
+                        is_wrapper = isinstance(control_hint, wrapper_type)
+                        if (applied.allow_condhint_latents
+                                and not applied.require_vae
+                                and not is_wrapper):
+                            raise TypeError(
+                                f"{type(applied).__name__} requires a "
+                                "preprocessed ControlNet image")
+                        if (not applied.allow_condhint_latents and is_wrapper
+                                and not applied.postpone_condhint_latents_check):
+                            raise TypeError(
+                                f"{type(applied).__name__} requires a normal image")
+                        if (applied.require_vae
+                                and not (applied.allow_condhint_latents
+                                         and is_wrapper)
+                                and vae_value is None):
+                            raise ValueError(
+                                f"{type(applied).__name__} requires a VAE")
+                        if keyframe_value is not None:
+                            applied.set_timestep_keyframes(keyframe_value)
+                        if weights_value is not None:
+                            applied.weights_override = weights_value
+                        applied.verify_all_weights()
+                    if mask_value is not None:
+                        effect_mask = mask_value.clone()
+                        if len(effect_mask.shape) < 3:
+                            effect_mask = effect_mask.unsqueeze(0)
+                        applied.set_cond_hint_mask(effect_mask)
+                    applied.set_previous_controlnet(previous)
+                    control_nets[previous] = applied
+                metadata["control"] = applied
+                metadata["control_apply_to_uncond"] = False
+                result.append([item[0], metadata])
+            outputs.append(result)
+        return (
+            CondRef._wrap(await rt.refs.create(
+                "CONDITIONING", outputs[0])),
+            CondRef._wrap(await rt.refs.create(
+                "CONDITIONING", outputs[1])),
+        )  # type: ignore[return-value]
 
     async def _controlnet_compile(
         self, control_net: "ControlNetRef", backend: str = "inductor",
@@ -3831,6 +12648,371 @@ class InProcessOps:
         return CondRef._wrap(await rt.refs.create(
             "CONDITIONING", result))  # type: ignore[return-value]
 
+    async def _inpaint_model_inpaint(
+        self, inpaint_model: "InpaintModelRef",
+        image: "ImageRef", mask: "MaskRef",
+    ) -> "ImageRef":
+        import torch
+        import comfy.model_management
+
+        rt = current_runtime()
+        bundle = await rt.refs.resolve(inpaint_model)
+        pixels = await rt.refs.resolve(image)
+        mask_value = await rt.refs.resolve(mask)
+        if bundle.get("secure_kind") != "image_inpaint.big-lama":
+            raise ValueError("unknown image inpaint model")
+        if pixels.ndim != 4 or pixels.shape[-1] < 3 or not 1 <= len(pixels) <= 4096:
+            raise ValueError("inpaint images must be a non-empty BHWC batch")
+        if mask_value.ndim == 4 and mask_value.shape[1] == 1:
+            mask_value = mask_value[:, 0]
+        elif mask_value.ndim == 4 and mask_value.shape[-1] == 1:
+            mask_value = mask_value[..., 0]
+        if mask_value.ndim != 3:
+            raise ValueError("inpaint masks must be a BHW batch")
+        height, width = map(int, pixels.shape[1:3])
+        if tuple(mask_value.shape[-2:]) != (height, width):
+            raise ValueError("inpaint image and mask dimensions must match")
+        if len(mask_value) not in (1, len(pixels)):
+            raise ValueError("inpaint image and mask batches must match")
+        if min(height, width) < 16 or height % 8 or width % 8:
+            raise ValueError(
+                "Big-LaMa image dimensions must be multiples of 8 and at least 16")
+        if len(pixels) * height * width > 67_108_864:
+            raise ValueError("inpaint batch exceeds 67108864 pixels")
+
+        model = bundle["model"]
+        model_lock = bundle["lock"]
+        device = comfy.model_management.get_torch_device()
+        offload_device = comfy.model_management.unet_offload_device()
+        source = pixels[..., :3].movedim(-1, 1).to(
+            device=device, dtype=torch.float32)
+        holes = mask_value.unsqueeze(1).to(
+            device=device, dtype=torch.float32)
+        if len(holes) == 1 and len(source) > 1:
+            holes = holes.expand(len(source), -1, -1, -1)
+        source = source.clamp(0.0, 1.0)
+        holes = holes.clamp(0.0, 1.0)
+        with model_lock:
+            model.to(device=device, dtype=torch.float32)
+            try:
+                result = model(source, holes)
+                result = result.movedim(1, -1).clamp(0.0, 1.0)
+                result = result.detach().to(device="cpu", dtype=torch.float32)
+            finally:
+                model.to(offload_device)
+        comfy.model_management.soft_empty_cache()
+        return ImageRef._wrap(await rt.refs.create(
+            "IMAGE", result))  # type: ignore[return-value]
+
+    async def _background_removal_mask(
+        self, background_model: "BackgroundRemovalModelRef",
+        image: "ImageRef",
+    ) -> "MaskRef":
+        import torch
+
+        rt = current_runtime()
+        bundle = await rt.refs.resolve(background_model)
+        pixels = await rt.refs.resolve(image)
+        if (
+            not isinstance(bundle, dict)
+            or bundle.get("secure_kind") != "background_removal.comfy"
+        ):
+            raise ValueError("unknown background-removal model")
+        if (
+            not isinstance(pixels, torch.Tensor)
+            or pixels.ndim != 4
+            or pixels.shape[-1] < 3
+            or not 1 <= len(pixels) <= 4096
+        ):
+            raise ValueError(
+                "background removal requires a non-empty BHWC image batch")
+        height, width = map(int, pixels.shape[1:3])
+        if height <= 0 or width <= 0 or len(pixels) * height * width > 67_108_864:
+            raise ValueError("background-removal image batch is too large")
+        with bundle["lock"]:
+            result = bundle["model"].encode_image(pixels[..., :3])
+        if (
+            not isinstance(result, torch.Tensor)
+            or result.ndim != 3
+            or tuple(result.shape) != (len(pixels), height, width)
+        ):
+            raise RuntimeError(
+                "background-removal model returned an invalid mask")
+        return MaskRef._wrap(await rt.refs.create(
+            "MASK", result.clamp(0.0, 1.0)
+        ))  # type: ignore[return-value]
+
+    async def _brushnet_apply(
+        self, brushnet: "BrushNetRef", model: "ModelRef", vae: "VaeRef",
+        image: "ImageRef", mask: "MaskRef", positive: "CondRef",
+        negative: "CondRef", scale: float = 1.0, start_step: int = 0,
+        end_step: int = 10000,
+    ) -> tuple["ModelRef", "CondRef", "CondRef", "LatentRef"]:
+        import math
+        import torch
+        import nodes
+
+        if isinstance(scale, bool) or not isinstance(scale, (int, float)):
+            raise TypeError("BrushNet scale must be a number")
+        scale = float(scale)
+        if not math.isfinite(scale) or not 0.0 <= scale <= 10.0:
+            raise ValueError("BrushNet scale must be finite and in [0, 10]")
+        if (isinstance(start_step, bool) or not isinstance(start_step, int)
+                or isinstance(end_step, bool) or not isinstance(end_step, int)):
+            raise TypeError("BrushNet start_step and end_step must be integers")
+        if not 0 <= start_step <= end_step <= 10000:
+            raise ValueError(
+                "BrushNet steps must satisfy 0 <= start_step <= end_step <= 10000")
+
+        rt = current_runtime()
+        brushnet_value = await rt.refs.resolve(brushnet)
+        model_value = await rt.refs.resolve(model)
+        vae_value = await rt.refs.resolve(vae)
+        pixels = await rt.refs.resolve(image)
+        mask_value = await rt.refs.resolve(mask)
+        positive_value = await rt.refs.resolve(positive)
+        negative_value = await rt.refs.resolve(negative)
+        if (not isinstance(brushnet_value, dict)
+                or brushnet_value.get("brushnet") is None
+                or brushnet_value.get("PP") is not False):
+            raise TypeError("BRUSHNET_MODEL is not a host-loaded BrushNet model")
+        if (not isinstance(pixels, torch.Tensor)
+                or pixels.ndim not in {3, 4} or pixels.shape[-1] < 3):
+            raise ValueError("BrushNet image must be an HWC or BHWC tensor")
+        if not isinstance(mask_value, torch.Tensor) or mask_value.ndim not in {2, 3}:
+            raise ValueError("BrushNet mask must be an HW or BHW tensor")
+        image_height, image_width = map(int, pixels.shape[-3:-1])
+        if tuple(map(int, mask_value.shape[-2:])) != (image_height, image_width):
+            raise ValueError("BrushNet image and mask dimensions must match")
+        image_batch = 1 if pixels.ndim == 3 else int(pixels.shape[0])
+        mask_batch = 1 if mask_value.ndim == 2 else int(mask_value.shape[0])
+        if (image_batch < 1 or image_batch > 4096
+                or mask_batch < 1 or mask_batch > 4096
+                or image_batch * image_height * image_width > 67_108_864):
+            raise ValueError("BrushNet image batch is too large")
+        if not isinstance(positive_value, list) or not isinstance(negative_value, list):
+            raise TypeError("BrushNet conditioning must be host conditioning lists")
+
+        node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get("BrushNet")
+        if node_class is None:
+            raise RuntimeError(
+                "BrushNet application requires the host-installed canonical "
+                "ComfyUI-BrushNet extension")
+        result = await asyncio.to_thread(
+            node_class().model_update,
+            model_value, vae_value, pixels, mask_value, brushnet_value,
+            positive_value, negative_value, scale, start_step, end_step,
+        )
+        if not isinstance(result, (tuple, list)) or len(result) != 4:
+            raise RuntimeError("the canonical BrushNet node returned invalid outputs")
+        patched, positive_out, negative_out, latent = result
+        if (patched is None or not isinstance(positive_out, list)
+                or not isinstance(negative_out, list)
+                or not isinstance(latent, dict)
+                or not isinstance(latent.get("samples"), torch.Tensor)):
+            raise RuntimeError("the canonical BrushNet node returned invalid outputs")
+        return (
+            ModelRef._wrap(await rt.refs.create("MODEL", patched)),
+            CondRef._wrap(await rt.refs.create("CONDITIONING", positive_out)),
+            CondRef._wrap(await rt.refs.create("CONDITIONING", negative_out)),
+            LatentRef._wrap(await rt.refs.create("LATENT", latent)),
+        )  # type: ignore[return-value]
+
+    async def _powerpaint_apply(
+        self, powerpaint: "PowerPaintRef", model: "ModelRef", vae: "VaeRef",
+        image: "ImageRef", mask: "MaskRef", positive: "CondRef",
+        negative: "CondRef", fitting: float = 1.0,
+        function: str = "text guided", scale: float = 1.0,
+        start_step: int = 0, end_step: int = 10000,
+        save_memory: str = "none",
+    ) -> tuple["ModelRef", "CondRef", "CondRef", "LatentRef"]:
+        import math
+        import torch
+        import nodes
+
+        for label, value, minimum, maximum in (
+            ("fitting", fitting, 0.3, 1.0),
+            ("scale", scale, 0.0, 10.0),
+        ):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"PowerPaint {label} must be a number")
+            if not math.isfinite(float(value)) or not minimum <= float(value) <= maximum:
+                raise ValueError(
+                    f"PowerPaint {label} must be finite and in "
+                    f"[{minimum}, {maximum}]")
+        fitting = float(fitting)
+        scale = float(scale)
+        functions = {
+            "text guided", "shape guided", "object removal",
+            "context aware", "image outpainting",
+        }
+        if function not in functions:
+            raise ValueError(f"unknown PowerPaint function {function!r}")
+        if save_memory not in {"none", "auto", "max"}:
+            raise ValueError(f"unknown PowerPaint save_memory {save_memory!r}")
+        if (isinstance(start_step, bool) or not isinstance(start_step, int)
+                or isinstance(end_step, bool) or not isinstance(end_step, int)):
+            raise TypeError("PowerPaint start_step and end_step must be integers")
+        if not 0 <= start_step <= end_step <= 10000:
+            raise ValueError(
+                "PowerPaint steps must satisfy "
+                "0 <= start_step <= end_step <= 10000")
+
+        rt = current_runtime()
+        bundle = await rt.refs.resolve(powerpaint)
+        model_value = await rt.refs.resolve(model)
+        vae_value = await rt.refs.resolve(vae)
+        pixels = await rt.refs.resolve(image)
+        mask_value = await rt.refs.resolve(mask)
+        positive_value = await rt.refs.resolve(positive)
+        negative_value = await rt.refs.resolve(negative)
+        if (not isinstance(bundle, dict)
+                or bundle.get("secure_kind") != "powerpaint.pipeline"
+                or not isinstance(bundle.get("powerpaint"), dict)
+                or bundle["powerpaint"].get("PP") is not True
+                or bundle.get("clip") is None):
+            raise TypeError(
+                "POWERPAINT_MODEL is not a host-loaded PowerPaint pipeline")
+        if (not isinstance(pixels, torch.Tensor)
+                or pixels.ndim not in {3, 4} or pixels.shape[-1] < 3):
+            raise ValueError("PowerPaint image must be an HWC or BHWC tensor")
+        if not isinstance(mask_value, torch.Tensor) or mask_value.ndim not in {2, 3}:
+            raise ValueError("PowerPaint mask must be an HW or BHW tensor")
+        height, width = map(int, pixels.shape[-3:-1])
+        if tuple(map(int, mask_value.shape[-2:])) != (height, width):
+            raise ValueError("PowerPaint image and mask dimensions must match")
+        image_batch = 1 if pixels.ndim == 3 else int(pixels.shape[0])
+        mask_batch = 1 if mask_value.ndim == 2 else int(mask_value.shape[0])
+        if (image_batch < 1 or image_batch > 4096
+                or mask_batch < 1 or mask_batch > 4096
+                or image_batch * height * width > 67_108_864):
+            raise ValueError("PowerPaint image batch is too large")
+        if not isinstance(positive_value, list) or not isinstance(negative_value, list):
+            raise TypeError("PowerPaint conditioning must be host conditioning lists")
+
+        node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get("PowerPaint")
+        if node_class is None:
+            raise RuntimeError(
+                "PowerPaint application requires the host-installed canonical "
+                "ComfyUI-BrushNet extension")
+        result = await asyncio.to_thread(
+            node_class().model_update,
+            model_value, vae_value, pixels, mask_value,
+            bundle["powerpaint"], bundle["clip"], positive_value,
+            negative_value, fitting, function, scale, start_step, end_step,
+            save_memory,
+        )
+        if not isinstance(result, (tuple, list)) or len(result) != 4:
+            raise RuntimeError(
+                "the canonical PowerPaint node returned invalid outputs")
+        patched, positive_out, negative_out, latent = result
+        if (patched is None or not isinstance(positive_out, list)
+                or not isinstance(negative_out, list)
+                or not isinstance(latent, dict)
+                or not isinstance(latent.get("samples"), torch.Tensor)):
+            raise RuntimeError(
+                "the canonical PowerPaint node returned invalid outputs")
+        return (
+            ModelRef._wrap(await rt.refs.create("MODEL", patched)),
+            CondRef._wrap(await rt.refs.create("CONDITIONING", positive_out)),
+            CondRef._wrap(await rt.refs.create("CONDITIONING", negative_out)),
+            LatentRef._wrap(await rt.refs.create("LATENT", latent)),
+        )  # type: ignore[return-value]
+
+    async def _transparent_vae_decoder_decode(
+        self, decoder: "TransparentVaeDecoderRef", latent: "LatentRef",
+        image: "ImageRef", frames: int = 1, sub_batch_size: int = 16,
+    ) -> tuple["ImageRef", "MaskRef"]:
+        import torch
+
+        if isinstance(frames, bool) or not isinstance(frames, int):
+            raise TypeError("transparent decoder frames must be an integer")
+        if not 1 <= frames <= 3:
+            raise ValueError("transparent decoder frames must be in [1, 3]")
+        if (
+            isinstance(sub_batch_size, bool)
+            or not isinstance(sub_batch_size, int)
+        ):
+            raise TypeError(
+                "transparent decoder sub_batch_size must be an integer")
+        if not 1 <= sub_batch_size <= 64:
+            raise ValueError(
+                "transparent decoder sub_batch_size must be in [1, 64]")
+
+        rt = current_runtime()
+        entry = await rt.refs.resolve(decoder)
+        latent_value = await rt.refs.resolve(latent)
+        pixels = await rt.refs.resolve(image)
+        samples = (
+            latent_value.get("samples")
+            if isinstance(latent_value, dict) else None)
+        if not isinstance(entry, _TransparentVaeDecoderEntry):
+            raise TypeError(
+                "TRANSPARENT_VAE_DECODER is not a host-loaded decoder")
+        if (
+            not isinstance(samples, torch.Tensor)
+            or samples.ndim != 4
+            or not isinstance(pixels, torch.Tensor)
+            or pixels.ndim != 4
+            or pixels.shape[-1] < 3
+            or not 1 <= len(pixels) <= 64
+            or len(samples) != len(pixels)
+        ):
+            raise ValueError(
+                "transparent decoding needs matching BCHW latent and BHWC "
+                "image batches")
+        height, width = map(int, pixels.shape[1:3])
+        if (
+            height <= 0
+            or width <= 0
+            or height % 64
+            or width % 64
+            or len(pixels) * height * width > 67_108_864
+        ):
+            raise ValueError(
+                "transparent decoder image dimensions must be multiples of "
+                "64 within the bounded batch limit")
+        if len(pixels) % frames:
+            raise ValueError(
+                "transparent decoder batch must be divisible by frames")
+
+        def decode_selected():
+            selected_pixels = pixels[::frames, ..., :3].movedim(-1, 1)
+            selected_samples = samples[::frames]
+            decoded = []
+            with entry.lock:
+                for start in range(0, len(selected_samples), sub_batch_size):
+                    decoded.append(entry.decoder.decode_pixel(
+                        selected_pixels[start:start + sub_batch_size],
+                        selected_samples[start:start + sub_batch_size],
+                    ))
+            result = torch.cat(decoded, dim=0)
+            if (
+                result.ndim != 4
+                or result.shape[1] < 4
+                or tuple(result.shape[2:]) != (height, width)
+            ):
+                raise RuntimeError(
+                    "canonical transparent VAE decoder returned an invalid "
+                    "pixel tensor")
+            result = result.movedim(1, -1)
+            decoded_rgb = result[..., 1:4].clamp(0.0, 1.0)
+            alpha = (1.0 - result[..., 0]).clamp(0.0, 1.0)
+            full_alpha = torch.ones(
+                (len(pixels), height, width),
+                dtype=alpha.dtype, device=alpha.device)
+            full_rgb = pixels[..., :3].to(decoded_rgb).clone()
+            full_rgb[::frames] = decoded_rgb
+            full_alpha[::frames] = alpha
+            rgba = torch.cat((full_rgb, full_alpha.unsqueeze(-1)), dim=-1)
+            return rgba, alpha
+
+        rgba, alpha = await asyncio.to_thread(decode_selected)
+        return (
+            ImageRef._wrap(await rt.refs.create("IMAGE", rgba)),
+            MaskRef._wrap(await rt.refs.create("MASK", alpha)),
+        )  # type: ignore[return-value]
+
     async def _clipseg_segment(
         self, clipseg: "ClipSegRef", images: "ImageRef", text: str,
         threshold: float = 0.5, binary_mask: bool = True,
@@ -3863,41 +13045,49 @@ class InProcessOps:
                     else await rt.refs.resolve(previous_mask))
         model = bundle["model"]
         processor = bundle["processor"]
+        model_lock = bundle.get("lock")
         offload_device = comfy.model_management.unet_offload_device()
         device = (comfy.model_management.get_torch_device()
                   if use_accelerator else torch.device("cpu"))
         dtype = comfy.model_management.unet_dtype()
-        model.to(dtype).to(device)
-        try:
-            height, width = pixels.shape[1:3]
-            source = pixels.to(device)
-            autocast = (
-                dtype != torch.float32
-                and not comfy.model_management.is_device_mps(device))
-            scope = (torch.autocast(
-                comfy.model_management.get_autocast_device(device), dtype=dtype)
-                if autocast else nullcontext())
-            with scope:
-                pil_images = [Image.fromarray(np.clip(
-                    255.0 * image.cpu().numpy().squeeze(), 0, 255
-                ).astype(np.uint8)) for image in source]
-                inputs = processor(
-                    text=[str(text)] * len(source), images=pil_images,
-                    return_tensors="pt")
-                inputs = {key: value.to(device) for key, value in inputs.items()}
-                outputs = model(**inputs)
-            mask = torch.sigmoid(outputs.logits)
-            mask = (mask - mask.min()) / (mask.max() - mask.min())
-            mask = torch.where(
-                mask > threshold, mask,
-                torch.tensor(0, dtype=torch.float, device=mask.device))
-            if mask.ndim == 2:
-                mask = mask.unsqueeze(0)
-            mask = functional.interpolate(
-                mask.unsqueeze(1), size=(height, width), mode="nearest"
-            ).squeeze(1)
-        finally:
-            model.to(offload_device)
+        with model_lock if model_lock is not None else nullcontext():
+            model.to(dtype).to(device)
+            try:
+                height, width = pixels.shape[1:3]
+                source = pixels.to(device)
+                autocast = (
+                    dtype != torch.float32
+                    and not comfy.model_management.is_device_mps(device))
+                scope = (torch.autocast(
+                    comfy.model_management.get_autocast_device(device), dtype=dtype)
+                    if autocast else nullcontext())
+                with scope, torch.inference_mode():
+                    pil_images = [Image.fromarray(np.clip(
+                        255.0 * image.cpu().numpy().squeeze(), 0, 255
+                    ).astype(np.uint8)) for image in source]
+                    inputs = processor(
+                        text=[str(text)] * len(source), images=pil_images,
+                        return_tensors="pt", padding=True, truncation=True,
+                        max_length=77)
+                    inputs = {
+                        key: value.to(device) for key, value in inputs.items()
+                    }
+                    outputs = model(**inputs)
+                mask = torch.sigmoid(outputs.logits)
+                minimum, maximum = mask.amin(), mask.amax()
+                scale = (maximum - minimum).clamp_min(
+                    torch.finfo(mask.dtype).eps)
+                mask = (mask - minimum) / scale
+                mask = torch.where(
+                    mask > threshold, mask,
+                    torch.tensor(0, dtype=torch.float, device=mask.device))
+                if mask.ndim == 2:
+                    mask = mask.unsqueeze(0)
+                mask = functional.interpolate(
+                    mask.unsqueeze(1), size=(height, width), mode="nearest"
+                ).squeeze(1)
+            finally:
+                model.to(offload_device)
 
         if binary_mask:
             mask = (mask > 0).float()
@@ -3913,9 +13103,10 @@ class InProcessOps:
         if previous is not None:
             if previous.shape != mask.shape:
                 previous = functional.interpolate(
-                    previous.unsqueeze(1), size=(height, width), mode="nearest")
+                    previous.unsqueeze(1), size=(height, width), mode="nearest"
+                ).squeeze(1)
             mask = mask + previous.to(device)
-            torch.clamp(mask, min=0.0, max=1.0)
+            mask = torch.clamp(mask, min=0.0, max=1.0)
         if invert:
             mask = 1 - mask
         result_image = torch.clamp(
@@ -3927,14 +13118,1557 @@ class InProcessOps:
         image_ref = ImageRef._wrap(await rt.refs.create("IMAGE", result_image))
         return mask_ref, image_ref  # type: ignore[return-value]
 
+    async def _clipseg_predict_mask(
+        self, clipseg: "ClipSegRef", images: "ImageRef", text: str,
+        use_accelerator: bool = True,
+    ) -> "MaskRef":
+        """Run CLIPSeg while leaving thresholding/post-processing to the node."""
+        from contextlib import nullcontext
+        import numpy as np
+        import torch
+        import comfy.model_management
+
+        text = str(text)
+        if len(text) > 32768:
+            raise ValueError("CLIPSeg text exceeds 32768 characters")
+        rt = current_runtime()
+        bundle = await rt.refs.resolve(clipseg)
+        pixels = await rt.refs.resolve(images)
+        if pixels.ndim != 4 or pixels.shape[-1] < 3:
+            raise ValueError("CLIPSeg images must be a non-empty BHWC batch")
+        if not 1 <= len(pixels) <= 4096:
+            raise ValueError("CLIPSeg batch size must be in [1, 4096]")
+
+        model = bundle["model"]
+        processor = bundle["processor"]
+        model_lock = bundle.get("lock")
+        offload_device = comfy.model_management.unet_offload_device()
+        if use_accelerator:
+            device = comfy.model_management.get_torch_device()
+            dtype = comfy.model_management.unet_dtype()
+        else:
+            device = torch.device("cpu")
+            dtype = torch.float32
+        with model_lock if model_lock is not None else nullcontext():
+            model.to(dtype).to(device)
+            try:
+                autocast = (
+                    dtype != torch.float32
+                    and not comfy.model_management.is_device_mps(device)
+                )
+                outputs = []
+                for image in pixels:
+                    array = np.clip(
+                        image.detach().cpu().numpy() * 255.0, 0, 255
+                    ).astype(np.uint8)
+                    inputs = processor(
+                        text=text, images=[array], return_tensors="pt",
+                        padding=True, truncation=True, max_length=77)
+                    inputs = {
+                        key: value.to(device) for key, value in inputs.items()
+                    }
+                    scope = (
+                        torch.autocast(
+                            comfy.model_management.get_autocast_device(device),
+                            dtype=dtype,
+                        )
+                        if autocast else nullcontext()
+                    )
+                    with scope, torch.inference_mode():
+                        prediction = model(**inputs).logits.unsqueeze(1)
+                    outputs.append(torch.sigmoid(prediction[0][0]))
+                result = torch.stack(outputs, dim=0).cpu().float()
+            finally:
+                model.to(offload_device)
+        comfy.model_management.soft_empty_cache()
+        return MaskRef._wrap(
+            await rt.refs.create("MASK", result)
+        )  # type: ignore[return-value]
+
+    async def _image_classifier_classify(
+        self, classifier: "ImageClassifierRef", images: "ImageRef",
+        use_accelerator: bool = True, top_k: int = 5,
+    ) -> list[list[dict[str, Any]]]:
+        from contextlib import nullcontext
+        import numpy as np
+        import torch
+        from PIL import Image
+        import comfy.model_management
+
+        top_k = int(top_k)
+        if not 1 <= top_k <= 1000:
+            raise ValueError("image classifier top_k must be in [1, 1000]")
+        rt = current_runtime()
+        bundle = await rt.refs.resolve(classifier)
+        pixels = await rt.refs.resolve(images)
+        if pixels.ndim != 4 or pixels.shape[-1] < 3:
+            raise ValueError("classifier images must be a non-empty BHWC batch")
+        if not 1 <= len(pixels) <= 4096:
+            raise ValueError("classifier batch size must be in [1, 4096]")
+        labels = tuple(bundle["labels"])
+        if not labels:
+            raise ValueError("image classifier has no labels")
+
+        model = bundle["model"]
+        processor = bundle["processor"]
+        model_lock = bundle.get("lock")
+        offload_device = comfy.model_management.unet_offload_device()
+        if use_accelerator:
+            device = comfy.model_management.get_torch_device()
+            dtype = comfy.model_management.unet_dtype()
+        else:
+            device = torch.device("cpu")
+            dtype = torch.float32
+
+        with model_lock if model_lock is not None else nullcontext():
+            model.to(dtype).to(device)
+            try:
+                source = [Image.fromarray(np.clip(
+                    image.detach().cpu().numpy()[..., :3] * 255.0,
+                    0, 255,
+                ).astype(np.uint8), mode="RGB") for image in pixels]
+                inputs = processor(images=source, return_tensors="pt")
+                inputs = {
+                    key: value.to(device) for key, value in inputs.items()
+                }
+                autocast = (
+                    dtype != torch.float32
+                    and not comfy.model_management.is_device_mps(device)
+                )
+                scope = (
+                    torch.autocast(
+                        comfy.model_management.get_autocast_device(device),
+                        dtype=dtype,
+                    ) if autocast else nullcontext()
+                )
+                with scope, torch.inference_mode():
+                    logits = model(**inputs).logits
+                    scores = torch.softmax(logits.float(), dim=-1)
+            finally:
+                model.to(offload_device)
+
+        if scores.ndim != 2 or scores.shape[1] != len(labels):
+            raise RuntimeError("image classifier returned an invalid score shape")
+        count = min(top_k, len(labels))
+        values, indices = torch.topk(scores.cpu(), count, dim=-1)
+        return [[
+            {"label": labels[int(index)], "score": float(score)}
+            for score, index in zip(row_scores, row_indices)
+        ] for row_scores, row_indices in zip(values, indices)]
+
+    async def _image_classifier_predict_scores(
+        self, classifier: "ImageClassifierRef", images: "ImageRef",
+    ) -> "ClassifierScoresRef":
+        import numpy as np
+        import torch
+        from PIL import Image
+
+        rt = current_runtime()
+        bundle = await rt.refs.resolve(classifier)
+        if (not isinstance(bundle, dict)
+                or bundle.get("secure_kind") != "image_classifier.onnx"):
+            raise TypeError(
+                "predict_scores requires a validated ONNX image classifier")
+        pixels = await rt.refs.resolve(images)
+        if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
+                or pixels.shape[-1] < 3 or not 1 <= len(pixels) <= 64):
+            raise ValueError(
+                "ONNX classifier images must be a 1-64 item BHWC RGB batch")
+        height, width = map(int, pixels.shape[1:3])
+        if (height <= 0 or width <= 0
+                or height * width * len(pixels) > 268_435_456
+                or not bool(torch.isfinite(pixels[..., :3]).all())):
+            raise ValueError("ONNX classifier image values are invalid")
+
+        target_height = int(bundle["input_height"])
+        target_width = int(bundle["input_width"])
+        resampling = {
+            "nearest": Image.Resampling.NEAREST,
+            "bilinear": Image.Resampling.BILINEAR,
+            "bicubic": Image.Resampling.BICUBIC,
+            "lanczos": Image.Resampling.LANCZOS,
+        }[bundle["resize_filter"]]
+        pad = tuple(
+            int(round(float(value) * 255.0)) for value in bundle["pad_color"])
+        mean = np.asarray(bundle["mean"], dtype=np.float32)
+        std = np.asarray(bundle["std"], dtype=np.float32)
+        input_scale = float(bundle["input_scale"])
+
+        def infer() -> np.ndarray:
+            rows = []
+            with bundle["lock"]:
+                for frame in pixels:
+                    source_array = np.clip(
+                        frame.detach().cpu().numpy()[..., :3] * 255.0,
+                        0, 255,
+                    ).astype(np.uint8)
+                    source = Image.fromarray(source_array)
+                    if bundle["resize_mode"] == "fit_pad":
+                        ratio = min(
+                            target_width / source.width,
+                            target_height / source.height,
+                        )
+                        resized_size = (
+                            max(1, int(source.width * ratio)),
+                            max(1, int(source.height * ratio)),
+                        )
+                        resized = source.resize(resized_size, resampling)
+                        prepared = Image.new(
+                            "RGB", (target_width, target_height), pad)
+                        prepared.paste(resized, (
+                            (target_width - resized_size[0]) // 2,
+                            (target_height - resized_size[1]) // 2,
+                        ))
+                    else:
+                        prepared = source.resize(
+                            (target_width, target_height), resampling)
+                    array = np.asarray(prepared, dtype=np.float32)
+                    array = array * (input_scale / 255.0)
+                    if bundle["channel_order"] == "BGR":
+                        array = array[..., ::-1]
+                    array = (array - mean) / std
+                    if bundle["input_layout"] == "NCHW":
+                        array = np.transpose(array, (2, 0, 1))
+                    model_input = np.ascontiguousarray(
+                        array[None, ...], dtype=np.float32)
+                    output = bundle["session"].run(
+                        [bundle["output_name"]],
+                        {bundle["input_name"]: model_input},
+                    )[0]
+                    output = np.asarray(output)
+                    if output.shape != (1, int(bundle["class_count"])):
+                        raise RuntimeError(
+                            "ONNX classifier returned an invalid score shape")
+                    row = output[0].astype(np.float32, copy=False)
+                    if bundle["activation"] == "sigmoid":
+                        row = 1.0 / (1.0 + np.exp(-np.clip(row, -80, 80)))
+                    elif bundle["activation"] == "softmax":
+                        shifted = row - np.max(row)
+                        exponent = np.exp(shifted)
+                        row = exponent / np.sum(exponent)
+                    if not np.isfinite(row).all():
+                        raise RuntimeError(
+                            "ONNX classifier returned non-finite scores")
+                    rows.append(row.astype(np.float32, copy=True))
+            return np.stack(rows, axis=0)
+
+        scores = await asyncio.to_thread(infer)
+        value = {"secure_kind": "classifier_scores.v1", "scores": scores}
+        return ClassifierScoresRef._wrap(await rt.refs.create(
+            "CLASSIFIER_SCORES", value))  # type: ignore[return-value]
+
+    async def _classifier_scores_shape(
+        self, scores: "ClassifierScoresRef",
+    ) -> tuple[int, int]:
+        import numpy as np
+
+        bundle = await current_runtime().refs.resolve(scores)
+        value = bundle.get("scores") if isinstance(bundle, dict) else None
+        if (not isinstance(value, np.ndarray) or value.ndim != 2
+                or not 1 <= value.shape[0] <= 64
+                or not 1 <= value.shape[1] <= 16_384):
+            raise TypeError("CLASSIFIER_SCORES handle is invalid")
+        return int(value.shape[0]), int(value.shape[1])
+
+    async def _classifier_scores_select_above(
+        self, scores: "ClassifierScoresRef", batch_index: int,
+        start: int, end: int, threshold: float,
+        offset: int = 0, limit: int = 512,
+    ) -> dict[str, Any]:
+        import math
+        import numpy as np
+
+        bundle = await current_runtime().refs.resolve(scores)
+        value = bundle.get("scores") if isinstance(bundle, dict) else None
+        if (not isinstance(value, np.ndarray) or value.ndim != 2
+                or not 1 <= value.shape[0] <= 64
+                or not 1 <= value.shape[1] <= 16_384):
+            raise TypeError("CLASSIFIER_SCORES handle is invalid")
+        batch_index = int(batch_index)
+        start = int(start)
+        end = int(end)
+        offset = int(offset)
+        limit = int(limit)
+        threshold = float(threshold)
+        if not 0 <= batch_index < value.shape[0]:
+            raise ValueError("classifier score batch index is invalid")
+        if not 0 <= start <= end <= value.shape[1]:
+            raise ValueError("classifier score class range is invalid")
+        if not math.isfinite(threshold) or abs(threshold) > 1_000_000:
+            raise ValueError("classifier score threshold is invalid")
+        if not 0 <= offset <= value.shape[1]:
+            raise ValueError("classifier score page offset is invalid")
+        if not 1 <= limit <= 512:
+            raise ValueError("classifier score page limit must be in [1, 512]")
+        matches = np.flatnonzero(value[batch_index, start:end] > threshold)
+        matches = matches.astype(np.int64, copy=False) + start
+        selected = matches[offset:offset + limit]
+        next_offset = offset + len(selected)
+        return {
+            "items": [{
+                "index": int(index),
+                "score": float(value[batch_index, index]),
+            } for index in selected],
+            "next_offset": (
+                next_offset if next_offset < len(matches) else None),
+        }
+
+    async def _semantic_segmentation_mask(
+        self, segmentation: "SemanticSegmentationRef", image: "ImageRef",
+        classes: list[int],
+    ) -> "MaskRef":
+        """Run a fixed SegFormer and union the requested semantic classes.
+
+        This primitive deliberately stops at class selection. Packs retain
+        ownership of label menus, alpha composition, cropping, and workflow
+        behavior.
+        """
+        import torch
+        import torch.nn.functional as functional
+        import comfy.model_management
+
+        if not isinstance(classes, (list, tuple)):
+            raise TypeError("semantic segmentation classes must be a list")
+        if not classes or len(classes) > 64:
+            raise ValueError(
+                "semantic segmentation needs between 1 and 64 classes")
+
+        rt = current_runtime()
+        entry = await rt.refs.resolve(segmentation)
+        if not isinstance(entry, _SegformerEntry):
+            raise TypeError(
+                "SEMANTIC_SEGMENTATION_MODEL is not a SegFormer model")
+        selected = []
+        for value in classes:
+            if (isinstance(value, bool) or not isinstance(value, int)
+                    or not 0 <= value < entry.num_labels):
+                raise ValueError(
+                    "semantic segmentation class IDs must match the model")
+            if value not in selected:
+                selected.append(value)
+
+        pixels = await rt.refs.resolve(image)
+        if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
+                or pixels.shape[-1] < 3 or not 1 <= len(pixels) <= 64):
+            raise ValueError(
+                "semantic segmentation needs a non-empty BHWC RGB batch")
+        height, width = map(int, pixels.shape[1:3])
+        if (height <= 0 or width <= 0
+                or height * width * len(pixels) > 268_435_456):
+            raise ValueError(
+                "semantic segmentation image dimensions are invalid")
+        if not bool(torch.isfinite(pixels[..., :3]).all()):
+            raise ValueError(
+                "semantic segmentation images must contain finite values")
+
+        device = comfy.model_management.get_torch_device()
+        offload_device = comfy.model_management.unet_offload_device()
+        mean = torch.tensor(
+            (0.485, 0.456, 0.406), device=device,
+            dtype=torch.float32).view(1, 3, 1, 1)
+        std = torch.tensor(
+            (0.229, 0.224, 0.225), device=device,
+            dtype=torch.float32).view(1, 3, 1, 1)
+        masks = []
+        with entry.lock:
+            entry.model.to(device=device, dtype=torch.float32)
+            try:
+                for frame in pixels:
+                    source = frame[..., :3].movedim(-1, 0).unsqueeze(0)
+                    source = source.to(device=device, dtype=torch.float32)
+                    source = functional.interpolate(
+                        source, size=(512, 512), mode="bilinear",
+                        align_corners=False)
+                    source = (source - mean) / std
+                    logits = entry.model(pixel_values=source).logits
+                    if (not isinstance(logits, torch.Tensor)
+                            or logits.ndim != 4
+                            or logits.shape[0] != 1
+                            or logits.shape[1] != entry.num_labels):
+                        raise RuntimeError(
+                            "SegFormer returned an invalid logits shape")
+                    logits = functional.interpolate(
+                        logits, size=(height, width), mode="bilinear",
+                        align_corners=False)
+                    labels = logits.argmax(dim=1)[0]
+                    mask = torch.zeros_like(labels, dtype=torch.bool)
+                    for class_id in selected:
+                        mask |= labels == class_id
+                    masks.append(mask.detach().cpu().float())
+            finally:
+                entry.model.to(offload_device)
+        comfy.model_management.soft_empty_cache()
+        return MaskRef._wrap(await rt.refs.create(
+            "MASK", torch.stack(masks, dim=0)
+        ))  # type: ignore[return-value]
+
+    async def _matting_refine(
+        self, matting: "MattingModelRef", image: "ImageRef",
+        trimap: "MaskRef", max_megapixels: float = 2.0,
+    ) -> "MaskRef":
+        import math
+        import torch
+        import torch.nn.functional as functional
+        import comfy.model_management
+
+        max_megapixels = float(max_megapixels)
+        if not math.isfinite(max_megapixels) or not 0.1 <= max_megapixels <= 1024.0:
+            raise ValueError("matting max_megapixels must be in [0.1, 1024]")
+        rt = current_runtime()
+        entry = await rt.refs.resolve(matting)
+        if not isinstance(entry, _VitMatteEntry):
+            raise TypeError("MATTING_MODEL is not a ViTMatte model")
+        pixels = await rt.refs.resolve(image)
+        trimap_value = await rt.refs.resolve(trimap)
+        if (
+            not isinstance(pixels, torch.Tensor)
+            or pixels.ndim != 4
+            or pixels.shape[-1] < 3
+            or not 1 <= len(pixels) <= 64
+        ):
+            raise ValueError("matting requires a non-empty BHWC RGB batch")
+        if trimap_value.ndim == 4 and trimap_value.shape[1] == 1:
+            trimap_value = trimap_value[:, 0]
+        elif trimap_value.ndim == 4 and trimap_value.shape[-1] == 1:
+            trimap_value = trimap_value[..., 0]
+        if not isinstance(trimap_value, torch.Tensor) or trimap_value.ndim != 3:
+            raise ValueError("matting trimaps must be a BHW mask batch")
+        height, width = map(int, pixels.shape[1:3])
+        if (
+            tuple(trimap_value.shape[-2:]) != (height, width)
+            or len(trimap_value) not in (1, len(pixels))
+        ):
+            raise ValueError("matting image and trimap dimensions must match")
+        if (
+            height <= 0
+            or width <= 0
+            or height * width * len(pixels) > 268_435_456
+            or not bool(torch.isfinite(pixels[..., :3]).all())
+            or not bool(torch.isfinite(trimap_value).all())
+        ):
+            raise ValueError("matting inputs are invalid or too large")
+
+        if len(trimap_value) == 1 and len(pixels) > 1:
+            trimap_value = trimap_value.expand(len(pixels), -1, -1)
+        limit = max_megapixels * 1_048_576.0
+        if height * width > limit:
+            ratio = width / height
+            target_width = max(1, int(math.sqrt(ratio * limit)))
+            target_height = max(1, int(target_width / ratio))
+        else:
+            target_height, target_width = height, width
+
+        device = comfy.model_management.get_torch_device()
+        offload_device = comfy.model_management.unet_offload_device()
+        source = pixels[..., :3].movedim(-1, 1).to(
+            device=device, dtype=torch.float32).clamp(0.0, 1.0)
+        source_trimap = trimap_value.unsqueeze(1).to(
+            device=device, dtype=torch.float32).clamp(0.0, 1.0)
+        if (target_height, target_width) != (height, width):
+            source = functional.interpolate(
+                source, size=(target_height, target_width),
+                mode="bilinear", align_corners=False)
+            source_trimap = functional.interpolate(
+                source_trimap, size=(target_height, target_width),
+                mode="bilinear", align_corners=False)
+        values = torch.cat((source * 2.0 - 1.0, source_trimap), dim=1)
+        pad_height = (-target_height) % 32
+        pad_width = (-target_width) % 32
+        if pad_height or pad_width:
+            values = functional.pad(values, (0, pad_width, 0, pad_height))
+
+        with entry.lock:
+            entry.model.to(device=device, dtype=torch.float32)
+            try:
+                alpha = entry.model(pixel_values=values).alphas
+                if (
+                    not isinstance(alpha, torch.Tensor)
+                    or alpha.ndim != 4
+                    or alpha.shape[:2] != (len(pixels), 1)
+                ):
+                    raise RuntimeError("ViTMatte returned an invalid alpha mask")
+                alpha = alpha[:, 0, :target_height, :target_width]
+                if (target_height, target_width) != (height, width):
+                    alpha = functional.interpolate(
+                        alpha.unsqueeze(1), size=(height, width),
+                        mode="bilinear", align_corners=False)[:, 0]
+                result = alpha.detach().to(
+                    device="cpu", dtype=torch.float32).clamp(0.0, 1.0)
+            finally:
+                entry.model.to(offload_device)
+        comfy.model_management.soft_empty_cache()
+        return MaskRef._wrap(await rt.refs.create(
+            "MASK", result))  # type: ignore[return-value]
+
+    async def _vqa_answer(
+        self, vqa: "VqaModelRef", image: "ImageRef", question: str,
+        max_new_tokens: int = 32,
+    ) -> str:
+        import torch
+        import torch.nn.functional as functional
+        import comfy.model_management
+
+        question = str(question).strip()
+        if not question or len(question) > 4096:
+            raise ValueError("VQA questions must contain 1..4096 characters")
+        if (
+            isinstance(max_new_tokens, bool)
+            or not isinstance(max_new_tokens, int)
+            or not 1 <= max_new_tokens <= 128
+        ):
+            raise ValueError("VQA max_new_tokens must be in [1, 128]")
+        rt = current_runtime()
+        value = await rt.refs.resolve(vqa)
+        if not isinstance(value, _VqaModelValue):
+            raise TypeError("VQA_MODEL is not a fixed BLIP model")
+        pixels = await rt.refs.resolve(image)
+        if (
+            not isinstance(pixels, torch.Tensor)
+            or pixels.ndim != 4
+            or pixels.shape[0] != 1
+            or pixels.shape[-1] < 3
+        ):
+            raise ValueError("VQA requires exactly one BHWC RGB image")
+        height, width = map(int, pixels.shape[1:3])
+        if (
+            height <= 0
+            or width <= 0
+            or height * width > 67_108_864
+            or not bool(torch.isfinite(pixels[..., :3]).all())
+        ):
+            raise ValueError("VQA image dimensions are invalid")
+
+        if value.device == "cuda" and torch.cuda.is_available():
+            device = comfy.model_management.get_torch_device()
+        else:
+            device = torch.device("cpu")
+        dtype = (
+            torch.float16
+            if value.precision == "fp16" and device.type != "cpu"
+            else torch.float32
+        )
+        source = pixels[..., :3].movedim(-1, 1).to(
+            device=device, dtype=dtype).clamp(0.0, 1.0)
+        source = functional.interpolate(
+            source, size=(384, 384), mode="bicubic",
+            align_corners=False, antialias=True)
+        mean = torch.tensor(
+            (0.48145466, 0.4578275, 0.40821073),
+            device=device, dtype=dtype).view(1, 3, 1, 1)
+        std = torch.tensor(
+            (0.26862954, 0.26130258, 0.27577711),
+            device=device, dtype=dtype).view(1, 3, 1, 1)
+        source = (source - mean) / std
+        encoded = value.entry.tokenizer(
+            question, return_tensors="pt", truncation=True, max_length=512)
+        input_ids = encoded["input_ids"].to(device)
+        attention_mask = encoded["attention_mask"].to(device)
+        offload_device = comfy.model_management.unet_offload_device()
+        with value.entry.lock:
+            value.entry.model.to(device=device, dtype=dtype)
+            try:
+                tokens = value.entry.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    pixel_values=source,
+                    max_new_tokens=max_new_tokens,
+                )
+                if (
+                    not isinstance(tokens, torch.Tensor)
+                    or tokens.ndim != 2
+                    or tokens.shape[0] != 1
+                ):
+                    raise RuntimeError("BLIP VQA returned invalid tokens")
+                answer = value.entry.tokenizer.decode(
+                    tokens[0].detach().cpu().tolist(),
+                    skip_special_tokens=True,
+                ).strip()
+            finally:
+                value.entry.model.to(offload_device)
+        comfy.model_management.soft_empty_cache()
+        return answer
+
+    async def _onnx_detector_detect(
+        self, detector: "OnnxDetectorRef", image: "ImageRef",
+    ) -> list[dict[str, Any]]:
+        from contextlib import nullcontext
+        import math
+        import numpy as np
+        import torch
+
+        rt = current_runtime()
+        bundle = await rt.refs.resolve(detector)
+        if (not isinstance(bundle, dict)
+                or bundle.get("secure_kind") != "onnx.object_detector"):
+            raise TypeError(
+                "ONNX_DETECTOR is not a trusted object-detector bundle")
+        pixels = await rt.refs.resolve(image)
+        if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
+                or pixels.shape[0] != 1 or pixels.shape[-1] < 3):
+            raise ValueError("ONNX detection requires one BHWC RGB image")
+        height, width = map(int, pixels.shape[1:3])
+        if height <= 0 or width <= 0 or height * width > 268_435_456:
+            raise ValueError("ONNX detector image dimensions are invalid")
+        source = np.ascontiguousarray(
+            pixels[0, ..., :3].detach().cpu().numpy()[..., ::-1] * 255.0,
+            dtype=np.float32,
+        )
+        source -= np.asarray((103.939, 116.779, 123.68), dtype=np.float32)
+        model = bundle["model"]
+        model_lock = bundle.get("lock")
+        with model_lock if model_lock is not None else nullcontext():
+            model.setInput(source[None, ...])
+            outputs = model.forward(model.getUnconnectedOutLayersNames())
+        if isinstance(outputs, np.ndarray):
+            outputs = [outputs]
+        arrays = [np.asarray(output) for output in outputs]
+        labels = next(
+            (value for value in arrays if np.issubdtype(
+                value.dtype, np.integer) and value.size), None)
+        boxes = next(
+            (value for value in arrays
+             if value.ndim >= 2 and value.shape[-1] == 4 and value.size),
+            None,
+        )
+        scores = next(
+            (value for value in arrays
+             if np.issubdtype(value.dtype, np.floating)
+             and value is not boxes and value.size
+             and (value.ndim <= 2 or value.shape[-1] == 1)),
+            None,
+        )
+        if labels is None or scores is None or boxes is None:
+            raise RuntimeError(
+                "ONNX detector must return integer labels, scores, and xyxy boxes")
+        labels = labels.reshape(-1)
+        scores = scores.reshape(-1)
+        boxes = boxes.reshape(-1, 4)
+        count = min(len(labels), len(scores), len(boxes))
+        invalid = np.flatnonzero(labels[:count] == -1)
+        if len(invalid):
+            count = int(invalid[0])
+        if count > 4096:
+            raise RuntimeError("ONNX detector returned more than 4096 objects")
+        result = []
+        for label, score, box in zip(
+            labels[:count], scores[:count], boxes[:count], strict=True,
+        ):
+            values = [float(value) for value in box]
+            confidence = float(score)
+            if not math.isfinite(confidence) or not all(
+                math.isfinite(value) for value in values
+            ):
+                raise RuntimeError("ONNX detector returned non-finite values")
+            result.append({
+                "label": int(label),
+                "score": confidence,
+                "box": values,
+            })
+        return result
+
+    async def _object_detector_detect(
+        self, detector: "ObjectDetectorRef", image: "ImageRef",
+        threshold: float = 0.5, class_name: str = "all",
+        max_detections: int = 100,
+    ) -> list[list[dict[str, Any]]]:
+        import torch
+        from comfy.ldm.rt_detr.rtdetr_v4 import COCO_CLASSES
+        from comfy_extras.nodes_rtdetr import detect
+
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("object-detector threshold must be in [0, 1]")
+        if class_name != "all" and class_name not in COCO_CLASSES:
+            raise ValueError("object-detector class_name is not a COCO class")
+        if not 1 <= max_detections <= 4096:
+            raise ValueError("object-detector max_detections must be in [1, 4096]")
+        rt = current_runtime()
+        bundle = await rt.refs.resolve(detector)
+        if (not isinstance(bundle, dict)
+                or bundle.get("secure_kind") != "object_detector.rt_detr"):
+            raise TypeError(
+                "OBJECT_DETECTOR is not a trusted RT-DETR bundle")
+        pixels = await rt.refs.resolve(image)
+        if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
+                or pixels.shape[-1] < 3 or not 1 <= pixels.shape[0] <= 64):
+            raise ValueError(
+                "object detection requires a non-empty BHWC RGB batch")
+        return detect(
+            bundle["model"], pixels[..., :3], threshold, class_name,
+            max_detections)
+
+    async def _ipadapter_apply(
+        self,
+        pipeline: "IpAdapterRef",
+        model: "ModelRef",
+        image: "ImageRef",
+        negative_image: Optional["ImageRef"] = None,
+        attn_mask: Optional["MaskRef"] = None,
+        style_image: Optional["ImageRef"] = None,
+        composition_image: Optional["ImageRef"] = None,
+        weight: float = 0.7,
+        weight_type: str = "channel penalty",
+        start_percent: float = 0.0,
+        end_percent: float = 1.0,
+        combine_embeds: str = "concat",
+        weight_faceidv2: float = 1.0,
+        embeds_scaling: str = "V only",
+        unfold_batch: bool = False,
+        layer_weights: Optional[str] = None,
+        weight_style: float = 1.0,
+        weight_composition: float = 1.0,
+        expand_style: bool = False,
+    ) -> "ModelRef":
+        """Apply one fixed IP-Adapter operation on the trusted plane.
+
+        This is intentionally an integration boundary, not an Impact detailer
+        implementation.  It accepts an opaque pipeline produced by a trusted
+        host node and invokes the canonical IPAdapterAdvanced operation.  The
+        guest remains responsible for SEGS traversal, crop choice, and chains.
+        """
+        import math
+        import nodes
+        import torch
+
+        weight = float(weight)
+        start_percent = float(start_percent)
+        end_percent = float(end_percent)
+        weight_faceidv2 = float(weight_faceidv2)
+        weight_style = float(weight_style)
+        weight_composition = float(weight_composition)
+        if not all(math.isfinite(value) for value in (
+            weight, start_percent, end_percent, weight_faceidv2,
+            weight_style, weight_composition,
+        )):
+            raise ValueError("IP-Adapter numeric parameters must be finite")
+        if not -1.0 <= weight <= 3.0:
+            raise ValueError("IP-Adapter weight must be in [-1, 3]")
+        if not 0.0 <= start_percent <= end_percent <= 1.0:
+            raise ValueError(
+                "IP-Adapter percentages must satisfy 0 <= start <= end <= 1")
+        if not -1.0 <= weight_faceidv2 <= 5.0:
+            raise ValueError("IP-Adapter FaceID v2 weight must be in [-1, 5]")
+        if not -1.0 <= weight_style <= 5.0:
+            raise ValueError("IP-Adapter style weight must be in [-1, 5]")
+        if not -1.0 <= weight_composition <= 5.0:
+            raise ValueError("IP-Adapter composition weight must be in [-1, 5]")
+        if weight_type not in {
+            "original", "linear", "channel penalty", "ease in", "ease out",
+            "ease in-out", "reverse in-out", "weak input", "weak output",
+            "weak middle", "strong middle", "style transfer", "composition",
+            "strong style transfer", "style and composition",
+            "style transfer precise", "composition precise",
+        }:
+            raise ValueError("unsupported IP-Adapter weight type")
+        if combine_embeds not in {
+            "concat", "add", "subtract", "average", "norm average",
+        }:
+            raise ValueError("unsupported IP-Adapter embedding combination")
+        if embeds_scaling not in {
+            "V only", "K+V", "K+V w/ C penalty",
+            "K+mean(V) w/ C penalty",
+        }:
+            raise ValueError("unsupported IP-Adapter embedding scaling")
+        if type(unfold_batch) is not bool:
+            raise TypeError("IP-Adapter unfold_batch must be a bool")
+        if type(expand_style) is not bool:
+            raise TypeError("IP-Adapter expand_style must be a bool")
+        if (layer_weights is not None
+                and (not isinstance(layer_weights, str)
+                     or len(layer_weights) > 16_384)):
+            raise ValueError("IP-Adapter layer weights are invalid")
+
+        rt = current_runtime()
+        pipe_value = await rt.refs.resolve(pipeline)
+        if not _is_ipadapter_pipe(pipe_value):
+            raise TypeError(
+                "IPADAPTER_PIPE is not a host-created IP-Adapter pipeline")
+        model_value = await rt.refs.resolve(model)
+        pixels = await rt.refs.resolve(image)
+        negative_pixels = (
+            None if negative_image is None
+            else await rt.refs.resolve(negative_image)
+        )
+        style_pixels = (
+            None if style_image is None
+            else await rt.refs.resolve(style_image)
+        )
+        composition_pixels = (
+            None if composition_image is None
+            else await rt.refs.resolve(composition_image)
+        )
+        mask_value = (
+            None if attn_mask is None
+            else await rt.refs.resolve(attn_mask)
+        )
+        for name, value in (
+            ("image", pixels),
+            ("negative_image", negative_pixels),
+            ("style_image", style_pixels),
+            ("composition_image", composition_pixels),
+        ):
+            if value is None:
+                continue
+            if (not isinstance(value, torch.Tensor) or value.ndim != 4
+                    or value.shape[-1] < 3 or value.shape[0] < 1
+                    or value.shape[0] > 4096):
+                raise ValueError(
+                    f"IP-Adapter {name} must be a bounded BHWC image batch")
+            height, width = map(int, value.shape[1:3])
+            if (height <= 0 or width <= 0
+                    or height * width * int(value.shape[0]) > 268_435_456):
+                raise ValueError(f"IP-Adapter {name} dimensions are invalid")
+
+        if mask_value is not None:
+            if (not isinstance(mask_value, torch.Tensor)
+                    or mask_value.ndim not in (2, 3)
+                    or mask_value.numel() <= 0
+                    or mask_value.numel() > 268_435_456):
+                raise ValueError("IP-Adapter attention mask must be bounded HW/BHW")
+
+        if isinstance(pipe_value, dict):
+            ipadapter = pipe_value["ipadapter"]
+            clip_vision = pipe_value["clip_vision"]
+            insightface = None
+            patched_model = model_value
+        else:
+            ipadapter, _unused, clip_vision, insightface, lora_loader = pipe_value
+            if not callable(lora_loader):
+                raise TypeError(
+                    "IPADAPTER_PIPE does not contain a host LoRA loader")
+            patched_model = lora_loader(model_value)
+        node_name = "IPAdapterBatch" if unfold_batch else "IPAdapterAdvanced"
+        node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get(node_name)
+        if node_class is None:
+            if getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get(
+                    "IPAdapterApply") is not None:
+                raise RuntimeError(
+                    "ComfyUI IPAdapter Plus is installed but outdated; "
+                    "IPAdapterAdvanced is required")
+            raise RuntimeError(
+                "IP-Adapter application requires the host-installed "
+                "ComfyUI IPAdapter Plus extension")
+
+        result = node_class().apply_ipadapter(
+            model=patched_model,
+            ipadapter=ipadapter,
+            weight=weight,
+            weight_type=weight_type,
+            start_at=start_percent,
+            end_at=end_percent,
+            combine_embeds=combine_embeds,
+            clip_vision=clip_vision,
+            image=pixels,
+            image_negative=negative_pixels,
+            attn_mask=mask_value,
+            insightface=insightface,
+            weight_faceidv2=weight_faceidv2,
+            embeds_scaling=embeds_scaling,
+            layer_weights=layer_weights,
+            image_style=style_pixels,
+            image_composition=composition_pixels,
+            weight_style=weight_style,
+            weight_composition=weight_composition,
+            expand_style=expand_style,
+        )
+        if not isinstance(result, (tuple, list)) or not result:
+            raise RuntimeError("IPAdapterAdvanced returned no model")
+        return ModelRef._wrap(await rt.refs.create(
+            "MODEL", result[0]))  # type: ignore[return-value]
+
+    async def _ipadapter_apply_tiled(
+        self,
+        pipeline: "IpAdapterRef",
+        model: "ModelRef",
+        image: "ImageRef",
+        negative_image: Optional["ImageRef"] = None,
+        attn_mask: Optional["MaskRef"] = None,
+        weight: float = 0.7,
+        weight_type: str = "linear",
+        start_percent: float = 0.0,
+        end_percent: float = 1.0,
+        combine_embeds: str = "concat",
+        embeds_scaling: str = "V only",
+        sharpening: float = 0.0,
+        unfold_batch: bool = False,
+    ) -> tuple["ModelRef", "ImageRef", "MaskRef"]:
+        """Invoke the host extension's canonical tiled operation."""
+        import math
+        import nodes
+        import torch
+
+        weight = float(weight)
+        start_percent = float(start_percent)
+        end_percent = float(end_percent)
+        sharpening = float(sharpening)
+        if not all(math.isfinite(value) for value in (
+            weight, start_percent, end_percent, sharpening,
+        )):
+            raise ValueError("IP-Adapter tiled parameters must be finite")
+        if not -1.0 <= weight <= 3.0:
+            raise ValueError("IP-Adapter weight must be in [-1, 3]")
+        if not 0.0 <= start_percent <= end_percent <= 1.0:
+            raise ValueError(
+                "IP-Adapter percentages must satisfy 0 <= start <= end <= 1")
+        if not 0.0 <= sharpening <= 1.0:
+            raise ValueError("IP-Adapter sharpening must be in [0, 1]")
+        if weight_type not in {
+            "linear", "ease in", "ease out", "ease in-out",
+            "reverse in-out", "weak input", "weak output", "weak middle",
+            "strong middle", "style transfer", "composition",
+            "strong style transfer", "style and composition",
+            "style transfer precise", "composition precise",
+        }:
+            raise ValueError("unsupported IP-Adapter weight type")
+        if combine_embeds not in {
+            "concat", "add", "subtract", "average", "norm average",
+        }:
+            raise ValueError("unsupported IP-Adapter embedding combination")
+        if embeds_scaling not in {
+            "V only", "K+V", "K+V w/ C penalty",
+            "K+mean(V) w/ C penalty",
+        }:
+            raise ValueError("unsupported IP-Adapter embedding scaling")
+        if type(unfold_batch) is not bool:
+            raise TypeError("IP-Adapter unfold_batch must be a bool")
+
+        rt = current_runtime()
+        pipe_value = await rt.refs.resolve(pipeline)
+        if not _is_ipadapter_pipe(pipe_value):
+            raise TypeError(
+                "IPADAPTER_PIPE is not a host-created IP-Adapter pipeline")
+        model_value = await rt.refs.resolve(model)
+        pixels = await rt.refs.resolve(image)
+        negative_pixels = (
+            None if negative_image is None
+            else await rt.refs.resolve(negative_image)
+        )
+        mask_value = (
+            None if attn_mask is None
+            else await rt.refs.resolve(attn_mask)
+        )
+        for name, value in (("image", pixels),
+                            ("negative_image", negative_pixels)):
+            if value is None:
+                continue
+            if (not isinstance(value, torch.Tensor) or value.ndim != 4
+                    or value.shape[-1] < 3 or value.shape[0] < 1
+                    or value.shape[0] > 4096):
+                raise ValueError(
+                    f"IP-Adapter {name} must be a bounded BHWC image batch")
+            height, width = map(int, value.shape[1:3])
+            if (height <= 0 or width <= 0
+                    or height * width * int(value.shape[0]) > 268_435_456):
+                raise ValueError(f"IP-Adapter {name} dimensions are invalid")
+        if mask_value is not None and (
+            not isinstance(mask_value, torch.Tensor)
+            or mask_value.ndim not in (2, 3)
+            or mask_value.numel() <= 0
+            or mask_value.numel() > 268_435_456
+        ):
+            raise ValueError("IP-Adapter attention mask must be bounded HW/BHW")
+
+        if isinstance(pipe_value, dict):
+            ipadapter = pipe_value["ipadapter"]
+            clip_vision = pipe_value["clip_vision"]
+            patched_model = model_value
+        else:
+            ipadapter, _unused, clip_vision, _insightface, lora_loader = pipe_value
+            if not callable(lora_loader):
+                raise TypeError(
+                    "IPADAPTER_PIPE does not contain a host LoRA loader")
+            patched_model = lora_loader(model_value)
+
+        node_name = (
+            "IPAdapterTiledBatch" if unfold_batch else "IPAdapterTiled")
+        node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get(node_name)
+        if node_class is None:
+            raise RuntimeError(
+                "tiled IP-Adapter application requires the host-installed "
+                "ComfyUI IPAdapter Plus extension")
+        result = node_class().apply_tiled(
+            model=patched_model,
+            ipadapter=ipadapter,
+            image=pixels,
+            weight=weight,
+            weight_type=weight_type,
+            start_at=start_percent,
+            end_at=end_percent,
+            sharpening=sharpening,
+            combine_embeds=combine_embeds,
+            image_negative=negative_pixels,
+            attn_mask=mask_value,
+            clip_vision=clip_vision,
+            embeds_scaling=embeds_scaling,
+        )
+        if (not isinstance(result, (tuple, list)) or len(result) < 3
+                or not isinstance(result[1], torch.Tensor)
+                or not isinstance(result[2], torch.Tensor)):
+            raise RuntimeError("IPAdapterTiled returned invalid outputs")
+        return (
+            ModelRef._wrap(await rt.refs.create("MODEL", result[0])),
+            ImageRef._wrap(await rt.refs.create("IMAGE", result[1])),
+            MaskRef._wrap(await rt.refs.create("MASK", result[2])),
+        )
+
+    async def _ipadapter_encode(
+        self,
+        pipeline: "IpAdapterRef",
+        image: "ImageRef",
+        weight: float = 1.0,
+        mask: Optional["MaskRef"] = None,
+    ) -> tuple["IpAdapterEmbedsRef", "IpAdapterEmbedsRef"]:
+        import math
+        import nodes
+        import torch
+
+        weight = float(weight)
+        if not math.isfinite(weight) or not -1.0 <= weight <= 3.0:
+            raise ValueError("IP-Adapter embedding weight must be in [-1, 3]")
+        rt = current_runtime()
+        pipe_value = await rt.refs.resolve(pipeline)
+        if not _is_ipadapter_pipe(pipe_value):
+            raise TypeError(
+                "IPADAPTER_PIPE is not a host-created IP-Adapter pipeline")
+        pixels = await rt.refs.resolve(image)
+        mask_value = None if mask is None else await rt.refs.resolve(mask)
+        if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
+                or pixels.shape[-1] < 3 or not 1 <= pixels.shape[0] <= 4096
+                or pixels.shape[1] <= 0 or pixels.shape[2] <= 0
+                or pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
+                > 268_435_456):
+            raise ValueError(
+                "IP-Adapter encoding requires a bounded BHWC image batch")
+        if mask_value is not None and (
+            not isinstance(mask_value, torch.Tensor)
+            or mask_value.ndim not in (2, 3)
+            or not 0 < mask_value.numel() <= 268_435_456
+        ):
+            raise ValueError("IP-Adapter mask must be bounded HW/BHW")
+        if isinstance(pipe_value, dict):
+            ipadapter = pipe_value["ipadapter"]
+            clip_vision = pipe_value["clip_vision"]
+        else:
+            ipadapter, _unused, clip_vision, _insightface, _loader = pipe_value
+        node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get(
+            "IPAdapterEncoder")
+        if node_class is None:
+            raise RuntimeError(
+                "IP-Adapter encoding requires the host-installed "
+                "ComfyUI IPAdapter Plus extension")
+        result = node_class().encode(
+            ipadapter=ipadapter,
+            image=pixels,
+            weight=weight,
+            mask=mask_value,
+            clip_vision=clip_vision,
+        )
+        if (not isinstance(result, (tuple, list)) or len(result) < 2
+                or any(not isinstance(value, torch.Tensor) for value in result[:2])
+                or any(not 0 < value.numel() <= 268_435_456
+                       for value in result[:2])):
+            raise RuntimeError("IPAdapterEncoder returned invalid embeddings")
+        return (
+            IpAdapterEmbedsRef._wrap(await rt.refs.create(
+                "IPADAPTER_EMBEDS", result[0])),
+            IpAdapterEmbedsRef._wrap(await rt.refs.create(
+                "IPADAPTER_EMBEDS", result[1])),
+        )
+
+    async def _ipadapter_embeds_combine(
+        self,
+        first: "IpAdapterEmbedsRef",
+        others: list["IpAdapterEmbedsRef"],
+        method: str = "concat",
+    ) -> "IpAdapterEmbedsRef":
+        import nodes
+        import torch
+
+        if method not in {
+            "concat", "add", "subtract", "average", "norm average",
+            "max", "min",
+        }:
+            raise ValueError("unsupported IP-Adapter embedding combination")
+        if not isinstance(others, list) or len(others) > 4:
+            raise ValueError("at most five IP-Adapter embeddings may be combined")
+        refs = [first, *others]
+        if any(not isinstance(ref, IpAdapterEmbedsRef) for ref in refs):
+            raise TypeError("IP-Adapter embedding combination needs typed refs")
+        rt = current_runtime()
+        values = [await rt.refs.resolve(ref) for ref in refs]
+        if any(
+            not isinstance(value, torch.Tensor)
+            or value.ndim < 2
+            or not 0 < value.numel() <= 268_435_456
+            for value in values
+        ):
+            raise ValueError("IP-Adapter embeddings are invalid")
+        node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get(
+            "IPAdapterCombineEmbeds")
+        if node_class is None:
+            raise RuntimeError(
+                "IP-Adapter embedding combination requires the "
+                "host-installed ComfyUI IPAdapter Plus extension")
+        padded = values + [None] * (5 - len(values))
+        result = node_class().batch(
+            embed1=padded[0],
+            embed2=padded[1],
+            embed3=padded[2],
+            embed4=padded[3],
+            embed5=padded[4],
+            method=method,
+        )
+        if (not isinstance(result, (tuple, list)) or not result
+                or not isinstance(result[0], torch.Tensor)
+                or not 0 < result[0].numel() <= 268_435_456):
+            raise RuntimeError(
+                "IPAdapterCombineEmbeds returned invalid embeddings")
+        return IpAdapterEmbedsRef._wrap(await rt.refs.create(
+            "IPADAPTER_EMBEDS", result[0]))  # type: ignore[return-value]
+
+    async def _ipadapter_apply_embeds(
+        self,
+        pipeline: "IpAdapterRef",
+        model: "ModelRef",
+        positive: "IpAdapterEmbedsRef",
+        negative: Optional["IpAdapterEmbedsRef"] = None,
+        attn_mask: Optional["MaskRef"] = None,
+        weight: float = 1.0,
+        weight_type: str = "linear",
+        start_percent: float = 0.0,
+        end_percent: float = 1.0,
+        embeds_scaling: str = "V only",
+    ) -> "ModelRef":
+        import math
+        import nodes
+        import torch
+
+        weight = float(weight)
+        start_percent = float(start_percent)
+        end_percent = float(end_percent)
+        if not all(math.isfinite(value) for value in (
+            weight, start_percent, end_percent,
+        )):
+            raise ValueError("IP-Adapter embedding parameters must be finite")
+        if not -1.0 <= weight <= 3.0:
+            raise ValueError("IP-Adapter weight must be in [-1, 3]")
+        if not 0.0 <= start_percent <= end_percent <= 1.0:
+            raise ValueError(
+                "IP-Adapter percentages must satisfy 0 <= start <= end <= 1")
+        if weight_type not in {
+            "linear", "ease in", "ease out", "ease in-out",
+            "reverse in-out", "weak input", "weak output", "weak middle",
+            "strong middle", "style transfer", "composition",
+            "strong style transfer", "style and composition",
+            "style transfer precise", "composition precise",
+        }:
+            raise ValueError("unsupported IP-Adapter weight type")
+        if embeds_scaling not in {
+            "V only", "K+V", "K+V w/ C penalty",
+            "K+mean(V) w/ C penalty",
+        }:
+            raise ValueError("unsupported IP-Adapter embedding scaling")
+        if not isinstance(positive, IpAdapterEmbedsRef) or (
+            negative is not None
+            and not isinstance(negative, IpAdapterEmbedsRef)
+        ):
+            raise TypeError("IP-Adapter application needs typed embedding refs")
+
+        rt = current_runtime()
+        pipe_value = await rt.refs.resolve(pipeline)
+        if not _is_ipadapter_pipe(pipe_value):
+            raise TypeError(
+                "IPADAPTER_PIPE is not a host-created IP-Adapter pipeline")
+        model_value = await rt.refs.resolve(model)
+        pos_value = await rt.refs.resolve(positive)
+        neg_value = None if negative is None else await rt.refs.resolve(negative)
+        mask_value = (
+            None if attn_mask is None else await rt.refs.resolve(attn_mask))
+        for value in (pos_value, neg_value):
+            if value is not None and (
+                not isinstance(value, torch.Tensor)
+                or value.ndim < 2
+                or not 0 < value.numel() <= 268_435_456
+            ):
+                raise ValueError("IP-Adapter embeddings are invalid")
+        if mask_value is not None and (
+            not isinstance(mask_value, torch.Tensor)
+            or mask_value.ndim not in (2, 3)
+            or not 0 < mask_value.numel() <= 268_435_456
+        ):
+            raise ValueError("IP-Adapter attention mask must be bounded HW/BHW")
+        if isinstance(pipe_value, dict):
+            ipadapter = pipe_value["ipadapter"]
+            clip_vision = pipe_value["clip_vision"]
+            patched_model = model_value
+        else:
+            ipadapter, _unused, clip_vision, _insightface, loader = pipe_value
+            if not callable(loader):
+                raise TypeError(
+                    "IPADAPTER_PIPE does not contain a host LoRA loader")
+            patched_model = loader(model_value)
+        node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get(
+            "IPAdapterEmbeds")
+        if node_class is None:
+            raise RuntimeError(
+                "IP-Adapter embedding application requires the "
+                "host-installed ComfyUI IPAdapter Plus extension")
+        result = node_class().apply_ipadapter(
+            model=patched_model,
+            ipadapter=ipadapter,
+            pos_embed=pos_value,
+            neg_embed=neg_value,
+            attn_mask=mask_value,
+            clip_vision=clip_vision,
+            weight=weight,
+            weight_type=weight_type,
+            start_at=start_percent,
+            end_at=end_percent,
+            embeds_scaling=embeds_scaling,
+        )
+        if not isinstance(result, (tuple, list)) or not result:
+            raise RuntimeError("IPAdapterEmbeds returned no model")
+        return ModelRef._wrap(await rt.refs.create(
+            "MODEL", result[0]))  # type: ignore[return-value]
+
+    async def _image_preprocessor_apply(
+        self,
+        preprocessor: "ImagePreprocessorRef",
+        image: "ImageRef",
+        mask: Optional["MaskRef"] = None,
+    ) -> "ImageRef":
+        """Invoke one trusted provider object's image-to-image operation."""
+        import torch
+
+        rt = current_runtime()
+        provider = await rt.refs.resolve(preprocessor)
+        apply = getattr(provider, "apply", None)
+        if not callable(apply) or not _is_image_preprocessor(provider):
+            raise TypeError(
+                "IMAGE_PREPROCESSOR is not a recognized host provider")
+        pixels = await rt.refs.resolve(image)
+        mask_value = None if mask is None else await rt.refs.resolve(mask)
+        if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
+                or pixels.shape[0] < 1 or pixels.shape[0] > 4096
+                or pixels.shape[-1] < 3):
+            raise ValueError(
+                "image preprocessing requires a bounded BHWC image batch")
+        height, width = map(int, pixels.shape[1:3])
+        if (height <= 0 or width <= 0
+                or height * width * int(pixels.shape[0]) > 268_435_456):
+            raise ValueError("image preprocessor input dimensions are invalid")
+        if mask_value is not None:
+            if (not isinstance(mask_value, torch.Tensor)
+                    or mask_value.ndim not in {2, 3, 4}):
+                raise ValueError("image preprocessor mask has an invalid shape")
+        result = apply(pixels, mask_value)
+        if (not isinstance(result, torch.Tensor) or result.ndim != 4
+                or result.shape[0] < 1 or result.shape[0] > 4096
+                or result.shape[-1] < 3):
+            raise RuntimeError(
+                "image preprocessor returned an invalid image batch")
+        out_height, out_width = map(int, result.shape[1:3])
+        if (out_height <= 0 or out_width <= 0
+                or out_height * out_width * int(result.shape[0])
+                > 268_435_456):
+            raise RuntimeError(
+                "image preprocessor output dimensions are invalid")
+        return ImageRef._wrap(await rt.refs.create(
+            "IMAGE", result))  # type: ignore[return-value]
+
+    async def _sam_segment(
+        self, sam: "SamModelRef", image: "ImageRef",
+        boxes: list[Optional[list[float]]],
+        point_coords: Optional[list[list[list[float]]]] = None,
+        point_labels: Optional[list[list[int]]] = None,
+        multimask_output: bool = True,
+    ) -> tuple["MaskRef", list[list[float]]]:
+        from contextlib import nullcontext
+        import math
+        import numpy as np
+        import torch
+        import comfy.model_management
+        from segment_anything import SamPredictor
+
+        rt = current_runtime()
+        bundle = await rt.refs.resolve(sam)
+        if (not isinstance(bundle, dict)
+                or bundle.get("secure_kind") != "sam.v1"):
+            raise TypeError("SAM_MODEL is not a trusted SAM v1 bundle")
+        pixels = await rt.refs.resolve(image)
+        if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
+                or pixels.shape[0] != 1 or pixels.shape[-1] < 3):
+            raise ValueError("SAM segmentation requires one BHWC RGB image")
+        height, width = int(pixels.shape[1]), int(pixels.shape[2])
+        if (height <= 0 or width <= 0 or height * width > 268_435_456):
+            raise ValueError("SAM image dimensions are invalid or too large")
+        if not isinstance(boxes, (list, tuple)) or not 1 <= len(boxes) <= 1024:
+            raise ValueError("SAM boxes must contain 1 to 1024 queries")
+        if type(multimask_output) is not bool:
+            raise TypeError("SAM multimask_output must be a bool")
+
+        query_count = len(boxes)
+        if point_coords is None:
+            point_coords = [[] for _ in range(query_count)]
+        if point_labels is None:
+            point_labels = [[] for _ in range(query_count)]
+        if (not isinstance(point_coords, (list, tuple))
+                or not isinstance(point_labels, (list, tuple))
+                or len(point_coords) != query_count
+                or len(point_labels) != query_count):
+            raise ValueError("SAM point hints must match the box query count")
+
+        def finite_number(value: Any) -> bool:
+            return (type(value) in (int, float)
+                    and math.isfinite(float(value)))
+
+        normalized_boxes = []
+        normalized_points = []
+        normalized_labels = []
+        total_points = 0
+        for box, points, labels in zip(boxes, point_coords, point_labels):
+            if box is None:
+                normalized_box = None
+            else:
+                if (not isinstance(box, (list, tuple)) or len(box) != 4
+                        or not all(finite_number(value) for value in box)):
+                    raise ValueError("each SAM box must be x1,y1,x2,y2 or null")
+                x1, y1, x2, y2 = (float(value) for value in box)
+                if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
+                    raise ValueError("SAM boxes must be inside the image")
+                normalized_box = [x1, y1, x2, y2]
+            if (not isinstance(points, (list, tuple))
+                    or not isinstance(labels, (list, tuple))
+                    or len(points) != len(labels)):
+                raise ValueError("SAM points and labels must have equal lengths")
+            if len(points) > 4096:
+                raise ValueError("a SAM query may contain at most 4096 points")
+            query_points = []
+            query_labels = []
+            for point, label in zip(points, labels):
+                if (not isinstance(point, (list, tuple)) or len(point) != 2
+                        or not all(finite_number(value) for value in point)):
+                    raise ValueError("each SAM point must be an x,y pair")
+                x, y = float(point[0]), float(point[1])
+                if not (0 <= x < width and 0 <= y < height):
+                    raise ValueError("SAM points must be inside the image")
+                if type(label) is not int or label not in (0, 1):
+                    raise ValueError("SAM point labels must be 0 or 1")
+                query_points.append([x, y])
+                query_labels.append(label)
+            if normalized_box is None and not query_points:
+                raise ValueError("each SAM query needs a box or point hint")
+            total_points += len(query_points)
+            normalized_boxes.append(normalized_box)
+            normalized_points.append(query_points)
+            normalized_labels.append(query_labels)
+        if total_points > 65_536:
+            raise ValueError("SAM request contains too many point hints")
+
+        model = bundle["model"]
+        model_lock = bundle.get("lock")
+        device_mode = bundle["device_mode"]
+        device = (
+            torch.device("cpu") if device_mode == "CPU"
+            else comfy.model_management.get_torch_device()
+        )
+        source = np.clip(
+            pixels[0, ..., :3].detach().cpu().numpy() * 255.0,
+            0, 255,
+        ).astype(np.uint8)
+        masks_by_query = []
+        scores_by_query = []
+        with model_lock if model_lock is not None else nullcontext():
+            model.to(device)
+            try:
+                predictor = SamPredictor(model)
+                with torch.inference_mode():
+                    predictor.set_image(source, image_format="RGB")
+                    for box, points, labels in zip(
+                        normalized_boxes, normalized_points, normalized_labels,
+                    ):
+                        masks, scores, _logits = predictor.predict(
+                            point_coords=(
+                                None if not points
+                                else np.asarray(points, dtype=np.float32)),
+                            point_labels=(
+                                None if not labels
+                                else np.asarray(labels, dtype=np.int64)),
+                            box=(
+                                None if box is None
+                                else np.asarray(box, dtype=np.float32)),
+                            multimask_output=multimask_output,
+                            return_logits=False,
+                        )
+                        masks_by_query.append(torch.from_numpy(masks).float())
+                        scores_by_query.append([
+                            float(score) for score in np.asarray(scores).tolist()
+                        ])
+            finally:
+                if device_mode != "Prefer GPU":
+                    model.to("cpu")
+        if device_mode == "AUTO":
+            comfy.model_management.soft_empty_cache()
+        output = torch.stack(masks_by_query, dim=0).cpu()
+        return (
+            MaskRef._wrap(await rt.refs.create("MASK", output)),
+            scores_by_query,
+        )  # type: ignore[return-value]
+
+    async def _sam_segment_video(
+        self, sam: "SamModelRef", frames: "ImageRef",
+        boxes: list[list[float]],
+    ) -> "MaskRef":
+        from contextlib import nullcontext
+        import math
+        import torch
+        import torch.nn.functional as functional
+        import comfy.model_management
+
+        rt = current_runtime()
+        bundle = await rt.refs.resolve(sam)
+        if (not isinstance(bundle, dict)
+                or bundle.get("secure_kind") != "sam.v2"):
+            raise TypeError("SAM_MODEL is not a trusted SAM2 bundle")
+        pixels = await rt.refs.resolve(frames)
+        if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
+                or pixels.shape[-1] < 3 or pixels.shape[0] < 1):
+            raise ValueError("SAM2 requires a non-empty BHWC RGB video")
+        frame_count, height, width = map(int, pixels.shape[:3])
+        if (frame_count > 1024
+                or height <= 0 or width <= 0
+                or frame_count * height * width > 268_435_456):
+            raise ValueError("SAM2 video dimensions are invalid or too large")
+        if not isinstance(boxes, (list, tuple)) or not 1 <= len(boxes) <= 128:
+            raise ValueError("SAM2 boxes must contain 1 to 128 queries")
+        normalized_boxes = []
+        for box in boxes:
+            if (not isinstance(box, (list, tuple)) or len(box) != 4
+                    or not all(type(value) in (int, float)
+                               and math.isfinite(float(value))
+                               for value in box)):
+                raise ValueError("each SAM2 box must be x1,y1,x2,y2")
+            x1, y1, x2, y2 = (float(value) for value in box)
+            if not (0 <= x1 < x2 <= width and 0 <= y1 < y2 <= height):
+                raise ValueError("SAM2 boxes must be inside the video frame")
+            normalized_boxes.append([x1, y1, x2, y2])
+
+        predictor = bundle["model"]
+        model_lock = bundle.get("lock")
+        device_mode = bundle["device_mode"]
+        device = (
+            torch.device("cpu") if device_mode == "CPU"
+            else comfy.model_management.get_torch_device()
+        )
+        image_size = int(predictor.image_size)
+        scale = min(image_size / width, image_size / height)
+        resized_width = max(1, min(image_size, int(width * scale)))
+        resized_height = max(1, min(image_size, int(height * scale)))
+        pad_left = (image_size - resized_width) // 2
+        pad_right = image_size - resized_width - pad_left
+        pad_top = (image_size - resized_height) // 2
+        pad_bottom = image_size - resized_height - pad_top
+        source = functional.interpolate(
+            pixels[..., :3].movedim(-1, 1).float(),
+            size=(resized_height, resized_width),
+            mode="bilinear", align_corners=False,
+        )
+        source = functional.pad(
+            source, (pad_left, pad_right, pad_top, pad_bottom))
+        mean = source.new_tensor((0.485, 0.456, 0.406))[None, :, None, None]
+        std = source.new_tensor((0.229, 0.224, 0.225))[None, :, None, None]
+        source = (source - mean) / std
+        adjusted_boxes = [[
+            box[0] * resized_width / width + pad_left,
+            box[1] * resized_height / height + pad_top,
+            box[2] * resized_width / width + pad_left,
+            box[3] * resized_height / height + pad_top,
+        ] for box in normalized_boxes]
+
+        inference_state = None
+        with model_lock if model_lock is not None else nullcontext():
+            predictor.to(device)
+            try:
+                inference_state = {
+                    "images": source,
+                    "num_frames": frame_count,
+                    "video_height": image_size,
+                    "video_width": image_size,
+                    "offload_video_to_cpu": True,
+                    "offload_state_to_cpu": device_mode == "CPU",
+                    "device": predictor.device,
+                    "storage_device": (
+                        torch.device("cpu") if device_mode == "CPU"
+                        else predictor.device),
+                    "point_inputs_per_obj": {},
+                    "mask_inputs_per_obj": {},
+                    "cached_features": {},
+                    "constants": {},
+                    "obj_id_to_idx": OrderedDict(),
+                    "obj_idx_to_id": OrderedDict(),
+                    "obj_ids": [],
+                    "output_dict_per_obj": {},
+                    "temp_output_dict_per_obj": {},
+                    "frames_tracked_per_obj": {},
+                }
+                predictor._get_image_feature(
+                    inference_state, frame_idx=0, batch_size=1)
+                for object_id, box in enumerate(adjusted_boxes):
+                    center = [[
+                        (box[0] + box[2]) / 2.0,
+                        (box[1] + box[3]) / 2.0,
+                    ]]
+                    predictor.add_new_points_or_box(
+                        inference_state=inference_state,
+                        frame_idx=0,
+                        obj_id=object_id,
+                        points=center,
+                        labels=[1],
+                        box=box,
+                    )
+                logits: list[list[Optional[torch.Tensor]]] = [
+                    [None] * frame_count for _ in adjusted_boxes
+                ]
+                for frame_index, object_ids, masks in (
+                    predictor.propagate_in_video(inference_state)
+                ):
+                    for mask_index, object_id in enumerate(object_ids):
+                        logits[int(object_id)][int(frame_index)] = (
+                            masks[mask_index, 0].detach().cpu())
+                if any(mask is None for item in logits for mask in item):
+                    raise RuntimeError("SAM2 did not return every object frame")
+                output = torch.stack([
+                    torch.stack(item) for item in logits
+                ])
+                output = output[
+                    :, :, pad_top:image_size - pad_bottom,
+                    pad_left:image_size - pad_right,
+                ]
+                output = functional.interpolate(
+                    output.flatten(0, 1).unsqueeze(1),
+                    size=(height, width), mode="bilinear",
+                    align_corners=False,
+                ).squeeze(1).unflatten(0, (len(adjusted_boxes), frame_count))
+            finally:
+                if inference_state is not None:
+                    predictor.reset_state(inference_state)
+                if device_mode != "Prefer GPU":
+                    predictor.to("cpu")
+        if device_mode == "AUTO":
+            comfy.model_management.soft_empty_cache()
+        return MaskRef._wrap(
+            await rt.refs.create("MASK", output.cpu().float())
+        )  # type: ignore[return-value]
+
     async def _upscale_model_upscale(
         self, upscale_model: "UpscaleModelRef", images: "ImageRef",
         per_batch: int = 16, downscale_ratio: float = 1.0,
         downscale_method: str = "lanczos", precision: str = "float32",
+        tile_size: Optional[int] = None, channels_last: bool = False,
     ) -> "ImageRef":
         import torch
         import comfy.model_management
-        from comfy.utils import ProgressBar, common_upscale
+        import comfy.utils
+        from comfy.utils import common_upscale
 
         batch_size = int(per_batch)
         ratio = float(downscale_ratio)
@@ -3952,6 +14686,14 @@ class InProcessOps:
             raise ValueError(f"unknown upscale downscale method {downscale_method!r}")
         if precision not in dtypes:
             raise ValueError(f"unknown upscale precision {precision!r}")
+        initial_tile = None
+        if tile_size is not None:
+            initial_tile = int(tile_size)
+            if initial_tile != tile_size or not 0 <= initial_tile <= 2048:
+                raise ValueError("upscale tile_size must be in [0, 2048]")
+            initial_tile = 512 if initial_tile == 0 else max(initial_tile, 128)
+        if not isinstance(channels_last, bool):
+            raise TypeError("upscale channels_last must be a boolean")
 
         rt = current_runtime()
         model = await rt.refs.resolve(upscale_model)
@@ -3963,16 +14705,77 @@ class InProcessOps:
         device = comfy.model_management.get_torch_device()
         outputs = []
         try:
-            model.to(device, dtype=dtype)
-            source = pixels.movedim(-1, -3).to(dtype)
-            progress = ProgressBar(source.shape[0])
-            for start in range(0, source.shape[0], batch_size):
-                batch = model(source[start:start + batch_size].to(device))
-                outputs.append(batch.cpu())
-                progress.update(batch.shape[0])
+            if initial_tile is None:
+                # Preserve the original operation for every existing caller.
+                model.to(device, dtype=dtype)
+                source = pixels.movedim(-1, -3).to(dtype)
+                progress = comfy.utils.ProgressBar(source.shape[0])
+                for start in range(0, source.shape[0], batch_size):
+                    batch = model(source[start:start + batch_size].to(device))
+                    outputs.append(batch.cpu())
+                    progress.update(batch.shape[0])
+            else:
+                # WhiteRabbit's advanced node uses ComfyUI's tiled runner and
+                # autocast.  The model itself stays in its admitted dtype.
+                from contextlib import nullcontext
+
+                model.to(device)
+                for parameter in model.model.parameters():
+                    if parameter.device != device:
+                        parameter.data = parameter.data.to(device)
+                        if parameter.grad is not None:
+                            parameter.grad.data = parameter.grad.data.to(device)
+                model.model.eval()
+                memory_required = int(
+                    comfy.model_management.module_size(model.model))
+                scale = float(model.scale)
+                memory_required += int(
+                    (512 * 512 * 3) * pixels.element_size()
+                    * max(scale, 1.0) * 384.0)
+                memory_required += pixels.nelement() * pixels.element_size()
+                comfy.model_management.free_memory(memory_required, device)
+                for start in range(0, pixels.shape[0], batch_size):
+                    current = pixels[start:start + batch_size].movedim(
+                        -1, -3).to(device, non_blocking=True)
+                    if channels_last and device.type == "cuda":
+                        current = current.to(memory_format=torch.channels_last)
+                    tile = initial_tile
+                    while tile >= 128:
+                        try:
+                            steps = (
+                                current.shape[0]
+                                * comfy.utils.get_tiled_scale_steps(
+                                    current.shape[3], current.shape[2],
+                                    tile_x=tile, tile_y=tile, overlap=32)
+                            )
+                            progress = comfy.utils.ProgressBar(steps)
+                            precision_context = nullcontext()
+                            if device.type == "cuda" and precision != "float32":
+                                precision_context = torch.autocast(
+                                    device_type="cuda", dtype=dtype)
+                            with precision_context:
+                                batch = comfy.utils.tiled_scale(
+                                    current,
+                                    model,
+                                    tile_x=tile,
+                                    tile_y=tile,
+                                    overlap=32,
+                                    upscale_amount=scale,
+                                    pbar=progress,
+                                )
+                            outputs.append(batch.cpu())
+                            break
+                        except Exception as error:
+                            comfy.model_management.raise_non_oom(error)
+                            tile //= 2
+                    else:
+                        raise RuntimeError(
+                            "upscale model exhausted safe tile sizes after GPU OOM")
         finally:
             model.to(previous_device, dtype=previous_dtype)
         output = torch.cat(outputs, dim=0).permute(0, 2, 3, 1).cpu().float()
+        if initial_tile is not None:
+            output = output.clamp(0.0, 1.0)
         if ratio < 1.0:
             height = int(output.shape[1] * ratio)
             width = int(output.shape[2] * ratio)
@@ -4055,7 +14858,8 @@ class InProcessOps:
 
     async def _guider_scheduled_cfg(
         self, model: "ModelRef", positive: "CondRef", negative: "CondRef",
-        cfg: float, start_percent: float, end_percent: float,
+        cfg: float, start_percent: float = 0.0, end_percent: float = 1.0,
+        bounds: Optional[dict] = None,
     ) -> "GuiderRef":
         import math
 
@@ -4076,6 +14880,31 @@ class InProcessOps:
             "start_percent", start_percent, 0.0, 1.0)
         end_value = checked_scalar(
             "end_percent", end_percent, 0.0, 1.0)
+        sigma_bounds = None
+        if bounds is not None:
+            if (
+                not isinstance(bounds, dict)
+                or set(bounds) != {"unit", "start", "end"}
+                or bounds.get("unit") != "sigma"
+            ):
+                raise ValueError(
+                    "scheduled CFG bounds must be an exact sigma range")
+            sigma_start = (
+                None if bounds["start"] is None else checked_scalar(
+                    "bounds.start", bounds["start"], 0.0, 1_000_000.0)
+            )
+            sigma_end = (
+                None if bounds["end"] is None else checked_scalar(
+                    "bounds.end", bounds["end"], 0.0, 1_000_000.0)
+            )
+            if (
+                sigma_start is not None
+                and sigma_end is not None
+                and sigma_start < sigma_end
+            ):
+                raise ValueError(
+                    "scheduled CFG sigma start must be at least its end")
+            sigma_bounds = (sigma_start, sigma_end)
         if model.kind != "MODEL":
             raise TypeError("scheduled CFG needs a MODEL ref")
         if positive.kind != "CONDITIONING" or negative.kind != "CONDITIONING":
@@ -4083,36 +14912,62 @@ class InProcessOps:
                 "scheduled CFG needs positive and negative CONDITIONING refs")
 
         class ScheduledCFGGuider(CFGGuider):
-            def set_cfg(self, value, start, end):
+            def set_cfg(self, value, start, end, sigma_range):
                 self.cfg = value
                 self.start_percent = start
                 self.end_percent = end
+                self.sigma_bounds = sigma_range
 
             def predict_noise(
                 self, x, timestep, model_options=None, seed=None,
             ):
                 if model_options is None:
                     model_options = {}
-                steps = model_options["transformer_options"]["sample_sigmas"]
-                if isinstance(timestep, torch.Tensor):
-                    timestep_value = timestep.reshape(-1)[0].to(steps)
-                else:
-                    timestep_value = torch.tensor(
-                        timestep, device=steps.device, dtype=steps.dtype)
-                matched_step_index = torch.isclose(
-                    steps, timestep_value).nonzero()
-                if len(matched_step_index) > 0:
-                    current_step_index = matched_step_index.item()
-                else:
-                    for index in range(len(steps) - 1):
-                        if ((steps[index] - timestep_value)
-                                * (steps[index + 1] - timestep_value) <= 0):
-                            current_step_index = index
-                            break
+                if self.sigma_bounds is not None:
+                    if isinstance(timestep, torch.Tensor):
+                        current_sigma = timestep.reshape(-1)[0]
                     else:
-                        current_step_index = 0
-                current_percent = current_step_index / (len(steps) - 1)
-                if self.start_percent <= current_percent <= self.end_percent:
+                        current_sigma = float(timestep)
+                    sigma_start, sigma_end = self.sigma_bounds
+                    if isinstance(current_sigma, torch.Tensor):
+                        active = (
+                            sigma_start is None
+                            or bool(current_sigma <= current_sigma.new_tensor(sigma_start))
+                        ) and (
+                            sigma_end is None
+                            or bool(current_sigma > current_sigma.new_tensor(sigma_end))
+                        )
+                    else:
+                        active = (
+                            (sigma_start is None or current_sigma <= sigma_start)
+                            and (sigma_end is None or current_sigma > sigma_end)
+                        )
+                else:
+                    steps = model_options[
+                        "transformer_options"]["sample_sigmas"]
+                    if isinstance(timestep, torch.Tensor):
+                        timestep_value = timestep.reshape(-1)[0].to(steps)
+                    else:
+                        timestep_value = torch.tensor(
+                            timestep, device=steps.device, dtype=steps.dtype)
+                    matched_step_index = torch.isclose(
+                        steps, timestep_value).nonzero()
+                    if len(matched_step_index) > 0:
+                        current_step_index = matched_step_index.item()
+                    else:
+                        for index in range(len(steps) - 1):
+                            if ((steps[index] - timestep_value)
+                                    * (steps[index + 1] - timestep_value) <= 0):
+                                current_step_index = index
+                                break
+                        else:
+                            current_step_index = 0
+                    current_percent = current_step_index / (len(steps) - 1)
+                    active = (
+                        self.start_percent <= current_percent
+                        <= self.end_percent
+                    )
+                if active:
                     uncond = self.conds.get("negative", None)
                     scale = self.cfg
                 else:
@@ -4129,9 +14984,234 @@ class InProcessOps:
         negative_value = await rt.refs.resolve(negative)
         guider = ScheduledCFGGuider(model_value)
         guider.set_conds(positive_value, negative_value)
-        guider.set_cfg(cfg_value, start_value, end_value)
+        guider.set_cfg(cfg_value, start_value, end_value, sigma_bounds)
         return GuiderRef._wrap(
             await rt.refs.create("GUIDER", guider))  # type: ignore[return-value]
+
+    async def _sampling_spatial_crop_inputs(
+        self, owner: Ref, regions: list, source_width: int,
+        source_height: int, target_width: int, target_height: int,
+    ) -> Ref:
+        """Clone a model/guider and crop only self-declared spatial patches.
+
+        Tile planning deliberately stays in the calling node. Core supplies a
+        narrow ownership boundary: a model patch may implement
+        ``spatial_crop_inputs`` to return an independent patch containing the
+        requested windows. Unknown patches are left untouched.
+        """
+        import copy
+
+        import comfy.model_patcher
+
+        if owner.kind not in {"MODEL", "GUIDER"}:
+            raise TypeError(
+                "spatial_crop_inputs requires a MODEL or GUIDER ref")
+        if isinstance(source_width, bool) or not isinstance(source_width, int):
+            raise TypeError("source_width must be an integer")
+        if isinstance(source_height, bool) or not isinstance(source_height, int):
+            raise TypeError("source_height must be an integer")
+        if not 1 <= source_width <= 1_000_000:
+            raise ValueError("source_width must be in [1, 1000000]")
+        if not 1 <= source_height <= 1_000_000:
+            raise ValueError("source_height must be in [1, 1000000]")
+        if isinstance(target_width, bool) or not isinstance(target_width, int):
+            raise TypeError("target_width must be an integer")
+        if isinstance(target_height, bool) or not isinstance(target_height, int):
+            raise TypeError("target_height must be an integer")
+        if not 1 <= target_width <= 16384:
+            raise ValueError("target_width must be in [1, 16384]")
+        if not 1 <= target_height <= 16384:
+            raise ValueError("target_height must be in [1, 16384]")
+        if not isinstance(regions, list) or not 1 <= len(regions) <= 4096:
+            raise ValueError("regions must contain between 1 and 4096 tiles")
+        if len(regions) * target_width * target_height > 268_435_456:
+            raise ValueError("spatial crop tile batch exceeds the size limit")
+
+        checked_regions: list[tuple[int, int, int, int]] = []
+        for region in regions:
+            if not isinstance(region, (list, tuple)) or len(region) != 4:
+                raise TypeError("each spatial crop region must have four integers")
+            if any(isinstance(value, bool) or not isinstance(value, int)
+                   for value in region):
+                raise TypeError("each spatial crop region must have four integers")
+            left, top, right, bottom = region
+            if not (0 <= left < right <= source_width):
+                raise ValueError("spatial crop x coordinates are outside the source")
+            if not (0 <= top < bottom <= source_height):
+                raise ValueError("spatial crop y coordinates are outside the source")
+            checked_regions.append((left, top, right, bottom))
+
+        def crop_model(value):
+            if not isinstance(value, comfy.model_patcher.ModelPatcher):
+                raise TypeError(
+                    "spatial_crop_inputs requires a ComfyUI ModelPatcher")
+            cloned = value.clone()
+            patches = cloned.model_options.get(
+                "transformer_options", {}).get("patches", {})
+            replacements: dict[int, Any] = {}
+            for module_patches in patches.values():
+                for index, patch in enumerate(module_patches):
+                    crop = getattr(patch, "spatial_crop_inputs", None)
+                    if not callable(crop):
+                        continue
+                    identity = id(patch)
+                    if identity not in replacements:
+                        replacements[identity] = crop(
+                            regions=checked_regions,
+                            source_width=source_width,
+                            source_height=source_height,
+                            target_width=target_width,
+                            target_height=target_height,
+                        )
+                    module_patches[index] = replacements[identity]
+            return cloned
+
+        runtime = current_runtime()
+        value = await runtime.refs.resolve(owner)
+        if owner.kind == "MODEL":
+            cropped = crop_model(value)
+            return ModelRef._wrap(await runtime.refs.create("MODEL", cropped))
+
+        # Guiders own one or more ModelPatchers. A shallow object copy retains
+        # the guider algorithm/configuration while each model attribute gets an
+        # independent cropped clone. This also covers dual-model guiders.
+        guider = copy.copy(value)
+        model_replacements: dict[int, Any] = {}
+        found_model = False
+        for name, candidate in vars(value).items():
+            if not isinstance(candidate, comfy.model_patcher.ModelPatcher):
+                continue
+            found_model = True
+            identity = id(candidate)
+            if identity not in model_replacements:
+                model_replacements[identity] = crop_model(candidate)
+            setattr(guider, name, model_replacements[identity])
+        if not found_model:
+            raise TypeError(
+                "spatial_crop_inputs requires a guider that owns a ModelPatcher")
+        primary = getattr(guider, "model_patcher", None)
+        if primary is not None and hasattr(value, "model_options"):
+            guider.model_options = primary.model_options
+        return GuiderRef._wrap(await runtime.refs.create("GUIDER", guider))
+
+    async def _model_ground_image(
+        self, model: "ModelRef", image: "ImageRef",
+        conditioning: "CondRef", threshold: float = 0.5,
+        refine_iterations: int = 2, individual_masks: bool = True,
+        max_detections: int = 64,
+    ) -> tuple["MaskRef", list[list[dict[str, float]]]]:
+        """Run the canonical core text-grounding implementation on SAM3.
+
+        The reusable boundary is deliberately smaller than SAM3_Detect's full
+        point/box prompting node. It exposes the common text-grounding intent
+        needed by layout, crop, and interrogation packs while leaving those
+        packs' layout and selection algorithms outside core.
+        """
+        import math
+        import torch
+
+        if not math.isfinite(float(threshold)) or not 0.0 <= threshold <= 1.0:
+            raise ValueError("grounding threshold must be finite and in [0, 1]")
+        if (isinstance(refine_iterations, bool)
+                or not isinstance(refine_iterations, int)
+                or not 0 <= refine_iterations <= 5):
+            raise ValueError("grounding refine_iterations must be in [0, 5]")
+        if not isinstance(individual_masks, bool):
+            raise TypeError("grounding individual_masks must be a bool")
+        if (isinstance(max_detections, bool)
+                or not isinstance(max_detections, int)
+                or not 1 <= max_detections <= 256):
+            raise ValueError("grounding max_detections must be in [1, 256]")
+
+        rt = current_runtime()
+        model_value = await rt.refs.resolve(model)
+        pixels = await rt.refs.resolve(image)
+        cond_value = await rt.refs.resolve(conditioning)
+        base_model = getattr(model_value, "model", None)
+        diffusion_model = getattr(base_model, "diffusion_model", None)
+        config = getattr(getattr(base_model, "model_config", None),
+                         "unet_config", None)
+        image_family = config.get("image_model") if isinstance(config, dict) else None
+        if (image_family not in {"SAM3", "SAM31"}
+                or type(diffusion_model).__module__
+                != "comfy.ldm.sam3.detector"
+                or type(diffusion_model).__name__ != "SAM3Model"):
+            raise TypeError(
+                "model.ground_image requires an official SAM3/SAM3.1 MODEL")
+        if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
+                or pixels.shape[0] < 1 or pixels.shape[0] > 64
+                or pixels.shape[-1] < 3):
+            raise ValueError("image grounding requires a bounded BHWC RGB batch")
+        batch, height, width = map(int, pixels.shape[:3])
+        if (height < 1 or width < 1
+                or batch * height * width > 268_435_456):
+            raise ValueError("image grounding input dimensions are invalid")
+        mask_planes = max_detections if individual_masks else batch
+        if mask_planes * height * width > 268_435_456:
+            raise ValueError("image grounding mask result would be too large")
+        if (not isinstance(cond_value, (list, tuple)) or not cond_value
+                or not isinstance(cond_value[0], (list, tuple))):
+            raise TypeError("image grounding requires text CONDITIONING")
+
+        from comfy_extras.nodes_sam3 import SAM3_Detect
+
+        output = SAM3_Detect.execute(
+            model_value,
+            pixels,
+            conditioning=cond_value,
+            threshold=float(threshold),
+            refine_iterations=refine_iterations,
+            individual_masks=individual_masks,
+        )
+        values = getattr(output, "result", output)
+        if (not isinstance(values, (list, tuple)) or len(values) < 2
+                or not isinstance(values[0], torch.Tensor)
+                or values[0].ndim != 3
+                or not isinstance(values[1], list)
+                or len(values[1]) != batch):
+            raise RuntimeError("SAM3 grounding returned an invalid result")
+
+        masks = values[0]
+        projected: list[list[dict[str, float]]] = []
+        remaining = max_detections
+        for raw_frame in values[1]:
+            if not isinstance(raw_frame, list):
+                raise RuntimeError("SAM3 grounding returned invalid frame boxes")
+            frame: list[dict[str, float]] = []
+            for raw_box in raw_frame[:remaining]:
+                if not isinstance(raw_box, dict):
+                    raise RuntimeError("SAM3 grounding returned an invalid box")
+                box: dict[str, float] = {}
+                for field in ("x", "y", "width", "height", "score"):
+                    value = raw_box.get(field)
+                    if (type(value) not in (int, float)
+                            or not math.isfinite(float(value))):
+                        raise RuntimeError(
+                            f"SAM3 grounding box has invalid {field}")
+                    box[field] = float(value)
+                if (box["width"] < 0.0 or box["height"] < 0.0
+                        or not 0.0 <= box["score"] <= 1.0
+                        or abs(box["x"]) > width * 4
+                        or abs(box["y"]) > height * 4
+                        or box["width"] > width * 4
+                        or box["height"] > height * 4):
+                    raise RuntimeError("SAM3 grounding box is outside its bounds")
+                frame.append(box)
+            remaining -= len(frame)
+            projected.append(frame)
+
+        detection_count = sum(map(len, projected))
+        if individual_masks:
+            if masks.shape[0] < detection_count:
+                raise RuntimeError("SAM3 grounding returned fewer masks than boxes")
+            masks = masks[:detection_count]
+        elif masks.shape[0] != batch:
+            raise RuntimeError("SAM3 union masks do not match the image batch")
+        if tuple(map(int, masks.shape[-2:])) != (height, width):
+            raise RuntimeError("SAM3 grounding masks have the wrong dimensions")
+
+        mask_ref = MaskRef._wrap(await rt.refs.create("MASK", masks))
+        return mask_ref, projected  # type: ignore[return-value]
 
     async def _model_patch(self, model: "ModelRef", transform: str,
                            params: dict) -> "ModelRef":
@@ -4163,6 +15243,170 @@ class InProcessOps:
 
         await current_runtime().refs.resolve(model)
         return _model_transforms.describe_all()
+
+    async def _model_is_flow(self, model: "ModelRef") -> bool:
+        import comfy.model_base
+
+        value = await current_runtime().refs.resolve(model)
+        return value.model.model_type == comfy.model_base.ModelType.FLOW
+
+    async def _model_family(self, model: "ModelRef") -> str:
+        import comfy.supported_models
+
+        value = await current_runtime().refs.resolve(model)
+        config = getattr(getattr(value, "model", None), "model_config", None)
+        families = (
+            ("sdxl_refiner", (comfy.supported_models.SDXLRefiner,)),
+            ("sdxl", (comfy.supported_models.SDXL,)),
+            ("sd1", (
+                comfy.supported_models.SD15,
+                comfy.supported_models.SD20,
+            )),
+            ("svd", (comfy.supported_models.SVD_img2vid,)),
+            ("sd3", (comfy.supported_models.SD3,)),
+            ("hunyuan_dit", (comfy.supported_models.HunyuanDiT,)),
+            ("flux", (comfy.supported_models.Flux,)),
+            ("mochi", (comfy.supported_models.GenmoMochi,)),
+        )
+        for family, classes in families:
+            if isinstance(config, classes):
+                return family
+        return "unknown"
+
+    async def _model_unet_context_dim(
+        self, model: "ModelRef",
+    ) -> Optional[int]:
+        value = await current_runtime().refs.resolve(model)
+        model_config = getattr(getattr(value, "model", None), "model_config", None)
+        unet_config = getattr(model_config, "unet_config", None)
+        context_dim = (
+            unet_config.get("context_dim")
+            if isinstance(unet_config, dict) else None
+        )
+        if (
+            isinstance(context_dim, bool)
+            or not isinstance(context_dim, (int, float))
+            or not 1 <= float(context_dim) <= 1_000_000
+        ):
+            return None
+        return int(context_dim)
+
+    async def _model_is_zero_terminal_snr(
+        self, model: "ModelRef",
+    ) -> bool:
+        value = await current_runtime().refs.resolve(model)
+        try:
+            model_sampling = value.get_model_object("model_sampling")
+        except (AttributeError, KeyError) as error:
+            raise ValueError("MODEL has no sampling schedule") from error
+        return bool(getattr(model_sampling, "zsnr", False))
+
+    async def _model_sigma_for_percent(
+        self, model: "ModelRef", percent: float,
+        actual_endpoints: bool = False,
+    ) -> float:
+        import math
+
+        if isinstance(percent, bool) or not isinstance(percent, (int, float)):
+            raise TypeError("sampling percent must be numeric")
+        percent = float(percent)
+        if not math.isfinite(percent) or not 0.0 <= percent <= 1.0:
+            raise ValueError("sampling percent must be finite and in [0, 1]")
+        if type(actual_endpoints) is not bool:
+            raise TypeError("actual_endpoints must be a bool")
+        value = await current_runtime().refs.resolve(model)
+        try:
+            model_sampling = value.get_model_object("model_sampling")
+        except (AttributeError, KeyError) as error:
+            raise ValueError("MODEL has no sampling schedule") from error
+        result = model_sampling.percent_to_sigma(percent)
+        if actual_endpoints and percent == 0.0:
+            result = model_sampling.sigma_max
+        elif actual_endpoints and percent == 1.0:
+            result = model_sampling.sigma_min
+        if hasattr(result, "item"):
+            result = result.item()
+        result = float(result)
+        if not math.isfinite(result) or abs(result) > 1_000_000_000_000.0:
+            raise ValueError("MODEL returned an invalid sigma")
+        return result
+
+    async def _model_sampling_sigma_delta(
+        self, model: "ModelRef", steps: int, sampler_name: str,
+        scheduler: str, start_step: int, end_step: int,
+        denoise: float = 1.0,
+        sigma_schedule: Optional[dict] = None,
+    ) -> float:
+        import math
+        import comfy.model_management
+        import comfy.samplers
+
+        steps = int(steps)
+        start_step = int(start_step)
+        end_step = int(end_step)
+        denoise = float(denoise)
+        if not 1 <= steps <= 10000:
+            raise ValueError("steps must be in [1, 10000]")
+        if not 0 <= start_step <= end_step <= steps:
+            raise ValueError("sigma step range is outside the schedule")
+        if not math.isfinite(denoise) or not 0.0 <= denoise <= 1.0:
+            raise ValueError("denoise must be finite and in [0, 1]")
+        if sampler_name not in comfy.samplers.KSampler.SAMPLERS:
+            raise ValueError("unknown sampler name")
+        if scheduler not in comfy.samplers.KSampler.SCHEDULERS:
+            raise ValueError("unknown scheduler name")
+        value = await current_runtime().refs.resolve(model)
+        comfy.model_management.load_model_gpu(value)
+        if sigma_schedule is None:
+            sampler = comfy.samplers.KSampler(
+                value,
+                steps=steps,
+                device=comfy.model_management.get_torch_device(),
+                sampler=sampler_name,
+                scheduler=scheduler,
+                denoise=denoise,
+                model_options=value.model_options,
+            )
+            sigmas = sampler.sigmas
+        else:
+            if not isinstance(sigma_schedule, dict):
+                raise TypeError("sigma_schedule must be a mapping or None")
+            total_steps = steps if denoise > 0.9999 else int(steps / denoise)
+            kind = sigma_schedule.get("kind")
+            if kind == "gits":
+                if set(sigma_schedule) != {"kind", "coeff", "denoise"}:
+                    raise ValueError("GITS sigma schedule has unknown fields")
+                coeff = float(sigma_schedule["coeff"])
+                schedule_denoise = float(sigma_schedule["denoise"])
+                if not 0.8 <= coeff <= 1.5:
+                    raise ValueError("GITS coefficient must be in [0.8, 1.5]")
+                if not 0.0 <= schedule_denoise <= 1.0:
+                    raise ValueError("GITS denoise must be in [0, 1]")
+                from comfy_extras.nodes_gits import GITSScheduler
+                sigmas = GITSScheduler.execute(
+                    coeff, total_steps, schedule_denoise,
+                )[0]
+            elif kind == "ays":
+                if set(sigma_schedule) != {"kind", "model_type", "denoise"}:
+                    raise ValueError("AYS sigma schedule has unknown fields")
+                model_type = str(sigma_schedule["model_type"])
+                schedule_denoise = float(sigma_schedule["denoise"])
+                if model_type not in {"SD1", "SDXL", "SVD"}:
+                    raise ValueError("AYS model type must be SD1, SDXL, or SVD")
+                if not 0.0 <= schedule_denoise <= 1.0:
+                    raise ValueError("AYS denoise must be in [0, 1]")
+                from comfy_extras.nodes_align_your_steps import (
+                    AlignYourStepsScheduler,
+                )
+                sigmas = AlignYourStepsScheduler().get_sigmas(
+                    model_type, total_steps, schedule_denoise,
+                )[0]
+            else:
+                raise ValueError("sigma_schedule kind is not supported")
+            if denoise <= 0.9999:
+                sigmas = sigmas[-(steps + 1):]
+        scale = float(value.model.latent_format.scale_factor)
+        return float((sigmas[start_step] - sigmas[end_step]).detach().cpu()) / scale
 
 
 class InProcessExecutionBackend:
@@ -4202,13 +15446,61 @@ def _is_plain_data(v: Any) -> bool:
     return False
 
 
+def _is_ipadapter_pipe(v: Any) -> bool:
+    """Recognize the fixed host pipeline shape without inspecting its models."""
+    return (
+        isinstance(v, dict)
+        and v.get("secure_kind") == "ipadapter.pipeline"
+        and set(v) == {"secure_kind", "ipadapter", "clip_vision"}
+        and isinstance(v.get("ipadapter"), dict)
+        and v.get("clip_vision") is not None
+    ) or (
+        isinstance(v, (list, tuple))
+        and len(v) == 5
+        and callable(v[4])
+    )
+
+
+def _is_image_preprocessor(v: Any) -> bool:
+    """Recognize Inspire's host-only SEGS provider protocol narrowly."""
+    value_type = type(v)
+    return (
+        value_type.__module__.endswith("inspire.segs_support")
+        and value_type.__name__.endswith("_wrapper")
+        and callable(getattr(v, "apply", None))
+    )
+
+
+def _is_interpolation_states(v: Any) -> bool:
+    """Recognize the fixed Frame-Interpolation policy without behavior."""
+    value_type = type(v)
+    if value_type.__name__ != "InterpolationStateList":
+        return False
+    try:
+        fields = object.__getattribute__(v, "__dict__")
+    except (AttributeError, TypeError):
+        return False
+    return (
+        type(fields) is dict
+        and set(fields) == {"frame_indices", "is_skip_list"}
+    )
+
+
 #: Live engine objects a node may receive, by the ref type that stands in for
 #: them. Detection is duck-typed because these classes live in `comfy.*`, which
 #: this module must not import.
 def _ref_type_for(v: Any) -> tuple[type, str]:
     """Choose the narrowest handle that preserves the value's authority."""
+    if _looks_like_tensor(v) and getattr(v, "ndim", None) == 1:
+        return SigmasRef, "SIGMAS"
     if _looks_like_tensor(v):
         return ImageRef, "IMAGE"
+    if _is_ipadapter_pipe(v):
+        return IpAdapterRef, "IPADAPTER_PIPE"
+    if _is_image_preprocessor(v):
+        return ImagePreprocessorRef, "IMAGE_PREPROCESSOR"
+    if _is_interpolation_states(v):
+        return InterpolationStatesRef, "INTERPOLATION_STATES"
     value_type = type(v)
     if value_type.__module__.endswith("adv_control.utils"):
         if value_type.__name__ == "ControlWeights":
@@ -4254,6 +15546,32 @@ def _ref_type_for(v: Any) -> tuple[type, str]:
     if hasattr(v, "decode") and hasattr(v, "encode"):
         return VaeRef, "VAE"
     if isinstance(v, dict):
+        if v.get("secure_kind") == "image_inpaint.big-lama" and set(v) >= {
+            "model", "architecture", "lock",
+        }:
+            return InpaintModelRef, "INPAINT_MODEL"
+        if v.get("secure_kind") in {"sam.v1", "sam.v2"} and set(v) >= {
+            "model", "architecture", "device_mode", "lock",
+        }:
+            return SamModelRef, "SAM_MODEL"
+        if v.get("secure_kind") == "onnx.object_detector" and set(v) >= {
+            "model", "lock",
+        }:
+            return OnnxDetectorRef, "ONNX_DETECTOR"
+        if v.get("secure_kind") == "object_detector.rt_detr" and "model" in v:
+            return ObjectDetectorRef, "OBJECT_DETECTOR"
+        if v.get("secure_kind") == "classifier_scores.v1" and "scores" in v:
+            return ClassifierScoresRef, "CLASSIFIER_SCORES"
+        if v.get("secure_kind") == "image_classifier.onnx" and set(v) >= {
+            "session", "input_name", "output_name", "class_count", "lock",
+        }:
+            return ImageClassifierRef, "IMAGE_CLASSIFIER"
+        if v.get("secure_kind") == "powerpaint.pipeline" and set(v) >= {
+            "powerpaint", "clip",
+        }:
+            return PowerPaintRef, "POWERPAINT_MODEL"
+        if set(v) >= {"model", "processor", "architecture", "labels"}:
+            return ImageClassifierRef, "IMAGE_CLASSIFIER"
         if set(v) >= {"model", "processor"}:
             return ClipSegRef, "CLIPSEGMODEL"
         if "samples" in v:
@@ -4278,14 +15596,38 @@ async def wrap_inputs(resolver: "RefResolver", inputs: dict) -> dict:
     as data, it becomes a handle. That is what lets a node take a MODEL or a
     CONDITIONING — which are live engine objects — and still run in a guest.
     """
-    out = {}
-    for k, v in inputs.items():
-        if _is_plain_data(v):
-            out[k] = v
-            continue
-        ref_cls, kind = _ref_type_for(v)
-        out[k] = ref_cls._wrap(await resolver.create(kind, v))
-    return out
+    async def wrap(value: Any) -> Any:
+        if _is_plain_data(value):
+            return value
+
+        # Custom structured sockets (for example rgthree's CONTEXT) may carry
+        # several live engine objects. Preserve mappings/sequences and replace
+        # each leaf with its narrow handle; wrapping the whole structure as
+        # VALUE would try to export MODEL/CLIP objects as data.
+        if isinstance(value, dict) and not (
+            "samples" in value
+            or ("waveform" in value and "sample_rate" in value)
+            or set(value) >= {"model", "processor"}
+            or _is_ipadapter_pipe(value)
+        ):
+            return {key: await wrap(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)) and not (
+            _is_ipadapter_pipe(value)
+            or (
+                value
+                and isinstance(value[0], (list, tuple))
+                and len(value[0]) == 2
+                and _looks_like_tensor(value[0][0])
+                and isinstance(value[0][1], dict)
+            )
+        ):
+            wrapped = [await wrap(item) for item in value]
+            return tuple(wrapped) if isinstance(value, tuple) else wrapped
+
+        ref_cls, kind = _ref_type_for(value)
+        return ref_cls._wrap(await resolver.create(kind, value))
+
+    return {key: await wrap(value) for key, value in inputs.items()}
 
 
 async def unwrap_outputs(resolver: "RefResolver", node_output: Any) -> Any:
