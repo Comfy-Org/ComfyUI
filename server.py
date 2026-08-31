@@ -811,6 +811,12 @@ class PromptServer():
             }
             return web.json_response(system_stats)
 
+        @routes.get("/system_monitor")
+        async def system_monitor(request):
+            from comfy.system_monitor import get_system_monitor_snapshot
+
+            return web.json_response(get_system_monitor_snapshot())
+
         @routes.get("/features")
         async def get_features(request):
             features = feature_flags.get_server_features()
