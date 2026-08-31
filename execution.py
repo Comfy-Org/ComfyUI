@@ -158,7 +158,57 @@ class CacheSet:
         }
         return result
 
-SENSITIVE_EXTRA_DATA_KEYS = ("auth_token_comfy_org", "api_key_comfy_org")
+SENSITIVE_EXTRA_DATA_KEYS = (
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "comfy_secure_tenant_id",
+)
+
+
+async def _notify_execution_backend_lifecycle(
+    event: str,
+    prompt_id: str,
+    extra_data: dict,
+) -> None:
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    backend = _comfy_sdk.providers.execution_backend
+    hook = getattr(backend, f"on_prompt_{event}", None)
+    if hook is None and event == "abort":
+        hook = getattr(backend, "on_prompt_end", None)
+    if hook is not None:
+        await hook(prompt_id, extra_data)
+
+
+async def _shutdown_execution_backend() -> None:
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    hook = getattr(_comfy_sdk.providers.execution_backend, "shutdown", None)
+    if hook is not None:
+        await hook()
+
+
+async def _maintain_execution_backend() -> None:
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    hook = getattr(_comfy_sdk.providers.execution_backend, "maintenance", None)
+    if hook is not None:
+        await hook()
+
+
+def _execution_backend_maintenance_interval() -> float | None:
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    value = getattr(
+        _comfy_sdk.providers.execution_backend,
+        "maintenance_interval_seconds",
+        None,
+    )
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError("execution backend maintenance interval must be positive")
+    return float(value)
 
 def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=None, extra_data={}):
     is_v3 = issubclass(class_def, _ComfyNodeInternal)
@@ -309,6 +359,8 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                 # registry manifest can narrow the set further. Nodes that
                 # declare nothing (the overwhelming majority) get nothing.
                 _sdk_perms = getattr(type_obj, "SDK_PERMISSIONS", ()) or ()
+                _sdk_required_weights = getattr(
+                    type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()
                 _sdk_refs_mode = bool(getattr(type_obj, "SDK_REFS", False))
                 _sdk_plan = _comfy_sdk.ExecutionPlan(
                     prompt_id=str(prompt_id),
@@ -319,9 +371,12 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                     input_mode="refs" if _sdk_refs_mode else "values",
                     method=func,
                     permissions=tuple(_sdk_perms),
+                    required_weights=tuple(_sdk_required_weights),
                     prompt=getattr(class_clone.hidden, "prompt", None),
                     extra_pnginfo=getattr(
                         class_clone.hidden, "extra_pnginfo", None),
+                    dynamic_prompt=getattr(
+                        class_clone.hidden, "dynprompt", None),
                 )
                 _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
                 _sdk_runtime = _comfy_sdk.bind_runtime(
@@ -362,6 +417,8 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                     method=_legacy_method,
                     permissions=tuple(
                         getattr(type_obj, "SDK_PERMISSIONS", ()) or ()),
+                    required_weights=tuple(getattr(
+                        type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()),
                 )
                 _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
                 _sdk_runtime = _comfy_sdk.bind_runtime(
@@ -765,6 +822,10 @@ class PromptExecutor:
         self.server = server
         self.asset_manager = asset_manager if asset_manager is not None else default_asset_manager()
         self.prompt_model_tracker = comfy.model_patcher.PromptModelTracker()
+        self._runner = asyncio.Runner()
+        self._active_loop = None
+        self._active_task = None
+        self._active_lock = threading.RLock()
         self.reset()
 
     def reset(self):
@@ -823,7 +884,71 @@ class PromptExecutor:
                 _cache_logger.warning(f"Cache provider {provider.__class__.__name__} error on {event}: {e}")
 
     def execute(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
-        asyncio.run(self.execute_async(prompt, prompt_id, extra_data, execute_outputs))
+        self._runner.run(
+            self._run_owned_prompt(
+                prompt,
+                prompt_id,
+                extra_data,
+                execute_outputs,
+            )
+        )
+
+    async def _run_owned_prompt(
+        self,
+        prompt,
+        prompt_id,
+        extra_data,
+        execute_outputs,
+    ):
+        task = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        with self._active_lock:
+            self._active_loop = loop
+            self._active_task = task
+        try:
+            return await self.execute_async(
+                prompt,
+                prompt_id,
+                extra_data,
+                execute_outputs,
+            )
+        finally:
+            with self._active_lock:
+                if self._active_task is task:
+                    self._active_loop = None
+                    self._active_task = None
+
+    def request_shutdown(self):
+        nodes.interrupt_processing(True)
+        with self._active_lock:
+            loop = self._active_loop
+            task = self._active_task
+        if loop is None or task is None or task.done():
+            return
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            pass
+
+    def close(self):
+        runner = self._runner
+        if runner is None:
+            return
+        self._runner = None
+        try:
+            runner.run(_shutdown_execution_backend())
+        finally:
+            runner.close()
+
+    def execution_backend_maintenance_interval(self) -> float | None:
+        return _execution_backend_maintenance_interval()
+
+    def maintain_execution_backend(self) -> None:
+        if self._runner is not None:
+            try:
+                self._runner.run(_maintain_execution_backend())
+            except Exception:
+                logging.exception("execution backend maintenance failed")
 
     async def execute_async(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
         set_preview_method(extra_data.get("preview_method"))
@@ -840,12 +965,17 @@ class PromptExecutor:
         self.add_message("execution_start", { "prompt_id": prompt_id}, broadcast=False)
 
         self._notify_prompt_lifecycle("start", prompt_id)
-        ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
-        ram_inactive_headroom = int(self.cache_args["ram_inactive"] * (1024 ** 3))
-        ram_release_callback = self.caches.outputs.ram_release if self.cache_type == CacheType.RAM_PRESSURE else None
-        comfy.memory_management.set_ram_cache_release_state(ram_release_callback, ram_headroom)
-
+        backend_reusable = False
         try:
+            await _notify_execution_backend_lifecycle(
+                "start",
+                prompt_id,
+                extra_data,
+            )
+            ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
+            ram_inactive_headroom = int(self.cache_args["ram_inactive"] * (1024 ** 3))
+            ram_release_callback = self.caches.outputs.ram_release if self.cache_type == CacheType.RAM_PRESSURE else None
+            comfy.memory_management.set_ram_cache_release_state(ram_release_callback, ram_headroom)
             with torch.inference_mode():
                 dynamic_prompt = DynamicPrompt(prompt)
                 reset_progress_state(prompt_id, dynamic_prompt)
@@ -874,12 +1004,14 @@ class PromptExecutor:
                 executed = set()
                 execution_list = ExecutionList(dynamic_prompt, self.caches.outputs, self.prompt_model_tracker.add)
                 current_outputs = self.caches.outputs.all_node_ids()
+                execution_failed = False
                 for node_id in list(execute_outputs):
                     execution_list.add_node(node_id)
 
                 while not execution_list.is_empty():
                     node_id, error, ex = await execution_list.stage_node_execution()
                     if error is not None:
+                        execution_failed = True
                         self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
                         break
 
@@ -887,6 +1019,7 @@ class PromptExecutor:
                     result, error, ex = await execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_node_outputs, self.asset_manager)
                     self.success = result != ExecutionResult.FAILURE
                     if result == ExecutionResult.FAILURE:
+                        execution_failed = True
                         self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
                         break
                     elif result == ExecutionResult.PENDING:
@@ -933,12 +1066,26 @@ class PromptExecutor:
                 self.server.last_node_id = None
                 if comfy.model_management.DISABLE_SMART_MEMORY:
                     comfy.model_management.unload_all_models()
+                backend_reusable = not execution_failed
         finally:
             if self.cache_type == CacheType.RAM_PRESSURE:
                 detail("RAM cache evictions: prompt=%s active=%s full=%s", prompt_id, self.caches.outputs.active_evictions, self.caches.outputs.full_evictions)
             comfy.memory_management.set_ram_cache_release_state(None, 0)
             self.prompt_model_tracker.end()
-            self._notify_prompt_lifecycle("end", prompt_id)
+            try:
+                try:
+                    await _notify_execution_backend_lifecycle(
+                        "end" if backend_reusable else "abort",
+                        prompt_id,
+                        extra_data,
+                    )
+                except Exception:
+                    self.success = False
+                    logging.exception(
+                        "execution backend prompt cleanup failed"
+                    )
+            finally:
+                self._notify_prompt_lifecycle("end", prompt_id)
 
 
 async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):

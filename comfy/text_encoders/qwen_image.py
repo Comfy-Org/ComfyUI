@@ -1,6 +1,7 @@
 from transformers import Qwen2Tokenizer
 from comfy import sd1_clip
 import comfy.text_encoders.llama
+import comfy.text_encoders.qwen_vl
 import os
 import torch
 import numbers
@@ -95,3 +96,189 @@ def te(dtype_llama=None, llama_quantization_metadata=None):
                 dtype = dtype_llama
             super().__init__(device=device, dtype=dtype, model_options=model_options)
     return QwenImageTEModel_
+
+
+class Qwen25VLTokenizer(sd1_clip.SD1Tokenizer):
+    """Static official Qwen2.5-VL tokenizer/template for generation."""
+
+    def __init__(
+        self, embedding_directory=None, tokenizer_data={},
+        model_type="qwen2_5_vl_7b",
+    ):
+        embedding_size = 2048 if model_type == "qwen2_5_vl_3b" else 3584
+
+        class Tokenizer(Qwen25_7BVLITokenizer):
+            def __init__(inner_self, embedding_directory=None, tokenizer_data={}):
+                tokenizer_path = os.path.join(
+                    os.path.dirname(os.path.realpath(__file__)),
+                    "qwen25_tokenizer",
+                )
+                sd1_clip.SDTokenizer.__init__(
+                    inner_self,
+                    tokenizer_path,
+                    pad_with_end=False,
+                    embedding_directory=embedding_directory,
+                    embedding_size=embedding_size,
+                    embedding_key=model_type,
+                    tokenizer_class=Qwen2Tokenizer,
+                    has_start_token=False,
+                    has_end_token=False,
+                    pad_to_max_length=False,
+                    max_length=99999999,
+                    min_length=1,
+                    pad_token=151643,
+                    tokenizer_data=tokenizer_data,
+                )
+
+        super().__init__(
+            embedding_directory=embedding_directory,
+            tokenizer_data=tokenizer_data,
+            name=model_type,
+            tokenizer=Tokenizer,
+        )
+        self.model_type = model_type
+
+    def tokenize_with_weights(
+        self, text, return_word_ids=False, image=None, video=None,
+        skip_template=False, **kwargs,
+    ):
+        descriptors = []
+        if skip_template:
+            llama_text = text
+        else:
+            content = ""
+            if image is not None:
+                content += "<|vision_start|><|image_pad|><|vision_end|>"
+                descriptors.append({
+                    "type": "image",
+                    "data": image,
+                    "original_type": "image",
+                })
+            if video is not None:
+                content += "<|vision_start|><|video_pad|><|vision_end|>"
+                descriptors.append({
+                    "type": "video",
+                    "data": video,
+                    "original_type": "video",
+                })
+            content += text
+            llama_text = (
+                "<|im_start|>system\nYou are a helpful assistant."
+                "<|im_end|>\n<|im_start|>user\n"
+                + content
+                + "<|im_end|>\n<|im_start|>assistant\n"
+            )
+        tokens = super().tokenize_with_weights(
+            llama_text,
+            return_word_ids=return_word_ids,
+            disable_weights=True,
+            **kwargs,
+        )
+        rows = tokens[self.clip_name]
+        descriptor_index = 0
+        for row in rows:
+            for index, item in enumerate(row):
+                if item[0] in {151655, 151656} and descriptor_index < len(descriptors):
+                    row[index] = (descriptors[descriptor_index],) + item[1:]
+                    descriptor_index += 1
+        if descriptor_index != len(descriptors):
+            raise ValueError("Qwen2.5-VL template/media placeholder mismatch")
+        return tokens
+
+
+class Qwen25VLClipModel(sd1_clip.SDClipModel):
+    def __init__(
+        self, device="cpu", layer="last", layer_idx=None, dtype=None,
+        attention_mask=True, model_options={}, model_type="qwen2_5_vl_7b",
+    ):
+        model_class = comfy.text_encoders.llama.make_qwen25_vl_model(model_type)
+        super().__init__(
+            device=device,
+            layer=layer,
+            layer_idx=layer_idx,
+            textmodel_json_config={},
+            dtype=dtype,
+            special_tokens={"pad": 151643},
+            layer_norm_hidden_state=False,
+            model_class=model_class,
+            enable_attention_masks=attention_mask,
+            return_attention_masks=attention_mask,
+            model_options=model_options,
+        )
+
+    def generate(
+        self, tokens, do_sample, max_length, temperature, top_k, top_p,
+        min_p, repetition_penalty, seed, presence_penalty=0.0,
+        num_beams=1,
+    ):
+        if isinstance(tokens, dict):
+            tokens = next(iter(tokens.values()))
+        tokens_only = [[item[0] for item in row] for row in tokens]
+        embeds, _, _, embeds_info = self.process_tokens(
+            tokens_only, self.execution_device)
+        position_ids = comfy.text_encoders.qwen_vl.qwen2vl_mrope_position_ids(
+            embeds_info, embeds.shape[1], embeds.device)
+        return self.transformer.generate(
+            embeds,
+            do_sample,
+            max_length,
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            repetition_penalty,
+            seed,
+            presence_penalty=presence_penalty,
+            position_ids=position_ids,
+            num_beams=num_beams,
+        )
+
+
+class Qwen25VLTEModel(sd1_clip.SD1ClipModel):
+    def __init__(
+        self, device="cpu", dtype=None, model_options={},
+        model_type="qwen2_5_vl_7b",
+    ):
+        clip_model = lambda **kwargs: Qwen25VLClipModel(
+            **kwargs, model_type=model_type)
+        super().__init__(
+            device=device,
+            dtype=dtype,
+            name=model_type,
+            clip_model=clip_model,
+            model_options=model_options,
+        )
+
+
+def vl_tokenizer(model_type="qwen2_5_vl_7b"):
+    class Qwen25VLTokenizer_(Qwen25VLTokenizer):
+        def __init__(self, embedding_directory=None, tokenizer_data={}):
+            super().__init__(
+                embedding_directory=embedding_directory,
+                tokenizer_data=tokenizer_data,
+                model_type=model_type,
+            )
+
+    return Qwen25VLTokenizer_
+
+
+def vl_te(
+    dtype_llama=None, llama_quantization_metadata=None,
+    model_type="qwen2_5_vl_7b",
+):
+    class Qwen25VLTEModel_(Qwen25VLTEModel):
+        def __init__(self, device="cpu", dtype=None, model_options={}):
+            if dtype_llama is not None:
+                dtype = dtype_llama
+            if llama_quantization_metadata is not None:
+                model_options = model_options.copy()
+                model_options["quantization_metadata"] = (
+                    llama_quantization_metadata)
+            super().__init__(
+                device=device,
+                dtype=dtype,
+                model_options=model_options,
+                model_type=model_type,
+            )
+
+    return Qwen25VLTEModel_
