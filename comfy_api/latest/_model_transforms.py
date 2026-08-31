@@ -254,6 +254,58 @@ class RefOf(Param):
         return {**super().describe(), "ref_kind": self.kind}
 
 
+class ListOfRefs(Param):
+    """A bounded homogeneous list of typed refs.
+
+    Retained regional-attention closures are the first consumer: they declare
+    a finite list of CONDITIONING and MASK inputs while the registering node's
+    ref table is still live.  The host resolves every member before retaining
+    the closure; no ref token survives into sampling.
+    """
+
+    type_name = "ref-list"
+
+    def __init__(
+        self, kind: str, *, min_items: int = 0, max_items: int = 32,
+        **kw: Any,
+    ) -> None:
+        super().__init__(**kw)
+        if not (
+            isinstance(min_items, int)
+            and isinstance(max_items, int)
+            and 0 <= min_items <= max_items
+        ):
+            raise ValueError("ref-list bounds must satisfy 0 <= min <= max")
+        self.kind = kind
+        self.min_items = min_items
+        self.max_items = max_items
+
+    def check(self, name: str, value: Any) -> list[Any]:
+        from ._sdk import Ref
+
+        if not isinstance(value, (list, tuple)):
+            raise TransformError(f"{name} must be a list of {self.kind} refs")
+        if not self.min_items <= len(value) <= self.max_items:
+            raise TransformError(
+                f"{name} must contain {self.min_items}..{self.max_items} refs")
+        checked = []
+        for index, item in enumerate(value):
+            if not isinstance(item, Ref) or item.kind != self.kind:
+                raise TransformError(
+                    f"{name}[{index}] must be a {self.kind} ref, got "
+                    f"{type(item).__name__}")
+            checked.append(item)
+        return checked
+
+    def describe(self) -> dict:
+        return {
+            **super().describe(),
+            "ref_kind": self.kind,
+            "min_items": self.min_items,
+            "max_items": self.max_items,
+        }
+
+
 class SafeTensorName(Param):
     """A confined logical filename in a fixed host model catalogue."""
 
