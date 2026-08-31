@@ -1,8 +1,31 @@
+import subprocess
+import sys
 import textwrap
 
 import pytest
 
 from comfy_api.latest import _sdk
+
+
+def test_versioned_v2_api_imports_without_private_comfy_modules() -> None:
+    script = textwrap.dedent(
+        """
+        import builtins
+
+        original_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            blocked = ("comfy", "folder_paths", "nodes", "server")
+            if any(name == root or name.startswith(root + ".") for root in blocked):
+                raise ImportError(f"private module is unavailable: {name}")
+            return original_import(name, *args, **kwargs)
+
+        builtins.__import__ = guarded_import
+        import comfy_api.v0_0_3
+        """
+    )
+
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def test_local_mode_allows_legacy_custom_nodes() -> None:
