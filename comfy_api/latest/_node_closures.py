@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._model_transforms import Param, RefOf  # noqa: F401  (RefOf: capture schemas)
+from ._model_transforms import ListOfRefs, Param, RefOf
 
 
 class ClosureError(Exception):
@@ -45,12 +45,6 @@ class ClosureError(Exception):
 # --------------------------------------------------------------------------- #
 MAX_CAPTURE_ENTRIES = 32
 MAX_CAPTURE_BYTES = 512 * 1024 * 1024
-
-# NOTE: a bounded list-of-refs capture type (for attention coupling's N
-# masks) is deliberately NOT here. No shipped kind declares a list
-# capture, and an unused param type is the same broken promise as an
-# unimplemented kind. It arrives with the kind that needs it.
-
 
 class ClosureKind:
     """One closed contract: when we call it, with what, and what it may hold."""
@@ -118,9 +112,9 @@ class ClosureKind:
 #
 # Only kinds whose delivery path is implemented and tested belong here. A kind
 # listed but unimplemented would be an API promise the host cannot keep, so the
-# remaining ComfyUI-ppm contracts (attention_couple,
-# clip_token_weight_encoder, scheduler_provider) are deliberately absent until
-# their delivery and, where applicable, capability plumbing lands.
+# any future closure contract is deliberately absent until its delivery and,
+# where applicable, capability plumbing lands. Scheduler providers are a
+# separate declarative manifest surface, not a closure kind.
 # --------------------------------------------------------------------------- #
 KINDS: dict[str, ClosureKind] = {
     "post_cfg": ClosureKind(
@@ -225,6 +219,41 @@ KINDS: dict[str, ClosureKind] = {
             "denoise", "noise_like", "preview", "schedule_parameters",
         ),
         stateful=True,
+    ),
+    "regional_attention": ClosureKind(
+        phase="regional_attention",
+        doc=(
+            "A paired regional cross-attention phase for canonical UNet and "
+            "Anima/Cosmos models. The closure is prepared from declared "
+            "CONDITIONING/MASK refs, expands attention inputs at each site, "
+            "then mask-blends the matching output to the original batch."
+        ),
+        arguments=(
+            "phase", "conditionings_or_primary", "strengths_or_secondary",
+            "base_strength_or_tertiary", "masks_or_metadata",
+        ),
+        returns="phase-dependent attention tensors",
+        captures={
+            "base_conditioning": RefOf("CONDITIONING"),
+            "conditionings": ListOfRefs(
+                "CONDITIONING", min_items=0, max_items=31),
+            "masks": ListOfRefs("MASK", min_items=1, max_items=32),
+        },
+        stateful=True,
+    ),
+    "clip_token_weight_encoder": ClosureKind(
+        phase="clip_token_weight_encoder",
+        doc=(
+            "Transforms future host-owned CLIP component encodes into a "
+            "paired key/value representation, or projects Anima signed "
+            "T5 weights into absolute weights plus a typed sign sidecar. "
+            "MODEL, CLIP, token objects, encoders, and weights stay host-owned."
+        ),
+        arguments=(
+            "phase", "encoded_rows_or_signed_weights",
+            "weight_rows_or_minimum_length", "empty_row_or_none",
+        ),
+        returns="phase-dependent encoded tensor or weight/mask tensor pair",
     ),
 }
 
