@@ -77,7 +77,6 @@ from ._llama_cpp import InProcessLlamaCpp
 if TYPE_CHECKING:  # keep this module import-safe / torch-free at import time
     pass
 
-
 logger = logging.getLogger(__name__)
 
 # Env var an operator points at a directory/module implementing ``register``.
@@ -13159,6 +13158,7 @@ class Providers:
         self.ops_provider: OpsProvider = InProcessOps()
         self.ref_resolver_factory: Callable[[], RefResolver] = InProcessRefResolver
         self._overlay_name: Optional[str] = None
+        self._extension_host_module_url: Optional[str] = None
 
     # Overlay entry points -------------------------------------------------- #
     def register_execution_backend(self, impl: ExecutionBackend) -> None:
@@ -13176,6 +13176,21 @@ class Providers:
     def register_ref_resolver_factory(self, factory: Callable[[], RefResolver]) -> None:
         logger.info("SDK: ref resolver -> %s", getattr(factory, "__name__", factory))
         self.ref_resolver_factory = factory
+
+    def register_extension_host(self, module_url: str) -> None:
+        if not module_url:
+            raise ValueError("extension host module URL must not be empty")
+        self._extension_host_module_url = module_url
+
+    @property
+    def frontend_runtime_config(self) -> dict[str, Any]:
+        if self._extension_host_module_url is None:
+            return {}
+        return {
+            "extension_host": {
+                "module_url": self._extension_host_module_url,
+            }
+        }
 
     @property
     def overlay_active(self) -> bool:
