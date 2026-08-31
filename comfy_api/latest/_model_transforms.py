@@ -254,6 +254,54 @@ class RefOf(Param):
         return {**super().describe(), "ref_kind": self.kind}
 
 
+class SafeTensorName(Param):
+    """A confined logical filename in a fixed host model catalogue."""
+
+    type_name = "safetensors-name"
+
+    def check(self, name: str, value: Any) -> str:
+        if not isinstance(value, str):
+            raise TransformError(f"{name} must be a string")
+        if (
+            not value
+            or len(value) > 1024
+            or "\\" in value
+            or "\x00" in value
+            or value.startswith("/")
+            or "://" in value
+            or any(part in ("", ".", "..") for part in value.split("/"))
+            or not value.lower().endswith((".safetensors", ".sft"))
+        ):
+            raise TransformError(
+                f"{name} must be a confined SafeTensors catalogue name")
+        return value
+
+
+class WeightArchiveName(Param):
+    """A confined logical filename for a restricted tensor archive."""
+
+    type_name = "weight-archive-name"
+
+    def check(self, name: str, value: Any) -> str:
+        if not isinstance(value, str):
+            raise TransformError(f"{name} must be a string")
+        if (
+            not value
+            or len(value) > 1024
+            or "\\" in value
+            or "\x00" in value
+            or value.startswith("/")
+            or "://" in value
+            or any(part in ("", ".", "..") for part in value.split("/"))
+            or not value.lower().endswith(
+                (".bin", ".ckpt", ".patch", ".pt", ".pth")
+            )
+        ):
+            raise TransformError(
+                f"{name} must be a confined PyTorch weight-archive name")
+        return value
+
+
 # --------------------------------------------------------------------------- #
 # The transform table
 # --------------------------------------------------------------------------- #
@@ -576,6 +624,31 @@ def _strict_flash_attention(patcher, allow_compile: bool):
 
     options["optimized_attention_override"] = override
     return model
+
+
+def _kohya_deep_shrink(
+    patcher, block_number: int, downscale_factor: float,
+    start_percent: float, end_percent: float,
+    downscale_after_skip: bool, downscale_method: str,
+    upscale_method: str,
+):
+    """Expose core's canonical PatchModelAddDownscale implementation."""
+    if start_percent > end_percent:
+        raise TransformError(
+            "kohya_deep_shrink.start_percent must not exceed end_percent")
+    from comfy_extras.nodes_model_downscale import PatchModelAddDownscale
+
+    output = PatchModelAddDownscale.execute(
+        patcher,
+        block_number,
+        downscale_factor,
+        start_percent,
+        end_percent,
+        downscale_after_skip,
+        downscale_method,
+        upscale_method,
+    )
+    return output.result[0]
 
 
 def _nabla_sparse_attention(
@@ -2250,28 +2323,789 @@ def _pid_color_bias(patcher, strength: float, backbone: str):
     return model
 
 
-def _differential_diffusion(patcher, multiplier: float):
-    def denoise_mask(sigma, mask, extra_options):
-        model = extra_options["model"]
-        step_sigmas = extra_options["sigmas"]
-        sigma_to = model.inner_model.model_sampling.sigma_min
-        if step_sigmas[-1] > sigma_to:
-            sigma_to = step_sigmas[-1]
-        sigma_from = step_sigmas[0]
-        sampling = model.inner_model.model_sampling
-        timestep_from = sampling.timestep(sigma_from)
-        timestep_to = sampling.timestep(sigma_to)
-        current_timestep = sampling.timestep(sigma[0])
-        threshold = (
-            (current_timestep - timestep_to)
-            / (timestep_from - timestep_to)
-            / multiplier
+_DYNAMIC_THRESHOLD_MODES = (
+    "Constant",
+    "Linear Down",
+    "Cosine Down",
+    "Half Cosine Down",
+    "Linear Up",
+    "Cosine Up",
+    "Half Cosine Up",
+    "Power Up",
+    "Power Down",
+    "Linear Repeating",
+    "Cosine Repeating",
+    "Sawtooth",
+)
+
+
+def _dynamic_threshold_scale(
+    value: float, minimum: float, mode: str, fraction: float,
+    schedule_value: float,
+) -> float:
+    """Evaluate one bounded Dynamic Thresholding schedule."""
+    import math
+
+    amplitude = value - minimum
+    if mode == "Linear Down":
+        amplitude *= 1.0 - fraction
+    elif mode == "Half Cosine Down":
+        amplitude *= math.cos(fraction)
+    elif mode == "Cosine Down":
+        amplitude *= math.cos(fraction * 1.5707)
+    elif mode == "Linear Up":
+        amplitude *= fraction
+    elif mode == "Half Cosine Up":
+        amplitude *= 1.0 - math.cos(fraction)
+    elif mode == "Cosine Up":
+        amplitude *= 1.0 - math.cos(fraction * 1.5707)
+    elif mode == "Power Up":
+        amplitude *= math.pow(fraction, schedule_value)
+    elif mode == "Power Down":
+        amplitude *= 1.0 - math.pow(fraction, schedule_value)
+    elif mode == "Linear Repeating":
+        portion = (fraction * schedule_value) % 1.0
+        amplitude *= (
+            (0.5 - portion) * 2.0
+            if portion < 0.5
+            else (portion - 0.5) * 2.0
         )
-        return (mask >= threshold).to(mask.dtype)
+    elif mode == "Cosine Repeating":
+        amplitude *= (
+            math.cos(fraction * 6.28318 * schedule_value) * 0.5
+            + 0.5
+        )
+    elif mode == "Sawtooth":
+        amplitude *= (fraction * schedule_value) % 1.0
+    return amplitude + minimum
+
+
+def _dynamic_threshold_result(
+    cond, uncond, cfg_scale,
+    *,
+    fraction: float,
+    mimic_scale: float,
+    threshold_percentile: float,
+    mimic_mode: str,
+    mimic_scale_min: float,
+    cfg_mode: str,
+    cfg_scale_min: float,
+    schedule_value: float,
+    separate_feature_channels: bool,
+    scaling_startpoint: str,
+    variability_measure: str,
+    interpolate_phi: float,
+):
+    """Return canonical Dynamic Thresholding guidance for one sample step."""
+    import torch
+
+    if cond.ndim < 3 or uncond.ndim != cond.ndim:
+        raise ValueError(
+            "dynamic_thresholding needs matching batched latent predictions")
+    if uncond.shape[0] < 1 or cond.shape[0] % uncond.shape[0] != 0:
+        raise ValueError(
+            "dynamic_thresholding needs a constant number of conditions "
+            "per batch item")
+    if tuple(cond.shape[1:]) != tuple(uncond.shape[1:]):
+        raise ValueError(
+            "dynamic_thresholding conditional and unconditional shapes differ")
+
+    mimic = _dynamic_threshold_scale(
+        mimic_scale, mimic_scale_min, mimic_mode, fraction, schedule_value)
+    cfg = _dynamic_threshold_scale(
+        float(cfg_scale), cfg_scale_min, cfg_mode, fraction, schedule_value)
+    conditions_per_batch = cond.shape[0] // uncond.shape[0]
+    cond_stacked = cond.reshape(
+        (-1, conditions_per_batch) + tuple(uncond.shape[1:]))
+    relative = (cond_stacked - uncond.unsqueeze(1)).sum(1)
+    mimic_target = uncond + relative * mimic
+    cfg_target = uncond + relative * cfg
+
+    mimic_flat = mimic_target.flatten(2)
+    cfg_flat = cfg_target.flatten(2)
+    mimic_mean = mimic_flat.mean(dim=2, keepdim=True)
+    cfg_mean = cfg_flat.mean(dim=2, keepdim=True)
+    mimic_centered = mimic_flat - mimic_mean
+    cfg_centered = cfg_flat - cfg_mean
+
+    if separate_feature_channels:
+        if variability_measure == "STD":
+            mimic_reference = mimic_centered.std(
+                dim=2, keepdim=True)
+            cfg_reference = cfg_centered.std(
+                dim=2, keepdim=True)
+        else:
+            mimic_reference = mimic_centered.abs().amax(
+                dim=2, keepdim=True)
+            cfg_reference = torch.quantile(
+                cfg_centered.abs(), threshold_percentile,
+                dim=2, keepdim=True)
+    elif variability_measure == "STD":
+        mimic_reference = mimic_centered.std()
+        cfg_reference = cfg_centered.std()
+    else:
+        mimic_reference = mimic_centered.abs().amax()
+        cfg_reference = torch.quantile(
+            cfg_centered.abs(), threshold_percentile)
+
+    if scaling_startpoint == "ZERO":
+        result = cfg_flat * (mimic_reference / cfg_reference)
+    elif variability_measure == "STD":
+        result = (
+            cfg_centered / cfg_reference * mimic_reference
+            + cfg_mean
+        )
+    else:
+        maximum = torch.maximum(mimic_reference, cfg_reference)
+        result = (
+            cfg_centered.clamp(-maximum, maximum)
+            / maximum
+            * mimic_reference
+            + cfg_mean
+        )
+
+    result = result.reshape_as(mimic_target)
+    if interpolate_phi != 1.0:
+        result = (
+            result * interpolate_phi
+            + cfg_target * (1.0 - interpolate_phi)
+        )
+    return result
+
+
+def _dynamic_thresholding(
+    patcher,
+    mimic_scale: float,
+    threshold_percentile: float,
+    mimic_mode: str,
+    mimic_scale_min: float,
+    cfg_mode: str,
+    cfg_scale_min: float,
+    schedule_value: float,
+    separate_feature_channels: bool,
+    scaling_startpoint: str,
+    variability_measure: str,
+    interpolate_phi: float,
+):
+    """Install core's closed, data-configured Dynamic Thresholding behavior."""
+    import torch
+
+    model_sampling = patcher.get_model_object("model_sampling")
+
+    def dynamic_cfg(args):
+        input_value = args["input"]
+        cond = input_value - args["cond"]
+        uncond = input_value - args["uncond"]
+        sigma = args.get("sigma")
+        if not isinstance(sigma, torch.Tensor) or sigma.numel() == 0:
+            raise ValueError(
+                "dynamic_thresholding needs the current diffusion sigma")
+        timestep = model_sampling.timestep(sigma)
+        if not isinstance(timestep, torch.Tensor) or timestep.numel() == 0:
+            raise ValueError(
+                "dynamic_thresholding model did not produce a diffusion "
+                "timestep")
+        # The pinned implementation intentionally uses max_steps=999 and then
+        # divides by max_steps-1.  Its final t=0 point is therefore slightly
+        # above one; preserve that endpoint instead of silently clamping it.
+        fraction = (
+            999.0 - float(timestep.reshape(-1)[0].item())
+        ) / 998.0
+        if float(args["cond_scale"]) == mimic_scale:
+            return input_value - (
+                uncond + (cond - uncond) * float(args["cond_scale"])
+            )
+        guided = _dynamic_threshold_result(
+            cond,
+            uncond,
+            args["cond_scale"],
+            fraction=fraction,
+            mimic_scale=mimic_scale,
+            threshold_percentile=threshold_percentile,
+            mimic_mode=mimic_mode,
+            mimic_scale_min=mimic_scale_min,
+            cfg_mode=cfg_mode,
+            cfg_scale_min=cfg_scale_min,
+            schedule_value=schedule_value,
+            separate_feature_channels=separate_feature_channels,
+            scaling_startpoint=scaling_startpoint,
+            variability_measure=variability_measure,
+            interpolate_phi=interpolate_phi,
+        )
+        return input_value - guided
 
     model = patcher.clone()
-    model.set_model_denoise_mask_function(denoise_mask)
+    model.set_model_sampler_cfg_function(dynamic_cfg)
     return model
+
+
+def _style_aligned_expand_reference(value, scale: float = 1.0):
+    """Expand the first item in each CFG half across that half's batch."""
+    import torch
+
+    batch = int(value.shape[0])
+    if batch < 2 or batch % 2:
+        return value
+    half = batch // 2
+    references = torch.stack((value[0], value[half]), dim=0).unsqueeze(1)
+    references = references.expand(
+        (2, half) + tuple(value.shape[1:]))
+    if scale != 1.0 and half > 1:
+        references = references.clone()
+        references[:, 1:] *= scale
+    return references.reshape_as(value)
+
+
+def _style_aligned_adain(value):
+    mean = value.mean(dim=-2, keepdim=True)
+    std = value.var(dim=-2, keepdim=True, correction=0).add(1e-5).sqrt()
+    reference_mean = _style_aligned_expand_reference(mean)
+    reference_std = _style_aligned_expand_reference(std)
+    return (value - mean) / std * reference_std + reference_mean
+
+
+def _style_aligned_batch(
+    patcher, share_norm: str, share_attention: str, scale: float,
+):
+    """Share reference style statistics within a classic UNet image batch."""
+    import types
+
+    import torch
+    import torch.nn as nn
+
+    diffusion = getattr(getattr(patcher, "model", None), "diffusion_model", None)
+    if (
+        diffusion is None
+        or not hasattr(diffusion, "input_blocks")
+        or not callable(getattr(diffusion, "named_modules", None))
+    ):
+        raise TransformError(
+            "style_aligned_batch needs a classic latent-diffusion UNet")
+
+    model = patcher.clone()
+    if hasattr(model, "disable_model_cfg1_optimization"):
+        model.disable_model_cfg1_optimization()
+
+    share_group = share_norm in {"group", "both"}
+    share_layer = share_norm in {"layer", "both"}
+    for name, module in diffusion.named_modules():
+        if not name or not (
+            (share_group and isinstance(module, nn.GroupNorm))
+            or (share_layer and isinstance(module, nn.LayerNorm))
+        ):
+            continue
+        key = f"diffusion_model.{name}.forward"
+        original = patcher.get_model_object(key)
+
+        def shared_norm(
+            self_module, hidden_states, *args,
+            _original=original, **kwargs,
+        ):
+            if hidden_states.ndim < 3 or hidden_states.shape[0] % 2:
+                return _original(hidden_states, *args, **kwargs)
+            tokens = hidden_states.shape[-2]
+            shared = _style_aligned_expand_reference(
+                hidden_states, scale=1.0)
+            shared = torch.cat((hidden_states, shared), dim=-2)
+            normalized = _original(shared, *args, **kwargs)
+            return normalized[..., :tokens, :]
+
+        model.add_object_patch(key, types.MethodType(shared_norm, module))
+
+    if share_attention != "disabled":
+        adain_queries = "q" in share_attention
+        adain_keys = "k" in share_attention
+        adain_values = "v" in share_attention
+
+        def shared_attention(q, k, v, _extra_options=None):
+            if q.shape[0] % 2:
+                return q, k, v
+            if adain_queries:
+                q = _style_aligned_adain(q)
+            if adain_keys:
+                k = _style_aligned_adain(k)
+            if adain_values:
+                v = _style_aligned_adain(v)
+            k = torch.cat(
+                (k, _style_aligned_expand_reference(k, scale=scale)),
+                dim=-2,
+            )
+            v = torch.cat(
+                (v, _style_aligned_expand_reference(v)), dim=-2)
+            return q, k, v
+
+        model.set_model_attn1_patch(shared_attention)
+    return model
+
+
+def _controlnet_lllite(
+    patcher, adapter: str, image, strength: float, steps: int,
+    start_percent: float, end_percent: float,
+):
+    """Apply the canonical legacy SD ControlNet-LLLite attention adapter."""
+    import sys
+
+    import folder_paths
+    import nodes
+    import torch
+
+    if (
+        not isinstance(image, torch.Tensor)
+        or image.ndim != 4
+        or not 1 <= image.shape[0] <= 4096
+        or image.shape[-1] < 3
+    ):
+        raise TransformError(
+            "controlnet_lllite needs a bounded BHWC RGB image batch")
+    height, width = map(int, image.shape[1:3])
+    if (
+        height <= 0
+        or width <= 0
+        or height * width * int(image.shape[0]) > 268_435_456
+    ):
+        raise TransformError("controlnet_lllite image dimensions are invalid")
+    effective_end = 100.0 if end_percent == 0.0 else end_percent
+    if start_percent > effective_end:
+        raise TransformError(
+            "controlnet_lllite start_percent must not exceed end_percent")
+
+    path = folder_paths.get_full_path_or_raise("controlnet", adapter)
+    node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get("LLLiteLoader")
+    module = (
+        None if node_class is None
+        else sys.modules.get(getattr(node_class, "__module__", ""))
+    )
+    load_patch = getattr(module, "load_control_net_lllite_patch", None)
+    if not callable(load_patch):
+        raise TransformError(
+            "controlnet_lllite requires the host-installed canonical "
+            "kohya-ss ControlNet-LLLite-ComfyUI extension")
+    patch = load_patch(
+        path,
+        image[..., :3],
+        strength,
+        steps,
+        start_percent,
+        end_percent,
+    )
+    if not callable(patch):
+        raise TransformError("ControlNet-LLLite returned no attention patch")
+    model = patcher.clone()
+    model.set_model_attn1_patch(patch)
+    model.set_model_attn2_patch(patch)
+    return model
+
+
+def _differential_diffusion(patcher, strength: float):
+    from comfy_extras.nodes_differential_diffusion import DifferentialDiffusion
+
+    return DifferentialDiffusion.execute(patcher, strength).result[0]
+
+
+def _fooocus_inpaint(patcher, latent, head: str, patch: str):
+    """Apply Fooocus' canonical SDXL inpaint head and quantized delta.
+
+    This is a closed model transform because the only irreducible part of the
+    behavior is installing a host-side UNet callback. Packs still choose and
+    declare the weights and own their inpaint-pipeline orchestration.
+    """
+    import torch
+    import torch.nn.functional as F
+    import comfy.lora
+    import comfy.utils
+    import folder_paths
+
+    if not isinstance(latent, dict):
+        raise TransformError("fooocus_inpaint.latent is not a latent payload")
+    samples = latent.get("samples")
+    noise_mask = latent.get("noise_mask")
+    if (
+        not isinstance(samples, torch.Tensor)
+        or samples.ndim != 4
+        or samples.shape[1] != 4
+        or not isinstance(noise_mask, torch.Tensor)
+        or noise_mask.ndim not in (3, 4)
+    ):
+        raise TransformError(
+            "fooocus_inpaint needs four-channel samples and a noise mask")
+    if noise_mask.ndim == 3:
+        noise_mask = noise_mask.unsqueeze(1)
+    if noise_mask.shape[1] != 1:
+        raise TransformError("fooocus_inpaint noise mask must have one channel")
+    if noise_mask.shape[0] not in (1, samples.shape[0]):
+        raise TransformError(
+            "fooocus_inpaint sample and noise-mask batches do not match")
+    head_path = folder_paths.get_full_path_or_raise("inpaint", head)
+    patch_path = folder_paths.get_full_path_or_raise("inpaint", patch)
+    head_state = comfy.utils.load_torch_file(head_path, safe_load=True)
+    head_weight = head_state.get("head") if isinstance(head_state, dict) else None
+    if (
+        not isinstance(head_weight, torch.Tensor)
+        or tuple(head_weight.shape) != (320, 5, 3, 3)
+        or len(head_state) != 1
+    ):
+        raise TransformError("Fooocus inpaint head has an invalid state dict")
+
+    base_model = patcher.model
+    latent_pixels = base_model.process_latent_in(samples)
+    if tuple(noise_mask.shape[-2:]) == tuple(latent_pixels.shape[-2:]):
+        latent_mask = noise_mask.round().to(latent_pixels)
+    else:
+        latent_mask = F.max_pool2d(
+            noise_mask.round(), (8, 8)).round().to(latent_pixels)
+    if latent_mask.shape[0] == 1 and latent_pixels.shape[0] > 1:
+        latent_mask = latent_mask.repeat(latent_pixels.shape[0], 1, 1, 1)
+    if tuple(latent_mask.shape[-2:]) != tuple(latent_pixels.shape[-2:]):
+        raise TransformError(
+            "Fooocus mask pooling does not match the model latent dimensions")
+    feed = torch.cat([latent_mask, latent_pixels], dim=1)
+    feature = F.conv2d(
+        F.pad(feed, (1, 1, 1, 1), "replicate"),
+        head_weight.to(device=feed.device, dtype=feed.dtype),
+    )
+
+    patch_state = comfy.utils.load_torch_file(patch_path, safe_load=True)
+    if not isinstance(patch_state, dict):
+        raise TransformError("Fooocus inpaint patch is not a state dict")
+    model_keys = comfy.lora.model_lora_keys_unet(base_model, {})
+    model_keys.update({key: key for key in base_model.state_dict().keys()})
+    loaded = {}
+    for key in model_keys.values():
+        value = patch_state.get(key)
+        if value is None:
+            continue
+        if (
+            not isinstance(value, (tuple, list))
+            or len(value) != 3
+            or not all(isinstance(item, torch.Tensor) for item in value)
+        ):
+            raise TransformError(
+                f"Fooocus patch entry {key!r} is not a quantized weight")
+        loaded[key] = ("fooocus", tuple(value))
+    if not loaded:
+        raise TransformError(
+            "Fooocus inpaint patch has no weights for this model")
+
+    def input_block_patch(hidden, transformer_options):
+        block = transformer_options.get("block")
+        if isinstance(block, (tuple, list)) and len(block) > 1 and block[1] == 0:
+            if hidden.shape[1:] != feature.shape[1:]:
+                raise RuntimeError(
+                    "Fooocus inpaint feature does not match the UNet input block")
+            if hidden.shape[0] % feature.shape[0] != 0:
+                raise RuntimeError(
+                    "Fooocus inpaint feature batch does not match the UNet batch")
+            repeated = feature.to(hidden).repeat(
+                hidden.shape[0] // feature.shape[0], 1, 1, 1)
+            hidden = hidden + repeated
+        return hidden
+
+    model = patcher.clone()
+    model.set_model_input_block_patch(input_block_patch)
+    patched = set(model.add_patches(loaded, 1.0))
+    missing = set(loaded) - patched
+    if missing:
+        logging.warning(
+            "Fooocus inpaint could not attach %d model weights", len(missing))
+    model.model_options.setdefault("transformer_options", {})["fooocus"] = True
+    return model
+
+
+def _diffusion_weight_delta(
+    patcher, model_patch: str, strength: float,
+    pad_input_channels: bool,
+):
+    """Apply a shape-checked SafeTensors diffusion-model delta.
+
+    This is deliberately architecture-neutral. The file may only change keys
+    already present in the model. The sole permitted shape change is widening
+    the first convolution's input channels when explicitly requested.
+    """
+    import torch
+    import comfy.utils
+    import folder_paths
+
+    path = folder_paths.get_full_path_or_raise("model_patches", model_patch)
+    state = comfy.utils.load_torch_file(path, safe_load=True)
+    if not isinstance(state, dict) or not state or len(state) > 100_000:
+        raise TransformError(
+            "diffusion_weight_delta requires a non-empty tensor state dict")
+
+    prefixes = ("model.diffusion_model.", "diffusion_model.")
+    normalized = {}
+    for source_key, value in state.items():
+        if not isinstance(source_key, str) or not isinstance(value, torch.Tensor):
+            raise TransformError(
+                "diffusion_weight_delta accepts tensor-only SafeTensors weights")
+        key = source_key
+        for prefix in prefixes:
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+                break
+        if key in normalized:
+            raise TransformError(
+                f"diffusion_weight_delta has duplicate key {key!r}")
+        normalized[key] = value
+
+    diffusion = getattr(getattr(patcher, "model", None), "diffusion_model", None)
+    if diffusion is None or not callable(getattr(diffusion, "state_dict", None)):
+        raise TransformError(
+            "diffusion_weight_delta needs a model with diffusion weights")
+    target = diffusion.state_dict()
+    input_key = "input_blocks.0.0.weight"
+    patches = {}
+    for key, value in normalized.items():
+        existing = target.get(key)
+        if existing is None:
+            raise TransformError(
+                f"diffusion_weight_delta key {key!r} is absent from the model")
+        can_pad = bool(pad_input_channels and key == input_key)
+        if tuple(value.shape) != tuple(existing.shape):
+            valid_padding = (
+                can_pad
+                and value.ndim == existing.ndim == 4
+                and value.shape[0] == existing.shape[0]
+                and value.shape[1] >= existing.shape[1]
+                and tuple(value.shape[2:]) == tuple(existing.shape[2:])
+            )
+            if not valid_padding:
+                raise TransformError(
+                    f"diffusion_weight_delta shape mismatch for {key!r}: "
+                    f"{tuple(value.shape)} != {tuple(existing.shape)}")
+        patches["diffusion_model." + key] = (
+            "diff", (value, {"pad_weight": can_pad}))
+
+    result = patcher.clone()
+    loaded = result.add_patches(patches, float(strength))
+    if loaded is not None and len(loaded) != len(patches):
+        raise TransformError(
+            "diffusion_weight_delta did not match every model weight")
+    return result
+
+
+def _serialized_model_patch(
+    patcher, model_patch: str, strength: float, pad_diff_weights: bool,
+):
+    """Apply a tensor-only serialized Comfy model patch.
+
+    Some model authors publish Comfy patch tuples in SafeTensors by encoding
+    ``model-key::patch-type::slot`` in each tensor name.  Parsing that small
+    interchange format is a reusable engine capability; the model-specific
+    orchestration that chooses a file and conditioning remains pack-side.
+    Only diffusion-model ``diff`` and ``lora`` patches are accepted here.
+    """
+    import torch
+    import comfy.utils
+    import folder_paths
+
+    path = folder_paths.get_full_path_or_raise("model_patches", model_patch)
+    state = comfy.utils.load_torch_file(path, safe_load=True)
+    if not isinstance(state, dict) or not state or len(state) > 100_000:
+        raise TransformError(
+            "serialized_model_patch requires a non-empty tensor state dict")
+
+    grouped: dict[str, tuple[str, list[Any]]] = {}
+    for encoded_key, tensor in state.items():
+        if not isinstance(encoded_key, str) or not isinstance(tensor, torch.Tensor):
+            raise TransformError(
+                "serialized_model_patch accepts tensor-only SafeTensors weights")
+        parts = encoded_key.rsplit("::", 2)
+        if len(parts) != 3:
+            raise TransformError(
+                "serialized_model_patch tensor names must use "
+                "model-key::patch-type::slot")
+        model_key, patch_type, slot_text = parts
+        if (
+            not model_key.startswith("diffusion_model.")
+            or len(model_key) > 1024
+            or patch_type not in {"diff", "lora"}
+        ):
+            raise TransformError(
+                "serialized_model_patch contains an unsupported model key or "
+                "patch type")
+        try:
+            slot = int(slot_text)
+        except ValueError as exc:
+            raise TransformError(
+                "serialized_model_patch slots must be integers") from exc
+        if not 0 <= slot < 16 or str(slot) != slot_text:
+            raise TransformError(
+                "serialized_model_patch slots must be canonical integers in "
+                "[0, 15]")
+        current = grouped.get(model_key)
+        if current is None:
+            current = (patch_type, [None] * 16)
+            grouped[model_key] = current
+        elif current[0] != patch_type:
+            raise TransformError(
+                f"serialized_model_patch mixes patch types for {model_key!r}")
+        if current[1][slot] is not None:
+            raise TransformError(
+                f"serialized_model_patch repeats slot {slot} for {model_key!r}")
+        current[1][slot] = tensor
+
+    patches = {}
+    for model_key, (patch_type, values) in grouped.items():
+        required_slots = (0,) if patch_type == "diff" else (0, 1)
+        if any(values[index] is None for index in required_slots):
+            raise TransformError(
+                f"serialized_model_patch has an incomplete {patch_type} patch "
+                f"for {model_key!r}")
+        if patch_type == "diff" and pad_diff_weights:
+            patches[model_key] = (
+                "diff", [values[0], {"pad_weight": True}])
+        else:
+            patches[model_key] = (patch_type, values)
+
+    result = patcher.clone()
+    loaded = result.add_patches(patches, float(strength))
+    if loaded is not None and len(loaded) != len(patches):
+        raise TransformError(
+            "serialized_model_patch did not match every model weight")
+    return result
+
+
+def _layer_diffusion_attention_sharing(
+    patcher, model_patch: str, frames: int, control_image=None,
+    first_conditioning=None, second_conditioning=None,
+    third_conditioning=None,
+):
+    """Bridge the canonical SD1 Layer Diffusion attention-sharing patcher.
+
+    The attention implementation remains owned by ComfyUI-layerdiffuse.  Core
+    supplies only a confined SafeTensor state dict and bounded typed inputs;
+    it does not carry a copy of the extension's model algorithm.
+    """
+    import sys
+    import torch
+    import comfy.supported_models
+    import comfy.utils
+    import folder_paths
+    import nodes
+
+    config = getattr(getattr(patcher, "model", None), "model_config", None)
+    if not isinstance(
+        config, (comfy.supported_models.SD15, comfy.supported_models.SD20),
+    ):
+        raise TransformError(
+            "layer_diffusion_attention_sharing requires an SD1.x model")
+
+    path = folder_paths.get_full_path_or_raise("model_patches", model_patch)
+    state = comfy.utils.load_torch_file(path, safe_load=True)
+    if (
+        not isinstance(state, dict)
+        or not state
+        or len(state) > 100_000
+        or any(
+            not isinstance(key, str) or not isinstance(value, torch.Tensor)
+            for key, value in state.items()
+        )
+    ):
+        raise TransformError(
+            "Layer Diffusion attention weights must be a tensor-only "
+            "SafeTensors state dict")
+
+    node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get(
+        "LayeredDiffusionApply")
+    module = (
+        None if node_class is None
+        else sys.modules.get(getattr(node_class, "__module__", ""))
+    )
+    attention_patcher = getattr(module, "AttentionSharingPatcher", None)
+    if not callable(attention_patcher):
+        raise TransformError(
+            "layer_diffusion_attention_sharing requires the host-installed "
+            "canonical ComfyUI-layerdiffuse extension")
+
+    control = None
+    if control_image is not None:
+        if (
+            not isinstance(control_image, torch.Tensor)
+            or control_image.ndim != 4
+            or not 1 <= control_image.shape[0] <= 64
+            or control_image.shape[-1] < 3
+            or control_image.numel() > 268_435_456
+        ):
+            raise TransformError(
+                "Layer Diffusion control_image must be a bounded BHWC image")
+        control = control_image[..., :3].movedim(-1, 1)
+
+    result = patcher.clone()
+    adapter = attention_patcher(
+        result, int(frames), use_control=control is not None)
+    adapter.load_state_dict(state, strict=True)
+    if control is not None:
+        adapter.set_control(control)
+
+    conditionings = (
+        first_conditioning, second_conditioning, third_conditioning)
+    active = conditionings[:int(frames)]
+    if int(frames) > 1 or any(value is not None for value in active):
+        overwritten = []
+        for index, conditioning in enumerate(active):
+            if conditioning is None:
+                overwritten.append(None)
+                continue
+            if (
+                not isinstance(conditioning, (list, tuple))
+                or not conditioning
+                or not isinstance(conditioning[0], (list, tuple))
+                or not conditioning[0]
+                or not isinstance(conditioning[0][0], torch.Tensor)
+            ):
+                raise TransformError(
+                    "Layer Diffusion conditioning must contain a host "
+                    f"embedding row at position {index}")
+            overwritten.append(conditioning[0][0])
+        result.model_options.setdefault("transformer_options", {})[
+            "cond_overwrite"] = overwritten
+    return result
+
+
+def _concat_latent_input(patcher, latent):
+    """Inject an encoded latent as bounded model ``c_concat`` input."""
+    import torch
+
+    samples = latent.get("samples") if isinstance(latent, dict) else None
+    if (
+        not isinstance(samples, torch.Tensor)
+        or samples.ndim != 4
+        or not 1 <= samples.shape[0] <= 64
+        or not 1 <= samples.shape[1] <= 64
+        or samples.shape[2] <= 0
+        or samples.shape[3] <= 0
+        or samples.numel() > 268_435_456
+    ):
+        raise TransformError(
+            "concat_latent_input needs a bounded BCHW latent tensor")
+    latent_format = getattr(
+        getattr(getattr(patcher, "model", None), "model_config", None),
+        "latent_format", None)
+    scale_factor = getattr(latent_format, "scale_factor", None)
+    if not isinstance(scale_factor, (int, float)):
+        raise TransformError(
+            "concat_latent_input needs a model latent scale factor")
+    concat = torch.cat(
+        [item.detach().unsqueeze(0) for item in samples], dim=1,
+    ) * float(scale_factor)
+
+    result = patcher.clone()
+    existing_wrapper = result.model_options.get("model_function_wrapper")
+
+    def wrapper(apply_model, args):
+        updated = dict(args)
+        conditioning = dict(args["c"])
+        sample = args["input"]
+        conditioning["c_concat"] = concat.to(sample).repeat(
+            sample.shape[0], 1, 1, 1)
+        updated["c"] = conditioning
+        if existing_wrapper is not None:
+            return existing_wrapper(apply_model, updated)
+        return apply_model(
+            x=updated["input"], t=updated["timestep"], **conditioning)
+
+    result.set_model_unet_function_wrapper(wrapper)
+    return result
 
 
 def _sampling_memory_report(patcher):
@@ -2449,6 +3283,166 @@ def _hunyuan_concat_image(patcher):
     return model
 
 
+def _flux_block_scales(patcher, double_blocks, single_blocks):
+    """Scale complete Flux double/single blocks by bounded layer tables."""
+    import re
+
+    double = list(double_blocks) + [1.0] * (19 - len(double_blocks))
+    single = list(single_blocks) + [1.0] * (38 - len(single_blocks))
+    model = patcher.clone()
+    for key in patcher.model_state_dict():
+        match = re.search(
+            r"double_blocks\.(\d+)\.(img|txt)_(mod|attn|mlp)\."
+            r"(lin|qkv|proj|0|2)\.(weight|bias)",
+            key,
+        )
+        scale = None
+        if match is not None:
+            index = int(match.group(1))
+            if index < len(double):
+                scale = double[index]
+        else:
+            match = re.search(
+                r"single_blocks\.(\d+)\."
+                r"(linear[12]|modulation\.lin)\.(weight|bias)",
+                key,
+            )
+            if match is not None:
+                index = int(match.group(1))
+                if index < len(single):
+                    scale = single[index]
+        if scale is not None and scale != 1.0:
+            model.add_patches({key: (None,)}, 0.0, scale)
+    return model
+
+
+def _guidance_timestepping(patcher, value, start_at, end_at):
+    sigma_start = patcher.get_model_object(
+        "model_sampling").percent_to_sigma(start_at)
+    sigma_end = patcher.get_model_object(
+        "model_sampling").percent_to_sigma(end_at)
+
+    def guidance(args):
+        cond = args["cond"]
+        uncond = args["uncond"]
+        cond_scale = args["cond_scale"]
+        sigma = args["sigma"].detach().cpu()[0].item()
+        if sigma <= sigma_start and sigma > sigma_end:
+            cond_scale = value
+        return uncond + (cond - uncond) * cond_scale
+
+    model = patcher.clone()
+    model.set_model_sampler_cfg_function(guidance)
+    return model
+
+
+def _sd3_advanced_sampling(patcher, shift, cut_off, shift_multiplier):
+    import torch
+    import comfy.model_sampling
+
+    class ModelSamplingDiscreteFlowCustom(torch.nn.Module):
+        def __init__(self, model_config=None):
+            super().__init__()
+            settings = (
+                model_config.sampling_settings
+                if model_config is not None else {}
+            )
+            self.set_parameters(
+                shift=settings.get("shift", 1.0),
+                multiplier=settings.get("multiplier", 1000),
+            )
+
+        def set_parameters(
+            self, shift=1.0, timesteps=1000, multiplier=1000,
+            cut_off=1.0, shift_multiplier=0,
+        ):
+            self.shift = shift
+            self.multiplier = multiplier
+            self.cut_off = cut_off
+            self.shift_multiplier = shift_multiplier
+            timesteps_tensor = self.sigma(
+                (torch.arange(1, timesteps + 1, 1) / timesteps) * multiplier
+            )
+            self.register_buffer("sigmas", timesteps_tensor)
+
+        @property
+        def sigma_min(self):
+            return self.sigmas[0]
+
+        @property
+        def sigma_max(self):
+            return self.sigmas[-1]
+
+        def timestep(self, sigma):
+            return sigma * self.multiplier
+
+        def sigma(self, timestep):
+            current_shift = self.shift
+            if timestep.dim() == 0:
+                normalized = timestep.cpu().item() / self.multiplier
+                if normalized <= self.cut_off:
+                    current_shift *= self.shift_multiplier
+            return comfy.model_sampling.time_snr_shift(
+                current_shift, timestep / self.multiplier
+            )
+
+        def percent_to_sigma(self, percent):
+            if percent <= 0.0:
+                return 1.0
+            if percent >= 1.0:
+                return 0.0
+            return 1.0 - percent
+
+    class ModelSamplingAdvanced(
+        ModelSamplingDiscreteFlowCustom, comfy.model_sampling.CONST
+    ):
+        pass
+
+    model = patcher.clone()
+    model_sampling = ModelSamplingAdvanced(patcher.model.model_config)
+    model_sampling.set_parameters(
+        shift=shift,
+        multiplier=1000,
+        cut_off=cut_off,
+        shift_multiplier=shift_multiplier,
+    )
+    model.add_object_patch("model_sampling", model_sampling)
+    return model
+
+
+def _flux_sampler_sampling(patcher, max_shift, base_shift, width, height):
+    import comfy.model_base
+    import comfy.model_sampling
+
+    if patcher.model.model_type == comfy.model_base.ModelType.FLOW:
+        sampling_base = comfy.model_sampling.ModelSamplingDiscreteFlow
+        shift = base_shift
+        multiplier = 1.0
+    else:
+        x1 = 256
+        x2 = 4096
+        slope = (max_shift - base_shift) / (x2 - x1)
+        intercept = base_shift - slope * x1
+        shift = (width * height / (8 * 8 * 2 * 2)) * slope + intercept
+        sampling_base = comfy.model_sampling.ModelSamplingFlux
+        multiplier = None
+
+    class ModelSamplingAdvanced(sampling_base, comfy.model_sampling.CONST):
+        pass
+
+    model = patcher.clone()
+    model_sampling = ModelSamplingAdvanced(patcher.model.model_config)
+    if multiplier is None:
+        model_sampling.set_parameters(shift=shift)
+    else:
+        model_sampling.set_parameters(shift=shift, multiplier=multiplier)
+        original = model.get_model_object("model_sampling")
+        if hasattr(original, "noise_scale"):
+            model_sampling.set_noise_scale(original.noise_scale)
+    model.add_object_patch("model_sampling", model_sampling)
+    return model
+
+
 def _latent_inpaint_ttm(patcher, steps: int, mask=None):
     import torch
     from comfy.patcher_extension import WrappersMP
@@ -2572,6 +3566,150 @@ def _leapfusion_hunyuan_i2v(
     return model
 
 
+def _spatial_tiled_evaluation(
+    patcher, rows: int, columns: int, overlap: float,
+    overlap_x: int, overlap_y: int, blend: str,
+    preserve_existing: bool,
+):
+    """Evaluate one denoise prediction over a bounded overlapping grid.
+
+    This is the common MultiDiffusion primitive only: callers still own image
+    encoding, grid options, sampling, decoding, and output policy.  Spatially
+    aware model patches receive a closed tile descriptor through transformer
+    options so vendor integrations can crop their own control inputs.
+    """
+    if rows * columns > 256:
+        raise TransformError(
+            "spatial_tiled_evaluation supports at most 256 tiles")
+    if blend != "linear":  # guarded by OneOf; defensive for direct callers
+        raise TransformError("unsupported spatial tile blend policy")
+
+    old_wrapper = patcher.model_options.get("model_function_wrapper")
+
+    def spans(total: int, count: int, extension: int):
+        if count > total:
+            raise TransformError(
+                "spatial tile grid exceeds the latent dimensions")
+        base = max(1, total // count)
+        return [
+            (
+                max(0, 0 if index == 0 else index * base - extension),
+                min(total, total if index == count - 1
+                    else (index + 1) * base + extension),
+            )
+            for index in range(count)
+        ]
+
+    def weight_1d(length, taper_left, taper_right, device, dtype):
+        import torch
+
+        weight = torch.ones(length, device=device, dtype=dtype)
+        left = min(int(taper_left), length // 2)
+        right = min(int(taper_right), length // 2)
+        if left:
+            weight[:left] = torch.linspace(
+                0, 1, left + 2, device=device, dtype=dtype)[1:-1]
+        if right:
+            weight[length - right:] = torch.linspace(
+                1, 0, right + 2, device=device, dtype=dtype)[1:-1]
+        return weight
+
+    cache: dict[tuple, list[dict[str, Any]]] = {}
+
+    def wrapper(apply_model, args):
+        import torch
+
+        x_in = args.get("input")
+        timestep = args.get("timestep")
+        conditioning = args.get("c")
+        if (not isinstance(x_in, torch.Tensor) or x_in.ndim < 4
+                or not isinstance(conditioning, dict)):
+            raise TransformError(
+                "spatial_tiled_evaluation requires a spatial model input")
+        height, width = int(x_in.shape[-2]), int(x_in.shape[-1])
+        if rows > height or columns > width:
+            raise TransformError(
+                "spatial tile grid exceeds the latent dimensions")
+        tile_height = max(1, height // rows)
+        tile_width = max(1, width // columns)
+        extend_y = (0 if rows == 1 else min(
+            int(tile_height * overlap) + overlap_y, tile_height // 2))
+        extend_x = (0 if columns == 1 else min(
+            int(tile_width * overlap) + overlap_x, tile_width // 2))
+        key = (
+            x_in.device, x_in.dtype, height, width,
+            rows, columns, extend_y, extend_x,
+        )
+        tiles = cache.get(key)
+        if tiles is None:
+            ys = spans(height, rows, extend_y)
+            xs = spans(width, columns, extend_x)
+            tiles = []
+            for row, (top, bottom) in enumerate(ys):
+                taper_top = ys[row - 1][1] - top if row else 0
+                taper_bottom = (
+                    bottom - ys[row + 1][0] if row < rows - 1 else 0)
+                wy = weight_1d(
+                    bottom - top, taper_top, taper_bottom,
+                    x_in.device, x_in.dtype)
+                for column, (left, right) in enumerate(xs):
+                    taper_left = xs[column - 1][1] - left if column else 0
+                    taper_right = (
+                        right - xs[column + 1][0]
+                        if column < columns - 1 else 0)
+                    wx = weight_1d(
+                        right - left, taper_left, taper_right,
+                        x_in.device, x_in.dtype)
+                    tiles.append({
+                        "top": top, "bottom": bottom,
+                        "left": left, "right": right,
+                        "weight": wy[:, None] * wx[None, :],
+                    })
+            cache[key] = tiles
+
+        accumulated = torch.zeros_like(x_in)
+        leading = (1,) * (x_in.ndim - 2)
+        weight_sum = torch.zeros(
+            leading + (height, width),
+            device=x_in.device, dtype=x_in.dtype)
+        for tile in tiles:
+            top, bottom = tile["top"], tile["bottom"]
+            left, right = tile["left"], tile["right"]
+            tile_input = x_in[..., top:bottom, left:right]
+            tile_conditioning = dict(conditioning)
+            transformer_options = dict(
+                conditioning.get("transformer_options") or {})
+            transformer_options["spatial_tile"] = {
+                "top": top, "bottom": bottom,
+                "left": left, "right": right,
+                "source_height": height, "source_width": width,
+            }
+            tile_conditioning["transformer_options"] = transformer_options
+            if preserve_existing and old_wrapper is not None:
+                prediction = old_wrapper(apply_model, {
+                    "input": tile_input,
+                    "timestep": timestep,
+                    "c": tile_conditioning,
+                })
+            else:
+                prediction = apply_model(
+                    tile_input, timestep, **tile_conditioning)
+            if (not isinstance(prediction, torch.Tensor)
+                    or prediction.shape != tile_input.shape):
+                raise TransformError(
+                    "spatial tile model prediction has an invalid shape")
+            tile_weight = tile["weight"].view(
+                leading + tile["weight"].shape)
+            accumulated[..., top:bottom, left:right] += (
+                prediction * tile_weight)
+            weight_sum[..., top:bottom, left:right] += tile_weight
+        return accumulated / weight_sum.clamp(min=1e-6)
+
+    model = patcher.clone()
+    model.set_model_unet_function_wrapper(wrapper)
+    return model
+
+
 TRANSFORMS: dict[str, Transform] = {
     t.name: t for t in (
         Transform(
@@ -2611,6 +3749,28 @@ TRANSFORMS: dict[str, Transform] = {
             },
             _strict_flash_attention,
             experimental=True,
+        ),
+        Transform(
+            "kohya_deep_shrink",
+            "Apply core's Kohya Deep Shrink UNet patch.",
+            {
+                "block_number": Int(1, 32, doc="UNet input block index."),
+                "downscale_factor": Float(
+                    0.1, 9.0, doc="Temporary feature downscale factor."),
+                "start_percent": Float(
+                    0.0, 1.0, doc="First sampling percentage."),
+                "end_percent": Float(
+                    0.0, 1.0, doc="Last sampling percentage."),
+                "downscale_after_skip": Bool(
+                    doc="Patch after the skip connection."),
+                "downscale_method": OneOf(
+                    ("bicubic", "nearest-exact", "bilinear", "area", "bislerp"),
+                    doc="Core feature downscale method."),
+                "upscale_method": OneOf(
+                    ("bicubic", "nearest-exact", "bilinear", "area", "bislerp"),
+                    doc="Core feature restore method."),
+            },
+            _kohya_deep_shrink,
         ),
         Transform(
             "nabla_sparse_attention",
@@ -2931,12 +4091,173 @@ TRANSFORMS: dict[str, Transform] = {
             experimental=True,
         ),
         Transform(
+            "dynamic_thresholding",
+            "Apply canonical Dynamic Thresholding to classifier-free guidance.",
+            {
+                "mimic_scale": Float(
+                    0.0, 100.0, default=7.0,
+                    doc="Target CFG scale whose variability is mimicked."),
+                "threshold_percentile": Float(
+                    0.0, 1.0, default=1.0,
+                    doc="Absolute-deviation quantile used for clipping."),
+                "mimic_mode": OneOf(
+                    _DYNAMIC_THRESHOLD_MODES, default="Constant",
+                    doc="Schedule applied to mimic_scale."),
+                "mimic_scale_min": Float(
+                    0.0, 100.0, default=0.0,
+                    doc="Minimum scheduled mimic scale."),
+                "cfg_mode": OneOf(
+                    _DYNAMIC_THRESHOLD_MODES, default="Constant",
+                    doc="Schedule applied to the sampler CFG scale."),
+                "cfg_scale_min": Float(
+                    0.0, 100.0, default=0.0,
+                    doc="Minimum scheduled CFG scale."),
+                "schedule_value": Float(
+                    0.0, 100.0, default=1.0,
+                    doc="Power or repetition value for scheduled modes."),
+                "separate_feature_channels": Bool(
+                    default=True,
+                    doc="Measure variability independently per channel."),
+                "scaling_startpoint": OneOf(
+                    ("MEAN", "ZERO"), default="MEAN",
+                    doc="Center scaling on each channel mean or zero."),
+                "variability_measure": OneOf(
+                    ("AD", "STD"), default="AD",
+                    doc="Use absolute deviation or standard deviation."),
+                "interpolate_phi": Float(
+                    0.0, 1.0, default=1.0,
+                    doc="Blend thresholded guidance with ordinary CFG."),
+            },
+            _dynamic_thresholding,
+        ),
+        Transform(
+            "style_aligned_batch",
+            "Share reference style statistics across a classic UNet batch.",
+            {
+                "share_norm": OneOf(
+                    ("both", "group", "layer", "disabled"),
+                    default="both",
+                    doc="Normalization families that share reference stats."),
+                "share_attention": OneOf(
+                    ("q+k", "q+k+v", "disabled"),
+                    default="q+k",
+                    doc="Attention tensors receiving reference AdaIN."),
+                "scale": Float(
+                    0.0, 1.0, default=1.0,
+                    doc="Reference-key scale for non-reference images."),
+            },
+            _style_aligned_batch,
+        ),
+        Transform(
+            "controlnet_lllite",
+            "Apply a canonical legacy SD ControlNet-LLLite adapter.",
+            {
+                "adapter": SafeTensorName(
+                    doc="Logical adapter name in the controlnet catalogue."),
+                "image": RefOf(
+                    "IMAGE", doc="RGB control image batch."),
+                "strength": Float(
+                    0.0, 10.0, default=1.0,
+                    doc="LLLite residual multiplier."),
+                "steps": Int(
+                    0, 200, default=0,
+                    doc="Sampler step count, or zero for no step window."),
+                "start_percent": Float(
+                    0.0, 100.0, default=0.0,
+                    doc="First active percentage of the sampling run."),
+                "end_percent": Float(
+                    0.0, 100.0, default=0.0,
+                    doc="Last active percentage; zero means the run end."),
+            },
+            _controlnet_lllite,
+        ),
+        Transform(
             "differential_diffusion",
-            "Apply a timestep-dependent denoise mask threshold.",
-            {"multiplier": Float(
-                -10.0, 10.0, default=1.0,
-                doc="Scale applied to the timestep mask threshold.")},
+            "Apply core's canonical differential-diffusion mask behavior.",
+            {"strength": Float(
+                0.0, 1.0, default=1.0,
+                doc="Blend strength for the binary differential mask.")},
             _differential_diffusion,
+            experimental=True,
+        ),
+        Transform(
+            "fooocus_inpaint",
+            "Apply Fooocus' canonical SDXL inpaint head and quantized delta.",
+            {
+                "latent": RefOf(
+                    "LATENT", doc="Inpaint latent with a noise mask."),
+                "head": WeightArchiveName(
+                    doc="Logical Fooocus head name in the inpaint catalogue."),
+                "patch": WeightArchiveName(
+                    doc="Logical Fooocus patch name in the inpaint catalogue."),
+            },
+            _fooocus_inpaint,
+        ),
+        Transform(
+            "diffusion_weight_delta",
+            "Apply a shape-checked SafeTensors diffusion-model delta.",
+            {
+                "model_patch": SafeTensorName(
+                    doc="Logical name in the model_patches catalogue."),
+                "strength": Float(
+                    -10.0, 10.0, default=1.0,
+                    doc="Delta multiplier."),
+                "pad_input_channels": Bool(
+                    default=False,
+                    doc="Allow only the first convolution input to widen."),
+            },
+            _diffusion_weight_delta,
+            experimental=True,
+        ),
+        Transform(
+            "serialized_model_patch",
+            "Apply a tensor-only serialized Comfy diffusion-model patch.",
+            {
+                "model_patch": SafeTensorName(
+                    doc="Logical name in the model_patches catalogue."),
+                "strength": Float(
+                    -10.0, 10.0, default=1.0,
+                    doc="Patch multiplier."),
+                "pad_diff_weights": Bool(
+                    default=False,
+                    doc="Allow serialized diff patches to widen inputs."),
+            },
+            _serialized_model_patch,
+            experimental=True,
+        ),
+        Transform(
+            "layer_diffusion_attention_sharing",
+            "Apply canonical SD1 Layer Diffusion attention sharing.",
+            {
+                "model_patch": SafeTensorName(
+                    doc="Logical SafeTensor name in model_patches."),
+                "frames": Int(
+                    1, 3, default=1,
+                    doc="Interleaved Layer Diffusion frame count."),
+                "control_image": RefOf(
+                    "IMAGE", default=None,
+                    doc="Optional bounded RGB control image."),
+                "first_conditioning": RefOf(
+                    "CONDITIONING", default=None,
+                    doc="Optional first per-frame conditioning."),
+                "second_conditioning": RefOf(
+                    "CONDITIONING", default=None,
+                    doc="Optional second per-frame conditioning."),
+                "third_conditioning": RefOf(
+                    "CONDITIONING", default=None,
+                    doc="Optional third per-frame conditioning."),
+            },
+            _layer_diffusion_attention_sharing,
+            experimental=True,
+        ),
+        Transform(
+            "concat_latent_input",
+            "Inject one encoded latent as model c_concat input.",
+            {
+                "latent": RefOf(
+                    "LATENT", doc="Encoded latent to inject."),
+            },
+            _concat_latent_input,
             experimental=True,
         ),
         Transform(
@@ -3003,6 +4324,58 @@ TRANSFORMS: dict[str, Transform] = {
             experimental=True,
         ),
         Transform(
+            "flux_block_scales",
+            "Scale complete Flux double and single transformer blocks.",
+            {
+                "double_blocks": FloatList(
+                    0.0, 5.0, 19,
+                    doc="Scale table for Flux double blocks 0 through 18."),
+                "single_blocks": FloatList(
+                    0.0, 5.0, 38,
+                    doc="Scale table for Flux single blocks 0 through 37."),
+            },
+            _flux_block_scales,
+            experimental=True,
+        ),
+        Transform(
+            "guidance_timestepping",
+            "Override CFG within a model-sigma percentage range.",
+            {
+                "value": Float(0.0, 100.0, doc="CFG value in the range."),
+                "start_at": Float(
+                    0.0, 1.0, doc="First sampling percentage."),
+                "end_at": Float(
+                    0.0, 1.0, doc="Last sampling percentage."),
+            },
+            _guidance_timestepping,
+            experimental=True,
+        ),
+        Transform(
+            "sd3_advanced_sampling",
+            "Install Essentials' cut-off SD3 flow schedule.",
+            {
+                "shift": Float(0.0, 100.0, doc="Base flow shift."),
+                "cut_off": Float(
+                    0.0, 1.0, doc="Normalized timestep cut-off."),
+                "shift_multiplier": Float(
+                    0.0, 10.0, doc="Shift multiplier below the cut-off."),
+            },
+            _sd3_advanced_sampling,
+            experimental=True,
+        ),
+        Transform(
+            "flux_sampler_sampling",
+            "Install the Flux or AuraFlow resolution-aware schedule.",
+            {
+                "max_shift": Float(0.0, 100.0, doc="Maximum Flux shift."),
+                "base_shift": Float(0.0, 100.0, doc="Base Flux shift."),
+                "width": Int(1, 16384, doc="Target image width."),
+                "height": Int(1, 16384, doc="Target image height."),
+            },
+            _flux_sampler_sampling,
+            experimental=True,
+        ),
+        Transform(
             "latent_inpaint_ttm",
             "Apply Time-To-Move latent inpainting during early sample steps.",
             {
@@ -3032,6 +4405,30 @@ TRANSFORMS: dict[str, Transform] = {
             },
             _leapfusion_hunyuan_i2v,
             experimental=True,
+        ),
+        Transform(
+            "spatial_tiled_evaluation",
+            "Evaluate one denoise prediction over bounded overlapping tiles.",
+            {
+                "rows": Int(1, 256, doc="Latent tile rows."),
+                "columns": Int(1, 256, doc="Latent tile columns."),
+                "overlap": Float(
+                    0.0, 0.5, default=0.0,
+                    doc="Fractional overlap added to each tile."),
+                "overlap_x": Int(
+                    0, 8192, default=0,
+                    doc="Additional horizontal overlap in latent cells."),
+                "overlap_y": Int(
+                    0, 8192, default=0,
+                    doc="Additional vertical overlap in latent cells."),
+                "blend": OneOf(
+                    ("linear",), default="linear",
+                    doc="Canonical overlap blend policy."),
+                "preserve_existing": Bool(
+                    default=True,
+                    doc="Delegate through an existing model wrapper."),
+            },
+            _spatial_tiled_evaluation,
         ),
     )
 }
