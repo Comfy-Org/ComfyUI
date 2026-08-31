@@ -6,7 +6,7 @@ import math
 import time
 import uuid
 import weakref
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from io import BytesIO
@@ -80,6 +80,8 @@ class _PollUIState:
     is_queued: bool = True
     price: float | None = None
     estimated_duration: int | None = None
+    estimated_p90: int | None = None
+    estimate_includes_queue: bool = False
     base_processing_elapsed: float = 0.0  # sum of completed active intervals
     active_since: float | None = None  # start time of current active interval (None if queued)
 
@@ -91,8 +93,25 @@ PRICE_CREDITS_HEADER = "X-Comfy-Credits-Used"
 """Proxy response header with the actual cost in Comfy credits. When present on any successful proxied response,
 it takes precedence over ``price_extractor``."""
 
+ESTIMATED_DURATION_HEADER = "X-Comfy-Estimated-Duration-Seconds"
+ESTIMATED_DURATION_P90_HEADER = "X-Comfy-Estimated-Duration-P90-Seconds"
+ESTIMATE_SOURCE_HEADER = "X-Comfy-Estimate-Source"
+"""Proxy response headers on 2xx async submission acknowledgements: p50/p90 duration estimates in whole
+seconds (submit acceptance to result availability, partner queue time included) and their source,
+``historical`` or ``default``."""
+
 _credits_used_by_execution: "weakref.WeakKeyDictionary[type, float]" = weakref.WeakKeyDictionary()
 """Last PRICE_CREDITS_HEADER value per node execution, keyed by the node's per-execution class clone."""
+
+
+@dataclass
+class _ServerEstimate:
+    p50_seconds: int
+    p90_seconds: int | None
+    source: str | None
+
+
+_server_estimates_by_execution: "weakref.WeakKeyDictionary[type, _ServerEstimate]" = weakref.WeakKeyDictionary()
 COMPLETED_STATUSES = ["succeeded", "succeed", "success", "completed", "finished", "done", "complete"]
 FAILED_STATUSES = ["cancelled", "canceled", "canceling", "fail", "failed", "error"]
 QUEUED_STATUSES = ["created", "queued", "queueing", "submitted", "initializing", "wait", "in_queue"]
@@ -115,6 +134,32 @@ def _maybe_remember_credits_used(node_cls: type[IO.ComfyNode], header_value: str
 
 def _get_remembered_credits_used(node_cls: type[IO.ComfyNode]) -> float | None:
     return _credits_used_by_execution.get(node_cls)
+
+
+def _parse_estimate_seconds(header_value: str | None) -> int | None:
+    if not header_value:
+        return None
+    try:
+        seconds = int(str(header_value).strip())
+    except (TypeError, ValueError):
+        logging.debug("Ignoring malformed estimate header value: %r", header_value)
+        return None
+    if not 1 <= seconds <= 86400:
+        logging.debug("Ignoring out-of-range estimate header value: %r", header_value)
+        return None
+    return seconds
+
+
+def _maybe_remember_server_estimate(node_cls: type[IO.ComfyNode], headers: Mapping[str, str]) -> None:
+    p50 = _parse_estimate_seconds(headers.get(ESTIMATED_DURATION_HEADER))
+    if p50 is None:
+        return
+    p90 = _parse_estimate_seconds(headers.get(ESTIMATED_DURATION_P90_HEADER))
+    if p90 is not None and p90 < p50:
+        p90 = p50
+    source = headers.get(ESTIMATE_SOURCE_HEADER) or None
+    _server_estimates_by_execution[node_cls] = _ServerEstimate(p50, p90, source)
+    logging.debug("Server duration estimate: p50=%ss, p90=%ss, source=%s", p50, p90, source)
 
 
 async def sync_op(
@@ -311,11 +356,22 @@ async def poll_op_raw(
     progress_bar = utils.ProgressBar(100) if progress_extractor else None
     last_progress: int | None = None
 
-    state = _PollUIState(started=started, estimated_duration=estimated_duration)
+    server_estimate = _server_estimates_by_execution.pop(cls, None)
+    if server_estimate is not None:
+        state = _PollUIState(
+            started=started,
+            estimated_duration=server_estimate.p50_seconds,
+            estimated_p90=server_estimate.p90_seconds,
+            estimate_includes_queue=True,
+        )
+    else:
+        state = _PollUIState(started=started, estimated_duration=estimated_duration)
+    estimate_bar = utils.ProgressBar(100) if progress_bar is None and server_estimate is not None else None
     stop_ticker = asyncio.Event()
 
     async def _ticker():
         """Emit a UI update every second while polling is in progress."""
+        last_estimate_pct = -1
         try:
             while not stop_ticker.is_set():
                 if is_processing_interrupted():
@@ -324,6 +380,11 @@ async def poll_op_raw(
                 proc_elapsed = state.base_processing_elapsed + (
                     (now - state.active_since) if state.active_since is not None else 0.0
                 )
+                if estimate_bar is not None:
+                    pct = _estimate_progress_pct(now - state.started, state.estimated_duration, state.estimated_p90)
+                    if pct != last_estimate_pct:
+                        estimate_bar.update_absolute(pct, total=100)
+                        last_estimate_pct = pct
                 _display_time_progress(
                     cls,
                     status=state.status_label,
@@ -333,6 +394,8 @@ async def poll_op_raw(
                     is_queued=state.is_queued,
                     processing_elapsed_seconds=int(proc_elapsed),
                     extra_text=extra_text,
+                    estimated_p90=state.estimated_p90,
+                    estimate_includes_queue=state.estimate_includes_queue,
                 )
                 await asyncio.sleep(1.0)
         except Exception as exc:
@@ -414,12 +477,14 @@ async def poll_op_raw(
 
                 if progress_bar and last_progress != 100:
                     progress_bar.update_absolute(100, total=100)
+                if estimate_bar is not None:
+                    estimate_bar.update_absolute(100, total=100)
 
                 _display_time_progress(
                     cls,
                     status=status if status else "Completed",
                     elapsed_seconds=int(now_ts - started),
-                    estimated_total=estimated_duration,
+                    estimated_total=None,
                     price=state.price,
                     is_queued=False,
                     processing_elapsed_seconds=int(state.base_processing_elapsed),
@@ -503,15 +568,35 @@ def _display_time_progress(
     is_queued: bool | None = None,
     processing_elapsed_seconds: int | None = None,
     extra_text: str | None = None,
+    estimated_p90: int | None = None,
+    estimate_includes_queue: bool = False,
 ) -> None:
-    if estimated_total is not None and estimated_total > 0 and is_queued is False:
-        pe = processing_elapsed_seconds if processing_elapsed_seconds is not None else elapsed_seconds
-        remaining = max(0, int(estimated_total) - int(pe))
-        time_line = f"Time elapsed: {int(elapsed_seconds)}s (~{remaining}s remaining)"
-    else:
-        time_line = f"Time elapsed: {int(elapsed_seconds)}s"
+    time_line = f"Time elapsed: {int(elapsed_seconds)}s"
+    if estimated_total is not None and estimated_total > 0:
+        if estimate_includes_queue:
+            if elapsed_seconds < estimated_total:
+                time_line += f" (~{int(estimated_total) - int(elapsed_seconds)}s remaining)"
+            elif estimated_p90 is not None and elapsed_seconds < estimated_p90:
+                time_line += " (should finish soon)"
+            else:
+                time_line += " (taking longer than usual)"
+        elif is_queued is False:
+            pe = processing_elapsed_seconds if processing_elapsed_seconds is not None else elapsed_seconds
+            remaining = max(0, int(estimated_total) - int(pe))
+            time_line += f" (~{remaining}s remaining)"
     text = f"{time_line}\n\n{extra_text}" if extra_text else time_line
     _display_text(node_cls, text, status=status, price=price)
+
+
+def _estimate_progress_pct(elapsed_seconds: float, p50_seconds: int | None, p90_seconds: int | None) -> int:
+    if not p50_seconds or p50_seconds <= 0 or elapsed_seconds <= 0:
+        return 0
+    if elapsed_seconds < p50_seconds:
+        return min(90, int(90.0 * elapsed_seconds / p50_seconds))
+    horizon = p90_seconds if p90_seconds is not None and p90_seconds > p50_seconds else p50_seconds
+    if elapsed_seconds >= horizon:
+        return 95
+    return min(95, 90 + int(5.0 * (elapsed_seconds - p50_seconds) / (horizon - p50_seconds)))
 
 
 async def _diagnose_connectivity() -> dict[str, bool]:
@@ -885,6 +970,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                     resp_headers = {k.lower(): v for k, v in resp.headers.items()}
                     if is_comfy_api_request:
                         _maybe_remember_credits_used(cfg.node_cls, resp.headers.get(PRICE_CREDITS_HEADER))
+                        _maybe_remember_server_estimate(cfg.node_cls, resp.headers)
                     if cfg.price_extractor:
                         with contextlib.suppress(Exception):
                             extracted_price = cfg.price_extractor(resp_headers)
@@ -914,6 +1000,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                         response_content_to_log = payload if isinstance(payload, dict) else text
                     if is_comfy_api_request:
                         _maybe_remember_credits_used(cfg.node_cls, resp.headers.get(PRICE_CREDITS_HEADER))
+                        _maybe_remember_server_estimate(cfg.node_cls, resp.headers)
                     with contextlib.suppress(Exception):
                         extracted_price = cfg.price_extractor(payload) if cfg.price_extractor else None
                     operation_succeeded = True
@@ -1007,7 +1094,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                         if final_elapsed_seconds is not None
                         else int(time.monotonic() - start_time)
                     ),
-                    estimated_total=cfg.estimated_total,
+                    estimated_total=None,
                     price=extracted_price,
                     is_queued=False,
                     processing_elapsed_seconds=final_elapsed_seconds,
