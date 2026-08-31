@@ -537,6 +537,8 @@ def start_comfyui(asyncio_loop=None):
     if args.enable_manager and not args.disable_manager_ui:
         comfyui_manager.start()
 
+    from comfy_api.latest import sdk
+    sdk.providers
     from comfy_api.latest._sdk import (
         load_overlay,
         should_load_legacy_custom_nodes,
