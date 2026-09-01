@@ -125,12 +125,6 @@ def register_assets_routes(
     app.add_routes(ROUTES)
 
 
-def disable_assets_routes() -> None:
-    """Disable asset routes at runtime (e.g. after DB init failure)."""
-    global _ASSETS_ENABLED
-    _ASSETS_ENABLED = False
-
-
 def _build_error_response(
     status: int, code: str, message: str, details: dict | None = None
 ) -> web.Response:

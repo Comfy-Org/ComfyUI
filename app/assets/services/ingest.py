@@ -2,7 +2,6 @@ import contextlib
 import logging
 import mimetypes
 import os
-from types import SimpleNamespace
 from typing import Any, NamedTuple, Sequence
 
 from sqlalchemy import func, select
@@ -29,6 +28,7 @@ from app.assets.services.path_utils import (
 )
 from app.assets.services.schemas import (
     AssetData,
+    RegisteredAsset,
     ReferenceData,
     UploadResult,
     UserMetadata,
@@ -238,7 +238,13 @@ def _record_to_upload_result(
         size_bytes=content.size_bytes if content else None,
         mime_type=record.mime_type,
     )
-    return UploadResult(ref=ref, asset=asset, tags=tag_names, created_new=created_new)
+    return UploadResult(
+        ref=ref,
+        content_id=record.content_id,
+        asset=asset,
+        tags=tag_names,
+        created_new=created_new,
+    )
 
 
 class _ContentFacts(NamedTuple):
@@ -615,7 +621,9 @@ def create_from_hash(
         return _record_to_upload_result(session, record, created_new=True)
 
 
-def register_cached_output(abs_path: str, job_id: str | None = None):
+def register_cached_output(
+    abs_path: str, job_id: str | None = None
+) -> RegisteredAsset | None:
     locator = os.path.abspath(abs_path)
     try:
         with create_session() as session:
@@ -673,7 +681,7 @@ def register_cached_output(abs_path: str, job_id: str | None = None):
         logging.exception("Failed to register cached output: %s", locator)
         return None
 
-    return SimpleNamespace(
+    return RegisteredAsset(
         id=record_id,
         content_id=record_content_id,
         job_id=record_job_id,
@@ -681,7 +689,9 @@ def register_cached_output(abs_path: str, job_id: str | None = None):
     )
 
 
-def register_executed_output(abs_path: str, job_id: str | None = None):
+def register_executed_output(
+    abs_path: str, job_id: str | None = None
+) -> RegisteredAsset | None:
     locator = os.path.abspath(abs_path)
     try:
         stat_result = os.stat(locator, follow_symlinks=True)
@@ -729,7 +739,7 @@ def register_executed_output(abs_path: str, job_id: str | None = None):
         logging.exception("Failed to register executed output: %s", locator)
         return None
 
-    return SimpleNamespace(
+    return RegisteredAsset(
         id=record_id,
         content_id=record_content_id,
         job_id=record_job_id,

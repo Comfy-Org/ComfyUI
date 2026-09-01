@@ -13,7 +13,7 @@ from app.assets.helpers import sql_path_under_prefix
 from app.assets.services.hash_mode_state import drain_transition_queue
 from app.assets.services.hash_mode_state import enqueue_transition_work
 from app.assets.services.hash_mode_state import record_transition_intent
-from app.database.db import can_create_session, create_session, init_db
+from app.database.db import can_create_session, create_session
 from comfy.cli_args import args
 
 _excluded_scan_roots: set[str] = set()
@@ -42,11 +42,6 @@ def drain_mode_transition_work() -> None:
     with create_session() as session:
         drain_transition_queue(session)
         session.commit()
-
-
-def init_db_and_state() -> None:
-    init_db()
-    record_hash_mode_transition_intent()
 
 
 def wipe_temp_db_rows(session) -> tuple[int, int]:

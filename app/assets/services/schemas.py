@@ -81,8 +81,26 @@ class DownloadResolutionResult:
 
 
 @dataclass(frozen=True)
+class RegisteredAsset:
+    id: str
+    content_id: str
+    job_id: str | None
+    name: str
+
+
+@dataclass(frozen=True)
+class UploadAssetView:
+    asset: RegisteredAsset
+    asset_hash: str | None
+    size: int | None
+    mime_type: str | None
+    tags: list[str]
+
+
+@dataclass(frozen=True)
 class UploadResult:
     ref: ReferenceData
+    content_id: str
     asset: AssetData
     tags: list[str]
     created_new: bool
