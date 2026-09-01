@@ -19,6 +19,26 @@ Design (see docs/secure_custom_nodes_WIP.md):
 
 Nothing isolation-specific lives in this file. This is the *seam*, not the
 engine.
+
+Layout
+------
+The file reads top-down as contract, then seam, then default implementation:
+
+* **Refs** — opaque typed handles (``ImageRef``, ``LatentRef``, ``ModelRef``).
+* **Engine-object handles** — MODEL/CLIP/VAE/CONDITIONING/GUIDER, which keep
+  the original API's natural shape.
+* **Runtime** — the per-execution binding a ref resolves through.
+* **Provider interfaces** — ``RefResolver``, ``ExecutionBackend``,
+  ``CtxProvider``: the three things an overlay may replace.
+* **ctx domains** — the brokered side-effect surface (assets, output, graph…).
+* **In-process defaults** — the OSS implementation of everything above,
+  including ``InProcessOps``, the dispatch table behind ``Ref.op(name, ...)``.
+* **Marshaling, provider registry, overlay loader** — how a node's heavy
+  inputs become refs, and how an overlay attaches at startup.
+
+Operations are addressed by string name (``"vae.decode"``) because that call
+has to survive an out-of-process hop under the overlay; the typed ``Ref``
+methods above are the interface node authors actually write against.
 """
 from __future__ import annotations
 
@@ -43,6 +63,7 @@ from typing import (
     runtime_checkable,
 )
 
+from ._weight_cache import WeightCache
 from ._profiling import InProcessProfiling
 from ._preview_override import InProcessPreviewOverride
 from ._anima import InProcessAnima
@@ -3041,6 +3062,30 @@ def _load_sdk_diffusion_model(
     return model
 
 
+# --------------------------------------------------------------------------- #
+# Weight caches for optional capabilities. Each capability contributes an entry
+# type (one loaded model plus its metadata) and a loader; the bounded LRU
+# behavior around them is generic and lives in ``WeightCache``. These back
+# specific model families rather than the core diffusion contract, and are the
+# part of this module most likely to move out to the packs that need them.
+# --------------------------------------------------------------------------- #
+def _release_model_to_cpu(entry: Any) -> None:
+    """Move a cached model off the accelerator as it leaves the cache."""
+    with entry.lock:
+        entry.model.to("cpu")
+
+
+def _loader(name: str) -> Callable[..., Any]:
+    """Resolve a weight loader by name at call time.
+
+    The caches below are module singletons built at import, but a loader may be
+    replaced afterwards — tests substitute one to avoid loading real weights.
+    Binding the function object here would capture the original and silently
+    ignore the substitution.
+    """
+    return lambda *args: globals()[name](*args)
+
+
 @dataclass
 class _TextGeneratorEntry:
     tokenizer: Any
@@ -3266,50 +3311,13 @@ def _load_inpaint_model_weight(
     return _InpaintModelEntry(model=model, architecture=architecture)
 
 
-class _InpaintModelCache:
-    def __init__(self, max_entries: int = 1) -> None:
-        self.max_entries = max_entries
-        self._entries: dict[tuple[Any, ...], _InpaintModelEntry] = {}
-        self._lock = threading.Lock()
-        self.loads = 0
-        self.hits = 0
-
-    @staticmethod
-    def _key(path: str, architecture: str) -> tuple[Any, ...]:
-        status = os.stat(path)
-        return (
-            os.path.realpath(path), architecture,
-            status.st_dev, status.st_ino, status.st_size,
-            status.st_mtime_ns, status.st_ctime_ns,
-        )
-
-    def get(self, path: str, architecture: str) -> _InpaintModelEntry:
-        key = self._key(path, architecture)
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is not None:
-                self.hits += 1
-                return entry
-            entry = _load_inpaint_model_weight(path, architecture)
-            self.loads += 1
-            while len(self._entries) >= self.max_entries:
-                _key, evicted = self._entries.popitem()
-                with evicted.lock:
-                    evicted.model.to("cpu")
-            self._entries[key] = entry
-            return entry
-
-    def clear(self) -> int:
-        with self._lock:
-            entries = list(self._entries.values())
-            self._entries.clear()
-        for entry in entries:
-            with entry.lock:
-                entry.model.to("cpu")
-        return len(entries)
 
 
-_INPAINT_MODEL_CACHE = _InpaintModelCache()
+_INPAINT_MODEL_CACHE = WeightCache(
+    load=_loader("_load_inpaint_model_weight"),
+    max_entries=1,
+    release=_release_model_to_cpu,
+)
 
 
 @dataclass
@@ -3437,55 +3445,13 @@ def _load_clipseg_weight(path: str) -> _ClipSegEntry:
     return _ClipSegEntry(model=model, processor=processor)
 
 
-class _ClipSegCache:
-    """Cache loaded CLIPSeg weights by immutable file identity."""
-
-    def __init__(self, max_entries: int = 2) -> None:
-        self.max_entries = max_entries
-        self._entries: dict[tuple[Any, ...], _ClipSegEntry] = {}
-        self._lock = threading.Lock()
-        self.loads = 0
-        self.hits = 0
-
-    @staticmethod
-    def _key(path: str) -> tuple[Any, ...]:
-        status = os.stat(path)
-        return (
-            os.path.realpath(path),
-            status.st_dev,
-            status.st_ino,
-            status.st_size,
-            status.st_mtime_ns,
-            status.st_ctime_ns,
-        )
-
-    def get(self, path: str) -> _ClipSegEntry:
-        key = self._key(path)
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is not None:
-                self.hits += 1
-                return entry
-            entry = _load_clipseg_weight(path)
-            self.loads += 1
-            while len(self._entries) >= self.max_entries:
-                _key, evicted = self._entries.popitem()
-                with evicted.lock:
-                    evicted.model.to("cpu")
-            self._entries[key] = entry
-            return entry
-
-    def clear(self) -> int:
-        with self._lock:
-            entries = list(self._entries.values())
-            self._entries.clear()
-        for entry in entries:
-            with entry.lock:
-                entry.model.to("cpu")
-        return len(entries)
 
 
-_CLIPSEG_CACHE = _ClipSegCache()
+_CLIPSEG_CACHE = WeightCache(
+    load=_loader("_load_clipseg_weight"),
+    max_entries=2,
+    release=_release_model_to_cpu,
+)
 
 
 @dataclass
@@ -3643,50 +3609,13 @@ def _load_image_classifier_weight(
     )
 
 
-class _ImageClassifierCache:
-    def __init__(self, max_entries: int = 3) -> None:
-        self.max_entries = max_entries
-        self._entries: dict[tuple[Any, ...], _ImageClassifierEntry] = {}
-        self._lock = threading.Lock()
-        self.loads = 0
-        self.hits = 0
-
-    @staticmethod
-    def _key(path: str, architecture: str) -> tuple[Any, ...]:
-        status = os.stat(path)
-        return (
-            os.path.realpath(path), architecture,
-            status.st_dev, status.st_ino, status.st_size,
-            status.st_mtime_ns, status.st_ctime_ns,
-        )
-
-    def get(self, path: str, architecture: str) -> _ImageClassifierEntry:
-        key = self._key(path, architecture)
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is not None:
-                self.hits += 1
-                return entry
-            entry = _load_image_classifier_weight(path, architecture)
-            self.loads += 1
-            while len(self._entries) >= self.max_entries:
-                _key, evicted = self._entries.popitem()
-                with evicted.lock:
-                    evicted.model.to("cpu")
-            self._entries[key] = entry
-            return entry
-
-    def clear(self) -> int:
-        with self._lock:
-            entries = list(self._entries.values())
-            self._entries.clear()
-        for entry in entries:
-            with entry.lock:
-                entry.model.to("cpu")
-        return len(entries)
 
 
-_IMAGE_CLASSIFIER_CACHE = _ImageClassifierCache()
+_IMAGE_CLASSIFIER_CACHE = WeightCache(
+    load=_loader("_load_image_classifier_weight"),
+    max_entries=3,
+    release=_release_model_to_cpu,
+)
 
 
 @dataclass
@@ -3724,51 +3653,10 @@ def _load_text_encoder_weight(
         clip=clip, model_type=model_type, device=device)
 
 
-class _TextEncoderCache:
-    def __init__(self, max_entries: int = 2) -> None:
-        self.max_entries = max_entries
-        self._entries: OrderedDict[tuple[Any, ...], _TextEncoderEntry] = (
-            OrderedDict())
-        self._lock = threading.Lock()
-        self.loads = 0
-        self.hits = 0
-
-    @staticmethod
-    def _key(
-        path: str, model_type: str, device: str,
-    ) -> tuple[Any, ...]:
-        status = os.stat(path)
-        return (
-            os.path.realpath(path), model_type, device,
-            status.st_dev, status.st_ino, status.st_size,
-            status.st_mtime_ns, status.st_ctime_ns,
-        )
-
-    def get(
-        self, path: str, model_type: str, device: str,
-    ) -> _TextEncoderEntry:
-        key = self._key(path, model_type, device)
-        with self._lock:
-            entry = self._entries.pop(key, None)
-            if entry is not None:
-                self.hits += 1
-                self._entries[key] = entry
-                return entry
-            entry = _load_text_encoder_weight(path, model_type, device)
-            self.loads += 1
-            while len(self._entries) >= self.max_entries:
-                self._entries.popitem(last=False)
-            self._entries[key] = entry
-            return entry
-
-    def clear(self) -> int:
-        with self._lock:
-            count = len(self._entries)
-            self._entries.clear()
-        return count
 
 
-_TEXT_ENCODER_CACHE = _TextEncoderCache()
+_TEXT_ENCODER_CACHE = WeightCache(
+    load=_loader("_load_text_encoder_weight"), max_entries=2)
 
 
 _QWEN_LANGUAGE_FAMILIES = frozenset({
@@ -4051,56 +3939,13 @@ def _load_segformer_weight(
         model=model, variant=variant, num_labels=num_labels)
 
 
-class _SegformerCache:
-    def __init__(self, max_entries: int = 2) -> None:
-        self.max_entries = max_entries
-        self._entries: OrderedDict[tuple[Any, ...], _SegformerEntry] = (
-            OrderedDict())
-        self._lock = threading.Lock()
-        self.loads = 0
-        self.hits = 0
-
-    @staticmethod
-    def _key(
-        path: str, variant: str, num_labels: int,
-    ) -> tuple[Any, ...]:
-        status = os.stat(path)
-        return (
-            os.path.realpath(path), variant, num_labels,
-            status.st_dev, status.st_ino, status.st_size,
-            status.st_mtime_ns, status.st_ctime_ns,
-        )
-
-    def get(
-        self, path: str, variant: str, num_labels: int,
-    ) -> _SegformerEntry:
-        key = self._key(path, variant, num_labels)
-        with self._lock:
-            entry = self._entries.pop(key, None)
-            if entry is not None:
-                self.hits += 1
-                self._entries[key] = entry
-                return entry
-            entry = _load_segformer_weight(path, variant, num_labels)
-            self.loads += 1
-            while len(self._entries) >= self.max_entries:
-                _old_key, old = self._entries.popitem(last=False)
-                with old.lock:
-                    old.model.to("cpu")
-            self._entries[key] = entry
-            return entry
-
-    def clear(self) -> int:
-        with self._lock:
-            entries = list(self._entries.values())
-            self._entries.clear()
-        for entry in entries:
-            with entry.lock:
-                entry.model.to("cpu")
-        return len(entries)
 
 
-_SEGFORMER_CACHE = _SegformerCache()
+_SEGFORMER_CACHE = WeightCache(
+    load=_loader("_load_segformer_weight"),
+    max_entries=2,
+    release=_release_model_to_cpu,
+)
 
 
 @dataclass
@@ -4164,52 +4009,13 @@ def _load_vitmatte_weight(path: str, variant: str) -> _VitMatteEntry:
     return _VitMatteEntry(model=model, variant=variant)
 
 
-class _VitMatteCache:
-    def __init__(self, max_entries: int = 2) -> None:
-        self.max_entries = max_entries
-        self._entries: OrderedDict[tuple[Any, ...], _VitMatteEntry] = (
-            OrderedDict())
-        self._lock = threading.Lock()
-        self.loads = 0
-        self.hits = 0
-
-    @staticmethod
-    def _key(path: str, variant: str) -> tuple[Any, ...]:
-        status = os.stat(path)
-        return (
-            os.path.realpath(path), variant,
-            status.st_dev, status.st_ino, status.st_size,
-            status.st_mtime_ns, status.st_ctime_ns,
-        )
-
-    def get(self, path: str, variant: str) -> _VitMatteEntry:
-        key = self._key(path, variant)
-        with self._lock:
-            entry = self._entries.pop(key, None)
-            if entry is not None:
-                self.hits += 1
-                self._entries[key] = entry
-                return entry
-            entry = _load_vitmatte_weight(path, variant)
-            self.loads += 1
-            while len(self._entries) >= self.max_entries:
-                _old_key, old = self._entries.popitem(last=False)
-                with old.lock:
-                    old.model.to("cpu")
-            self._entries[key] = entry
-            return entry
-
-    def clear(self) -> int:
-        with self._lock:
-            entries = list(self._entries.values())
-            self._entries.clear()
-        for entry in entries:
-            with entry.lock:
-                entry.model.to("cpu")
-        return len(entries)
 
 
-_VITMATTE_CACHE = _VitMatteCache()
+_VITMATTE_CACHE = WeightCache(
+    load=_loader("_load_vitmatte_weight"),
+    max_entries=2,
+    release=_release_model_to_cpu,
+)
 
 
 def _validate_onnx_weight_file(path: str) -> None:
@@ -4377,46 +4183,10 @@ def _load_onnx_image_classifier(path: str) -> _OnnxImageClassifierEntry:
     )
 
 
-class _OnnxImageClassifierCache:
-    def __init__(self, max_entries: int = 3) -> None:
-        self.max_entries = max_entries
-        self._entries: OrderedDict[tuple[Any, ...], _OnnxImageClassifierEntry] = (
-            OrderedDict())
-        self._lock = threading.Lock()
-        self.loads = 0
-        self.hits = 0
-
-    @staticmethod
-    def _key(path: str) -> tuple[Any, ...]:
-        status = os.stat(path)
-        return (
-            os.path.realpath(path), status.st_dev, status.st_ino,
-            status.st_size, status.st_mtime_ns, status.st_ctime_ns,
-        )
-
-    def get(self, path: str) -> _OnnxImageClassifierEntry:
-        key = self._key(path)
-        with self._lock:
-            entry = self._entries.pop(key, None)
-            if entry is not None:
-                self.hits += 1
-                self._entries[key] = entry
-                return entry
-            entry = _load_onnx_image_classifier(path)
-            self.loads += 1
-            while len(self._entries) >= self.max_entries:
-                self._entries.popitem(last=False)
-            self._entries[key] = entry
-            return entry
-
-    def clear(self) -> int:
-        with self._lock:
-            count = len(self._entries)
-            self._entries.clear()
-        return count
 
 
-_ONNX_IMAGE_CLASSIFIER_CACHE = _OnnxImageClassifierCache()
+_ONNX_IMAGE_CLASSIFIER_CACHE = WeightCache(
+    load=_loader("_load_onnx_image_classifier"), max_entries=3)
 
 
 @dataclass
@@ -4433,44 +4203,10 @@ def _load_onnx_detector(path: str) -> _OnnxDetectorEntry:
     return _OnnxDetectorEntry(cv2.dnn.readNetFromONNX(path))
 
 
-class _OnnxDetectorCache:
-    def __init__(self, max_entries: int = 2) -> None:
-        self.max_entries = max_entries
-        self._entries: dict[tuple[Any, ...], _OnnxDetectorEntry] = {}
-        self._lock = threading.Lock()
-        self.loads = 0
-        self.hits = 0
-
-    @staticmethod
-    def _key(path: str) -> tuple[Any, ...]:
-        status = os.stat(path)
-        return (
-            os.path.realpath(path), status.st_dev, status.st_ino,
-            status.st_size, status.st_mtime_ns, status.st_ctime_ns,
-        )
-
-    def get(self, path: str) -> _OnnxDetectorEntry:
-        key = self._key(path)
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is not None:
-                self.hits += 1
-                return entry
-            entry = _load_onnx_detector(path)
-            self.loads += 1
-            while len(self._entries) >= self.max_entries:
-                self._entries.popitem()
-            self._entries[key] = entry
-            return entry
-
-    def clear(self) -> int:
-        with self._lock:
-            count = len(self._entries)
-            self._entries.clear()
-        return count
 
 
-_ONNX_DETECTOR_CACHE = _OnnxDetectorCache()
+_ONNX_DETECTOR_CACHE = WeightCache(
+    load=_loader("_load_onnx_detector"), max_entries=2)
 
 
 @dataclass
@@ -4501,50 +4237,13 @@ def _load_sam_weight(path: str, architecture: str) -> _SamEntry:
     return _SamEntry(model=model, architecture=architecture)
 
 
-class _SamCache:
-    def __init__(self, max_entries: int = 2) -> None:
-        self.max_entries = max_entries
-        self._entries: dict[tuple[Any, ...], _SamEntry] = {}
-        self._lock = threading.Lock()
-        self.loads = 0
-        self.hits = 0
-
-    @staticmethod
-    def _key(path: str, architecture: str) -> tuple[Any, ...]:
-        status = os.stat(path)
-        return (
-            os.path.realpath(path), architecture,
-            status.st_dev, status.st_ino, status.st_size,
-            status.st_mtime_ns, status.st_ctime_ns,
-        )
-
-    def get(self, path: str, architecture: str) -> _SamEntry:
-        key = self._key(path, architecture)
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is not None:
-                self.hits += 1
-                return entry
-            entry = _load_sam_weight(path, architecture)
-            self.loads += 1
-            while len(self._entries) >= self.max_entries:
-                _key, evicted = self._entries.popitem()
-                with evicted.lock:
-                    evicted.model.to("cpu")
-            self._entries[key] = entry
-            return entry
-
-    def clear(self) -> int:
-        with self._lock:
-            entries = list(self._entries.values())
-            self._entries.clear()
-        for entry in entries:
-            with entry.lock:
-                entry.model.to("cpu")
-        return len(entries)
 
 
-_SAM_CACHE = _SamCache()
+_SAM_CACHE = WeightCache(
+    load=_loader("_load_sam_weight"),
+    max_entries=2,
+    release=_release_model_to_cpu,
+)
 
 
 _SAM2_CONFIGS = {
@@ -4576,25 +4275,13 @@ def _load_sam2_weight(path: str, architecture: str) -> _SamEntry:
     return _SamEntry(model=model, architecture=architecture)
 
 
-class _Sam2Cache(_SamCache):
-    def get(self, path: str, architecture: str) -> _SamEntry:
-        key = self._key(path, architecture)
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is not None:
-                self.hits += 1
-                return entry
-            entry = _load_sam2_weight(path, architecture)
-            self.loads += 1
-            while len(self._entries) >= self.max_entries:
-                _key, evicted = self._entries.popitem()
-                with evicted.lock:
-                    evicted.model.to("cpu")
-            self._entries[key] = entry
-            return entry
 
 
-_SAM2_CACHE = _Sam2Cache(max_entries=1)
+_SAM2_CACHE = WeightCache(
+    load=_loader("_load_sam2_weight"),
+    max_entries=1,
+    release=_release_model_to_cpu,
+)
 
 
 @dataclass
@@ -4646,48 +4333,10 @@ def _load_transparent_vae_decoder_weight(
     return _TransparentVaeDecoderEntry(decoder=decoder, family=family)
 
 
-class _TransparentVaeDecoderCache:
-    def __init__(self, max_entries: int = 2) -> None:
-        self.max_entries = max_entries
-        self._entries: OrderedDict[
-            tuple[Any, ...], _TransparentVaeDecoderEntry
-        ] = OrderedDict()
-        self._lock = threading.Lock()
-        self.loads = 0
-        self.hits = 0
-
-    @staticmethod
-    def _key(path: str, family: str) -> tuple[Any, ...]:
-        status = os.stat(path)
-        return (
-            os.path.realpath(path), family,
-            status.st_dev, status.st_ino, status.st_size,
-            status.st_mtime_ns, status.st_ctime_ns,
-        )
-
-    def get(self, path: str, family: str) -> _TransparentVaeDecoderEntry:
-        key = self._key(path, family)
-        with self._lock:
-            entry = self._entries.pop(key, None)
-            if entry is not None:
-                self.hits += 1
-                self._entries[key] = entry
-                return entry
-            entry = _load_transparent_vae_decoder_weight(path, family)
-            self.loads += 1
-            while len(self._entries) >= self.max_entries:
-                self._entries.popitem(last=False)
-            self._entries[key] = entry
-            return entry
-
-    def clear(self) -> int:
-        with self._lock:
-            count = len(self._entries)
-            self._entries.clear()
-        return count
 
 
-_TRANSPARENT_VAE_DECODER_CACHE = _TransparentVaeDecoderCache()
+_TRANSPARENT_VAE_DECODER_CACHE = WeightCache(
+    load=_loader("_load_transparent_vae_decoder_weight"), max_entries=2)
 
 
 def _advanced_control_module(relative: str):
@@ -6198,6 +5847,12 @@ class _InProcessModels:
             generator, weight_path, input_text, max_new_tokens)
 
 
+# --------------------------------------------------------------------------- #
+# ctx domain implementations — one class per domain declared above, each doing
+# in-process what the overlay does across a process boundary. Output and graph
+# carry the most logic because they translate a node's declarative result into
+# the engine's expected shapes.
+# --------------------------------------------------------------------------- #
 class _InProcessCapture:
     async def screen(self, region=None, monitor: int = 1) -> ImageRef:
         import asyncio
