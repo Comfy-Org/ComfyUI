@@ -1475,13 +1475,6 @@ class SemanticSegmentationRef(_TypedRef):
 
 
 
-class OnnxDetectorRef(_TypedRef):
-    KIND = "ONNX_DETECTOR"
-
-    async def detect(self, image: ImageRef) -> list[dict[str, Any]]:
-        """Run a catalogued ONNX object detector on one host-side image."""
-        return await current_runtime().ops.apply(
-            "onnx_detector.detect", self, {"image": image})
 
 
 class ObjectDetectorRef(_TypedRef):
@@ -2501,7 +2494,6 @@ class ModelsDomain(Protocol):
     async def load_background_removal_model(
         self, model: str,
     ) -> BackgroundRemovalModelRef: ...
-    async def load_onnx_detector(self, model: str) -> OnnxDetectorRef: ...
     async def load_object_detector(self, model: str) -> ObjectDetectorRef: ...
     async def load_sam(
         self, model: str, architecture: str = "vit_b",
@@ -4108,24 +4100,12 @@ _ONNX_IMAGE_CLASSIFIER_CACHE = WeightCache(
     load=_loader("_load_onnx_image_classifier"), max_entries=3)
 
 
-@dataclass
-class _OnnxDetectorEntry:
-    model: Any
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-def _load_onnx_detector(path: str) -> _OnnxDetectorEntry:
-    try:
-        import cv2
-    except ImportError as exc:
-        raise RuntimeError("ONNX detection requires OpenCV DNN") from exc
-    return _OnnxDetectorEntry(cv2.dnn.readNetFromONNX(path))
 
 
 
 
-_ONNX_DETECTOR_CACHE = WeightCache(
-    load=_loader("_load_onnx_detector"), max_entries=2)
+
+
 
 
 @dataclass
@@ -5654,21 +5634,6 @@ class _InProcessModels:
                 "BACKGROUND_REMOVAL_MODEL", bundle)
         )  # type: ignore[return-value]
 
-    async def load_onnx_detector(self, model: str) -> OnnxDetectorRef:
-        import folder_paths
-
-        model = self._model_name(model, "ONNX detector")
-        if not model.lower().endswith(".onnx"):
-            raise ValueError("ONNX detectors must use .onnx model files")
-        path = folder_paths.get_full_path_or_raise("onnx", model)
-        entry = await asyncio.to_thread(_ONNX_DETECTOR_CACHE.get, path)
-        value = {
-            "secure_kind": "onnx.object_detector",
-            "model": entry.model,
-            "lock": entry.lock,
-        }
-        return OnnxDetectorRef._wrap(await current_runtime().refs.create(
-            "ONNX_DETECTOR", value))  # type: ignore[return-value]
 
     async def load_object_detector(self, model: str) -> ObjectDetectorRef:
         import comfy.model_base
@@ -9983,7 +9948,6 @@ class InProcessOps:
             "classifier_scores.select_above":
                 self._classifier_scores_select_above,
             "semantic_segmentation.mask": self._semantic_segmentation_mask,
-            "onnx_detector.detect": self._onnx_detector_detect,
             "object_detector.detect": self._object_detector_detect,
             "inpaint_model.inpaint": self._inpaint_model_inpaint,
             "background_removal.mask": self._background_removal_mask,
@@ -13886,83 +13850,6 @@ class InProcessOps:
         ))  # type: ignore[return-value]
 
 
-    async def _onnx_detector_detect(
-        self, detector: "OnnxDetectorRef", image: "ImageRef",
-    ) -> list[dict[str, Any]]:
-        from contextlib import nullcontext
-        import math
-        import numpy as np
-        import torch
-
-        rt = current_runtime()
-        bundle = await rt.refs.resolve(detector)
-        if (not isinstance(bundle, dict)
-                or bundle.get("secure_kind") != "onnx.object_detector"):
-            raise TypeError(
-                "ONNX_DETECTOR is not a trusted object-detector bundle")
-        pixels = await rt.refs.resolve(image)
-        if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
-                or pixels.shape[0] != 1 or pixels.shape[-1] < 3):
-            raise ValueError("ONNX detection requires one BHWC RGB image")
-        height, width = map(int, pixels.shape[1:3])
-        if height <= 0 or width <= 0 or height * width > 268_435_456:
-            raise ValueError("ONNX detector image dimensions are invalid")
-        source = np.ascontiguousarray(
-            pixels[0, ..., :3].detach().cpu().numpy()[..., ::-1] * 255.0,
-            dtype=np.float32,
-        )
-        source -= np.asarray((103.939, 116.779, 123.68), dtype=np.float32)
-        model = bundle["model"]
-        model_lock = bundle.get("lock")
-        with model_lock if model_lock is not None else nullcontext():
-            model.setInput(source[None, ...])
-            outputs = model.forward(model.getUnconnectedOutLayersNames())
-        if isinstance(outputs, np.ndarray):
-            outputs = [outputs]
-        arrays = [np.asarray(output) for output in outputs]
-        labels = next(
-            (value for value in arrays if np.issubdtype(
-                value.dtype, np.integer) and value.size), None)
-        boxes = next(
-            (value for value in arrays
-             if value.ndim >= 2 and value.shape[-1] == 4 and value.size),
-            None,
-        )
-        scores = next(
-            (value for value in arrays
-             if np.issubdtype(value.dtype, np.floating)
-             and value is not boxes and value.size
-             and (value.ndim <= 2 or value.shape[-1] == 1)),
-            None,
-        )
-        if labels is None or scores is None or boxes is None:
-            raise RuntimeError(
-                "ONNX detector must return integer labels, scores, and xyxy boxes")
-        labels = labels.reshape(-1)
-        scores = scores.reshape(-1)
-        boxes = boxes.reshape(-1, 4)
-        count = min(len(labels), len(scores), len(boxes))
-        invalid = np.flatnonzero(labels[:count] == -1)
-        if len(invalid):
-            count = int(invalid[0])
-        if count > 4096:
-            raise RuntimeError("ONNX detector returned more than 4096 objects")
-        result = []
-        for label, score, box in zip(
-            labels[:count], scores[:count], boxes[:count], strict=True,
-        ):
-            values = [float(value) for value in box]
-            confidence = float(score)
-            if not math.isfinite(confidence) or not all(
-                math.isfinite(value) for value in values
-            ):
-                raise RuntimeError("ONNX detector returned non-finite values")
-            result.append({
-                "label": int(label),
-                "score": confidence,
-                "box": values,
-            })
-        return result
 
     async def _object_detector_detect(
         self, detector: "ObjectDetectorRef", image: "ImageRef",
@@ -15752,10 +15639,6 @@ def _ref_type_for(v: Any) -> tuple[type, str]:
             "model", "architecture", "device_mode", "lock",
         }:
             return SamModelRef, "SAM_MODEL"
-        if v.get("secure_kind") == "onnx.object_detector" and set(v) >= {
-            "model", "lock",
-        }:
-            return OnnxDetectorRef, "ONNX_DETECTOR"
         if v.get("secure_kind") == "object_detector.rt_detr" and "model" in v:
             return ObjectDetectorRef, "OBJECT_DETECTOR"
         if v.get("secure_kind") == "classifier_scores.v1" and "scores" in v:
