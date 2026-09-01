@@ -22,8 +22,9 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
+from app.assets import mode
+from app.assets.lifecycle import cleanup_temp_filesystem, init_db_and_state, run_shutdown, run_startup
 from app.assets.seeder import asset_seeder
-from app.assets.services import register_output_files
 import itertools
 import utils.extra_config
 from utils.mime_types import init_mime_types
@@ -34,7 +35,7 @@ import sys
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
-from app.database.db import init_db, dependencies_available
+from app.database.db import dependencies_available
 
 if __name__ == "__main__":
     #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
@@ -316,38 +317,6 @@ def cuda_malloc_warning():
             logging.warning("\nWARNING: this card most likely does not support cuda-malloc, if you get \"CUDA error\" please run ComfyUI with: --disable-cuda-malloc\n")
 
 
-def _collect_output_absolute_paths(history_result: dict) -> list[str]:
-    """Extract absolute file paths for output items from a history result."""
-    paths: list[str] = []
-    seen: set[str] = set()
-    for node_output in history_result.get("outputs", {}).values():
-        for items in node_output.values():
-            if not isinstance(items, list):
-                continue
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                item_type = item.get("type")
-                if item_type not in ("output", "temp"):
-                    continue
-                base_dir = folder_paths.get_directory_by_type(item_type)
-                if base_dir is None:
-                    continue
-                base_dir = os.path.abspath(base_dir)
-                filename = item.get("filename")
-                if not filename:
-                    continue
-                abs_path = os.path.abspath(
-                    os.path.join(base_dir, item.get("subfolder", ""), filename)
-                )
-                if not abs_path.startswith(base_dir + os.sep) and abs_path != base_dir:
-                    continue
-                if abs_path not in seen:
-                    seen.add(abs_path)
-                    paths.append(abs_path)
-    return paths
-
-
 def prompt_worker(q, server_instance):
     current_time: float = 0.0
     cache_ram = 0
@@ -414,10 +383,6 @@ def prompt_worker(q, server_instance):
                 logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
             else:
                 logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
-
-            if not asset_seeder.is_disabled():
-                paths = _collect_output_absolute_paths(e.history_result)
-                register_output_files(paths, job_id=prompt_id)
 
         flags = q.get_flags()
         free_memory = flags.get("free_memory", False)
@@ -486,19 +451,13 @@ def hijack_progress(server_instance):
     comfy.utils.set_progress_bar_global_hook(hook)
 
 
-def cleanup_temp():
-    temp_dir = folder_paths.get_temp_directory()
-    if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-
 def setup_database():
+    if not dependencies_available():
+        return
+
     try:
-        if dependencies_available():
-            init_db()
-            if args.enable_assets:
-                if asset_seeder.start(roots=("models", "input", "output"), prune_first=True, compute_hashes=args.enable_asset_hashing):
-                    logging.info("Background asset scan initiated for models, input, output")
+        mode.init(args)
+        init_db_and_state()
     except Exception as e:
         if "database is locked" in str(e):
             logging.error(
@@ -518,6 +477,8 @@ def setup_database():
             )
             sys.exit(1)
         logging.error(f"Failed to initialize database. Please ensure you have installed the latest requirements. If the error persists, please report this as in future the database will be required: {e}")
+    else:
+        run_startup(enable_assets=args.enable_assets)
 
 
 def start_comfyui(asyncio_loop=None):
@@ -529,7 +490,9 @@ def start_comfyui(asyncio_loop=None):
         temp_dir = os.path.join(os.path.abspath(args.temp_directory), "temp")
         logging.info(f"Setting temp directory to: {temp_dir}")
         folder_paths.set_temp_directory(temp_dir)
-    cleanup_temp()
+
+    if not (args.enable_assets and dependencies_available()):
+        cleanup_temp_filesystem()
 
     if not asyncio_loop:
         asyncio_loop = asyncio.new_event_loop()
@@ -614,4 +577,4 @@ if __name__ == "__main__":
         logging.info("\nStopped server")
     finally:
         asset_seeder.shutdown()
-        cleanup_temp()
+        run_shutdown()

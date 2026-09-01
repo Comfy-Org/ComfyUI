@@ -445,7 +445,12 @@ class PromptServer():
                         tag = image_upload_type if image_upload_type in ("input", "output") else "input"
                         tags = [tag]
                         tags.extend(get_known_subfolder_tags(subfolder))
-                        result = register_file_in_place(abs_path=filepath, name=filename, tags=tags)
+                        result = register_file_in_place(
+                            abs_path=filepath,
+                            name=filename,
+                            tags=tags,
+                            content_written=not image_is_duplicate,
+                        )
                         resp["asset"] = {
                             "id": result.ref.id,
                             "name": result.ref.name,
@@ -523,8 +528,11 @@ class PromptServer():
                 # node preview, it constructs /view?filename=<asset_hash>, so this
                 # endpoint must resolve blake3 hashes to their on-disk file paths.
                 if filename.startswith("blake3:"):
-                    owner_id = self.user_manager.get_request_user_id(request)
-                    result = resolve_hash_to_path(filename, owner_id=owner_id)
+                    # Side-effect call: get_request_user_id raises KeyError for an unknown or
+                    # system user in multi-user mode, which is what gates hash resolution.
+                    # The returned id is deliberately unused (resolution is not owner-scoped).
+                    self.user_manager.get_request_user_id(request)
+                    result = resolve_hash_to_path(filename)
                     if result is None:
                         return web.Response(status=404)
                     file, filename, resolved_content_type = result.abs_path, result.download_name, result.content_type

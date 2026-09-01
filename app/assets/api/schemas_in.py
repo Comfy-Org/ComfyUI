@@ -58,9 +58,6 @@ class ListAssetsQuery(BaseModel):
     tags_none: list[str] = Field(default_factory=list)
     name_contains: str | None = None
 
-    # Accept either a JSON string (query param) or a dict
-    metadata_filter: dict[str, Any] | None = None
-
     limit: conint(ge=1, le=500) = 20
     offset: conint(ge=0) = 0
     # Opaque keyset cursor. When supplied, `offset` is ignored. Cursor pagination
@@ -92,22 +89,6 @@ class ListAssetsQuery(BaseModel):
                     out.extend([t.strip() for t in item.split(",") if t.strip()])
             return out
         return v
-
-    @field_validator("metadata_filter", mode="before")
-    @classmethod
-    def _parse_metadata_json(cls, v):
-        if v is None or isinstance(v, dict):
-            return v
-        if isinstance(v, str) and v.strip():
-            try:
-                parsed = json.loads(v)
-            except Exception as e:
-                raise ValueError(f"metadata_filter must be JSON: {e}") from e
-            if not isinstance(parsed, dict):
-                raise ValueError("metadata_filter must be a JSON object")
-            return parsed
-        return None
-
 
 class UpdateAssetBody(BaseModel):
     name: str | None = None
@@ -168,7 +149,6 @@ class TagsRefineQuery(BaseModel):
     tags_any: list[str] = Field(default_factory=list)
     tags_none: list[str] = Field(default_factory=list)
     name_contains: str | None = None
-    metadata_filter: dict[str, Any] | None = None
     limit: conint(ge=1, le=1000) = 100
 
     @field_validator(
@@ -188,22 +168,6 @@ class TagsRefineQuery(BaseModel):
                     out.extend([t.strip() for t in item.split(",") if t.strip()])
             return out
         return v
-
-    @field_validator("metadata_filter", mode="before")
-    @classmethod
-    def _parse_metadata_json(cls, v):
-        if v is None or isinstance(v, dict):
-            return v
-        if isinstance(v, str) and v.strip():
-            try:
-                parsed = json.loads(v)
-            except Exception as e:
-                raise ValueError(f"metadata_filter must be JSON: {e}") from e
-            if not isinstance(parsed, dict):
-                raise ValueError("metadata_filter must be a JSON object")
-            return parsed
-        return None
-
 
 class TagsListQuery(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)

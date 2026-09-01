@@ -184,6 +184,19 @@ def _init_file_db(db_url):
     prepare_file_db_path(db_path)
     db_exists = os.path.exists(db_path)
 
+    # Lock BEFORE any migration work — deliberately diverging from upstream master, whose
+    # "it would block Alembic" rationale is false (the lock guards a separate `<db>.lock`
+    # file). Only this order makes revision inspection, backup, upgrade and the failure-path
+    # restore mutually exclusive between processes.
+    _acquire_file_lock(db_path)
+    try:
+        _migrate_and_bind(db_url, db_path, db_exists)
+    except Exception:
+        _db_lock.release()
+        raise
+
+
+def _migrate_and_bind(db_url, db_path, db_exists):
     config = get_alembic_config()
 
     # Check if we need to upgrade
@@ -225,11 +238,7 @@ def _init_file_db(db_url):
             logging.exception("Error upgrading database: ")
             raise e
 
-    # Acquire an OS-level file lock after migrations are complete.
-    # Alembic uses its own connection, so we must wait until it's done
-    # before locking — otherwise our own lock blocks the migration.
     conn.close()
-    _acquire_file_lock(db_path)
 
     global Session
     Session = sessionmaker(bind=engine)
