@@ -418,15 +418,6 @@ class SemanticSegmentationRef(Ref):
         classes: list[int],
     ) -> MaskRef: ...
 
-class MattingModelRef(Ref):
-    KIND: str
-    async def refine(
-        self,
-        image: ImageRef,
-        trimap: MaskRef,
-        max_megapixels: float = ...,
-    ) -> MaskRef: ...
-
 class InpaintModelRef(Ref):
     KIND: str
     async def inpaint(
@@ -898,11 +889,6 @@ class ModelsDomain(Protocol):
         variant: str,
         num_labels: int,
     ) -> SemanticSegmentationRef: ...
-    async def load_vitmatte(
-        self,
-        model: str,
-        variant: str,
-    ) -> MattingModelRef: ...
     async def load_inpaint_model(
         self,
         model: str,
