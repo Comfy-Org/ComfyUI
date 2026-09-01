@@ -46,6 +46,7 @@ from typing import (
 from ._profiling import InProcessProfiling
 from ._preview_override import InProcessPreviewOverride
 from ._anima import InProcessAnima
+from ._cloud_media import InProcessImgBB, InProcessLuma, InProcessSenseNova
 from ._civitai import InProcessCivitai
 from ._ollama import InProcessOllama
 from ._llama_cpp import InProcessLlamaCpp
@@ -2170,6 +2171,7 @@ class OutputDomain(Protocol):
         caption_extension: str = ".txt",
         save_metadata: bool = True,
         extra_metadata: Optional[dict[str, Any]] = None,
+        a1111_parameters: Optional[str] = None,
         image_format: str = "png", quality: int = 95,
         filenames: Optional[list[str]] = None,
         lossless: bool = False, optimize: bool = False,
@@ -2311,6 +2313,67 @@ class WebSearchDomain(Protocol):
     ) -> list[dict[str, str]]: ...
 
 
+class LumaDomain(Protocol):
+    """Fixed-origin Luma Dream Machine generation jobs (D32)."""
+
+    async def create_video(
+        self, api_key: str, prompt: str, model: str, *,
+        loop: bool = False, aspect_ratio: Optional[str] = None,
+        duration: Optional[str] = None, resolution: str = "720p",
+        keyframes: Optional[dict[str, Any]] = None,
+        save: bool = True, filename: str = "",
+    ) -> dict[str, Any]: ...
+    async def upscale_video(
+        self, api_key: str, generation_id: str, resolution: str, *,
+        save: bool = True, filename: str = "",
+    ) -> dict[str, Any]: ...
+    async def add_audio(
+        self, api_key: str, generation_id: str, prompt: str,
+        negative_prompt: str, *, save: bool = True, filename: str = "",
+    ) -> dict[str, Any]: ...
+    async def create_image(
+        self, api_key: str, prompt: str, model: str, *,
+        aspect_ratio: str = "1:1",
+        image_ref: Optional[list[dict[str, Any]]] = None,
+        style_ref: Optional[list[dict[str, Any]]] = None,
+        character_ref: Optional[dict[str, Any]] = None,
+        modify_image_ref: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]: ...
+
+
+class ImgBBDomain(Protocol):
+    """Upload one host-owned image to the fixed ImgBB endpoint (D32)."""
+
+    async def upload(
+        self, api_key: str, image: ImageRef, *,
+        expiration_seconds: Optional[int] = None,
+    ) -> str: ...
+
+
+class SenseNovaDomain(Protocol):
+    """Fixed-origin SenseNova chat, vision, and image generation (D33)."""
+
+    async def chat(
+        self, text: str, system_prompt: str, model: str, *,
+        temperature: float = 0.7, top_p: float = 1.0,
+        max_tokens: int = 2048, timeout_seconds: int = 120,
+    ) -> dict[str, ValueRef]: ...
+    async def vision_url(
+        self, image_url: str, prompt: str, system_prompt: str, model: str, *,
+        temperature: float = 0.2, top_p: float = 1.0,
+        max_tokens: int = 2048, timeout_seconds: int = 120,
+    ) -> dict[str, ValueRef]: ...
+    async def vision_image(
+        self, image: ImageRef, prompt: str, system_prompt: str, model: str, *,
+        temperature: float = 0.2, top_p: float = 1.0,
+        max_tokens: int = 2048, timeout_seconds: int = 120,
+    ) -> dict[str, ValueRef]: ...
+    async def generate_image(
+        self, prompt: str, model: str, size: str, *,
+        timeout_seconds: int = 300,
+    ) -> dict[str, Ref]: ...
+
+
 class LlamaCppDomain(Protocol):
     """Bounded llama.cpp vendor adapter over managed GGUF weights."""
 
@@ -2353,9 +2416,12 @@ class IntegrationsDomain(Protocol):
 
     anima: AnimaDomain
     civitai: CivitaiDomain
+    imgbb: ImgBBDomain
     llm: LlmDomain
     llama_cpp: LlamaCppDomain
+    luma: LumaDomain
     ollama: OllamaDomain
+    sensenova: SenseNovaDomain
     wanvideo: WanVideoDomain
     web: WebSearchDomain
 
@@ -2371,6 +2437,7 @@ class ModelsDomain(Protocol):
     async def load_checkpoint(
         self, name: str, weight_dtype: str = "default",
         compute_dtype: str = "default", cublas_linear: bool = False,
+        config_name: Optional[str] = None,
     ) -> tuple[ModelRef, Optional[ClipRef], Optional[VaeRef]]: ...
     async def load_diffusion_model(
         self, name: str, extra_name: Optional[str] = None,
@@ -5319,6 +5386,7 @@ class _InProcessModels:
     async def load_checkpoint(
         self, name: str, weight_dtype: str = "default",
         compute_dtype: str = "default", cublas_linear: bool = False,
+        config_name: Optional[str] = None,
     ) -> tuple[ModelRef, Optional[ClipRef], Optional[VaeRef]]:
         import folder_paths
         import comfy.sd
@@ -5327,10 +5395,23 @@ class _InProcessModels:
         options, compute = self._load_options(
             weight_dtype, compute_dtype, cublas_linear)
         path = folder_paths.get_full_path_or_raise("checkpoints", logical)
-        model, clip, vae, _ = comfy.sd.load_checkpoint_guess_config(
-            path, output_vae=True, output_clip=True,
-            embedding_directory=folder_paths.get_folder_paths("embeddings"),
-            model_options=options)
+        if config_name is None:
+            model, clip, vae, _ = comfy.sd.load_checkpoint_guess_config(
+                path, output_vae=True, output_clip=True,
+                embedding_directory=folder_paths.get_folder_paths("embeddings"),
+                model_options=options)
+        else:
+            config = self._model_name(config_name, "config_name")
+            if (weight_dtype != "default" or compute_dtype != "default"
+                    or cublas_linear):
+                raise ValueError(
+                    "an explicit checkpoint config cannot be combined with "
+                    "weight_dtype, compute_dtype, or cublas_linear overrides")
+            config_path = folder_paths.get_full_path_or_raise("configs", config)
+            model, clip, vae = comfy.sd.load_checkpoint(
+                config_path=config_path, ckpt_path=path,
+                output_vae=True, output_clip=True,
+                embedding_directory=folder_paths.get_folder_paths("embeddings"))
         if compute is not None:
             model.set_model_compute_dtype(compute)
             model.force_cast_weights = False
@@ -6467,6 +6548,35 @@ def _image_metadata_owner(
     return SimpleNamespace(hidden=hidden)
 
 
+def _a1111_parameters_payload(value: Optional[str]) -> tuple[Optional[str], bytes]:
+    """Validate the closed Automatic1111 metadata profile.
+
+    EXIF UserComment uses an eight-byte character-code prefix followed by
+    UTF-16BE.  Keeping the payload below 60 KiB leaves deterministic room for
+    TIFF/EXIF structure inside JPEG's single APP1 segment.
+    """
+    if value is None:
+        return None, b""
+    if not isinstance(value, str):
+        raise TypeError("a1111_parameters must be a string or None")
+    try:
+        encoded = value.encode("utf-16-be")
+    except UnicodeEncodeError as error:
+        raise ValueError("a1111_parameters must contain valid Unicode") from error
+    if len(encoded) > 60 * 1024:
+        raise ValueError("a1111_parameters exceeds the 60 KiB EXIF payload limit")
+    return value, b"UNICODE\x00" + encoded
+
+
+def _add_a1111_exif(exif: Any, payload: bytes) -> Any:
+    if not payload:
+        return exif
+    exif_ifd = exif.get_ifd(0x8769)
+    exif_ifd[0x9286] = payload
+    exif[0x8769] = exif_ifd
+    return exif
+
+
 class _InProcessUi:
     def __init__(self, prompt: Any = None, extra_pnginfo: Any = None) -> None:
         self._metadata_owner = _image_metadata_owner(prompt, extra_pnginfo)
@@ -6803,6 +6913,7 @@ class _InProcessOutput:
         caption_extension: str = ".txt",
         save_metadata: bool = True,
         extra_metadata: Optional[dict[str, Any]] = None,
+        a1111_parameters: Optional[str] = None,
         image_format: str = "png", quality: int = 95,
         filenames: Optional[list[str]] = None,
         lossless: bool = False, optimize: bool = False,
@@ -6827,6 +6938,11 @@ class _InProcessOutput:
             raise ValueError("PNG compression level must be in [0, 9]")
         pil_format, allowed_suffixes, default_suffix = self._still_format(
             image_format)
+        a1111_text, a1111_exif = _a1111_parameters_payload(
+            a1111_parameters)
+        if a1111_text is not None and pil_format not in {"PNG", "JPEG", "WEBP"}:
+            raise ValueError(
+                "a1111_parameters is supported only for PNG, JPEG, and WebP")
         quality = int(quality)
         if not 1 <= quality <= 100:
             raise ValueError("image quality must be in [1, 100]")
@@ -6876,6 +6992,11 @@ class _InProcessOutput:
 
         results = []
         png_metadata = ImageSaveHelper._create_png_metadata(metadata_owner)
+        if a1111_text is not None and pil_format == "PNG":
+            if png_metadata is None:
+                from PIL.PngImagePlugin import PngInfo
+                png_metadata = PngInfo()
+            png_metadata.add_text("parameters", a1111_text)
         for image, (target, _logical, file, saved_subfolder) in zip(
                 value, requested):
             array = np.clip(
@@ -6907,6 +7028,8 @@ class _InProcessOutput:
             if pil_format in {"WEBP", "AVIF", "JPEG2000", "TIFF"}:
                 exif = ImageSaveHelper._create_webp_metadata(
                     rendered, metadata_owner)
+                if pil_format == "WEBP":
+                    exif = _add_a1111_exif(exif, a1111_exif)
                 if len(exif):
                     options["exif"] = exif.tobytes()
             if pil_format == "JPEG":
@@ -6938,8 +7061,11 @@ class _InProcessOutput:
                         if owner is not None:
                             exif = ImageSaveHelper._create_webp_metadata(
                                 rendered.copy(), owner)
-                            if len(exif):
-                                jpeg_options["exif"] = exif.tobytes()
+                        else:
+                            exif = rendered.copy().getexif()
+                        exif = _add_a1111_exif(exif, a1111_exif)
+                        if len(exif):
+                            jpeg_options["exif"] = exif.tobytes()
                         self._save_pil_exclusive(
                             rendered, target, pil_format, jpeg_options)
                         break
@@ -10137,9 +10263,12 @@ class _InProcessLlm:
 class _InProcessIntegrations:
     anima: Any = field(default_factory=InProcessAnima)
     civitai: Any = field(default_factory=InProcessCivitai)
+    imgbb: Any = field(default_factory=InProcessImgBB)
     llm: Any = field(default_factory=_InProcessLlm)
     llama_cpp: Any = field(default_factory=InProcessLlamaCpp)
+    luma: Any = field(default_factory=InProcessLuma)
     ollama: Any = field(default_factory=InProcessOllama)
+    sensenova: Any = field(default_factory=InProcessSenseNova)
     wanvideo: Any = field(default_factory=_InProcessWanVideo)
     web: Any = field(default_factory=lambda: _StubDomain("integrations.web"))
 
