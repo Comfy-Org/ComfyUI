@@ -1697,7 +1697,7 @@ class ModelPatcher:
                 if used:
                     target_device = weight.device
             self.hook_backup[key] = (weight.to(device=target_device, copy=True), weight.device, inplace_update)
-        cached_weight = cached_weights[key][0].to(device=cached_weights[key][1])
+        cached_weight = cached_weights[key][0].to(device=weight.device)
         if inplace_update:
             comfy.utils.copy_to_param(self.model, key, cached_weight)
         else:
@@ -2245,7 +2245,7 @@ class ModelPatcherDynamic(ModelPatcher):
         assert False #Should be unreachable - we dont ever cache in the new implementation
 
     def patch_hook_weight_to_device(self, hooks: comfy.hooks.HookGroup, combined_patches: dict, key: str, original_weights: dict,
-                                    memory_counter: MemoryCounter, cache_entries: dict=None):
+                                    memory_counter: MemoryCounter, cache_entries: dict=None, cache_on_device: bool=False):
         if key not in combined_patches:
             return
 

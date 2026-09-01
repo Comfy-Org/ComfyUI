@@ -18,7 +18,7 @@ if not has_gpu():
     args.cpu = True
 
 from comfy import hooks, ops
-from comfy.model_patcher import ModelPatcher
+from comfy.model_patcher import ModelPatcher, ModelPatcherDynamic
 from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor, TensorCoreFP8E4M3Layout
 import comfy.utils
 
@@ -550,6 +550,66 @@ class TestMixedPrecisionOps(unittest.TestCase):
         torch.testing.assert_close(model.linear.weight.dequantize(), patched)
         patcher.patch_hooks(None)
         torch.testing.assert_close(model.linear.weight.dequantize(), original)
+
+    def test_cached_hook_restore_uses_current_weight_device(self):
+        class SetterModule(torch.nn.Module):
+            def __init__(self, device):
+                super().__init__()
+                self.weight = torch.nn.Parameter(
+                    torch.empty((2, 2), device=device),
+                    requires_grad=False,
+                )
+
+            def set_weight(self, weight, **kwargs):
+                return weight
+
+        source_model = torch.nn.Module()
+        source_model.linear = SetterModule("cpu")
+        source_patcher = ModelPatcher(
+            source_model,
+            load_device=torch.device("cpu"),
+            offload_device=torch.device("cpu"),
+        )
+        group = hooks.HookGroup()
+        source_patcher.cached_hook_patches[group] = {
+            "linear.weight": (
+                torch.ones((2, 2)),
+                torch.device("cpu"),
+            )
+        }
+
+        target_model = torch.nn.Module()
+        target_model.linear = SetterModule("meta")
+        patcher = source_patcher.clone(
+            model_override=(target_model, ({}, {}, {}, set()))
+        )
+        patcher.hook_backup["linear.weight"] = (
+            torch.empty(0),
+            torch.device("meta"),
+            False,
+        )
+
+        patcher.patch_cached_hook_weights(
+            patcher.cached_hook_patches[group],
+            "linear.weight",
+            memory_counter=mock.Mock(),
+        )
+
+        self.assertEqual(target_model.linear.weight.device.type, "meta")
+
+    def test_dynamic_hook_override_accepts_cache_on_device(self):
+        patcher = object.__new__(ModelPatcherDynamic)
+
+        with self.assertRaisesRegex(RuntimeError, "Hooks not implemented"):
+            patcher.patch_hook_weight_to_device(
+                hooks=hooks.HookGroup(),
+                combined_patches={"weight": ()},
+                key="weight",
+                original_weights={},
+                memory_counter=mock.Mock(),
+                cache_entries={},
+                cache_on_device=True,
+            )
 
     def test_hook_patches_switch_quantized_groups_and_restore_identity(self):
         operations = ops.mixed_precision_ops(compute_dtype=torch.float32)
