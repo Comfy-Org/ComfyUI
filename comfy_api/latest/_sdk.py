@@ -1473,22 +1473,6 @@ class SemanticSegmentationRef(_TypedRef):
             })
 
 
-class MattingModelRef(_TypedRef):
-    """Opaque fixed-architecture image matting model."""
-
-    KIND = "MATTING_MODEL"
-
-    async def refine(
-        self, image: ImageRef, trimap: MaskRef,
-        max_megapixels: float = 2.0,
-    ) -> MaskRef:
-        """Refine a coarse trimap into an alpha mask."""
-        return await current_runtime().ops.apply(
-            "matting.refine", self, {
-                "image": image,
-                "trimap": trimap,
-                "max_megapixels": float(max_megapixels),
-            })
 
 
 class OnnxDetectorRef(_TypedRef):
@@ -2511,9 +2495,6 @@ class ModelsDomain(Protocol):
     async def load_segformer(
         self, model: str, variant: str, num_labels: int,
     ) -> SemanticSegmentationRef: ...
-    async def load_vitmatte(
-        self, model: str, variant: str,
-    ) -> MattingModelRef: ...
     async def load_inpaint_model(
         self, model: str, architecture: str = "big-lama",
     ) -> InpaintModelRef: ...
@@ -3948,74 +3929,12 @@ _SEGFORMER_CACHE = WeightCache(
 )
 
 
-@dataclass
-class _VitMatteEntry:
-    model: Any
-    variant: str
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-def _load_vitmatte_weight(path: str, variant: str) -> _VitMatteEntry:
-    try:
-        from transformers import (
-            VitDetConfig,
-            VitMatteConfig,
-            VitMatteForImageMatting,
-        )
-    except ImportError as exc:
-        raise RuntimeError("ViTMatte requires Transformers") from exc
-    import torch
-    import comfy.utils
-
-    parameters = {
-        "small": (384, 6),
-        "base": (768, 12),
-    }
-    if variant not in parameters:
-        raise ValueError("ViTMatte variant must be small or base")
-    hidden_size, attention_heads = parameters[variant]
-    backbone = VitDetConfig(
-        hidden_size=hidden_size,
-        num_attention_heads=attention_heads,
-        image_size=512,
-        num_channels=4,
-        _out_features=["stage12"],
-        _out_indices=[12],
-        residual_block_indices=[2, 5, 8, 11],
-        use_relative_position_embeddings=True,
-        window_block_indices=[0, 1, 3, 4, 6, 7, 9, 10],
-        window_size=14,
-    )
-    config = VitMatteConfig(
-        backbone_config=backbone,
-        hidden_size=hidden_size,
-        convstream_hidden_sizes=[48, 96, 192],
-        fusion_hidden_sizes=[256, 128, 64, 32],
-    )
-    state = comfy.utils.load_torch_file(path, safe_load=True)
-    if (
-        not isinstance(state, dict)
-        or not state
-        or any(
-            not isinstance(key, str) or not isinstance(value, torch.Tensor)
-            for key, value in state.items()
-        )
-    ):
-        raise ValueError("ViTMatte weights must contain only tensors")
-    model = VitMatteForImageMatting(config)
-    model.load_state_dict(state, strict=True)
-    model.eval()
-    model.to("cpu")
-    return _VitMatteEntry(model=model, variant=variant)
 
 
 
 
-_VITMATTE_CACHE = WeightCache(
-    load=_loader("_load_vitmatte_weight"),
-    max_entries=2,
-    release=_release_model_to_cpu,
-)
+
+
 
 
 def _validate_onnx_weight_file(path: str) -> None:
@@ -5527,7 +5446,6 @@ class _InProcessModels:
             _LANGUAGE_MODEL_CACHE.clear()
             InProcessLlamaCpp().clear()
             _SEGFORMER_CACHE.clear()
-            _VITMATTE_CACHE.clear()
             _SAM_CACHE.clear()
             _TRANSPARENT_VAE_DECODER_CACHE.clear()
         if bool(collect_cycles):
@@ -5691,22 +5609,6 @@ class _InProcessModels:
                 "SEMANTIC_SEGMENTATION_MODEL", entry)
         )  # type: ignore[return-value]
 
-    async def load_vitmatte(
-        self, model: str, variant: str,
-    ) -> MattingModelRef:
-        import folder_paths
-
-        model = self._model_name(model, "ViTMatte weight")
-        if not model.lower().endswith((".safetensors", ".sft", ".bin")):
-            raise ValueError("ViTMatte weights must be SafeTensors or a weight-only bin")
-        variant = str(variant)
-        if variant not in {"small", "base"}:
-            raise ValueError("ViTMatte variant must be small or base")
-        path = folder_paths.get_full_path_or_raise("detection", model)
-        entry = await asyncio.to_thread(
-            _VITMATTE_CACHE.get, path, variant)
-        return MattingModelRef._wrap(await current_runtime().refs.create(
-            "MATTING_MODEL", entry))  # type: ignore[return-value]
 
     async def load_inpaint_model(
         self, model: str, architecture: str = "big-lama",
@@ -10081,7 +9983,6 @@ class InProcessOps:
             "classifier_scores.select_above":
                 self._classifier_scores_select_above,
             "semantic_segmentation.mask": self._semantic_segmentation_mask,
-            "matting.refine": self._matting_refine,
             "onnx_detector.detect": self._onnx_detector_detect,
             "object_detector.detect": self._object_detector_detect,
             "inpaint_model.inpaint": self._inpaint_model_inpaint,
@@ -13984,103 +13885,6 @@ class InProcessOps:
             "MASK", torch.stack(masks, dim=0)
         ))  # type: ignore[return-value]
 
-    async def _matting_refine(
-        self, matting: "MattingModelRef", image: "ImageRef",
-        trimap: "MaskRef", max_megapixels: float = 2.0,
-    ) -> "MaskRef":
-        import math
-        import torch
-        import torch.nn.functional as functional
-        import comfy.model_management
-
-        max_megapixels = float(max_megapixels)
-        if not math.isfinite(max_megapixels) or not 0.1 <= max_megapixels <= 1024.0:
-            raise ValueError("matting max_megapixels must be in [0.1, 1024]")
-        rt = current_runtime()
-        entry = await rt.refs.resolve(matting)
-        if not isinstance(entry, _VitMatteEntry):
-            raise TypeError("MATTING_MODEL is not a ViTMatte model")
-        pixels = await rt.refs.resolve(image)
-        trimap_value = await rt.refs.resolve(trimap)
-        if (
-            not isinstance(pixels, torch.Tensor)
-            or pixels.ndim != 4
-            or pixels.shape[-1] < 3
-            or not 1 <= len(pixels) <= 64
-        ):
-            raise ValueError("matting requires a non-empty BHWC RGB batch")
-        if trimap_value.ndim == 4 and trimap_value.shape[1] == 1:
-            trimap_value = trimap_value[:, 0]
-        elif trimap_value.ndim == 4 and trimap_value.shape[-1] == 1:
-            trimap_value = trimap_value[..., 0]
-        if not isinstance(trimap_value, torch.Tensor) or trimap_value.ndim != 3:
-            raise ValueError("matting trimaps must be a BHW mask batch")
-        height, width = map(int, pixels.shape[1:3])
-        if (
-            tuple(trimap_value.shape[-2:]) != (height, width)
-            or len(trimap_value) not in (1, len(pixels))
-        ):
-            raise ValueError("matting image and trimap dimensions must match")
-        if (
-            height <= 0
-            or width <= 0
-            or height * width * len(pixels) > 268_435_456
-            or not bool(torch.isfinite(pixels[..., :3]).all())
-            or not bool(torch.isfinite(trimap_value).all())
-        ):
-            raise ValueError("matting inputs are invalid or too large")
-
-        if len(trimap_value) == 1 and len(pixels) > 1:
-            trimap_value = trimap_value.expand(len(pixels), -1, -1)
-        limit = max_megapixels * 1_048_576.0
-        if height * width > limit:
-            ratio = width / height
-            target_width = max(1, int(math.sqrt(ratio * limit)))
-            target_height = max(1, int(target_width / ratio))
-        else:
-            target_height, target_width = height, width
-
-        device = comfy.model_management.get_torch_device()
-        offload_device = comfy.model_management.unet_offload_device()
-        source = pixels[..., :3].movedim(-1, 1).to(
-            device=device, dtype=torch.float32).clamp(0.0, 1.0)
-        source_trimap = trimap_value.unsqueeze(1).to(
-            device=device, dtype=torch.float32).clamp(0.0, 1.0)
-        if (target_height, target_width) != (height, width):
-            source = functional.interpolate(
-                source, size=(target_height, target_width),
-                mode="bilinear", align_corners=False)
-            source_trimap = functional.interpolate(
-                source_trimap, size=(target_height, target_width),
-                mode="bilinear", align_corners=False)
-        values = torch.cat((source * 2.0 - 1.0, source_trimap), dim=1)
-        pad_height = (-target_height) % 32
-        pad_width = (-target_width) % 32
-        if pad_height or pad_width:
-            values = functional.pad(values, (0, pad_width, 0, pad_height))
-
-        with entry.lock:
-            entry.model.to(device=device, dtype=torch.float32)
-            try:
-                alpha = entry.model(pixel_values=values).alphas
-                if (
-                    not isinstance(alpha, torch.Tensor)
-                    or alpha.ndim != 4
-                    or alpha.shape[:2] != (len(pixels), 1)
-                ):
-                    raise RuntimeError("ViTMatte returned an invalid alpha mask")
-                alpha = alpha[:, 0, :target_height, :target_width]
-                if (target_height, target_width) != (height, width):
-                    alpha = functional.interpolate(
-                        alpha.unsqueeze(1), size=(height, width),
-                        mode="bilinear", align_corners=False)[:, 0]
-                result = alpha.detach().to(
-                    device="cpu", dtype=torch.float32).clamp(0.0, 1.0)
-            finally:
-                entry.model.to(offload_device)
-        comfy.model_management.soft_empty_cache()
-        return MaskRef._wrap(await rt.refs.create(
-            "MASK", result))  # type: ignore[return-value]
 
     async def _onnx_detector_detect(
         self, detector: "OnnxDetectorRef", image: "ImageRef",
