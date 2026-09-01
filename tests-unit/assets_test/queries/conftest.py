@@ -5,6 +5,18 @@ from sqlalchemy.orm import Session
 from app.assets.database.models import Base
 
 
+@pytest.fixture(scope="session", autouse=True)
+def assert_asset_metadata_tables():
+    assert set(Base.metadata.tables) == {
+        "assets",
+        "asset_contents",
+        "asset_meta",
+        "asset_tags",
+        "tags",
+        "asset_system_state",
+    }
+
+
 @pytest.fixture
 def session():
     """In-memory SQLite session for fast unit tests."""
