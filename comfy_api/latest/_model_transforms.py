@@ -410,6 +410,86 @@ def validate(name: str, params: dict) -> dict:
 # Implementations. Core's own, calling core's own functions.
 # --------------------------------------------------------------------------- #
 
+# Where each supported architecture keeps its transformer blocks and its
+# optional embedding modules. This table is the whole reason block swapping is
+# a generic transform rather than a vendor one: the POLICY ("keep N resident,
+# offload the rest") is identical everywhere, and only these attribute names
+# differ. Adding an architecture is a row here, not an API change.
+_BLOCK_SWAP_ARCHITECTURES = {
+    "WAN21": {
+        "blocks": "blocks",
+        "txt_emb": "text_embedding",
+        "img_emb": "img_emb",
+    },
+}
+
+
+def _block_swap_layout(diffusion_model):
+    """Find the block list for a model, or refuse by name."""
+    for type_name in (cls.__name__ for cls in type(diffusion_model).__mro__):
+        layout = _BLOCK_SWAP_ARCHITECTURES.get(type_name)
+        if layout is not None and hasattr(diffusion_model, layout["blocks"]):
+            return layout
+    raise TransformError(
+        f"block_swap does not support {type(diffusion_model).__name__} "
+        f"models; supported architectures are "
+        f"{sorted(_BLOCK_SWAP_ARCHITECTURES)}")
+
+
+def _block_swap(patcher, blocks_to_swap: int, offload_img_emb: bool,
+                offload_txt_emb: bool, use_non_blocking: bool):
+    """Keep the last N transformer blocks on the compute device, offload the rest.
+
+    Large video models do not fit in consumer VRAM. Offloading most blocks to
+    system RAM and moving them across on demand is how they are run at all, and
+    every video-model wrapper hand-rolls its own copy of it by reaching into
+    the model's module tree. The guest supplies only the four numbers a user
+    chose; core owns which modules those numbers refer to.
+
+    Placement happens in an ON_LOAD callback so it composes with ModelPatcher's
+    own offload and low-VRAM lifecycle rather than fighting it.
+    """
+    from comfy import model_management
+    from comfy.patcher_extension import CallbacksMP
+
+    def swap_blocks(model, device_to, lowvram_model_memory,
+                    force_patch_weights, full_load):
+        import gc
+
+        diffusion_model = model.model.diffusion_model
+        layout = _block_swap_layout(diffusion_model)
+        blocks = getattr(diffusion_model, layout["blocks"])
+        # Upstream hardcodes torch.device('cuda'), which raises outright on
+        # Apple Silicon and CPU-only hosts. Ask core for the active device;
+        # on CUDA this resolves to the same thing.
+        resident_device = model_management.get_torch_device()
+        offload_device = model.offload_device
+
+        # Clamped, so asking for 40 blocks of a 30-block model offloads 30
+        # rather than indexing past the end.
+        limit = min(int(blocks_to_swap), len(blocks) - 1)
+        for index, block in enumerate(blocks):
+            # `>` not `>=`, reproducing upstream's inclusive boundary: this
+            # offloads blocks 0..limit, one more than the label implies.
+            # Workflows are tuned against that, so it is preserved.
+            block.to(offload_device if index <= limit else resident_device)
+
+        for enabled, key in ((offload_txt_emb, "txt_emb"),
+                             (offload_img_emb, "img_emb")):
+            attribute = layout.get(key)
+            module = (None if not enabled or attribute is None
+                      else getattr(diffusion_model, attribute, None))
+            if module is not None:
+                module.to(offload_device, non_blocking=use_non_blocking)
+
+        model_management.soft_empty_cache()
+        gc.collect()
+
+    out = patcher.clone()
+    out.add_callback(CallbacksMP.ON_LOAD, swap_blocks)
+    return out
+
+
 _ATTENTION_IMPLS = ("pytorch", "basic", "split", "sub_quad", "xformers",
                     "sage", "flash")
 
@@ -3764,6 +3844,27 @@ def _spatial_tiled_evaluation(
 
 TRANSFORMS: dict[str, Transform] = {
     t.name: t for t in (
+        Transform(
+            "block_swap",
+            "Keep only some transformer blocks on the compute device, "
+            "offloading the rest to system RAM so a large video model fits.",
+            {
+                "blocks_to_swap": Int(
+                    0, 64,
+                    doc="How many leading transformer blocks to offload. "
+                        "Clamped to the model's actual block count."),
+                "offload_img_emb": Bool(
+                    default=False,
+                    doc="Also offload the image embedding module."),
+                "offload_txt_emb": Bool(
+                    default=False,
+                    doc="Also offload the text embedding module."),
+                "use_non_blocking": Bool(
+                    default=False,
+                    doc="Use non-blocking transfers: faster, more pinned RAM."),
+            },
+            _block_swap,
+        ),
         Transform(
             "attention_impl",
             "Select which attention implementation this model uses.",
