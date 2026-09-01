@@ -427,15 +427,6 @@ class MattingModelRef(Ref):
         max_megapixels: float = ...,
     ) -> MaskRef: ...
 
-class VqaModelRef(Ref):
-    KIND: str
-    async def answer(
-        self,
-        image: ImageRef,
-        question: str,
-        max_new_tokens: int = ...,
-    ) -> str: ...
-
 class InpaintModelRef(Ref):
     KIND: str
     async def inpaint(
@@ -912,13 +903,6 @@ class ModelsDomain(Protocol):
         model: str,
         variant: str,
     ) -> MattingModelRef: ...
-    async def load_vqa(
-        self,
-        model: str,
-        architecture: str,
-        precision: str = ...,
-        device: str = ...,
-    ) -> VqaModelRef: ...
     async def load_inpaint_model(
         self,
         model: str,
