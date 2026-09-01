@@ -473,10 +473,6 @@ class TransparentVaeDecoderRef(Ref):
         sub_batch_size: int = ...,
     ) -> tuple[ImageRef, MaskRef]: ...
 
-class OnnxDetectorRef(Ref):
-    KIND: str
-    async def detect(self, image: ImageRef) -> list[dict[str, Any]]: ...
-
 class ObjectDetectorRef(Ref):
     KIND: str
     async def detect(
@@ -898,7 +894,6 @@ class ModelsDomain(Protocol):
         self,
         model: str,
     ) -> BackgroundRemovalModelRef: ...
-    async def load_onnx_detector(self, model: str) -> OnnxDetectorRef: ...
     async def load_object_detector(self, model: str) -> ObjectDetectorRef: ...
     async def load_sam(
         self,
