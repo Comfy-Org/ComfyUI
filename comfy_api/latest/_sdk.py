@@ -1470,23 +1470,6 @@ class MattingModelRef(_TypedRef):
             })
 
 
-class VqaModelRef(_TypedRef):
-    """Opaque visual question-answering model."""
-
-    KIND = "VQA_MODEL"
-
-    async def answer(
-        self, image: ImageRef, question: str,
-        max_new_tokens: int = 32,
-    ) -> str:
-        return str(await current_runtime().ops.apply(
-            "vqa.answer", self, {
-                "image": image,
-                "question": str(question),
-                "max_new_tokens": int(max_new_tokens),
-            }))
-
-
 class OnnxDetectorRef(_TypedRef):
     KIND = "ONNX_DETECTOR"
 
@@ -2510,10 +2493,6 @@ class ModelsDomain(Protocol):
     async def load_vitmatte(
         self, model: str, variant: str,
     ) -> MattingModelRef: ...
-    async def load_vqa(
-        self, model: str, architecture: str,
-        precision: str = "fp16", device: str = "cuda",
-    ) -> VqaModelRef: ...
     async def load_inpaint_model(
         self, model: str, architecture: str = "big-lama",
     ) -> InpaintModelRef: ...
@@ -4233,163 +4212,6 @@ class _VitMatteCache:
 _VITMATTE_CACHE = _VitMatteCache()
 
 
-@dataclass
-class _VqaEntry:
-    model: Any
-    tokenizer: Any
-    architecture: str
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-@dataclass
-class _VqaModelValue:
-    entry: _VqaEntry
-    precision: str
-    device: str
-
-
-def _load_vqa_weight(path: str, architecture: str) -> _VqaEntry:
-    try:
-        from transformers import (
-            BertTokenizer,
-            BlipConfig,
-            BlipForQuestionAnswering,
-        )
-    except ImportError as exc:
-        raise RuntimeError("BLIP visual question answering requires Transformers") from exc
-    import torch
-    import comfy.utils
-
-    if architecture not in {
-        "blip-vqa-base", "blip-vqa-capfilt-large",
-    }:
-        raise ValueError("unknown BLIP VQA architecture")
-    text_config = {
-        "attention_probs_dropout_prob": 0.0,
-        "bos_token_id": 30522,
-        "encoder_hidden_size": 768,
-        "eos_token_id": 2,
-        "hidden_act": "gelu",
-        "hidden_dropout_prob": 0.0,
-        "hidden_size": 768,
-        "initializer_range": 0.02,
-        "intermediate_size": 3072,
-        "is_decoder": True,
-        "layer_norm_eps": 1e-12,
-        "max_position_embeddings": 512,
-        "num_attention_heads": 12,
-        "num_hidden_layers": 12,
-        "pad_token_id": 0,
-        "projection_dim": 768,
-        "sep_token_id": 102,
-        "use_cache": True,
-        "vocab_size": 30524,
-    }
-    vision_config = {
-        "attention_dropout": 0.0,
-        "dropout": 0.0,
-        "hidden_act": "gelu",
-        "hidden_size": 768,
-        "image_size": 384,
-        "initializer_range": 0.02,
-        "intermediate_size": 3072,
-        "layer_norm_eps": 1e-5,
-        "num_attention_heads": 12,
-        "num_channels": 3,
-        "num_hidden_layers": 12,
-        "patch_size": 16,
-        "projection_dim": 512,
-    }
-    config = BlipConfig(
-        text_config=text_config,
-        vision_config=vision_config,
-        projection_dim=512,
-        image_text_hidden_size=256,
-    )
-    state = comfy.utils.load_torch_file(path, safe_load=True)
-    if (
-        not isinstance(state, dict)
-        or not state
-        or any(
-            not isinstance(key, str) or not isinstance(value, torch.Tensor)
-            for key, value in state.items()
-        )
-    ):
-        raise ValueError("BLIP VQA weights must contain only tensors")
-    model = BlipForQuestionAnswering(config)
-    incompatible = model.load_state_dict(state, strict=False)
-    allowed_missing = {"text_decoder.cls.predictions.decoder.bias"}
-    allowed_unexpected = {
-        "text_decoder.bert.embeddings.position_ids",
-        "text_encoder.embeddings.position_ids",
-    }
-    if (
-        set(incompatible.missing_keys) - allowed_missing
-        or set(incompatible.unexpected_keys) - allowed_unexpected
-    ):
-        raise ValueError("BLIP VQA weights do not match the fixed architecture")
-    model.eval()
-    model.to("cpu")
-    vocab = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "comfy", "text_encoders", "blip_tokenizer", "vocab.txt",
-    )
-    if not os.path.isfile(vocab):
-        raise RuntimeError("the bundled BLIP tokenizer vocabulary is unavailable")
-    tokenizer = BertTokenizer(vocab=vocab, do_lower_case=True)
-    if len(tokenizer) != 30522:
-        raise RuntimeError("the bundled BLIP tokenizer vocabulary is invalid")
-    return _VqaEntry(
-        model=model, tokenizer=tokenizer, architecture=architecture)
-
-
-class _VqaCache:
-    def __init__(self, max_entries: int = 1) -> None:
-        self.max_entries = max_entries
-        self._entries: OrderedDict[tuple[Any, ...], _VqaEntry] = OrderedDict()
-        self._lock = threading.Lock()
-        self.loads = 0
-        self.hits = 0
-
-    @staticmethod
-    def _key(path: str, architecture: str) -> tuple[Any, ...]:
-        status = os.stat(path)
-        return (
-            os.path.realpath(path), architecture,
-            status.st_dev, status.st_ino, status.st_size,
-            status.st_mtime_ns, status.st_ctime_ns,
-        )
-
-    def get(self, path: str, architecture: str) -> _VqaEntry:
-        key = self._key(path, architecture)
-        with self._lock:
-            entry = self._entries.pop(key, None)
-            if entry is not None:
-                self.hits += 1
-                self._entries[key] = entry
-                return entry
-            entry = _load_vqa_weight(path, architecture)
-            self.loads += 1
-            while len(self._entries) >= self.max_entries:
-                _old_key, old = self._entries.popitem(last=False)
-                with old.lock:
-                    old.model.to("cpu")
-            self._entries[key] = entry
-            return entry
-
-    def clear(self) -> int:
-        with self._lock:
-            entries = list(self._entries.values())
-            self._entries.clear()
-        for entry in entries:
-            with entry.lock:
-                entry.model.to("cpu")
-        return len(entries)
-
-
-_VQA_CACHE = _VqaCache()
-
-
 def _validate_onnx_weight_file(path: str) -> None:
     """Admit only one self-contained graph made from standard ONNX domains."""
     try:
@@ -6057,7 +5879,6 @@ class _InProcessModels:
             InProcessLlamaCpp().clear()
             _SEGFORMER_CACHE.clear()
             _VITMATTE_CACHE.clear()
-            _VQA_CACHE.clear()
             _SAM_CACHE.clear()
             _TRANSPARENT_VAE_DECODER_CACHE.clear()
         if bool(collect_cycles):
@@ -6237,34 +6058,6 @@ class _InProcessModels:
             _VITMATTE_CACHE.get, path, variant)
         return MattingModelRef._wrap(await current_runtime().refs.create(
             "MATTING_MODEL", entry))  # type: ignore[return-value]
-
-    async def load_vqa(
-        self, model: str, architecture: str,
-        precision: str = "fp16", device: str = "cuda",
-    ) -> VqaModelRef:
-        import folder_paths
-
-        model = self._model_name(model, "BLIP VQA weight")
-        if not model.lower().endswith((".safetensors", ".sft", ".bin")):
-            raise ValueError("BLIP VQA weights must be SafeTensors or a weight-only bin")
-        architecture = str(architecture)
-        if architecture not in {
-            "blip-vqa-base", "blip-vqa-capfilt-large",
-        }:
-            raise ValueError("unknown BLIP VQA architecture")
-        precision = str(precision)
-        if precision not in {"fp16", "fp32"}:
-            raise ValueError("BLIP VQA precision must be fp16 or fp32")
-        device = str(device)
-        if device not in {"cuda", "cpu"}:
-            raise ValueError("BLIP VQA device must be cuda or cpu")
-        path = folder_paths.get_full_path_or_raise("detection", model)
-        entry = await asyncio.to_thread(
-            _VQA_CACHE.get, path, architecture)
-        value = _VqaModelValue(
-            entry=entry, precision=precision, device=device)
-        return VqaModelRef._wrap(await current_runtime().refs.create(
-            "VQA_MODEL", value))  # type: ignore[return-value]
 
     async def load_inpaint_model(
         self, model: str, architecture: str = "big-lama",
@@ -10634,7 +10427,6 @@ class InProcessOps:
                 self._classifier_scores_select_above,
             "semantic_segmentation.mask": self._semantic_segmentation_mask,
             "matting.refine": self._matting_refine,
-            "vqa.answer": self._vqa_answer,
             "onnx_detector.detect": self._onnx_detector_detect,
             "object_detector.detect": self._object_detector_detect,
             "inpaint_model.inpaint": self._inpaint_model_inpaint,
@@ -14634,94 +14426,6 @@ class InProcessOps:
         comfy.model_management.soft_empty_cache()
         return MaskRef._wrap(await rt.refs.create(
             "MASK", result))  # type: ignore[return-value]
-
-    async def _vqa_answer(
-        self, vqa: "VqaModelRef", image: "ImageRef", question: str,
-        max_new_tokens: int = 32,
-    ) -> str:
-        import torch
-        import torch.nn.functional as functional
-        import comfy.model_management
-
-        question = str(question).strip()
-        if not question or len(question) > 4096:
-            raise ValueError("VQA questions must contain 1..4096 characters")
-        if (
-            isinstance(max_new_tokens, bool)
-            or not isinstance(max_new_tokens, int)
-            or not 1 <= max_new_tokens <= 128
-        ):
-            raise ValueError("VQA max_new_tokens must be in [1, 128]")
-        rt = current_runtime()
-        value = await rt.refs.resolve(vqa)
-        if not isinstance(value, _VqaModelValue):
-            raise TypeError("VQA_MODEL is not a fixed BLIP model")
-        pixels = await rt.refs.resolve(image)
-        if (
-            not isinstance(pixels, torch.Tensor)
-            or pixels.ndim != 4
-            or pixels.shape[0] != 1
-            or pixels.shape[-1] < 3
-        ):
-            raise ValueError("VQA requires exactly one BHWC RGB image")
-        height, width = map(int, pixels.shape[1:3])
-        if (
-            height <= 0
-            or width <= 0
-            or height * width > 67_108_864
-            or not bool(torch.isfinite(pixels[..., :3]).all())
-        ):
-            raise ValueError("VQA image dimensions are invalid")
-
-        if value.device == "cuda" and torch.cuda.is_available():
-            device = comfy.model_management.get_torch_device()
-        else:
-            device = torch.device("cpu")
-        dtype = (
-            torch.float16
-            if value.precision == "fp16" and device.type != "cpu"
-            else torch.float32
-        )
-        source = pixels[..., :3].movedim(-1, 1).to(
-            device=device, dtype=dtype).clamp(0.0, 1.0)
-        source = functional.interpolate(
-            source, size=(384, 384), mode="bicubic",
-            align_corners=False, antialias=True)
-        mean = torch.tensor(
-            (0.48145466, 0.4578275, 0.40821073),
-            device=device, dtype=dtype).view(1, 3, 1, 1)
-        std = torch.tensor(
-            (0.26862954, 0.26130258, 0.27577711),
-            device=device, dtype=dtype).view(1, 3, 1, 1)
-        source = (source - mean) / std
-        encoded = value.entry.tokenizer(
-            question, return_tensors="pt", truncation=True, max_length=512)
-        input_ids = encoded["input_ids"].to(device)
-        attention_mask = encoded["attention_mask"].to(device)
-        offload_device = comfy.model_management.unet_offload_device()
-        with value.entry.lock:
-            value.entry.model.to(device=device, dtype=dtype)
-            try:
-                tokens = value.entry.model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    pixel_values=source,
-                    max_new_tokens=max_new_tokens,
-                )
-                if (
-                    not isinstance(tokens, torch.Tensor)
-                    or tokens.ndim != 2
-                    or tokens.shape[0] != 1
-                ):
-                    raise RuntimeError("BLIP VQA returned invalid tokens")
-                answer = value.entry.tokenizer.decode(
-                    tokens[0].detach().cpu().tolist(),
-                    skip_special_tokens=True,
-                ).strip()
-            finally:
-                value.entry.model.to(offload_device)
-        comfy.model_management.soft_empty_cache()
-        return answer
 
     async def _onnx_detector_detect(
         self, detector: "OnnxDetectorRef", image: "ImageRef",
