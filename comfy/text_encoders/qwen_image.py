@@ -108,13 +108,13 @@ class Qwen25VLTokenizer(sd1_clip.SD1Tokenizer):
         embedding_size = 2048 if model_type == "qwen2_5_vl_3b" else 3584
 
         class Tokenizer(Qwen25_7BVLITokenizer):
-            def __init__(inner_self, embedding_directory=None, tokenizer_data={}):
+            def __init__(self, embedding_directory=None, tokenizer_data={}):
                 tokenizer_path = os.path.join(
                     os.path.dirname(os.path.realpath(__file__)),
                     "qwen25_tokenizer",
                 )
                 sd1_clip.SDTokenizer.__init__(
-                    inner_self,
+                    self,
                     tokenizer_path,
                     pad_with_end=False,
                     embedding_directory=embedding_directory,
