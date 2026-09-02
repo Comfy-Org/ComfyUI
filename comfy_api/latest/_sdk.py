@@ -99,6 +99,16 @@ class Ref:
     def __repr__(self) -> str:  # keep ids short in logs, never leak contents
         return f"<{type(self).__name__} {self.id[:8]}>"
 
+    async def op(self, name: str, **params: Any) -> Any:
+        """Run a named operation on this handle.
+
+        The operation vocabulary is data rather than API surface, so a pack can
+        reach a capability this class knows nothing about — and wrap it in its
+        own typed accessor — without core growing a method for it. Subclasses
+        narrow the return type where it is always the same kind.
+        """
+        return await current_runtime().ops.apply(name, self, params)
+
     async def release(self) -> None:
         """Optional early free. **A node never has to call this.**
 
