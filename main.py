@@ -457,7 +457,7 @@ def setup_database(asset_manager):
         init_db()
         asset_manager.startup()
     except Exception as e:
-        if "database is locked" in str(e):
+        if "database is locked" in str(e) or "Could not acquire lock on database" in str(e):
             logging.error(
                 "Database is locked. Another ComfyUI process is already using this database.\n"
                 "To resolve this, specify a separate database file for this instance:\n"
