@@ -34,6 +34,7 @@ class Ref:
     kind: str
     id: str
     async def describe(self, max_value_chars: int = ...) -> dict[str, Any]: ...
+    async def op(self, name: str, **params: Any) -> Any: ...
 
 class ClosureRef(Ref):
     """Prompt-scoped handle to pack math retained for a sampling phase."""
