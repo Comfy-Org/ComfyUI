@@ -99,6 +99,12 @@ class Ref:
     def __repr__(self) -> str:  # keep ids short in logs, never leak contents
         return f"<{type(self).__name__} {self.id[:8]}>"
 
+    @classmethod
+    def _wrap(cls, ref: "Ref") -> "Ref":
+        """Re-type a handle. The base keeps the resolver's kind; a subclass that
+        declares KIND asserts its own."""
+        return cls(kind=getattr(cls, "KIND", None) or ref.kind, id=ref.id)
+
     async def op(self, name: str, **params: Any) -> Any:
         """Run a named operation on this handle.
 
@@ -1628,150 +1634,8 @@ class TransparentVaeDecoderRef(_TypedRef):
         return result[0], result[1]
 
 
-class IpAdapterEmbedsRef(_TypedRef):
-    """Opaque image embeddings produced by a host IP-Adapter encoder."""
-
-    KIND = "IPADAPTER_EMBEDS"
-
-    async def combine(
-        self,
-        others: list["IpAdapterEmbedsRef"],
-        method: str = "concat",
-    ) -> "IpAdapterEmbedsRef":
-        return await current_runtime().ops.apply(
-            "ipadapter_embeds.combine", self, {
-                "others": list(others),
-                "method": str(method),
-            })
 
 
-class IpAdapterRef(_TypedRef):
-    """Opaque, host-created IP-Adapter pipeline.
-
-    The pipeline's models and loader objects remain in the trusted process.
-    Guest code may only request the fixed model-application operation below;
-    crop selection and pack-specific orchestration stay in the guest.
-    """
-
-    KIND = "IPADAPTER_PIPE"
-
-    async def apply(
-        self,
-        model: ModelRef,
-        image: ImageRef,
-        negative_image: Optional[ImageRef] = None,
-        attn_mask: Optional[MaskRef] = None,
-        style_image: Optional[ImageRef] = None,
-        composition_image: Optional[ImageRef] = None,
-        weight: float = 0.7,
-        weight_type: str = "channel penalty",
-        start_percent: float = 0.0,
-        end_percent: float = 1.0,
-        combine_embeds: str = "concat",
-        weight_faceidv2: float = 1.0,
-        embeds_scaling: str = "V only",
-        unfold_batch: bool = False,
-        layer_weights: Optional[str] = None,
-        weight_style: float = 1.0,
-        weight_composition: float = 1.0,
-        expand_style: bool = False,
-    ) -> ModelRef:
-        """Apply this pipeline to a model using bounded image inputs."""
-        return await current_runtime().ops.apply(
-            "ipadapter.apply", self, {
-                "model": model,
-                "image": image,
-                "negative_image": negative_image,
-                "attn_mask": attn_mask,
-                "style_image": style_image,
-                "composition_image": composition_image,
-                "weight": float(weight),
-                "weight_type": str(weight_type),
-                "start_percent": float(start_percent),
-                "end_percent": float(end_percent),
-                "combine_embeds": str(combine_embeds),
-                "weight_faceidv2": float(weight_faceidv2),
-                "embeds_scaling": str(embeds_scaling),
-                "unfold_batch": bool(unfold_batch),
-                "layer_weights": layer_weights,
-                "weight_style": float(weight_style),
-                "weight_composition": float(weight_composition),
-                "expand_style": bool(expand_style),
-            })
-
-    async def apply_tiled(
-        self,
-        model: ModelRef,
-        image: ImageRef,
-        negative_image: Optional[ImageRef] = None,
-        attn_mask: Optional[MaskRef] = None,
-        weight: float = 0.7,
-        weight_type: str = "linear",
-        start_percent: float = 0.0,
-        end_percent: float = 1.0,
-        combine_embeds: str = "concat",
-        embeds_scaling: str = "V only",
-        sharpening: float = 0.0,
-        unfold_batch: bool = False,
-    ) -> tuple[ModelRef, ImageRef, MaskRef]:
-        """Apply the canonical tiled IP-Adapter operation."""
-        result = await current_runtime().ops.apply(
-            "ipadapter.apply_tiled", self, {
-                "model": model,
-                "image": image,
-                "negative_image": negative_image,
-                "attn_mask": attn_mask,
-                "weight": float(weight),
-                "weight_type": str(weight_type),
-                "start_percent": float(start_percent),
-                "end_percent": float(end_percent),
-                "combine_embeds": str(combine_embeds),
-                "embeds_scaling": str(embeds_scaling),
-                "sharpening": float(sharpening),
-                "unfold_batch": bool(unfold_batch),
-            })
-        return result[0], result[1], result[2]
-
-    async def encode(
-        self,
-        image: ImageRef,
-        weight: float = 1.0,
-        mask: Optional[MaskRef] = None,
-    ) -> tuple[IpAdapterEmbedsRef, IpAdapterEmbedsRef]:
-        """Encode one image into positive and negative IP-Adapter embeddings."""
-        result = await current_runtime().ops.apply(
-            "ipadapter.encode", self, {
-                "image": image,
-                "weight": float(weight),
-                "mask": mask,
-            })
-        return result[0], result[1]
-
-    async def apply_embeds(
-        self,
-        model: ModelRef,
-        positive: IpAdapterEmbedsRef,
-        negative: Optional[IpAdapterEmbedsRef] = None,
-        attn_mask: Optional[MaskRef] = None,
-        weight: float = 1.0,
-        weight_type: str = "linear",
-        start_percent: float = 0.0,
-        end_percent: float = 1.0,
-        embeds_scaling: str = "V only",
-    ) -> ModelRef:
-        """Apply already encoded image embeddings to a model."""
-        return await current_runtime().ops.apply(
-            "ipadapter.apply_embeds", self, {
-                "model": model,
-                "positive": positive,
-                "negative": negative,
-                "attn_mask": attn_mask,
-                "weight": float(weight),
-                "weight_type": str(weight_type),
-                "start_percent": float(start_percent),
-                "end_percent": float(end_percent),
-                "embeds_scaling": str(embeds_scaling),
-            })
 
 
 class SamModelRef(_TypedRef):
@@ -2471,7 +2335,7 @@ class ModelsDomain(Protocol):
     ) -> ClipRef: ...
     async def load_ipadapter(
         self, model: str, clip_vision: ClipVisionRef,
-    ) -> IpAdapterRef: ...
+    ) -> Ref: ...
     async def load_brushnet(
         self, model: str, dtype: str = "float16",
     ) -> BrushNetRef: ...
@@ -5250,7 +5114,7 @@ class _InProcessModels:
 
     async def load_ipadapter(
         self, model: str, clip_vision: ClipVisionRef,
-    ) -> IpAdapterRef:
+    ) -> Ref:
         import folder_paths
         import nodes
 
@@ -5277,8 +5141,7 @@ class _InProcessModels:
             "ipadapter": result[0],
             "clip_vision": vision,
         }
-        return IpAdapterRef._wrap(await current_runtime().refs.create(
-            "IPADAPTER_PIPE", value))  # type: ignore[return-value]
+        return await current_runtime().refs.create("IPADAPTER_PIPE", value)
 
     async def load_brushnet(
         self, model: str, dtype: str = "float16",
@@ -13893,7 +13756,7 @@ class InProcessOps:
 
     async def _ipadapter_apply(
         self,
-        pipeline: "IpAdapterRef",
+        pipeline: "Ref",
         model: "ModelRef",
         image: "ImageRef",
         negative_image: Optional["ImageRef"] = None,
@@ -14072,7 +13935,7 @@ class InProcessOps:
 
     async def _ipadapter_apply_tiled(
         self,
-        pipeline: "IpAdapterRef",
+        pipeline: "Ref",
         model: "ModelRef",
         image: "ImageRef",
         negative_image: Optional["ImageRef"] = None,
@@ -14207,11 +14070,11 @@ class InProcessOps:
 
     async def _ipadapter_encode(
         self,
-        pipeline: "IpAdapterRef",
+        pipeline: "Ref",
         image: "ImageRef",
         weight: float = 1.0,
         mask: Optional["MaskRef"] = None,
-    ) -> tuple["IpAdapterEmbedsRef", "IpAdapterEmbedsRef"]:
+    ) -> tuple["Ref", "Ref"]:
         import math
         import nodes
         import torch
@@ -14263,18 +14126,16 @@ class InProcessOps:
                        for value in result[:2])):
             raise RuntimeError("IPAdapterEncoder returned invalid embeddings")
         return (
-            IpAdapterEmbedsRef._wrap(await rt.refs.create(
-                "IPADAPTER_EMBEDS", result[0])),
-            IpAdapterEmbedsRef._wrap(await rt.refs.create(
-                "IPADAPTER_EMBEDS", result[1])),
+            await rt.refs.create("IPADAPTER_EMBEDS", result[0]),
+            await rt.refs.create("IPADAPTER_EMBEDS", result[1]),
         )
 
     async def _ipadapter_embeds_combine(
         self,
-        first: "IpAdapterEmbedsRef",
-        others: list["IpAdapterEmbedsRef"],
+        first: "Ref",
+        others: list["Ref"],
         method: str = "concat",
-    ) -> "IpAdapterEmbedsRef":
+    ) -> "Ref":
         import nodes
         import torch
 
@@ -14286,7 +14147,7 @@ class InProcessOps:
         if not isinstance(others, list) or len(others) > 4:
             raise ValueError("at most five IP-Adapter embeddings may be combined")
         refs = [first, *others]
-        if any(not isinstance(ref, IpAdapterEmbedsRef) for ref in refs):
+        if any(getattr(ref, "kind", None) != "IPADAPTER_EMBEDS" for ref in refs):
             raise TypeError("IP-Adapter embedding combination needs typed refs")
         rt = current_runtime()
         values = [await rt.refs.resolve(ref) for ref in refs]
@@ -14317,15 +14178,14 @@ class InProcessOps:
                 or not 0 < result[0].numel() <= 268_435_456):
             raise RuntimeError(
                 "IPAdapterCombineEmbeds returned invalid embeddings")
-        return IpAdapterEmbedsRef._wrap(await rt.refs.create(
-            "IPADAPTER_EMBEDS", result[0]))  # type: ignore[return-value]
+        return await rt.refs.create("IPADAPTER_EMBEDS", result[0])
 
     async def _ipadapter_apply_embeds(
         self,
-        pipeline: "IpAdapterRef",
+        pipeline: "Ref",
         model: "ModelRef",
-        positive: "IpAdapterEmbedsRef",
-        negative: Optional["IpAdapterEmbedsRef"] = None,
+        positive: "Ref",
+        negative: Optional["Ref"] = None,
         attn_mask: Optional["MaskRef"] = None,
         weight: float = 1.0,
         weight_type: str = "linear",
@@ -14362,9 +14222,9 @@ class InProcessOps:
             "K+mean(V) w/ C penalty",
         }:
             raise ValueError("unsupported IP-Adapter embedding scaling")
-        if not isinstance(positive, IpAdapterEmbedsRef) or (
+        if getattr(positive, "kind", None) != "IPADAPTER_EMBEDS" or (
             negative is not None
-            and not isinstance(negative, IpAdapterEmbedsRef)
+            and getattr(negative, "kind", None) != "IPADAPTER_EMBEDS"
         ):
             raise TypeError("IP-Adapter application needs typed embedding refs")
 
@@ -15591,7 +15451,7 @@ def _ref_type_for(v: Any) -> tuple[type, str]:
     if _looks_like_tensor(v):
         return ImageRef, "IMAGE"
     if _is_ipadapter_pipe(v):
-        return IpAdapterRef, "IPADAPTER_PIPE"
+        return Ref, "IPADAPTER_PIPE"
     if _is_image_preprocessor(v):
         return ImagePreprocessorRef, "IMAGE_PREPROCESSOR"
     if _is_interpolation_states(v):
