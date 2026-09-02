@@ -75,7 +75,6 @@ from ._llama_cpp import InProcessLlamaCpp
 if TYPE_CHECKING:  # keep this module import-safe / torch-free at import time
     import torch
 
-    from ._io import NodeOutput
 
 logger = logging.getLogger(__name__)
 
@@ -15137,13 +15136,13 @@ class InProcessOps:
                 if not isinstance(raw_box, dict):
                     raise RuntimeError("SAM3 grounding returned an invalid box")
                 box: dict[str, float] = {}
-                for field in ("x", "y", "width", "height", "score"):
-                    value = raw_box.get(field)
+                for key in ("x", "y", "width", "height", "score"):
+                    value = raw_box.get(key)
                     if (type(value) not in (int, float)
                             or not math.isfinite(float(value))):
                         raise RuntimeError(
-                            f"SAM3 grounding box has invalid {field}")
-                    box[field] = float(value)
+                            f"SAM3 grounding box has invalid {key}")
+                    box[key] = float(value)
                 if (box["width"] < 0.0 or box["height"] < 0.0
                         or not 0.0 <= box["score"] <= 1.0
                         or abs(box["x"]) > width * 4

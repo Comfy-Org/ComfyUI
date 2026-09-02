@@ -56,6 +56,9 @@ class LatentOperationRef(Ref):
 
 _T = TypeVar("_T", bound="TensorRef")
 
+class ValueRef(Ref):
+    KIND: str
+
 class TensorRef(Ref):
     KIND: str
     # RAW ESCAPE HATCH — permissioned (`raw`/`tensor.read`), discouraged; forces
