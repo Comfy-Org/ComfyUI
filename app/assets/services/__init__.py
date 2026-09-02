@@ -1,3 +1,7 @@
+"""Re-exports the asset service functions so routes and the seeder import them
+from one place instead of reaching into individual service modules.
+"""
+
 from app.assets.services.ingest import (
     DependencyMissingError,
     HashMismatchError,

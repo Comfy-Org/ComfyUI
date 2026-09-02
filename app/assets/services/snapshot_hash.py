@@ -1,3 +1,11 @@
+"""Hashes a file and returns the stat it proved describes those exact bytes.
+Identity, size and mtime are sampled before the read, on the open handle at
+both ends of it, and once more afterwards; if any sample disagrees the file
+moved under the reader and the result is discarded rather than returned.
+Callers persist the stat that comes back, which is what makes a stored hash and
+a stored size describe one observation.
+"""
+
 from __future__ import annotations
 
 import os

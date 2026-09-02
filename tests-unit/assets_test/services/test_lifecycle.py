@@ -23,6 +23,8 @@ from app.assets.lifecycle import (
 from app.assets.scanner import get_temp_prefixes, sync_temp_references_safely
 from app.assets.scanner_changes import is_path_under_prefixes
 from app.assets.seeder import asset_seeder
+from app.assets.services import hash_mode_state
+from app.assets.services.hash_mode_state import clear_transition_queue, write_stored_mode
 
 from .path_prefix_cases import prefix_case_paths
 
@@ -32,6 +34,15 @@ def autoclean_unit_test_assets():
     lifecycle._excluded_scan_roots.clear()
     yield
     lifecycle._excluded_scan_roots.clear()
+
+
+@pytest.fixture(autouse=True)
+def autoclean_transition_queue():
+    clear_transition_queue()
+    lifecycle._hash_mode_transition = None
+    yield
+    clear_transition_queue()
+    lifecycle._hash_mode_transition = None
 
 
 @pytest.fixture
@@ -85,12 +96,39 @@ def test_startup_order_wipe_before_rmtree_before_seeder(mock_create_session):
         patch("app.assets.lifecycle.wipe_temp_db_rows", side_effect=_wipe),
         patch("app.assets.lifecycle.cleanup_temp_filesystem", side_effect=lambda: calls.append("rmtree") or True),
         patch("app.assets.lifecycle.enqueue_mode_transition_work", side_effect=lambda: calls.append("enqueue")),
-        patch("app.assets.lifecycle.drain_mode_transition_work", side_effect=lambda: calls.append("drain")),
         patch("app.assets.lifecycle.start_asset_seeder", side_effect=lambda: calls.append("seeder") or True),
     ):
         run_asset_startup()
 
-    assert calls == ["wipe", "rmtree", "enqueue", "drain", "seeder"]
+    assert calls == ["wipe", "rmtree", "enqueue", "seeder"]
+
+
+@pytest.mark.parametrize("wipe_fails", [False, True], ids=["wipe_succeeds", "wipe_fails"])
+def test_startup_defers_transition_drain_to_the_seeder(
+    session, mock_create_session, tmp_path, monkeypatch, wipe_fails
+):
+    asset_file = tmp_path / "model.safetensors"
+    asset_file.write_bytes(b"weights")
+    stat = asset_file.stat()
+    create_content(session, path=str(asset_file), size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns)
+    write_stored_mode(session, "off")
+    session.commit()
+    monkeypatch.setattr(hash_mode_state._mode, "hashing_enabled", lambda: True)
+
+    wipe_side_effect = RuntimeError("db wipe failed") if wipe_fails else (lambda _session: (0, 0))
+
+    with (
+        patch("app.assets.lifecycle.wipe_temp_db_rows", side_effect=wipe_side_effect),
+        patch("app.assets.lifecycle.cleanup_temp_filesystem", return_value=True),
+        patch("app.assets.lifecycle.start_asset_seeder", return_value=True),
+        patch.object(hash_mode_state, "drain_transition_queue") as drain_spy,
+    ):
+        lifecycle.record_hash_mode_transition_intent()
+        run_asset_startup()
+
+    drain_spy.assert_not_called()
+    assert hash_mode_state.pending_transition_count() > 0
+    assert hash_mode_state.read_stored_mode(session) == "off"
 
 
 def test_db_wipe_failure_skips_rmtree_and_continues(mock_create_session):

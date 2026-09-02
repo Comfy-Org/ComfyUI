@@ -3,7 +3,7 @@ from sqlalchemy import create_engine, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.assets.database.models import Asset, AssetContent
+from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries.records import (
     RecordPageSpec,
     create_content,
@@ -118,3 +118,17 @@ def test_create_content_uniqueness_race_returns_existing_live_row(session):
     second = create_content(session, path="/tmp/race")
 
     assert second.id == first.id
+
+
+def test_create_record_links_a_repeated_tag_name_once(session):
+    content = create_content(session, path="/tmp/repeated-tag")
+
+    record = create_record(session, content_id=content.id, name="repeat", tags=["x", "x"])
+    session.commit()
+
+    linked = session.scalars(
+        select(AssetTag.tag_name).where(AssetTag.asset_id == record.id)
+    ).all()
+    assert list(linked) == ["x"], (
+        "a tag name repeated within one call must link once, not raise on the composite PK"
+    )

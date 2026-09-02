@@ -101,20 +101,43 @@ def _seed_spec(path: str, size_bytes: int, mtime_ns: int, name: str) -> SeedAsse
     }
 
 
-def test_seed_asset_specs_discards_content_on_record_failure(
+def _content_at(session: Session, path: str) -> AssetContent | None:
+    return session.scalar(select(AssetContent).where(AssetContent.path == path))
+
+
+def _reference_count(session: Session, content_id: str) -> int:
+    return session.scalar(
+        select(func.count()).select_from(Asset).where(Asset.content_id == content_id)
+    )
+
+
+def _orphaned_content_paths(session: Session) -> list[str]:
+    return [
+        content.path
+        for content in session.scalars(select(AssetContent))
+        if _reference_count(session, content.id) == 0
+    ]
+
+
+def test_seed_asset_specs_orphans_nothing_and_keeps_earlier_specs_on_record_failure(
     session: Session, tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     specs: list[SeedAssetSpec] = []
+    paths: dict[str, str] = {}
     fail_name = "vanished.bin"
     for name in ("first.bin", fail_name, "last.bin"):
         file_path = tmp_path / name
         file_path.write_bytes(name.encode())
         stat_result = file_path.stat()
+        paths[name] = str(file_path)
         specs.append(
             _seed_spec(str(file_path), stat_result.st_size, stat_result.st_mtime_ns, name)
         )
 
+    attempted: list[str] = []
+
     def _create_record_or_raise(session_arg, content_id, name, *args, **kwargs):
+        attempted.append(name)
         if name == fail_name:
             raise RuntimeError("forced create_record failure")
         return create_record_query(session_arg, content_id, name, *args, **kwargs)
@@ -125,5 +148,21 @@ def test_seed_asset_specs_discards_content_on_record_failure(
         seed_asset_specs(session, specs)
     session.rollback()
 
-    assert _live_content_count(session) == 0
-    assert session.scalar(select(func.count()).select_from(Asset)) == 0
+    assert _content_at(session, paths[fail_name]) is None, (
+        "the failed spec's content must not outlive the record that would have referenced it"
+    )
+    assert session.scalar(select(Asset).where(Asset.name == fail_name)) is None
+    assert _orphaned_content_paths(session) == []
+
+    survivor = _content_at(session, paths["first.bin"])
+    assert survivor is not None, (
+        "a spec that already succeeded must not be retroactively erased by a later "
+        "unrelated failure; its savepoint was released before that failure happened"
+    )
+    assert session.scalar(select(Asset).where(Asset.name == "first.bin")) is not None
+    assert _reference_count(session, survivor.id) == 1
+
+    assert attempted == ["first.bin", fail_name]
+    assert _content_at(session, paths["last.bin"]) is None, (
+        "the raise aborts the loop, so the spec after the failed one is never attempted"
+    )

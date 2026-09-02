@@ -1,7 +1,18 @@
+"""Tracks the persisted hashing mode and carries the existing catalog across an
+off-to-on switch. Turning hashing on enqueues every live content row for
+verification and the queue is drained in the background; a path that cannot be
+read is retried a bounded number of times and then has its stored hash cleared,
+so the queue can empty and the mode can flip. An unverifiable digest never
+survives into the persisted enabled state.
+"""
+
 from __future__ import annotations
 
 import logging
 import os
+from collections import deque
+from dataclasses import dataclass
+from typing import Final
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -14,7 +25,17 @@ from app.assets.services.path_utils import compute_loader_path, get_name_and_tag
 from app.assets.services.snapshot_hash import snapshot_hash
 
 _KEY = "hash_mode"
-_PENDING_QUEUE: list[str] = []
+_MAX_VERIFY_ATTEMPTS: Final = 3
+
+
+@dataclass
+class _PendingEntry:
+    path: str
+    ticks: int = 0
+
+
+_PENDING_QUEUE: deque[_PendingEntry] = deque()
+_PENDING_PATHS: set[str] = set()
 _off_to_on_transition_in_flight = False
 
 
@@ -22,6 +43,7 @@ def clear_transition_queue() -> None:
     global _off_to_on_transition_in_flight
 
     _PENDING_QUEUE.clear()
+    _PENDING_PATHS.clear()
     _off_to_on_transition_in_flight = False
 
 
@@ -67,8 +89,30 @@ def enqueue_transition_work(session: Session, transition: str | None) -> None:
         select(AssetContent).where(AssetContent.is_missing.is_(False))
     )
     for row in rows:
-        if row.path not in _PENDING_QUEUE:
-            _PENDING_QUEUE.append(row.path)
+        if row.path not in _PENDING_PATHS:
+            _PENDING_QUEUE.append(_PendingEntry(row.path))
+            _PENDING_PATHS.add(row.path)
+
+
+def _retry_or_retire(session: Session, entry: _PendingEntry) -> None:
+    entry.ticks += 1
+    if entry.ticks < _MAX_VERIFY_ATTEMPTS:
+        _PENDING_QUEUE.append(entry)
+        _PENDING_PATHS.add(entry.path)
+        return
+    content = session.scalars(
+        select(AssetContent).where(
+            AssetContent.path == entry.path, AssetContent.is_missing.is_(False)
+        )
+    ).first()
+    if content is not None:
+        content.hash = None
+    logging.warning(
+        "Could not verify %s in %d attempts; clearing its stored hash so the hash-mode "
+        "transition can complete",
+        entry.path,
+        _MAX_VERIFY_ATTEMPTS,
+    )
 
 
 def drain_transition_queue(session: Session) -> None:
@@ -76,11 +120,13 @@ def drain_transition_queue(session: Session) -> None:
 
     pending_count = len(_PENDING_QUEUE)
     for _ in range(pending_count):
-        path = _PENDING_QUEUE.pop(0)
+        entry = _PENDING_QUEUE.popleft()
+        _PENDING_PATHS.discard(entry.path)
+        path = entry.path
         try:
             snapshot = snapshot_hash(path)
         except OSError:
-            _PENDING_QUEUE.append(path)
+            _retry_or_retire(session, entry)
             continue
         if snapshot is None:
             # snapshot_hash returns None for vanished and unstable files; stat distinguishes them.
@@ -95,9 +141,9 @@ def drain_transition_queue(session: Session) -> None:
                 if gone is not None:
                     mark_content_missing(session, gone.id)
             except OSError:
-                _PENDING_QUEUE.append(path)
+                _retry_or_retire(session, entry)
             else:
-                _PENDING_QUEUE.append(path)
+                _retry_or_retire(session, entry)
             continue
         digest, stat = snapshot
         stored_hash = to_stored_hash(digest)

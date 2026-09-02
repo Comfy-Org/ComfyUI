@@ -1,4 +1,10 @@
-"""Background asset seeder with thread management and cancellation support."""
+"""Runs the filesystem scan on a background thread so startup never waits for it,
+exposing pause, resume, cancel and progress to the API. A run seeds
+newly-observed files first, then enriches records in batches, and settles any
+pending hash-mode transition at the start of the enrich phase so a server that
+receives no prompts still completes the switch. A pass stops once batches stop
+making progress, bounding a scan over files that cannot be read.
+"""
 
 import logging
 import os
@@ -23,7 +29,7 @@ from app.assets.scanner import (
     drain_pending_verifications,
     tick_watch_list,
 )
-from app.assets.services.hash_mode_state import drain_transition_queue
+from app.assets.services.hash_mode_state import drain_transition_queue, pending_transition_count
 from app.database.db import create_session, dependencies_available
 
 
@@ -785,8 +791,11 @@ class _AssetSeeder:
         with create_session() as session:
             drain_pending_verifications(session)
             tick_watch_list(session)
-            drain_transition_queue(session)
-            session.commit()
+            for _ in range(3):
+                drain_transition_queue(session)
+                session.commit()
+                if pending_transition_count() == 0:
+                    break
         batch_size = 100
         last_progress_time = time.perf_counter()
         progress_interval = 1.0

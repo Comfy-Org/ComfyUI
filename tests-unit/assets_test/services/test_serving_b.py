@@ -136,7 +136,7 @@ def test_resolve_hash_to_path_uses_newest_record_for_name_and_content_type(
     digest = "c" * 64
     f = temp_dir / "shared.bin"
     f.write_bytes(b"data")
-    content = create_content(session, path=str(f), hash=to_stored_hash(digest))
+    content = create_content(session, path=str(f), hash=to_stored_hash(digest), size_bytes=f.stat().st_size)
     older = create_record(
         session,
         content_id=content.id,
@@ -170,7 +170,7 @@ def test_resolve_hash_to_path_serves_content_with_zero_records(
     digest = "d" * 64
     f = temp_dir / "orphan.png"
     f.write_bytes(b"data")
-    content = create_content(session, path=str(f), hash=to_stored_hash(digest))
+    content = create_content(session, path=str(f), hash=to_stored_hash(digest), size_bytes=f.stat().st_size)
     record = create_record(
         session,
         content_id=content.id,
@@ -232,7 +232,7 @@ def test_view_hash_read_updates_last_access_time(
     digest = "a" * 64
     f = temp_dir / "view.bin"
     f.write_bytes(b"view")
-    content = create_content(session, path=str(f), hash=to_stored_hash(digest))
+    content = create_content(session, path=str(f), hash=to_stored_hash(digest), size_bytes=f.stat().st_size)
     record = create_record(session, content_id=content.id, name="view.bin")
     session.commit()
     record_id = record.id

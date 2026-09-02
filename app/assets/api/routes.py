@@ -1,3 +1,11 @@
+"""Serves the asset HTTP API: listing, detail, upload, tagging, hash-addressed
+creation and scan control. A feature gate wraps every handler and answers 503
+when the asset system is switched off or its database dependencies are absent,
+and failures leave as a JSON envelope carrying a stable machine-readable code
+rather than aiohttp's default text. Handlers own request parsing and error
+shaping only; the work itself belongs to the services layer.
+"""
+
 import asyncio
 import functools
 import json
@@ -139,12 +147,18 @@ def _build_validation_error_response(code: str, ve: ValidationError) -> web.Resp
     return _build_error_response(400, code, "Validation failed.", {"errors": errors})
 
 
+class SystemTagForbiddenError(Exception):
+    def __init__(self, tag: str):
+        super().__init__(
+            f"Tag '{tag}' is system-managed and cannot be modified via the API"
+        )
+        self.tag = tag
+
+
 def _reject_system_tags(tags: list[str]) -> None:
     for tag in tags:
         if tag in SYSTEM_TAGS:
-            raise web.HTTPBadRequest(
-                reason=f"Tag '{tag}' is system-managed and cannot be modified via the API"
-            )
+            raise SystemTagForbiddenError(tag)
 
 
 class InvalidTagFilterError(Exception):
@@ -896,9 +910,8 @@ async def add_asset_tags(request: web.Request) -> web.Response:
             400, "INVALID_JSON", "Request body must be valid JSON."
         )
 
-    _reject_system_tags(data.tags)
-
     try:
+        _reject_system_tags(data.tags)
         result = apply_tags(
             reference_id=reference_id,
             tags=data.tags,
@@ -908,6 +921,10 @@ async def add_asset_tags(request: web.Request) -> web.Response:
             added=result.added,
             already_present=result.already_present,
             total_tags=result.total_tags,
+        )
+    except SystemTagForbiddenError as se:
+        return _build_error_response(
+            400, "SYSTEM_TAG_FORBIDDEN", str(se), {"tag": se.tag}
         )
     except PermissionError as pe:
         return _build_error_response(403, "FORBIDDEN", str(pe), {"id": reference_id})
@@ -945,9 +962,8 @@ async def delete_asset_tags(request: web.Request) -> web.Response:
             400, "INVALID_JSON", "Request body must be valid JSON."
         )
 
-    _reject_system_tags(data.tags)
-
     try:
+        _reject_system_tags(data.tags)
         result = remove_tags(
             reference_id=reference_id,
             tags=data.tags,
@@ -957,6 +973,10 @@ async def delete_asset_tags(request: web.Request) -> web.Response:
             not_present=result.not_present,
             total_tags=result.total_tags,
             protected=result.protected,
+        )
+    except SystemTagForbiddenError as se:
+        return _build_error_response(
+            400, "SYSTEM_TAG_FORBIDDEN", str(se), {"tag": se.tag}
         )
     except PermissionError as pe:
         return _build_error_response(403, "FORBIDDEN", str(pe), {"id": reference_id})

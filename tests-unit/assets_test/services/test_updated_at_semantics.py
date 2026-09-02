@@ -28,7 +28,7 @@ STALE = datetime(2020, 1, 1, 0, 0, 0)
 
 
 def _seed_record(session: Session, path: str, name: str = "fixture", tags=None, hash=None) -> Asset:
-    content = create_content(session, path, hash=hash)
+    content = create_content(session, path, hash=hash, size_bytes=os.stat(path).st_size)
     record = create_record(session, content.id, name, tags=tags)
     session.commit()
     _force_stale(session, record.id)

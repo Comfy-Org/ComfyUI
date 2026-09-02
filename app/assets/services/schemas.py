@@ -1,3 +1,9 @@
+"""Defines the frozen result types the service layer hands back to routes and to
+the seeder, keeping those callers off ORM objects and the sessions that own
+them. Each type carries only what its caller renders, so nothing can be lazily
+loaded from a row after its session has closed.
+"""
+
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, NamedTuple

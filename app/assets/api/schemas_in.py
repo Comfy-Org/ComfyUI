@@ -1,3 +1,10 @@
+"""Parses and validates everything the asset API accepts from a client, so
+handlers receive typed values instead of raw JSON. Query strings, JSON bodies
+and multipart upload specs each get a model that rejects malformed input at the
+boundary, normalizes tags and hashes, and raises errors already carrying the
+HTTP status and code the handler should return.
+"""
+
 import json
 from dataclasses import dataclass
 from typing import Any, Literal

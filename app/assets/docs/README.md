@@ -1,6 +1,6 @@
 # Assets
 
-The asset system is only active when explicitly enabled at startup; it is off by default. When it is not enabled, asset API routes return a disabled-service error and no background filesystem scanning occurs.
+The asset system is only active when explicitly enabled at startup; it is off by default. When it is not enabled, asset API routes return a disabled-service error and no background filesystem scanning occurs. Routes answer that same disabled-service error when the system is enabled but its database dependencies are unavailable.
 
 ## Data model
 
@@ -54,7 +54,7 @@ stateDiagram-v2
 
 A reappeared file that matches no missing candidate, or more than one, does not recover any of them. The scanner creates a new content row for the file instead, and the missing candidates stay missing. The same old-missing-plus-new-content shape applies to a same-path edit or reuse: the old row is marked missing and a separate new row and record are created for the new bytes, never transformed in place.
 
-Only a hash can recover a missing content row, with one narrow exception for rows that were never hashed. The scanner hashes the file now present at the missing path and recovers the row only when exactly one missing candidate for that path has the same hash. If no candidate matches, the scanner creates new content. If multiple candidates match, none recover.
+Only a hash can recover a missing content row, with one narrow exception for rows that were never hashed. The scanner hashes the file now present at the missing path and recovers the row only when exactly one missing candidate for that path has the same hash. If no candidate matches, the scanner creates new content. If multiple candidates match, none recover. Recovery also never fires for a path a live content row already occupies: the file there belongs to that row, and ordinary change detection owns it.
 
 A missing row can have a null hash, for example a file deleted before it was ever hashed while every server was down during an off-to-on hashing transition. Such a row can never satisfy the hash comparison, so it has its own narrower recovery condition: it recovers only when it is the single missing null-hash candidate at that path, and its recorded byte size and modification time exactly match the reappeared file's verified stat. The freshly computed hash is set on the row as part of recovery. The stat facts are the only recorded identity a never-hashed row has, so a same-path reappearance that does not preserve them creates new content instead, and the old row stays missing rather than risk recovering the wrong record.
 
@@ -73,7 +73,7 @@ With hashing on, the scanner uses modification time as the cheap change detector
 - If the hash is unchanged, refresh the stored file facts on the existing content row.
 - If the hash changed, mark the old content missing and create a new content row and asset record for the path.
 
-The system persists the previous hashing mode. On a transition from off to on, it hashes every live row without a hash and revalidates every live row that already has one. On a transition from on to off, it retains existing hashes as inert data.
+The system persists the previous hashing mode. On a transition from off to on, it hashes every live row without a hash and revalidates every live row that already has one. A file that cannot be read after a bounded number of attempts keeps its record live with its stored hash cleared, and the transition completes without it. On a transition from on to off, it retains existing hashes as inert data.
 
 Hashing must use a stable file snapshot. The worker checks file facts before and after hashing and accepts the digest only when they still match each other. Otherwise it retries later.
 
@@ -131,13 +131,13 @@ Classification is fixed at record creation. A newly visible path receives the re
 
 ### Delete through the API
 
-Delete the target asset record. Leave its content row and file intact. Do not soft-delete the record, retain a tombstone, or revive the deleted identity during later discovery.
+Delete the target asset record. Leave its content row and file intact. Do not soft-delete the record or revive the deleted identity during later discovery. The retained content row is not a tombstone: it is ordinary live content describing bytes that are still there, and nothing records that a deletion happened.
 
 Deleting a record never deletes any other record. A preview record the deleted asset nominated stays untouched; references to a preview clear only when the preview record itself is deleted. The preview reference points from the deleted record to its target, so deleting the pointer must not destroy the target.
 
 Content left behind after all its asset records are deleted can still be resolved by hash lookup, falling back to a generic name and a guessed content type when no record is left to supply one. There is currently no mechanism that reclaims or removes such orphaned content.
 
-If the file can be found again, a later scan may create a fresh asset record. It must never recreate the deleted identity.
+That retained row is also what makes the deletion durable. A scan seeds only paths with no live content row, so an unchanged file is never given a new record however often it is rediscovered. Only new content at that path produces a fresh asset record: bytes that changed and retired the old row, or content minted after the old row itself is gone. Such a record describes the new content and must never recreate the deleted identity.
 
 ### Rename
 
@@ -313,7 +313,7 @@ Accept a digest only from a stable snapshot (see Hashing modes).
 
 ### Concurrent writers
 
-Database constraints choose the winner when scanners, hooks, or uploads race within one process. Losing writers retry or discard their work, with one known exception: tag creation checks for an existing tag and then inserts without conflict handling, so a genuine race there can surface as an unhandled server error rather than a clean retry-or-discard outcome.
+Database constraints choose the winner when scanners, hooks, or uploads race within one process. Losing writers retry or discard their work. Tag and tag-link inserts run inside a savepoint and re-read the row they collided with, so a duplicate-key collision between concurrent tag writers settles quietly instead of surfacing an error. That covers duplicate keys only; lock contention is a separate limit (see Write pressure and reader starvation).
 
 A file lock prevents more than one server process from opening the same database, so a second process never becomes a concurrent writer in the first place. Do not add advisory locks.
 
@@ -339,4 +339,4 @@ When startup finds the schema that predates the record/content split, it drops a
 
 Scanning runs in the background after startup returns, so the asset API can already be serving requests while the rebuilt tables are still being populated.
 
-The rebuild discards data that a scan cannot reconstruct: manual tags, user metadata, preview assignments, API-created records, `job_id` links, and any record renames.
+The rebuild discards data that a scan cannot reconstruct: manual tags, user metadata, preview assignments, API-created records, `job_id` links, any record renames, and deletions — nothing records which assets were deleted, so the scan mints a record for every file still on disk. When the rebuild runs, startup logs a warning naming the backup file and what was discarded.

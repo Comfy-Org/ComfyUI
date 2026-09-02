@@ -12,6 +12,7 @@ from app.assets.scanner import (
     pending_recovery_count,
     seed_asset_specs,
 )
+from app.assets.scanner_changes import recover_missing_content
 from app.assets.services.snapshot_hash import snapshot_hash
 
 
@@ -135,3 +136,33 @@ def test_unstable_hash_requeues(session, temp_dir: Path):
     assert created == 0
     assert pending_recovery_count() == 1
     assert session.get(AssetContent, missing.id).is_missing is True
+
+
+def test_recovery_skips_a_path_a_live_row_already_occupies(session, temp_dir: Path):
+    path = temp_dir / "contested.bin"
+    path.write_bytes(b"bytes restored under a path someone else already owns")
+    digest = _stored_hash(path)
+    stat_result = path.stat()
+    missing_a, _ = _missing_content(session, path, digest)
+    live_b = AssetContent(
+        path=str(path),
+        hash=digest,
+        is_missing=False,
+        size_bytes=stat_result.st_size,
+        mtime_ns=stat_result.st_mtime_ns,
+    )
+    session.add(live_b)
+    session.commit()
+    live_b_id = live_b.id
+
+    result = recover_missing_content(
+        session, str(path), stat_result, hashing_is_enabled=True
+    )
+    session.commit()
+
+    assert result == "no_match", (
+        "the file at an occupied path belongs to the live row's story; change detection "
+        "owns it, and recovering onto it would put two live rows on one path"
+    )
+    assert session.get(AssetContent, missing_a.id).is_missing is True
+    assert session.get(AssetContent, live_b_id).is_missing is False

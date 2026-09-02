@@ -2,11 +2,17 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from aiohttp import web
 
 from app.assets.api import routes
 
 _RECORD_ID = "00000000-0000-0000-0000-000000000001"
+_SYSTEM_TAG_ENVELOPE = {
+    "error": {
+        "code": "SYSTEM_TAG_FORBIDDEN",
+        "message": "Tag 'missing' is system-managed and cannot be modified via the API",
+        "details": {"tag": "missing"},
+    }
+}
 
 
 class _JsonRequest:
@@ -32,10 +38,10 @@ async def test_add_missing_tag_returns_400(monkeypatch):
         lambda **_kwargs: SimpleNamespace(added=[], already_present=[], total_tags=[]),
     )
 
-    with pytest.raises(web.HTTPBadRequest) as error:
-        await routes.add_asset_tags.__wrapped__(_JsonRequest(["missing"]))
+    response = await routes.add_asset_tags.__wrapped__(_JsonRequest(["missing"]))
 
-    assert error.value.status == 400
+    assert response.status == 400
+    assert json.loads(response.body) == _SYSTEM_TAG_ENVELOPE
 
 
 @pytest.mark.asyncio
@@ -47,10 +53,10 @@ async def test_remove_missing_tag_returns_400(monkeypatch):
         lambda **_kwargs: SimpleNamespace(removed=[], not_present=[], total_tags=[]),
     )
 
-    with pytest.raises(web.HTTPBadRequest) as error:
-        await routes.delete_asset_tags.__wrapped__(_JsonRequest(["missing"]))
+    response = await routes.delete_asset_tags.__wrapped__(_JsonRequest(["missing"]))
 
-    assert error.value.status == 400
+    assert response.status == 400
+    assert json.loads(response.body) == _SYSTEM_TAG_ENVELOPE
 
 
 @pytest.mark.asyncio
