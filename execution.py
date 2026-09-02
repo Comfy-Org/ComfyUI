@@ -210,6 +210,28 @@ def _execution_backend_maintenance_interval() -> float | None:
         raise ValueError("execution backend maintenance interval must be positive")
     return float(value)
 
+_LEGACY_SDK_METHODS = {
+    "execute": "execute",
+    "VALIDATE_INPUTS": "validate_inputs",
+    "IS_CHANGED": "fingerprint_inputs",
+    "check_lazy_status": "check_lazy_status",
+}
+
+
+def _sdk_seam_engaged(type_obj) -> bool:
+    """Whether this node's invocation has to go through the custom-node SDK.
+
+    False on a stock install — no overlay is registered and no node declares
+    SDK intent — which leaves the original call path untouched.
+    """
+    if (getattr(type_obj, "SDK_REFS", False)
+            or getattr(type_obj, "SDK_PERMISSIONS", ())
+            or getattr(type_obj, "SDK_REQUIRED_WEIGHTS", ())):
+        return True
+    from comfy_api.latest import _sdk as _comfy_sdk
+    return _comfy_sdk.providers.engaged
+
+
 def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=None, extra_data={}):
     is_v3 = issubclass(class_def, _ComfyNodeInternal)
     v3_data: io.V3Data = {}
@@ -352,80 +374,77 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                 # swaps them for the isolated engine. Binding happens inside the
                 # invocation scope below so it is correct for the concurrent
                 # async-task path too.
-                from comfy_api.latest import _sdk as _comfy_sdk
-                # A node declares the host capabilities it needs; the backend
-                # decides whether to grant them. Declaring is not granting — an
-                # out-of-process backend still gates each one at the wire, and a
-                # registry manifest can narrow the set further. Nodes that
-                # declare nothing (the overwhelming majority) get nothing.
-                _sdk_perms = getattr(type_obj, "SDK_PERMISSIONS", ()) or ()
-                _sdk_required_weights = getattr(
-                    type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()
-                _sdk_refs_mode = bool(getattr(type_obj, "SDK_REFS", False))
-                _sdk_plan = _comfy_sdk.ExecutionPlan(
-                    prompt_id=str(prompt_id),
-                    node_id=str(unique_id),
-                    node_type=getattr(type_obj, "__name__", "node"),
-                    node_module=getattr(type_obj, "__module__", "") or "",
-                    inputs=inputs,
-                    input_mode="refs" if _sdk_refs_mode else "values",
-                    method=func,
-                    permissions=tuple(_sdk_perms),
-                    required_weights=tuple(_sdk_required_weights),
-                    prompt=getattr(class_clone.hidden, "prompt", None),
-                    extra_pnginfo=getattr(
-                        class_clone.hidden, "extra_pnginfo", None),
-                    dynamic_prompt=getattr(
-                        class_clone.hidden, "dynprompt", None),
-                )
-                _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
-                _sdk_runtime = _comfy_sdk.bind_runtime(
-                    _sdk_refs,
-                    _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
-                    _comfy_sdk.providers.ops_provider,
-                )
-                # SDK nodes see assets (refs), not buffers: wrap heavy inputs.
-                if _sdk_refs_mode:
-                    inputs = await _comfy_sdk.wrap_inputs(_sdk_refs, inputs)
-                    # Ship the work unit on the plan so an out-of-process
-                    # backend can execute without local_call.
-                    _sdk_plan.inputs = inputs
+                if _sdk_seam_engaged(type_obj):
+                    from comfy_api.latest import _sdk as _comfy_sdk
+                    # A node declares the host capabilities it needs; the backend
+                    # decides whether to grant them. Declaring is not granting — an
+                    # out-of-process backend still gates each one at the wire, and a
+                    # registry manifest can narrow the set further. Nodes that
+                    # declare nothing (the overwhelming majority) get nothing.
+                    _sdk_perms = getattr(type_obj, "SDK_PERMISSIONS", ()) or ()
+                    _sdk_required_weights = getattr(
+                        type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()
+                    _sdk_refs_mode = bool(getattr(type_obj, "SDK_REFS", False))
+                    _sdk_plan = _comfy_sdk.ExecutionPlan(
+                        prompt_id=str(prompt_id),
+                        node_id=str(unique_id),
+                        node_type=getattr(type_obj, "__name__", "node"),
+                        node_module=getattr(type_obj, "__module__", "") or "",
+                        inputs=inputs,
+                        input_mode="refs" if _sdk_refs_mode else "values",
+                        method=func,
+                        permissions=tuple(_sdk_perms),
+                        required_weights=tuple(_sdk_required_weights),
+                        prompt=getattr(class_clone.hidden, "prompt", None),
+                        extra_pnginfo=getattr(
+                            class_clone.hidden, "extra_pnginfo", None),
+                        dynamic_prompt=getattr(
+                            class_clone.hidden, "dynprompt", None),
+                    )
+                    _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
+                    _sdk_runtime = _comfy_sdk.bind_runtime(
+                        _sdk_refs,
+                        _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
+                        _comfy_sdk.providers.ops_provider,
+                    )
+                    # SDK nodes see assets (refs), not buffers: wrap heavy inputs.
+                    if _sdk_refs_mode:
+                        inputs = await _comfy_sdk.wrap_inputs(_sdk_refs, inputs)
+                        # Ship the work unit on the plan so an out-of-process
+                        # backend can execute without local_call.
+                        _sdk_plan.inputs = inputs
             # V1
             else:
                 f = getattr(obj, func)
                 type_obj = obj if is_class(obj) else type(obj)
-                if func == getattr(type_obj, "FUNCTION", None):
-                    _legacy_method = "execute"
-                elif func == "VALIDATE_INPUTS":
-                    _legacy_method = "validate_inputs"
-                elif func == "IS_CHANGED":
-                    _legacy_method = "fingerprint_inputs"
-                elif func == "check_lazy_status":
-                    _legacy_method = "check_lazy_status"
-                else:
-                    raise ValueError(
-                        f"legacy node method {func!r} has no sandbox mapping")
+                if _sdk_seam_engaged(type_obj):
+                    _legacy_method = _LEGACY_SDK_METHODS.get(
+                        "execute" if func == getattr(type_obj, "FUNCTION", None)
+                        else func)
+                    if _legacy_method is None:
+                        raise ValueError(
+                            f"legacy node method {func!r} has no sandbox mapping")
 
-                from comfy_api.latest import _sdk as _comfy_sdk
-                _sdk_plan = _comfy_sdk.ExecutionPlan(
-                    prompt_id=str(prompt_id),
-                    node_id=str(unique_id),
-                    node_type=getattr(type_obj, "__name__", "node"),
-                    node_module=getattr(type_obj, "__module__", "") or "",
-                    inputs=inputs,
-                    input_mode="values",
-                    method=_legacy_method,
-                    permissions=tuple(
-                        getattr(type_obj, "SDK_PERMISSIONS", ()) or ()),
-                    required_weights=tuple(getattr(
-                        type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()),
-                )
-                _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
-                _sdk_runtime = _comfy_sdk.bind_runtime(
-                    _sdk_refs,
-                    _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
-                    _comfy_sdk.providers.ops_provider,
-                )
+                    from comfy_api.latest import _sdk as _comfy_sdk
+                    _sdk_plan = _comfy_sdk.ExecutionPlan(
+                        prompt_id=str(prompt_id),
+                        node_id=str(unique_id),
+                        node_type=getattr(type_obj, "__name__", "node"),
+                        node_module=getattr(type_obj, "__module__", "") or "",
+                        inputs=inputs,
+                        input_mode="values",
+                        method=_legacy_method,
+                        permissions=tuple(
+                            getattr(type_obj, "SDK_PERMISSIONS", ()) or ()),
+                        required_weights=tuple(getattr(
+                            type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()),
+                    )
+                    _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
+                    _sdk_runtime = _comfy_sdk.bind_runtime(
+                        _sdk_refs,
+                        _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
+                        _comfy_sdk.providers.ops_provider,
+                    )
 
             def _invoke_scope():
                 import contextlib
