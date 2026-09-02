@@ -1,9 +1,11 @@
+import os
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.assets.database.models import Asset, AssetContent
@@ -114,10 +116,33 @@ def test_seed_logs_once_for_each_vanished_path(
 
 
 def test_seed_isolates_a_poisoned_spec_and_persists_the_specs_around_it(
-    session: Session, temp_dir: Path
+    session: Session, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     specs, poisoned_path = _specs_with_vanished_path(temp_dir)
-    specs[1]["size_bytes"] = -1
+
+    def _create_record_or_raise(
+        session_arg: Session,
+        *,
+        content_id: str,
+        name: str,
+        mime_type: str | None,
+        job_id: str | None,
+        loader_path: str | None,
+        tags: list[str],
+    ) -> Asset:
+        if name == poisoned_path.name:
+            raise IntegrityError("forced record creation failure", {}, ValueError())
+        return create_record(
+            session_arg,
+            content_id,
+            name,
+            mime_type,
+            job_id,
+            loader_path,
+            tags,
+        )
+
+    monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
 
     created = seed_asset_specs(session, specs)
     session.commit()
@@ -131,6 +156,32 @@ def test_seed_isolates_a_poisoned_spec_and_persists_the_specs_around_it(
         "the batch shares one transaction, so a bare rollback would erase the spec BEFORE "
         f"the poisoned one; both neighbours of {poisoned_path.name} must survive"
     )
+
+
+def test_seed_persists_fresh_stat_after_spec_was_built(
+    session: Session, temp_dir: Path
+) -> None:
+    path = temp_dir / "changed-after-walk.bin"
+    path.write_bytes(b"walk-time")
+    spec = _spec(path)
+
+    path.write_bytes(b"fresh-seed-time-content")
+    fresh_mtime_ns = spec["mtime_ns"] + 1_000_000
+    os.utime(path, ns=(fresh_mtime_ns, fresh_mtime_ns))
+    fresh_stat = path.stat()
+
+    created = seed_asset_specs(session, [spec])
+    session.commit()
+
+    persisted = session.scalar(
+        select(AssetContent).where(AssetContent.path == str(path))
+    )
+    assert created == 1
+    assert fresh_stat.st_size != spec["size_bytes"]
+    assert fresh_stat.st_mtime_ns != spec["mtime_ns"]
+    assert persisted is not None
+    assert persisted.size_bytes == fresh_stat.st_size
+    assert persisted.mtime_ns == fresh_stat.st_mtime_ns
 
 
 def test_seed_record_failure_preserves_retained_live_content(

@@ -347,8 +347,8 @@ def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
                         session,
                         path=path,
                         hash=None,
-                        size_bytes=spec["size_bytes"],
-                        mtime_ns=spec["mtime_ns"],
+                        size_bytes=stat_result.st_size,
+                        mtime_ns=get_mtime_ns(stat_result),
                     )
                     if inserted:
                         created_content_ids.append(content.id)
