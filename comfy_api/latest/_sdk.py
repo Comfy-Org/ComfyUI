@@ -15646,6 +15646,21 @@ class Providers:
     def overlay_active(self) -> bool:
         return self._overlay_name is not None
 
+    @property
+    def engaged(self) -> bool:
+        """Whether anything has replaced a default in-process provider.
+
+        False on a stock install, which is what lets core skip the SDK seam
+        and keep its original node-invocation path. The ops provider is
+        excluded: ops are reachable only through the seam, so extending the op
+        vocabulary alone cannot change how an ordinary node runs.
+        """
+        return not (
+            type(self.execution_backend) is InProcessExecutionBackend
+            and type(self.ctx_provider) is InProcessCtxProvider
+            and self.ref_resolver_factory is InProcessRefResolver
+        )
+
 
 providers = Providers()
 
