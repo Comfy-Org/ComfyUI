@@ -6,7 +6,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.assets.database.models import Asset
+from app.assets.database.models import Asset, AssetContent
+from app.assets.database.queries import create_content, create_record, delete_record
 from app.assets.scanner import SeedAssetSpec, seed_asset_specs
 from app.assets.services.snapshot_hash import snapshot_hash
 
@@ -130,3 +131,33 @@ def test_seed_isolates_a_poisoned_spec_and_persists_the_specs_around_it(
         "the batch shares one transaction, so a bare rollback would erase the spec BEFORE "
         f"the poisoned one; both neighbours of {poisoned_path.name} must survive"
     )
+
+
+def test_seed_record_failure_preserves_retained_live_content(
+    session: Session, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = temp_dir / "retained.bin"
+    path.write_bytes(b"retained-live-content")
+    spec = _spec(path)
+    content = create_content(
+        session,
+        path=str(path),
+        size_bytes=spec["size_bytes"],
+        mtime_ns=spec["mtime_ns"],
+    )
+    record = create_record(session, content.id, path.name)
+    session.commit()
+    retained_content_id = content.id
+    delete_record(session, record.id)
+    session.commit()
+
+    def _raise_record_creation(*_args, **_kwargs):
+        raise RuntimeError("forced record creation failure")
+
+    monkeypatch.setattr("app.assets.scanner.create_record", _raise_record_creation)
+
+    with pytest.raises(RuntimeError, match="forced record creation failure"):
+        seed_asset_specs(session, [spec])
+    session.rollback()
+
+    assert session.get(AssetContent, retained_content_id) is not None

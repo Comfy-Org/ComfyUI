@@ -47,7 +47,7 @@ def _live_content_count(session: Session) -> int:
     )
 
 
-def test_upload_from_temp_path_discards_content_on_record_failure(
+def test_upload_record_failure_discards_newly_inserted_content(
     mock_create_session, hashing_off, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     content = b"orphan-upload-" + uuid.uuid4().bytes

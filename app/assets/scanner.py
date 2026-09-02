@@ -20,10 +20,10 @@ from sqlalchemy.orm import Session
 from app.assets import mode
 from app.assets.database.queries import (
     mark_content_missing,
-    create_content,
     create_record,
 )
 from app.assets.database.models import Asset, AssetContent
+from app.assets.database.queries.records import create_content_reporting_insert
 from app.assets.helpers import sql_path_under_prefix, to_stored_hash
 from app.assets.lifecycle import get_excluded_scan_roots
 from app.assets.scanner_changes import (
@@ -343,14 +343,15 @@ def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
                         continue
                     if recovery != "no_match":
                         continue
-                    content = create_content(
+                    content, inserted = create_content_reporting_insert(
                         session,
                         path=path,
                         hash=None,
                         size_bytes=spec["size_bytes"],
                         mtime_ns=spec["mtime_ns"],
                     )
-                    created_content_ids.append(content.id)
+                    if inserted:
+                        created_content_ids.append(content.id)
                     existing_record = session.scalar(
                         sa.select(Asset.id).where(Asset.content_id == content.id).limit(1)
                     )
