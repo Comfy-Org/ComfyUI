@@ -1063,4 +1063,3 @@ if __name__ == "__main__":
     test_async_sdk_node_inverts_through_real_engine()
     test_legacy_sync_node_scales_through_real_engine()
     test_overlay_backend_intercepts_dispatch()
-    print("PASS: all secure-SDK seam checks")
