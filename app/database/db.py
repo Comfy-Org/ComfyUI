@@ -21,6 +21,7 @@ try:
 
     from app.database.models import Base
     import app.assets.database.models  # noqa: F401 — register models with Base.metadata
+    import blake3  # noqa: F401 — verify the hard dependency is importable at startup
 
     _DB_AVAILABLE = True
 except ImportError as e:
