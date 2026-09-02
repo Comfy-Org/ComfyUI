@@ -492,71 +492,6 @@ class ImagePreprocessorRef(Ref):
         mask: Optional[MaskRef] = ...,
     ) -> ImageRef: ...
 
-class IpAdapterEmbedsRef(Ref):
-    KIND: str
-    async def combine(
-        self,
-        others: list["IpAdapterEmbedsRef"],
-        method: str = ...,
-    ) -> "IpAdapterEmbedsRef": ...
-
-class IpAdapterRef(Ref):
-    KIND: str
-    async def apply(
-        self,
-        model: ModelRef,
-        image: ImageRef,
-        negative_image: Optional[ImageRef] = ...,
-        attn_mask: Optional[MaskRef] = ...,
-        style_image: Optional[ImageRef] = ...,
-        composition_image: Optional[ImageRef] = ...,
-        weight: float = ...,
-        weight_type: str = ...,
-        start_percent: float = ...,
-        end_percent: float = ...,
-        combine_embeds: str = ...,
-        weight_faceidv2: float = ...,
-        embeds_scaling: str = ...,
-        unfold_batch: bool = ...,
-        layer_weights: Optional[str] = ...,
-        weight_style: float = ...,
-        weight_composition: float = ...,
-        expand_style: bool = ...,
-    ) -> ModelRef: ...
-    async def apply_tiled(
-        self,
-        model: ModelRef,
-        image: ImageRef,
-        negative_image: Optional[ImageRef] = ...,
-        attn_mask: Optional[MaskRef] = ...,
-        weight: float = ...,
-        weight_type: str = ...,
-        start_percent: float = ...,
-        end_percent: float = ...,
-        combine_embeds: str = ...,
-        embeds_scaling: str = ...,
-        sharpening: float = ...,
-        unfold_batch: bool = ...,
-    ) -> tuple[ModelRef, ImageRef, MaskRef]: ...
-    async def encode(
-        self,
-        image: ImageRef,
-        weight: float = ...,
-        mask: Optional[MaskRef] = ...,
-    ) -> tuple[IpAdapterEmbedsRef, IpAdapterEmbedsRef]: ...
-    async def apply_embeds(
-        self,
-        model: ModelRef,
-        positive: IpAdapterEmbedsRef,
-        negative: Optional[IpAdapterEmbedsRef] = ...,
-        attn_mask: Optional[MaskRef] = ...,
-        weight: float = ...,
-        weight_type: str = ...,
-        start_percent: float = ...,
-        end_percent: float = ...,
-        embeds_scaling: str = ...,
-    ) -> ModelRef: ...
-
 class SamModelRef(Ref):
     KIND: str
     async def segment(
@@ -855,7 +790,7 @@ class ModelsDomain(Protocol):
         self,
         model: str,
         clip_vision: ClipVisionRef,
-    ) -> IpAdapterRef: ...
+    ) -> Ref: ...
     async def load_brushnet(
         self,
         model: str,
