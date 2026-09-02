@@ -26,7 +26,6 @@ same move at a different scope.
 """
 from __future__ import annotations
 
-from typing import Any
 
 from ._model_transforms import ListOfRefs, Param, RefOf
 
