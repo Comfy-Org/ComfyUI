@@ -55,13 +55,17 @@ def test_ollama_vendor_projection_is_closed_bounded_and_encodes_images(
     async def run():
         refs = InProcessRefResolver()
         context = InProcessCtxProvider().build(_plan())
-        integration = context.integrations.ollama
+        async def ollama(operation, **params):
+            return await context.integrations.call("ollama", operation, **params)
+
         with bind_runtime(refs, context, InProcessOps()):
             image = ImageRef._wrap(await refs.create(
                 "IMAGE", torch.zeros((2, 3, 4, 3))))
-            assert await integration.list_models(
-                "http://127.0.0.1:11434") == ["vision:latest", "qwen"]
-            generated = await integration.generate(
+            assert await ollama(
+                "list_models", endpoint="http://127.0.0.1:11434",
+            ) == ["vision:latest", "qwen"]
+            generated = await ollama(
+                "generate",
                 endpoint="http://127.0.0.1:11434",
                 model="vision:latest",
                 system="be precise",
@@ -89,7 +93,8 @@ def test_ollama_vendor_projection_is_closed_bounded_and_encodes_images(
                 "thinking": "considered",
                 "context": [2, 3, 5],
             }
-            chatted = await integration.chat(
+            chatted = await ollama(
+                "chat",
                 endpoint="ollama://studio",
                 model="qwen",
                 messages=[{"role": "user", "content": "hello"}],
@@ -101,10 +106,11 @@ def test_ollama_vendor_projection_is_closed_bounded_and_encodes_images(
             assert chatted == {"response": "chatted", "thinking": "reasoned"}
 
             with pytest.raises(ValueError, match="loopback"):
-                await integration.list_models("http://example.com:11434")
+                await ollama("list_models", endpoint="http://example.com:11434")
             with pytest.raises(ValueError, match="unsupported"):
-                await integration.generate(
-                    "http://127.0.0.1:11434", "qwen", "", "x",
+                await ollama(
+                    "generate", endpoint="http://127.0.0.1:11434",
+                    model="qwen", system="", prompt="x",
                     options={"arbitrary": True})
 
     asyncio.run(run())
@@ -166,11 +172,7 @@ def test_generic_llm_tool_chat_normalizes_messages_and_calls(monkeypatch):
         refs = InProcessRefResolver()
         context = InProcessCtxProvider().build(_plan())
         with bind_runtime(refs, context, InProcessOps()):
-            result = await context.integrations.llm.chat(
-                provider="ollama",
-                profile="http://127.0.0.1:11434",
-                model="qwen",
-                messages=[
+            result = await context.integrations.call("llm", "chat", provider="ollama", profile="http://127.0.0.1:11434", model="qwen", messages=[
                     {"role": "system", "content": "Use tools."},
                     {"role": "user", "content": "What time is it?"},
                     {
@@ -186,8 +188,7 @@ def test_generic_llm_tool_chat_normalizes_messages_and_calls(monkeypatch):
                         "name": "search_internet",
                         "content": "12:34",
                     },
-                ],
-                tools=[{
+                ], tools=[{
                     "name": "search_internet",
                     "description": "Search the web",
                     "parameters": {
@@ -195,19 +196,12 @@ def test_generic_llm_tool_chat_normalizes_messages_and_calls(monkeypatch):
                         "properties": {"query": {"type": "string"}},
                         "required": ["query"],
                     },
-                }],
-                temperature=0.2,
-                max_tokens=2048,
-                thinking=True,
-                response_format="json",
-                timeout_seconds=120,
-                vendor_options={
+                }], temperature=0.2, max_tokens=2048, thinking=True, response_format="json", timeout_seconds=120, vendor_options={
                     "ollama": {
                         "keep_alive": 2,
                         "keep_alive_unit": "hours",
                     },
-                },
-            )
+                })
             assert result == {
                 "content": "",
                 "thinking": "I should search",
@@ -218,10 +212,7 @@ def test_generic_llm_tool_chat_normalizes_messages_and_calls(monkeypatch):
             }
 
             with pytest.raises(ValueError, match="provider"):
-                await context.integrations.llm.chat(
-                    "unknown", "profile", "model",
-                    [{"role": "user", "content": "x"}],
-                )
+                await context.integrations.call("llm", "chat", provider="unknown", profile="profile", model="model", messages=[{"role": "user", "content": "x"}])
 
     asyncio.run(run())
 

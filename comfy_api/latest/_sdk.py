@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import inspect
 import logging
 import os
 import re
@@ -53,13 +54,14 @@ import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import (
-    TYPE_CHECKING,
     Any,
     Awaitable,
     Callable,
+    Mapping,
     Optional,
     Protocol,
     Sequence,
+    TYPE_CHECKING,
     runtime_checkable,
 )
 
@@ -1072,8 +1074,9 @@ class LlamaCppModelRef(_TypedRef):
         repetition_penalty: float = 1.0,
         seed: int = 1,
     ) -> str:
-        return str(await current_context().integrations.llama_cpp.generate(
-            self,
+        return str(await current_context().integrations.call(
+            "llama_cpp", "generate",
+            model=self,
             system=system,
             prompt=prompt,
             image=image,
@@ -2006,180 +2009,43 @@ class ExecutionDomain(Protocol):
     async def interrupt(self) -> bool: ...
 
 
-class CivitaiDomain(Protocol):
-    """Bounded read-only projection of the Civitai public model API."""
-
-    async def search_models(
-        self, username: str, query: Optional[str] = None,
-        limit: int = 20, nsfw: bool = False,
-    ) -> dict[str, Any]: ...
-    async def model_version(
-        self, model_version_id: int,
-    ) -> dict[str, Any]: ...
-    async def model_version_by_hash(
-        self, hash_value: str, refresh: bool = False,
-    ) -> dict[str, Any]: ...
-
-
-class OllamaDomain(Protocol):
-    """Bounded Ollama vendor API; endpoint is loopback or an admin profile."""
-
-    async def list_models(self, endpoint: str) -> list[str]: ...
-    async def generate(
-        self, endpoint: str, model: str, system: str, prompt: str,
-        images: Optional[ImageRef] = None,
-        context: Optional[list[int]] = None, think: bool = False,
-        options: Optional[dict[str, Any]] = None, keep_alive: int = 5,
-        keep_alive_unit: str = "minutes",
-        format: str | dict[str, Any] = "",
-        timeout_seconds: float = 600.0,
-    ) -> dict[str, Any]: ...
-    async def chat(
-        self, endpoint: str, model: str,
-        messages: list[dict[str, Any]], images: Optional[ImageRef] = None,
-        think: bool = False, options: Optional[dict[str, Any]] = None,
-        keep_alive: int = 5, keep_alive_unit: str = "minutes",
-        format: str | dict[str, Any] = "", timeout_seconds: float = 600.0,
-        tools: Optional[list[dict[str, Any]]] = None,
-    ) -> dict[str, Any]: ...
-
-
-class LlmDomain(Protocol):
-    """Provider-neutral bounded chat and function-tool contract."""
-
-    async def chat(
-        self, provider: str, profile: str, model: str,
-        messages: list[dict[str, Any]], *,
-        tools: Optional[list[dict[str, Any]]] = None,
-        temperature: float = 0.8, max_tokens: int = 512,
-        thinking: bool = False,
-        response_format: str | dict[str, Any] = "",
-        timeout_seconds: float = 600.0,
-        vendor_options: Optional[dict[str, Any]] = None,
-    ) -> dict[str, Any]: ...
-
-
-class WebSearchDomain(Protocol):
-    """Fixed-profile web search with bounded normalized results."""
-
-    async def search(
-        self, query: str, *, provider_profile: str = "duckduckgo",
-        limit: int = 5,
-        vendor_options: Optional[dict[str, Any]] = None,
-    ) -> list[dict[str, str]]: ...
-
-
-class LumaDomain(Protocol):
-    """Fixed-origin Luma Dream Machine generation jobs (D32)."""
-
-    async def create_video(
-        self, api_key: str, prompt: str, model: str, *,
-        loop: bool = False, aspect_ratio: Optional[str] = None,
-        duration: Optional[str] = None, resolution: str = "720p",
-        keyframes: Optional[dict[str, Any]] = None,
-        save: bool = True, filename: str = "",
-    ) -> dict[str, Any]: ...
-    async def upscale_video(
-        self, api_key: str, generation_id: str, resolution: str, *,
-        save: bool = True, filename: str = "",
-    ) -> dict[str, Any]: ...
-    async def add_audio(
-        self, api_key: str, generation_id: str, prompt: str,
-        negative_prompt: str, *, save: bool = True, filename: str = "",
-    ) -> dict[str, Any]: ...
-    async def create_image(
-        self, api_key: str, prompt: str, model: str, *,
-        aspect_ratio: str = "1:1",
-        image_ref: Optional[list[dict[str, Any]]] = None,
-        style_ref: Optional[list[dict[str, Any]]] = None,
-        character_ref: Optional[dict[str, Any]] = None,
-        modify_image_ref: Optional[dict[str, Any]] = None,
-    ) -> dict[str, Any]: ...
-
-
-class ImgBBDomain(Protocol):
-    """Upload one host-owned image to the fixed ImgBB endpoint (D32)."""
-
-    async def upload(
-        self, api_key: str, image: ImageRef, *,
-        expiration_seconds: Optional[int] = None,
-    ) -> str: ...
-
-
-class SenseNovaDomain(Protocol):
-    """Fixed-origin SenseNova chat, vision, and image generation (D33)."""
-
-    async def chat(
-        self, text: str, system_prompt: str, model: str, *,
-        temperature: float = 0.7, top_p: float = 1.0,
-        max_tokens: int = 2048, timeout_seconds: int = 120,
-    ) -> dict[str, ValueRef]: ...
-    async def vision_url(
-        self, image_url: str, prompt: str, system_prompt: str, model: str, *,
-        temperature: float = 0.2, top_p: float = 1.0,
-        max_tokens: int = 2048, timeout_seconds: int = 120,
-    ) -> dict[str, ValueRef]: ...
-    async def vision_image(
-        self, image: ImageRef, prompt: str, system_prompt: str, model: str, *,
-        temperature: float = 0.2, top_p: float = 1.0,
-        max_tokens: int = 2048, timeout_seconds: int = 120,
-    ) -> dict[str, ValueRef]: ...
-    async def generate_image(
-        self, prompt: str, model: str, size: str, *,
-        timeout_seconds: int = 300,
-    ) -> dict[str, Ref]: ...
-
-
-class LlamaCppDomain(Protocol):
-    """Bounded llama.cpp vendor adapter over managed GGUF weights."""
-
-    async def load_chat_model(
-        self, model_weight: str, mmproj_weight: Optional[str] = None, *,
-        family: str = "qwen3_vl", device: str = "auto",
-        context_length: int = 8192, batch_size: int = 512,
-        gpu_layers: int = -1, image_max_tokens: int = 4096,
-        top_k: int = 0, pool_size: int = 4_194_304,
-        cache: bool = True,
-    ) -> LlamaCppModelRef: ...
-    async def generate(
-        self, model: LlamaCppModelRef, system: str, prompt: str,
-        image: Optional[ImageRef] = None,
-        video: Optional[ImageRef] = None,
-        max_tokens: int = 512, temperature: float = 0.7,
-        top_p: float = 0.9, repetition_penalty: float = 1.0,
-        seed: int = 1,
-    ) -> str: ...
-
-
-class WanVideoDomain(Protocol):
-    """Bounded metadata for WanVideo vendor-owned opaque model handles."""
-
-    async def transformer_dim(self, model: Ref) -> int: ...
-
-
-class AnimaDomain(Protocol):
-    """Vendor-specific Anima model adapters."""
-
-    async def apply_lllite(
-        self, model: ModelRef, weights: AssetRef, image: ImageRef, *,
-        strength: float = 1.0, start_percent: float = 0.0,
-        end_percent: float = 1.0, preserve_wrapper: bool = True,
-    ) -> ModelRef: ...
-
-
 class IntegrationsDomain(Protocol):
-    """Vendor pass-throughs with vendor-shaped, less-stable contracts."""
+    """Named dispatch to a host-registered third-party service.
 
-    anima: AnimaDomain
-    civitai: CivitaiDomain
-    imgbb: ImgBBDomain
-    llm: LlmDomain
-    llama_cpp: LlamaCppDomain
-    luma: LumaDomain
-    ollama: OllamaDomain
-    sensenova: SenseNovaDomain
-    wanvideo: WanVideoDomain
-    web: WebSearchDomain
+    A guest has no network. Everything here is performed by the host on the
+    node's behalf, against an origin the host fixes — a loopback or admin
+    Ollama endpoint, Civitai's public read API, ImgBB's upload endpoint. The
+    node names an integration; it never supplies a URL, so this cannot become
+    a general-purpose request facility.
+
+    Authority is the permission `integrations.<name>`, declared by the node,
+    granted or refused by the deployment, and enforced at the wire before any
+    vendor code runs. That check keys off the name alone, which is why the
+    typed per-vendor domains this replaced added published surface without
+    adding enforcement: ten vendor-shaped contracts inside an API that has to
+    stay stable, growing by one every time a service was added.
+
+    `describe()` reports what the host currently offers, so a node can adapt
+    to a deployment rather than assume a build.
+    """
+
+    async def call(
+        self, integration: str, operation: str, **params: Any,
+    ) -> Any:
+        """Invoke `operation` on `integration`, e.g. `("ollama", "generate")`.
+
+        Raises if the integration is unknown to the host or the node was not
+        granted `integrations.<integration>`.
+        """
+        ...
+
+    async def describe(self) -> Mapping[str, Sequence[str]]:
+        """The operations each granted integration exposes, by name.
+
+        Reports only integrations this node was granted, so a refusal is not
+        also a disclosure of what the deployment has configured.
+        """
+        ...
 
 
 class ModelsDomain(Protocol):
@@ -8740,16 +8606,48 @@ class _InProcessLlm:
 
 @dataclass(frozen=True)
 class _InProcessIntegrations:
-    anima: Any = field(default_factory=InProcessAnima)
-    civitai: Any = field(default_factory=InProcessCivitai)
-    imgbb: Any = field(default_factory=InProcessImgBB)
-    llm: Any = field(default_factory=_InProcessLlm)
-    llama_cpp: Any = field(default_factory=InProcessLlamaCpp)
-    luma: Any = field(default_factory=InProcessLuma)
-    ollama: Any = field(default_factory=InProcessOllama)
-    sensenova: Any = field(default_factory=InProcessSenseNova)
-    wanvideo: Any = field(default_factory=_InProcessWanVideo)
-    web: Any = field(default_factory=lambda: _StubDomain("integrations.web"))
+    """`IntegrationsDomain` for the trusted in-process path.
+
+    The vendors are held privately and reached only by name, so this path
+    offers exactly the surface the sandboxed one does. Exposing them as
+    attributes here instead let a node work unsandboxed and fail the moment it
+    was sandboxed, which is the one difference this path must never have.
+    """
+
+    _vendors: Mapping[str, Any] = field(default_factory=lambda: {
+        "anima": InProcessAnima(),
+        "civitai": InProcessCivitai(),
+        "imgbb": InProcessImgBB(),
+        "llm": _InProcessLlm(),
+        "llama_cpp": InProcessLlamaCpp(),
+        "luma": InProcessLuma(),
+        "ollama": InProcessOllama(),
+        "sensenova": InProcessSenseNova(),
+        "wanvideo": _InProcessWanVideo(),
+        "web": _StubDomain("integrations.web"),
+    })
+
+    async def call(
+        self, integration: str, operation: str, **params: Any,
+    ) -> Any:
+        vendor = self._vendors.get(integration)
+        if vendor is None:
+            raise ValueError(f"unknown integration {integration!r}")
+        handler = getattr(vendor, operation, None)
+        if handler is None or operation.startswith("_"):
+            raise ValueError(
+                f"integration {integration!r} has no operation {operation!r}")
+        return await handler(**params)
+
+    async def describe(self) -> Mapping[str, Sequence[str]]:
+        return {
+            name: tuple(sorted(
+                op for op in dir(vendor)
+                if not op.startswith("_")
+                and inspect.iscoroutinefunction(getattr(vendor, op, None))
+            ))
+            for name, vendor in self._vendors.items()
+        }
 
 
 @dataclass
