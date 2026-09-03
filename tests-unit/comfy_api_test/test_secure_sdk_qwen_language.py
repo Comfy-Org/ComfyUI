@@ -316,12 +316,7 @@ def test_llama_cpp_vendor_ref_hides_paths_and_encodes_media(
         refs = InProcessRefResolver()
         context = InProcessCtxProvider().build(_plan())
         with bind_runtime(refs, context, InProcessOps()):
-            model = await context.integrations.llama_cpp.load_chat_model(
-                "model.gguf",
-                "mmproj.gguf",
-                family="qwen3_vl",
-                device="cpu",
-            )
+            model = await context.integrations.call("llama_cpp", "load_chat_model", model_weight="model.gguf", mmproj_weight="mmproj.gguf", family="qwen3_vl", device="cpu")
             assert isinstance(model, LlamaCppModelRef)
             image = ImageRef._wrap(await refs.create(
                 "IMAGE", torch.zeros((1, 4, 5, 3))))
@@ -331,8 +326,7 @@ def test_llama_cpp_vendor_ref_hides_paths_and_encodes_media(
                 "system", "prompt", image=image, video=video,
                 max_tokens=32, seed=9)
             with pytest.raises(ValueError, match="require an mmproj"):
-                await context.integrations.llama_cpp.load_chat_model(
-                    "model.gguf", family="qwen3_vl")
+                await context.integrations.call("llama_cpp", "load_chat_model", model_weight="model.gguf", family="qwen3_vl")
         return result
 
     assert asyncio.run(run()) == "described"

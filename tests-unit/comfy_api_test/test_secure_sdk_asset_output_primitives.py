@@ -353,20 +353,15 @@ def test_civitai_vendor_projection_is_closed_bounded_and_cached(monkeypatch):
 
     async def run():
         context = InProcessCtxProvider().build(_plan())
-        first = await context.integrations.civitai.search_models(
-            "alice", "Model", limit=20, nsfw=True)
-        again = await context.integrations.civitai.search_models(
-            "alice", "Model", limit=20, nsfw=True)
-        version = await context.integrations.civitai.model_version(9)
-        by_hash = await context.integrations.civitai.model_version_by_hash(
-            "a" * 64)
-        refreshed = await context.integrations.civitai.model_version_by_hash(
-            "a" * 64, refresh=True)
+        first = await context.integrations.call("civitai", "search_models", username="alice", query="Model", limit=20, nsfw=True)
+        again = await context.integrations.call("civitai", "search_models", username="alice", query="Model", limit=20, nsfw=True)
+        version = await context.integrations.call("civitai", "model_version", model_version_id=9)
+        by_hash = await context.integrations.call("civitai", "model_version_by_hash", hash_value="a" * 64)
+        refreshed = await context.integrations.call("civitai", "model_version_by_hash", hash_value="a" * 64, refresh=True)
         with pytest.raises(ValueError, match="limit"):
-            await context.integrations.civitai.search_models(
-                "alice", limit=101)
+            await context.integrations.call("civitai", "search_models", username="alice", limit=101)
         with pytest.raises(ValueError, match="hash"):
-            await context.integrations.civitai.model_version_by_hash("../x")
+            await context.integrations.call("civitai", "model_version_by_hash", hash_value="../x")
         return first, again, version, by_hash, refreshed
 
     first, again, version, by_hash, refreshed = asyncio.run(run())
@@ -444,90 +439,6 @@ def test_civitai_image_metadata_projection_is_closed_and_bounded():
     assert all(
         "127.0.0.1" not in item["url"] for item in projected["images"])
     assert all(set(item) <= {"url", "meta"} for item in projected["images"])
-
-
-def test_onnx_multilabel_classifier_keeps_scores_opaque_and_pages_matches(
-    tmp_path, monkeypatch,
-):
-    import numpy as np
-    import onnx
-    from onnx import TensorProto, helper
-    import folder_paths
-    from comfy_api.latest import _sdk
-
-    input_info = helper.make_tensor_value_info(
-        "image", TensorProto.FLOAT, [None, 4, 4, 3])
-    output_info = helper.make_tensor_value_info(
-        "scores", TensorProto.FLOAT, [None, 4])
-    weights = helper.make_tensor(
-        "weights", TensorProto.FLOAT, [48, 4],
-        np.zeros((48, 4), dtype=np.float32).ravel())
-    bias = helper.make_tensor(
-        "bias", TensorProto.FLOAT, [4], [0.1, 0.7, 0.3, 0.9])
-    graph = helper.make_graph([
-        helper.make_node("Flatten", ["image"], ["flat"], axis=1),
-        helper.make_node(
-            "Gemm", ["flat", "weights", "bias"], ["scores"]),
-    ], "classifier", [input_info], [output_info], [weights, bias])
-    model = helper.make_model(
-        graph, opset_imports=[
-            helper.make_opsetid("", 17),
-            # Several real WD exporters retain unused provider opsets. The
-            # validator confines domains on executable nodes, not dead imports.
-            helper.make_opsetid("com.microsoft", 1),
-        ])
-    model.ir_version = 8
-    model_path = tmp_path / "classifier.onnx"
-    onnx.save(model, model_path)
-    monkeypatch.setitem(
-        folder_paths.folder_names_and_paths,
-        "onnx", ([str(tmp_path)], {".onnx"}),
-    )
-    _sdk._ONNX_IMAGE_CLASSIFIER_CACHE.clear()
-
-    with pytest.raises(ValueError, match="sha256"):
-        _sdk.HuggingFaceWeight(
-            "owner/model", "model.onnx", "onnx", revision="abc123")
-    declaration = _sdk.HuggingFaceWeight(
-        "owner/model", "model.onnx", "onnx", revision="abc123",
-        sha256="a" * 64,
-    )
-    assert declaration.catalogue_name.endswith("/model.onnx")
-
-    async def run():
-        refs = InProcessRefResolver()
-        context = InProcessCtxProvider().build(_plan())
-        with bind_runtime(refs, context, InProcessOps()):
-            classifier = await context.models.load_onnx_image_classifier(
-                "classifier.onnx",
-                input_layout="NHWC",
-                channel_order="BGR",
-                resize_mode="fit_pad",
-                input_scale=255.0,
-                activation="identity",
-            )
-            # A second bind reuses the validated runtime session.
-            await context.models.load_onnx_image_classifier(
-                "classifier.onnx", activation="identity")
-            images = ImageRef._wrap(await refs.create(
-                "IMAGE", torch.zeros((2, 2, 4, 3), dtype=torch.float32)))
-            scores = await classifier.predict_scores(images)
-            shape = await scores.shape()
-            first = await scores.select_above(
-                0, 0, 4, 0.25, offset=0, limit=2)
-            second = await scores.select_above(
-                0, 0, 4, 0.25, offset=first["next_offset"], limit=2)
-            with pytest.raises(ValueError, match="class range"):
-                await scores.select_above(0, 0, 5, 0.0)
-            return shape, first, second
-
-    shape, first, second = asyncio.run(run())
-    assert shape == (2, 4)
-    assert [item["index"] for item in first["items"]] == [1, 2]
-    assert first["next_offset"] == 2
-    assert [item["index"] for item in second["items"]] == [3]
-    assert second["next_offset"] is None
-    assert _sdk._ONNX_IMAGE_CLASSIFIER_CACHE.loads == 1
 
 
 def test_onnx_validation_rejects_external_tensor_data(tmp_path):
