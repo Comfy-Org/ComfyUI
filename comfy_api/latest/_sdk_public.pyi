@@ -390,14 +390,6 @@ class AssetRef(Ref):
 class ClipSegRef(Ref):
     KIND: str
 
-class SemanticSegmentationRef(Ref):
-    KIND: str
-    async def mask(
-        self,
-        image: ImageRef,
-        classes: list[int],
-    ) -> MaskRef: ...
-
 class InpaintModelRef(Ref):
     KIND: str
     async def inpaint(
@@ -760,12 +752,6 @@ class ModelsDomain(Protocol):
         dtype: str = ...,
     ) -> PowerPaintRef: ...
     async def load_clipseg(self, model: str) -> ClipSegRef: ...
-    async def load_segformer(
-        self,
-        model: str,
-        variant: str,
-        num_labels: int,
-    ) -> SemanticSegmentationRef: ...
     async def load_inpaint_model(
         self,
         model: str,

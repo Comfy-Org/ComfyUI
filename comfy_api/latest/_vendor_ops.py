@@ -26,7 +26,6 @@ if TYPE_CHECKING:
         ModelRef,
         Ref,
         SamModelRef,
-        SemanticSegmentationRef,
         TimestepKeyframeRef,
     )
 
@@ -413,94 +412,6 @@ async def clipseg_predict_mask(clipseg: "ClipSegRef", images: "ImageRef", text: 
     return _sdk.MaskRef._wrap(
         await rt.refs.create("MASK", result)
     )  # type: ignore[return-value]
-
-async def semantic_segmentation_mask(segmentation: "SemanticSegmentationRef", image: "ImageRef",
-    classes: list[int],
-) -> "MaskRef":
-    """Run a fixed SegFormer and union the requested semantic classes.
-
-    This primitive deliberately stops at class selection. Packs retain
-    ownership of label menus, alpha composition, cropping, and workflow
-    behavior.
-    """
-    import torch
-    import torch.nn.functional as functional
-    import comfy.model_management
-
-    if not isinstance(classes, (list, tuple)):
-        raise TypeError("semantic segmentation classes must be a list")
-    if not classes or len(classes) > 64:
-        raise ValueError(
-            "semantic segmentation needs between 1 and 64 classes")
-
-    rt = _sdk.current_runtime()
-    entry = await rt.refs.resolve(segmentation)
-    if not isinstance(entry, _sdk._SegformerEntry):
-        raise TypeError(
-            "SEMANTIC_SEGMENTATION_MODEL is not a SegFormer model")
-    selected = []
-    for value in classes:
-        if (isinstance(value, bool) or not isinstance(value, int)
-                or not 0 <= value < entry.num_labels):
-            raise ValueError(
-                "semantic segmentation class IDs must match the model")
-        if value not in selected:
-            selected.append(value)
-
-    pixels = await rt.refs.resolve(image)
-    if (not isinstance(pixels, torch.Tensor) or pixels.ndim != 4
-            or pixels.shape[-1] < 3 or not 1 <= len(pixels) <= 64):
-        raise ValueError(
-            "semantic segmentation needs a non-empty BHWC RGB batch")
-    height, width = map(int, pixels.shape[1:3])
-    if (height <= 0 or width <= 0
-            or height * width * len(pixels) > 268_435_456):
-        raise ValueError(
-            "semantic segmentation image dimensions are invalid")
-    if not bool(torch.isfinite(pixels[..., :3]).all()):
-        raise ValueError(
-            "semantic segmentation images must contain finite values")
-
-    device = comfy.model_management.get_torch_device()
-    offload_device = comfy.model_management.unet_offload_device()
-    mean = torch.tensor(
-        (0.485, 0.456, 0.406), device=device,
-        dtype=torch.float32).view(1, 3, 1, 1)
-    std = torch.tensor(
-        (0.229, 0.224, 0.225), device=device,
-        dtype=torch.float32).view(1, 3, 1, 1)
-    masks = []
-    with entry.lock:
-        entry.model.to(device=device, dtype=torch.float32)
-        try:
-            for frame in pixels:
-                source = frame[..., :3].movedim(-1, 0).unsqueeze(0)
-                source = source.to(device=device, dtype=torch.float32)
-                source = functional.interpolate(
-                    source, size=(512, 512), mode="bilinear",
-                    align_corners=False)
-                source = (source - mean) / std
-                logits = entry.model(pixel_values=source).logits
-                if (not isinstance(logits, torch.Tensor)
-                        or logits.ndim != 4
-                        or logits.shape[0] != 1
-                        or logits.shape[1] != entry.num_labels):
-                    raise RuntimeError(
-                        "SegFormer returned an invalid logits shape")
-                logits = functional.interpolate(
-                    logits, size=(height, width), mode="bilinear",
-                    align_corners=False)
-                labels = logits.argmax(dim=1)[0]
-                mask = torch.zeros_like(labels, dtype=torch.bool)
-                for class_id in selected:
-                    mask |= labels == class_id
-                masks.append(mask.detach().cpu().float())
-        finally:
-            entry.model.to(offload_device)
-    comfy.model_management.soft_empty_cache()
-    return _sdk.MaskRef._wrap(await rt.refs.create(
-        "MASK", torch.stack(masks, dim=0)
-    ))  # type: ignore[return-value]
 
 async def ipadapter_apply(pipeline: "Ref",
     model: "ModelRef",
