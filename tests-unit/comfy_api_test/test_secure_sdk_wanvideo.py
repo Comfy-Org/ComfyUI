@@ -33,13 +33,12 @@ def test_wanvideo_projects_only_a_bounded_transformer_dimension():
                 SimpleNamespace(model=SimpleNamespace(
                     diffusion_model=SimpleNamespace(dim=5120))),
             ))
-            assert await context.integrations.wanvideo.transformer_dim(
-                model) == 5120
+            assert await context.integrations.call("wanvideo", "transformer_dim", model=model) == 5120
 
             missing = OpaqueRef._wrap(await refs.create(
                 "OPAQUE", SimpleNamespace(model=SimpleNamespace())))
             with pytest.raises(ValueError, match="does not publish"):
-                await context.integrations.wanvideo.transformer_dim(missing)
+                await context.integrations.call("wanvideo", "transformer_dim", model=missing)
 
             invalid = OpaqueRef._wrap(await refs.create(
                 "OPAQUE",
@@ -47,6 +46,6 @@ def test_wanvideo_projects_only_a_bounded_transformer_dimension():
                     diffusion_model=SimpleNamespace(dim=0))),
             ))
             with pytest.raises(ValueError, match="invalid"):
-                await context.integrations.wanvideo.transformer_dim(invalid)
+                await context.integrations.call("wanvideo", "transformer_dim", model=invalid)
 
     asyncio.run(run())
