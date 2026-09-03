@@ -1423,55 +1423,6 @@ class ClipSegRef(_TypedRef):
         return result[0], result[1]
 
 
-class ImageClassifierRef(_TypedRef):
-    KIND = "IMAGE_CLASSIFIER"
-
-    async def classify(
-        self, images: ImageRef, use_accelerator: bool = True,
-        top_k: int = 5,
-    ) -> list[list[dict[str, Any]]]:
-        """Classify a host-side image batch and return bounded label scores."""
-        return await current_runtime().ops.apply(
-            "image_classifier.classify", self, {
-                "images": images,
-                "use_accelerator": bool(use_accelerator),
-                "top_k": int(top_k),
-            })
-
-    async def predict_scores(
-        self, images: ImageRef,
-    ) -> "ClassifierScoresRef":
-        """Run a multi-label classifier and retain its score matrix host-side."""
-        return await current_runtime().ops.apply(
-            "image_classifier.predict_scores", self, {"images": images})
-
-
-class ClassifierScoresRef(_TypedRef):
-    """Opaque bounded batch-by-class scores from an image classifier."""
-
-    KIND = "CLASSIFIER_SCORES"
-
-    async def shape(self) -> tuple[int, int]:
-        result = await current_runtime().ops.apply(
-            "classifier_scores.shape", self, {})
-        return int(result[0]), int(result[1])
-
-    async def select_above(
-        self, batch_index: int, start: int, end: int, threshold: float,
-        offset: int = 0, limit: int = 512,
-    ) -> dict[str, Any]:
-        """Page score/index pairs above a threshold in one class range."""
-        return await current_runtime().ops.apply(
-            "classifier_scores.select_above", self, {
-                "batch_index": int(batch_index),
-                "start": int(start),
-                "end": int(end),
-                "threshold": float(threshold),
-                "offset": int(offset),
-                "limit": int(limit),
-            })
-
-
 class SemanticSegmentationRef(_TypedRef):
     """Opaque fixed-architecture semantic segmentation model."""
 
@@ -2314,18 +2265,6 @@ class ModelsDomain(Protocol):
         dtype: str = "float16",
     ) -> PowerPaintRef: ...
     async def load_clipseg(self, model: str) -> ClipSegRef: ...
-    async def load_image_classifier(
-        self, model: str, architecture: str, labels: list[str],
-    ) -> ImageClassifierRef: ...
-    async def load_onnx_image_classifier(
-        self, model: str, input_layout: str = "NHWC",
-        channel_order: str = "BGR", resize_mode: str = "fit_pad",
-        input_scale: float = 255.0,
-        pad_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
-        mean: tuple[float, float, float] = (0.0, 0.0, 0.0),
-        std: tuple[float, float, float] = (1.0, 1.0, 1.0),
-        activation: str = "identity", resize_filter: str = "lanczos",
-    ) -> ImageClassifierRef: ...
     async def load_segformer(
         self, model: str, variant: str, num_labels: int,
     ) -> SemanticSegmentationRef: ...
@@ -3269,170 +3208,6 @@ _CLIPSEG_CACHE = WeightCache(
 
 
 @dataclass
-class _ImageClassifierEntry:
-    model: Any
-    processor: Any
-    architecture: str
-    num_labels: int
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-def _load_image_classifier_weight(
-    path: str, architecture: str,
-) -> _ImageClassifierEntry:
-    """Build one closed image-classifier architecture from SafeTensors."""
-    import torch
-    from safetensors.torch import load_file
-    from transformers import (
-        BeitConfig,
-        BeitForImageClassification,
-        BeitImageProcessor,
-        ConvNextImageProcessor,
-        ResNetConfig,
-        ResNetForImageClassification,
-        ViTConfig,
-        ViTForImageClassification,
-        ViTImageProcessor,
-    )
-
-    state = load_file(path, device="cpu")
-    if not state:
-        raise ValueError("classifier SafeTensors file contains no weights")
-    heads = {
-        "vit-base-patch16-224": "classifier.weight",
-        "beit-base-patch16-224": "classifier.weight",
-        "resnet-50-224": "classifier.1.weight",
-    }
-    if architecture not in heads:
-        raise ValueError("image classifier architecture is not supported")
-    head = state.get(heads[architecture])
-    if not isinstance(head, torch.Tensor) or head.ndim != 2:
-        raise ValueError("classifier weights have no compatible output head")
-    num_labels = int(head.shape[0])
-    if not 1 <= num_labels <= 10_000:
-        raise ValueError("classifier output count is outside the safe range")
-    floating_dtypes = {
-        value.dtype for value in state.values()
-        if isinstance(value, torch.Tensor) and value.is_floating_point()
-    }
-    if len(floating_dtypes) != 1:
-        raise ValueError("classifier weights must use one floating-point dtype")
-    dtype = next(iter(floating_dtypes))
-    if dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise ValueError("classifier weights use an unsupported dtype")
-
-    if architecture == "vit-base-patch16-224":
-        config = ViTConfig(
-            num_labels=num_labels,
-            attention_probs_dropout_prob=0.0,
-            encoder_stride=16,
-            hidden_act="gelu",
-            hidden_dropout_prob=0.0,
-            hidden_size=768,
-            image_size=224,
-            initializer_range=0.02,
-            intermediate_size=3072,
-            layer_norm_eps=1e-12,
-            num_attention_heads=12,
-            num_channels=3,
-            num_hidden_layers=12,
-            patch_size=16,
-            qkv_bias=True,
-        )
-        model = ViTForImageClassification(config)
-        processor = ViTImageProcessor(
-            do_resize=True,
-            size={"height": 224, "width": 224},
-            resample=2,
-            do_rescale=True,
-            rescale_factor=1.0 / 255.0,
-            do_normalize=True,
-            image_mean=(0.5, 0.5, 0.5),
-            image_std=(0.5, 0.5, 0.5),
-        )
-    elif architecture == "beit-base-patch16-224":
-        config = BeitConfig(
-            num_labels=num_labels,
-            attention_probs_dropout_prob=0.0,
-            drop_path_rate=0.1,
-            hidden_act="gelu",
-            hidden_dropout_prob=0.0,
-            hidden_size=768,
-            image_size=224,
-            initializer_range=0.02,
-            intermediate_size=3072,
-            layer_norm_eps=1e-12,
-            layer_scale_init_value=0.1,
-            num_attention_heads=12,
-            num_channels=3,
-            num_hidden_layers=12,
-            patch_size=16,
-            use_absolute_position_embeddings=False,
-            use_mask_token=False,
-            use_mean_pooling=True,
-            use_relative_position_bias=True,
-            use_shared_relative_position_bias=False,
-        )
-        model = BeitForImageClassification(config)
-        processor = BeitImageProcessor(
-            do_resize=True,
-            size={"height": 224, "width": 224},
-            resample=2,
-            do_rescale=True,
-            rescale_factor=1.0 / 255.0,
-            do_normalize=True,
-            do_center_crop=False,
-            crop_size={"height": 224, "width": 224},
-            do_reduce_labels=False,
-            image_mean=(0.5, 0.5, 0.5),
-            image_std=(0.5, 0.5, 0.5),
-        )
-    else:
-        config = ResNetConfig(
-            num_labels=num_labels,
-            depths=[3, 4, 6, 3],
-            downsample_in_first_stage=False,
-            embedding_size=64,
-            hidden_act="relu",
-            hidden_sizes=[256, 512, 1024, 2048],
-            layer_type="bottleneck",
-            num_channels=3,
-            out_features=["stage4"],
-            out_indices=[4],
-        )
-        model = ResNetForImageClassification(config)
-        processor = ConvNextImageProcessor(
-            do_resize=True,
-            size={"shortest_edge": 224},
-            resample=3,
-            do_rescale=True,
-            rescale_factor=1.0 / 255.0,
-            do_normalize=True,
-            image_mean=(0.485, 0.456, 0.406),
-            image_std=(0.229, 0.224, 0.225),
-        )
-
-    model = model.to(dtype=dtype)
-    model.load_state_dict(state, strict=True)
-    model.eval()
-    return _ImageClassifierEntry(
-        model=model,
-        processor=processor,
-        architecture=architecture,
-        num_labels=num_labels,
-    )
-
-
-
-
-_IMAGE_CLASSIFIER_CACHE = WeightCache(
-    load=_loader("_load_image_classifier_weight"),
-    max_entries=3,
-    release=_release_model_to_cpu,
-)
-
-
-@dataclass
 class _TextEncoderEntry:
     clip: Any
     model_type: str
@@ -3854,99 +3629,6 @@ def _validate_onnx_weight_file(path: str) -> None:
         onnx.checker.check_model(model, full_check=False)
     except Exception as exc:
         raise ValueError("ONNX model failed structural validation") from exc
-
-
-@dataclass
-class _OnnxImageClassifierEntry:
-    session: Any
-    input_name: str
-    output_name: str
-    input_height: int
-    input_width: int
-    class_count: int
-    input_layouts: frozenset[str]
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-def _load_onnx_image_classifier(path: str) -> _OnnxImageClassifierEntry:
-    _validate_onnx_weight_file(path)
-    try:
-        import onnxruntime as ort
-    except ImportError as exc:
-        raise RuntimeError(
-            "ONNX image classification requires onnxruntime") from exc
-
-    options = ort.SessionOptions()
-    options.log_severity_level = 3
-    available = set(ort.get_available_providers())
-    providers = [
-        provider for provider in (
-            "CUDAExecutionProvider", "CPUExecutionProvider")
-        if provider in available
-    ]
-    if not providers:
-        raise RuntimeError("ONNX Runtime has no supported execution provider")
-    try:
-        session = ort.InferenceSession(
-            path, sess_options=options, providers=providers)
-    except Exception as exc:
-        raise ValueError("ONNX image classifier could not be loaded") from exc
-    inputs = session.get_inputs()
-    outputs = session.get_outputs()
-    if len(inputs) != 1 or len(outputs) != 1:
-        raise ValueError("ONNX image classifier must have one input and output")
-    model_input = inputs[0]
-    model_output = outputs[0]
-    if model_input.type != "tensor(float)" or model_output.type not in {
-        "tensor(float)", "tensor(float16)", "tensor(double)",
-    }:
-        raise ValueError("ONNX image classifier must use floating-point tensors")
-    input_shape = model_input.shape
-    output_shape = model_output.shape
-    if len(input_shape) != 4 or len(output_shape) != 2:
-        raise ValueError("ONNX image classifier has an invalid tensor rank")
-
-    # WD-style NHWC and common NCHW models are both admitted.  The selected
-    # layout is checked again when the loader binds preprocessing options.
-    nhwc = input_shape[3] == 3
-    nchw = input_shape[1] == 3
-    if not nhwc and not nchw:
-        raise ValueError("ONNX image classifier must consume three channels")
-    if nhwc and nchw:
-        raise ValueError("ONNX classifier channel layout is ambiguous")
-    height = input_shape[1] if nhwc else input_shape[2]
-    width = input_shape[2] if nhwc else input_shape[3]
-    class_count = output_shape[1]
-    if (type(height) is not int or type(width) is not int
-            or not 1 <= height <= 4096 or not 1 <= width <= 4096):
-        raise ValueError("ONNX classifier spatial dimensions must be fixed")
-    if type(class_count) is not int or not 1 <= class_count <= 16_384:
-        raise ValueError("ONNX classifier output count is outside the safe range")
-    return _OnnxImageClassifierEntry(
-        session=session,
-        input_name=model_input.name,
-        output_name=model_output.name,
-        input_height=height,
-        input_width=width,
-        class_count=class_count,
-        input_layouts=frozenset(
-            layout for layout, valid in (("NHWC", nhwc), ("NCHW", nchw))
-            if valid),
-    )
-
-
-
-
-_ONNX_IMAGE_CLASSIFIER_CACHE = WeightCache(
-    load=_loader("_load_onnx_image_classifier"), max_entries=3)
-
-
-
-
-
-
-
-
 
 
 @dataclass
@@ -5176,8 +4858,6 @@ class _InProcessModels:
             _TEXT_GENERATOR_CACHE.clear()
             _INPAINT_MODEL_CACHE.clear()
             _CLIPSEG_CACHE.clear()
-            _IMAGE_CLASSIFIER_CACHE.clear()
-            _ONNX_IMAGE_CLASSIFIER_CACHE.clear()
             _TEXT_ENCODER_CACHE.clear()
             _LANGUAGE_MODEL_CACHE.clear()
             InProcessLlamaCpp().clear()
@@ -5198,128 +4878,6 @@ class _InProcessModels:
         value = (await asyncio.to_thread(_CLIPSEG_CACHE.get, path)).bundle()
         return ClipSegRef._wrap(await current_runtime().refs.create(
             "CLIPSEGMODEL", value))  # type: ignore[return-value]
-
-    async def load_image_classifier(
-        self, model: str, architecture: str, labels: list[str],
-    ) -> ImageClassifierRef:
-        import folder_paths
-
-        model = self._model_name(model, "image classifier weight")
-        if not model.lower().endswith(".safetensors"):
-            raise ValueError("image classifier weights must use SafeTensors")
-        architecture = str(architecture)
-        if architecture not in {
-            "vit-base-patch16-224",
-            "beit-base-patch16-224",
-            "resnet-50-224",
-        }:
-            raise ValueError("image classifier architecture is not supported")
-        if not isinstance(labels, (list, tuple)):
-            raise TypeError("image classifier labels must be a list")
-        labels = tuple(str(label) for label in labels)
-        if (not labels or len(labels) > 10_000
-                or any(not label or len(label) > 256 for label in labels)):
-            raise ValueError("image classifier labels are invalid")
-        path = folder_paths.get_full_path_or_raise("detection", model)
-        entry = await asyncio.to_thread(
-            _IMAGE_CLASSIFIER_CACHE.get, path, architecture)
-        if len(labels) != entry.num_labels:
-            raise ValueError(
-                "image classifier labels do not match the weight output count")
-        value = {
-            "model": entry.model,
-            "processor": entry.processor,
-            "architecture": entry.architecture,
-            "labels": labels,
-            "lock": entry.lock,
-        }
-        return ImageClassifierRef._wrap(await current_runtime().refs.create(
-            "IMAGE_CLASSIFIER", value))  # type: ignore[return-value]
-
-    async def load_onnx_image_classifier(
-        self, model: str, input_layout: str = "NHWC",
-        channel_order: str = "BGR", resize_mode: str = "fit_pad",
-        input_scale: float = 255.0,
-        pad_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
-        mean: tuple[float, float, float] = (0.0, 0.0, 0.0),
-        std: tuple[float, float, float] = (1.0, 1.0, 1.0),
-        activation: str = "identity", resize_filter: str = "lanczos",
-    ) -> ImageClassifierRef:
-        """Bind a self-contained standard ONNX image classifier.
-
-        Preprocessing is a closed, reusable transform.  Labels, category
-        ranges, thresholds, exclusions, and output formatting remain node
-        code; the host only retains and pages the numeric score matrix.
-        """
-        import math
-        import folder_paths
-
-        model = self._model_name(model, "ONNX image classifier")
-        if not model.lower().endswith(".onnx"):
-            raise ValueError("ONNX image classifiers must use .onnx files")
-        input_layout = str(input_layout).upper()
-        channel_order = str(channel_order).upper()
-        resize_mode = str(resize_mode).lower()
-        activation = str(activation).lower()
-        resize_filter = str(resize_filter).lower()
-        if input_layout not in {"NHWC", "NCHW"}:
-            raise ValueError("ONNX classifier layout must be NHWC or NCHW")
-        if channel_order not in {"RGB", "BGR"}:
-            raise ValueError("ONNX classifier channel order must be RGB or BGR")
-        if resize_mode not in {"fit_pad", "stretch"}:
-            raise ValueError("ONNX classifier resize mode is not supported")
-        if activation not in {"identity", "sigmoid", "softmax"}:
-            raise ValueError("ONNX classifier activation is not supported")
-        if resize_filter not in {"nearest", "bilinear", "bicubic", "lanczos"}:
-            raise ValueError("ONNX classifier resize filter is not supported")
-        input_scale = float(input_scale)
-        if not math.isfinite(input_scale) or not 0 < input_scale <= 65_535:
-            raise ValueError("ONNX classifier input scale is invalid")
-
-        def triple(
-            value: Any, field_name: str, *, nonzero: bool = False,
-            unit: bool = False,
-        ) -> tuple[float, float, float]:
-            if not isinstance(value, (list, tuple)) or len(value) != 3:
-                raise ValueError(
-                    f"ONNX classifier {field_name} must have three values")
-            result = tuple(float(item) for item in value)
-            if (any(not math.isfinite(item) or abs(item) > 1_000_000
-                    for item in result)
-                    or (nonzero and any(item == 0 for item in result))
-                    or (unit and any(not 0 <= item <= 1 for item in result))):
-                raise ValueError(f"ONNX classifier {field_name} is invalid")
-            return result  # type: ignore[return-value]
-
-        pad_color = triple(pad_color, "pad color", unit=True)
-        mean = triple(mean, "mean")
-        std = triple(std, "standard deviation", nonzero=True)
-        path = folder_paths.get_full_path_or_raise("onnx", model)
-        entry = await asyncio.to_thread(_ONNX_IMAGE_CLASSIFIER_CACHE.get, path)
-        if input_layout not in entry.input_layouts:
-            raise ValueError(
-                f"ONNX classifier tensor is not laid out as {input_layout}")
-        value = {
-            "secure_kind": "image_classifier.onnx",
-            "session": entry.session,
-            "input_name": entry.input_name,
-            "output_name": entry.output_name,
-            "input_height": entry.input_height,
-            "input_width": entry.input_width,
-            "class_count": entry.class_count,
-            "input_layout": input_layout,
-            "channel_order": channel_order,
-            "resize_mode": resize_mode,
-            "input_scale": input_scale,
-            "pad_color": pad_color,
-            "mean": mean,
-            "std": std,
-            "activation": activation,
-            "resize_filter": resize_filter,
-            "lock": entry.lock,
-        }
-        return ImageClassifierRef._wrap(await current_runtime().refs.create(
-            "IMAGE_CLASSIFIER", value))  # type: ignore[return-value]
 
     async def load_segformer(
         self, model: str, variant: str, num_labels: int,
@@ -9696,12 +9254,6 @@ class InProcessOps:
             "style_model.apply": self._style_model_apply,
             "clipseg.predict_mask": _vendor_ops.clipseg_predict_mask,
             "clipseg.segment": _vendor_ops.clipseg_segment,
-            "image_classifier.classify": _vendor_ops.image_classifier_classify,
-            "image_classifier.predict_scores":
-                _vendor_ops.image_classifier_predict_scores,
-            "classifier_scores.shape": _vendor_ops.classifier_scores_shape,
-            "classifier_scores.select_above":
-                _vendor_ops.classifier_scores_select_above,
             "semantic_segmentation.mask": _vendor_ops.semantic_segmentation_mask,
             "object_detector.detect": self._object_detector_detect,
             "inpaint_model.inpaint": _vendor_ops.inpaint_model_inpaint,
@@ -13751,18 +13303,10 @@ def _ref_type_for(v: Any) -> tuple[type, str]:
             return SamModelRef, "SAM_MODEL"
         if v.get("secure_kind") == "object_detector.rt_detr" and "model" in v:
             return ObjectDetectorRef, "OBJECT_DETECTOR"
-        if v.get("secure_kind") == "classifier_scores.v1" and "scores" in v:
-            return ClassifierScoresRef, "CLASSIFIER_SCORES"
-        if v.get("secure_kind") == "image_classifier.onnx" and set(v) >= {
-            "session", "input_name", "output_name", "class_count", "lock",
-        }:
-            return ImageClassifierRef, "IMAGE_CLASSIFIER"
         if v.get("secure_kind") == "powerpaint.pipeline" and set(v) >= {
             "powerpaint", "clip",
         }:
             return PowerPaintRef, "POWERPAINT_MODEL"
-        if set(v) >= {"model", "processor", "architecture", "labels"}:
-            return ImageClassifierRef, "IMAGE_CLASSIFIER"
         if set(v) >= {"model", "processor"}:
             return ClipSegRef, "CLIPSEGMODEL"
         if "samples" in v:
