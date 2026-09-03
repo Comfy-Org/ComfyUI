@@ -390,30 +390,6 @@ class AssetRef(Ref):
 class ClipSegRef(Ref):
     KIND: str
 
-class ImageClassifierRef(Ref):
-    KIND: str
-    async def classify(
-        self,
-        images: ImageRef,
-        use_accelerator: bool = ...,
-        top_k: int = ...,
-    ) -> list[list[dict[str, Any]]]: ...
-    async def predict_scores(
-        self, images: ImageRef,
-    ) -> ClassifierScoresRef: ...
-
-class ClassifierScoresRef(Ref):
-    async def shape(self) -> tuple[int, int]: ...
-    async def select_above(
-        self,
-        batch_index: int,
-        start: int,
-        end: int,
-        threshold: float,
-        offset: int = ...,
-        limit: int = ...,
-    ) -> dict[str, Any]: ...
-
 class SemanticSegmentationRef(Ref):
     KIND: str
     async def mask(
@@ -705,19 +681,6 @@ class ModelsDomain(Protocol):
         revision: str = ...,
         sha256: Optional[str] = ...,
     ) -> str: ...
-    async def load_onnx_image_classifier(
-        self,
-        model: str,
-        input_layout: str = ...,
-        channel_order: str = ...,
-        resize_mode: str = ...,
-        input_scale: float = ...,
-        pad_color: tuple[float, float, float] = ...,
-        mean: tuple[float, float, float] = ...,
-        std: tuple[float, float, float] = ...,
-        activation: str = ...,
-        resize_filter: str = ...,
-    ) -> ImageClassifierRef: ...
     async def list_diffusion_models(
         self, include_connectors: bool = ...
     ) -> list[str]: ...
@@ -797,12 +760,6 @@ class ModelsDomain(Protocol):
         dtype: str = ...,
     ) -> PowerPaintRef: ...
     async def load_clipseg(self, model: str) -> ClipSegRef: ...
-    async def load_image_classifier(
-        self,
-        model: str,
-        architecture: str,
-        labels: list[str],
-    ) -> ImageClassifierRef: ...
     async def load_segformer(
         self,
         model: str,
