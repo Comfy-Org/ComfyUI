@@ -17,7 +17,7 @@ Two audiences, separated below:
 If prose and this stub disagree, treat the stub + its implementation tests as
 authoritative.
 """
-from typing import Any, Awaitable, Callable, Optional, Protocol, TypeVar, runtime_checkable
+from typing import Any, Awaitable, Callable, Mapping, Optional, Protocol, Sequence, TypeVar, runtime_checkable
 
 # NOTE: the contract deliberately does NOT import torch or any backend module.
 # Node code has no direct access to torch/CUDA/filesystem; it works through
@@ -782,133 +782,20 @@ class ModelsDomain(Protocol):
         unload_all_models: bool = ...,
     ) -> tuple[int, int]: ...
 
-class CivitaiDomain(Protocol):
-    async def search_models(
-        self,
-        username: str,
-        query: Optional[str] = ...,
-        limit: int = ...,
-        nsfw: bool = ...,
-    ) -> dict[str, Any]: ...
-    async def model_version(
-        self, model_version_id: int,
-    ) -> dict[str, Any]: ...
-    async def model_version_by_hash(
-        self, hash_value: str, refresh: bool = ...,
-    ) -> dict[str, Any]: ...
-
-class OllamaDomain(Protocol):
-    async def list_models(self, endpoint: str) -> list[str]: ...
-    async def generate(
-        self,
-        endpoint: str,
-        model: str,
-        system: str,
-        prompt: str,
-        images: Optional[ImageRef] = ...,
-        context: Optional[list[int]] = ...,
-        think: bool = ...,
-        options: Optional[dict[str, Any]] = ...,
-        keep_alive: int = ...,
-        keep_alive_unit: str = ...,
-        format: str = ...,
-    ) -> dict[str, Any]: ...
-    async def chat(
-        self,
-        endpoint: str,
-        model: str,
-        messages: list[dict[str, Any]],
-        images: Optional[ImageRef] = ...,
-        think: bool = ...,
-        options: Optional[dict[str, Any]] = ...,
-        keep_alive: int = ...,
-        keep_alive_unit: str = ...,
-        format: str | dict[str, Any] = ...,
-        timeout_seconds: float = ...,
-        tools: Optional[list[dict[str, Any]]] = ...,
-    ) -> dict[str, Any]: ...
-
-class LlmDomain(Protocol):
-    async def chat(
-        self,
-        provider: str,
-        profile: str,
-        model: str,
-        messages: list[dict[str, Any]],
-        *,
-        tools: Optional[list[dict[str, Any]]] = ...,
-        temperature: float = ...,
-        max_tokens: int = ...,
-        thinking: bool = ...,
-        response_format: str | dict[str, Any] = ...,
-        timeout_seconds: float = ...,
-        vendor_options: Optional[dict[str, Any]] = ...,
-    ) -> dict[str, Any]: ...
-
-class WebSearchDomain(Protocol):
-    async def search(
-        self,
-        query: str,
-        *,
-        provider_profile: str = ...,
-        limit: int = ...,
-        vendor_options: Optional[dict[str, Any]] = ...,
-    ) -> list[dict[str, str]]: ...
-
-class LlamaCppDomain(Protocol):
-    async def load_chat_model(
-        self,
-        model_weight: str,
-        mmproj_weight: Optional[str] = ...,
-        *,
-        family: str = ...,
-        device: str = ...,
-        context_length: int = ...,
-        batch_size: int = ...,
-        gpu_layers: int = ...,
-        image_max_tokens: int = ...,
-        top_k: int = ...,
-        pool_size: int = ...,
-        cache: bool = ...,
-    ) -> LlamaCppModelRef: ...
-    async def generate(
-        self,
-        model: LlamaCppModelRef,
-        system: str,
-        prompt: str,
-        image: Optional[ImageRef] = ...,
-        video: Optional[ImageRef] = ...,
-        max_tokens: int = ...,
-        temperature: float = ...,
-        top_p: float = ...,
-        repetition_penalty: float = ...,
-        seed: int = ...,
-    ) -> str: ...
-
-class WanVideoDomain(Protocol):
-    async def transformer_dim(self, model: Ref) -> int: ...
-
-class AnimaDomain(Protocol):
-    async def apply_lllite(
-        self,
-        model: ModelRef,
-        weights: AssetRef,
-        image: ImageRef,
-        *,
-        strength: float = ...,
-        start_percent: float = ...,
-        end_percent: float = ...,
-        preserve_wrapper: bool = ...,
-    ) -> ModelRef: ...
-
 class IntegrationsDomain(Protocol):
-    anima: AnimaDomain
-    civitai: CivitaiDomain
-    llm: LlmDomain
-    llama_cpp: LlamaCppDomain
-    ollama: OllamaDomain
-    wanvideo: WanVideoDomain
-    web: WebSearchDomain
+    """Named dispatch to a host-registered third-party service.
+
+    The node names an integration and never supplies a URL: the host fixes the
+    origin, and the permission `integrations.<name>` is enforced at the wire
+    before any vendor code runs. Typed per-vendor domains lived here until they
+    had accreted ten entries — three of which this stub never gained, having
+    fallen behind the very growth it was meant to publish.
+    """
+
+    async def call(
+        self, integration: str, operation: str, **params: Any,
+    ) -> Any: ...
+    async def describe(self) -> Mapping[str, Sequence[str]]: ...
 
 class SystemDomain(Protocol):
     async def stats(self) -> dict[str, Any]: ...

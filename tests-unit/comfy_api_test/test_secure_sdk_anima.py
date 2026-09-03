@@ -113,11 +113,7 @@ def test_anima_lllite_uses_confined_rgb_weights_and_preserves_patch_stacking(
                 await refs.create("ASSET", str(weights_path)))
             image = _sdk.ImageRef._wrap(
                 await refs.create("IMAGE", torch.zeros(1, 32, 48, 3)))
-            result_ref = await context.integrations.anima.apply_lllite(
-                model, weights, image, strength=0.75,
-                start_percent=0.2, end_percent=0.8,
-                preserve_wrapper=False,
-            )
+            result_ref = await context.integrations.call("anima", "apply_lllite", model=model, weights=weights, image=image, strength=0.75, start_percent=0.2, end_percent=0.8, preserve_wrapper=False)
             result = await refs.resolve(result_ref)
             assert "model_function_wrapper" not in result.model_options
             patches = result.model_options["transformer_options"]["patches"]
@@ -129,8 +125,7 @@ def test_anima_lllite_uses_confined_rgb_weights_and_preserves_patch_stacking(
             outside_ref = _sdk.AssetRef._wrap(
                 await refs.create("ASSET", str(outside)))
             with pytest.raises(ValueError, match="escapes the controlnet"):
-                await context.integrations.anima.apply_lllite(
-                    model, outside_ref, image)
+                await context.integrations.call("anima", "apply_lllite", model=model, weights=outside_ref, image=image)
 
     asyncio.run(run())
 
