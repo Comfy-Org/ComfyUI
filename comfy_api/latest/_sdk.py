@@ -1608,35 +1608,6 @@ class PowerPaintRef(_TypedRef):
             })
 
 
-class TransparentVaeDecoderRef(_TypedRef):
-    """Opaque canonical decoder for Layer Diffusion transparency weights."""
-
-    KIND = "TRANSPARENT_VAE_DECODER"
-
-    async def decode(
-        self, latent: LatentRef, image: ImageRef, frames: int = 1,
-        sub_batch_size: int = 16,
-    ) -> tuple[ImageRef, MaskRef]:
-        """Return a consistent RGBA batch and decoded alpha masks.
-
-        For interleaved multi-frame Layer Diffusion batches, only the first
-        frame in each group is transparency-decoded; the other RGB frames are
-        returned with an opaque alpha channel.
-        """
-        result = await current_runtime().ops.apply(
-            "transparent_vae_decoder.decode", self, {
-                "latent": latent,
-                "image": image,
-                "frames": int(frames),
-                "sub_batch_size": int(sub_batch_size),
-            })
-        return result[0], result[1]
-
-
-
-
-
-
 class SamModelRef(_TypedRef):
     KIND = "SAM_MODEL"
 
@@ -2342,9 +2313,6 @@ class ModelsDomain(Protocol):
         self, model: str, base_clip: str, powerpaint_clip: str,
         dtype: str = "float16",
     ) -> PowerPaintRef: ...
-    async def load_transparent_vae_decoder(
-        self, model: str, family: str,
-    ) -> TransparentVaeDecoderRef: ...
     async def load_clipseg(self, model: str) -> ClipSegRef: ...
     async def load_image_classifier(
         self, model: str, architecture: str, labels: list[str],
@@ -4056,61 +4024,6 @@ _SAM2_CACHE = WeightCache(
 )
 
 
-@dataclass
-class _TransparentVaeDecoderEntry:
-    decoder: Any
-    family: str
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-def _load_transparent_vae_decoder_weight(
-    path: str, family: str,
-) -> _TransparentVaeDecoderEntry:
-    import nodes
-    import comfy.model_management
-    import comfy.utils
-
-    node_class = getattr(nodes, "NODE_CLASS_MAPPINGS", {}).get(
-        "LayeredDiffusionDecode")
-    module = (
-        None if node_class is None
-        else sys.modules.get(getattr(node_class, "__module__", ""))
-    )
-    decoder_class = getattr(module, "TransparentVAEDecoder", None)
-    if not callable(decoder_class):
-        raise RuntimeError(
-            "transparent VAE decoding requires the host-installed canonical "
-            "ComfyUI-layerdiffuse extension")
-    state = comfy.utils.load_torch_file(path, safe_load=True)
-    if not isinstance(state, dict) or not state:
-        raise ValueError(
-            "transparent VAE decoder weights must be a non-empty SafeTensor "
-            "state dict")
-    import torch
-    if any(
-        not isinstance(key, str) or not isinstance(value, torch.Tensor)
-        for key, value in state.items()
-    ):
-        raise ValueError(
-            "transparent VAE decoder weights must contain only tensors")
-    decoder = decoder_class(
-        state,
-        device=comfy.model_management.get_torch_device(),
-        dtype=(
-            torch.float16
-            if comfy.model_management.should_use_fp16()
-            else torch.float32
-        ),
-    )
-    return _TransparentVaeDecoderEntry(decoder=decoder, family=family)
-
-
-
-
-_TRANSPARENT_VAE_DECODER_CACHE = WeightCache(
-    load=_loader("_load_transparent_vae_decoder_weight"), max_entries=2)
-
-
 def _advanced_control_module(relative: str):
     """Resolve a fixed module from the installed Advanced-ControlNet pack.
 
@@ -5248,35 +5161,6 @@ class _InProcessModels:
         return PowerPaintRef._wrap(await current_runtime().refs.create(
             "POWERPAINT_MODEL", value))  # type: ignore[return-value]
 
-    async def load_transparent_vae_decoder(
-        self, model: str, family: str,
-    ) -> TransparentVaeDecoderRef:
-        import folder_paths
-
-        model = self._model_name(model, "transparent VAE decoder weight")
-        if not model.lower().endswith((".safetensors", ".sft")):
-            raise ValueError(
-                "transparent VAE decoder weights must use SafeTensors")
-        family = str(family)
-        expected = {
-            "sd1": "layer_sd15_vae_transparent_decoder.safetensors",
-            "sdxl": "vae_transparent_decoder.safetensors",
-        }
-        if family not in expected:
-            raise ValueError(
-                "transparent VAE decoder family must be sd1 or sdxl")
-        if os.path.basename(model).lower() != expected[family].lower():
-            raise ValueError(
-                f"{family} transparent VAE decoding requires "
-                f"{expected[family]!r}")
-        path = folder_paths.get_full_path_or_raise("vae", model)
-        entry = await asyncio.to_thread(
-            _TRANSPARENT_VAE_DECODER_CACHE.get, path, family)
-        return TransparentVaeDecoderRef._wrap(
-            await current_runtime().refs.create(
-                "TRANSPARENT_VAE_DECODER", entry)
-        )  # type: ignore[return-value]
-
     async def memory_cleanup(
         self, empty_cache: bool = True, collect_cycles: bool = True,
         unload_all_models: bool = False,
@@ -5299,7 +5183,6 @@ class _InProcessModels:
             InProcessLlamaCpp().clear()
             _SEGFORMER_CACHE.clear()
             _SAM_CACHE.clear()
-            _TRANSPARENT_VAE_DECODER_CACHE.clear()
         if bool(collect_cycles):
             gc.collect()
         after = int(comfy.model_management.get_free_memory())
@@ -9825,8 +9708,6 @@ class InProcessOps:
             "background_removal.mask": self._background_removal_mask,
             "brushnet.apply": self._brushnet_apply,
             "powerpaint.apply": self._powerpaint_apply,
-            "transparent_vae_decoder.decode":
-                _vendor_ops.transparent_vae_decoder_decode,
             "image_preprocessor.apply": _vendor_ops.image_preprocessor_apply,
             "ipadapter.apply": _vendor_ops.ipadapter_apply,
             "ipadapter.apply_tiled": _vendor_ops.ipadapter_apply_tiled,
