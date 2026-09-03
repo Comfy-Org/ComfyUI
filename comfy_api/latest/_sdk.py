@@ -1423,26 +1423,6 @@ class ClipSegRef(_TypedRef):
         return result[0], result[1]
 
 
-class SemanticSegmentationRef(_TypedRef):
-    """Opaque fixed-architecture semantic segmentation model."""
-
-    KIND = "SEMANTIC_SEGMENTATION_MODEL"
-
-    async def mask(
-        self, image: ImageRef, classes: list[int],
-    ) -> MaskRef:
-        """Return the union of selected semantic class IDs as a mask."""
-        return await current_runtime().ops.apply(
-            "semantic_segmentation.mask", self, {
-                "image": image,
-                "classes": list(classes),
-            })
-
-
-
-
-
-
 class ObjectDetectorRef(_TypedRef):
     KIND = "OBJECT_DETECTOR"
 
@@ -2265,9 +2245,6 @@ class ModelsDomain(Protocol):
         dtype: str = "float16",
     ) -> PowerPaintRef: ...
     async def load_clipseg(self, model: str) -> ClipSegRef: ...
-    async def load_segformer(
-        self, model: str, variant: str, num_labels: int,
-    ) -> SemanticSegmentationRef: ...
     async def load_inpaint_model(
         self, model: str, architecture: str = "big-lama",
     ) -> InpaintModelRef: ...
@@ -3442,107 +3419,6 @@ class _LanguageModelCache:
 
 
 _LANGUAGE_MODEL_CACHE = _LanguageModelCache()
-
-
-@dataclass
-class _SegformerEntry:
-    model: Any
-    variant: str
-    num_labels: int
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-def _load_segformer_weight(
-    path: str, variant: str, num_labels: int,
-) -> _SegformerEntry:
-    try:
-        from safetensors.torch import load_file
-        from transformers import SegformerConfig, SegformerForSemanticSegmentation
-    except ImportError as exc:
-        raise RuntimeError(
-            "SegFormer semantic segmentation requires transformers and "
-            "safetensors") from exc
-
-    depths = {
-        "b2": [3, 4, 6, 3],
-        "b3": [3, 4, 18, 3],
-        "b5": [3, 6, 40, 3],
-    }.get(variant)
-    if depths is None:
-        raise ValueError("SegFormer variant must be b2, b3, or b5")
-    config = SegformerConfig(
-        num_labels=num_labels,
-        num_channels=3,
-        depths=depths,
-        hidden_sizes=[64, 128, 320, 512],
-        decoder_hidden_size=768,
-        patch_sizes=[7, 3, 3, 3],
-        strides=[4, 2, 2, 2],
-        num_attention_heads=[1, 2, 5, 8],
-        mlp_ratios=[4, 4, 4, 4],
-        sr_ratios=[8, 4, 2, 1],
-        hidden_act="gelu",
-        hidden_dropout_prob=0.0,
-        attention_probs_dropout_prob=0.0,
-        classifier_dropout_prob=0.1,
-        drop_path_rate=0.1,
-        reshape_last_stage=True,
-        semantic_loss_ignore_index=255,
-    )
-    model = SegformerForSemanticSegmentation(config)
-    state = load_file(path, device="cpu")
-    model_state = model.state_dict()
-    if set(state) != set(model_state):
-        try:
-            from transformers.conversion_mapping import (
-                get_model_conversion_mapping,
-            )
-            from transformers.core_model_loading import (
-                WeightRenaming,
-                rename_source_key,
-            )
-        except ImportError as exc:
-            raise ValueError(
-                "SegFormer weights do not match the installed Transformers "
-                "version") from exc
-        conversions = get_model_conversion_mapping(
-            model, add_legacy=False)
-        if not conversions or any(
-            not isinstance(item, WeightRenaming) for item in conversions
-        ):
-            raise ValueError(
-                "SegFormer checkpoint conversion is not a pure key rename")
-        converted = {}
-        for key, value in state.items():
-            renamed, _pattern = rename_source_key(
-                key, conversions, [], model.base_model_prefix, model_state)
-            if renamed in converted:
-                raise ValueError(
-                    "SegFormer checkpoint conversion produced duplicate keys")
-            converted[renamed] = value
-        state = converted
-    model.load_state_dict(state, strict=True)
-    model.eval()
-    model.to("cpu")
-    return _SegformerEntry(
-        model=model, variant=variant, num_labels=num_labels)
-
-
-
-
-_SEGFORMER_CACHE = WeightCache(
-    load=_loader("_load_segformer_weight"),
-    max_entries=2,
-    release=_release_model_to_cpu,
-)
-
-
-
-
-
-
-
-
 
 
 def _validate_onnx_weight_file(path: str) -> None:
@@ -4861,7 +4737,6 @@ class _InProcessModels:
             _TEXT_ENCODER_CACHE.clear()
             _LANGUAGE_MODEL_CACHE.clear()
             InProcessLlamaCpp().clear()
-            _SEGFORMER_CACHE.clear()
             _SAM_CACHE.clear()
         if bool(collect_cycles):
             gc.collect()
@@ -4878,30 +4753,6 @@ class _InProcessModels:
         value = (await asyncio.to_thread(_CLIPSEG_CACHE.get, path)).bundle()
         return ClipSegRef._wrap(await current_runtime().refs.create(
             "CLIPSEGMODEL", value))  # type: ignore[return-value]
-
-    async def load_segformer(
-        self, model: str, variant: str, num_labels: int,
-    ) -> SemanticSegmentationRef:
-        import folder_paths
-
-        model = self._model_name(model, "SegFormer weight")
-        if not model.lower().endswith((".safetensors", ".sft")):
-            raise ValueError("SegFormer weights must use SafeTensors")
-        variant = str(variant)
-        if variant not in {"b2", "b3", "b5"}:
-            raise ValueError("SegFormer variant must be b2, b3, or b5")
-        if (isinstance(num_labels, bool) or not isinstance(num_labels, int)
-                or not 1 <= num_labels <= 1024):
-            raise ValueError("SegFormer num_labels must be in [1, 1024]")
-        path = folder_paths.get_full_path_or_raise(
-            "semantic_segmentation", model)
-        entry = await asyncio.to_thread(
-            _SEGFORMER_CACHE.get, path, variant, num_labels)
-        return SemanticSegmentationRef._wrap(
-            await current_runtime().refs.create(
-                "SEMANTIC_SEGMENTATION_MODEL", entry)
-        )  # type: ignore[return-value]
-
 
     async def load_inpaint_model(
         self, model: str, architecture: str = "big-lama",
@@ -9254,7 +9105,6 @@ class InProcessOps:
             "style_model.apply": self._style_model_apply,
             "clipseg.predict_mask": _vendor_ops.clipseg_predict_mask,
             "clipseg.segment": _vendor_ops.clipseg_segment,
-            "semantic_segmentation.mask": _vendor_ops.semantic_segmentation_mask,
             "object_detector.detect": self._object_detector_detect,
             "inpaint_model.inpaint": _vendor_ops.inpaint_model_inpaint,
             "background_removal.mask": self._background_removal_mask,
