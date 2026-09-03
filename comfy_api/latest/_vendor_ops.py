@@ -30,7 +30,6 @@ if TYPE_CHECKING:
         SamModelRef,
         SemanticSegmentationRef,
         TimestepKeyframeRef,
-        TransparentVaeDecoderRef,
     )
 
 
@@ -246,99 +245,6 @@ async def inpaint_model_inpaint(inpaint_model: "InpaintModelRef",
     comfy.model_management.soft_empty_cache()
     return _sdk.ImageRef._wrap(await rt.refs.create(
         "IMAGE", result))  # type: ignore[return-value]
-
-async def transparent_vae_decoder_decode(decoder: "TransparentVaeDecoderRef", latent: "LatentRef",
-    image: "ImageRef", frames: int = 1, sub_batch_size: int = 16,
-) -> tuple["ImageRef", "MaskRef"]:
-    import torch
-
-    if isinstance(frames, bool) or not isinstance(frames, int):
-        raise TypeError("transparent decoder frames must be an integer")
-    if not 1 <= frames <= 3:
-        raise ValueError("transparent decoder frames must be in [1, 3]")
-    if (
-        isinstance(sub_batch_size, bool)
-        or not isinstance(sub_batch_size, int)
-    ):
-        raise TypeError(
-            "transparent decoder sub_batch_size must be an integer")
-    if not 1 <= sub_batch_size <= 64:
-        raise ValueError(
-            "transparent decoder sub_batch_size must be in [1, 64]")
-
-    rt = _sdk.current_runtime()
-    entry = await rt.refs.resolve(decoder)
-    latent_value = await rt.refs.resolve(latent)
-    pixels = await rt.refs.resolve(image)
-    samples = (
-        latent_value.get("samples")
-        if isinstance(latent_value, dict) else None)
-    if not isinstance(entry, _sdk._TransparentVaeDecoderEntry):
-        raise TypeError(
-            "TRANSPARENT_VAE_DECODER is not a host-loaded decoder")
-    if (
-        not isinstance(samples, torch.Tensor)
-        or samples.ndim != 4
-        or not isinstance(pixels, torch.Tensor)
-        or pixels.ndim != 4
-        or pixels.shape[-1] < 3
-        or not 1 <= len(pixels) <= 64
-        or len(samples) != len(pixels)
-    ):
-        raise ValueError(
-            "transparent decoding needs matching BCHW latent and BHWC "
-            "image batches")
-    height, width = map(int, pixels.shape[1:3])
-    if (
-        height <= 0
-        or width <= 0
-        or height % 64
-        or width % 64
-        or len(pixels) * height * width > 67_108_864
-    ):
-        raise ValueError(
-            "transparent decoder image dimensions must be multiples of "
-            "64 within the bounded batch limit")
-    if len(pixels) % frames:
-        raise ValueError(
-            "transparent decoder batch must be divisible by frames")
-
-    def decode_selected():
-        selected_pixels = pixels[::frames, ..., :3].movedim(-1, 1)
-        selected_samples = samples[::frames]
-        decoded = []
-        with entry.lock:
-            for start in range(0, len(selected_samples), sub_batch_size):
-                decoded.append(entry.decoder.decode_pixel(
-                    selected_pixels[start:start + sub_batch_size],
-                    selected_samples[start:start + sub_batch_size],
-                ))
-        result = torch.cat(decoded, dim=0)
-        if (
-            result.ndim != 4
-            or result.shape[1] < 4
-            or tuple(result.shape[2:]) != (height, width)
-        ):
-            raise RuntimeError(
-                "canonical transparent VAE decoder returned an invalid "
-                "pixel tensor")
-        result = result.movedim(1, -1)
-        decoded_rgb = result[..., 1:4].clamp(0.0, 1.0)
-        alpha = (1.0 - result[..., 0]).clamp(0.0, 1.0)
-        full_alpha = torch.ones(
-            (len(pixels), height, width),
-            dtype=alpha.dtype, device=alpha.device)
-        full_rgb = pixels[..., :3].to(decoded_rgb).clone()
-        full_rgb[::frames] = decoded_rgb
-        full_alpha[::frames] = alpha
-        rgba = torch.cat((full_rgb, full_alpha.unsqueeze(-1)), dim=-1)
-        return rgba, alpha
-
-    rgba, alpha = await asyncio.to_thread(decode_selected)
-    return (
-        _sdk.ImageRef._wrap(await rt.refs.create("IMAGE", rgba)),
-        _sdk.MaskRef._wrap(await rt.refs.create("MASK", alpha)),
-    )  # type: ignore[return-value]
 
 async def clipseg_segment(clipseg: "ClipSegRef", images: "ImageRef", text: str,
     threshold: float = 0.5, binary_mask: bool = True,

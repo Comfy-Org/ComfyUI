@@ -467,16 +467,6 @@ class PowerPaintRef(Ref):
         save_memory: str = ...,
     ) -> tuple[ModelRef, CondRef, CondRef, LatentRef]: ...
 
-class TransparentVaeDecoderRef(Ref):
-    KIND: str
-    async def decode(
-        self,
-        latent: LatentRef,
-        image: ImageRef,
-        frames: int = ...,
-        sub_batch_size: int = ...,
-    ) -> tuple[ImageRef, MaskRef]: ...
-
 class ObjectDetectorRef(Ref):
     KIND: str
     async def detect(
@@ -806,11 +796,6 @@ class ModelsDomain(Protocol):
         powerpaint_clip: str,
         dtype: str = ...,
     ) -> PowerPaintRef: ...
-    async def load_transparent_vae_decoder(
-        self,
-        model: str,
-        family: str,
-    ) -> TransparentVaeDecoderRef: ...
     async def load_clipseg(self, model: str) -> ClipSegRef: ...
     async def load_image_classifier(
         self,
