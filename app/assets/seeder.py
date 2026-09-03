@@ -394,7 +394,7 @@ class _AssetSeeder:
         joined = self.wait(timeout=timeout)
         if not joined:
             logging.warning(
-                "Asset seeder thread did not exit within %ss; skipping temp cleanup",
+                "Asset seeder thread did not exit within %ss",
                 timeout,
             )
         with self._lock:
