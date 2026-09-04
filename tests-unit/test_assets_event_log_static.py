@@ -47,14 +47,14 @@ class CallSite(NamedTuple):
 # also removes its pending marker below.
 EXPECTED_CALL_SITES: dict[CallSite, int | None] = {
     # todo 10 - seeder lifecycle + the single assets.enabled site
-    CallSite("server.py", "__init__", "assets.enabled"): 10,
-    CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_started"): 10,
-    CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_completed"): 10,
-    CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_failed"): 10,
-    CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_cancelled"): 10,
-    CallSite("app/assets/seeder.py", "_run_scan", "seeder.marked_missing"): 10,
-    CallSite("app/assets/seeder.py", "mark_missing_outside_prefixes", "seeder.marked_missing"): 10,
-    CallSite("app/assets/seeder.py", "_run_fast_phase", "seeder.batch_insert_failed"): 10,
+    CallSite("server.py", "__init__", "assets.enabled"): None,
+    CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_started"): None,
+    CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_completed"): None,
+    CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_failed"): None,
+    CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_cancelled"): None,
+    CallSite("app/assets/seeder.py", "_run_scan", "seeder.marked_missing"): None,
+    CallSite("app/assets/seeder.py", "mark_missing_outside_prefixes", "seeder.marked_missing"): None,
+    CallSite("app/assets/seeder.py", "_run_fast_phase", "seeder.batch_insert_failed"): None,
     # todo 11 - scanner and ingest failure paths
     CallSite("app/assets/scanner.py", "sync_root_safely", "scanner.fast_scan_failed"): 11,
     CallSite("app/assets/scanner.py", "sync_temp_references_safely", "scanner.temp_sync_failed"): 11,
