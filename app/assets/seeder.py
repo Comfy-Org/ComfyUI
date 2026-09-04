@@ -193,54 +193,6 @@ class _AssetSeeder:
             compute_hashes=False,
         )
 
-    def start_enrich(
-        self,
-        roots: tuple[RootType, ...] = ("models", "input", "output"),
-        progress_callback: ProgressCallback | None = None,
-        compute_hashes: bool = False,
-    ) -> bool:
-        """Start an enrichment scan (phase 2 only) - extracts metadata and hashes.
-
-        Args:
-            roots: Tuple of root types to scan
-            progress_callback: Optional callback for progress updates
-            compute_hashes: If True, compute blake3 hashes
-
-        Returns:
-            True if scan was started, False if already running
-        """
-        return self.start(
-            roots=roots,
-            phase=ScanPhase.ENRICH,
-            progress_callback=progress_callback,
-            prune_first=False,
-            compute_hashes=compute_hashes,
-        )
-
-    def enqueue_enrich(
-        self,
-        roots: tuple[RootType, ...] = ("models", "input", "output"),
-        compute_hashes: bool = False,
-    ) -> bool:
-        """Start an enrichment scan now, or queue it for after the current scan.
-
-        If the seeder is idle, starts immediately. Otherwise, the enrich
-        request is stored and will run automatically when the current scan
-        finishes.
-
-        Args:
-            roots: Tuple of root types to scan
-            compute_hashes: If True, compute blake3 hashes
-
-        Returns:
-            True if started immediately, False if queued for later
-        """
-        return self.enqueue_scan(
-            roots=roots,
-            phase=ScanPhase.ENRICH,
-            compute_hashes=compute_hashes,
-        )
-
     def enqueue_scan(
         self,
         roots: tuple[RootType, ...],

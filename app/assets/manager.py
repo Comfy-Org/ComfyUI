@@ -157,6 +157,12 @@ class AssetsEnabled:
         asset_seeder.pause()
 
     def queue_output_scan(self) -> None:
+        # ScanPhase.FULL, not ENRICH, is deliberate: only a walk discovers output
+        # files a custom node wrote without declaring them, so they become assets
+        # shortly after generation instead of at the next restart or page load.
+        # The cost is one output-root walk per ~10s of activity - the same walk
+        # every frontend page load already triggers, minus the models roots.
+        # Do not downgrade this to ENRICH without revisiting that trade.
         if not asset_seeder.is_disabled():
             asset_seeder.enqueue_scan(
                 roots=("output",),

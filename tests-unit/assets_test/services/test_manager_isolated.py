@@ -18,7 +18,7 @@ from app.assets import scanner, seeder as seeder_module
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_content, create_record
 from app.assets.manager import AssetsEnabled
-from app.assets.seeder import asset_seeder
+from app.assets.seeder import ScanStatus, asset_seeder
 from app.database.models import Base
 from app.assets.services.schemas import RegisteredAsset, UploadAssetView
 
@@ -30,6 +30,8 @@ class _ArgsStub:
 
 class _OutputSeeder(Protocol):
     def wait(self, timeout: float | None = None) -> bool: ...
+
+    def get_status(self) -> ScanStatus: ...
 
     def shutdown(self, timeout: float = 5.0) -> bool: ...
 
@@ -123,9 +125,12 @@ def test_queue_output_scan_does_not_duplicate_declared_output(
         str(output_path), job_id="declared-job"
     )
     assert registered is not None
+    undeclared_path = output_dir / "alongside.bin"
+    undeclared_path.write_bytes(b"undeclared custom node output")
 
     enabled_manager.queue_output_scan()
     assert output_seeder.wait(timeout=5)
+    assert output_seeder.get_status().errors == []
 
     with threaded_create_session() as session:
         rows = list(
@@ -135,7 +140,17 @@ def test_queue_output_scan_does_not_duplicate_declared_output(
                 .where(AssetContent.path == str(output_path.resolve()))
             )
         )
+        undeclared_rows = list(
+            session.scalars(
+                select(Asset)
+                .join(AssetContent, Asset.content_id == AssetContent.id)
+                .where(AssetContent.path == str(undeclared_path.resolve()))
+            )
+        )
     assert len(rows) == 1
+    assert len(undeclared_rows) == 1, (
+        "the undeclared sibling proves the walk ran, so the declared row's count of 1 is a real skip rather than a silently-failed scan"
+    )
 
 
 def test_executed_and_cached_outputs_share_unhashed_content(

@@ -19,11 +19,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.assets import mode
 from app.assets.database.queries import (
+    create_content_reporting_insert,
     mark_content_missing,
     create_record,
 )
 from app.assets.database.models import Asset, AssetContent
-from app.assets.database.queries.records import create_content_reporting_insert
 from app.assets.helpers import sql_path_under_prefix, to_stored_hash
 from app.assets.lifecycle import get_excluded_scan_roots
 from app.assets.scanner_changes import (
@@ -69,6 +69,7 @@ RootType = Literal["models", "input", "output"]
 class SeedAssetSpec(TypedDict):
 
     abs_path: str
+    # Walk-time diagnostics only: seeding persists the seed-time restat instead.
     size_bytes: int
     mtime_ns: int
     info_name: str
