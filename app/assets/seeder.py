@@ -65,6 +65,10 @@ class Progress:
     total: int = 0
     created: int = 0
     skipped: int = 0
+    hash_failed: int = 0
+    enrich_failed: int = 0
+    permission_denied: int = 0
+    enrich_failure_emitted: bool = False
     cancel_stage: _ScanStage | None = None
 
 
@@ -379,6 +383,10 @@ class _AssetSeeder:
                     total=src.total,
                     created=src.created,
                     skipped=src.skipped,
+                    hash_failed=src.hash_failed,
+                    enrich_failed=src.enrich_failed,
+                    permission_denied=src.permission_denied,
+                    enrich_failure_emitted=src.enrich_failure_emitted,
                     cancel_stage=src.cancel_stage,
                 )
                 if src
@@ -537,6 +545,10 @@ class _AssetSeeder:
                     total=self._progress.total,
                     created=self._progress.created,
                     skipped=self._progress.skipped,
+                    hash_failed=self._progress.hash_failed,
+                    enrich_failed=self._progress.enrich_failed,
+                    permission_denied=self._progress.permission_denied,
+                    enrich_failure_emitted=self._progress.enrich_failure_emitted,
                 )
 
         if callback and progress:
@@ -590,6 +602,8 @@ class _AssetSeeder:
                 return
 
             emit("seeder.scan_started", phase=phase.value, root=root)
+            assert self._progress is not None
+            progress = self._progress
 
             if self._prune_first:
                 all_prefixes = get_owned_prefixes()
@@ -601,7 +615,7 @@ class _AssetSeeder:
                 )
                 if marked > 0:
                     logging.info("Marked %d refs as missing before scan", marked)
-                sync_temp_references_safely()
+                sync_temp_references_safely(progress)
 
             if self._check_pause_and_cancel(_ScanStage.PRUNING):
                 logging.info("Asset scan cancelled after pruning phase")
@@ -670,9 +684,9 @@ class _AssetSeeder:
                 created=total_created,
                 enriched=total_enriched,
                 skipped=skipped_existing,
-                hash_failed=0,
-                enrich_failed=0,
-                permission_denied=0,
+                hash_failed=progress.hash_failed,
+                enrich_failed=progress.enrich_failed,
+                permission_denied=progress.permission_denied,
                 root=root,
             )
 
@@ -742,10 +756,12 @@ class _AssetSeeder:
 
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()
+        assert self._progress is not None
+        progress = self._progress
         for r in roots:
             if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
                 return total_created, skipped_existing, 0
-            existing_paths.update(sync_root_safely(r))
+            existing_paths.update(sync_root_safely(r, progress))
         logging.debug(
             "Fast scan: sync_root phase took %.3fs (%d existing paths)",
             time.perf_counter() - t_sync,
@@ -848,6 +864,8 @@ class _AssetSeeder:
             Tuple of (cancelled, total_enriched)
         """
         total_enriched = 0
+        assert self._progress is not None
+        progress = self._progress
         with create_session() as session:
             drain_pending_verifications(session)
             tick_watch_list(session)
@@ -890,9 +908,11 @@ class _AssetSeeder:
                 extract_metadata=True,
                 compute_hash=self._compute_hashes,
                 interrupt_check=self._is_paused_or_cancelled,
+                progress=progress,
             )
             total_enriched += enriched
             skip_ids.update(failed_ids)
+            progress.enrich_failed += len(failed_ids)
 
             if enriched == 0:
                 consecutive_empty += 1

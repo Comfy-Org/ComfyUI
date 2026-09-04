@@ -56,23 +56,23 @@ EXPECTED_CALL_SITES: dict[CallSite, int | None] = {
     CallSite("app/assets/seeder.py", "mark_missing_outside_prefixes", "seeder.marked_missing"): None,
     CallSite("app/assets/seeder.py", "_run_fast_phase", "seeder.batch_insert_failed"): None,
     # todo 11 - scanner and ingest failure paths
-    CallSite("app/assets/scanner.py", "sync_root_safely", "scanner.fast_scan_failed"): 11,
-    CallSite("app/assets/scanner.py", "sync_temp_references_safely", "scanner.temp_sync_failed"): 11,
+    CallSite("app/assets/scanner.py", "sync_root_safely", "scanner.fast_scan_failed"): None,
+    CallSite("app/assets/scanner.py", "sync_temp_references_safely", "scanner.temp_sync_failed"): None,
     CallSite(
         "app/assets/scanner.py", "mark_missing_outside_prefixes_safely", "scanner.mark_missing_failed"
-    ): 11,
-    CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_failed"): 11,
-    CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_discarded_modified"): 11,
-    CallSite("app/assets/scanner.py", "enrich_assets_batch", "scanner.enrich_failed"): 11,
+    ): None,
+    CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_failed"): None,
+    CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_discarded_modified"): None,
+    CallSite("app/assets/scanner.py", "enrich_assets_batch", "scanner.enrich_failed"): None,
     CallSite(
         "app/assets/services/ingest.py", "register_cached_output", "ingest.register_output_failed"
-    ): 11,
+    ): None,
     CallSite(
         "app/assets/services/ingest.py", "register_executed_output", "ingest.register_output_failed"
-    ): 11,
+    ): None,
     CallSite(
         "app/assets/services/ingest.py", "_discard_unreferenced_content", "ingest.discard_orphan_failed"
-    ): 11,
+    ): None,
     # todo 12 - one api.request_failed per route handler, seven handlers
     CallSite("app/assets/api/routes.py", "get_asset_route", "api.request_failed"): 12,
     CallSite("app/assets/api/routes.py", "upload_asset", "api.request_failed"): 12,

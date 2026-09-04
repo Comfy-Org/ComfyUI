@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.assets import mode
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries.records import create_content, create_record, mark_content_missing
+from app.assets.event_log import emit, error_type
 from app.assets.helpers import normalize_tags, to_stored_hash
 from app.assets.services.file_utils import get_mtime_ns, get_size_and_mtime_ns
 from app.assets.services.image_dimensions import extract_image_dimensions
@@ -91,8 +92,9 @@ def _discard_unreferenced_content(session: Session, content_id: str) -> None:
         if content is not None:
             session.delete(content)
             session.commit()
-    except Exception:
+    except Exception as exc:
         logging.exception("Failed to discard orphan content %s", content_id)
+        emit("ingest.discard_orphan_failed", error_type=error_type(exc))
 
 
 def _sanitize_filename(name: str | None, fallback: str) -> str:
@@ -677,8 +679,9 @@ def register_cached_output(
             record_content_id = record.content_id
             record_job_id = record.job_id
             record_name = record.name
-    except Exception:
+    except Exception as exc:
         logging.exception("Failed to register cached output: %s", locator)
+        emit("ingest.register_output_failed", error_type=error_type(exc))
         return None
 
     return RegisteredAsset(
@@ -735,8 +738,9 @@ def register_executed_output(
             record_content_id = record.content_id
             record_job_id = record.job_id
             record_name = record.name
-    except Exception:
+    except Exception as exc:
         logging.exception("Failed to register executed output: %s", locator)
+        emit("ingest.register_output_failed", error_type=error_type(exc))
         return None
 
     return RegisteredAsset(
