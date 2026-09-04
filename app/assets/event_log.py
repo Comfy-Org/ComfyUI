@@ -118,7 +118,7 @@ def _caller_call_site() -> tuple[str, int]:
     return (caller.filename, caller.lineno or 0)
 
 
-def emit(event: str, **fields: Any) -> None:
+def emit(event: str, *, root: str | None = None, **fields: Any) -> None:
     """Log one tagged event line.
 
     An invalid call raises in strict mode (under pytest, or with
@@ -126,6 +126,9 @@ def emit(event: str, **fields: Any) -> None:
     In production it warns once per call site and drops the event, so a
     vocabulary mistake can never break a running server.
     """
+    if root is not None:
+        fields["root"] = root
+
     problem = _find_problem(event, fields)
     if problem is None:
         logging.info(
