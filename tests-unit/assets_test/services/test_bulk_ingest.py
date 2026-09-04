@@ -1,5 +1,6 @@
 """Tests for bulk ingest services."""
 
+import logging
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +14,25 @@ from app.assets.services.bulk_ingest import SeedAssetSpec, batch_insert_seed_ass
 
 
 class TestBatchInsertSeedAssets:
+    def test_locked_file_logs_typed_error_without_path(self, caplog):
+        locked_path = "/private/user/models/locked.safetensors"
+
+        with (
+            patch(
+                "app.assets.scanner.os.stat", side_effect=PermissionError(locked_path)
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            specs, tags, skipped = build_asset_specs([locked_path], set())
+
+        assert specs == []
+        assert tags == set()
+        assert skipped == 0
+        assert caplog.messages == [
+            "Asset scan error: phase=discovery_stat error_type=permission_denied"
+        ]
+        assert locked_path not in caplog.text
+
     def test_populates_mime_type_for_model_files(self, session: Session, temp_dir: Path):
         """Verify mime_type is stored in the Asset table for model files."""
         file_path = temp_dir / "model.safetensors"
