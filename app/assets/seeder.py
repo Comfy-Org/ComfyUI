@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable
+from typing import Any, Callable, TypedDict
 
 from app.assets.scanner import (
     RootType,
@@ -52,6 +52,12 @@ class ScanPhase(Enum):
     FAST = "fast"  # Phase 1: filesystem only (stubs)
     ENRICH = "enrich"  # Phase 2: metadata + hash
     FULL = "full"  # Both phases sequentially
+
+
+class PendingScan(TypedDict):
+    roots: tuple[RootType, ...]
+    phase: ScanPhase
+    compute_hashes: bool
 
 
 @dataclass
@@ -103,7 +109,7 @@ class _AssetSeeder:
         self._progress_callback: ProgressCallback | None = None
         self._event_sink: Callable[[str, dict[str, Any]], None] | None = None
         self._disabled: bool = False
-        self._pending_enrich: dict | None = None
+        self._pending_scan: PendingScan | None = None
 
     def set_event_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
         self._event_sink = sink
@@ -187,64 +193,40 @@ class _AssetSeeder:
             compute_hashes=False,
         )
 
-    def start_enrich(
+    def enqueue_scan(
         self,
-        roots: tuple[RootType, ...] = ("models", "input", "output"),
-        progress_callback: ProgressCallback | None = None,
+        roots: tuple[RootType, ...],
+        phase: ScanPhase,
         compute_hashes: bool = False,
     ) -> bool:
-        """Start an enrichment scan (phase 2 only) - extracts metadata and hashes.
-
-        Args:
-            roots: Tuple of root types to scan
-            progress_callback: Optional callback for progress updates
-            compute_hashes: If True, compute blake3 hashes
-
-        Returns:
-            True if scan was started, False if already running
-        """
-        return self.start(
-            roots=roots,
-            phase=ScanPhase.ENRICH,
-            progress_callback=progress_callback,
-            prune_first=False,
-            compute_hashes=compute_hashes,
-        )
-
-    def enqueue_enrich(
-        self,
-        roots: tuple[RootType, ...] = ("models", "input", "output"),
-        compute_hashes: bool = False,
-    ) -> bool:
-        """Start an enrichment scan now, or queue it for after the current scan.
-
-        If the seeder is idle, starts immediately. Otherwise, the enrich
-        request is stored and will run automatically when the current scan
-        finishes.
-
-        Args:
-            roots: Tuple of root types to scan
-            compute_hashes: If True, compute blake3 hashes
-
-        Returns:
-            True if started immediately, False if queued for later
-        """
         with self._lock:
-            if self.start_enrich(roots=roots, compute_hashes=compute_hashes):
+            if self.start(
+                roots=roots,
+                phase=phase,
+                prune_first=False,
+                compute_hashes=compute_hashes,
+            ):
                 return True
-            if self._pending_enrich is not None:
-                existing_roots = set(self._pending_enrich["roots"])
+            if self._pending_scan is not None:
+                existing_roots = set(self._pending_scan["roots"])
                 existing_roots.update(roots)
-                self._pending_enrich["roots"] = tuple(existing_roots)
-                self._pending_enrich["compute_hashes"] = (
-                    self._pending_enrich["compute_hashes"] or compute_hashes
+                self._pending_scan["roots"] = tuple(existing_roots)
+                self._pending_scan["compute_hashes"] = (
+                    self._pending_scan["compute_hashes"] or compute_hashes
                 )
+                if self._pending_scan["phase"] is not phase:
+                    self._pending_scan["phase"] = ScanPhase.FULL
             else:
-                self._pending_enrich = {
+                self._pending_scan = {
                     "roots": roots,
+                    "phase": phase,
                     "compute_hashes": compute_hashes,
                 }
-            logging.info("Enrich scan queued (roots=%s)", self._pending_enrich["roots"])
+            logging.info(
+                "Scan queued (roots=%s, phase=%s)",
+                self._pending_scan["roots"],
+                self._pending_scan["phase"].value,
+            )
         return False
 
     def cancel(self) -> bool:
@@ -394,7 +376,7 @@ class _AssetSeeder:
         joined = self.wait(timeout=timeout)
         if not joined:
             logging.warning(
-                "Asset seeder thread did not exit within %ss; skipping temp cleanup",
+                "Asset seeder thread did not exit within %ss",
                 timeout,
             )
         with self._lock:
@@ -659,16 +641,19 @@ class _AssetSeeder:
                 )
             with self._lock:
                 self._reset_to_idle()
-                pending = self._pending_enrich
+                pending = self._pending_scan
                 if pending is not None:
-                    self._pending_enrich = None
-                    if not self.start_enrich(
+                    self._pending_scan = None
+                    if not self.start(
                         roots=pending["roots"],
+                        phase=pending["phase"],
+                        prune_first=False,
                         compute_hashes=pending["compute_hashes"],
                     ):
                         logging.warning(
-                            "Pending enrich scan could not start (roots=%s)",
+                            "Pending scan could not start (roots=%s, phase=%s)",
                             pending["roots"],
+                            pending["phase"].value,
                         )
 
     def _run_fast_phase(self, roots: tuple[RootType, ...]) -> tuple[int, int, int]:

@@ -1,3 +1,4 @@
+import logging
 import os
 import tempfile
 from contextlib import contextmanager
@@ -212,6 +213,14 @@ def test_shutdown_skips_cleanup_when_seeder_join_times_out(session, comfy_dirs, 
 
     wipe_mock.assert_not_called()
     assert session.get(Asset, record_id) is not None
+
+
+def test_seeder_shutdown_logs_only_when_thread_does_not_exit(caplog: pytest.LogCaptureFixture) -> None:
+    seeder = type(asset_seeder)()
+    with patch.object(seeder, "cancel"), patch.object(seeder, "wait", return_value=False), caplog.at_level(logging.WARNING):
+        assert seeder.shutdown(timeout=2.5) is False
+    assert caplog.messages == ["Asset seeder thread did not exit within 2.5s"]
+    assert "skipping temp cleanup" not in caplog.text
 
 
 def test_shutdown_cleanup_wipes_rows_then_rmtree(session, comfy_dirs, mock_create_session):

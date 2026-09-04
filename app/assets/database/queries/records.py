@@ -55,7 +55,7 @@ def _is_live_path_conflict(error: IntegrityError) -> bool:
     return postgres_names_the_index or sqlite_names_the_column
 
 
-def create_content(session: Session, path: str, hash: str | None = None, size_bytes: int = 0, mtime_ns: int | None = None) -> AssetContent:
+def create_content_reporting_insert(session: Session, path: str, hash: str | None = None, size_bytes: int = 0, mtime_ns: int | None = None) -> tuple[AssetContent, bool]:
     # The sole writer of asset_contents.path, which is what makes the raw-column SQL prefix
     # predicates sound — lifecycle's temp wipe HARD-DELETES every row its predicate admits.
     path = os.path.abspath(path)
@@ -64,12 +64,17 @@ def create_content(session: Session, path: str, hash: str | None = None, size_by
         with session.begin_nested():
             session.add(content)
             session.flush()
-            return content
+            return content, True
     except IntegrityError as error:
         if not _is_live_path_conflict(error):
             raise
         winner = session.execute(sa.select(AssetContent).where(AssetContent.path == path, AssetContent.is_missing.is_(False))).scalar_one()
-        return winner
+        return winner, False
+
+
+def create_content(session: Session, path: str, hash: str | None = None, size_bytes: int = 0, mtime_ns: int | None = None) -> AssetContent:
+    content, _ = create_content_reporting_insert(session, path, hash, size_bytes, mtime_ns)
+    return content
 
 
 def ensure_tag(session: Session, name: str) -> None:

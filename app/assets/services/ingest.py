@@ -18,7 +18,11 @@ from sqlalchemy.orm import Session
 
 from app.assets import mode
 from app.assets.database.models import Asset, AssetContent, AssetTag
-from app.assets.database.queries.records import create_content, create_record, mark_content_missing
+from app.assets.database.queries.records import (
+    create_content_reporting_insert,
+    create_record,
+    mark_content_missing,
+)
 from app.assets.helpers import normalize_tags, to_stored_hash
 from app.assets.services.file_utils import get_mtime_ns, get_size_and_mtime_ns
 from app.assets.services.image_dimensions import extract_image_dimensions
@@ -485,10 +489,10 @@ def upload_from_temp_path(
             _ContentFacts(stored_hash, size_bytes, mtime_ns),
             content_written=True,
         )
-        content = create_content(
+        content, inserted = create_content_reporting_insert(
             session, dest_abs, stored_hash, size_bytes, mtime_ns
         )
-        created_content_id = content.id
+        created_content_id = content.id if inserted else None
         try:
             record = _create_upload_record(
                 session,
@@ -503,7 +507,8 @@ def upload_from_temp_path(
             session.commit()
         except Exception:
             session.rollback()
-            _discard_unreferenced_content(session, created_content_id)
+            if created_content_id is not None:
+                _discard_unreferenced_content(session, created_content_id)
             raise
         return _record_to_upload_result(session, record, created_new=True)
 
@@ -565,10 +570,10 @@ def register_file_in_place(
         session.commit()
 
     with create_session() as session:
-        content = create_content(
+        content, inserted = create_content_reporting_insert(
             session, locator, stored_hash, size_bytes, mtime_ns
         )
-        created_content_id = content.id
+        created_content_id = content.id if inserted else None
         try:
             record = _create_upload_record(
                 session,
@@ -583,7 +588,8 @@ def register_file_in_place(
             session.commit()
         except Exception:
             session.rollback()
-            _discard_unreferenced_content(session, created_content_id)
+            if created_content_id is not None:
+                _discard_unreferenced_content(session, created_content_id)
             raise
         return _record_to_upload_result(session, record, created_new=True)
 
@@ -724,8 +730,11 @@ def register_executed_output(
                 ).first()
                 if existing is not None:
                     mark_content_missing(session, existing.id)
-                content = create_content(session, locator, None, size_bytes, mtime_ns)
-                created_content_id = content.id
+                content, inserted = create_content_reporting_insert(
+                    session, locator, None, size_bytes, mtime_ns
+                )
+                if inserted:
+                    created_content_id = content.id
                 record = create_record(
                     session,
                     content.id,

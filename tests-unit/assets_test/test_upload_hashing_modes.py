@@ -7,15 +7,19 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import requests
+from aiohttp import web
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session as SASession
 
 import app.assets.mode as mode_module
 import folder_paths
+from app.assets.api import routes, schemas_in
 from app.assets.database.models import AssetContent, Base
 from app.assets.services.ingest import register_executed_output
 
@@ -89,6 +93,40 @@ def _upload_via_image(
 
 def _unique_bytes(seed: str, size: int = 4096) -> bytes:
     return uuid.uuid4().bytes + seed.encode("utf-8").ljust(size, b"\0")[: size - 16]
+
+
+@pytest.mark.asyncio
+async def test_hash_only_multipart_upload_off_mode_returns_400(monkeypatch):
+    hash_value = f"blake3:{'a' * 64}"
+    parsed = schemas_in.ParsedUpload(
+        file_present=False,
+        file_written=0,
+        file_client_name=None,
+        tmp_path=None,
+        tags_raw=[],
+        provided_name=None,
+        user_metadata_raw=None,
+        provided_hash=hash_value,
+        provided_hash_exists=True,
+    )
+    monkeypatch.setattr(mode_module, "hashing_enabled", lambda: False)
+    monkeypatch.setattr(routes, "_ASSETS_ENABLED", True)
+    monkeypatch.setattr(
+        routes, "parse_multipart_upload", AsyncMock(return_value=parsed)
+    )
+    monkeypatch.setattr(
+        routes,
+        "USER_MANAGER",
+        SimpleNamespace(get_request_user_id=lambda _request: "test-user"),
+    )
+
+    response = await routes.upload_asset(AsyncMock(spec=web.Request))
+
+    assert isinstance(response, web.Response)
+    assert response.status == 400
+    response_body = response.body
+    assert isinstance(response_body, bytes | bytearray)
+    assert json.loads(response_body)["error"]["code"] == "FEATURE_DISABLED"
 
 
 @pytest.fixture(scope="session")

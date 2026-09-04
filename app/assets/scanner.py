@@ -19,8 +19,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.assets import mode
 from app.assets.database.queries import (
+    create_content_reporting_insert,
     mark_content_missing,
-    create_content,
     create_record,
 )
 from app.assets.database.models import Asset, AssetContent
@@ -69,6 +69,7 @@ RootType = Literal["models", "input", "output"]
 class SeedAssetSpec(TypedDict):
 
     abs_path: str
+    # Walk-time diagnostics only: seeding persists the seed-time restat instead.
     size_bytes: int
     mtime_ns: int
     info_name: str
@@ -343,14 +344,15 @@ def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
                         continue
                     if recovery != "no_match":
                         continue
-                    content = create_content(
+                    content, inserted = create_content_reporting_insert(
                         session,
                         path=path,
                         hash=None,
-                        size_bytes=spec["size_bytes"],
-                        mtime_ns=spec["mtime_ns"],
+                        size_bytes=stat_result.st_size,
+                        mtime_ns=get_mtime_ns(stat_result),
                     )
-                    created_content_ids.append(content.id)
+                    if inserted:
+                        created_content_ids.append(content.id)
                     existing_record = session.scalar(
                         sa.select(Asset.id).where(Asset.content_id == content.id).limit(1)
                     )

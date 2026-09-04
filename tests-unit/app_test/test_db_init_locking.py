@@ -1,12 +1,20 @@
+import logging
 import os
 import sqlite3
 
 import pytest
+import torch
 from alembic import command
 from alembic.config import Config
 from filelock import FileLock, Timeout
 
 from app.database import db as db_module
+from comfy.cli_args import args as cli_args
+
+if not torch.cuda.is_available():
+    cli_args.cpu = True
+
+import main  # noqa: E402
 
 _PRE_HEAD = "0006_add_loader_path"
 
@@ -87,3 +95,24 @@ def test_held_lock_blocks_before_any_migration_work(stale_db):
         assert db_module.Session is None
     finally:
         holder.release()
+
+
+def test_setup_database_routes_file_lock_to_lock_guidance(monkeypatch, caplog):
+    monkeypatch.setattr(main, "dependencies_available", lambda: True)
+
+    def _raise_file_lock():
+        raise RuntimeError(
+            "Could not acquire lock on database '/some/path.db'. "
+            "Another ComfyUI process may already be using it. "
+            "Use --database-url to specify a separate database file."
+        )
+
+    monkeypatch.setattr(main, "init_db", _raise_file_lock)
+    monkeypatch.setattr(main.args, "enable_assets", False)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as error:
+        main.setup_database(None)
+
+    assert error.value.code == 1
+    assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
+    assert "Failed to initialize database." not in caplog.text

@@ -736,6 +736,10 @@ async def upload_asset(request: web.Request) -> web.Response:
 
     try:
         if not parsed.file_present and spec.hash:
+            if not mode.hashing_enabled():
+                return _build_error_response(
+                    400, "FEATURE_DISABLED", "Asset hashing is disabled."
+                )
             result = create_from_hash(
                 hash_str=spec.hash,
                 name=spec.name or (spec.hash.split(":", 1)[1]),
