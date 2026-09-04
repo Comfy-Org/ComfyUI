@@ -537,7 +537,8 @@ def enrich_asset(
         except Exception as e:
             if isinstance(e, OSError):
                 _log_scan_error("hashing", e)
-            logging.warning("Failed to hash %s: %s", file_path, e)
+            else:
+                logging.warning("Failed to hash %s: %s", file_path, e)
 
     # Optimistic guard: if the reference's mtime_ns changed since we
     # started (e.g. ingest_existing_file updated it), our results are
