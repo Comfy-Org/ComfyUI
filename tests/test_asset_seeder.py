@@ -1,4 +1,3 @@
-"""Covers the seeder's event sink, idle reset, and ``enqueue_scan``'s start-now-or-queue-and-merge behaviour."""
 
 import threading
 from typing import Any
@@ -108,7 +107,6 @@ class TestEnqueueScanStartsImmediately:
 
 class TestEnqueueScanQueuesWhenBusy:
     def test_queues_when_busy(self, seeder):
-        """enqueue_scan should store a pending request when seeder is busy."""
         with patch.object(seeder, "start", return_value=False):
             result = seeder.enqueue_scan(
                 roots=("models",), phase=ScanPhase.ENRICH, compute_hashes=False

@@ -199,7 +199,6 @@ class _AssetSeeder:
         phase: ScanPhase,
         compute_hashes: bool = False,
     ) -> bool:
-        """Start a scan now, or coalesce it with work pending after this scan."""
         with self._lock:
             if self.start(
                 roots=roots,
