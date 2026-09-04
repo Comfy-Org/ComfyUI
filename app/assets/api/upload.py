@@ -15,6 +15,7 @@ from aiohttp import web
 
 import folder_paths
 from app.assets.api.schemas_in import ParsedUpload, UploadError
+from app.assets.event_log import emit, error_type
 from app.assets.helpers import validate_blake3_hash
 
 
@@ -88,6 +89,11 @@ async def parse_multipart_upload(
                 except Exception as e:
                     logging.exception(
                         "check_hash_exists failed for hash=%s: %s", provided_hash, e
+                    )
+                    emit(
+                        "api.request_failed",
+                        route="parse_multipart_upload",
+                        error_type=error_type(e),
                     )
                     raise UploadError(
                         500,

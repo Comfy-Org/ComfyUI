@@ -74,13 +74,13 @@ EXPECTED_CALL_SITES: dict[CallSite, int | None] = {
         "app/assets/services/ingest.py", "_discard_unreferenced_content", "ingest.discard_orphan_failed"
     ): None,
     # todo 12 - one api.request_failed per route handler, seven handlers
-    CallSite("app/assets/api/routes.py", "get_asset_route", "api.request_failed"): 12,
-    CallSite("app/assets/api/routes.py", "upload_asset", "api.request_failed"): 12,
-    CallSite("app/assets/api/routes.py", "update_asset_route", "api.request_failed"): 12,
-    CallSite("app/assets/api/routes.py", "delete_asset_route", "api.request_failed"): 12,
-    CallSite("app/assets/api/routes.py", "add_asset_tags", "api.request_failed"): 12,
-    CallSite("app/assets/api/routes.py", "delete_asset_tags", "api.request_failed"): 12,
-    CallSite("app/assets/api/upload.py", "parse_multipart_upload", "api.request_failed"): 12,
+    CallSite("app/assets/api/routes.py", "get_asset_route", "api.request_failed"): None,
+    CallSite("app/assets/api/routes.py", "upload_asset", "api.request_failed"): None,
+    CallSite("app/assets/api/routes.py", "update_asset_route", "api.request_failed"): None,
+    CallSite("app/assets/api/routes.py", "delete_asset_route", "api.request_failed"): None,
+    CallSite("app/assets/api/routes.py", "add_asset_tags", "api.request_failed"): None,
+    CallSite("app/assets/api/routes.py", "delete_asset_tags", "api.request_failed"): None,
+    CallSite("app/assets/api/upload.py", "parse_multipart_upload", "api.request_failed"): None,
 }
 
 REQUEST_FAILED_HANDLERS = frozenset(
