@@ -405,7 +405,7 @@ def prompt_worker(q, server_instance, asset_manager):
                 need_gc = False
                 hook_breaker_ac10a0.restore_functions()
 
-                asset_manager.queue_output_enrichment()
+                asset_manager.queue_output_scan()
                 asset_manager.resume_background_scan()
 
 

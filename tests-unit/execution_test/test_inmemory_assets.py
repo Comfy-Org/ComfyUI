@@ -59,7 +59,7 @@ class InMemoryAssets:
     def pause_background_scan(self) -> None:
         return None
 
-    def queue_output_enrichment(self) -> None:
+    def queue_output_scan(self) -> None:
         return None
 
     def resume_background_scan(self) -> None:
@@ -135,7 +135,7 @@ def test_conforms() -> None:
     manager.register_routes(web.Application(), None)
     manager.ensure_scan_started()
     manager.pause_background_scan()
-    manager.queue_output_enrichment()
+    manager.queue_output_scan()
     manager.resume_background_scan()
     assert (
         manager.register_upload(

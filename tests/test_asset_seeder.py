@@ -1,12 +1,10 @@
-"""Tests for app.assets.seeder – enqueue_enrich and pending-queue behaviour."""
-
 import threading
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import pytest
 
-from app.assets.seeder import Progress, _AssetSeeder, State
+from app.assets.seeder import Progress, ScanPhase, _AssetSeeder, State
 
 
 @pytest.fixture()
@@ -81,16 +79,19 @@ class TestResetToIdle:
 
 class TestEnqueueEnrichStartsImmediately:
     def test_starts_when_idle(self, seeder):
-        """enqueue_enrich should delegate to start_enrich and return True when idle."""
-        with patch.object(seeder, "start_enrich", return_value=True) as mock:
+        with patch.object(seeder, "start", return_value=True) as mock:
             assert seeder.enqueue_enrich(roots=("output",), compute_hashes=True) is True
-            mock.assert_called_once_with(roots=("output",), compute_hashes=True)
+            mock.assert_called_once_with(
+                roots=("output",),
+                phase=ScanPhase.ENRICH,
+                prune_first=False,
+                compute_hashes=True,
+            )
 
     def test_no_pending_when_started_immediately(self, seeder):
-        """No pending request should be stored when start_enrich succeeds."""
-        with patch.object(seeder, "start_enrich", return_value=True):
+        with patch.object(seeder, "start", return_value=True):
             seeder.enqueue_enrich(roots=("output",))
-        assert seeder._pending_enrich is None
+        assert seeder._pending_scan is None
 
 
 # ---------------------------------------------------------------------------
@@ -101,20 +102,21 @@ class TestEnqueueEnrichStartsImmediately:
 class TestEnqueueEnrichQueuesWhenBusy:
     def test_queues_when_busy(self, seeder):
         """enqueue_enrich should store a pending request when seeder is busy."""
-        with patch.object(seeder, "start_enrich", return_value=False):
+        with patch.object(seeder, "start", return_value=False):
             result = seeder.enqueue_enrich(roots=("models",), compute_hashes=False)
 
         assert result is False
-        assert seeder._pending_enrich == {
+        assert seeder._pending_scan == {
             "roots": ("models",),
+            "phase": ScanPhase.ENRICH,
             "compute_hashes": False,
         }
 
     def test_queues_preserves_compute_hashes_true(self, seeder):
-        with patch.object(seeder, "start_enrich", return_value=False):
+        with patch.object(seeder, "start", return_value=False):
             seeder.enqueue_enrich(roots=("input",), compute_hashes=True)
 
-        assert seeder._pending_enrich["compute_hashes"] is True
+        assert seeder._pending_scan["compute_hashes"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -124,17 +126,17 @@ class TestEnqueueEnrichQueuesWhenBusy:
 
 class TestEnqueueEnrichMergesPending:
     def _make_busy(self, seeder):
-        """Patch start_enrich to always return False (seeder busy)."""
-        return patch.object(seeder, "start_enrich", return_value=False)
+        return patch.object(seeder, "start", return_value=False)
 
     def test_merges_roots(self, seeder):
         """A second enqueue should merge roots with the existing pending request."""
         with self._make_busy(seeder):
             seeder.enqueue_enrich(roots=("models",))
-            seeder.enqueue_enrich(roots=("output",))
+            seeder.enqueue_scan(roots=("output",), phase=ScanPhase.FAST)
 
-        merged = set(seeder._pending_enrich["roots"])
+        merged = set(seeder._pending_scan["roots"])
         assert merged == {"models", "output"}
+        assert seeder._pending_scan["phase"] is ScanPhase.FULL
 
     def test_merges_overlapping_roots(self, seeder):
         """Duplicate roots should be deduplicated."""
@@ -142,7 +144,7 @@ class TestEnqueueEnrichMergesPending:
             seeder.enqueue_enrich(roots=("models", "input"))
             seeder.enqueue_enrich(roots=("input", "output"))
 
-        merged = set(seeder._pending_enrich["roots"])
+        merged = set(seeder._pending_scan["roots"])
         assert merged == {"models", "input", "output"}
 
     def test_compute_hashes_sticky_true(self, seeder):
@@ -151,7 +153,7 @@ class TestEnqueueEnrichMergesPending:
             seeder.enqueue_enrich(roots=("models",), compute_hashes=True)
             seeder.enqueue_enrich(roots=("output",), compute_hashes=False)
 
-        assert seeder._pending_enrich["compute_hashes"] is True
+        assert seeder._pending_scan["compute_hashes"] is True
 
     def test_compute_hashes_upgrades_to_true(self, seeder):
         """A later enqueue with compute_hashes=True should upgrade the pending request."""
@@ -159,7 +161,7 @@ class TestEnqueueEnrichMergesPending:
             seeder.enqueue_enrich(roots=("models",), compute_hashes=False)
             seeder.enqueue_enrich(roots=("output",), compute_hashes=True)
 
-        assert seeder._pending_enrich["compute_hashes"] is True
+        assert seeder._pending_scan["compute_hashes"] is True
 
     def test_compute_hashes_stays_false(self, seeder):
         """If both enqueues have compute_hashes=False it stays False."""
@@ -167,7 +169,7 @@ class TestEnqueueEnrichMergesPending:
             seeder.enqueue_enrich(roots=("models",), compute_hashes=False)
             seeder.enqueue_enrich(roots=("output",), compute_hashes=False)
 
-        assert seeder._pending_enrich["compute_hashes"] is False
+        assert seeder._pending_scan["compute_hashes"] is False
 
     def test_triple_merge(self, seeder):
         """Three successive enqueues should all merge correctly."""
@@ -176,43 +178,41 @@ class TestEnqueueEnrichMergesPending:
             seeder.enqueue_enrich(roots=("input",), compute_hashes=False)
             seeder.enqueue_enrich(roots=("output",), compute_hashes=True)
 
-        merged = set(seeder._pending_enrich["roots"])
+        merged = set(seeder._pending_scan["roots"])
         assert merged == {"models", "input", "output"}
-        assert seeder._pending_enrich["compute_hashes"] is True
+        assert seeder._pending_scan["compute_hashes"] is True
 
 
-# ---------------------------------------------------------------------------
-# Pending enrich drains after scan completes
-# ---------------------------------------------------------------------------
-
-
-class TestPendingEnrichDrain:
-    """Verify that _run_scan drains _pending_enrich via start_enrich."""
+class TestPendingScanDrain:
 
     @patch("app.assets.seeder.dependencies_available", return_value=True)
     @patch("app.assets.seeder.get_owned_prefixes", return_value=[])
     @patch("app.assets.seeder.sync_root_safely", return_value=set())
     @patch("app.assets.seeder.collect_paths_for_roots", return_value=[])
     @patch("app.assets.seeder.build_asset_specs", return_value=([], {}, 0))
-    def test_pending_enrich_starts_after_scan(self, *_mocks):
-        """After a fast scan finishes, the pending enrich should be started."""
+    def test_pending_scan_starts_after_scan(self, *_mocks):
         seeder = _AssetSeeder()
 
-        seeder._pending_enrich = {
+        seeder._pending_scan = {
             "roots": ("output",),
+            "phase": ScanPhase.FULL,
             "compute_hashes": True,
         }
 
-        with patch.object(seeder, "start_enrich", return_value=True) as mock_start:
+        real_start = seeder.start
+        with patch.object(seeder, "start", wraps=real_start) as mock_start:
             seeder.start_fast(roots=("models",))
             seeder.wait(timeout=5)
+            seeder.wait(timeout=5)
 
-            mock_start.assert_called_once_with(
+            assert mock_start.call_args_list[-1] == call(
                 roots=("output",),
+                phase=ScanPhase.FULL,
+                prune_first=False,
                 compute_hashes=True,
             )
 
-        assert seeder._pending_enrich is None
+        assert seeder._pending_scan is None
 
     @patch("app.assets.seeder.dependencies_available", return_value=True)
     @patch("app.assets.seeder.get_owned_prefixes", return_value=[])
@@ -220,18 +220,25 @@ class TestPendingEnrichDrain:
     @patch("app.assets.seeder.collect_paths_for_roots", return_value=[])
     @patch("app.assets.seeder.build_asset_specs", return_value=([], {}, 0))
     def test_pending_cleared_even_when_start_fails(self, *_mocks):
-        """_pending_enrich should be cleared even if start_enrich returns False."""
         seeder = _AssetSeeder()
-        seeder._pending_enrich = {
+        seeder._pending_scan = {
             "roots": ("output",),
+            "phase": ScanPhase.ENRICH,
             "compute_hashes": False,
         }
 
-        with patch.object(seeder, "start_enrich", return_value=False):
+        real_start = seeder.start
+
+        def start_initial_scan_only(**kwargs):
+            if kwargs["roots"] == ("models",):
+                return real_start(**kwargs)
+            return False
+
+        with patch.object(seeder, "start", side_effect=start_initial_scan_only):
             seeder.start_fast(roots=("models",))
             seeder.wait(timeout=5)
 
-        assert seeder._pending_enrich is None
+        assert seeder._pending_scan is None
 
     @patch("app.assets.seeder.dependencies_available", return_value=True)
     @patch("app.assets.seeder.get_owned_prefixes", return_value=[])
@@ -239,15 +246,15 @@ class TestPendingEnrichDrain:
     @patch("app.assets.seeder.collect_paths_for_roots", return_value=[])
     @patch("app.assets.seeder.build_asset_specs", return_value=([], {}, 0))
     def test_no_drain_when_no_pending(self, *_mocks):
-        """start_enrich should not be called when there is no pending request."""
         seeder = _AssetSeeder()
-        assert seeder._pending_enrich is None
+        assert seeder._pending_scan is None
 
-        with patch.object(seeder, "start_enrich", return_value=True) as mock_start:
+        real_start = seeder.start
+        with patch.object(seeder, "start", wraps=real_start) as mock_start:
             seeder.start_fast(roots=("models",))
             seeder.wait(timeout=5)
 
-            mock_start.assert_not_called()
+            assert mock_start.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +265,7 @@ class TestPendingEnrichDrain:
 class TestEnqueueEnrichThreadSafety:
     def test_concurrent_enqueues(self, seeder):
         """Multiple threads enqueuing should not lose roots."""
-        with patch.object(seeder, "start_enrich", return_value=False):
+        with patch.object(seeder, "start", return_value=False):
             barrier = threading.Barrier(3)
 
             def enqueue(root):
@@ -274,5 +281,5 @@ class TestEnqueueEnrichThreadSafety:
             for t in threads:
                 t.join(timeout=5)
 
-        merged = set(seeder._pending_enrich["roots"])
+        merged = set(seeder._pending_scan["roots"])
         assert merged == {"models", "input", "output"}

@@ -148,19 +148,19 @@ def test_noassets_callbacks_are_noops_without_seeder_side_effects() -> None:
     with (
         patch.object(asset_seeder, "start") as start,
         patch.object(asset_seeder, "pause") as pause,
-        patch.object(asset_seeder, "enqueue_enrich") as enqueue_enrich,
+        patch.object(asset_seeder, "enqueue_scan") as enqueue_scan,
         patch.object(asset_seeder, "resume") as resume,
         patch.object(asset_seeder, "set_event_sink") as set_event_sink,
     ):
         assert manager.ensure_scan_started() is None
         assert manager.pause_background_scan() is None
-        assert manager.queue_output_enrichment() is None
+        assert manager.queue_output_scan() is None
         assert manager.resume_background_scan() is None
         assert manager.set_event_sink(Mock()) is None
 
     start.assert_not_called()
     pause.assert_not_called()
-    enqueue_enrich.assert_not_called()
+    enqueue_scan.assert_not_called()
     resume.assert_not_called()
     set_event_sink.assert_not_called()
 

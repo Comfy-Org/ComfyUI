@@ -6,7 +6,7 @@ from aiohttp import web
 from app.assets import mode
 from app.assets.api.routes import register_assets_routes
 from app.assets.lifecycle import record_hash_mode_transition_intent, run_shutdown, run_startup
-from app.assets.seeder import asset_seeder
+from app.assets.seeder import ScanPhase, asset_seeder
 from app.assets.services.ingest import (
     register_cached_output as ingest_register_cached_output,
     register_executed_output as ingest_register_executed_output,
@@ -35,7 +35,7 @@ class AssetManager(Protocol):
 
     def pause_background_scan(self) -> None: ...
 
-    def queue_output_enrichment(self) -> None: ...
+    def queue_output_scan(self) -> None: ...
 
     def resume_background_scan(self) -> None: ...
 
@@ -98,7 +98,7 @@ class NoAssets:
     def pause_background_scan(self) -> None:
         return None
 
-    def queue_output_enrichment(self) -> None:
+    def queue_output_scan(self) -> None:
         return None
 
     def resume_background_scan(self) -> None:
@@ -156,10 +156,12 @@ class AssetsEnabled:
     def pause_background_scan(self) -> None:
         asset_seeder.pause()
 
-    def queue_output_enrichment(self) -> None:
+    def queue_output_scan(self) -> None:
         if not asset_seeder.is_disabled():
-            asset_seeder.enqueue_enrich(
-                roots=("output",), compute_hashes=self._args.enable_asset_hashing
+            asset_seeder.enqueue_scan(
+                roots=("output",),
+                phase=ScanPhase.FULL,
+                compute_hashes=self._args.enable_asset_hashing,
             )
 
     def resume_background_scan(self) -> None:
