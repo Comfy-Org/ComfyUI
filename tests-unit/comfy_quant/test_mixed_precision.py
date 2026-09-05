@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 import torch
 import sys
 import os
@@ -14,7 +15,7 @@ from comfy.cli_args import args
 if not has_gpu():
     args.cpu = True
 
-from comfy import ops
+from comfy import ops, quant_ops
 from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor
 import comfy.utils
 
@@ -283,6 +284,44 @@ class TestMixedPrecisionOps(unittest.TestCase):
         saved = model.state_dict()
         saved_conf = json.loads(saved["layer.comfy_quant"].numpy().tobytes())
         self.assertTrue(saved_conf["convrot"])
+
+    def test_int8_linear_input_act_uses_registered_custom_op(self):
+        weight = torch.randn(16, 256, dtype=torch.bfloat16)
+        quantized_weight = QuantizedTensor.from_float(
+            weight,
+            "TensorWiseINT8Layout",
+            per_channel=True,
+        )
+        layer = ops.mixed_precision_ops({}).Linear(
+            256, 16, device="cpu", dtype=torch.bfloat16
+        )
+        layer.weight = torch.nn.Parameter(quantized_weight, requires_grad=False)
+        layer.bias = torch.nn.Parameter(
+            torch.randn(16, dtype=torch.bfloat16),
+            requires_grad=False,
+        )
+        layer.quant_format = "int8_tensorwise"
+        layer.layout_type = "TensorWiseINT8Layout"
+        layer.weight_function = []
+        layer.bias_function = []
+
+        input_tensor = torch.randn(2, 512, dtype=torch.bfloat16)
+        expected = torch.empty(2, 16, dtype=torch.bfloat16)
+        with mock.patch.object(
+            torch.ops.comfy_kitchen,
+            "int8_linear",
+            return_value=expected,
+        ) as int8_linear:
+            output = ops.linear_input_act(layer, input_tensor, "swiglu")
+
+        self.assertIs(output, expected)
+        int8_linear.assert_called_once()
+        op_args = int8_linear.call_args.args
+        self.assertIs(op_args[0], input_tensor)
+        self.assertEqual(op_args[4], quant_ops.ck.DTYPE_TO_CODE[input_tensor.dtype])
+        self.assertFalse(op_args[5])
+        self.assertEqual(op_args[6], 256)
+        self.assertEqual(op_args[7], "swiglu")
 
     def test_convrot_w4a4_loads_into_params(self):
         """ConvRot W4A4 checkpoints must load as the dedicated kitchen layout."""

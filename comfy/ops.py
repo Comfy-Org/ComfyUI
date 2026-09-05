@@ -981,11 +981,11 @@ def linear_input_act(linear, x, input_act):
             # weight's, make the cast hand back a dequantized tensor.
             return torch.nn.functional.linear(INPUT_ACT_EAGER[input_act](x), weight, bias)
         qdata, scale = TensorWiseINT8Layout.get_plain_tensors(weight)
-        return quant_ops.ck.int8_linear(
-            x, qdata, scale, bias, x.dtype,
-            convrot=getattr(weight._params, "convrot", False),
-            convrot_groupsize=getattr(weight._params, "convrot_groupsize", 256),
-            input_act=input_act,
+        return torch.ops.comfy_kitchen.int8_linear(
+            x, qdata, scale, bias, quant_ops.ck.DTYPE_TO_CODE[x.dtype],
+            getattr(weight._params, "convrot", False),
+            getattr(weight._params, "convrot_groupsize", 256),
+            input_act,
         )
     finally:
         uncast_bias_weight(linear, weight, bias, offload_stream)
