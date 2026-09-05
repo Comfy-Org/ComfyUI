@@ -322,7 +322,7 @@ class AudioSaveHelper:
             for key, value in metadata.items():
                 output_container.metadata[key] = value
 
-            layout = "mono" if waveform.shape[0] == 1 else "stereo"
+            layout = f"{waveform.shape[0]}c"
             # Set up the output stream with appropriate properties
             if format == "opus":
                 out_stream = output_container.add_stream("libopus", rate=sample_rate, layout=layout)
@@ -337,7 +337,8 @@ class AudioSaveHelper:
                 elif quality == "320k":
                     out_stream.bit_rate = 320000
             elif format == "mp3":
-                out_stream = output_container.add_stream("libmp3lame", rate=sample_rate, layout=layout)
+                mp3_layout = "mono" if waveform.shape[0] == 1 else "stereo"
+                out_stream = output_container.add_stream("libmp3lame", rate=sample_rate, layout=mp3_layout)
                 if quality == "V0":
                     # TODO i would really love to support V3 and V5 but there doesn't seem to be a way to set the qscale level, the property below is a bool
                     out_stream.codec_context.qscale = 1
@@ -349,8 +350,8 @@ class AudioSaveHelper:
                 out_stream = output_container.add_stream("flac", rate=sample_rate, layout=layout)
 
             frame = av.AudioFrame.from_ndarray(
-                waveform.movedim(0, 1).reshape(1, -1).float().numpy(),
-                format="flt",
+                waveform.float().contiguous().numpy(),
+                format="fltp",
                 layout=layout,
             )
             frame.sample_rate = sample_rate
