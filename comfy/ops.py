@@ -390,8 +390,9 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
         return format_return((weight, bias, (offload_stream, offload_device, None)), offloadable)
 
 
-    if offloadable and (device != s.weight.device or
-                        (s.bias is not None and device != s.bias.device)):
+    if (offloadable and not getattr(s, "comfy_disable_async_offload", False) and
+        (device != s.weight.device or
+         (s.bias is not None and device != s.bias.device))):
         offload_stream = comfy.model_management.get_offload_stream(device)
     else:
         offload_stream = None
@@ -481,6 +482,7 @@ class CastBiasWeightContext:
 
 class CastWeightBiasOp:
     comfy_cast_weights = False
+    comfy_disable_async_offload = False
     weight_function = []
     bias_function = []
 

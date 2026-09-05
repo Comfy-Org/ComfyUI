@@ -213,6 +213,19 @@ def low_vram_patch_estimate_vram(model, key):
 
     return weight.numel() * model_dtype.itemsize * LOWVRAM_PATCH_ESTIMATE_MATH_FACTOR
 
+def _collect_quantized_weight_state_dict_keys(model):
+    """Return state-dict keys owned by each module's QuantizedTensor weight."""
+    keys = set()
+    for module_name, module in model.named_modules(remove_duplicate=False):
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, QuantizedTensor):
+            continue
+        prefix = f"{module_name}." if module_name else ""
+        weight_key = f"{prefix}weight"
+        keys.update(k for k in weight.state_dict(weight_key) if k != weight_key)
+        keys.add(f"{prefix}comfy_quant")
+    return keys
+
 def get_key_weight(model, key):
     set_func = None
     convert_func = None
@@ -379,6 +392,7 @@ class ModelPatcher:
         self.forced_hooks: Optional[comfy.hooks.HookGroup] = None  # NOTE: only used for CLIP at this time
         self.is_clip = False
         self.hook_mode = comfy.hooks.EnumHookMode.MaxSpeed
+        self._hook_async_offload_disabled = False
 
         self.cached_patcher_init: tuple[Callable, tuple] | tuple[Callable, tuple, int] | None = None
         self.is_multigpu_base_clone = False
@@ -865,11 +879,14 @@ class ModelPatcher:
 
     def get_key_patches(self, filter_prefix=None):
         model_sd = self.model_state_dict()
+        quantized_weight_state_dict_keys = _collect_quantized_weight_state_dict_keys(self.model)
         p = {}
         for k in model_sd:
             if filter_prefix is not None:
                 if not k.startswith(filter_prefix):
                     continue
+            if k in quantized_weight_state_dict_keys:
+                continue
             bk = self.backup.get(k, None)
             hbk = self.hook_backup.get(k, None)
             weight, set_func, convert_func = get_key_weight(self.model, k)
@@ -1301,6 +1318,9 @@ class ModelPatcher:
             callback(self, unpatch_all)
         return self.model
 
+    def finalize_model_unload(self):
+        pass
+
     def current_loaded_device(self):
         return self.model.device
 
@@ -1626,6 +1646,9 @@ class ModelPatcher:
             self.current_hooks = hooks
 
     def patch_cached_hook_weights(self, cached_weights: dict, key: str, memory_counter: MemoryCounter):
+        _, set_func, _ = get_key_weight(self.model, key)
+        if set_func is None:
+            self._disable_async_offload_for_hooks()
         if key not in self.hook_backup:
             weight: torch.Tensor = comfy.utils.get_attr(self.model, key)
             target_device = self.offload_device
@@ -1640,12 +1663,28 @@ class ModelPatcher:
         self.cached_hook_patches.clear()
         self.patch_hooks(None)
 
+    def _disable_async_offload_for_hooks(self):
+        if self._hook_async_offload_disabled:
+            return
+        # Hook writeback changes prepared weight storage after model loading.
+        # Keep this delegate's transfers synchronous and honor its model dtypes.
+        for module in self.model.modules():
+            if hasattr(module, "comfy_cast_weights"):
+                module.comfy_disable_async_offload = True
+                for param_name, param in module.named_parameters(recurse=False):
+                    model_dtype = getattr(module, param_name + "_comfy_model_dtype", None)
+                    if model_dtype is not None and param.dtype != model_dtype:
+                        module.comfy_cast_weights = True
+        self._hook_async_offload_disabled = True
+
     def patch_hook_weight_to_device(self, hooks: comfy.hooks.HookGroup, combined_patches: dict, key: str, original_weights: dict, memory_counter: MemoryCounter):
         if key not in combined_patches:
             return
 
         weight, set_func, convert_func = get_key_weight(self.model, key)
         weight: torch.Tensor
+        if set_func is None:
+            self._disable_async_offload_for_hooks()
         if key not in self.hook_backup:
             target_device = self.offload_device
             if self.hook_mode == comfy.hooks.EnumHookMode.MaxSpeed:
@@ -2137,6 +2176,10 @@ class ModelPatcherDynamic(ModelPatcher):
             self.partially_unload(None, 1e32)
             for m in self.model.modules():
                 move_weight_functions(m, device_to)
+
+    def finalize_model_unload(self):
+        # A loaded Dynamic model owns the ordinary model kept for Hook reuse.
+        self.non_dynamic_delegate_model = None
 
     def partially_load(self, device_to, extra_memory=0, force_patch_weights=False):
         assert not force_patch_weights #See above
