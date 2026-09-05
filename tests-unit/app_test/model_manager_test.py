@@ -12,9 +12,14 @@ pytestmark = (
     pytest.mark.asyncio
 )  # This applies the asyncio mark to all test functions in the module
 
+class DummyPromptServer:
+    def __init__(self):
+        self.client_session = None
+
 @pytest.fixture
 def model_manager():
-    return ModelFileManager()
+    prompt_server = DummyPromptServer()
+    return ModelFileManager(prompt_server)
 
 @pytest.fixture
 def app(model_manager):
