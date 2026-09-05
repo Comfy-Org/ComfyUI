@@ -87,8 +87,8 @@ class IsChangedCache:
             self.is_changed[node_id] = node["is_changed"]
             return self.is_changed[node_id]
 
-        # Intentionally do not use cached outputs here. We only want constants in IS_CHANGED
-        input_data_all, _, v3_data = get_input_data(node["inputs"], class_def, node_id, None)
+        # Intentionally do not use cached outputs here. We only want constants in IS_CHANGED.
+        input_data_all, _, v3_data = get_input_data(node["inputs"], class_def, node_id, None, self.dynprompt)
         try:
             is_changed = await _async_map_node_over_list(self.prompt_id, node_id, class_def, input_data_all, is_changed_name, v3_data=v3_data)
             is_changed = await resolve_map_node_over_list_results(is_changed)
@@ -156,13 +156,16 @@ class CacheSet:
 
 SENSITIVE_EXTRA_DATA_KEYS = ("auth_token_comfy_org", "api_key_comfy_org")
 
-def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=None, extra_data={}):
+def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=None, extra_data={}, live_input_types=None):
     is_v3 = issubclass(class_def, _ComfyNodeInternal)
     v3_data: io.V3Data = {}
     hidden_inputs_v3 = {}
     valid_inputs = class_def.INPUT_TYPES()
     if is_v3:
-        valid_inputs, hidden, v3_data = _io.get_finalized_class_inputs(valid_inputs, inputs)
+        # Let dynamic schemas branch on resolved upstream types, not just literal values.
+        if live_input_types is None and dynprompt is not None and hasattr(dynprompt, "get_type_resolver"):
+            live_input_types = dynprompt.get_type_resolver().compute_live_input_types(unique_id)
+        valid_inputs, hidden, v3_data = _io.get_finalized_class_inputs(valid_inputs, inputs, live_input_types=live_input_types)
     input_data_all = {}
     missing_keys = {}
     for x in inputs:
@@ -843,9 +846,17 @@ class PromptExecutor:
             self._notify_prompt_lifecycle("end", prompt_id)
 
 
-async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
+async def validate_inputs(prompt_id, prompt, item, validated, visiting=None, type_resolver=None):
+    """Validate inputs for a single node, recursing into upstream nodes.
+
+    ``type_resolver`` is built once at the top of recursion and shared so
+    MatchType chains are only walked once per prompt.
+    """
     if visiting is None:
         visiting = []
+    if type_resolver is None:
+        from comfy_execution.type_resolver import TypeResolver
+        type_resolver = TypeResolver(prompt)
 
     unique_id = item
     if unique_id in validated:
@@ -877,10 +888,12 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
     v3_data = None
     validate_function_inputs = []
     validate_has_kwargs = False
+    live_input_types = None
     if issubclass(obj_class, _ComfyNodeInternal):
         obj_class: _io._ComfyNodeBaseInternal
         class_inputs = obj_class.INPUT_TYPES()
-        class_inputs, _, v3_data = _io.get_finalized_class_inputs(class_inputs, inputs)
+        live_input_types = type_resolver.compute_live_input_types(unique_id)
+        class_inputs, _, v3_data = _io.get_finalized_class_inputs(class_inputs, inputs, live_input_types=live_input_types)
         validate_function_name = "validate_inputs"
         validate_function = first_real_override(obj_class, validate_function_name)
     else:
@@ -930,11 +943,20 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                 continue
 
             o_id = val[0]
-            o_class_type = prompt[o_id]['class_type']
-            r = nodes.NODE_CLASS_MAPPINGS[o_class_type].RETURN_TYPES
-            received_type = r[val[1]]
+            # Walks MatchType/template chains so API workflows without
+            # frontend-injected type metadata get the same answer as the UI.
+            received_type = type_resolver.resolve_output_type(o_id, val[1])
             received_types[x] = received_type
-            if 'input_types' not in validate_function_inputs and not validate_node_input(received_type, input_type):
+            # DynamicSlot's declared input_type is just the dispatch tag
+            # (COMFY_DYNAMICSLOT_V3); a link is valid iff some Option would
+            # actually claim the resolved upstream type.
+            if input_type == _io.DynamicSlot.io_type and isinstance(extra_info, dict):
+                link_valid = _io.DynamicSlot._select_option(
+                    extra_info.get("options", []), {x: received_type}, x, has_link=True
+                ) is not None
+            else:
+                link_valid = validate_node_input(received_type, input_type)
+            if 'input_types' not in validate_function_inputs and not link_valid:
                 details = f"{x}, received_type({received_type}) mismatch input_type({input_type})"
                 error = {
                     "type": "return_type_mismatch",
@@ -952,7 +974,7 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
             try:
                 visiting.append(unique_id)
                 try:
-                    r = await validate_inputs(prompt_id, prompt, o_id, validated, visiting)
+                    r = await validate_inputs(prompt_id, prompt, o_id, validated, visiting, type_resolver)
                 finally:
                     visiting.pop()
                 if r[0] is False:
@@ -1080,7 +1102,11 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                         continue
 
     if len(validate_function_inputs) > 0 or validate_has_kwargs:
-        input_data_all, _, v3_data = get_input_data(inputs, obj_class, unique_id)
+        # Reuse the precomputed live_input_types so a custom validate_inputs()
+        # sees the same DynamicSlot branch that finalization picked above.
+        input_data_all, _, v3_data = get_input_data(
+            inputs, obj_class, unique_id, live_input_types=live_input_types
+        )
         input_filtered = {}
         for x in input_data_all:
             if x in validate_function_inputs or validate_has_kwargs:
@@ -1177,11 +1203,14 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
     errors = []
     node_errors = {}
     validated = {}
+    # Shared across output validations so MatchType chains walk only once.
+    from comfy_execution.type_resolver import TypeResolver
+    type_resolver = TypeResolver(prompt)
     for o in outputs:
         valid = False
         reasons = []
         try:
-            m = await validate_inputs(prompt_id, prompt, o, validated)
+            m = await validate_inputs(prompt_id, prompt, o, validated, None, type_resolver)
             valid = m[0]
             reasons = m[1]
         except Exception as ex:
