@@ -313,6 +313,21 @@ def cuda_device_context(device):
         if prev is not None:
             torch.cuda.set_device(prev)
 
+def xpu_get_memory_info(dev, mem_reserved):
+    try:
+        mem_free_xpu, mem_total_xpu = torch.xpu.mem_get_info(dev)
+        if (
+            mem_total_xpu <= 0
+            or mem_free_xpu < 0
+            or mem_free_xpu > mem_total_xpu
+            or mem_total_xpu - mem_free_xpu < mem_reserved
+        ):
+            raise RuntimeError("Inconsistent XPU memory information")
+    except (AttributeError, RuntimeError, TypeError, ValueError):
+        mem_total_xpu = torch.xpu.get_device_properties(dev).total_memory
+        mem_free_xpu = mem_total_xpu - mem_reserved
+    return mem_free_xpu, mem_total_xpu
+
 def get_total_memory(dev=None, torch_total_too=False):
     global directml_enabled
     if dev is None:
@@ -328,7 +343,7 @@ def get_total_memory(dev=None, torch_total_too=False):
         elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
             mem_reserved = stats['reserved_bytes.all.current']
-            mem_total_xpu = torch.xpu.get_device_properties(dev).total_memory
+            _, mem_total_xpu = xpu_get_memory_info(dev, mem_reserved)
             mem_total_torch = mem_reserved
             mem_total = mem_total_xpu
         elif is_ascend_npu():
@@ -1770,9 +1785,9 @@ def get_free_memory(dev=None, torch_free_too=False):
             stats = torch.xpu.memory_stats(dev)
             mem_active = stats['active_bytes.all.current']
             mem_reserved = stats['reserved_bytes.all.current']
-            mem_free_xpu = torch.xpu.get_device_properties(dev).total_memory - mem_reserved
+            mem_free_xpu, mem_total_xpu = xpu_get_memory_info(dev, mem_reserved)
             mem_free_torch = mem_reserved - mem_active
-            mem_free_total = mem_free_xpu + mem_free_torch
+            mem_free_total = min(mem_free_xpu + mem_free_torch, mem_total_xpu)
         elif is_ascend_npu():
             stats = torch.npu.memory_stats(dev)
             mem_active = stats['active_bytes.all.current']
