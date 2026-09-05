@@ -287,6 +287,9 @@ class MemoryCounter:
 
 CustomTorchDevice = collections.namedtuple("FakeDevice", ["type", "index"])("comfy-lazy-caster", 0)
 
+# Created once at module level: a new namedtuple class per backed-up weight adds GC pressure on large models.
+ModelPatcherBackup = collections.namedtuple("ModelPatcherBackup", ["weight", "inplace_update"])
+
 class LazyCastingParam(torch.nn.Parameter):
     def __new__(cls, model, key, tensor):
         return super().__new__(cls, tensor)
@@ -904,7 +907,7 @@ class ModelPatcher:
         inplace_update = self.weight_inplace_update or inplace_update
 
         if key not in self.backup and not return_weight:
-            self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
+            self.backup[key] = ModelPatcherBackup(weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
 
         temp_dtype = comfy.model_management.lora_compute_dtype(device_to) if key in self.patches else None
         if device_to is not None:
@@ -1994,7 +1997,7 @@ class ModelPatcherDynamic(ModelPatcher):
                         key = key_param_name_to_key(n, param)
                         weight, _, _ = get_key_weight(self.model, key)
                         if key not in self.backup:
-                            self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight, False)
+                            self.backup[key] = ModelPatcherBackup(weight, False)
                         model_dtype = getattr(m, param + "_comfy_model_dtype", None)
                         casted_weight = weight.to(dtype=model_dtype, device=device_to)
                         comfy.utils.set_attr_param(self.model, key, casted_weight)
