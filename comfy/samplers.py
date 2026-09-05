@@ -26,8 +26,16 @@ import numpy
 
 
 def add_area_dims(area, num_dims):
-    while (len(area) // 2) < num_dims:
-        area = [2147483648] + area[:len(area) // 2] + [0] + area[len(area) // 2:]
+    current_dims = len(area) // 2
+    while current_dims < num_dims:
+        midpoint = len(area) // 2
+        # More efficient construction of the new area list
+        new_area = [2147483648]
+        new_area.extend(area[:midpoint])
+        new_area.append(0)
+        new_area.extend(area[midpoint:])
+        area = new_area
+        current_dims += 1
     return area
 
 def get_area_and_mult(conds, x_in, timestep_in):
