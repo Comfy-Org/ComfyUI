@@ -9,6 +9,39 @@ from torchvision.transforms import ToPILImage, ToTensor
 from PIL import ImageDraw, ImageFont
 
 
+def detect(model, image, threshold, class_name, max_detections):
+    B, H, W, C = image.shape
+
+    comfy.model_management.load_model_gpu(model)
+    results = []
+    for i in range(0, B, 32):
+        batch = image[i:i + 32]
+        image_in = comfy.utils.common_upscale(batch.movedim(-1, 1), 640, 640, "bilinear", crop="disabled")
+        results.extend(model.model.diffusion_model(image_in, (W, H)))
+
+    all_bbox_dicts = []
+    for det in results:
+        keep = det['scores'] > threshold
+        boxes = det['boxes'][keep].cpu()
+        labels = det['labels'][keep].cpu()
+        scores = det['scores'][keep].cpu()
+        bbox_dicts = [
+            {
+                "x": float(box[0]),
+                "y": float(box[1]),
+                "width": float(box[2] - box[0]),
+                "height": float(box[3] - box[1]),
+                "label": COCO_CLASSES[int(label)],
+                "score": float(score),
+            }
+            for box, label, score in zip(boxes, labels, scores)
+            if class_name == "all" or COCO_CLASSES[int(label)] == class_name
+        ]
+        bbox_dicts.sort(key=lambda d: d["score"], reverse=True)
+        all_bbox_dicts.append(bbox_dicts[:max_detections])
+    return all_bbox_dicts
+
+
 class RTDETR_detect(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -30,39 +63,8 @@ class RTDETR_detect(io.ComfyNode):
 
     @classmethod
     def execute(cls, model, image, threshold, class_name, max_detections) -> io.NodeOutput:
-        B, H, W, C = image.shape
-
-        comfy.model_management.load_model_gpu(model)
-        results = []
-        for i in range(0, B, 32):
-            batch = image[i:i + 32]
-            image_in = comfy.utils.common_upscale(batch.movedim(-1, 1), 640, 640, "bilinear", crop="disabled")
-            results.extend(model.model.diffusion_model(image_in, (W, H)))
-
-        all_bbox_dicts = []
-
-        for det in results:
-            keep   = det['scores'] > threshold
-            boxes  = det['boxes'][keep].cpu()
-            labels = det['labels'][keep].cpu()
-            scores = det['scores'][keep].cpu()
-
-            bbox_dicts = [
-                {
-                    "x": float(box[0]),
-                    "y": float(box[1]),
-                    "width": float(box[2] - box[0]),
-                    "height": float(box[3] - box[1]),
-                    "label": COCO_CLASSES[int(label)],
-                    "score": float(score)
-                }
-                for box, label, score in zip(boxes, labels, scores)
-                if class_name == "all" or COCO_CLASSES[int(label)] == class_name
-            ]
-            bbox_dicts.sort(key=lambda d: d["score"], reverse=True)
-            all_bbox_dicts.append(bbox_dicts[:max_detections])
-
-        return io.NodeOutput(all_bbox_dicts)
+        return io.NodeOutput(detect(
+            model, image, threshold, class_name, max_detections))
 
 
 class DrawBBoxes(io.ComfyNode):

@@ -27,6 +27,8 @@ comfy-aimdo==0.5.2
 requests
 simpleeval>=1.0.0
 blake3
+onnx>=1.17.0
+onnxruntime>=1.20.0
 
 #non essential dependencies:
 kornia>=0.7.1

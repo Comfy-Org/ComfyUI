@@ -425,6 +425,70 @@ class AnimaLLLiteApply:
         return (model_patched,)
 
 
+def _spatial_crop_bounds(region, source_width, source_height, width, height):
+    left, top, right, bottom = region
+    x1 = max(0, min(width - 1, left * width // source_width))
+    y1 = max(0, min(height - 1, top * height // source_height))
+    x2 = max(x1 + 1, min(
+        width, (right * width + source_width - 1) // source_width))
+    y2 = max(y1 + 1, min(
+        height, (bottom * height + source_height - 1) // source_height))
+    return x1, y1, x2, y2
+
+
+def _resize_spatial_tensor(value, target_width, target_height):
+    """Resize the last two axes while preserving arbitrary leading axes."""
+    original_dtype = value.dtype
+    leading = value.shape[:-2]
+    flat = value.reshape(-1, 1, value.shape[-2], value.shape[-1]).float()
+    resized = torch.nn.functional.interpolate(
+        flat, size=(target_height, target_width), mode="bilinear",
+        align_corners=False,
+    ).reshape(*leading, target_height, target_width)
+    if original_dtype == torch.bool:
+        return resized >= 0.5
+    return resized.to(dtype=original_dtype)
+
+
+def _crop_bhwc_regions(
+    value, regions, source_width, source_height, target_width, target_height,
+):
+    if value is None:
+        return None
+    if value.ndim != 4:
+        raise ValueError("model spatial images must use BHWC layout")
+    height, width = value.shape[1:3]
+    cropped = []
+    for region in regions:
+        x1, y1, x2, y2 = _spatial_crop_bounds(
+            region, source_width, source_height, width, height)
+        tile = value[:, y1:y2, x1:x2, :].movedim(-1, 1)
+        tile = torch.nn.functional.interpolate(
+            tile, size=(target_height, target_width), mode="bilinear",
+            align_corners=False,
+        ).movedim(1, -1)
+        cropped.append(tile)
+    return torch.cat(cropped, dim=0)
+
+
+def _crop_mask_regions(
+    value, regions, source_width, source_height, target_width, target_height,
+):
+    if value is None:
+        return None
+    if value.ndim < 3:
+        raise ValueError("model spatial masks must have at least three axes")
+    height, width = value.shape[-2:]
+    cropped = []
+    for region in regions:
+        x1, y1, x2, y2 = _spatial_crop_bounds(
+            region, source_width, source_height, width, height)
+        tile = value[..., y1:y2, x1:x2]
+        cropped.append(_resize_spatial_tensor(
+            tile, target_width, target_height))
+    return torch.cat(cropped, dim=0)
+
+
 class DiffSynthCnetPatch:
     def __init__(self, model_patch, vae, image, strength, mask=None):
         self.model_patch = model_patch
@@ -470,6 +534,23 @@ class DiffSynthCnetPatch:
 
     def models(self):
         return [self.model_patch]
+
+    def spatial_crop_inputs(
+        self, *, regions, source_width, source_height,
+        target_width, target_height,
+    ):
+        """Return an independent patch whose guidance matches tile regions."""
+        return type(self)(
+            self.model_patch,
+            self.vae,
+            _crop_bhwc_regions(
+                self.image, regions, source_width, source_height,
+                target_width, target_height),
+            self.strength,
+            mask=_crop_mask_regions(
+                self.mask, regions, source_width, source_height,
+                target_width, target_height),
+        )
 
 class ZImageControlPatch:
     def __init__(self, model_patch, vae, image, strength, inpaint_image=None, mask=None):
@@ -593,6 +674,26 @@ class ZImageControlPatch:
 
     def models(self):
         return [self.model_patch]
+
+    def spatial_crop_inputs(
+        self, *, regions, source_width, source_height,
+        target_width, target_height,
+    ):
+        """Return an independent patch whose guidance matches tile regions."""
+        return type(self)(
+            self.model_patch,
+            self.vae,
+            _crop_bhwc_regions(
+                self.image, regions, source_width, source_height,
+                target_width, target_height),
+            self.strength,
+            inpaint_image=_crop_bhwc_regions(
+                self.inpaint_image, regions, source_width, source_height,
+                target_width, target_height),
+            mask=_crop_mask_regions(
+                self.mask, regions, source_width, source_height,
+                target_width, target_height),
+        )
 
 class QwenImageDiffsynthControlnet:
     @classmethod

@@ -562,6 +562,11 @@ class ModelPatcher:
                 n.load_device = mm.load_device
                 n.hook_backup = mm.hook_backup
                 n.is_multigpu_base_clone = mm.is_multigpu_base_clone
+                if "torch_compile_kwargs" in n.model_options:
+                    from comfy_api.torch_helpers.torch_compile import (
+                        refresh_torch_compile_wrapper,
+                    )
+                    refresh_torch_compile_wrapper(n)
                 n.remove_additional_models("multigpu")
                 orig_additional_models: dict[str, list[ModelPatcher]] = comfy.patcher_extension.copy_nested_dicts(n.additional_models)
                 n.additional_models = comfy.patcher_extension.copy_nested_dicts(mm.additional_models)
@@ -1309,12 +1314,33 @@ class ModelPatcher:
         return comfy.lora.calculate_weight(patches, weight, key, intermediate_dtype=intermediate_dtype)
 
     def cleanup(self):
-        self.model_patches_call_function(function_name="cleanup")
-        self.clean_hooks()
+        errors = []
+
+        def run(step):
+            try:
+                step()
+            except BaseException as error:
+                errors.append(error)
+
+        run(lambda: self.model_patches_call_function(function_name="cleanup"))
+        run(self.clean_hooks)
         if hasattr(self.model, "current_patcher"):
-            self.model.current_patcher = None
-        for callback in self.get_all_callbacks(CallbacksMP.ON_CLEANUP):
-            callback(self)
+            run(lambda: setattr(self.model, "current_patcher", None))
+
+        callbacks = []
+        run(lambda: callbacks.extend(
+            self.get_all_callbacks(CallbacksMP.ON_CLEANUP)))
+        for callback in callbacks:
+            run(lambda callback=callback: callback(self))
+
+        if errors:
+            first = errors[0]
+            for error in errors[1:]:
+                if hasattr(first, "add_note"):
+                    first.add_note(
+                        f"additional cleanup failure: {type(error).__name__}: "
+                        f"{error}")
+            raise first.with_traceback(first.__traceback__)
 
     def add_callback(self, call_type: str, callback: Callable):
         self.add_callback_with_key(call_type, None, callback)

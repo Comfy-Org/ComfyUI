@@ -154,7 +154,105 @@ class CacheSet:
         }
         return result
 
-SENSITIVE_EXTRA_DATA_KEYS = ("auth_token_comfy_org", "api_key_comfy_org")
+SENSITIVE_EXTRA_DATA_KEYS = (
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "comfy_secure_tenant_id",
+)
+
+
+async def _notify_execution_backend_lifecycle(
+    event: str,
+    prompt_id: str,
+    extra_data: dict,
+) -> None:
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    backend = _comfy_sdk.providers.execution_backend
+    hook = getattr(backend, f"on_prompt_{event}", None)
+    if hook is None and event == "abort":
+        hook = getattr(backend, "on_prompt_end", None)
+    if hook is not None:
+        await hook(prompt_id, extra_data)
+
+
+async def _shutdown_execution_backend() -> None:
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    hook = getattr(_comfy_sdk.providers.execution_backend, "shutdown", None)
+    if hook is not None:
+        await hook()
+
+
+async def _maintain_execution_backend() -> None:
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    hook = getattr(_comfy_sdk.providers.execution_backend, "maintenance", None)
+    if hook is not None:
+        await hook()
+
+
+def _execution_backend_maintenance_interval() -> float | None:
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    value = getattr(
+        _comfy_sdk.providers.execution_backend,
+        "maintenance_interval_seconds",
+        None,
+    )
+    if value is None:
+        return None
+    if not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError("execution backend maintenance interval must be positive")
+    return float(value)
+
+_LEGACY_SDK_METHODS = {
+    "execute": "execute",
+    "VALIDATE_INPUTS": "validate_inputs",
+    "IS_CHANGED": "fingerprint_inputs",
+    "check_lazy_status": "check_lazy_status",
+}
+
+
+class _PersistentLoopRunner:
+    """`asyncio.Runner` stand-in for Python 3.10, where Runner is unavailable.
+
+    Same contract as the executor needs: one event loop that survives across
+    `run()` calls so backend state persists between prompts.
+    """
+
+    def __init__(self) -> None:
+        self._loop = asyncio.new_event_loop()
+
+    def get_loop(self):
+        return self._loop
+
+    def run(self, coro):
+        return self._loop.run_until_complete(coro)
+
+    def close(self) -> None:
+        try:
+            self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+        finally:
+            self._loop.close()
+
+
+_AsyncRunner = getattr(asyncio, "Runner", _PersistentLoopRunner)
+
+
+def _sdk_seam_engaged(type_obj) -> bool:
+    """Whether this node's invocation has to go through the custom-node SDK.
+
+    False on a stock install — no overlay is registered and no node declares
+    SDK intent — which leaves the original call path untouched.
+    """
+    if (getattr(type_obj, "SDK_REFS", False)
+            or getattr(type_obj, "SDK_PERMISSIONS", ())
+            or getattr(type_obj, "SDK_REQUIRED_WEIGHTS", ())):
+        return True
+    from comfy_api.latest import _sdk as _comfy_sdk
+    return _comfy_sdk.providers.engaged
+
 
 def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=None, extra_data={}):
     is_v3 = issubclass(class_def, _ComfyNodeInternal)
@@ -271,6 +369,8 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
             if pre_execute_cb is not None and index is not None:
                 pre_execute_cb(index)
             # V3
+            _sdk_plan = None
+            _sdk_runtime = None
             if isinstance(obj, _ComfyNodeInternal) or (is_class(obj) and issubclass(obj, _ComfyNodeInternal)):
                 # if is just a class, then assign no state, just create clone
                 if is_class(obj):
@@ -286,25 +386,125 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                 # in case of dynamic inputs, restructure inputs to expected nested dict
                 if v3_data is not None:
                     inputs = _io.build_nested_inputs(inputs, v3_data)
+                # Custom-node SDK seam: build a per-node ExecutionPlan + bind a
+                # ctx and ref resolver from the active providers. Default
+                # providers are in-process (behavior-preserving); the overlay
+                # swaps them for the isolated engine. Binding happens inside the
+                # invocation scope below so it is correct for the concurrent
+                # async-task path too.
+                if _sdk_seam_engaged(type_obj):
+                    from comfy_api.latest import _sdk as _comfy_sdk
+                    # A node declares the host capabilities it needs; the backend
+                    # decides whether to grant them. Declaring is not granting — an
+                    # out-of-process backend still gates each one at the wire, and a
+                    # registry manifest can narrow the set further. Nodes that
+                    # declare nothing (the overwhelming majority) get nothing.
+                    _sdk_perms = getattr(type_obj, "SDK_PERMISSIONS", ()) or ()
+                    _sdk_required_weights = getattr(
+                        type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()
+                    _sdk_refs_mode = bool(getattr(type_obj, "SDK_REFS", False))
+                    _sdk_plan = _comfy_sdk.ExecutionPlan(
+                        prompt_id=str(prompt_id),
+                        node_id=str(unique_id),
+                        node_type=getattr(type_obj, "__name__", "node"),
+                        node_module=getattr(type_obj, "__module__", "") or "",
+                        inputs=inputs,
+                        input_mode="refs" if _sdk_refs_mode else "values",
+                        method=func,
+                        permissions=tuple(_sdk_perms),
+                        required_weights=tuple(_sdk_required_weights),
+                        prompt=getattr(class_clone.hidden, "prompt", None),
+                        extra_pnginfo=getattr(
+                            class_clone.hidden, "extra_pnginfo", None),
+                        dynamic_prompt=getattr(
+                            class_clone.hidden, "dynprompt", None),
+                    )
+                    _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
+                    _sdk_runtime = _comfy_sdk.bind_runtime(
+                        _sdk_refs,
+                        _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
+                        _comfy_sdk.providers.ops_provider,
+                    )
+                    # SDK nodes see assets (refs), not buffers: wrap heavy inputs.
+                    if _sdk_refs_mode:
+                        inputs = await _comfy_sdk.wrap_inputs(_sdk_refs, inputs)
+                        # Ship the work unit on the plan so an out-of-process
+                        # backend can execute without local_call.
+                        _sdk_plan.inputs = inputs
             # V1
             else:
                 f = getattr(obj, func)
-            if inspect.iscoroutinefunction(f):
-                async def async_wrapper(f, prompt_id, unique_id, list_index, args):
-                    with CurrentNodeContext(prompt_id, unique_id, list_index):
-                        return await f(**args)
-                task = asyncio.create_task(async_wrapper(f, prompt_id, unique_id, index, args=inputs))
-                # Give the task a chance to execute without yielding
-                await asyncio.sleep(0)
-                if task.done():
-                    result = task.result()
-                    results.append(result)
+                type_obj = obj if is_class(obj) else type(obj)
+                if _sdk_seam_engaged(type_obj):
+                    _legacy_method = _LEGACY_SDK_METHODS.get(
+                        "execute" if func == getattr(type_obj, "FUNCTION", None)
+                        else func)
+                    if _legacy_method is None:
+                        raise ValueError(
+                            f"legacy node method {func!r} has no sandbox mapping")
+
+                    from comfy_api.latest import _sdk as _comfy_sdk
+                    _sdk_plan = _comfy_sdk.ExecutionPlan(
+                        prompt_id=str(prompt_id),
+                        node_id=str(unique_id),
+                        node_type=getattr(type_obj, "__name__", "node"),
+                        node_module=getattr(type_obj, "__module__", "") or "",
+                        inputs=inputs,
+                        input_mode="values",
+                        method=_legacy_method,
+                        permissions=tuple(
+                            getattr(type_obj, "SDK_PERMISSIONS", ()) or ()),
+                        required_weights=tuple(getattr(
+                            type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()),
+                    )
+                    _sdk_refs = _comfy_sdk.providers.ref_resolver_factory()
+                    _sdk_runtime = _comfy_sdk.bind_runtime(
+                        _sdk_refs,
+                        _comfy_sdk.providers.ctx_provider.build(_sdk_plan),
+                        _comfy_sdk.providers.ops_provider,
+                    )
+
+            def _invoke_scope():
+                import contextlib
+                return _sdk_runtime if _sdk_runtime is not None else contextlib.nullcontext()
+
+            async def local_call():
+                if inspect.iscoroutinefunction(f):
+                    async def async_wrapper(f, prompt_id, unique_id, list_index, args):
+                        with CurrentNodeContext(prompt_id, unique_id, list_index), _invoke_scope():
+                            return await f(**args)
+                    task = asyncio.create_task(async_wrapper(f, prompt_id, unique_id, index, args=inputs))
+                    # Give the task a chance to execute without yielding
+                    await asyncio.sleep(0)
+                    if task.done():
+                        return task.result()
+                    return task
                 else:
-                    results.append(task)
+                    with CurrentNodeContext(prompt_id, unique_id, index), _invoke_scope():
+                        return f(**inputs)
+
+            if _sdk_plan is not None:
+                try:
+                    result = await _comfy_sdk.providers.execution_backend.dispatch(
+                        _sdk_plan, local_call, _sdk_runtime.runtime
+                    )
+                    # A sandbox backend returns refs in both modes: explicit-ref
+                    # nodes create them directly, while compatibility-mode V2
+                    # nodes have their ordinary outputs wrapped by the guest.
+                    if isinstance(result, asyncio.Task):
+                        result = await result
+                    result = await _comfy_sdk.unwrap_outputs(_sdk_refs, result)
+                finally:
+                    # The table holds this node's inputs and every intermediate
+                    # it created — for image or latent work, the largest
+                    # allocation in the process. Released here rather than left
+                    # to collection, and in `finally` because the path that most
+                    # needs it is the one where the node raised or its guest
+                    # died: that is exactly when nothing else is going to run.
+                    _sdk_refs.clear()
             else:
-                with CurrentNodeContext(prompt_id, unique_id, index):
-                    result = f(**inputs)
-                results.append(result)
+                result = await local_call()
+            results.append(result)
         else:
             results.append(execution_block)
 
@@ -666,6 +866,10 @@ class PromptExecutor:
         self.cache_args = cache_args
         self.cache_type = cache_type
         self.server = server
+        self._runner = _AsyncRunner()
+        self._active_loop = None
+        self._active_task = None
+        self._active_lock = threading.RLock()
         self.prompt_model_tracker = comfy.model_patcher.PromptModelTracker()
         self.reset()
 
@@ -725,7 +929,71 @@ class PromptExecutor:
                 _cache_logger.warning(f"Cache provider {provider.__class__.__name__} error on {event}: {e}")
 
     def execute(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
-        asyncio.run(self.execute_async(prompt, prompt_id, extra_data, execute_outputs))
+        self._runner.run(
+            self._run_owned_prompt(
+                prompt,
+                prompt_id,
+                extra_data,
+                execute_outputs,
+            )
+        )
+
+    async def _run_owned_prompt(
+        self,
+        prompt,
+        prompt_id,
+        extra_data,
+        execute_outputs,
+    ):
+        task = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        with self._active_lock:
+            self._active_loop = loop
+            self._active_task = task
+        try:
+            return await self.execute_async(
+                prompt,
+                prompt_id,
+                extra_data,
+                execute_outputs,
+            )
+        finally:
+            with self._active_lock:
+                if self._active_task is task:
+                    self._active_loop = None
+                    self._active_task = None
+
+    def request_shutdown(self):
+        nodes.interrupt_processing(True)
+        with self._active_lock:
+            loop = self._active_loop
+            task = self._active_task
+        if loop is None or task is None or task.done():
+            return
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            pass
+
+    def close(self):
+        runner = self._runner
+        if runner is None:
+            return
+        self._runner = None
+        try:
+            runner.run(_shutdown_execution_backend())
+        finally:
+            runner.close()
+
+    def execution_backend_maintenance_interval(self) -> float | None:
+        return _execution_backend_maintenance_interval()
+
+    def maintain_execution_backend(self) -> None:
+        if self._runner is not None:
+            try:
+                self._runner.run(_maintain_execution_backend())
+            except Exception:
+                logging.exception("execution backend maintenance failed")
 
     async def execute_async(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
         set_preview_method(extra_data.get("preview_method"))
@@ -742,12 +1010,17 @@ class PromptExecutor:
         self.add_message("execution_start", { "prompt_id": prompt_id}, broadcast=False)
 
         self._notify_prompt_lifecycle("start", prompt_id)
-        ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
-        ram_inactive_headroom = int(self.cache_args["ram_inactive"] * (1024 ** 3))
-        ram_release_callback = self.caches.outputs.ram_release if self.cache_type == CacheType.RAM_PRESSURE else None
-        comfy.memory_management.set_ram_cache_release_state(ram_release_callback, ram_headroom)
-
+        backend_reusable = False
         try:
+            await _notify_execution_backend_lifecycle(
+                "start",
+                prompt_id,
+                extra_data,
+            )
+            ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
+            ram_inactive_headroom = int(self.cache_args["ram_inactive"] * (1024 ** 3))
+            ram_release_callback = self.caches.outputs.ram_release if self.cache_type == CacheType.RAM_PRESSURE else None
+            comfy.memory_management.set_ram_cache_release_state(ram_release_callback, ram_headroom)
             with torch.inference_mode():
                 dynamic_prompt = DynamicPrompt(prompt)
                 reset_progress_state(prompt_id, dynamic_prompt)
@@ -776,12 +1049,14 @@ class PromptExecutor:
                 executed = set()
                 execution_list = ExecutionList(dynamic_prompt, self.caches.outputs, self.prompt_model_tracker.add)
                 current_outputs = self.caches.outputs.all_node_ids()
+                execution_failed = False
                 for node_id in list(execute_outputs):
                     execution_list.add_node(node_id)
 
                 while not execution_list.is_empty():
                     node_id, error, ex = await execution_list.stage_node_execution()
                     if error is not None:
+                        execution_failed = True
                         self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
                         break
 
@@ -789,6 +1064,7 @@ class PromptExecutor:
                     result, error, ex = await execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_node_outputs)
                     self.success = result != ExecutionResult.FAILURE
                     if result == ExecutionResult.FAILURE:
+                        execution_failed = True
                         self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
                         break
                     elif result == ExecutionResult.PENDING:
@@ -835,12 +1111,26 @@ class PromptExecutor:
                 self.server.last_node_id = None
                 if comfy.model_management.DISABLE_SMART_MEMORY:
                     comfy.model_management.unload_all_models()
+                backend_reusable = not execution_failed
         finally:
             if self.cache_type == CacheType.RAM_PRESSURE:
                 detail("RAM cache evictions: prompt=%s active=%s full=%s", prompt_id, self.caches.outputs.active_evictions, self.caches.outputs.full_evictions)
             comfy.memory_management.set_ram_cache_release_state(None, 0)
             self.prompt_model_tracker.end()
-            self._notify_prompt_lifecycle("end", prompt_id)
+            try:
+                try:
+                    await _notify_execution_backend_lifecycle(
+                        "end" if backend_reusable else "abort",
+                        prompt_id,
+                        extra_data,
+                    )
+                except Exception:
+                    self.success = False
+                    logging.exception(
+                        "execution backend prompt cleanup failed"
+                    )
+            finally:
+                self._notify_prompt_lifecycle("end", prompt_id)
 
 
 async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):

@@ -242,6 +242,10 @@ import asyncio
 import threading
 import gc
 
+_prompt_worker_shutdown = threading.Event()
+_prompt_worker_thread = None
+_prompt_executor = None
+
 if 'torch' in sys.modules:
     logging.warning("WARNING: Potential Error in code: Torch already imported, torch should never be imported before this point.")
 
@@ -349,6 +353,7 @@ def _collect_output_absolute_paths(history_result: dict) -> list[str]:
 
 
 def prompt_worker(q, server_instance):
+    global _prompt_executor
     current_time: float = 0.0
     cache_ram = 0
     cache_ram_inactive = 0
@@ -369,81 +374,96 @@ def prompt_worker(q, server_instance):
         cache_type = execution.CacheType.NONE
 
     e = execution.PromptExecutor(server_instance, cache_type=cache_type, cache_args={ "lru" : args.cache_lru, "ram" : cache_ram, "ram_inactive" : cache_ram_inactive } )
+    _prompt_executor = e
+    maintenance_interval = e.execution_backend_maintenance_interval()
     last_gc_collect = 0
     need_gc = False
     gc_collect_interval = 10.0
 
-    while True:
-        timeout = 1000.0
-        if need_gc:
-            timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
+    try:
+        while not _prompt_worker_shutdown.is_set():
+            timeout = 1000.0
+            if need_gc:
+                timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
+            if maintenance_interval is not None:
+                timeout = min(timeout, maintenance_interval)
 
-        queue_item = q.get(timeout=timeout)
-        if queue_item is not None:
-            item, item_id = queue_item
-            execution_start_time = time.perf_counter()
-            prompt_id = item[1]
-            server_instance.last_prompt_id = prompt_id
+            queue_item = q.get(timeout=timeout)
+            if queue_item is not None:
+                item, item_id = queue_item
+                execution_start_time = time.perf_counter()
+                prompt_id = item[1]
+                server_instance.last_prompt_id = prompt_id
 
-            sensitive = item[5]
-            extra_data = item[3].copy()
-            for k in sensitive:
-                extra_data[k] = sensitive[k]
+                sensitive = item[5]
+                extra_data = item[3].copy()
+                for k in sensitive:
+                    extra_data[k] = sensitive[k]
 
-            asset_seeder.pause()
-            e.execute(item[2], prompt_id, extra_data, item[4])
+                asset_seeder.pause()
+                try:
+                    e.execute(item[2], prompt_id, extra_data, item[4])
+                except asyncio.CancelledError:
+                    if _prompt_worker_shutdown.is_set():
+                        break
+                    raise
 
-            need_gc = True
+                need_gc = True
 
-            remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
-            q.task_done(item_id,
-                        e.history_result,
-                        status=execution.PromptQueue.ExecutionStatus(
-                            status_str='success' if e.success else 'error',
-                            completed=e.success,
-                            messages=e.status_messages), process_item=remove_sensitive)
-            if server_instance.client_id is not None:
-                server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
+                remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
+                q.task_done(item_id,
+                            e.history_result,
+                            status=execution.PromptQueue.ExecutionStatus(
+                                status_str='success' if e.success else 'error',
+                                completed=e.success,
+                                messages=e.status_messages), process_item=remove_sensitive)
+                if server_instance.client_id is not None:
+                    server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
 
-            current_time = time.perf_counter()
-            execution_time = current_time - execution_start_time
+                current_time = time.perf_counter()
+                execution_time = current_time - execution_start_time
 
-            # Log Time in a more readable way after 10 minutes
-            if execution_time > 600:
-                execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
-                logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
-            else:
-                logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
-
-            if not asset_seeder.is_disabled():
-                paths = _collect_output_absolute_paths(e.history_result)
-                register_output_files(paths, job_id=prompt_id)
-
-        flags = q.get_flags()
-        free_memory = flags.get("free_memory", False)
-
-        if flags.get("unload_models", free_memory):
-            comfy.model_management.unload_all_models()
-            need_gc = True
-            last_gc_collect = 0
-
-        if free_memory:
-            e.reset()
-            need_gc = True
-            last_gc_collect = 0
-
-        if need_gc:
-            current_time = time.perf_counter()
-            if (current_time - last_gc_collect) > gc_collect_interval:
-                gc.collect()
-                comfy.model_management.soft_empty_cache()
-                last_gc_collect = current_time
-                need_gc = False
-                hook_breaker_ac10a0.restore_functions()
+                # Log Time in a more readable way after 10 minutes
+                if execution_time > 600:
+                    execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
+                    logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
+                else:
+                    logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
 
                 if not asset_seeder.is_disabled():
-                    asset_seeder.enqueue_enrich(roots=("output",), compute_hashes=args.enable_asset_hashing)
-                asset_seeder.resume()
+                    paths = _collect_output_absolute_paths(e.history_result)
+                    register_output_files(paths, job_id=prompt_id)
+
+            e.maintain_execution_backend()
+
+            flags = q.get_flags()
+            free_memory = flags.get("free_memory", False)
+
+            if flags.get("unload_models", free_memory):
+                comfy.model_management.unload_all_models()
+                need_gc = True
+                last_gc_collect = 0
+
+            if free_memory:
+                e.reset()
+                need_gc = True
+                last_gc_collect = 0
+
+            if need_gc:
+                current_time = time.perf_counter()
+                if (current_time - last_gc_collect) > gc_collect_interval:
+                    gc.collect()
+                    comfy.model_management.soft_empty_cache()
+                    last_gc_collect = current_time
+                    need_gc = False
+                    hook_breaker_ac10a0.restore_functions()
+
+                    if not asset_seeder.is_disabled():
+                        asset_seeder.enqueue_enrich(roots=("output",), compute_hashes=args.enable_asset_hashing)
+                    asset_seeder.resume()
+    finally:
+        _prompt_executor = None
+        e.close()
 
 
 async def run(server_instance, address='', port=8188, verbose=True, call_on_start=None):
@@ -539,6 +559,17 @@ def start_comfyui(asyncio_loop=None):
     if args.enable_manager and not args.disable_manager_ui:
         comfyui_manager.start()
 
+    # Custom-node SDK overlay: if COMFY_OVERLAY_MODULE points at a module, it
+    # registers isolated execution/ctx/ref providers before nodes load. Unset =
+    # pure in-process open-source behavior.
+    try:
+        from comfy_api.latest import sdk
+        sdk.providers  # ensure module imported
+        from comfy_api.latest._sdk import load_overlay
+        load_overlay()
+    except Exception as e:
+        logging.error(f"Custom-node SDK overlay failed to load: {e}")
+
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
         init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
@@ -557,7 +588,14 @@ def start_comfyui(asyncio_loop=None):
     prompt_server.add_routes()
     hijack_progress(prompt_server)
 
-    threading.Thread(target=prompt_worker, daemon=True, args=(prompt_server.prompt_queue, prompt_server,)).start()
+    global _prompt_worker_thread
+    _prompt_worker_shutdown.clear()
+    _prompt_worker_thread = threading.Thread(
+        target=prompt_worker,
+        daemon=True,
+        args=(prompt_server.prompt_queue, prompt_server,),
+    )
+    _prompt_worker_thread.start()
 
     if args.quick_test_for_ci:
         exit(0)
@@ -605,7 +643,11 @@ if __name__ == "__main__":
             "dynamic vram enabled and using native ComfyUI model formats instead. "
             "ComfyUI native formats like fp8, int8 and w4a8 will be faster even if they are larger than your memory."
         )
-    event_loop, _, start_all_func = start_comfyui()
+    def stop_on_sigterm(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_on_sigterm)
+    event_loop, prompt_server, start_all_func = start_comfyui()
     try:
         x = start_all_func()
         app.logger.print_startup_warnings()
@@ -613,5 +655,13 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logging.info("\nStopped server")
     finally:
+        _prompt_worker_shutdown.set()
+        if _prompt_executor is not None:
+            _prompt_executor.request_shutdown()
+        prompt_server.prompt_queue.set_flag("shutdown", True)
+        if _prompt_worker_thread is not None:
+            _prompt_worker_thread.join(timeout=5)
+            if _prompt_worker_thread.is_alive():
+                logging.error("Prompt worker did not stop within five seconds")
         asset_seeder.shutdown()
         cleanup_temp()

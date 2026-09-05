@@ -280,6 +280,15 @@ class Qwen3VL_8BConfig(Qwen3_8BConfig):
     interleaved_mrope = True
 
 @dataclass
+class Qwen3VL_2BConfig(Qwen3VL_8BConfig):
+    hidden_size: int = 2048
+    intermediate_size: int = 6144
+    num_hidden_layers: int = 28
+    num_attention_heads: int = 16
+    num_key_value_heads: int = 8
+    lm_head: bool = False
+
+@dataclass
 class Qwen3VL_4BConfig(Qwen3VL_8BConfig):
     hidden_size: int = 2560
     intermediate_size: int = 9728
@@ -340,7 +349,25 @@ class Qwen25_7BVLI_Config:
     k_norm = None
     rope_scale = None
     final_norm: bool = True
+    lm_head: bool = True
+
+@dataclass
+class Qwen25_3BVLI_Config(Qwen25_7BVLI_Config):
+    hidden_size: int = 2048
+    intermediate_size: int = 11008
+    num_hidden_layers: int = 36
+    num_attention_heads: int = 16
+    num_key_value_heads: int = 2
     lm_head: bool = False
+
+@dataclass
+class Qwen3_06BGenerationConfig(Qwen3_06BConfig):
+    max_position_embeddings: int = 40960
+
+@dataclass
+class Qwen3_4BGenerationConfig(Qwen3_4BConfig):
+    max_position_embeddings: int = 262144
+    rope_theta: float = 5000000.0
 
 @dataclass
 class Gemma2_2B_Config:
@@ -1001,7 +1028,22 @@ class BaseGenerate:
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         return self.model.init_kv_cache(batch, max_cache_len, device, execution_dtype)
 
-    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None, embeds_info=None):
+    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None, embeds_info=None, num_beams=1):
+        if num_beams != 1:
+            return self.generate_beam(
+                embeds=embeds,
+                max_length=max_length,
+                repetition_penalty=repetition_penalty,
+                stop_tokens=stop_tokens,
+                initial_tokens=initial_tokens,
+                execution_dtype=execution_dtype,
+                presence_penalty=presence_penalty,
+                initial_input_ids=initial_input_ids,
+                position_ids=position_ids,
+                deepstack_embeds=deepstack_embeds,
+                visual_pos_masks=visual_pos_masks,
+                num_beams=num_beams,
+            )
         device = embeds.device
 
         if stop_tokens is None:
@@ -1066,6 +1108,147 @@ class BaseGenerate:
                 break
 
         return generated_token_ids
+
+    @staticmethod
+    def _clone_kv_cache(past_key_values):
+        return [
+            (key.clone(), value.clone(), position)
+            for key, value, position in past_key_values
+        ]
+
+    def generate_beam(
+        self, *, embeds, max_length, repetition_penalty, stop_tokens,
+        initial_tokens, execution_dtype, presence_penalty,
+        initial_input_ids, position_ids, deepstack_embeds,
+        visual_pos_masks, num_beams,
+    ):
+        """Bounded deterministic beam search for canonical language models."""
+        if isinstance(num_beams, bool) or not isinstance(num_beams, int):
+            raise TypeError("num_beams must be an integer")
+        if not 2 <= num_beams <= 8:
+            raise ValueError("num_beams must be in [2, 8]")
+        device = embeds.device
+        if stop_tokens is None:
+            stop_tokens = self.model.config.stop_tokens
+        if execution_dtype is None:
+            execution_dtype = (
+                torch.bfloat16
+                if comfy.model_management.should_use_bf16(device)
+                else torch.float32
+            )
+        embeds = embeds.to(execution_dtype)
+        if embeds.ndim == 2:
+            embeds = embeds.unsqueeze(0)
+        if embeds.shape[0] != 1:
+            raise ValueError("beam generation currently requires batch size 1")
+
+        max_cache_len = embeds.shape[1] + max_length
+        cache = self.init_kv_cache(1, max_cache_len, device, execution_dtype)
+        extra = {}
+        if deepstack_embeds is not None:
+            extra["deepstack_embeds"] = deepstack_embeds
+            extra["visual_pos_masks"] = visual_pos_masks
+        output, _, cache = self.model.forward(
+            None,
+            embeds=embeds,
+            attention_mask=None,
+            past_key_values=cache,
+            input_ids=initial_input_ids,
+            position_ids=position_ids,
+            **extra,
+        )
+        logits = self.logits(output)[:, -1]
+        log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
+        scores, tokens = torch.topk(log_probs[0], num_beams)
+        next_position = (
+            int(position_ids[:, -1].max()) + 1
+            if position_ids is not None else None
+        )
+        beams = []
+        for score, token in zip(scores.tolist(), tokens.tolist()):
+            beams.append({
+                "tokens": [int(token)],
+                "score": float(score),
+                "cache": self._clone_kv_cache(cache),
+                "finished": int(token) in stop_tokens,
+            })
+
+        pbar = comfy.utils.ProgressBar(max_length)
+        pbar.update(1)
+        for step in tqdm(range(1, max_length), desc="Generating beam tokens"):
+            candidates = []
+            for beam in beams:
+                if beam["finished"]:
+                    candidates.append(beam)
+                    continue
+                token = torch.tensor(
+                    [[beam["tokens"][-1]]], device=device, dtype=torch.long)
+                token_embed = self.model.embed_tokens(token).to(execution_dtype)
+                decode_position = None
+                if next_position is not None:
+                    decode_position = torch.tensor(
+                        [[next_position + step - 1]], device=device)
+                output, _, updated_cache = self.model.forward(
+                    None,
+                    embeds=token_embed,
+                    attention_mask=None,
+                    past_key_values=beam["cache"],
+                    input_ids=token if initial_input_ids is not None else None,
+                    position_ids=decode_position,
+                )
+                logits = self.logits(output)[:, -1].float()
+                history = initial_tokens + beam["tokens"]
+                if history and (
+                    repetition_penalty != 1.0 or presence_penalty != 0.0
+                ):
+                    ids = torch.tensor(
+                        list(set(history)), device=device, dtype=torch.long)
+                    selected = logits[:, ids]
+                    if repetition_penalty != 1.0:
+                        selected = torch.where(
+                            selected < 0,
+                            selected * repetition_penalty,
+                            selected / repetition_penalty,
+                        )
+                    if presence_penalty != 0.0:
+                        selected = selected - presence_penalty
+                    logits[:, ids] = selected
+                log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+                child_scores, child_tokens = torch.topk(
+                    log_probs[0], num_beams)
+                for child_score, child_token in zip(
+                    child_scores.tolist(), child_tokens.tolist()
+                ):
+                    child_token = int(child_token)
+                    candidates.append({
+                        "tokens": beam["tokens"] + [child_token],
+                        "score": beam["score"] + float(child_score),
+                        "cache": updated_cache,
+                        "finished": child_token in stop_tokens,
+                    })
+
+            def rank(candidate):
+                # Matches the common length-penalty=1 beam ranking while
+                # keeping the raw score for future expansion.
+                return candidate["score"] / max(1, len(candidate["tokens"]))
+
+            selected = sorted(candidates, key=rank, reverse=True)[:num_beams]
+            cache_counts = {}
+            for candidate in selected:
+                cache_id = id(candidate["cache"])
+                cache_counts[cache_id] = cache_counts.get(cache_id, 0) + 1
+                if cache_counts[cache_id] > 1:
+                    candidate["cache"] = self._clone_kv_cache(
+                        candidate["cache"])
+            beams = selected
+            pbar.update(1)
+            if all(beam["finished"] for beam in beams):
+                break
+
+        return max(
+            beams,
+            key=lambda beam: beam["score"] / max(1, len(beam["tokens"])),
+        )["tokens"]
 
     def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
 
@@ -1299,6 +1482,91 @@ class Qwen25_7BVLI(BaseLlama, BaseGenerate, torch.nn.Module):
             position_ids = None
 
         return super().forward(x, attention_mask=attention_mask, embeds=embeds, num_tokens=num_tokens, intermediate_output=intermediate_output, final_layer_norm_intermediate=final_layer_norm_intermediate, dtype=dtype, position_ids=position_ids)
+
+
+class Qwen25VLI(Qwen25_7BVLI):
+    """Canonical Qwen2.5-VL generation model for the fixed 3B/7B families."""
+
+    model_type = "qwen2_5_vl_7b"
+
+    def __init__(self, config_dict, dtype, device, operations):
+        torch.nn.Module.__init__(self)
+        config_class = (
+            Qwen25_3BVLI_Config
+            if self.model_type == "qwen2_5_vl_3b"
+            else Qwen25_7BVLI_Config
+        )
+        config = config_class(**config_dict)
+        self.num_layers = config.num_hidden_layers
+        self.model = Llama2_(config, device=device, dtype=dtype, ops=operations)
+        self.visual = qwen_vl.Qwen2VLVisionTransformer(
+            hidden_size=1280,
+            output_hidden_size=config.hidden_size,
+            device=device,
+            dtype=dtype,
+            ops=operations,
+        )
+        self.dtype = dtype
+
+    def preprocess_embed(self, embed, device):
+        if embed["type"] in {"image", "video"}:
+            pixels, grid, mrope = qwen_vl.process_qwen_vl_media(
+                embed["data"], family=self.model_type)
+            merged = self.visual(
+                pixels.to(device, dtype=torch.float32), grid.to(device))
+            return merged, {
+                "grid": grid,
+                "mrope": mrope,
+            }
+        return None, None
+
+    def forward(
+        self, x, attention_mask=None, embeds=None, num_tokens=None,
+        intermediate_output=None, final_layer_norm_intermediate=True,
+        dtype=None, embeds_info=[], **kwargs,
+    ):
+        position_ids = kwargs.pop("position_ids", None)
+        if embeds is not None and position_ids is None:
+            position_ids = qwen_vl.qwen2vl_mrope_position_ids(
+                embeds_info, embeds.shape[1], embeds.device)
+        return BaseLlama.forward(
+            self,
+            x,
+            attention_mask=attention_mask,
+            embeds=embeds,
+            num_tokens=num_tokens,
+            intermediate_output=intermediate_output,
+            final_layer_norm_intermediate=final_layer_norm_intermediate,
+            dtype=dtype,
+            position_ids=position_ids,
+            **kwargs,
+        )
+
+
+def make_qwen25_vl_model(model_type):
+    class Qwen25VLI_(Qwen25VLI):
+        pass
+
+    Qwen25VLI_.model_type = model_type
+    return Qwen25VLI_
+
+
+class Qwen3_06BGeneration(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
+    def __init__(self, config_dict, dtype, device, operations):
+        super().__init__()
+        config = Qwen3_06BGenerationConfig(**config_dict)
+        self.num_layers = config.num_hidden_layers
+        self.model = Llama2_(config, device=device, dtype=dtype, ops=operations)
+        self.dtype = dtype
+
+
+class Qwen3_4BGeneration(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
+    def __init__(self, config_dict, dtype, device, operations):
+        super().__init__()
+        config = Qwen3_4BGenerationConfig(**config_dict)
+        self.num_layers = config.num_hidden_layers
+        self.model = Llama2_(config, device=device, dtype=dtype, ops=operations)
+        self.dtype = dtype
 
 class Gemma2_2B(BaseLlama, BaseGenerate, torch.nn.Module):
     def __init__(self, config_dict, dtype, device, operations):

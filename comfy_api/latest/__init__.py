@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+import importlib
 from typing import TYPE_CHECKING
 from comfy_api.internal import ComfyAPIBase
 from comfy_api.internal.singleton import ProxiedSingleton
@@ -7,11 +10,7 @@ from ._input import ImageInput, AudioInput, MaskInput, LatentInput, VideoInput
 from ._input_impl import VideoFromFile, VideoFromComponents
 from ._util import VideoCodec, VideoContainer, VideoComponents, MESH, VOXEL, SPLAT, File3D
 from . import _io_public as io
-from . import _ui_public as ui
-from comfy_execution.utils import get_executing_context
-from comfy_execution.progress import get_progress_state, PreviewImageTuple
 from PIL import Image
-from comfy.cli_args import args
 import numpy as np
 
 
@@ -48,6 +47,10 @@ class ComfyAPI_latest(ComfyAPIBase):
 
             Migration from previous API: comfy.utils.PROGRESS_BAR_HOOK
             """
+            from comfy.cli_args import args
+            from comfy_execution.progress import get_progress_state
+            from comfy_execution.utils import get_executing_context
+
             executing_context = get_executing_context()
             if node_id is None and executing_context is not None:
                 node_id = executing_context.node_id
@@ -55,7 +58,7 @@ class ComfyAPI_latest(ComfyAPIBase):
                 raise ValueError("node_id must be provided if not in executing context")
 
             # Convert preview_image to PreviewImageTuple if needed
-            to_display: PreviewImageTuple | Image.Image | ImageInput | None = preview_image
+            to_display = preview_image
             if to_display is not None:
                 # First convert to PIL Image if needed
                 if isinstance(to_display, ImageInput):
@@ -158,9 +161,20 @@ if TYPE_CHECKING:
     ComfyAPISync: type[comfy_api.latest.generated.ComfyAPISyncStub.ComfyAPISyncStub]
 ComfyAPISync = create_sync_class(ComfyAPI_latest)
 
-# create new aliases for io and ui
+# create new alias for io
 IO = io
-UI = ui
+
+# Custom-node SDK: refs, ctx, and the overlay provider seam.
+from . import _sdk_public as sdk  # noqa: E402
+
+
+def __getattr__(name: str):
+    if name in {"ui", "UI"}:
+        module = importlib.import_module(f"{__name__}._ui_public")
+        globals()["ui"] = module
+        globals()["UI"] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "ComfyAPI",
@@ -174,4 +188,5 @@ __all__ = [
     "IO",
     "ui",
     "UI",
+    "sdk",
 ]

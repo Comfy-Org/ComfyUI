@@ -88,9 +88,211 @@ def process_qwen2vl_images(
     return flatten_patches, image_grid_thw
 
 
+def _qwen_smart_resize(
+    height: int,
+    width: int,
+    *,
+    factor: int,
+    min_pixels: int,
+    max_pixels: int,
+    frames: int = 1,
+    padded_frames: Optional[int] = None,
+):
+    """Return the closed Qwen processor resize for one media item.
+
+    This intentionally contains only the geometry shared by the official
+    Qwen2.5-VL and Qwen3-VL processors.  Conversation construction and frame
+    selection remain caller policy.
+    """
+    if height <= 0 or width <= 0 or frames <= 0:
+        raise ValueError("Qwen media dimensions must be positive")
+    if padded_frames is None:
+        padded_frames = frames
+    if padded_frames <= 0:
+        raise ValueError("Qwen padded media length must be positive")
+    if max(height, width) / min(height, width) > 200:
+        raise ValueError("Qwen media aspect ratio must not exceed 200")
+    if factor <= 0 or min_pixels <= 0 or max_pixels < min_pixels:
+        raise ValueError("invalid Qwen resize bounds")
+
+    h_bar = max(factor, round(height / factor) * factor)
+    w_bar = max(factor, round(width / factor) * factor)
+    volume = padded_frames * h_bar * w_bar
+    if volume > max_pixels:
+        beta = math.sqrt((frames * height * width) / max_pixels)
+        h_bar = max(factor, math.floor(height / beta / factor) * factor)
+        w_bar = max(factor, math.floor(width / beta / factor) * factor)
+    elif volume < min_pixels:
+        beta = math.sqrt(min_pixels / (frames * height * width))
+        h_bar = max(factor, math.ceil(height * beta / factor) * factor)
+        w_bar = max(factor, math.ceil(width * beta / factor) * factor)
+    return h_bar, w_bar
+
+
+def process_qwen_vl_media(
+    frames: torch.Tensor,
+    *,
+    family: str,
+):
+    """Patch one already-selected Qwen image/video batch.
+
+    ``frames`` is BHWC RGB in [0, 1].  The return value is
+    ``(patches, grid_thw, relative_mrope)``.  ``relative_mrope`` describes the
+    merged visual tokens only; the language-model wrapper offsets it around
+    surrounding text.  No temporal sampling occurs here.
+    """
+    if not isinstance(frames, torch.Tensor) or frames.ndim != 4:
+        raise TypeError("Qwen media must be a BHWC tensor")
+    if frames.shape[0] < 1 or frames.shape[-1] < 3:
+        raise ValueError("Qwen media must contain RGB frames")
+    if frames.shape[0] > 64:
+        raise ValueError("Qwen video is limited to 64 selected frames")
+
+    frames = frames[..., :3]
+    count, height, width, _ = map(int, frames.shape)
+    is_qwen3 = family.startswith(("qwen3_vl_", "qwen3vl_"))
+    is_qwen25 = family.startswith("qwen2_5_vl_")
+    if not (is_qwen3 or is_qwen25):
+        raise ValueError(f"unsupported Qwen vision family {family!r}")
+
+    if is_qwen3:
+        patch_size = 16
+        factor = 32
+        min_pixels = 4096
+        max_pixels = 25_165_824
+        mean = (0.5, 0.5, 0.5)
+        std = (0.5, 0.5, 0.5)
+        # The video processor pads an odd final frame instead of dropping it,
+        # so the spatial budget must use that same padded temporal length.
+        resize_frames = count
+        padded_resize_frames = max(2, math.ceil(count / 2) * 2)
+    else:
+        patch_size = 14
+        factor = 28
+        min_pixels = 3136
+        max_pixels = 12_845_056
+        mean = (0.48145466, 0.4578275, 0.40821073)
+        std = (0.26862954, 0.26130258, 0.27577711)
+        resize_frames = 1
+        padded_resize_frames = 1
+
+    h_bar, w_bar = _qwen_smart_resize(
+        height,
+        width,
+        factor=factor,
+        min_pixels=min_pixels,
+        max_pixels=max_pixels,
+        frames=resize_frames,
+        padded_frames=padded_resize_frames,
+    )
+    pixels = frames.permute(0, 3, 1, 2)
+    pixels = F.interpolate(
+        pixels,
+        size=(h_bar, w_bar),
+        mode="bicubic",
+        align_corners=False,
+    )
+    mean_tensor = torch.tensor(mean, device=pixels.device, dtype=pixels.dtype)[None, :, None, None]
+    std_tensor = torch.tensor(std, device=pixels.device, dtype=pixels.dtype)[None, :, None, None]
+    pixels = (pixels - mean_tensor) / std_tensor
+
+    if count % 2:
+        pixels = torch.cat((pixels, pixels[-1:]), dim=0)
+    grid_t = pixels.shape[0] // 2
+    grid_h = h_bar // patch_size
+    grid_w = w_bar // patch_size
+    merge_size = 2
+    channels = pixels.shape[1]
+    patches = pixels.reshape(
+        grid_t,
+        2,
+        channels,
+        grid_h // merge_size,
+        merge_size,
+        patch_size,
+        grid_w // merge_size,
+        merge_size,
+        patch_size,
+    )
+    patches = patches.permute(0, 3, 6, 4, 7, 2, 1, 5, 8)
+    patches = patches.reshape(
+        grid_t * grid_h * grid_w,
+        channels * 2 * patch_size * patch_size,
+    )
+    grid = torch.tensor(
+        [[grid_t, grid_h, grid_w]], device=frames.device, dtype=torch.long)
+
+    merged_h = grid_h // merge_size
+    merged_w = grid_w // merge_size
+    spatial = merged_h * merged_w
+    if is_qwen25:
+        temporal = torch.arange(
+            grid_t, device=frames.device, dtype=torch.long) * 2
+    else:
+        # Qwen3-VL carries time in the timestamp text preceding each visual
+        # span.  Each pair therefore starts its visual MRoPE at t=0.
+        temporal = torch.zeros(grid_t, device=frames.device, dtype=torch.long)
+    t_ids = temporal.repeat_interleave(spatial)
+    h_ids = torch.arange(
+        merged_h, device=frames.device, dtype=torch.long
+    ).repeat_interleave(merged_w).repeat(grid_t)
+    w_ids = torch.arange(
+        merged_w, device=frames.device, dtype=torch.long
+    ).repeat(merged_h).repeat(grid_t)
+    relative_mrope = torch.stack((t_ids, h_ids, w_ids), dim=0)
+    return patches, grid, relative_mrope
+
+
 def qwen2vl_mrope_position_ids(embeds_info, seq_len, device):
     # (3, seq_len) T/H/W MRoPE position ids: text runs sequentially, each image span gets its grid positions.
     # Returns None when there are no image embeds. `extra` is the image grid_thw, or a dict carrying it under "grid".
+    media = [
+        e for e in embeds_info
+        if e.get("type") in {"image", "video", "video_segment"}
+    ]
+    if not media:
+        return None
+
+    # New canonical media wrappers provide exact relative positions.  Keep
+    # the legacy grid path below for existing image-generation encoders.
+    if all(isinstance(e.get("extra"), dict)
+           and e["extra"].get("mrope") is not None for e in media):
+        position_ids = torch.zeros(
+            (3, seq_len), device=device, dtype=torch.long)
+        cursor = 0
+        next_position = 0
+        for e in sorted(media, key=lambda item: item["index"]):
+            start = int(e["index"])
+            end = start + int(e["size"])
+            if start < cursor or end > seq_len:
+                raise ValueError("overlapping or invalid Qwen media span")
+            text_len = start - cursor
+            if text_len:
+                text = torch.arange(
+                    next_position,
+                    next_position + text_len,
+                    device=device,
+                    dtype=torch.long,
+                )
+                position_ids[:, cursor:start] = text
+                next_position += text_len
+            relative = e["extra"]["mrope"].to(
+                device=device, dtype=torch.long)
+            if relative.shape != (3, end - start):
+                raise ValueError("Qwen media MRoPE shape does not match span")
+            position_ids[:, start:end] = relative + next_position
+            next_position += int(relative.max().item()) + 1
+            cursor = end
+        if cursor < seq_len:
+            text = torch.arange(
+                next_position,
+                next_position + seq_len - cursor,
+                device=device,
+                dtype=torch.long,
+            )
+            position_ids[:, cursor:] = text
+        return position_ids
+
     position_ids = None
     offset = 0
     for e in embeds_info:

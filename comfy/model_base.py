@@ -205,11 +205,12 @@ class BaseModel(torch.nn.Module):
         self.memory_usage_shape_process = {}
 
     def apply_model(self, x, t, c_concat=None, c_crossattn=None, control=None, transformer_options={}, **kwargs):
-        return comfy.patcher_extension.WrapperExecutor.new_class_executor(
-            self._apply_model,
-            self,
-            comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.APPLY_MODEL, transformer_options)
-        ).execute(x, t, c_concat, c_crossattn, control, transformer_options, **kwargs)
+        with comfy.model_management.model_backend_flags(transformer_options):
+            return comfy.patcher_extension.WrapperExecutor.new_class_executor(
+                self._apply_model,
+                self,
+                comfy.patcher_extension.get_all_wrappers(comfy.patcher_extension.WrappersMP.APPLY_MODEL, transformer_options)
+            ).execute(x, t, c_concat, c_crossattn, control, transformer_options, **kwargs)
 
     def _apply_model(self, x, t, c_concat=None, c_crossattn=None, control=None, transformer_options={}, **kwargs):
         sigma = t
