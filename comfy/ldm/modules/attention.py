@@ -801,8 +801,8 @@ try:
 
     @flash_attn_wrapper.register_fake
     def flash_attn_fake(q, k, v, dropout_p=0.0, causal=False, softmax_scale=-1.0):
-        # Output shape is the same as q
-        return q.new_empty(q.shape)
+        # Output shape and stride are the same as q
+        return torch.empty_strided(q.shape, q.stride(), dtype=q.dtype, device=q.device)
 except AttributeError as error:
     FLASH_ATTN_ERROR = error
 
