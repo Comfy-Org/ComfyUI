@@ -8,18 +8,45 @@ on:
 jobs:
   dispatch-cloud:
     runs-on: ubuntu-latest
+    # No checkout and no use of GITHUB_TOKEN; the dispatch goes out on the App
+    # token generated below, which is scoped to Comfy-Org/cloud only.
+    permissions:
+      contents: read
     steps:
+      # A PAT was used here previously. It was silently regenerated upstream
+      # without the Actions secret being updated, so every tag from v0.25.0
+      # (2026-06-16) through v0.29.0 dispatched a 401 and no cloud bump PR was
+      # opened for six weeks. App installation tokens are minted per run and
+      # cannot drift out of sync with a stored copy.
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          # A single-purpose App: installed only on Comfy-Org/cloud, holding
+          # only contents:write. Deliberately NOT cloud-code-bot, which is also
+          # entitled to cloud's production release and migration workflows --
+          # an App private key is not scoped, so any key stored here can mint a
+          # token for everything its App is entitled to, on every repo it is
+          # installed on. The owner/repositories inputs below are arguments,
+          # not a security boundary. Keeping this App minimal is what makes it
+          # safe to hold in a public repository.
+          app-id: ${{ vars.CORE_TO_CLOUD_DISPATCH_APP_ID }}
+          private-key: ${{ secrets.CORE_TO_CLOUD_DISPATCH_PRIVATE_KEY }}
+          # create-github-app-token scopes to the current repository by
+          # default; this dispatch targets another repo.
+          owner: Comfy-Org
+          repositories: cloud
+          # Without this, the minted token carries every permission the
+          # installation holds. Pinning it to the one scope repository_dispatch
+          # needs keeps that true even if the App is later granted more.
+          permission-contents: write
+
       - name: Send repository dispatch to cloud
         env:
-          DISPATCH_TOKEN: ${{ secrets.CLOUD_REPO_DISPATCH_TOKEN }}
+          DISPATCH_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-
-          if [ -z "${DISPATCH_TOKEN:-}" ]; then
-            echo "::error::CLOUD_REPO_DISPATCH_TOKEN is required but not set."
-            exit 1
-          fi
 
           RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
 
