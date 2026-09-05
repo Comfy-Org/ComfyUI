@@ -212,7 +212,9 @@ class GatedDeltaNet(nn.Module):
         mixed_qkv = mixed_qkv.transpose(1, 2)  # [B, seq_len, conv_dim]
         query, key, value = mixed_qkv.split([self.key_dim, self.key_dim, self.value_dim], dim=-1)
         beta = b.sigmoid()
-        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias.float())
+        A_log = comfy.model_management.cast_to_device(self.A_log, a.device, torch.float32)
+        dt_bias = comfy.model_management.cast_to_device(self.dt_bias, a.device, torch.float32)
+        g = -A_log.exp() * F.softplus(a.float() + dt_bias)
 
         # Delta rule
         if use_recurrent:
