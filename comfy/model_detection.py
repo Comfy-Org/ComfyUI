@@ -41,6 +41,35 @@ def calculate_transformer_depth(prefix, state_dict_keys, state_dict):
         return last_transformer_depth, context_dim, use_linear_in_transformer, time_stack, time_stack_cross
     return None
 
+def is_nvfp4_layer(metadata, layer_name):
+    """True if the given layer is stored as packed NVFP4 (2 values/byte).
+
+    NVFP4 qdata has half the columns of the original weight; model config
+    detection must double the dims of such layers or the architecture is
+    built with wrong sizes. Malformed quantization metadata raises a clear
+    error instead of silently deriving wrong dimensions.
+    """
+    if not metadata:
+        return False
+    if "_quantization_metadata" not in metadata:
+        return False
+    qm = metadata["_quantization_metadata"]
+    try:
+        parsed = json.loads(qm)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise ValueError(f"Invalid _quantization_metadata in model metadata: {e}") from e
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("layers"), dict):
+        raise ValueError('Invalid _quantization_metadata: expected an object with a "layers" object')
+    if layer_name not in parsed["layers"]:
+        return False
+    layer_conf = parsed["layers"][layer_name]
+    if layer_conf is None or not isinstance(layer_conf, dict):
+        raise ValueError(f"Invalid _quantization_metadata: layer {layer_name!r} is not an object")
+    if not isinstance(layer_conf.get("format"), str):
+        raise ValueError(f"Invalid _quantization_metadata: layer {layer_name!r} has no format")
+    return layer_conf["format"] == "nvfp4"
+
+
 def detect_unet_config(state_dict, key_prefix, metadata=None):
     state_dict_keys = list(state_dict.keys())
 
@@ -296,18 +325,24 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         in_key = "{}img_in.weight".format(key_prefix)
         if in_key in state_dict_keys:
             w = state_dict[in_key]
-            dit_config["in_channels"] = w.shape[1] // (patch_size * patch_size)
+            # NVFP4-packed weights store 2 values per byte (halved last dim);
+            # use the doubled dim so the model is built with correct sizes.
+            in_dim = w.shape[1] * 2 if is_nvfp4_layer(metadata, key_prefix + "img_in") else w.shape[1]
+            dit_config["in_channels"] = in_dim // (patch_size * patch_size)
             dit_config["hidden_size"] = w.shape[0]
 
         txt_in_key = "{}txt_in.weight".format(key_prefix)
         if txt_in_key in state_dict_keys:
             w = state_dict[txt_in_key]
-            dit_config["context_in_dim"] = w.shape[1]
+            ctx_dim = w.shape[1] * 2 if is_nvfp4_layer(metadata, key_prefix + "txt_in") else w.shape[1]
+            dit_config["context_in_dim"] = ctx_dim
             dit_config["hidden_size"] = w.shape[0]
 
         vec_in_key = '{}vector_in.in_layer.weight'.format(key_prefix)
         if vec_in_key in state_dict_keys:
-            dit_config["vec_in_dim"] = state_dict[vec_in_key].shape[1]
+            w = state_dict[vec_in_key]
+            vec_dim = w.shape[1] * 2 if is_nvfp4_layer(metadata, key_prefix + "vector_in.in_layer") else w.shape[1]
+            dit_config["vec_in_dim"] = vec_dim
         else:
             dit_config["vec_in_dim"] = None
 
