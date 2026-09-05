@@ -301,3 +301,320 @@ def test_load_extra_path_config_no_base_path(
     actual_diffusion = folder_paths.folder_names_and_paths["diffusion_models"][0]
     assert len(actual_diffusion) == 1, "Should have one path for 'diffusion_models'."
     assert actual_diffusion[0] == os.path.abspath(expected_unet)
+
+
+@patch("yaml.safe_load")
+def test_load_extra_path_config_implicit_subdirs(
+    mock_yaml_load, clear_folder_paths, tmp_path
+):
+    """
+    When base_path is set and no explicit sub-paths are declared, any subdir
+    whose name matches a known category is auto-registered.
+    """
+    # Create real subdirs that match known categories
+    (tmp_path / "checkpoints").mkdir()
+    (tmp_path / "loras").mkdir()
+    (tmp_path / "unknown_dir").mkdir()  # not a registered category — should be ignored
+
+    config_data = {
+        "comfyui": {
+            "base_path": str(tmp_path),
+        }
+    }
+    mock_yaml_load.return_value = config_data
+
+    # Pre-populate only the categories we're testing so clear_folder_paths doesn't hide them
+    folder_paths.folder_names_and_paths["checkpoints"] = ([], set())
+    folder_paths.folder_names_and_paths["loras"] = ([], set())
+
+    yaml_path = str(tmp_path / "extra_model_paths.yaml")
+    with open(yaml_path, "w") as f:
+        f.write("")  # content ignored; yaml.safe_load is mocked
+
+    load_extra_path_config(yaml_path)
+
+    assert str(tmp_path / "checkpoints") in folder_paths.folder_names_and_paths["checkpoints"][0]
+    assert str(tmp_path / "loras") in folder_paths.folder_names_and_paths["loras"][0]
+    assert "unknown_dir" not in folder_paths.folder_names_and_paths
+
+
+@patch("yaml.safe_load")
+def test_implicit_scan_excludes_custom_nodes(
+    mock_yaml_load, clear_folder_paths, tmp_path
+):
+    """custom_nodes must never be auto-registered by the implicit scan."""
+    (tmp_path / "custom_nodes").mkdir()
+    (tmp_path / "checkpoints").mkdir()
+
+    config_data = {"comfyui": {"base_path": str(tmp_path)}}
+    mock_yaml_load.return_value = config_data
+
+    folder_paths.folder_names_and_paths["checkpoints"] = ([], set())
+    folder_paths.folder_names_and_paths["custom_nodes"] = ([], set())
+
+    yaml_path = str(tmp_path / "extra_paths.yaml")
+    with open(yaml_path, "w") as f:
+        f.write("")
+
+    load_extra_path_config(yaml_path)
+
+    assert str(tmp_path / "checkpoints") in folder_paths.folder_names_and_paths["checkpoints"][0]
+    assert str(tmp_path / "custom_nodes") not in folder_paths.folder_names_and_paths["custom_nodes"][0], \
+        "custom_nodes must not be auto-registered by the implicit scan"
+
+
+@patch("yaml.safe_load")
+def test_load_extra_path_config_explicit_overrides_implicit(
+    mock_yaml_load, clear_folder_paths, tmp_path
+):
+    """
+    Explicit sub-path declarations take precedence; the implicit scan must not
+    double-register a category that was already declared explicitly.
+    """
+    (tmp_path / "loras").mkdir()
+    custom_loras = tmp_path / "my_custom_loras"
+    custom_loras.mkdir()
+
+    config_data = {
+        "comfyui": {
+            "base_path": str(tmp_path),
+            "loras": "my_custom_loras",  # explicit override
+        }
+    }
+    mock_yaml_load.return_value = config_data
+    folder_paths.folder_names_and_paths["loras"] = ([], set())
+
+    yaml_path = str(tmp_path / "extra_model_paths.yaml")
+    with open(yaml_path, "w") as f:
+        f.write("")
+
+    load_extra_path_config(yaml_path)
+
+    registered = folder_paths.folder_names_and_paths["loras"][0]
+    assert str(custom_loras) in registered
+    assert str(tmp_path / "loras") not in registered, "Implicit path must not override explicit"
+
+
+@pytest.fixture
+def save_restore_system_dirs():
+    """Save and restore folder_paths system directories around a test."""
+    saved = {
+        "output": folder_paths.get_output_directory(),
+        "input": folder_paths.get_input_directory(),
+        "temp": folder_paths.get_temp_directory(),
+        "user": folder_paths.get_user_directory(),
+    }
+    yield
+    folder_paths.set_output_directory(saved["output"])
+    folder_paths.set_input_directory(saved["input"])
+    folder_paths.set_temp_directory(saved["temp"])
+    folder_paths.set_user_directory(saved["user"])
+
+
+@patch("yaml.safe_load")
+def test_system_dir_keys(mock_yaml_load, save_restore_system_dirs, tmp_path):
+    """System directory keys (output, input, temp, user) call set_*_directory()."""
+    config_data = {
+        "comfyui": {
+            "base_path": str(tmp_path),
+            "output": "my_output/",
+            "input": "my_input/",
+            "temp": "my_temp/",
+            "user": "my_user/",
+        }
+    }
+    mock_yaml_load.return_value = config_data
+
+    yaml_path = str(tmp_path / "extra_paths.yaml")
+    with open(yaml_path, "w") as f:
+        f.write("")
+
+    load_extra_path_config(yaml_path, allow_system_dirs=True)
+
+    assert folder_paths.get_output_directory() == os.path.normpath(str(tmp_path / "my_output"))
+    assert folder_paths.get_input_directory() == os.path.normpath(str(tmp_path / "my_input"))
+    assert folder_paths.get_temp_directory() == os.path.normpath(str(tmp_path / "my_temp"))
+    assert folder_paths.get_user_directory() == os.path.normpath(str(tmp_path / "my_user"))
+
+
+@patch("yaml.safe_load")
+def test_system_dir_keys_not_applied_for_legacy(mock_yaml_load, save_restore_system_dirs, tmp_path):
+    """System directory keys are ignored when allow_system_dirs=False (legacy extra_model_paths.yaml)."""
+    original_output = folder_paths.get_output_directory()
+    config_data = {
+        "comfyui": {
+            "base_path": str(tmp_path),
+            "output": "my_output/",
+        }
+    }
+    mock_yaml_load.return_value = config_data
+
+    yaml_path = str(tmp_path / "extra_model_paths.yaml")
+    with open(yaml_path, "w") as f:
+        f.write("")
+
+    load_extra_path_config(yaml_path)  # allow_system_dirs defaults to False
+
+    # output should be unchanged — treated as a model category, not a system dir
+    assert folder_paths.get_output_directory() == original_output
+
+
+@patch("yaml.safe_load")
+def test_nested_models_block(mock_yaml_load, clear_folder_paths, tmp_path):
+    """Nested models: block registers model paths relative to models/base_path."""
+    config_data = {
+        "comfyui": {
+            "base_path": str(tmp_path),
+            "models": {
+                "base_path": "models/",
+                "checkpoints": "checkpoints/",
+                "loras": "loras/",
+            },
+        }
+    }
+    mock_yaml_load.return_value = config_data
+
+    folder_paths.folder_names_and_paths["checkpoints"] = ([], set())
+    folder_paths.folder_names_and_paths["loras"] = ([], set())
+
+    yaml_path = str(tmp_path / "extra_paths.yaml")
+    with open(yaml_path, "w") as f:
+        f.write("")
+
+    load_extra_path_config(yaml_path)
+
+    expected_ckpt = os.path.normpath(str(tmp_path / "models" / "checkpoints"))
+    expected_loras = os.path.normpath(str(tmp_path / "models" / "loras"))
+    assert expected_ckpt in folder_paths.folder_names_and_paths["checkpoints"][0]
+    assert expected_loras in folder_paths.folder_names_and_paths["loras"][0]
+
+
+@patch("yaml.safe_load")
+def test_nested_models_is_default(mock_yaml_load, clear_folder_paths, tmp_path):
+    """is_default under models: applies to all model paths in that block."""
+    config_data = {
+        "comfyui": {
+            "models": {
+                "base_path": str(tmp_path),
+                "is_default": True,
+                "checkpoints": "checkpoints/",
+            },
+        }
+    }
+    mock_yaml_load.return_value = config_data
+    folder_paths.folder_names_and_paths["checkpoints"] = ([], set())
+
+    yaml_path = str(tmp_path / "extra_paths.yaml")
+    with open(yaml_path, "w") as f:
+        f.write("")
+
+    mock_add = Mock()
+    with patch.object(folder_paths, "add_model_folder_path", mock_add):
+        load_extra_path_config(yaml_path)
+
+    call = mock_add.call_args_list[0]
+    assert call.args[0] == "checkpoints"
+    assert call.args[2] is True, "is_default under models: must be passed as True"
+
+
+@patch("yaml.safe_load")
+def test_nested_models_multipath(mock_yaml_load, clear_folder_paths, tmp_path):
+    """Multi-line path values inside models: register multiple paths per category."""
+    config_data = {
+        "comfyui": {
+            "models": {
+                "base_path": str(tmp_path),
+                "text_encoders": "text_encoders/\nclip/",
+            },
+        }
+    }
+    mock_yaml_load.return_value = config_data
+    folder_paths.folder_names_and_paths["text_encoders"] = ([], set())
+
+    yaml_path = str(tmp_path / "extra_paths.yaml")
+    with open(yaml_path, "w") as f:
+        f.write("")
+
+    load_extra_path_config(yaml_path)
+
+    registered = folder_paths.folder_names_and_paths["text_encoders"][0]
+    assert os.path.normpath(str(tmp_path / "text_encoders")) in registered
+    assert os.path.normpath(str(tmp_path / "clip")) in registered
+
+
+@patch("yaml.safe_load")
+def test_nested_models_auto_scan(mock_yaml_load, clear_folder_paths, tmp_path):
+    """models: with only base_path auto-scans for known categories that exist on disk."""
+    (tmp_path / "models" / "checkpoints").mkdir(parents=True)
+    (tmp_path / "models" / "loras").mkdir()
+
+    config_data = {
+        "comfyui": {
+            "base_path": str(tmp_path),
+            "models": {"base_path": "models/"},
+        }
+    }
+    mock_yaml_load.return_value = config_data
+    folder_paths.folder_names_and_paths["checkpoints"] = ([], set())
+    folder_paths.folder_names_and_paths["loras"] = ([], set())
+
+    yaml_path = str(tmp_path / "extra_paths.yaml")
+    with open(yaml_path, "w") as f:
+        f.write("")
+
+    load_extra_path_config(yaml_path)
+
+    assert os.path.normpath(str(tmp_path / "models" / "checkpoints")) in \
+        folder_paths.folder_names_and_paths["checkpoints"][0]
+    assert os.path.normpath(str(tmp_path / "models" / "loras")) in \
+        folder_paths.folder_names_and_paths["loras"][0]
+
+
+@patch("yaml.safe_load")
+def test_explicit_custom_nodes_key(mock_yaml_load, clear_folder_paths, tmp_path):
+    """Explicit custom_nodes key in a block registers the path via add_model_folder_path."""
+    config_data = {
+        "comfyui": {
+            "base_path": str(tmp_path),
+            "custom_nodes": "my_nodes/",
+        }
+    }
+    mock_yaml_load.return_value = config_data
+    folder_paths.folder_names_and_paths["custom_nodes"] = ([], set())
+
+    yaml_path = str(tmp_path / "extra_paths.yaml")
+    with open(yaml_path, "w") as f:
+        f.write("")
+
+    load_extra_path_config(yaml_path)
+
+    assert os.path.normpath(str(tmp_path / "my_nodes")) in \
+        folder_paths.folder_names_and_paths["custom_nodes"][0]
+
+
+@patch("yaml.safe_load")
+def test_nested_models_inherits_block_base(mock_yaml_load, clear_folder_paths, tmp_path):
+    """models: block without its own base_path inherits the outer block's base_path."""
+    config_data = {
+        "comfyui": {
+            "base_path": str(tmp_path),
+            "is_default": True,
+            "models": {
+                "checkpoints": "models/checkpoints/",
+            },
+        }
+    }
+    mock_yaml_load.return_value = config_data
+    folder_paths.folder_names_and_paths["checkpoints"] = ([], set())
+
+    yaml_path = str(tmp_path / "extra_paths.yaml")
+    with open(yaml_path, "w") as f:
+        f.write("")
+
+    load_extra_path_config(yaml_path)
+
+    expected = os.path.normpath(str(tmp_path / "models" / "checkpoints"))
+    paths = folder_paths.folder_names_and_paths["checkpoints"][0]
+    assert expected in paths
+    # is_default inherited: path should be at index 0
+    assert paths[0] == expected
