@@ -81,12 +81,19 @@ class ImageUpscaleWithModel(io.ComfyNode):
 
         output_device = comfy.model_management.intermediate_device()
 
+        # spandrel's ImageModelDescriptor is not built from comfy ops, so the dynamic
+        # weight loading path leaves its parameters on the offload device even with
+        # force_full_load=True. Materialize them on the compute device explicitly.
+        upscale_model.to(device)
+
         oom = True
         while oom:
             try:
                 steps = in_img.shape[0] * comfy.utils.get_tiled_scale_steps(in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=overlap)
                 pbar = comfy.utils.ProgressBar(steps)
+                
                 s = comfy.utils.tiled_scale(in_img, lambda a: upscale_model(a.float()), tile_x=tile, tile_y=tile, overlap=overlap, upscale_amount=upscale_model.scale, pbar=pbar, output_device=output_device)
+                
                 oom = False
             except Exception as e:
                 model_management.raise_non_oom(e)
