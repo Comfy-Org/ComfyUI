@@ -36,10 +36,12 @@ def app(user_directory):
 
 
 async def test_mkdir_creates_directory(aiohttp_client, app, user_directory):
-    """A new directory is created and reported back."""
+    """A new directory is created and its relative path is reported back."""
     client = await aiohttp_client(app)
     resp = await client.post("/userdata/workflows%2Fnew_folder/mkdir")
     assert resp.status == 200
+    # Separators stay OS-native here, matching the other userdata write routes.
+    assert await resp.json() == os.path.join("workflows", "new_folder")
     assert os.path.isdir(user_directory / "default" / "workflows" / "new_folder")
 
 
@@ -48,6 +50,7 @@ async def test_mkdir_creates_intermediate_directories(aiohttp_client, app, user_
     client = await aiohttp_client(app)
     resp = await client.post("/userdata/" + quote("workflows/a/b/c", safe="") + "/mkdir")
     assert resp.status == 200
+    assert await resp.json() == os.path.join("workflows", "a", "b", "c")
     assert os.path.isdir(user_directory / "default" / "workflows" / "a" / "b" / "c")
 
 
