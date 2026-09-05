@@ -24,6 +24,7 @@ import logging
 import math
 import time
 import uuid
+import weakref
 from typing import Callable, Optional
 
 import torch
@@ -35,6 +36,7 @@ import comfy.lora
 import comfy.model_management
 import comfy.ops
 import comfy.patcher_extension
+import comfy.pinned_memory
 import comfy.utils
 import comfy_aimdo.host_buffer
 from comfy.comfy_types import UnetWrapperFunction
@@ -1778,6 +1780,7 @@ class ModelPatcherDynamic(ModelPatcher):
         """
         if device not in self.model.dynamic_pins:
             self.model.dynamic_pins[device] = {
+                "device": device,
                 "weights": (comfy_aimdo.host_buffer.HostBuffer(0, 0, 0), [], [-1], [0], [0], {}),
                 "patches": (comfy_aimdo.host_buffer.HostBuffer(0, 0, 0), [], [-1], [0], [0], {}),
                 "weights-loaded": (comfy_aimdo.host_buffer.HostBuffer(0, 0, 0), [], [-1], [0], [0], {}),
@@ -1786,6 +1789,7 @@ class ModelPatcherDynamic(ModelPatcher):
                 "failed": False,
                 "active": False,
                 "current_prompt": False,
+                "prefetch_orders": weakref.WeakSet(),
             }
 
     def is_dynamic(self):
@@ -2069,57 +2073,13 @@ class ModelPatcherDynamic(ModelPatcher):
         pin_state = self.model.dynamic_pins[self.load_device]
         return pin_state["weights"][3][0] + pin_state["weights-loaded"][3][0]
 
-    def unregister_inactive_pins(self, ram_to_unload, subsets=[ "weights-loaded", "patches-loaded", "weights", "patches" ]):
-        freed = 0
+    def unregister_inactive_pins(self, ram_to_unload, subsets=[ "weights-loaded", "patches-loaded", "weights", "patches" ], protected=None, prefetch_only=False):
         pin_state = self.model.dynamic_pins[self.load_device]
-        for subset in subsets:
-            hostbuf, stack, stack_split, pinned_size, *_ = pin_state[subset]
-            split = stack_split[0]
-            while split >= 0:
-                module, offset = stack[split]
-                module_pin = module._pins[subset]
-                split -= 1
-                stack_split[0] = split
-                if not module_pin["registered"]:
-                    continue
-                pin = module_pin["pin"]
-                size = pin.numel() * pin.element_size()
-                if torch.cuda.cudart().cudaHostUnregister(pin.data_ptr()) != 0:
-                    comfy.model_management.discard_cuda_async_error()
-                    continue
-                module_pin["registered"] = False
-                comfy.model_management.TOTAL_PINNED_MEMORY = max(0, comfy.model_management.TOTAL_PINNED_MEMORY - size)
-                pinned_size[0] = max(0, pinned_size[0] - size)
-                freed += size
-                ram_to_unload -= size
-                if ram_to_unload <= 0:
-                    return freed
-        return freed
+        return comfy.pinned_memory.unregister_inactive_pins(pin_state, ram_to_unload, subsets, protected=protected, prefetch_only=prefetch_only)
 
-    def partially_unload_ram(self, ram_to_unload, subsets=[ "weights-loaded", "patches-loaded", "weights", "patches" ]):
-        freed = 0
+    def partially_unload_ram(self, ram_to_unload, subsets=[ "weights-loaded", "patches-loaded", "weights", "patches" ], protected=None):
         pin_state = self.model.dynamic_pins[self.load_device]
-        for subset in subsets:
-            hostbuf, stack, stack_split, pinned_size, *_ = pin_state[subset]
-            while len(stack) > 0:
-                module, offset = stack.pop()
-                module_pin = module._pins[subset]
-                pin = module_pin["pin"]
-                size = pin.numel() * pin.element_size()
-                module_pin["balancer_entry"][-1] = None
-                del module_pin["balancer_entry"]
-                del module_pin["pin"]
-                registered = module_pin["registered"]
-                hostbuf.truncate(offset, do_unregister=registered)
-                stack_split[0] = min(stack_split[0], len(stack) - 1)
-                if registered:
-                    comfy.model_management.TOTAL_PINNED_MEMORY = max(0, comfy.model_management.TOTAL_PINNED_MEMORY - size)
-                    pinned_size[0] = max(0, pinned_size[0] - size)
-                freed += size
-                ram_to_unload -= size
-                if ram_to_unload <= 0:
-                    return freed
-        return freed
+        return comfy.pinned_memory.partially_unload_ram(pin_state, ram_to_unload, subsets, protected=protected)
 
     def patch_model(self, device_to=None, lowvram_model_memory=0, load_weights=True, force_patch_weights=False):
         #This isn't used by the core at all and can only be to load a model out of
