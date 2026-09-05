@@ -107,7 +107,7 @@ def load_lora_for_models(model, clip, lora, strength_model, strength_clip, lora_
         key_map = comfy.lora.model_lora_keys_clip(clip.cond_stage_model, key_map)
 
     lora = comfy.lora_convert.convert_lora(lora)
-    loaded = comfy.lora.load_lora(lora, key_map)
+    loaded = comfy.lora.load_lora(lora, key_map, metadata=lora_metadata)
     if model is not None:
         new_modelpatcher = model.clone()
         k = new_modelpatcher.add_patches(loaded, strength_model)
