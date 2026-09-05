@@ -1,0 +1,77 @@
+"""Tests for the userdata mkdir endpoint in user_manager.py."""
+
+import os
+from unittest.mock import patch
+from urllib.parse import quote
+
+import pytest
+from aiohttp import web
+
+import folder_paths
+from app.user_manager import UserManager
+
+pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture
+def user_directory(tmp_path):
+    original = folder_paths.get_user_directory()
+    folder_paths.set_user_directory(str(tmp_path))
+    yield tmp_path
+    folder_paths.set_user_directory(original)
+
+
+@pytest.fixture
+def app(user_directory):
+    with patch("app.user_manager.args") as mock_args:
+        mock_args.multi_user = False
+        manager = UserManager()
+        application = web.Application()
+        routes = web.RouteTableDef()
+        manager.add_routes(routes)
+        application.add_routes(routes)
+        yield application
+
+
+async def test_mkdir_creates_directory(aiohttp_client, app, user_directory):
+    client = await aiohttp_client(app)
+    resp = await client.post("/userdata/workflows%2Fnew_folder/mkdir")
+    assert resp.status == 200
+    assert os.path.isdir(user_directory / "default" / "workflows" / "new_folder")
+
+
+async def test_mkdir_creates_intermediate_directories(aiohttp_client, app, user_directory):
+    client = await aiohttp_client(app)
+    resp = await client.post("/userdata/" + quote("workflows/a/b/c", safe="") + "/mkdir")
+    assert resp.status == 200
+    assert os.path.isdir(user_directory / "default" / "workflows" / "a" / "b" / "c")
+
+
+async def test_mkdir_conflicts_with_existing_directory(aiohttp_client, app):
+    client = await aiohttp_client(app)
+    assert (await client.post("/userdata/workflows%2Fdup/mkdir")).status == 200
+    resp = await client.post("/userdata/workflows%2Fdup/mkdir")
+    assert resp.status == 409
+
+
+async def test_mkdir_conflicts_with_existing_file(aiohttp_client, app):
+    client = await aiohttp_client(app)
+    assert (await client.post("/userdata/workflows%2Ftaken.json", data="{}")).status == 200
+    resp = await client.post("/userdata/workflows%2Ftaken.json/mkdir")
+    assert resp.status == 409
+
+
+async def test_mkdir_rejects_path_traversal(aiohttp_client, app, user_directory):
+    client = await aiohttp_client(app)
+    resp = await client.post("/userdata/" + quote("../escaped", safe="") + "/mkdir")
+    assert resp.status == 403
+    assert not os.path.exists(user_directory / "escaped")
+
+
+async def test_mkdir_directory_appears_in_listing(aiohttp_client, app):
+    client = await aiohttp_client(app)
+    assert (await client.post("/userdata/workflows%2Flisted/mkdir")).status == 200
+    resp = await client.get("/v2/userdata?path=workflows")
+    assert resp.status == 200
+    entries = await resp.json()
+    assert any(e["type"] == "directory" and e["name"] == "listed" for e in entries)

@@ -434,6 +434,44 @@ class UserManager():
 
             return web.Response(status=204)
 
+        @routes.post("/userdata/{directory}/mkdir")
+        async def mkdir_userdata(request):
+            """
+            Create a directory in a user's data directory.
+
+            Directories were previously only created as a side effect of writing a
+            file into them, so an empty directory could not be created at all. This
+            lets clients offer folder creation directly.
+
+            Path Parameters:
+            - directory: The directory path to create (URL encoded if necessary).
+              Intermediate directories are created as needed.
+
+            Returns:
+            - 400: If the 'directory' parameter is missing, or the directory could not
+                   be created.
+            - 403: If the requested path is not allowed.
+            - 409: If a file or directory already exists at that path.
+            - 200: JSON response with the relative path of the created directory.
+            """
+            path = get_user_data_path(request, param="directory")
+            if not isinstance(path, str):
+                return path
+
+            if os.path.exists(path):
+                if os.path.isdir(path):
+                    return web.Response(status=409, text="Directory already exists")
+                return web.Response(status=409, text="A file with that name already exists")
+
+            try:
+                os.makedirs(path)
+            except OSError as e:
+                logging.error("failed to create directory '%s': %s", path, e)
+                return web.Response(status=400, text="Failed to create directory")
+
+            user_path = self.get_request_user_filepath(request, None)
+            return web.json_response(os.path.relpath(path, user_path))
+
         @routes.post("/userdata/{file}/move/{dest}")
         async def move_userdata(request):
             """
