@@ -327,11 +327,14 @@ class String(ComfyTypeIO):
         '''String input.'''
         def __init__(self, id: str, display_name: str=None, optional=False, tooltip: str=None, lazy: bool=None,
                     multiline=False, placeholder: str=None, default: str=None, dynamic_prompts: bool=None,
-                    socketless: bool=None, force_input: bool=None, extra_dict=None, raw_link: bool=None, advanced: bool=None):
+                    socketless: bool=None, force_input: bool=None, extra_dict=None, raw_link: bool=None, advanced: bool=None,
+                    min_length: int=None, max_length: int=None):
             super().__init__(id, display_name, optional, tooltip, lazy, default, socketless, None, force_input, extra_dict, raw_link, advanced)
             self.multiline = multiline
             self.placeholder = placeholder
             self.dynamic_prompts = dynamic_prompts
+            self.min_length = min_length
+            self.max_length = max_length
             self.default: str
 
         def as_dict(self):
@@ -339,6 +342,8 @@ class String(ComfyTypeIO):
                 "multiline": self.multiline,
                 "placeholder": self.placeholder,
                 "dynamicPrompts": self.dynamic_prompts,
+                "minLength": self.min_length,
+                "maxLength": self.max_length,
             })
 
 @comfytype(io_type="COMBO")
@@ -1762,6 +1767,12 @@ class Schema:
     Use this for nodes with interactive/operable UI regions that produce intermediate outputs
     (e.g., Image Crop, Painter) rather than final outputs (e.g., Save Image).
     """
+    runtime_input_validation: bool = False
+    """Opt this node into runtime validation of declared input bounds (STRING minLength/maxLength,
+    INT/FLOAT min/max, COMBO membership) against resolved values, including values that arrive via links.
+
+    When False, only direct widget values are validated pre-execution and linked values flow through unchecked.
+    """
 
     def validate(self):
         '''Validate the schema:
@@ -2219,6 +2230,14 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
             cls.GET_SCHEMA()
         return cls._ACCEPT_ALL_INPUTS
 
+    _RUNTIME_INPUT_VALIDATION = None
+    @final
+    @classproperty
+    def RUNTIME_INPUT_VALIDATION(cls):  # noqa
+        if cls._RUNTIME_INPUT_VALIDATION is None:
+            cls.GET_SCHEMA()
+        return cls._RUNTIME_INPUT_VALIDATION
+
     @final
     @classmethod
     def INPUT_TYPES(cls) -> dict[str, dict]:
@@ -2263,6 +2282,8 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
             cls._NOT_IDEMPOTENT = schema.not_idempotent
         if cls._ACCEPT_ALL_INPUTS is None:
             cls._ACCEPT_ALL_INPUTS = schema.accept_all_inputs
+        if cls._RUNTIME_INPUT_VALIDATION is None:
+            cls._RUNTIME_INPUT_VALIDATION = schema.runtime_input_validation
 
         if cls._RETURN_TYPES is None:
             output = []

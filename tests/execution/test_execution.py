@@ -1034,3 +1034,124 @@ class TestExecution:
         """Test getting a non-existent job returns 404"""
         job = client.get_job("nonexistent-job-id")
         assert job is None, "Non-existent job should return None"
+
+
+    @pytest.mark.parametrize("text, expect_error", [
+        ("hello", False),       # 5 chars, within [3, 10]
+        ("abc", False),         # 3 chars, exact min boundary
+        ("abcdefghij", False),  # 10 chars, exact max boundary
+        ("ab", True),           # 2 chars, below min
+        ("abcdefghijk", True),  # 11 chars, above max
+        ("", True),             # 0 chars, below min
+    ])
+    def test_string_length_widget_validation(self, text, expect_error, client: ComfyClient, builder: GraphBuilder):
+        """Test minLength/maxLength validation for direct widget values (validate_inputs path)."""
+        g = builder
+        node = g.node("StubStringWithLength", text=text)
+        g.node("SaveImage", images=node.out(0))
+        if expect_error:
+            with pytest.raises(urllib.error.HTTPError) as exc_info:
+                client.run(g)
+            assert exc_info.value.code == 400
+        else:
+            client.run(g)
+
+
+    @pytest.mark.parametrize("text, expect_error", [
+        ("hello", False),       # within bounds
+        ("ab", True),           # below min
+        ("abcdefghijk", True),  # above max
+    ])
+    def test_string_length_linked_validation(self, text, expect_error, client: ComfyClient, builder: GraphBuilder):
+        """Test minLength/maxLength validation for linked inputs when node opts in via RUNTIME_INPUT_VALIDATION=True."""
+        g = builder
+        str_node = g.node("StubStringOutput", value=text)
+        node = g.node("StubStringWithLength", text=str_node.out(0))
+        g.node("SaveImage", images=node.out(0))
+
+        if expect_error:
+            try:
+                client.run(g)
+                assert False, "Should have raised an error"
+            except Exception as e:
+                assert 'prompt_id' in e.args[0], f"Did not get proper error message: {e}"
+        else:
+            client.run(g)
+
+
+    @pytest.mark.parametrize("text", [
+        "ab",            # below declared minLength
+        "abcdefghijk",   # above declared maxLength
+        "",              # empty
+        "hello",         # within bounds
+    ])
+    def test_string_length_linked_skipped_without_flag(self, text, client: ComfyClient, builder: GraphBuilder):
+        """Without RUNTIME_INPUT_VALIDATION=True, declared bounds must NOT be enforced for linked values.
+
+        Preserves V1 behavior: many existing workflows rely on out-of-bounds values passing
+        through links. Adding declared bounds without the flag must not break them.
+        """
+        g = builder
+        str_node = g.node("StubStringOutput", value=text)
+        node = g.node("StubStringWithLengthNoFlag", text=str_node.out(0))
+        g.node("SaveImage", images=node.out(0))
+        client.run(g)
+
+
+    @pytest.mark.parametrize("value, expect_error", [
+        (5, False),     # within [1, 10]
+        (1, False),     # exact min boundary
+        (10, False),    # exact max boundary
+        (0, True),      # below min
+        (11, True),     # above max
+        (-7, True),     # well below min
+    ])
+    def test_int_bounds_linked_validation(self, value, expect_error, client: ComfyClient, builder: GraphBuilder):
+        """min/max validation for linked INT inputs when node opts in via RUNTIME_INPUT_VALIDATION=True.
+
+        Direct widget INT values are already validated pre-execution. This test exercises the
+        symmetric runtime path for values arriving through a connection.
+        """
+        g = builder
+        int_node = g.node("StubInt", value=value)
+        node = g.node("StubIntWithBounds", value=int_node.out(0))
+        g.node("SaveImage", images=node.out(0))
+
+        if expect_error:
+            try:
+                client.run(g)
+                assert False, "Should have raised an error"
+            except Exception as e:
+                assert 'prompt_id' in e.args[0], f"Did not get proper error message: {e}"
+        else:
+            client.run(g)
+
+
+    @pytest.mark.parametrize("choice, expect_error", [
+        ("RED", False),
+        ("GREEN", False),
+        ("BLUE", False),
+        ("PURPLE", True),
+        ("", True),
+        ("red", True),    # case-sensitive
+    ])
+    def test_combo_membership_linked_validation(self, choice, expect_error, client: ComfyClient, builder: GraphBuilder):
+        """COMBO option membership for linked values when node opts in via RUNTIME_INPUT_VALIDATION=True.
+
+        StubComboWithOptions declares ``input_types`` in VALIDATE_INPUTS to bypass the engine's
+        link-type compatibility check, so we can feed a STRING into a COMBO and verify the
+        runtime membership check fires.
+        """
+        g = builder
+        str_node = g.node("StubStringOutput", value=choice)
+        node = g.node("StubComboWithOptions", choice=str_node.out(0))
+        g.node("SaveImage", images=node.out(0))
+
+        if expect_error:
+            try:
+                client.run(g)
+                assert False, "Should have raised an error"
+            except Exception as e:
+                assert 'prompt_id' in e.args[0], f"Did not get proper error message: {e}"
+        else:
+            client.run(g)
