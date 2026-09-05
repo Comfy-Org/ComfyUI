@@ -1,6 +1,9 @@
+import contextlib
+import contextvars
 import math
 import sys
 import inspect
+import threading
 
 import torch
 import torch.nn.functional as F
@@ -268,6 +271,44 @@ def attention_basic(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
         )
     return out
 
+_memory_chunk_cache_lock = threading.Lock()
+_memory_chunk_cache_var = contextvars.ContextVar("_memory_chunk_cache", default=None)
+
+
+@contextlib.contextmanager
+def deterministic_memory_chunking():
+    """Freeze memory-dependent chunk-size decisions so repeated calls with identical
+    shapes (e.g. a gradient-checkpoint recomputing the same forward) reuse the first
+    choice instead of picking a different one from the free memory available then.
+    The cache lives in a context-local variable so concurrent training contexts
+    (separate threads/tasks) each get their own, instead of sharing one global."""
+    token = _memory_chunk_cache_var.set({})
+    try:
+        yield
+    finally:
+        _memory_chunk_cache_var.reset(token)
+
+
+def _cached_memory_chunk_choice(key, compute):
+    cache = _memory_chunk_cache_var.get()
+    if cache is None:
+        return compute()
+    with _memory_chunk_cache_lock:
+        if key in cache:
+            return cache[key]
+    value = compute()
+    with _memory_chunk_cache_lock:
+        cache[key] = value
+    return value
+
+
+def _update_cached_memory_chunk_choice(key, value):
+    cache = _memory_chunk_cache_var.get()
+    if cache is not None:
+        with _memory_chunk_cache_lock:
+            cache[key] = value
+
+
 @wrap_attn
 def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
     attn_precision = get_attn_precision(attn_precision, query.dtype)
@@ -304,21 +345,18 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
     batch_x_heads, q_tokens, _ = query.shape
     _, _, k_tokens = key.shape
 
-    mem_free_total, _ = model_management.get_free_memory(query.device, True)
+    def _choose_chunk_sizes():
+        mem_free_total, _ = model_management.get_free_memory(query.device, True)
+        for x in [4096, 2048, 1024, 512, 256]:
+            count = mem_free_total / (batch_x_heads * bytes_per_token * x * 4.0)
+            if count >= k_tokens:
+                return k_tokens, x
+        return None, 512
 
     kv_chunk_size_min = None
-    kv_chunk_size = None
-    query_chunk_size = None
-
-    for x in [4096, 2048, 1024, 512, 256]:
-        count = mem_free_total / (batch_x_heads * bytes_per_token * x * 4.0)
-        if count >= k_tokens:
-            kv_chunk_size = k_tokens
-            query_chunk_size = x
-            break
-
-    if query_chunk_size is None:
-        query_chunk_size = 512
+    kv_chunk_size, query_chunk_size = _cached_memory_chunk_choice(
+        (query.device, batch_x_heads, bytes_per_token, k_tokens), _choose_chunk_sizes
+    )
 
     if mask is not None:
         if len(mask.shape) == 2:
@@ -371,8 +409,6 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
 
     r1 = torch.zeros(q.shape[0], q.shape[1], v.shape[2], device=q.device, dtype=q.dtype)
 
-    mem_free_total = model_management.get_free_memory(q.device)
-
     if attn_precision == torch.float32:
         element_size = 4
         upcast = True
@@ -380,22 +416,25 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
         element_size = q.element_size()
         upcast = False
 
+    device = q.device
     gb = 1024 ** 3
     tensor_size = q.shape[0] * q.shape[1] * k.shape[1] * element_size
     modifier = 3
     mem_required = tensor_size * modifier
-    steps = 1
 
+    def _choose_steps():
+        mem_free_total = model_management.get_free_memory(device)
+        steps = 1
+        if mem_required > mem_free_total:
+            steps = 2**(math.ceil(math.log(mem_required / mem_free_total, 2)))
 
-    if mem_required > mem_free_total:
-        steps = 2**(math.ceil(math.log(mem_required / mem_free_total, 2)))
-        # print(f"Expected tensor size:{tensor_size/gb:0.1f}GB, cuda free:{mem_free_cuda/gb:0.1f}GB "
-        #      f"torch free:{mem_free_torch/gb:0.1f} total:{mem_free_total/gb:0.1f} steps:{steps}")
+        if steps > 64:
+            max_res = math.floor(math.sqrt(math.sqrt(mem_free_total / 2.5)) / 8) * 64
+            raise RuntimeError(f'Not enough memory, use lower resolution (max approx. {max_res}x{max_res}). '
+                                f'Need: {mem_required/64/gb:0.1f}GB free, Have:{mem_free_total/gb:0.1f}GB free')
+        return steps
 
-    if steps > 64:
-        max_res = math.floor(math.sqrt(math.sqrt(mem_free_total / 2.5)) / 8) * 64
-        raise RuntimeError(f'Not enough memory, use lower resolution (max approx. {max_res}x{max_res}). '
-                            f'Need: {mem_required/64/gb:0.1f}GB free, Have:{mem_free_total/gb:0.1f}GB free')
+    steps = _cached_memory_chunk_choice((device, mem_required), _choose_steps)
 
     if mask is not None:
         if len(mask.shape) == 2:
@@ -448,6 +487,8 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
                 logging.warning("out of memory error, increasing steps and trying again {}".format(steps))
             else:
                 raise e
+
+    _update_cached_memory_chunk_choice((device, mem_required), steps)
 
     del q, k, v
 

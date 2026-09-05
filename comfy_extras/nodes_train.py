@@ -15,6 +15,7 @@ import comfy.sampler_helpers
 import comfy.sd
 import comfy.utils
 import comfy.model_management
+from comfy.ldm.modules.attention import deterministic_memory_chunking
 from comfy.conds import CONDRegular, CONDList
 from comfy.cli_args import args, PerformanceFeature
 import comfy_extras.nodes_custom_sampler
@@ -356,12 +357,13 @@ class TrainSampler(comfy.samplers.Sampler):
                 self.seed + i * 1000
             )
 
-            if self.bucket_latents is not None:
-                self._train_step_bucket_mode(model_wrap, cond, extra_args, noisegen, latent_image, pbar)
-            elif self.real_dataset is None:
-                self._train_step_standard_mode(model_wrap, cond, extra_args, noisegen, latent_image, dataset_size, pbar)
-            else:
-                self._train_step_multires_mode(model_wrap, cond, extra_args, noisegen, latent_image, dataset_size, pbar)
+            with deterministic_memory_chunking():
+                if self.bucket_latents is not None:
+                    self._train_step_bucket_mode(model_wrap, cond, extra_args, noisegen, latent_image, pbar)
+                elif self.real_dataset is None:
+                    self._train_step_standard_mode(model_wrap, cond, extra_args, noisegen, latent_image, dataset_size, pbar)
+                else:
+                    self._train_step_multires_mode(model_wrap, cond, extra_args, noisegen, latent_image, dataset_size, pbar)
 
             if (i + 1) % self.grad_acc == 0:
                 if self.grad_scaler is not None:
