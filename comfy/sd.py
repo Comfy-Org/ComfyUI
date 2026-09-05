@@ -32,6 +32,7 @@ import comfy.weight_adapter
 import yaml
 import math
 import os
+from tqdm import tqdm
 
 import comfy.utils
 import comfy.ops
@@ -1130,11 +1131,11 @@ class VAE:
     def vae_output_dtype(self):
         return model_management.intermediate_dtype()
 
-    def decode_tiled_(self, samples, tile_x=64, tile_y=64, overlap = 16):
+    def decode_tiled_(self, samples, tile_x=64, tile_y=64, overlap = 16, term_pbar_desc=None):
         steps = samples.shape[0] * comfy.utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x, tile_y, overlap)
         steps += samples.shape[0] * comfy.utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x // 2, tile_y * 2, overlap)
         steps += samples.shape[0] * comfy.utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x * 2, tile_y // 2, overlap)
-        pbar = comfy.utils.ProgressBar(steps)
+        pbar = comfy.utils.ProgressBar(steps, term_desc=term_pbar_desc)
 
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         output = self.process_output(
@@ -1144,7 +1145,7 @@ class VAE:
             / 3.0)
         return output
 
-    def decode_tiled_1d(self, samples, tile_x=256, overlap=32):
+    def decode_tiled_1d(self, samples, tile_x=256, overlap=32, term_pbar_desc=None):
         if samples.ndim == 3:
             decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         else:
@@ -1152,21 +1153,21 @@ class VAE:
             samples = samples.reshape((og_shape[0], og_shape[1] * og_shape[2], -1))
             decode_fn = lambda a: self.first_stage_model.decode(a.reshape((-1, og_shape[1], og_shape[2], a.shape[-1])).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
 
-        return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_x,), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, output_device=self.output_device))
+        return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_x,), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, output_device=self.output_device, term_pbar_desc=term_pbar_desc))
 
-    def decode_tiled_3d(self, samples, tile_t=999, tile_x=32, tile_y=32, overlap=(1, 8, 8)):
+    def decode_tiled_3d(self, samples, tile_t=999, tile_x=32, tile_y=32, overlap=(1, 8, 8), term_pbar_desc=None):
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
-        return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device))
+        return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device, term_pbar_desc=term_pbar_desc))
 
     def _decode_tiled_owned(self, samples, **kwargs):
         out = self.first_stage_model.decode_tiled(samples.to(self.vae_dtype).to(self.device), **kwargs)
         return self.process_output(out.to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True))
 
-    def encode_tiled_(self, pixel_samples, tile_x=512, tile_y=512, overlap = 64):
+    def encode_tiled_(self, pixel_samples, tile_x=512, tile_y=512, overlap = 64, term_pbar_desc=None):
         steps = pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2], tile_x, tile_y, overlap)
         steps += pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2], tile_x // 2, tile_y * 2, overlap)
         steps += pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2], tile_x * 2, tile_y // 2, overlap)
-        pbar = comfy.utils.ProgressBar(steps)
+        pbar = comfy.utils.ProgressBar(steps, term_desc=term_pbar_desc)
 
         encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         samples = comfy.utils.tiled_scale(pixel_samples, encode_fn, tile_x, tile_y, overlap, upscale_amount = (1/self.downscale_ratio), out_channels=self.latent_channels, output_device=self.output_device, pbar=pbar)
@@ -1175,7 +1176,7 @@ class VAE:
         samples /= 3.0
         return samples
 
-    def encode_tiled_1d(self, samples, tile_x=256 * 2048, overlap=64 * 2048):
+    def encode_tiled_1d(self, samples, tile_x=256 * 2048, overlap=64 * 2048, term_pbar_desc=None):
         if self.latent_dim == 1:
             encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
             out_channels = self.latent_channels
@@ -1188,15 +1189,15 @@ class VAE:
             upscale_amount = 1 / self.downscale_ratio
             encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).reshape(1, out_channels, -1).to(dtype=self.vae_output_dtype())
 
-        out = comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_x,), overlap=overlap, upscale_amount=upscale_amount, out_channels=out_channels, output_device=self.output_device)
+        out = comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_x,), overlap=overlap, upscale_amount=upscale_amount, out_channels=out_channels, output_device=self.output_device, term_pbar_desc=term_pbar_desc)
         if self.latent_dim == 1:
             return out
         else:
             return out.reshape(samples.shape[0], self.latent_channels, extra_channel_size, -1)
 
-    def encode_tiled_3d(self, samples, tile_t=9999, tile_x=512, tile_y=512, overlap=(1, 64, 64)):
+    def encode_tiled_3d(self, samples, tile_t=9999, tile_x=512, tile_y=512, overlap=(1, 64, 64), term_pbar_desc=None):
         encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
-        return comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.downscale_ratio, out_channels=self.latent_channels, downscale=True, index_formulas=self.downscale_index_formula, output_device=self.output_device)
+        return comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.downscale_ratio, out_channels=self.latent_channels, downscale=True, index_formulas=self.downscale_index_formula, output_device=self.output_device, term_pbar_desc=term_pbar_desc)
 
     def _encode_tiled_owned(self, pixel_samples, **kwargs):
         x = self.process_input(pixel_samples).to(self.vae_dtype).to(self.device)
@@ -1217,7 +1218,7 @@ class VAE:
             args["overlap_t"] = overlap_t
         return args
 
-    def decode(self, samples_in, vae_options={}):
+    def decode(self, samples_in, vae_options={}, term_pbar_desc="VaeDecode"):
         self.throw_exception_if_invalid()
         pixel_samples = None
         do_tile = False
@@ -1238,7 +1239,7 @@ class VAE:
                     pixel_samples = torch.empty(self.first_stage_model.decode_output_shape(samples_in.shape), device=self.output_device, dtype=self.vae_output_dtype())
                     preallocated = True
 
-                for x in range(0, samples_in.shape[0], batch_number):
+                for x in tqdm(range(0, samples_in.shape[0], batch_number), desc=term_pbar_desc, disable=term_pbar_desc is None):
                     samples = samples_in[x:x + batch_number].to(device=self.device, dtype=self.vae_dtype)
                     if preallocated:
                         self.first_stage_model.decode(samples, output_buffer=pixel_samples[x:x+batch_number], **vae_options)
@@ -1263,14 +1264,14 @@ class VAE:
                 comfy.model_management.soft_empty_cache()
                 dims = samples_in.ndim - 2
                 if dims == 1 or self.extra_1d_channel is not None:
-                    pixel_samples = self.decode_tiled_1d(samples_in)
+                    pixel_samples = self.decode_tiled_1d(samples_in, term_pbar_desc=term_pbar_desc)
                 elif dims == 2:
                     if self.handles_tiling:
                         tile = 256 // self.spacial_compression_decode()
                         overlap = tile // 4
                         pixel_samples = self._decode_tiled_owned(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
                     else:
-                        pixel_samples = self.decode_tiled_(samples_in)
+                        pixel_samples = self.decode_tiled_(samples_in, term_pbar_desc=term_pbar_desc)
                 elif dims == 3:
                     tile = 256 // self.spacial_compression_decode()
                     overlap = tile // 4
@@ -1290,7 +1291,7 @@ class VAE:
                         while tile * 2 <= max(samples_in.shape[3], samples_in.shape[4]) and est(tile_t, tile * 2) <= budget:
                             tile *= 2
                         overlap = tile // 4
-                        pixel_samples = self.decode_tiled_3d(samples_in, tile_t=tile_t, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
+                        pixel_samples = self.decode_tiled_3d(samples_in, tile_t=tile_t, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap), term_pbar_desc=term_pbar_desc)
 
         pixel_samples = pixel_samples.to(self.output_device).movedim(1,-1)
         return pixel_samples
@@ -1323,7 +1324,7 @@ class VAE:
             s[-1] = min(s[-1], tile_x)
         return tuple(s)
 
-    def decode_tiled(self, samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
+    def decode_tiled(self, samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None, term_pbar_desc="VaeDecode"):
         self.throw_exception_if_invalid()
         memory_used = self.memory_used_decode(self._tile_bounded_shape(samples.shape, tile_x, tile_y, tile_t), self.vae_dtype)
         model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
@@ -1341,9 +1342,9 @@ class VAE:
                 output = self._decode_tiled_owned(samples, **self._owned_tiled_args(tile_x, tile_y, overlap, tile_t, overlap_t))
             elif dims == 1 or self.extra_1d_channel is not None:
                 args.pop("tile_y")
-                output = self.decode_tiled_1d(samples, **args)
+                output = self.decode_tiled_1d(samples, **args, term_pbar_desc=term_pbar_desc)
             elif dims == 2:
-                output = self.decode_tiled_(samples, **args)
+                output = self.decode_tiled_(samples, **args, term_pbar_desc=term_pbar_desc)
             elif dims == 3:
                 if overlap_t is None:
                     args["overlap"] = (1, overlap, overlap)
@@ -1352,10 +1353,10 @@ class VAE:
                 if tile_t is not None:
                     args["tile_t"] = max(2, tile_t)
 
-                output = self.decode_tiled_3d(samples, **args)
+                output = self.decode_tiled_3d(samples, **args, term_pbar_desc=term_pbar_desc)
         return output.movedim(1, -1)
 
-    def encode(self, pixel_samples):
+    def encode(self, pixel_samples, term_pbar_desc="VaeEncode"):
         self.throw_exception_if_invalid()
         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
         pixel_samples = pixel_samples.movedim(-1, 1)
@@ -1374,7 +1375,7 @@ class VAE:
                 batch_number = int(free_memory / max(1, memory_used))
                 batch_number = max(1, batch_number)
                 samples = None
-                for x in range(0, pixel_samples.shape[0], batch_number):
+                for x in tqdm(range(0, pixel_samples.shape[0], batch_number), desc=term_pbar_desc, disable=term_pbar_desc is None):
                     pixels_in = self.process_input(pixel_samples[x:x + batch_number]).to(self.vae_dtype)
                     if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
                         out = self.first_stage_model.encode(pixels_in, device=self.device)
@@ -1403,17 +1404,17 @@ class VAE:
                     if self.handles_tiling:
                         samples = self._encode_tiled_owned(pixel_samples, tile_x=tile, tile_y=tile, overlap=overlap)
                     else:
-                        samples = self.encode_tiled_3d(pixel_samples, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
+                        samples = self.encode_tiled_3d(pixel_samples, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap), term_pbar_desc=term_pbar_desc)
                 elif self.latent_dim == 1 or self.extra_1d_channel is not None:
-                    samples = self.encode_tiled_1d(pixel_samples)
+                    samples = self.encode_tiled_1d(pixel_samples, term_pbar_desc=term_pbar_desc)
                 else:
-                    samples = self.encode_tiled_(pixel_samples)
+                    samples = self.encode_tiled_(pixel_samples, term_pbar_desc=term_pbar_desc)
 
         if self.format_encoded is not None:
             samples = self.format_encoded(samples)
         return samples
 
-    def encode_tiled(self, pixel_samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
+    def encode_tiled(self, pixel_samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None, term_pbar_desc="VaeEncode"):
         self.throw_exception_if_invalid()
         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
         dims = self.latent_dim
@@ -1438,9 +1439,9 @@ class VAE:
         with model_management.cuda_device_context(self.device):
             if dims == 1:
                 args.pop("tile_y")
-                samples = self.encode_tiled_1d(pixel_samples, **args)
+                samples = self.encode_tiled_1d(pixel_samples, **args, term_pbar_desc=term_pbar_desc)
             elif dims == 2:
-                samples = self.encode_tiled_(pixel_samples, **args)
+                samples = self.encode_tiled_(pixel_samples, **args, term_pbar_desc=term_pbar_desc)
             elif dims == 3:
                 if self.handles_tiling:
                     samples = self._encode_tiled_owned(pixel_samples, **self._owned_tiled_args(tile_x, tile_y, overlap, tile_t, overlap_t))
@@ -1459,7 +1460,7 @@ class VAE:
                     maximum = pixel_samples.shape[2]
                     maximum = self.upscale_ratio[0](self.downscale_ratio[0](maximum))
 
-                    samples = self.encode_tiled_3d(pixel_samples[:,:,:maximum], **args)
+                    samples = self.encode_tiled_3d(pixel_samples[:,:,:maximum], **args, term_pbar_desc=term_pbar_desc)
 
         if self.format_encoded is not None:
             samples = self.format_encoded(samples)

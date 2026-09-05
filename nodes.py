@@ -335,7 +335,7 @@ class VAEDecode:
         if latent.is_nested:
             latent = latent.unbind()[0]
 
-        images = vae.decode(latent)
+        images = vae.decode(latent, term_pbar_desc="VaeDecode")
         if len(images.shape) == 5: #Combine batches
             images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
         return (images, )
