@@ -1128,8 +1128,12 @@ def full_type_name(klass):
 async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[str], None]):
     outputs = set()
     for x in prompt:
-        if 'class_type' not in prompt[x]:
-            node_data = prompt[x]
+        node_data = prompt[x]
+        if not isinstance(node_data, dict):
+            # UI-saved workflow format stores non-dict metadata keys at the top
+            # level (e.g. `last_node_id`, `last_link_id` as ints). Skip them.
+            continue
+        if 'class_type' not in node_data:
             node_title = node_data.get('_meta', {}).get('title')
             error = {
                 "type": "missing_node_type",
