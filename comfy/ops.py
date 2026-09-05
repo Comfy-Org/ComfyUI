@@ -292,6 +292,7 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
     def post_cast(s, param_key, x, dtype, resident, update_weight):
         lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
         fns = getattr(s, param_key + "_function", [])
+        requant = want_requant and param_key == "weight"
 
         if x is None:
             return None
@@ -309,13 +310,13 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
         if not resident and lowvram_fn is not None:
             x = to_dequant(x, dtype if compute_dtype is None else compute_dtype)
             x = lowvram_fn(x)
-            if (want_requant and len(fns) == 0 or update_weight):
+            if (requant and len(fns) == 0 or update_weight):
                 seed = comfy.utils.string_to_seed(s.seed_key)
                 if isinstance(orig, QuantizedTensor):
                     y = orig.requantize_from_float(x, scale="recalculate", stochastic_rounding=seed)
                 else:
                     y = comfy.float.stochastic_rounding(x, orig.dtype, seed=seed)
-            if want_requant and len(fns) == 0:
+            if requant and len(fns) == 0:
                 x = y
             if update_weight:
                 orig.copy_(y)
