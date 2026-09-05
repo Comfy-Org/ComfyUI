@@ -53,6 +53,21 @@ ComfyUI is the AI creation engine for visual professionals who demand control ov
 #### [Manual Install](#manual-install-windows-linux)
 Supports all operating systems and GPU types (NVIDIA, AMD, Intel, Apple Silicon, Ascend).
 
+#### Docker Desktop
+This repository includes a Docker Desktop configuration for NVIDIA GPUs. The compose project is named `comfyui-sos`, so it will appear under that name in Docker Desktop after startup.
+
+```bash
+docker compose up -d --build
+```
+
+Open ComfyUI at http://localhost:8188. Models, outputs, inputs, user settings, temp files, and custom nodes are mounted from the local project folders.
+
+If Docker Hub or Debian mirrors are slow, copy `.env.example` to `.env` and uncomment the mirror settings before building.
+
+#### Asset Checklist
+
+Custom nodes and models are not downloaded by Docker Compose. Use [ASSETS.md](ASSETS.md) to clone the listed custom nodes and place model files manually before startup.
+
 ### Cloud
 
 #### [Comfy Cloud](https://www.comfy.org/cloud)

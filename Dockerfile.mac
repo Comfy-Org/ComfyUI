@@ -1,0 +1,37 @@
+# Apple Silicon compatibility image.
+# Docker Desktop for macOS cannot expose Metal/MPS to ordinary Linux
+# containers, so this image deliberately runs ComfyUI in CPU mode.
+
+ARG PYTHON_BASE_IMAGE=python:3.11-slim-bookworm
+FROM ${PYTHON_BASE_IMAGE}
+
+ARG APT_MIRROR=
+ARG APT_SECURITY_MIRROR=
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN if [ -n "${APT_MIRROR}" ]; then \
+        sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && if [ -n "${APT_SECURITY_MIRROR}" ]; then \
+        sed -i "s|http://deb.debian.org/debian-security|${APT_SECURITY_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+       build-essential ffmpeg git libgl1 libglib2.0-0 libgomp1 libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt /app/
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && python -m pip install --no-cache-dir -r /app/requirements.txt
+
+COPY . /app
+RUN mkdir -p /app/models /app/output /app/input /app/user /app/temp /app/custom_nodes
+
+EXPOSE 8188
+
+CMD ["python", "main.py", "--cpu", "--listen", "0.0.0.0", "--port", "8188"]
