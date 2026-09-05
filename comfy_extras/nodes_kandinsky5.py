@@ -34,6 +34,9 @@ class Kandinsky5ImageToVideo(io.ComfyNode):
 
     @classmethod
     def execute(cls, positive, negative, vae, width, height, length, batch_size, start_image=None) -> io.NodeOutput:
+        if length > 121: # 10 sec generation, for nabla
+            height = 128 * round(height / 128)
+            width = 128 * round(width / 128)
         latent = torch.zeros([batch_size, 16, ((length - 1) // 4) + 1, height // 8, width // 8], device=comfy.model_management.intermediate_device())
         cond_latent_out = {}
         if start_image is not None:

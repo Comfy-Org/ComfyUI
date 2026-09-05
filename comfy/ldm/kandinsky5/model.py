@@ -6,6 +6,12 @@ import comfy.ldm.common_dit
 from comfy.ldm.modules.attention import optimized_attention
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.flux.layers import EmbedND
+from comfy.ldm.kandinsky5.utils_nabla import (
+    fractal_flatten,
+    fractal_unflatten,
+    fast_sta_nabla,
+    nabla,
+)
 
 def attention(q, k, v, heads, transformer_options={}):
     return optimized_attention(
@@ -116,14 +122,17 @@ class SelfAttention(nn.Module):
         result = proj_fn(x).view(*x.shape[:-1], self.num_heads, -1)
         return apply_rope1(norm_fn(result), freqs)
 
-    def _forward(self, x, freqs, transformer_options={}):
+    def _forward(self, x, freqs, sparse_params=None, transformer_options={}):
         q = self._compute_qk(x, freqs, self.to_query, self.query_norm)
         k = self._compute_qk(x, freqs, self.to_key, self.key_norm)
         v = self.to_value(x).view(*x.shape[:-1], self.num_heads, -1)
-        out = attention(q, k, v, self.num_heads, transformer_options=transformer_options)
+        if sparse_params is None:
+            out = attention(q, k, v, self.num_heads, transformer_options=transformer_options)
+        else:
+            out = nabla(q, k, v, sparse_params)
         return self.out_layer(out)
 
-    def _forward_chunked(self, x, freqs, transformer_options={}):
+    def _forward_chunked(self, x, freqs, sparse_params=None, transformer_options={}):
         def process_chunks(proj_fn, norm_fn):
             x_chunks = torch.chunk(x, self.num_chunks, dim=1)
             freqs_chunks = torch.chunk(freqs, self.num_chunks, dim=1)
@@ -135,14 +144,17 @@ class SelfAttention(nn.Module):
         q = process_chunks(self.to_query, self.query_norm)
         k = process_chunks(self.to_key, self.key_norm)
         v = self.to_value(x).view(*x.shape[:-1], self.num_heads, -1)
-        out = attention(q, k, v, self.num_heads, transformer_options=transformer_options)
+        if sparse_params is None:
+            out = attention(q, k, v, self.num_heads, transformer_options=transformer_options)
+        else:
+            out = nabla(q, k, v, sparse_params)
         return self.out_layer(out)
 
-    def forward(self, x, freqs, transformer_options={}):
+    def forward(self, x, freqs, sparse_params=None, transformer_options={}):
         if x.shape[1] > 8192:
-            return self._forward_chunked(x, freqs, transformer_options=transformer_options)
+            return self._forward_chunked(x, freqs, sparse_params=sparse_params, transformer_options=transformer_options)
         else:
-            return self._forward(x, freqs, transformer_options=transformer_options)
+            return self._forward(x, freqs, sparse_params=sparse_params, transformer_options=transformer_options)
 
 
 class CrossAttention(SelfAttention):
@@ -251,12 +263,12 @@ class TransformerDecoderBlock(nn.Module):
         self.feed_forward_norm = operations.LayerNorm(model_dim, elementwise_affine=False, device=operation_settings.get("device"), dtype=operation_settings.get("dtype"))
         self.feed_forward = FeedForward(model_dim, ff_dim, operation_settings=operation_settings)
 
-    def forward(self, visual_embed, text_embed, time_embed, freqs, transformer_options={}):
+    def forward(self, visual_embed, text_embed, time_embed, freqs, sparse_params=None, transformer_options={}):
         self_attn_params, cross_attn_params, ff_params = torch.chunk(self.visual_modulation(time_embed), 3, dim=-1)
         # self attention
         shift, scale, gate = get_shift_scale_gate(self_attn_params)
         visual_out = apply_scale_shift_norm(self.self_attention_norm, visual_embed, scale, shift)
-        visual_out = self.self_attention(visual_out, freqs, transformer_options=transformer_options)
+        visual_out = self.self_attention(visual_out, freqs, sparse_params=sparse_params, transformer_options=transformer_options)
         visual_embed = apply_gate_sum(visual_embed, visual_out, gate)
         # cross attention
         shift, scale, gate = get_shift_scale_gate(cross_attn_params)
@@ -369,21 +381,82 @@ class Kandinsky5(nn.Module):
 
         visual_embed = self.visual_embeddings(x)
         visual_shape = visual_embed.shape[:-1]
-        visual_embed = visual_embed.flatten(1, -2)
 
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.visual_transformer_blocks)
         transformer_options["block_type"] = "double"
+
+        B, _, T, H, W = x.shape
+        NABLA_THR = 31 # long (10 sec) generation
+        if T > NABLA_THR:
+            assert self.patch_size[0] == 1
+
+            # pro video model uses lower P at higher resolutions
+            P = 0.7 if self.model_dim == 4096 and H * W >= 14080 else 0.9
+
+            freqs = freqs.view(freqs.shape[0], *visual_shape[1:], *freqs.shape[2:])
+            visual_embed, freqs = fractal_flatten(visual_embed, freqs, visual_shape[1:])
+            pt, ph, pw = self.patch_size
+            T, H, W = T // pt, H // ph, W // pw
+
+            wT, wW, wH = 11, 3, 3
+            sta_mask = fast_sta_nabla(T, H // 8, W // 8, wT, wH, wW, device=x.device)
+
+            sparse_params = dict(
+                sta_mask=sta_mask.unsqueeze_(0).unsqueeze_(0),
+                attention_type="nabla",
+                to_fractal=True,
+                P=P,
+                wT=wT, wW=wW, wH=wH,
+                add_sta=True,
+                visual_shape=(T, H, W),
+                method="topcdf",
+            )
+        else:
+            sparse_params = None
+            visual_embed = visual_embed.flatten(1, -2)
+
         for i, block in enumerate(self.visual_transformer_blocks):
             transformer_options["block_index"] = i
             if ("double_block", i) in blocks_replace:
                 def block_wrap(args):
-                    return block(x=args["x"], context=args["context"], time_embed=args["time_embed"], freqs=args["freqs"], transformer_options=args.get("transformer_options"))
-                visual_embed = blocks_replace[("double_block", i)]({"x": visual_embed, "context": context, "time_embed": time_embed, "freqs": freqs, "transformer_options": transformer_options}, {"original_block": block_wrap})["x"]
+                    return block(
+                        x=args["x"],
+                        context=args["context"],
+                        time_embed=args["time_embed"],
+                        freqs=args["freqs"],
+                        sparse_params=args.get("sparse_params"),
+                        transformer_options=args.get("transformer_options"),
+                    )
+                visual_embed = blocks_replace[("double_block", i)](
+                    {
+                        "x": visual_embed,
+                        "context": context,
+                        "time_embed": time_embed,
+                        "freqs": freqs,
+                        "sparse_params": sparse_params,
+                        "transformer_options": transformer_options,
+                    },
+                    {"original_block": block_wrap},
+                )["x"]
             else:
-                visual_embed = block(visual_embed, context, time_embed, freqs=freqs, transformer_options=transformer_options)
+                visual_embed = block(
+                    visual_embed,
+                    context,
+                    time_embed,
+                    freqs=freqs,
+                    sparse_params=sparse_params,
+                    transformer_options=transformer_options,
+                )
 
-        visual_embed = visual_embed.reshape(*visual_shape, -1)
+        if T > NABLA_THR:
+            visual_embed = fractal_unflatten(
+                visual_embed,
+                visual_shape[1:],
+            )
+        else:
+            visual_embed = visual_embed.reshape(*visual_shape, -1)
+
         return self.out_layer(visual_embed, time_embed)
 
     def _forward(self, x, timestep, context, y, time_dim_replace=None, transformer_options={}, **kwargs):
