@@ -1739,8 +1739,10 @@ class LoadImage:
     @classmethod
     def INPUT_TYPES(s):
         input_dir = folder_paths.get_input_directory()
-        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-        files = folder_paths.filter_files_content_types(files, ["image"])
+        files = folder_paths.filter_files_content_types(
+            [os.path.join(root, f) for root, _, files in os.walk(input_dir) for f in files if os.path.isfile(os.path.join(root, f))],
+            ["image"]
+        )
         return {"required":
                     {"image": (sorted(files), {"image_upload": True})},
                 }
