@@ -1087,6 +1087,10 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
                 input_filtered[x] = input_data_all[x]
         if 'input_types' in validate_function_inputs:
             input_filtered['input_types'] = [received_types]
+        for x in list(input_filtered.keys()):
+            if input_filtered[x] is io.EmptyInputSentinel:
+                del input_filtered[x]
+
 
         ret = await _async_map_node_over_list(prompt_id, unique_id, obj_class, input_filtered, validate_function_name, v3_data=v3_data)
         ret = await resolve_map_node_over_list_results(ret)
