@@ -3,11 +3,12 @@ from typing import Type, Literal
 import nodes
 import asyncio
 import inspect
-from comfy_execution.graph_utils import is_link, ExecutionBlocker
+from comfy_execution.graph_utils import is_link, ExecutionBlocker, ExecutionFailureBlocker
 from comfy.comfy_types.node_typing import ComfyNodeABC, InputTypeDict, InputTypeOptions
 
 # NOTE: ExecutionBlocker code got moved to graph_utils.py to prevent torch being imported too soon during unit tests
 ExecutionBlocker = ExecutionBlocker
+ExecutionFailureBlocker = ExecutionFailureBlocker
 
 class DependencyCycleError(Exception):
     pass
@@ -202,14 +203,21 @@ class ExecutionList(TopologicalSort):
         self.staged_node_id = None
         self.execution_cache = {}
         self.execution_cache_listeners = {}
+        self.transient_cache = {}
+        self.failure_tainted_parents = set()
 
     def is_cached(self, node_id):
-        return self.output_cache.get_local(node_id) is not None
+        return node_id in self.transient_cache or self.output_cache.get_local(node_id) is not None
+
+    def _get_cache_value(self, node_id):
+        if node_id in self.transient_cache:
+            return self.transient_cache[node_id]
+        return self.output_cache.get_local(node_id)
 
     def cache_link(self, from_node_id, to_node_id, from_socket=None):
         if to_node_id not in self.execution_cache:
             self.execution_cache[to_node_id] = {}
-        value = self.output_cache.get_local(from_node_id)
+        value = self._get_cache_value(from_node_id)
         self.execution_cache[to_node_id][from_node_id] = value
         if from_node_id not in self.execution_cache_listeners:
             self.execution_cache_listeners[from_node_id] = set()
@@ -218,6 +226,8 @@ class ExecutionList(TopologicalSort):
             self.output_link_callback(value.outputs[from_socket])
 
     def get_cache(self, from_node_id, to_node_id):
+        if from_node_id in self.transient_cache:
+            return self.transient_cache[from_node_id]
         if to_node_id not in self.execution_cache:
             return None
         value = self.execution_cache[to_node_id].get(from_node_id)
@@ -227,7 +237,9 @@ class ExecutionList(TopologicalSort):
         self.output_cache.set_local(from_node_id, value)
         return value
 
-    def cache_update(self, node_id, value):
+    def cache_update(self, node_id, value, transient=False):
+        if transient:
+            self.transient_cache[node_id] = value
         if node_id in self.execution_cache_listeners:
             for to_node_id, from_socket in self.execution_cache_listeners[node_id]:
                 if to_node_id in self.execution_cache:
@@ -238,6 +250,25 @@ class ExecutionList(TopologicalSort):
     def add_strong_link(self, from_node_id, from_socket, to_node_id):
         super().add_strong_link(from_node_id, from_socket, to_node_id)
         self.cache_link(from_node_id, to_node_id, from_socket)
+
+    def add_completion_link(self, from_node_id, to_node_id):
+        # Block to_node_id until from_node_id finishes, without consuming any of its output sockets.
+        if not self.is_cached(from_node_id):
+            self.add_node(from_node_id)
+            if to_node_id not in self.blocking[from_node_id]:
+                self.blocking[from_node_id][to_node_id] = {}
+                self.blockCount[to_node_id] += 1
+
+    def mark_failure_tainted(self, node_id):
+        # Taint all ephemeral ancestors of a failed or failure-blocked node so dynamically-expanded parents are
+        # never cached as reusable when part of their expansion did not complete.
+        parent_id = self.dynprompt.get_parent_node_id(node_id)
+        while parent_id is not None and parent_id not in self.failure_tainted_parents:
+            self.failure_tainted_parents.add(parent_id)
+            parent_id = self.dynprompt.get_parent_node_id(parent_id)
+
+    def is_failure_tainted(self, node_id):
+        return node_id in self.failure_tainted_parents
 
     async def stage_node_execution(self):
         assert self.staged_node_id is None
@@ -329,7 +360,9 @@ class ExecutionList(TopologicalSort):
         blocked_by = { node_id: {} for node_id in self.pendingNodes }
         for from_node_id in self.blocking:
             for to_node_id in self.blocking[from_node_id]:
-                if True in self.blocking[from_node_id][to_node_id].values():
+                # Strong links have a True socket entry; completion links have no socket entries at all.
+                sockets = self.blocking[from_node_id][to_node_id]
+                if len(sockets) == 0 or True in sockets.values():
                     blocked_by[to_node_id][from_node_id] = True
         to_remove = [node_id for node_id in blocked_by if len(blocked_by[node_id]) == 0]
         while len(to_remove) > 0:
