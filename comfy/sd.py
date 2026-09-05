@@ -1059,7 +1059,7 @@ class VAE:
                     raise RuntimeError("TripoSplat gaussian decoder: use the 'TripoSplat Decode' (VAEDecodeTripoSplat)")
                 self.memory_used_encode = self.memory_used_decode = _no_generic_io
             else:
-                logging.warning("WARNING: No VAE weights detected, VAE not initalized.")
+                logging.warning("WARNING: No VAE weights detected, VAE not initialized.")
                 self.first_stage_model = None
                 return
         else:
