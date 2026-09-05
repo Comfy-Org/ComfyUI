@@ -23,6 +23,7 @@ file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
 from app.assets.seeder import asset_seeder
+from app.assets.api.routes import disable_assets_routes
 from app.assets.services import register_output_files
 import itertools
 import utils.extra_config
@@ -496,9 +497,15 @@ def setup_database():
     try:
         if dependencies_available():
             init_db()
-            if args.enable_assets:
-                if asset_seeder.start(roots=("models", "input", "output"), prune_first=True, compute_hashes=args.enable_asset_hashing):
-                    logging.info("Background asset scan initiated for models, input, output")
+            if asset_seeder.start(roots=("models", "input", "output"), prune_first=True, compute_hashes=args.enable_asset_hashing):
+                logging.info("Background asset scan initiated for models, input, output")
+        else:
+            # Optional DB dependencies are missing, so init_db() is skipped and the
+            # asset backend has no database. Disable assets so /api/assets/* returns
+            # a clean 503 instead of 500s against an uninitialized DB.
+            logging.warning("Optional database dependencies are missing; assets system disabled.")
+            disable_assets_routes()
+            asset_seeder.disable()
     except Exception as e:
         if "database is locked" in str(e):
             logging.error(
@@ -507,16 +514,10 @@ def setup_database():
                 "  --database-url sqlite:///path/to/another.db"
             )
             sys.exit(1)
-        if args.enable_assets:
-            logging.error(
-                f"Failed to initialize database: {e}\n"
-                "The --enable-assets flag requires a working database connection.\n"
-                "To resolve this, try one of the following:\n"
-                "  1. Install the latest requirements: pip install -r requirements.txt\n"
-                "  2. Specify an alternative database URL: --database-url sqlite:///path/to/your.db\n"
-                "  3. Use an in-memory database: --database-url sqlite:///:memory:"
-            )
-            sys.exit(1)
+        # The database is unusable. Fail safe by disabling assets so endpoints
+        # return 503 (service unavailable) rather than 500s on every request.
+        disable_assets_routes()
+        asset_seeder.disable()
         logging.error(f"Failed to initialize database. Please ensure you have installed the latest requirements. If the error persists, please report this as in future the database will be required: {e}")
 
 

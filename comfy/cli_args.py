@@ -271,7 +271,9 @@ database_default_path = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "user", "comfyui.db")
 )
 parser.add_argument("--database-url", type=str, default=None, help="Specify the database URL, e.g. for an in-memory database you can use 'sqlite:///:memory:'. Defaults to 'comfyui.db' in the effective user directory.")
-parser.add_argument("--enable-assets", action="store_true", help="Enable the assets system (API routes, database synchronization, and background scanning).")
+# Deprecated no-op: the asset system is now always enabled. Kept (hidden) so that
+# existing launchers/containers still passing --enable-assets don't fail argparse.
+parser.add_argument("--enable-assets", action="store_true", help=argparse.SUPPRESS)
 parser.add_argument("--enable-asset-hashing", action="store_true", help="Compute blake3 content hashes when scanning assets. Hashing enables future asset-portability features (deduplication, cross-machine model resolution) but adds startup cost and per-output cost on large models directories. Off by default; enable to opt in.")
 parser.add_argument("--feature-flag", type=str, action='append', default=[], metavar="KEY[=VALUE]", help="Set a server feature flag. Use KEY=VALUE to set an explicit value, or bare KEY to set it to true. Can be specified multiple times. Boolean values (true/false) and numbers are auto-converted. Examples: --feature-flag show_signin_button=true  or  --feature-flag show_signin_button")
 parser.add_argument("--list-feature-flags", action="store_true", help="Print the registry of known CLI-settable feature flags as JSON and exit.")
