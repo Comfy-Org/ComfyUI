@@ -87,7 +87,7 @@ class TextEncodeQwenImageEditPlus(io.ComfyNode):
                 height = round(samples.shape[2] * scale_by)
 
                 s = comfy.utils.common_upscale(samples, width, height, "area", "disabled")
-                images_vl.append(s.movedim(1, -1))
+                images_vl.append(s.movedim(1, -1)[:, :, :, :3])
                 if vae is not None:
                     total = int(1024 * 1024)
                     scale_by = math.sqrt(total / (samples.shape[3] * samples.shape[2]))
