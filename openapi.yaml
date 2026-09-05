@@ -4202,7 +4202,24 @@ paths:
     /api/upload/mask:
         post:
             description: |
-                Upload a mask image to be applied to an existing image.
+                Upload a mask image to be composited onto an existing image server-side.
+
+                The uploaded mask's alpha channel replaces the original image's alpha.
+                If the mask resolution differs from the original (e.g. the mask was
+                painted on a downscaled preview obtained via /api/view's preview and
+                max_size parameters), the mask alpha is upscaled to the original's
+                resolution before compositing, so the result keeps the original's full
+                resolution.
+
+                An optional paint layer can be supplied to additionally produce painted
+                composites: 'painted' (original + paint) and 'painted_masked'
+                (original + paint + mask alpha), saved next to the main output under
+                the provided filenames.
+
+                Clients that already have the fully composited result client-side
+                should upload it as a plain image via /api/upload/image instead;
+                this endpoint exists for server-side compositing at original
+                resolution.
 
                 Image limits apply to both the uploaded mask and the referenced
                 original image:
@@ -4218,11 +4235,24 @@ paths:
                         schema:
                             properties:
                                 image:
-                                    description: The mask image file to upload
+                                    description: The mask image file to upload; its alpha channel is composited onto the original
                                     format: binary
                                     type: string
                                 original_ref:
                                     description: JSON string containing reference to the original image
+                                    type: string
+                                paint:
+                                    description: Optional RGBA paint-stroke layer to composite over the original
+                                    format: binary
+                                    type: string
+                                paint_filename:
+                                    description: Optional filename to save the (upscaled) paint layer as, next to the main output
+                                    type: string
+                                painted_filename:
+                                    description: Optional filename to save the original+paint composite as
+                                    type: string
+                                painted_masked_filename:
+                                    description: Optional filename to save the original+paint+mask composite as
                                     type: string
                             required:
                                 - image
@@ -4844,6 +4874,32 @@ paths:
                     maximum: 1024
                     minimum: 64
                     type: integer
+                - description: |
+                    Compressed preview request in the form "<format>[;<quality>]", e.g. "webp;90".
+                    Format may be webp or jpeg; requests that need the alpha channel (channel
+                    containing 'a') are forced to an alpha-capable format. Quality is an integer
+                    from 1 to 100 (defaults to 90); values outside that range are ignored.
+                    Takes precedence over 'res' and 'channel' processing.
+                  in: query
+                  name: preview
+                  schema:
+                    example: webp;90
+                    type: string
+                - description: |
+                    Requests a downscaled compressed preview, giving the maximum dimension
+                    (width or height) while preserving aspect ratio. Larger images are
+                    downscaled to fit; smaller images are never upscaled. Any integer is
+                    accepted and clamped to 512-8192; omit the parameter for no downscale.
+                    Only used together with 'preview'. Requires the assets system
+                    (--enable-assets): generated previews are keyed by the source's content
+                    hash and registered as assets linked to the source via preview_id. When
+                    assets are disabled, max_size is ignored and the image is only
+                    recompressed at full resolution.
+                  in: query
+                  name: max_size
+                  schema:
+                    example: 4096
+                    type: integer
             responses:
                 "200":
                     content:
@@ -4857,7 +4913,12 @@ paths:
                                 description: Processed PNG image with extracted channel
                                 format: binary
                                 type: string
-                    description: Success - File content returned (used when channel or res parameter is present)
+                        image/webp:
+                            schema:
+                                description: Compressed preview (returned when the preview parameter is used)
+                                format: binary
+                                type: string
+                    description: Success - File content returned (used when channel, res, or preview parameter is present)
                 "302":
                     description: Redirect to GCS signed URL
                     headers:
