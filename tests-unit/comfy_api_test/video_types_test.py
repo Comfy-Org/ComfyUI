@@ -120,6 +120,16 @@ def test_video_from_components_get_dimensions(video_components):
     assert height == 2
 
 
+def test_video_from_components_as_trimmed_respects_strict_duration(video_components):
+    """as_trimmed honors strict_duration, matching VideoFromFile.as_trimmed."""
+    video = VideoFromComponents(video_components)
+    over = video.get_duration() + 100
+    # Non-strict: a window longer than the source yields a best-effort clip, not None.
+    assert video.as_trimmed(start_time=0, duration=over, strict_duration=False) is not None
+    # Strict: the same over-long window is rejected.
+    assert video.as_trimmed(start_time=0, duration=over, strict_duration=True) is None
+
+
 def test_video_from_file_get_duration(simple_video_file):
     """Duration extracted from file metadata"""
     video = VideoFromFile(simple_video_file)

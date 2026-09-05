@@ -1206,7 +1206,7 @@ class VideoFromComponents(VideoInput):
         duration: float | None = None,
         strict_duration: bool = True,
     ) -> VideoInput | None:
-        if self.get_duration() < start_time + duration:
+        if strict_duration and self.get_duration() < start_time + duration:
             return None
         #TODO Consider tracking duration and trimming at time of save?
         return VideoFromFile(self.get_stream_source(), start_time=start_time, duration=duration)
