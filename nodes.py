@@ -13,6 +13,7 @@ import math
 import time
 import random
 import logging
+import psutil
 
 from PIL import Image, ImageOps, ImageSequence
 from PIL.PngImagePlugin import PngInfo
@@ -2353,6 +2354,7 @@ async def init_external_custom_nodes():
     base_node_names = set(NODE_CLASS_MAPPINGS.keys())
     node_paths = folder_paths.get_folder_paths("custom_nodes")
     node_import_times = []
+    process = psutil.Process()
     for custom_node_path in node_paths:
         possible_modules = os.listdir(os.path.realpath(custom_node_path))
         if "__pycache__" in possible_modules:
@@ -2373,18 +2375,21 @@ async def init_external_custom_nodes():
                     logging.info(f"Blocked by policy: {module_path}")
                     continue
 
+            rss_before = process.memory_info().rss
             time_before = time.perf_counter()
             success = await load_custom_node(module_path, base_node_names, module_parent="custom_nodes")
-            node_import_times.append((time.perf_counter() - time_before, module_path, success))
+            elapsed = time.perf_counter() - time_before
+            rss_delta = (process.memory_info().rss - rss_before) / (1024 * 1024)
+            node_import_times.append((elapsed, rss_delta, module_path, success))
 
     if len(node_import_times) > 0:
         logging.info("\nImport times for custom nodes:")
         for n in sorted(node_import_times):
-            if n[2]:
+            if n[3]:
                 import_message = ""
             else:
                 import_message = " (IMPORT FAILED)"
-            logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
+            logging.info("{:6.1f} seconds  RAM {:>6.1f} MB{}: {}".format(n[0], n[1], import_message, n[2]))
         logging.info("")
 
 async def init_builtin_extra_nodes():
