@@ -203,32 +203,21 @@ Put your SD checkpoints (the huge ckpt/safetensors files) in: models/checkpoints
 Put your VAE in: models/vae
 
 
-### AMD GPUs (Linux)
+### AMD GPUs (Windows and Linux)
 
-AMD users can install rocm and pytorch with pip if you don't have it already installed, this is the command to install the stable version:
+AMD users can install rocm and pytorch with pip if you don't have it already installed, this is the command to install the stable version for all supported devices:
 
-```pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/rocm7.2```
+```sh
+pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "torch[device-all]" "torchvision[device-all]" torchaudio
+```
 
-This is the command to install the nightly with ROCm 7.2 which might have some performance improvements:
+Nightlies are available from rocm.nightlies.amd.com, installs targeted at a specific device are also possible.
 
-```pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm7.2```
+E.g. for 7900 XTX / 7900 GRE "gfx1100" nightly:
 
-
-### AMD GPUs (Experimental: Windows and Linux), RDNA 3, 3.5 and 4 only.
-
-These have less hardware support than the builds above but they work on windows. You also need to install the pytorch version specific to your hardware.
-
-RDNA 3 (RX 7000 series):
-
-```pip install --pre torch torchvision torchaudio --index-url https://rocm.nightlies.amd.com/v2/gfx110X-all/```
-
-RDNA 3.5 (Strix halo/Ryzen AI Max+ 365):
-
-```pip install --pre torch torchvision torchaudio --index-url https://rocm.nightlies.amd.com/v2/gfx1151/```
-
-RDNA 4 (RX 9000 series):
-
-```pip install --pre torch torchvision torchaudio --index-url https://rocm.nightlies.amd.com/v2/gfx120X-all/```
+```sh
+pip install --index-url https://rocm.nightlies.amd.com/whl-multi-arch/ "torch[device-gfx1100]" "torchvision[device-gfx1100]" torchaudio
+```
 
 ### Intel GPUs (Windows and Linux)
 
