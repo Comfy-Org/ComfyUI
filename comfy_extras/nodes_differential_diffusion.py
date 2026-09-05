@@ -50,6 +50,9 @@ class DifferentialDiffusion(io.ComfyNode):
 
         threshold = (current_ts - ts_to) / (ts_from - ts_to)
 
+        # Move the threshold tensor to the same device as denoise mask tensor
+        threshold = threshold.to(denoise_mask.device)
+        
         # Generate the binary mask based on the threshold
         binary_mask = (denoise_mask >= threshold).to(denoise_mask.dtype)
 
