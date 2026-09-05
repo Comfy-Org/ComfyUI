@@ -373,7 +373,10 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
         prefetched = hasattr(s, "_prefetch")
         offload_stream = None
         offload_device = None
-        if not prefetched:
+        # comfy_aimdo is only registered for CUDA / ROCm backends. On MPS (and
+        # CPU) we have to skip the vbar fast path and fall back to the plain
+        # cast in resolve_cast_module_with_vbar below.
+        if not prefetched and device.type not in ("cpu", "mps"):
             offload_stream = cast_modules_with_vbar([s], dtype, device, bias_dtype, non_blocking)
             comfy.model_management.sync_stream(device, offload_stream)
 
