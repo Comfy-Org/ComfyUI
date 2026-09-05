@@ -197,11 +197,14 @@ class LoadImageDataSetFromFolderNode(io.ComfyNode):
     def execute(cls, folder):
         sub_input_dir = secure_subfolder_path(folder_paths.get_input_directory(), folder)
         valid_extensions = [".png", ".jpg", ".jpeg", ".webp"]
-        image_files = [
+        # Sort explicitly: os.listdir() order is filesystem-dependent (e.g.
+        # APFS returns filename-hash order), which silently scrambles frame
+        # sequences.
+        image_files = sorted(
             f
             for f in os.listdir(sub_input_dir)
             if any(f.lower().endswith(ext) for ext in valid_extensions)
-        ]
+        )
         output_tensor = load_and_process_images(image_files, sub_input_dir)
         return io.NodeOutput(output_tensor)
 
@@ -245,7 +248,10 @@ class LoadImageTextDataSetFromFolderNode(io.ComfyNode):
         valid_extensions = [".png", ".jpg", ".jpeg", ".webp"]
 
         image_files = []
-        for item in os.listdir(sub_input_dir):
+        # Sort explicitly: os.listdir() order is filesystem-dependent (e.g.
+        # APFS returns filename-hash order), which silently scrambles frame
+        # sequences.
+        for item in sorted(os.listdir(sub_input_dir)):
             path = os.path.join(sub_input_dir, item)
             if any(item.lower().endswith(ext) for ext in valid_extensions):
                 image_files.append(path)
@@ -255,11 +261,11 @@ class LoadImageTextDataSetFromFolderNode(io.ComfyNode):
                 if item.split("_")[0].isdigit():
                     repeat = int(item.split("_")[0])
                 image_files.extend(
-                    [
+                    sorted(
                         os.path.join(path, f)
                         for f in os.listdir(path)
                         if any(f.lower().endswith(ext) for ext in valid_extensions)
-                    ]
+                    )
                     * repeat
                 )
 
