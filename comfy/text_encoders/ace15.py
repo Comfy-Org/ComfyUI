@@ -332,7 +332,7 @@ class ACE15TEModel(torch.nn.Module):
 
         lm_metadata = token_weight_pairs["lm_metadata"]
         if lm_metadata["generate_audio_codes"]:
-            audio_codes = generate_audio_codes(getattr(self, self.lm_model, self.qwen3_06b), token_weight_pairs["lm_prompt"], token_weight_pairs["lm_prompt_negative"], min_tokens=lm_metadata["min_tokens"], max_tokens=lm_metadata["min_tokens"], seed=lm_metadata["seed"], cfg_scale=lm_metadata["cfg_scale"], temperature=lm_metadata["temperature"], top_p=lm_metadata["top_p"], top_k=lm_metadata["top_k"], min_p=lm_metadata["min_p"])
+            audio_codes = generate_audio_codes(getattr(self, self.lm_model, self.qwen3_06b), token_weight_pairs["lm_prompt"], token_weight_pairs["lm_prompt_negative"], min_tokens=lm_metadata["min_tokens"], max_tokens=lm_metadata["max_tokens"], seed=lm_metadata["seed"], cfg_scale=lm_metadata["cfg_scale"], temperature=lm_metadata["temperature"], top_p=lm_metadata["top_p"], top_k=lm_metadata["top_k"], min_p=lm_metadata["min_p"])
             out["audio_codes"] = [audio_codes]
 
         return base_out, None, out
@@ -371,7 +371,7 @@ class ACE15TEModel(torch.nn.Module):
 
         token_weight_pairs = token_weight_pairs.get("lm_prompt", [])
         num_tokens = sum(map(lambda a: len(a), token_weight_pairs))
-        num_tokens += lm_metadata.get("min_tokens", 0)
+        num_tokens += lm_metadata.get("max_tokens", 0)
         return num_tokens * constant * 1024 * 1024
 
 def te(dtype_llama=None, llama_quantization_metadata=None, lm_model="qwen3_2b"):
