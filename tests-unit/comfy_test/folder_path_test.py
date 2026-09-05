@@ -3,6 +3,7 @@
 import sys
 import pytest
 import os
+import time
 import tempfile
 from unittest.mock import patch
 from importlib import reload
@@ -109,13 +110,30 @@ def test_get_filename_list(mock_folder_names_and_paths, mock_recursive_search):
     mock_recursive_search.return_value = (["file1.txt", "file2.jpg"], {})
     assert folder_paths.get_filename_list("test_folder") == ["file1.txt"]
 
-def test_get_save_image_path(temp_dir):
-    with patch("folder_paths.output_directory", temp_dir):
+def test_get_save_image_path_default(temp_dir):
+    with patch("folder_paths.output_directory", temp_dir), \
+         patch.object(folder_paths.args, "date_based_output", False, create=True):
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path("test", temp_dir, 100, 100)
         assert os.path.samefile(full_output_folder, temp_dir)
         assert filename == "test"
         assert counter == 1
         assert subfolder == ""
+        assert filename_prefix == "test"
+
+
+def test_get_save_image_path_date_based(temp_dir):
+    fixed_time = time.struct_time((2025, 1, 15, 0, 0, 0, 2, 15, -1))
+    with patch("folder_paths.output_directory", temp_dir), \
+         patch.object(folder_paths.args, "date_based_output", True, create=True), \
+         patch.object(folder_paths.args, "date_output_format", "%Y-%m-%d", create=True), \
+         patch("folder_paths.time.localtime", return_value=fixed_time):
+        full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path("test", temp_dir, 100, 100)
+        expected_date = "2025-01-15"
+        expected_folder = os.path.join(temp_dir, expected_date)
+        assert os.path.samefile(full_output_folder, expected_folder)
+        assert filename == "test"
+        assert counter == 1
+        assert subfolder == expected_date
         assert filename_prefix == "test"
 
 

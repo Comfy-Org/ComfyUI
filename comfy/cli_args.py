@@ -70,6 +70,8 @@ parser.add_argument("--max-upload-size", type=float, default=100, help="Set the 
 parser.add_argument("--base-directory", type=str, default=None, help="Set the ComfyUI base directory for models, custom_nodes, input, output, temp, and user directories.")
 parser.add_argument("--extra-model-paths-config", type=str, default=None, metavar="PATH", nargs='+', action='append', help="Load one or more extra_model_paths.yaml files.")
 parser.add_argument("--output-directory", type=str, default=None, help="Set the ComfyUI output directory. Overrides --base-directory.")
+parser.add_argument("--date-based-output", action="store_true", help="Save outputs into a date-based subfolder (e.g. YYYY-MM-DD).")
+parser.add_argument("--date-output-format", type=str, default="%Y-%m-%d", help="strftime format for date-based output folder (used with --date-based-output).")
 parser.add_argument("--temp-directory", type=str, default=None, help="Set the ComfyUI temp directory (default is in the ComfyUI directory). Overrides --base-directory.")
 parser.add_argument("--input-directory", type=str, default=None, help="Set the ComfyUI input directory. Overrides --base-directory.")
 parser.add_argument("--auto-launch", action="store_true", help="Automatically launch ComfyUI in the default browser.")
