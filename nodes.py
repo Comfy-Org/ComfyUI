@@ -435,7 +435,7 @@ class VAEEncodeForInpaint:
         if grow_mask_by == 0:
             mask_erosion = mask
         else:
-            kernel_tensor = torch.ones((1, 1, grow_mask_by, grow_mask_by))
+            kernel_tensor = torch.ones((1, 1, grow_mask_by, grow_mask_by), device=mask.device, dtype=mask.dtype)
             padding = math.ceil((grow_mask_by - 1) / 2)
 
             mask_erosion = torch.clamp(torch.nn.functional.conv2d(mask.round(), kernel_tensor, padding=padding), 0, 1)
