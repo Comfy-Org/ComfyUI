@@ -970,12 +970,24 @@ def set_attr(obj, attr, value):
         setattr(obj, name, value)
     return prev
 
-def set_attr_param(obj, attr, value):
+def make_param(value):
     # Clone inference tensors (created under torch.inference_mode) since
     # their version counter is frozen and nn.Parameter() cannot wrap them.
     if (not torch.is_inference_mode_enabled()) and value.is_inference():
         value = value.clone()
-    return set_attr(obj, attr, torch.nn.Parameter(value, requires_grad=False))
+    elif torch.is_inference_mode_enabled() and (not value.is_inference()) and hasattr(value, "__tensor_flatten__"):
+        # A wrapper tensor subclass (e.g. QuantizedTensor) built outside inference
+        # mode: nn.Parameter()'s detach() would rebuild it as an inference tensor
+        # while still tied to the original's (non-frozen) version counter, which
+        # torch refuses. Rebuilding the wrapper here makes it a fresh inference
+        # tensor with its own version counter instead.
+        attrs, ctx = value.__tensor_flatten__()
+        inner_tensors = {name: getattr(value, name) for name in attrs}
+        value = type(value).__tensor_unflatten__(inner_tensors, ctx, value.shape, value.stride())
+    return torch.nn.Parameter(value, requires_grad=False)
+
+def set_attr_param(obj, attr, value):
+    return set_attr(obj, attr, make_param(value))
 
 def set_attr_buffer(obj, attr, value):
     obj, name = resolve_attr(obj, attr)
