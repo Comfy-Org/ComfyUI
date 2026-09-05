@@ -22,6 +22,8 @@ class BasicScheduler(io.ComfyNode):
             category="model/sampling/schedulers",
             inputs=[
                 io.Model.Input("model"),
+                io.Combo.Input("sampler_name", options=["none"] + list(comfy.samplers.SAMPLER_NAMES), optional=True,
+                               tooltip="Set this to the sampler you will feed these sigmas to. Samplers like dpm_2 and uni_pc need a slightly different schedule than the plain one, matching what KSampler builds internally. Leave as none for the old behavior."),
                 io.Combo.Input("scheduler", options=comfy.samplers.SCHEDULER_NAMES),
                 io.Int.Input("steps", default=20, min=1, max=10000),
                 io.Float.Input("denoise", default=1.0, min=0.0, max=1.0, step=0.01),
@@ -30,14 +32,17 @@ class BasicScheduler(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, model, scheduler, steps, denoise) -> io.NodeOutput:
+    def execute(cls, model, scheduler, steps, denoise, sampler_name="none") -> io.NodeOutput:
         total_steps = steps
         if denoise < 1.0:
             if denoise <= 0.0:
                 return io.NodeOutput(torch.FloatTensor([]))
             total_steps = int(steps/denoise)
 
-        sigmas = comfy.samplers.calculate_sigmas(model.get_model_object("model_sampling"), scheduler, total_steps).cpu()
+        if sampler_name == "none":
+            sigmas = comfy.samplers.calculate_sigmas(model.get_model_object("model_sampling"), scheduler, total_steps).cpu()
+        else:
+            sigmas = comfy.samplers.calculate_sigmas_for_sampler(model.get_model_object("model_sampling"), scheduler, total_steps, sampler_name).cpu()
         sigmas = sigmas[-(steps + 1):]
         return io.NodeOutput(sigmas)
 
