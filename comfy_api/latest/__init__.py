@@ -24,6 +24,7 @@ class ComfyAPI_latest(ComfyAPIBase):
         self.node_replacement = self.NodeReplacement()
         self.execution = self.Execution()
         self.caching = self.Caching()
+        self.execution_lifecycle = self.ExecutionLifecycle()
 
     class NodeReplacement(ProxiedSingleton):
         async def register(self, node_replace: io.NodeReplace) -> None:
@@ -113,6 +114,33 @@ class ComfyAPI_latest(ComfyAPIBase):
             from comfy_execution.cache_provider import unregister_cache_provider
             unregister_cache_provider(provider)
 
+    class ExecutionLifecycle(ProxiedSingleton):
+        from ._execution_lifecycle import (
+            CancelledEvent,
+            FailedEvent,
+            FailureSource,
+            InterruptedEvent,
+            LifecycleEvent,
+            LifecycleHandler as Handler,
+            QueuedEvent,
+            StartedEvent,
+            SucceededEvent,
+            TerminalEvent,
+        )
+
+        async def register(
+            self,
+            handler: "ComfyAPI_latest.ExecutionLifecycle.Handler",
+        ) -> None:
+            """Register a task lifecycle handler during extension loading."""
+            from comfy_execution.lifecycle import _register_handler
+            _register_handler(handler)
+
+    node_replacement: NodeReplacement
+    execution: Execution
+    caching: Caching
+    execution_lifecycle: ExecutionLifecycle
+
 class ComfyExtension(ABC):
     async def on_load(self) -> None:
         """
@@ -148,6 +176,7 @@ class Types:
 
 
 Caching = ComfyAPI_latest.Caching
+ExecutionLifecycle = ComfyAPI_latest.ExecutionLifecycle
 
 ComfyAPI = ComfyAPI_latest
 
@@ -169,6 +198,7 @@ __all__ = [
     "InputImpl",
     "Types",
     "Caching",
+    "ExecutionLifecycle",
     "ComfyExtension",
     "io",
     "IO",

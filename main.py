@@ -239,6 +239,7 @@ execute_prestartup_script()
 
 # Main code
 import asyncio
+from contextlib import nullcontext
 import threading
 import gc
 
@@ -250,6 +251,7 @@ import comfy.utils
 
 import execution
 import server
+from comfy_execution.lifecycle import _freeze_handler_routes, _PromptExecutionLifecycle
 from protocol import BinaryEventTypes
 import nodes
 import comfy.model_management
@@ -381,27 +383,37 @@ def prompt_worker(q, server_instance):
         queue_item = q.get(timeout=timeout)
         if queue_item is not None:
             item, item_id = queue_item
+            queued_context = q._take_lifecycle_context(item_id)
             execution_start_time = time.perf_counter()
             prompt_id = item[1]
             server_instance.last_prompt_id = prompt_id
 
-            sensitive = item[5]
-            extra_data = item[3].copy()
-            for k in sensitive:
-                extra_data[k] = sensitive[k]
+            lifecycle_context = (
+                _PromptExecutionLifecycle(prompt_id, queued_context)
+                if queued_context is not None else nullcontext()
+            )
+            with lifecycle_context as prompt_lifecycle:
+                sensitive = item[5]
+                extra_data = item[3].copy()
+                for k in sensitive:
+                    extra_data[k] = sensitive[k]
 
-            asset_seeder.pause()
-            e.execute(item[2], prompt_id, extra_data, item[4])
+                asset_seeder.pause()
+                e.execute(item[2], prompt_id, extra_data, item[4])
 
-            need_gc = True
+                need_gc = True
 
-            remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
-            q.task_done(item_id,
-                        e.history_result,
-                        status=execution.PromptQueue.ExecutionStatus(
-                            status_str='success' if e.success else 'error',
-                            completed=e.success,
-                            messages=e.status_messages), process_item=remove_sensitive)
+                if prompt_lifecycle is not None:
+                    prompt_lifecycle.record_executor_result(e.status_messages, e.history_result)
+                remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
+                q.task_done(item_id,
+                            e.history_result,
+                            status=execution.PromptQueue.ExecutionStatus(
+                                status_str='success' if e.success else 'error',
+                                completed=e.success,
+                                messages=e.status_messages), process_item=remove_sensitive)
+                if prompt_lifecycle is not None:
+                    prompt_lifecycle.mark_task_done_succeeded()
             if server_instance.client_id is not None:
                 server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
 
@@ -544,6 +556,7 @@ def start_comfyui(asyncio_loop=None):
         init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
         init_api_nodes=not args.disable_api_nodes
     ))
+    _freeze_handler_routes()
 
     # Re-apply Comfy's cuDNN benchmark policy after custom-node imports. Benchmark
     # mode can request near-card-sized autotune workspaces, and some custom nodes set it at import time.

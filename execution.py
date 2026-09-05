@@ -1,4 +1,5 @@
 import copy
+from collections import deque
 import heapq
 import inspect
 import logging
@@ -47,6 +48,13 @@ from comfy_execution.asset_enrichment import enrich_output_with_assets
 from comfy_api.internal import _ComfyNodeInternal, _NodeOutputInternal, first_real_override, is_class, make_locked_method_func
 from comfy_api.latest import io, _io
 from comfy_execution.cache_provider import _has_cache_providers, _get_cache_providers, _logger as _cache_logger
+from comfy_execution.lifecycle import (
+    _QueuedLifecycleContext,
+    _freeze_metadata,
+    _has_any_handlers,
+    _publish_cancelled,
+    _publish_queued,
+)
 
 
 class ExecutionResult(Enum):
@@ -1258,10 +1266,22 @@ class PromptQueue:
         self.currently_running = {}
         self.history = {}
         self.flags = {}
+        self._queued_lifecycle_contexts = {}
+        self._running_lifecycle_contexts = {}
 
     def put(self, item):
         with self.mutex:
             heapq.heappush(self.queue, item)
+            if _has_any_handlers():
+                try:
+                    context = _QueuedLifecycleContext(
+                        queued_at_ms=int(time.time() * 1000),
+                        metadata=_freeze_metadata(item[3]),
+                    )
+                    self._queued_lifecycle_contexts.setdefault(id(item), deque()).append(context)
+                    _publish_queued(item, context)
+                except Exception:
+                    logging.exception("Unable to initialize execution lifecycle context")
             self.server.queue_updated()
             self.not_empty.notify()
 
@@ -1274,9 +1294,33 @@ class PromptQueue:
             item = heapq.heappop(self.queue)
             i = self.task_counter
             self.currently_running[i] = copy.deepcopy(item)
+            context = self._pop_queued_lifecycle_context(item)
+            if context is not None:
+                self._running_lifecycle_contexts[i] = context
+            elif _has_any_handlers():
+                logging.error("Missing execution lifecycle context for prompt %s", item[1])
             self.task_counter += 1
             self.server.queue_updated()
             return (item, i)
+
+    def _pop_queued_lifecycle_context(self, item):
+        contexts = self._queued_lifecycle_contexts.get(id(item))
+        if not contexts:
+            return None
+        context = contexts.popleft()
+        if not contexts:
+            del self._queued_lifecycle_contexts[id(item)]
+        return context
+
+    def _take_lifecycle_context(self, item_id):
+        with self.mutex:
+            context = self._running_lifecycle_contexts.pop(item_id, None)
+            if context is not None or not _has_any_handlers():
+                return context
+            item = self.currently_running.get(item_id)
+            prompt_id = item[1] if item is not None else "unknown"
+            logging.error("Missing execution lifecycle context for prompt %s", prompt_id)
+            return None
 
     class ExecutionStatus(NamedTuple):
         status_str: Literal['success', 'error']
@@ -1287,6 +1331,7 @@ class PromptQueue:
                   status: Optional['PromptQueue.ExecutionStatus'], process_item=None):
         with self.mutex:
             prompt = self.currently_running.pop(item_id)
+            self._running_lifecycle_contexts.pop(item_id, None)
             if len(self.history) > MAXIMUM_HISTORY_SIZE:
                 self.history.pop(next(iter(self.history)))
 
@@ -1344,22 +1389,40 @@ class PromptQueue:
             return len(self.queue) + len(self.currently_running)
 
     def wipe_queue(self):
+        removed = []
         with self.mutex:
+            cancelled_at_ms = int(time.time() * 1000)
+            for item in self.queue:
+                context = self._pop_queued_lifecycle_context(item)
+                if context is not None:
+                    removed.append((item, context, cancelled_at_ms))
+                elif _has_any_handlers():
+                    logging.error("Missing execution lifecycle context for prompt %s", item[1])
             self.queue = []
             self.server.queue_updated()
+        for item, context, cancelled_at_ms in removed:
+            _publish_cancelled(item, context, cancelled_at_ms)
 
     def delete_queue_item(self, function):
+        removed = None
         with self.mutex:
             for x in range(len(self.queue)):
                 if function(self.queue[x]):
-                    if len(self.queue) == 1:
-                        self.wipe_queue()
-                    else:
-                        self.queue.pop(x)
+                    item = self.queue.pop(x)
+                    if self.queue:
                         heapq.heapify(self.queue)
+                    context = self._pop_queued_lifecycle_context(item)
+                    if context is not None:
+                        removed = (item, context, int(time.time() * 1000))
+                    elif _has_any_handlers():
+                        logging.error("Missing execution lifecycle context for prompt %s", item[1])
                     self.server.queue_updated()
-                    return True
-        return False
+                    break
+            else:
+                return False
+        if removed is not None:
+            _publish_cancelled(*removed)
+        return True
 
     def get_history(self, prompt_id=None, max_items=None, offset=-1, map_function=None):
         with self.mutex:
