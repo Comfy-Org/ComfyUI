@@ -31,7 +31,10 @@ from app.assets.database.queries import (
 from app.assets.helpers import get_utc_now, normalize_tags
 from app.assets.services.bulk_ingest import batch_insert_seed_assets
 from app.assets.services.file_utils import get_size_and_mtime_ns
-from app.assets.services.image_dimensions import extract_image_dimensions
+from app.assets.services.media_metadata import (
+    MEDIA_METADATA_KEYS,
+    extract_media_metadata,
+)
 from app.assets.services.path_utils import (
     compute_loader_path,
     get_name_and_tags_from_asset_path,
@@ -138,7 +141,7 @@ def _ingest_file_from_path(
                 user_metadata=user_metadata,
             )
 
-            _maybe_store_image_dimensions(
+            _maybe_store_media_metadata(
                 session,
                 reference_id=reference_id,
                 file_path=locator,
@@ -316,7 +319,7 @@ def _register_existing_asset(
                 user_metadata=new_meta,
             )
 
-        _backfill_image_dimensions_from_siblings(
+        _backfill_media_metadata_from_siblings(
             session,
             asset_id=asset.id,
             new_reference_id=ref.id,
@@ -369,25 +372,22 @@ def _update_metadata_with_filename(
         )
 
 
-_IMAGE_DIMENSION_KEYS = ("kind", "width", "height")
+_MEDIA_KINDS = ("image", "video")
 
 
-def _maybe_store_image_dimensions(
+def _maybe_store_media_metadata(
     session: Session,
     reference_id: str,
     file_path: str,
     mime_type: str | None,
     current_system_metadata: dict | None,
 ) -> None:
-    """Populate ``kind``/``width``/``height`` on system_metadata for image refs.
+    """Populate media keys on system_metadata for image and video refs.
 
-    Non-image MIME types are a no-op. Pre-existing keys (e.g. enricher-written
+    Non-media MIME types are a no-op. Pre-existing keys (e.g. enricher-written
     safetensors metadata, download provenance) are preserved by merge.
     """
-    if not mime_type or not mime_type.startswith("image/"):
-        return
-
-    dims = extract_image_dimensions(file_path, mime_type=mime_type)
+    dims = extract_media_metadata(file_path, mime_type=mime_type)
     if not dims:
         return
 
@@ -402,31 +402,35 @@ def _maybe_store_image_dimensions(
         )
 
 
-def _backfill_image_dimensions_from_siblings(
+def _backfill_media_metadata_from_siblings(
     session: Session,
     asset_id: str,
     new_reference_id: str,
     current_system_metadata: dict | None,
 ) -> None:
-    """Copy image dimension keys from any sibling reference of the same asset.
+    """Copy media metadata keys from any sibling reference of the same asset.
 
-    The from-hash path doesn't read the file bytes, so dimensions can't be
+    The from-hash path doesn't read the file bytes, so metadata can't be
     extracted there directly. When another reference of the same asset already
-    carries image dimensions, copy them onto the new reference so consumers
-    see consistent metadata regardless of how the asset was registered.
+    carries media metadata, copy it onto the new reference so consumers see
+    consistent metadata regardless of how the asset was registered.
 
-    Best-effort: missing siblings, non-image siblings, or absent dimension
+    Best-effort: missing siblings, non-media siblings, or absent metadata
     keys leave the target reference unchanged.
     """
     current = current_system_metadata or {}
-    if current.get("kind") == "image" and "width" in current and "height" in current:
+    if (
+        current.get("kind") in _MEDIA_KINDS
+        and "width" in current
+        and "height" in current
+    ):
         return
 
     for sibling in list_references_by_asset_id(session, asset_id):
         if sibling.id == new_reference_id:
             continue
         meta = sibling.system_metadata or {}
-        if meta.get("kind") != "image":
+        if meta.get("kind") not in _MEDIA_KINDS:
             continue
         width = meta.get("width")
         height = meta.get("height")
@@ -438,9 +442,9 @@ def _backfill_image_dimensions_from_siblings(
         ):
             continue
         merged = dict(current)
-        merged["kind"] = "image"
-        merged["width"] = width
-        merged["height"] = height
+        for key in MEDIA_METADATA_KEYS:
+            if key in meta:
+                merged[key] = meta[key]
         if merged != current:
             set_reference_system_metadata(
                 session,
