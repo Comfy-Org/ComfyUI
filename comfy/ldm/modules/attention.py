@@ -562,6 +562,14 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
     sdpa_keys = ("scale", "enable_gqa")
     sdpa_extra = {k: v for k, v in kwargs.items() if k in sdpa_keys}
 
+    # SDPA cannot use the memory-efficient/flash backends with enable_gqa + an explicit attn_mask,
+    # so it falls back to the math backend, which materialises the full [B, heads, S, S] scores
+    # (O(S^2)) and OOMs on long sequences (e.g. a Llama/Qwen text encoder with a long prompt).
+    # Expand KV ourselves and drop enable_gqa so the masked case keeps a memory-efficient backend.
+    if mask is not None and sdpa_extra.get("enable_gqa"):
+        k, v = _repeat_kv_for_gqa(k, v, heads, -3)
+        sdpa_extra.pop("enable_gqa", None)
+
     if SDP_BATCH_LIMIT >= b:
         out = comfy.ops.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False, **sdpa_extra)
         if not skip_output_reshape:
