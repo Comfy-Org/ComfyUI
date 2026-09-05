@@ -1363,6 +1363,8 @@ def current_stream(device):
         return torch.cuda.current_stream()
     elif is_device_xpu(device):
         return torch.xpu.current_stream()
+    elif is_device_npu(device):
+        return torch.npu.current_stream(device)
     else:
         return None
 
@@ -1494,6 +1496,18 @@ def get_offload_stream(device):
         for k in range(NUM_STREAMS):
             s1 = torch.xpu.Stream(device=device, priority=0)
             s1.as_context = torch.xpu.stream
+            ss.append(s1)
+        STREAMS[device] = ss
+        s = ss[stream_counter]
+        stream_counters[device] = stream_counter
+        return s
+    elif is_device_npu(device):
+        ss = []
+        # Match the CUDA/XPU stream interface used by the shared offload path.
+        # torch.npu.stream provides the context manager for torch-npu streams.
+        for k in range(NUM_STREAMS):
+            s1 = torch.npu.Stream(device=device, priority=0)
+            s1.as_context = torch.npu.stream
             ss.append(s1)
         STREAMS[device] = ss
         s = ss[stream_counter]
@@ -1826,6 +1840,9 @@ def is_device_xpu(device):
 def is_device_cuda(device):
     return is_device_type(device, 'cuda')
 
+def is_device_npu(device):
+    return is_device_type(device, 'npu')
+
 def set_torch_device(device):
     """Set the current device for the given torch device. Supports CUDA and XPU."""
     if is_device_cuda(device):
@@ -2048,6 +2065,8 @@ def synchronize():
         return
     if is_intel_xpu():
         torch.xpu.synchronize()
+    elif is_ascend_npu():
+        torch.npu.synchronize()
     elif torch.cuda.is_available():
         torch.cuda.synchronize()
 
