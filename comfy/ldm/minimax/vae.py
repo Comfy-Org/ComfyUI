@@ -52,7 +52,17 @@ class CausalConv3d(ops.Conv3d):
         if x.shape[2] == 1:
             # single frame: the causal front padding is all zeros truncate the temporal taps instead of convolving zero frames
             return super().forward(x, autopad="causal_zero")
-        x = F.pad(x, (0, 0, 0, 0, self.causal_padding[0] * 2, 0), mode="constant")
+        # On MPS, F.pad(mode="constant") along the temporal axis of a 5D
+        # tensor is corrupted for padded spatial extents above ~2^16
+        # elements/frame: it silently writes wrong values into ~80% of the
+        # tensor (NaNs in fp16) with no error raised. This destroyed H3 VAE
+        # encodes above ~224x480 on Apple Silicon; see pytorch/pytorch#194922
+        # for the upstream kernel bug and characterization. torch.cat with a
+        # zero slab is equivalent and correct on every backend (bit-exact vs
+        # CPU at 256x544).
+        pad_t = self.causal_padding[0] * 2
+        zeros = x.new_zeros(*x.shape[:2], pad_t, *x.shape[3:])
+        x = torch.cat([zeros, x], dim=2)
         return super().forward(x)
 
 
