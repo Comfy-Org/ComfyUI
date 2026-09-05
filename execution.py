@@ -28,6 +28,7 @@ from comfy_execution.caching import (
     CacheKeySetID,
     CacheKeySetInputSignature,
     NullCache,
+    get_lazy_input_keys,
     HierarchicalCache,
     LRUCache,
     RAMPressureCache,
@@ -131,6 +132,12 @@ class CacheSet:
 
         self.all = [self.outputs, self.objects]
 
+        # Executor-owned record of which lazy inputs were actually evaluated, shared with the
+        # cache key builder so unconsumed lazy inputs stop poisoning downstream cache keys.
+        self.lazy_evaluated: dict = {}
+        if hasattr(self.outputs, "key_class") and self.outputs.key_class is CacheKeySetInputSignature:
+            self.outputs.key_class_kwargs = {"lazy_evaluated": self.lazy_evaluated}
+
     # Performs like the old cache -- dump data ASAP
     def init_classic_cache(self):
         self.outputs = HierarchicalCache(CacheKeySetInputSignature, enable_providers=True)
@@ -225,6 +232,16 @@ def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=
                     input_data_all[x] = [extra_data.get("comfy_usage_source", None)]
     v3_data["hidden_inputs"] = hidden_inputs_v3
     return input_data_all, missing_keys, v3_data
+
+def record_lazy_evidence(caches, unique_id, class_type, lazy_requested):
+    """Persist which lazy inputs check_lazy_status requested for this node run."""
+    if lazy_requested is None:
+        return
+    for lazy_key in get_lazy_input_keys(class_type):
+        key = (unique_id, lazy_key)
+        # Once consumed, an input keeps invalidating: later runs see it cached and
+        # check_lazy_status stops naming it, which must not flip the recorded value.
+        caches.lazy_evaluated[key] = caches.lazy_evaluated.get(key, False) or lazy_key in lazy_requested
 
 map_node_over_list = None #Don't hook this please
 
@@ -451,6 +468,7 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
         return (ExecutionResult.SUCCESS, None, None)
 
     input_data_all = None
+    lazy_requested = None
     try:
         if unique_id in pending_async_nodes:
             results = []
@@ -511,12 +529,16 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                 required_inputs = await _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, "check_lazy_status", allow_interrupt=True, v3_data=v3_data_lazy)
                 required_inputs = await resolve_map_node_over_list_results(required_inputs)
                 required_inputs = set(sum([r for r in required_inputs if isinstance(r,list)], []))
+                lazy_requested = {x for x in required_inputs if isinstance(x, str)}
                 required_inputs = [x for x in required_inputs if isinstance(x,str) and (
                     x not in input_data_all or x in missing_keys
                 )]
                 if len(required_inputs) > 0:
                     for i in required_inputs:
                         execution_list.make_input_strong_link(unique_id, i)
+                    # Inputs requested here get consumed when the pending pass resumes,
+                    # so they must count as evaluated even though the tail is skipped.
+                    record_lazy_evidence(caches, unique_id, class_type, lazy_requested)
                     return (ExecutionResult.PENDING, None, None)
 
             def execution_block_cb(block):
@@ -658,6 +680,11 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
 
     get_progress_state().finish_progress(unique_id)
     executed.add(unique_id)
+
+    if lazy_requested is not None:
+        # Evidence comes from what check_lazy_status actually requested this pass; inputs
+        # resolved opportunistically from cache don't count as consumed.
+        record_lazy_evidence(caches, unique_id, class_type, lazy_requested)
 
     return (ExecutionResult.SUCCESS, None, None)
 

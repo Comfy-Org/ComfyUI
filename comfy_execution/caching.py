@@ -14,6 +14,7 @@ import nodes
 from comfy_execution.graph_utils import is_link
 
 NODE_CLASS_CONTAINS_UNIQUE_ID: Dict[str, bool] = {}
+LAZY_INPUT_KEYS: Dict[str, frozenset] = {}
 
 
 def include_unique_id_in_input(class_type: str) -> bool:
@@ -22,6 +23,20 @@ def include_unique_id_in_input(class_type: str) -> bool:
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
     NODE_CLASS_CONTAINS_UNIQUE_ID[class_type] = "UNIQUE_ID" in class_def.INPUT_TYPES().get("hidden", {}).values()
     return NODE_CLASS_CONTAINS_UNIQUE_ID[class_type]
+
+
+def get_lazy_input_keys(class_type: str) -> frozenset:
+    if class_type in LAZY_INPUT_KEYS:
+        return LAZY_INPUT_KEYS[class_type]
+    class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
+    valid_inputs = class_def.INPUT_TYPES()
+    lazy = set()
+    for section in ("required", "optional"):
+        for key, input_info in valid_inputs.get(section, {}).items():
+            if isinstance(input_info, tuple) and len(input_info) == 2 and isinstance(input_info[1], dict) and input_info[1].get("lazy"):
+                lazy.add(key)
+    LAZY_INPUT_KEYS[class_type] = frozenset(lazy)
+    return LAZY_INPUT_KEYS[class_type]
 
 class CacheKeySet(ABC):
     def __init__(self, dynprompt, node_ids, is_changed_cache):
@@ -80,10 +95,15 @@ class CacheKeySetID(CacheKeySet):
             self.subcache_keys[node_id] = (node_id, node["class_type"])
 
 class CacheKeySetInputSignature(CacheKeySet):
-    def __init__(self, dynprompt, node_ids, is_changed_cache):
+    def __init__(self, dynprompt, node_ids, is_changed_cache, lazy_evaluated=None):
         super().__init__(dynprompt, node_ids, is_changed_cache)
         self.dynprompt = dynprompt
         self.is_changed_cache = is_changed_cache
+        # Executor-owned record of whether each lazy input was evaluated in the previous run
+        # (True) or left unevaluated (False). Inputs with no recorded run are treated as
+        # consumed so keys stay identical until we have real evidence. Unevaluated lazy inputs
+        # are excluded from cache keys, since churn behind them can't affect the node output.
+        self.lazy_evaluated = lazy_evaluated
 
     def include_node_id_in_input(self) -> bool:
         return False
@@ -97,6 +117,18 @@ class CacheKeySetInputSignature(CacheKeySet):
             node = self.dynprompt.get_node(node_id)
             self.keys[node_id] = await self.get_node_signature(self.dynprompt, node_id)
             self.subcache_keys[node_id] = (node_id, node["class_type"])
+
+    def _skipped_lazy_links(self, dynprompt, node_id):
+        if self.lazy_evaluated is None or not dynprompt.has_node(node_id):
+            return frozenset()
+        node = dynprompt.get_node(node_id)
+        lazy_keys = get_lazy_input_keys(node["class_type"])
+        skipped = set()
+        inputs = node["inputs"]
+        for key in lazy_keys:
+            if key in inputs and is_link(inputs[key]) and self.lazy_evaluated.get((node_id, key)) is False:
+                skipped.add(key)
+        return frozenset(skipped)
 
     async def get_node_signature(self, dynprompt, node_id):
         signature = []
@@ -117,8 +149,12 @@ class CacheKeySetInputSignature(CacheKeySet):
         if self.include_node_id_in_input() or (hasattr(class_def, "NOT_IDEMPOTENT") and class_def.NOT_IDEMPOTENT) or include_unique_id_in_input(class_type):
             signature.append(node_id)
         inputs = node["inputs"]
+        skipped_lazy_links = self._skipped_lazy_links(dynprompt, node_id)
         for key in sorted(inputs.keys()):
             if is_link(inputs[key]):
+                if key in skipped_lazy_links:
+                    signature.append((key, "ANCESTOR_UNEVALUATED"))
+                    continue
                 (ancestor_id, ancestor_socket) = inputs[key]
                 ancestor_index = ancestor_order_mapping[ancestor_id]
                 signature.append((key,("ANCESTOR", ancestor_index, ancestor_socket)))
@@ -138,9 +174,12 @@ class CacheKeySetInputSignature(CacheKeySet):
         if not dynprompt.has_node(node_id):
             return
         inputs = dynprompt.get_node(node_id)["inputs"]
+        skipped_lazy_links = self._skipped_lazy_links(dynprompt, node_id)
         input_keys = sorted(inputs.keys())
         for key in input_keys:
             if is_link(inputs[key]):
+                if key in skipped_lazy_links:
+                    continue
                 ancestor_id = inputs[key][0]
                 if ancestor_id not in order_mapping:
                     ancestors.append(ancestor_id)
@@ -148,8 +187,9 @@ class CacheKeySetInputSignature(CacheKeySet):
                     self.get_ordered_ancestry_internal(dynprompt, ancestor_id, ancestors, order_mapping)
 
 class BasicCache:
-    def __init__(self, key_class, enable_providers=False):
+    def __init__(self, key_class, enable_providers=False, key_class_kwargs={}):
         self.key_class = key_class
+        self.key_class_kwargs = key_class_kwargs
         self.initialized = False
         self.enable_providers = enable_providers
         self.dynprompt: DynamicPrompt
@@ -160,7 +200,7 @@ class BasicCache:
 
     async def set_prompt(self, dynprompt, node_ids, is_changed_cache):
         self.dynprompt = dynprompt
-        self.cache_key_set = self.key_class(dynprompt, node_ids, is_changed_cache)
+        self.cache_key_set = self.key_class(dynprompt, node_ids, is_changed_cache, **self.key_class_kwargs)
         await self.cache_key_set.add_keys(node_ids)
         self.is_changed_cache = is_changed_cache
         self.initialized = True
@@ -337,7 +377,7 @@ class BasicCache:
         subcache_key = self.cache_key_set.get_subcache_key(node_id)
         subcache = self.subcaches.get(subcache_key, None)
         if subcache is None:
-            subcache = BasicCache(self.key_class)
+            subcache = BasicCache(self.key_class, key_class_kwargs=self.key_class_kwargs)
             self.subcaches[subcache_key] = subcache
         await subcache.set_prompt(self.dynprompt, children_ids, self.is_changed_cache)
         return subcache
