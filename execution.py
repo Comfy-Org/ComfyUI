@@ -31,6 +31,7 @@ from comfy_execution.caching import (
     HierarchicalCache,
     LRUCache,
     RAMPressureCache,
+    ScoreCache,
     RAM_CACHE_LARGE_INTERMEDIATE,
 )
 from comfy_execution.graph import (
@@ -111,6 +112,7 @@ class CacheType(Enum):
     LRU = 1
     NONE = 2
     RAM_PRESSURE = 3
+    SCORE = 4
 
 
 class CacheSet:
@@ -122,6 +124,9 @@ class CacheSet:
             cache_ram = cache_args.get("ram", 16.0)
             self.init_ram_cache(cache_ram)
             logging.info("Using RAM pressure cache.")
+        elif cache_type == CacheType.SCORE:
+            self.init_score_cache()
+            logging.info("Using score-based cache.")
         elif cache_type == CacheType.LRU:
             cache_size = cache_args.get("lru", 0)
             self.init_lru_cache(cache_size)
@@ -142,6 +147,10 @@ class CacheSet:
 
     def init_ram_cache(self, min_headroom):
         self.outputs = RAMPressureCache(CacheKeySetInputSignature, enable_providers=True)
+        self.objects = HierarchicalCache(CacheKeySetID)
+
+    def init_score_cache(self):
+        self.outputs = ScoreCache(CacheKeySetInputSignature, enable_providers=True)
         self.objects = HierarchicalCache(CacheKeySetID)
 
     def init_null_cache(self):
@@ -435,7 +444,7 @@ def _send_cached_ui(server, node_id, display_node_id, cached, prompt_id, ui_outp
     cached_ui = cached.ui or {}
     server.send_sync("executed", { "node": node_id, "display_node": display_node_id, "output": cached_ui.get("output", None), "prompt_id": prompt_id }, server.client_id)
 
-async def execute(server, dynprompt, caches, current_item, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_outputs):
+async def execute(server, dynprompt, caches, current_item, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, execution_start_times, ui_outputs):
     unique_id = current_item
     real_node_id = dynprompt.get_real_node_id(unique_id)
     display_node_id = dynprompt.get_display_node_id(unique_id)
@@ -541,6 +550,7 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                 # TODO - How to handle this with async functions without contextvars (which requires Python 3.12)?
                 GraphBuilder.set_default_prefix(unique_id, call_index, 0)
 
+            execution_start_times[unique_id] = time.perf_counter()
             try:
                 output_data, output_ui, has_subgraph, has_pending_tasks = await get_output_data(prompt_id, unique_id, obj, input_data_all, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb, v3_data=v3_data)
             finally:
@@ -612,11 +622,15 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
             pending_subgraph_results[unique_id] = cached_outputs
             return (ExecutionResult.PENDING, None, None)
 
+        execution_time = time.perf_counter() - execution_start_times.pop(unique_id)
         cache_entry = CacheEntry(ui=ui_outputs.get(unique_id), outputs=output_data)
+        if isinstance(caches.outputs, ScoreCache):
+            caches.outputs.set_execution_time(unique_id, execution_time)
         execution_list.cache_update(unique_id, cache_entry)
         await caches.outputs.set(unique_id, cache_entry)
 
     except comfy.model_management.InterruptProcessingException as iex:
+        execution_start_times.pop(unique_id, None)
         logging.info("Processing interrupted")
 
         # skip formatting inputs/outputs
@@ -626,6 +640,7 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
 
         return (ExecutionResult.FAILURE, error_details, iex)
     except Exception as ex:
+        execution_start_times.pop(unique_id, None)
         typ, _, tb = sys.exc_info()
         exception_type = full_type_name(typ)
         input_data_formatted = {}
@@ -744,7 +759,7 @@ class PromptExecutor:
         self._notify_prompt_lifecycle("start", prompt_id)
         ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
         ram_inactive_headroom = int(self.cache_args["ram_inactive"] * (1024 ** 3))
-        ram_release_callback = self.caches.outputs.ram_release if self.cache_type == CacheType.RAM_PRESSURE else None
+        ram_release_callback = self.caches.outputs.ram_release if self.cache_type in (CacheType.RAM_PRESSURE, CacheType.SCORE) else None
         comfy.memory_management.set_ram_cache_release_state(ram_release_callback, ram_headroom)
 
         try:
@@ -772,6 +787,7 @@ class PromptExecutor:
                               broadcast=False)
                 pending_subgraph_results = {}
                 pending_async_nodes = {} # TODO - Unify this with pending_subgraph_results
+                execution_start_times = {}
                 ui_node_outputs = {}
                 executed = set()
                 execution_list = ExecutionList(dynamic_prompt, self.caches.outputs, self.prompt_model_tracker.add)
@@ -786,7 +802,7 @@ class PromptExecutor:
                         break
 
                     assert node_id is not None, "Node ID should not be None at this point"
-                    result, error, ex = await execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, ui_node_outputs)
+                    result, error, ex = await execute(self.server, dynamic_prompt, self.caches, node_id, extra_data, executed, prompt_id, execution_list, pending_subgraph_results, pending_async_nodes, execution_start_times, ui_node_outputs)
                     self.success = result != ExecutionResult.FAILURE
                     if result == ExecutionResult.FAILURE:
                         self.handle_execution_error(prompt_id, dynamic_prompt.original_prompt, current_outputs, executed, error, ex)
@@ -796,7 +812,7 @@ class PromptExecutor:
                     else: # result == ExecutionResult.SUCCESS:
                         execution_list.complete_node_execution()
 
-                    if self.cache_type == CacheType.RAM_PRESSURE:
+                    if self.cache_type in (CacheType.RAM_PRESSURE, CacheType.SCORE):
                         ram_release_callback(ram_inactive_headroom)
                         ram_shortfall = ram_headroom - comfy.system_memory.virtual_memory_available()
                         if ram_shortfall > 0:

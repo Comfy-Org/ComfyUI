@@ -355,10 +355,11 @@ def prompt_worker(q, server_instance):
     if not args.cache_classic and not args.cache_none and args.cache_lru <= 0:
         cache_ram = min(10.0, max(2.0, comfy.model_management.total_ram * 0.10 / 1024.0))
         cache_ram_inactive = min(128.0, comfy.model_management.total_ram / 1024.0)
-        if len(args.cache_ram) > 0:
-            cache_ram = args.cache_ram[0]
-        if len(args.cache_ram) > 1:
-            cache_ram_inactive = args.cache_ram[1]
+        cache_headroom = args.cache_score if args.cache_score is not None else args.cache_ram
+        if len(cache_headroom) > 0:
+            cache_ram = cache_headroom[0]
+        if len(cache_headroom) > 1:
+            cache_ram_inactive = cache_headroom[1]
 
     cache_type = execution.CacheType.RAM_PRESSURE
     if args.cache_classic:
@@ -367,6 +368,8 @@ def prompt_worker(q, server_instance):
         cache_type = execution.CacheType.LRU
     elif args.cache_none:
         cache_type = execution.CacheType.NONE
+    elif args.cache_score is not None:
+        cache_type = execution.CacheType.SCORE
 
     e = execution.PromptExecutor(server_instance, cache_type=cache_type, cache_args={ "lru" : args.cache_lru, "ram" : cache_ram, "ram_inactive" : cache_ram_inactive } )
     last_gc_collect = 0
