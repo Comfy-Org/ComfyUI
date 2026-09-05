@@ -119,6 +119,14 @@ if not os.path.exists(input_directory):
     except:
         logging.error("Failed to create input directory")
 
+custom_nodes_paths, _ = folder_names_and_paths["custom_nodes"]
+for directory in custom_nodes_paths:
+    if not os.path.exists(directory):
+        try:
+            os.makedirs(directory)
+        except:
+            logging.error(f"Failed to create custom_nodes directory: {directory}")
+
 def set_output_directory(output_dir: str) -> None:
     global output_directory
     output_directory = output_dir
