@@ -808,6 +808,7 @@ class Load3DCamera(ComfyTypeIO):
         zoom: float | int  # dimensionless, 1 = 100%
         cameraType: str  # 'perspective' | 'orthographic'
         quaternion: NotRequired[dict[str, float | int]]  # normalized, dimensionless; camera world rotation
+        useCustomUp: NotRequired[bool]  # honor the quaternion's up as camera up instead of world +Y
         fov: NotRequired[float | int]  # degrees, vertical FOV (perspective only)
         aspect: NotRequired[float | int]  # width / height (perspective only)
         near: NotRequired[float | int]  # scene units
@@ -900,6 +901,16 @@ class Compositor(ComfyTypeIO):
             super().__init__(id, display_name, optional, tooltip, None, default, socketless, None, None, None, None, advanced)
             if default is None:
                 self.default = {}
+
+
+@comfytype(io_type="CAMERA_INFO_STATE")
+class CameraInfoState(ComfyTypeI):
+    Type = dict
+
+    class Input(WidgetInput):
+        def __init__(self, id: str, display_name: str=None, optional=False, tooltip: str=None,
+                     socketless: bool=True, advanced: bool=None):
+            super().__init__(id, display_name, optional, tooltip, None, None, socketless, None, None, None, None, advanced)
 
 
 @comfytype(io_type="PHOTOMAKER")
@@ -2516,6 +2527,7 @@ __all__ = [
     "Load3DAnimation",
     "Compositor",
     "Layers",
+    "CameraInfoState",
     "Photomaker",
     "Point",
     "FaceAnalysis",
