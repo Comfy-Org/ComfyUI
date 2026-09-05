@@ -1467,7 +1467,7 @@ class Gemma4_Tokenizer():
         up_slopes = slopes[:, 2:] / filter_diff[1:]
         return np.maximum(np.zeros(1), np.minimum(down_slopes, up_slopes))
 
-    def tokenize_with_weights(self, text, return_word_ids=False, image=None, audio=None, video=None, llama_template=None, skip_template=True, thinking=False, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, image=None, audio=None, video=None, llama_template=None, skip_template=True, thinking=False, images=None, **kwargs):
 
         # Process audio
         audio_features = []
@@ -1479,9 +1479,27 @@ class Gemma4_Tokenizer():
 
         # Process image/video frames
         is_video = video is not None
-        source = video if is_video else image
-        images = []
-        if source is not None:
+        sources = []
+
+        if is_video:
+            sources.append(video)
+        elif isinstance(images, torch.Tensor):
+            if images.numel() > 0:
+                sources.append(images)
+        elif isinstance(images, (list, tuple)):
+            for source in images:
+                if not isinstance(source, torch.Tensor):
+                    raise TypeError("images must be a tensor or a sequence of tensors")
+                if source.numel() > 0:
+                    sources.append(source)
+        elif images is not None:
+            raise TypeError("images must be a tensor or a sequence of tensors")
+
+        if not sources and not is_video and image is not None:
+            sources.append(image)
+
+        image_pixels = []
+        for source in sources:
             samples = source.movedim(-1, 1)  # [B, C, H, W]
             num_frames = samples.shape[0]
 
@@ -1508,7 +1526,7 @@ class Gemma4_Tokenizer():
                 if target_h != h or target_w != w:
                     s = TVF.resize(s, [target_h, target_w], interpolation=TVF.InterpolationMode.BICUBIC, antialias=True)
                 s = s.float() * (1.0 / 255.0)
-                images.append({"pixels": s.unsqueeze(0).movedim(1, -1)[:, :, :, :3], "max_soft_tokens": max_soft_tokens})
+                image_pixels.append({"pixels": s.unsqueeze(0).movedim(1, -1)[:, :, :, :3], "max_soft_tokens": max_soft_tokens})
 
         if text.startswith('<|turn>'):
             skip_template = True
@@ -1522,17 +1540,17 @@ class Gemma4_Tokenizer():
                 # Build template from modalities present
                 system = "<|turn>system\n<|think|>\n<turn|>\n" if thinking else ""
                 media = ""
-                if len(images) > 0:
+                if len(image_pixels) > 0:
                     if is_video:
                         media += "\n\n"
-                        for i in range(len(images)):
+                        for i in range(len(image_pixels)):
                             ts = f"{int(i // 60):02d}:{int(i % 60):02d}"
                             sep = "" if i == 0 else " "
                             media += f"{sep}{ts} <|image><|video|><image|>"
                         media += "\n\n"
                     else:
                         media += "\n\n"
-                        for i in range(len(images)):
+                        for i in range(len(image_pixels)):
                             if i > 0:
                                 media += "\n\n\n\n"
                             media += "<|image><|image|><image|>"
@@ -1562,9 +1580,9 @@ class Gemma4_Tokenizer():
                 else:
                     i += 1
 
-        if len(images) > 0:
+        if len(image_pixels) > 0:
             img_token_id = 258884 if is_video else 258880
-            img_embeds = [{"type": "image", "data": img["pixels"], "max_soft_tokens": img["max_soft_tokens"]} for img in images]
+            img_embeds = [{"type": "image", "data": img["pixels"], "max_soft_tokens": img["max_soft_tokens"]} for img in image_pixels]
             for r in text_tokens:
                 _replace_placeholders(r, img_token_id, img_embeds)
 
