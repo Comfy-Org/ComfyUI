@@ -60,6 +60,8 @@ class BOFTAdapter(WeightAdapterBase):
         blocks = v[0]
         rescale = v[1]
         alpha = v[2]
+        if alpha is None:
+            alpha = 0
         dora_scale = v[3]
 
         blocks = comfy.model_management.cast_to_device(
