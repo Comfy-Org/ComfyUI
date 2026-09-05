@@ -2,6 +2,7 @@ import pytest
 import yaml
 import os
 import sys
+import logging
 from unittest.mock import Mock, patch, mock_open
 
 from utils.extra_config import load_extra_path_config
@@ -301,3 +302,26 @@ def test_load_extra_path_config_no_base_path(
     actual_diffusion = folder_paths.folder_names_and_paths["diffusion_models"][0]
     assert len(actual_diffusion) == 1, "Should have one path for 'diffusion_models'."
     assert actual_diffusion[0] == os.path.abspath(expected_unet)
+
+
+@pytest.mark.parametrize("yaml_content", [
+    "",
+    "   \n  \n  ",
+    "# only a comment\n# another comment\n",
+])
+def test_load_extra_path_config_empty_yaml(yaml_content, clear_folder_paths, tmp_path, caplog):
+    """
+    An empty, whitespace-only, or comments-only config file parses to None.
+    It should be skipped with a warning instead of crashing with a TypeError.
+    """
+    config_file = tmp_path / "extra_model_paths.yaml"
+    config_file.write_text(yaml_content)
+
+    with caplog.at_level(logging.WARNING):
+        load_extra_path_config(str(config_file))
+
+    # No model folder paths were registered from the empty config
+    assert folder_paths.folder_names_and_paths == {}
+    # A single warning explains why the config contributed nothing
+    assert len(caplog.records) == 1
+    assert "is empty; skipping" in caplog.text
