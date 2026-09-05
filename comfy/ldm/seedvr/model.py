@@ -16,7 +16,6 @@ from comfy.ldm.seedvr.constants import (
     BYTEDANCE_ROPE_MAX_FREQ,
     BYTEDANCE_SINUSOIDAL_DIM,
     ROPE_THETA,
-    SEEDVR2_7B_MLP_CHUNK,
     SEEDVR2_7B_VID_DIM,
     SEEDVR2_LATENT_CHANNELS,
     SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS,
@@ -73,20 +72,56 @@ def repeat_concat_idx(
     txt_idx = torch.arange(len(vid_idx), len(vid_idx) + txt_len.sum(), device=device)
     txt_repeat_list = txt_repeat.tolist()
     tgt_idx = repeat_concat(vid_idx, txt_idx, vid_len, txt_len, txt_repeat_list)
-    src_idx = torch.argsort(tgt_idx)
-    txt_idx_len = len(tgt_idx) - len(vid_idx)
+    
+    vid_mask = tgt_idx < len(vid_idx)
+    txt_mask = ~vid_mask
+    
+    vid_out_idx = torch.nonzero(vid_mask).squeeze(1)
+    txt_out_idx = torch.nonzero(txt_mask).squeeze(1)
+    txt_tgt = tgt_idx[txt_mask] - len(vid_idx)
+    
     repeat_txt_len = (txt_len * txt_repeat).tolist()
+    txt_len_list = txt_len.tolist()
+
+    device_cache = {}
+
+    def concat(vid, txt):
+        dev = vid.device
+        if dev not in device_cache:
+            device_cache[dev] = (
+                vid_out_idx.to(dev),
+                txt_out_idx.to(dev),
+                txt_tgt.to(dev)
+            )
+        v_out, t_out, t_tgt = device_cache[dev]
+        
+        res = torch.empty((len(tgt_idx), *vid.shape[1:]), dtype=vid.dtype, device=dev)
+        res[v_out] = vid
+        res[t_out] = txt[t_tgt]
+        return res
 
     def unconcat_coalesce(all):
-        vid_out, txt_out = all[src_idx].split([len(vid_idx), txt_idx_len])
+        dev = all.device
+        if dev not in device_cache:
+            device_cache[dev] = (
+                vid_out_idx.to(dev),
+                txt_out_idx.to(dev),
+                txt_tgt.to(dev)
+            )
+        v_out, t_out, _ = device_cache[dev]
+        
+        vid_out = all[v_out]
+        txt_out_raw = all[t_out]
+        
         txt_out_coalesced = []
-        for txt, repeat_time in zip(txt_out.split(repeat_txt_len), txt_repeat_list):
-            txt = txt.reshape(-1, repeat_time, *txt.shape[1:]).mean(1)
-            txt_out_coalesced.append(txt)
+        for txt_chunk, repeat_time, t_len in zip(txt_out_raw.split(repeat_txt_len), txt_repeat_list, txt_len_list):
+            txt_chunk = txt_chunk.reshape(repeat_time, t_len, *txt_chunk.shape[1:]).mean(0)
+            txt_out_coalesced.append(txt_chunk)
+            
         return vid_out, torch.cat(txt_out_coalesced)
 
     return (
-        lambda vid, txt: torch.cat([vid, txt])[tgt_idx],
+        concat,
         lambda all: unconcat_coalesce(all),
     )
 
@@ -469,11 +504,13 @@ class MMModule(nn.Module):
         *args,
         shared_weights: bool = False,
         vid_only: bool = False,
+        chunkable: bool = False,
         **kwargs,
     ):
         super().__init__()
         self.shared_weights = shared_weights
         self.vid_only = vid_only
+        self.chunkable = chunkable
         if self.shared_weights:
             if get_args("vid", args) != get_args("txt", args):
                 raise ValueError("SeedVR2 shared MMModule requires matching vid/txt args.")
@@ -499,11 +536,44 @@ class MMModule(nn.Module):
         torch.FloatTensor,
     ]:
         vid_module = self.vid if not self.shared_weights else self.all
-        vid = vid_module(vid, *get_args("vid", args), **get_kwargs("vid", kwargs))
+        
+        free_memory = comfy.model_management.get_free_memory(vid.device)
+        usable_memory = max(0, free_memory * 0.9)
+        bytes_per_token = vid.shape[-1] * 32
+        dynamic_chunk_size = max(1, int(usable_memory / bytes_per_token))
+        dynamic_chunk_size = min(vid.shape[0], dynamic_chunk_size)
+        
+        is_linear = self.chunkable
+        if is_linear and not comfy.model_management.in_training and not vid.requires_grad:
+            vid_out = None
+            offset = 0
+            for chunk in vid.split(dynamic_chunk_size, dim=0):
+                chunk_out = vid_module(chunk, *get_args("vid", args), **get_kwargs("vid", kwargs))
+                if vid_out is None:
+                    vid_out = chunk_out.new_empty((vid.shape[0], *chunk_out.shape[1:]))
+                vid_out[offset:offset + chunk_out.shape[0]] = chunk_out
+                offset += chunk_out.shape[0]
+            vid = vid_out
+        else:
+            vid = vid_module(vid, *get_args("vid", args), **get_kwargs("vid", kwargs))
+
         if not self.vid_only:
             txt_module = self.txt if not self.shared_weights else self.all
             txt = txt.to(device=vid.device, dtype=vid.dtype)
-            txt = txt_module(txt, *get_args("txt", args), **get_kwargs("txt", kwargs))
+            
+            is_linear_txt = self.chunkable
+            if is_linear_txt and not comfy.model_management.in_training and not txt.requires_grad:
+                txt_out = None
+                offset = 0
+                for chunk in txt.split(dynamic_chunk_size, dim=0):
+                    chunk_out = txt_module(chunk, *get_args("txt", args), **get_kwargs("txt", kwargs))
+                    if txt_out is None:
+                        txt_out = chunk_out.new_empty((txt.shape[0], *chunk_out.shape[1:]))
+                    txt_out[offset:offset + chunk_out.shape[0]] = chunk_out
+                    offset += chunk_out.shape[0]
+                txt = txt_out
+            else:
+                txt = txt_module(txt, *get_args("txt", args), **get_kwargs("txt", kwargs))
         return vid, txt
 
 def get_na_rope(rope_type: Optional[str], dim: int):
@@ -537,9 +607,9 @@ class NaMMAttention(nn.Module):
         qkv_dim = inner_dim * 3
         self.head_dim = head_dim
         self.proj_qkv = MMModule(
-            operations.Linear, dim, qkv_dim, bias=qk_bias, shared_weights=shared_weights, device=device, dtype=dtype
+            operations.Linear, dim, qkv_dim, bias=qk_bias, shared_weights=shared_weights, chunkable=True, device=device, dtype=dtype
         )
-        self.proj_out = MMModule(operations.Linear, inner_dim, dim, shared_weights=shared_weights, device=device, dtype=dtype)
+        self.proj_out = MMModule(operations.Linear, inner_dim, dim, shared_weights=shared_weights, chunkable=True, device=device, dtype=dtype)
         self.norm_q = MMModule(
             qk_norm,
             normalized_shape=head_dim,
@@ -621,8 +691,6 @@ class NaSwinAttention(NaMMAttention):
         torch.FloatTensor,
     ]:
 
-        vid_qkv, txt_qkv = self.proj_qkv(vid, txt)
-
         cache_win = cache.namespace(f"{self.window_method}_{self.window}_sd3")
 
         def make_window(x: torch.Tensor):
@@ -634,13 +702,52 @@ class NaSwinAttention(NaMMAttention):
             "win_transform",
             lambda: window_idx(vid_shape, make_window),
         )
-        vid_qkv_win = window_partition(vid_qkv)
 
-        vid_qkv_win = vid_qkv_win.reshape(vid_qkv_win.shape[0], 3, self.heads, self.head_dim)
-        txt_qkv = txt_qkv.reshape(txt_qkv.shape[0], 3, self.heads, self.head_dim)
+        vid_win = window_partition(vid)
+        
+        vid_module = self.proj_qkv.vid if not self.proj_qkv.shared_weights else self.proj_qkv.all
+        txt_module = self.proj_qkv.txt if not self.proj_qkv.shared_weights else self.proj_qkv.all
 
-        vid_q, vid_k, vid_v = vid_qkv_win.unbind(1)
-        txt_q, txt_k, txt_v = txt_qkv.unbind(1)
+        if not comfy.model_management.in_training and not vid.requires_grad and not txt.requires_grad:
+            free_memory = comfy.model_management.get_free_memory(vid.device)
+            usable_memory = max(0, free_memory * 0.9)
+            bytes_per_token = vid.shape[-1] * 32
+            dynamic_chunk_size = max(1, int(usable_memory / bytes_per_token))
+            dynamic_chunk_size = min(vid.shape[0], dynamic_chunk_size)
+            
+            vid_q = vid_win.new_empty((vid_win.shape[0], self.heads, self.head_dim))
+            vid_k = vid_win.new_empty((vid_win.shape[0], self.heads, self.head_dim))
+            vid_v = vid_win.new_empty((vid_win.shape[0], self.heads, self.head_dim))
+            offset = 0
+            for chunk in vid_win.split(dynamic_chunk_size, dim=0):
+                chunk_qkv = vid_module(chunk)
+                chunk_qkv = chunk_qkv.reshape(chunk_qkv.shape[0], 3, self.heads, self.head_dim)
+                q, k, v = chunk_qkv.unbind(1)
+                vid_q[offset:offset + chunk.shape[0]] = q
+                vid_k[offset:offset + chunk.shape[0]] = k
+                vid_v[offset:offset + chunk.shape[0]] = v
+                offset += chunk.shape[0]
+
+            txt_device = txt.to(device=vid.device, dtype=vid.dtype)
+            txt_q = txt_device.new_empty((txt.shape[0], self.heads, self.head_dim))
+            txt_k = txt_device.new_empty((txt.shape[0], self.heads, self.head_dim))
+            txt_v = txt_device.new_empty((txt.shape[0], self.heads, self.head_dim))
+            offset = 0
+            for chunk in txt_device.split(dynamic_chunk_size, dim=0):
+                chunk_qkv = txt_module(chunk)
+                chunk_qkv = chunk_qkv.reshape(chunk_qkv.shape[0], 3, self.heads, self.head_dim)
+                q, k, v = chunk_qkv.unbind(1)
+                txt_q[offset:offset + chunk.shape[0]] = q
+                txt_k[offset:offset + chunk.shape[0]] = k
+                txt_v[offset:offset + chunk.shape[0]] = v
+                offset += chunk.shape[0]
+        else:
+            vid_qkv_win = vid_module(vid_win)
+            txt_qkv = txt_module(txt.to(device=vid.device, dtype=vid.dtype))
+            vid_qkv_win = vid_qkv_win.reshape(vid_qkv_win.shape[0], 3, self.heads, self.head_dim)
+            txt_qkv = txt_qkv.reshape(txt_qkv.shape[0], 3, self.heads, self.head_dim)
+            vid_q, vid_k, vid_v = vid_qkv_win.unbind(1)
+            txt_q, txt_k, txt_v = txt_qkv.unbind(1)
 
         vid_q, txt_q = self.norm_q(vid_q, txt_q)
         vid_k, txt_k = self.norm_k(vid_k, txt_k)
@@ -798,6 +905,7 @@ class NaMMSRTransformerBlock(nn.Module):
             expand_ratio=expand_ratio,
             shared_weights=shared_weights,
             vid_only=is_last_layer,
+            chunkable=True,
             device=device, dtype=dtype, operations=operations
         )
         self.ada = MMModule(ada, dim=dim, emb_dim=emb_dim, layers=["attn", "mlp"], shared_weights=shared_weights, vid_only=is_last_layer, device=device, dtype=dtype)
@@ -813,12 +921,19 @@ class NaMMSRTransformerBlock(nn.Module):
         torch.FloatTensor,
     ]:
         vid_module = self.mlp.vid if not self.mlp.shared_weights else self.mlp.all
+        
+        free_memory = comfy.model_management.get_free_memory(vid.device)
+        usable_memory = max(0, free_memory * 0.9)
+        bytes_per_token = vid.shape[-1] * 32
+        dynamic_chunk_size = max(1, int(usable_memory / bytes_per_token))
+        dynamic_chunk_size = min(vid.shape[0], dynamic_chunk_size)
+        
         if comfy.model_management.in_training or vid.requires_grad:
-            vid = torch.cat([vid_module(chunk) for chunk in vid.split(SEEDVR2_7B_MLP_CHUNK, dim=0)], dim=0)
+            vid = vid_module(vid)
         else:
             vid_out = None
             offset = 0
-            for chunk in vid.split(SEEDVR2_7B_MLP_CHUNK, dim=0):
+            for chunk in vid.split(dynamic_chunk_size, dim=0):
                 chunk_out = vid_module(chunk)
                 if vid_out is None:
                     vid_out = chunk_out.new_empty((vid.shape[0], *chunk_out.shape[1:]))
