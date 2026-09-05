@@ -291,27 +291,33 @@ def resolve_gpu_device_option(option: str):
 
 @contextmanager
 def cuda_device_context(device):
-    """Context manager that sets torch.cuda.current_device to match *device*.
+    """Context manager that sets the current accelerator to match *device*.
 
-    Used when running operations on a non-default CUDA device so that custom
-    CUDA kernels (e.g. comfy_kitchen fp8 quantization) pick up the correct
-    device index.  The previous device is restored on exit.
+    Used when running operations on a non-default CUDA or NPU device so that
+    custom kernels pick up the correct device index. The previous device is
+    restored on exit.
 
-    No-op when *device* is not CUDA, has no explicit index, or already matches
-    the current device.
+    No-op for other device types, when *device* has no explicit index, or when
+    the requested device is already current.
     """
+    device_module = None
+    if device.type == "cuda":
+        device_module = torch.cuda
+    elif device.type == "npu":
+        device_module = torch.npu
+
     prev = None
-    if device.type == "cuda" and device.index is not None:
-        prev = torch.cuda.current_device()
+    if device_module is not None and device.index is not None:
+        prev = device_module.current_device()
         if prev != device.index:
-            torch.cuda.set_device(device)
+            device_module.set_device(device)
         else:
             prev = None
     try:
         yield
     finally:
         if prev is not None:
-            torch.cuda.set_device(prev)
+            device_module.set_device(prev)
 
 def get_total_memory(dev=None, torch_total_too=False):
     global directml_enabled
@@ -1826,12 +1832,17 @@ def is_device_xpu(device):
 def is_device_cuda(device):
     return is_device_type(device, 'cuda')
 
+def is_device_npu(device):
+    return is_device_type(device, 'npu')
+
 def set_torch_device(device):
-    """Set the current device for the given torch device. Supports CUDA and XPU."""
+    """Set the current device for the given torch accelerator."""
     if is_device_cuda(device):
         torch.cuda.set_device(device)
     elif is_device_xpu(device):
         torch.xpu.set_device(device)
+    elif is_device_npu(device):
+        torch.npu.set_device(device)
 
 def is_directml_enabled():
     global directml_enabled
