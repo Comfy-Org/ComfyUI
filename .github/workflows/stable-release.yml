@@ -165,7 +165,7 @@ jobs:
           ls
 
       - name: Upload binaries to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           files: ComfyUI_windows_portable_${{ inputs.rel_name }}${{ inputs.rel_extra_name }}.7z
           tag_name: ${{ inputs.git_tag }}

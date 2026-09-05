@@ -40,7 +40,7 @@ jobs:
     runs-on: ${{ matrix.runner_label }}
     steps:
       - name: Test Workflows
-        uses: comfy-org/comfy-action@main
+        uses: comfy-org/comfy-action@2239a587d36772deab9605f1543abf0dc8aa8f92 # main
         with:
           os: ${{ matrix.os }}
           python_version: ${{ matrix.python_version }}
@@ -90,7 +90,7 @@ jobs:
     runs-on: ${{ matrix.runner_label }}
     steps:
       - name: Test Workflows
-        uses: comfy-org/comfy-action@main
+        uses: comfy-org/comfy-action@2239a587d36772deab9605f1543abf0dc8aa8f92 # main
         with:
           os: ${{ matrix.os }}
           python_version: ${{ matrix.python_version }}
