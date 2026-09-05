@@ -399,6 +399,10 @@ def recursive_search(directory: str, excluded_dir_names: list[str] | None=None) 
     if excluded_dir_names is None:
         excluded_dir_names = []
 
+    # Check if we should skip following symlinks
+    skip_symlinks = getattr(args, 'skip_symlink_scan', False)
+    followlinks = not skip_symlinks
+
     result = []
     dirs = {}
 
@@ -413,7 +417,19 @@ def recursive_search(directory: str, excluded_dir_names: list[str] | None=None) 
     subdirs: list[str]
     filenames: list[str]
 
-    for dirpath, subdirs, filenames in os.walk(directory, followlinks=True, topdown=True):
+    for dirpath, subdirs, filenames in os.walk(directory, followlinks=followlinks, topdown=True):
+        # If skipping symlinks, filter out symlinked directories
+        if skip_symlinks:
+            filtered_subdirs = []
+            for d in subdirs:
+                subdir_path = os.path.join(dirpath, d)
+                # Check if it's a symlink
+                if os.path.islink(subdir_path):
+                    logging.debug(f"Skipping symlink: {subdir_path}")
+                    continue
+                filtered_subdirs.append(d)
+            subdirs[:] = filtered_subdirs
+        
         subdirs[:] = [d for d in subdirs if d not in excluded_dir_names]
         for file_name in filenames:
             try:
