@@ -550,6 +550,27 @@ def start_comfyui(asyncio_loop=None):
     comfy.model_management.set_cudnn_benchmark()
 
     hook_breaker_ac10a0.restore_functions()
+    
+    # Build static extensions after loading custom nodes
+    try:
+        import build_static_extensions
+        # Check if we should build static extensions (skip if all custom nodes disabled)
+        if (not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0:
+            logging.info("Building static extensions...")
+            result = build_static_extensions.build_static_extensions(
+                output_dir="./static_extensions",
+                clean=False,  # Don't clean by default to avoid deleting existing files
+                use_oss=True,  # Enable OSS upload by default
+                verbose=False
+            )
+            if result:
+                total_processed, total_uploaded = result
+                logging.info(f"Static extensions build completed: {total_processed} files processed, {total_uploaded} uploaded to OSS")
+            else:
+                logging.debug("No static extensions found to build")
+    except Exception as e:
+        logging.warning(f"Failed to build static extensions: {e}")
+        logging.debug("Static extensions build error", exc_info=True)
 
     cuda_malloc_warning()
     setup_database()
