@@ -448,8 +448,7 @@ class UserManager():
               Intermediate directories are created as needed.
 
             Returns:
-            - 400: If the 'directory' parameter is missing, or the directory could not
-                   be created.
+            - 400: If the directory could not be created.
             - 403: If the requested path is not allowed.
             - 409: If a file or directory already exists at that path.
             - 200: JSON response with the relative path of the created directory.
@@ -465,6 +464,9 @@ class UserManager():
 
             try:
                 os.makedirs(path)
+            except FileExistsError:
+                # Lost a race with a concurrent request creating the same path.
+                return web.Response(status=409, text="Directory already exists")
             except OSError as e:
                 logging.error("failed to create directory '%s': %s", path, e)
                 return web.Response(status=400, text="Failed to create directory")
