@@ -32,11 +32,11 @@ jobs:
         pull-requests: "read"
     runs-on: windows-latest
     steps:
-        - uses: actions/checkout@v4
+        - uses: actions/checkout@v6
           with:
             fetch-depth: 30
             persist-credentials: false
-        - uses: actions/setup-python@v5
+        - uses: actions/setup-python@v6
           with:
             python-version: 3.${{ inputs.python_minor }}.${{ inputs.python_patch }}
         - shell: bash
