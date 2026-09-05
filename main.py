@@ -446,13 +446,15 @@ def prompt_worker(q, server_instance):
                 asset_seeder.resume()
 
 
-async def run(server_instance, address='', port=8188, verbose=True, call_on_start=None):
-    addresses = []
-    for addr in address.split(","):
-        addresses.append((addr, port))
-    await asyncio.gather(
-        server_instance.start_multi_address(addresses, call_on_start, verbose), server_instance.publish_loop()
-    )
+async def run(server_instance, address='', port=8188, unix_socket=None, verbose=True, call_on_start=None):
+    if unix_socket:
+        start_coro = server_instance.start_unix_socket(unix_socket, verbose)
+    else:
+        addresses = []
+        for addr in address.split(","):
+            addresses.append((addr, port))
+        start_coro = server_instance.start_multi_address(addresses, call_on_start, verbose)
+    await asyncio.gather(start_coro, server_instance.publish_loop())
 
 def hijack_progress(server_instance):
     def hook(value, total, preview_image, prompt_id=None, node_id=None):
@@ -576,7 +578,7 @@ def start_comfyui(asyncio_loop=None):
 
     async def start_all():
         await prompt_server.setup()
-        await run(prompt_server, address=args.listen, port=args.port, verbose=not args.dont_print_server, call_on_start=call_on_start)
+        await run(prompt_server, address=args.listen, port=args.port, unix_socket=args.unix_socket, verbose=not args.dont_print_server, call_on_start=call_on_start)
 
     # Returning these so that other code can integrate with the ComfyUI loop and server
     return asyncio_loop, prompt_server, start_all

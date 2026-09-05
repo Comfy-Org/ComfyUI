@@ -1,6 +1,7 @@
 import errno
 import os
 import sys
+import stat
 import asyncio
 import traceback
 import time
@@ -1452,6 +1453,38 @@ class PromptServer():
 
         if call_on_start is not None:
             call_on_start(scheme, self.address, self.port)
+
+    async def start_unix_socket(self, unix_socket, verbose=True):
+        """Start the server listening on a Unix domain socket instead of TCP."""
+        if sys.platform == 'win32':
+            raise RuntimeError("Unix sockets are not supported on Windows. Please use --listen and --port instead.")
+
+        if verbose:
+            logging.info("Starting server\n")
+
+        if os.path.lexists(unix_socket):
+            st_mode = os.lstat(unix_socket).st_mode
+            if not stat.S_ISSOCK(st_mode):
+                raise RuntimeError(f"Refusing to remove non-socket path: {unix_socket}")
+            os.unlink(unix_socket)
+
+        runner = web.AppRunner(self.app, access_log=None)
+        await runner.setup()
+        try:
+            site = web.UnixSite(runner, unix_socket)
+            await site.start()
+            os.chmod(unix_socket, 0o660)
+        except OSError as e:
+            await runner.cleanup()
+            raise RuntimeError(f"Failed to set socket permissions: {e}") from e
+        except Exception:
+            await runner.cleanup()
+            raise
+        self.address = unix_socket
+        self.port = None
+        self.unix_socket = unix_socket
+        if verbose:
+            logging.info("Listening on Unix socket: {}".format(unix_socket))
 
     def add_on_prompt_handler(self, handler):
         self.on_prompt_handlers.append(handler)
