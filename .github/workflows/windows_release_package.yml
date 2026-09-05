@@ -39,7 +39,8 @@ jobs:
               cu${{ inputs.cu }}_python_deps.tar
               update_comfyui_and_python_dependencies.bat
             key: ${{ runner.os }}-build-cu${{ inputs.cu }}-${{ inputs.python_minor }}
-        - shell: bash
+        - name: Extract cached Python dependencies
+          shell: bash
           run: |
             mv cu${{ inputs.cu }}_python_deps.tar ../
             mv update_comfyui_and_python_dependencies.bat ../
@@ -52,7 +53,8 @@ jobs:
           with:
             fetch-depth: 150
             persist-credentials: false
-        - shell: bash
+        - name: Set up embedded Python and install dependencies
+          shell: bash
           run: |
             cd ..
             cp -r ComfyUI ComfyUI_copy
@@ -68,8 +70,11 @@ jobs:
             rm ./Lib/site-packages/torch/lib/dnnl.lib #I don't think this is actually used and I need the space
             rm ./Lib/site-packages/torch/lib/libprotoc.lib
             rm ./Lib/site-packages/torch/lib/libprotobuf.lib
-            cd ..
 
+        - name: Bundle ComfyUI portable layout
+          shell: bash
+          run: |
+            cd ..
             git clone --depth 1 https://github.com/comfyanonymous/taesd
             cp taesd/*.safetensors ./ComfyUI_copy/models/vae_approx/
 
@@ -84,12 +89,17 @@ jobs:
             cp -r ComfyUI/.ci/windows_nvidia_base_files/* ./
             cp ../update_comfyui_and_python_dependencies.bat ./update/
 
+        - name: Create portable 7z archive
+          shell: bash
+          run: |
             cd ..
-
             "C:\Program Files\7-Zip\7z.exe" a -t7z -m0=lzma2 -mx=9 -mfb=128 -md=768m -ms=on -mf=BCJ2 ComfyUI_windows_portable.7z ComfyUI_windows_portable
             mv ComfyUI_windows_portable.7z ComfyUI/new_ComfyUI_windows_portable_nvidia_cu${{ inputs.cu }}_or_cpu.7z
 
-            cd ComfyUI_windows_portable
+        - name: Quick-test portable package
+          shell: bash
+          run: |
+            cd ../ComfyUI_windows_portable
             python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu
 
             python_embeded/python.exe -s ./update/update.py ComfyUI/
