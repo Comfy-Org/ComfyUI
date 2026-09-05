@@ -268,6 +268,22 @@ Install the dependencies by opening your terminal inside the ComfyUI folder and:
 
 After this you should have everything installed and can proceed to running ComfyUI.
 
+#### Linux: Python Build Requirements
+
+If you are building Python from source on Linux (e.g., using pyenv, asdf, or compiling manually), ensure the following development libraries are installed **before** building Python. These are required for the `_bz2` and `_lzma` standard library modules:
+
+**Debian/Ubuntu:**
+```bash
+sudo apt install libbz2-dev liblzma-dev
+```
+
+**RHEL/Fedora/CentOS:**
+```bash
+sudo dnf install bzip2-devel xz-devel
+```
+
+After installing these packages, rebuild Python to include the `_bz2` and `_lzma` modules.
+
 ### Others:
 
 #### Apple Mac silicon
