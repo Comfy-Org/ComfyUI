@@ -49,3 +49,8 @@ def test_empty_input_directory():
     with tempfile.TemporaryDirectory() as temp_dir:
         set_input_directory(temp_dir)
         assert get_input_subfolders() == []  # Empty since we don't include root
+
+
+def test_supported_pt_extensions():
+    from folder_paths import supported_pt_extensions
+    assert ".onnx" in supported_pt_extensions
