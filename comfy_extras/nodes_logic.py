@@ -168,6 +168,46 @@ class SoftSwitchNode(io.ComfyNode):
         return io.NodeOutput(on_true if switch else on_false)
 
 
+class SwitchInverseNode(SwitchNode):
+    @classmethod
+    def define_schema(cls):
+        template = io.MatchType.Template("switch")
+        return io.Schema(
+            node_id="ComfySwitchInverseNode",
+            display_name="Switch (Inverse)",
+            category="logic",
+            is_experimental=True,
+            inputs=[
+                io.Boolean.Input("switch"),
+                io.MatchType.Input("on_true", template=template, lazy=True),
+                io.MatchType.Input("on_false", template=template, lazy=True),
+            ],
+            outputs=[
+                io.MatchType.Output(template=template, display_name="output"),
+            ],
+        )
+
+
+class SoftSwitchInverseNode(SoftSwitchNode):
+    @classmethod
+    def define_schema(cls):
+        template = io.MatchType.Template("switch")
+        return io.Schema(
+            node_id="ComfySoftSwitchInverseNode",
+            display_name="Soft Switch (Inverse)",
+            category="logic",
+            is_experimental=True,
+            inputs=[
+                io.Boolean.Input("switch"),
+                io.MatchType.Input("on_true", template=template, lazy=True, optional=True),
+                io.MatchType.Input("on_false", template=template, lazy=True, optional=True),
+            ],
+            outputs=[
+                io.MatchType.Output(template=template, display_name="output"),
+            ],
+        )
+
+
 class CustomComboNode(io.ComfyNode):
     """
     Frontend node that allows user to write their own options for a combo.
@@ -337,11 +377,13 @@ class LogicExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             SwitchNode,
+            SwitchInverseNode,
             CustomComboNode,
             NotNode,
             AndNode,
             OrNode,
             # SoftSwitchNode,
+            # SoftSwitchInverseNode,
             # ConvertStringToComboNode,
             # DCTestNode,
             # AutogrowNamesTestNode,
