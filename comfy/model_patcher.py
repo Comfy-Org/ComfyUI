@@ -904,7 +904,15 @@ class ModelPatcher:
         inplace_update = self.weight_inplace_update or inplace_update
 
         if key not in self.backup and not return_weight:
-            self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
+            # When set_func is present (e.g. QuantizedTensor/fp8_scaled ops), it replaces
+            # the parameter object rather than modifying it in-place.  The restore path
+            # must therefore also replace the parameter (set_attr_param) instead of doing
+            # an in-place copy (copy_to_param), because QuantizedTensor.__torch_dispatch__
+            # routes copy_() through dequant-and-fallback which silently fails to update
+            # the underlying quantized data.  Force inplace_update=False in the backup
+            # for these keys so unpatch_model uses set_attr_param for restoration.
+            backup_inplace = inplace_update if set_func is None else False
+            self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight.to(device=self.offload_device, copy=inplace_update), backup_inplace)
 
         temp_dtype = comfy.model_management.lora_compute_dtype(device_to) if key in self.patches else None
         if device_to is not None:
