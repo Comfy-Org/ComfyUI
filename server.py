@@ -42,6 +42,7 @@ from comfy_api import feature_flags
 from comfy.comfy_api_env import get_environment_overrides
 import node_helpers
 from comfyui_version import __version__
+from app.api_docs import add_api_docs_routes
 from app.frontend_management import FrontendManager, parse_version
 from comfy_api.internal import _ComfyNodeInternal
 from app.assets.seeder import asset_seeder
@@ -1223,6 +1224,8 @@ class PromptServer():
         self.custom_node_manager.add_routes(self.routes, self.app, nodes.LOADED_MODULE_DIRS.items())
         self.subgraph_manager.add_routes(self.routes, nodes.LOADED_MODULE_DIRS.items())
         self.node_replace_manager.add_routes(self.routes)
+        if args.enable_api_docs:
+            add_api_docs_routes(self.routes)
         self.app.add_subapp('/internal', self.internal_routes.get_app())
 
         # Prefix every route with /api for easier matching for delegation.

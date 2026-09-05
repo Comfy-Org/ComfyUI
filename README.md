@@ -380,6 +380,12 @@ Use `--tls-keyfile key.pem --tls-certfile cert.pem` to enable TLS/SSL, the app w
 > Note: Windows users can use [alexisrolland/docker-openssl](https://github.com/alexisrolland/docker-openssl) or one of the [3rd party binary distributions](https://wiki.openssl.org/index.php/Binaries) to run the command example above.
 <br/><br/>If you use a container, note that the volume mount `-v` can be a relative path so `... -v ".\:/openssl-certs" ...` would create the key & cert files in the current directory of your command prompt or powershell terminal.
 
+## How to browse the HTTP API?
+
+Launch with `--enable-api-docs` to serve the OpenAPI specification at `/openapi.yaml` and a browsable API reference at `/api-docs`.
+
+Both are off by default. The reference page loads its viewer from a CDN, so it needs outbound network access to render; the specification itself is served locally and can be read with any offline viewer, such as `npx @redocly/cli preview-docs openapi.yaml`.
+
 ## Support and dev channel
 
 [Discord](https://comfy.org/discord): Try the #help or #feedback channels.
