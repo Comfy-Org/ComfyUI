@@ -14,6 +14,8 @@
 [![][github-downloads-shield]][github-downloads-link]
 [![][github-downloads-latest-shield]][github-downloads-link]
 
+[中文版 README](README_CN.md)
+
 [matrix-shield]: https://img.shields.io/badge/Matrix-000000?style=flat&logo=matrix&logoColor=white
 [matrix-url]: https://app.element.io/#/room/%23comfyui_space%3Amatrix.org
 [website-shield]: https://img.shields.io/badge/ComfyOrg-4285F4?style=flat
