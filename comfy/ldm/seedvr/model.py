@@ -370,11 +370,20 @@ def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tens
     seq_len = out.shape[-2]
     for start in range(0, seq_len, SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS):
         end = min(start + SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS, seq_len)
-        freqs_chunk = freqs_cis[start:end]
-        if rot_d == out.shape[-1]:
-            out[..., start:end, :] = apply_rope1(out[..., start:end, :], freqs_chunk).to(out.dtype)
-        else:
-            out[..., start:end, :rot_d] = apply_rope1(out[..., start:end, :rot_d], freqs_chunk).to(out.dtype)
+        freqs_chunk = freqs_cis[start:end]  # [Ls, K, 2, 2] rotation matrices
+        target = out[..., start:end, :]
+        sub = target[..., :rot_d] if rot_d != out.shape[-1] else target
+        # comfy-kitchen/flux apply_rope1 mis-handle this 3D layout; the freqs are
+        # explicit 2x2 rotation matrices, so rotate each pair directly.
+        if sub.numel():
+            pairs = sub.reshape(*sub.shape[:-1], -1, 2).to(freqs_chunk.dtype)
+            f0 = freqs_chunk[..., 0, :]  # [Ls, K, 2]
+            f1 = freqs_chunk[..., 1, :]
+            rope = (pairs[..., 0:1] * f0 + pairs[..., 1:2] * f1).reshape(sub.shape).to(out.dtype)
+            if rot_d == out.shape[-1]:
+                target[...] = rope
+            else:
+                target[..., :rot_d] = rope
     return out
 
 
