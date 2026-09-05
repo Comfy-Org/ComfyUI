@@ -27,8 +27,8 @@ class LatentRebatch(io.ComfyNode):
         samples = latents[list_ind]['samples']
         shape = samples.shape
         mask = latents[list_ind]['noise_mask'] if 'noise_mask' in latents[list_ind] else torch.ones((shape[0], 1, shape[2]*8, shape[3]*8), device='cpu')
-        if mask.shape[-1] != shape[-1] * 8 or mask.shape[-2] != shape[-2]:
-            torch.nn.functional.interpolate(mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1])), size=(shape[-2]*8, shape[-1]*8), mode="bilinear")
+        if mask.shape[-1] != shape[-1] * 8 or mask.shape[-2] != shape[-2] * 8:
+            mask = torch.nn.functional.interpolate(mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1])), size=(shape[-2]*8, shape[-1]*8), mode="bilinear")
         if mask.shape[0] < samples.shape[0]:
             mask = mask.repeat((shape[0] - 1) // mask.shape[0] + 1, 1, 1, 1)[:shape[0]]
         if 'batch_index' in latents[list_ind]:
