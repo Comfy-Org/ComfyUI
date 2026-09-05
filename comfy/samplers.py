@@ -783,15 +783,23 @@ def resolve_areas_and_cond_masks_multidim(conditions, dims, device):
             mask = c['mask']
             mask = mask.to(device=device)
             modified = c.copy()
-            if len(mask.shape) == len(dims):
+            # Normalize mask to [batch, *spatial_dims]
+            target_ndim = len(dims) + 1
+            while mask.ndim > target_ndim and mask.shape[0] == 1:
+                mask = mask.squeeze(0)
+            while mask.ndim < target_ndim:
                 mask = mask.unsqueeze(0)
             if mask.shape[1:] != dims:
-                if mask.ndim < 4:
+                if len(dims) == 1:
+                    mask = torch.nn.functional.interpolate(
+                        mask.unsqueeze(1), size=dims[0],
+                        mode='linear', align_corners=False).squeeze(1)
+                elif mask.ndim < 4:
                     mask = comfy.utils.common_upscale(mask.unsqueeze(1), dims[-1], dims[-2], 'bilinear', 'none').squeeze(1)
                 else:
                     mask = comfy.utils.common_upscale(mask, dims[-1], dims[-2], 'bilinear', 'none')
 
-            if modified.get("set_area_to_bounds", False): #TODO: handle dim != 2
+            if modified.get("set_area_to_bounds", False) and len(dims) == 2:
                 bounds = torch.max(torch.abs(mask),dim=0).values.unsqueeze(0)
                 boxes, is_empty = get_mask_aabb(bounds)
                 if is_empty[0]:
