@@ -84,7 +84,7 @@ class _PollUIState:
     active_since: float | None = None  # start time of current active interval (None if queued)
 
 
-_RETRY_STATUS = {408, 500, 502, 503, 504}  # status 429 is handled separately
+_RETRY_STATUS = {401, 408, 500, 502, 503, 504}  # status 429 is handled separately
 _MAX_RETRY_AFTER_WAIT = 150.0  # Cap a server Retry-After at this many seconds so a large hint can't block execution
 
 PRICE_CREDITS_HEADER = "X-Comfy-Credits-Used"
