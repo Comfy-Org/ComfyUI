@@ -1107,12 +1107,29 @@ class PromptServer():
                 if "partial_execution_targets" in json_data:
                     partial_execution_targets = json_data["partial_execution_targets"]
 
+                node_failure_policy = json_data.get(
+                    "node_failure_policy",
+                    execution.NODE_FAILURE_POLICY_FAIL_FAST,
+                )
+                if not isinstance(node_failure_policy, str) or node_failure_policy not in execution.NODE_FAILURE_POLICIES:
+                    error = {
+                        "type": "invalid_node_failure_policy",
+                        "message": "node_failure_policy must be 'fail_fast' or 'continue_independent'",
+                        "details": f"Invalid node_failure_policy: {node_failure_policy!r}",
+                        "extra_info": {},
+                    }
+                    return web.json_response({"error": error, "node_errors": {}}, status=400)
+
                 self.node_replace_manager.apply_replacements(prompt)
 
                 valid = await execution.validate_prompt(prompt_id, prompt, partial_execution_targets)
                 extra_data = {}
                 if "extra_data" in json_data:
                     extra_data = json_data["extra_data"]
+
+                extra_data.pop(execution.NODE_FAILURE_POLICY_EXTRA_DATA_KEY, None)
+                if node_failure_policy == execution.NODE_FAILURE_POLICY_CONTINUE_INDEPENDENT:
+                    extra_data[execution.NODE_FAILURE_POLICY_EXTRA_DATA_KEY] = node_failure_policy
 
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]

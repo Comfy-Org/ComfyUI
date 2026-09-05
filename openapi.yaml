@@ -1063,6 +1063,13 @@ components:
                 number:
                     description: Priority number for the queue (lower numbers have higher priority)
                     type: number
+                node_failure_policy:
+                    default: fail_fast
+                    description: Controls whether a runtime node failure terminates the prompt or only blocks dependent nodes
+                    enum:
+                        - fail_fast
+                        - continue_independent
+                    type: string
                 partial_execution_targets:
                     description: List of node names to execute
                     items:
