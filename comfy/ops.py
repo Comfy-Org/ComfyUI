@@ -1325,6 +1325,11 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 return _quantized_weight_state_dict(self, sd, prefix, extra_quant_params=("input_scale", "pre_quant_scale"))
 
             def _forward(self, input, weight, bias):
+                if getattr(self, "layout_type", None) == "TensorCoreNVFP4Layout" and isinstance(input, QuantizedTensor) and isinstance(weight, QuantizedTensor):
+                    output = torch.mm(input, weight.t())
+                    if bias is not None:
+                        output = output + bias
+                    return output
                 return torch.nn.functional.linear(input, weight, bias)
 
             def forward_comfy_cast_weights(
