@@ -154,6 +154,44 @@ class CacheSet:
         }
         return result
 
+# The frontend flattens UI subgraphs into colon-joined node ids ("12:5" is node 5 inside subgraph node 12).
+SUBGRAPH_ID_SEPARATOR = ":"
+
+def subgraph_scope_of(node_id):
+    if SUBGRAPH_ID_SEPARATOR not in node_id:
+        return ""
+    return node_id.rsplit(SUBGRAPH_ID_SEPARATOR, 1)[0]
+
+def mark_subgraph_internal_nodes_no_cache(prompt):
+    """Sets "no_cache" on nodes whose outputs never leave their subgraph, returns the marked ids."""
+    consumer_scopes_by_producer = {}
+    for consumer_id, node in prompt.items():
+        consumer_scope = subgraph_scope_of(consumer_id)
+        for input_value in node.get("inputs", {}).values():
+            if is_link(input_value):
+                producer_id = input_value[0]
+                consumer_scopes_by_producer.setdefault(producer_id, set()).add(consumer_scope)
+
+    marked_node_ids = []
+    for node_id, node in prompt.items():
+        scope = subgraph_scope_of(node_id)
+        if scope == "":
+            continue
+        class_def = nodes.NODE_CLASS_MAPPINGS.get(node.get("class_type"))
+        if class_def is not None and getattr(class_def, "OUTPUT_NODE", False):
+            # Output nodes stay cached so unchanged re-queues stay no-ops.
+            continue
+        value_escapes_subgraph = False
+        for consumer_scope in consumer_scopes_by_producer.get(node_id, ()):
+            consumer_stays_inside = consumer_scope == scope or consumer_scope.startswith(scope + SUBGRAPH_ID_SEPARATOR)
+            if not consumer_stays_inside:
+                value_escapes_subgraph = True
+                break
+        if not value_escapes_subgraph:
+            node["no_cache"] = True
+            marked_node_ids.append(node_id)
+    return marked_node_ids
+
 SENSITIVE_EXTRA_DATA_KEYS = ("auth_token_comfy_org", "api_key_comfy_org")
 
 def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=None, extra_data={}):
@@ -614,7 +652,8 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
 
         cache_entry = CacheEntry(ui=ui_outputs.get(unique_id), outputs=output_data)
         execution_list.cache_update(unique_id, cache_entry)
-        await caches.outputs.set(unique_id, cache_entry)
+        if not dynprompt.get_node(unique_id).get("no_cache", False):
+            await caches.outputs.set(unique_id, cache_entry)
 
     except comfy.model_management.InterruptProcessingException as iex:
         logging.info("Processing interrupted")
@@ -749,6 +788,11 @@ class PromptExecutor:
 
         try:
             with torch.inference_mode():
+                if args.disable_subgraph_caching:
+                    no_cache_node_ids = mark_subgraph_internal_nodes_no_cache(prompt)
+                    if len(no_cache_node_ids) > 0:
+                        logging.info(f"Skipping persistent cache for {len(no_cache_node_ids)} subgraph-internal nodes")
+                        logging.debug(f"Subgraph-internal nodes not cached: {sorted(no_cache_node_ids)}")
                 dynamic_prompt = DynamicPrompt(prompt)
                 reset_progress_state(prompt_id, dynamic_prompt)
                 add_progress_handler(WebUIProgressHandler(self.server))

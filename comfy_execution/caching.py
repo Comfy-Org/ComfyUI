@@ -95,7 +95,9 @@ class CacheKeySetInputSignature(CacheKeySet):
             if not self.dynprompt.has_node(node_id):
                 continue
             node = self.dynprompt.get_node(node_id)
-            self.keys[node_id] = await self.get_node_signature(self.dynprompt, node_id)
+            # No data key for "no_cache" nodes; the subcache key stays so expansion under them works.
+            if not node.get("no_cache", False):
+                self.keys[node_id] = await self.get_node_signature(self.dynprompt, node_id)
             self.subcache_keys[node_id] = (node_id, node["class_type"])
 
     async def get_node_signature(self, dynprompt, node_id):
@@ -203,6 +205,8 @@ class BasicCache:
         if not self.initialized:
             return None
         cache_key = self.cache_key_set.get_data_key(node_id)
+        if cache_key is None:
+            return None
         if cache_key in self.cache:
             return self.cache[cache_key]
         return None
@@ -210,11 +214,15 @@ class BasicCache:
     def set_local(self, node_id, value):
         assert self.initialized
         cache_key = self.cache_key_set.get_data_key(node_id)
+        if cache_key is None:
+            return
         self.cache[cache_key] = value
 
     async def _set_immediate(self, node_id, value):
         assert self.initialized
         cache_key = self.cache_key_set.get_data_key(node_id)
+        if cache_key is None:
+            return
         self.cache[cache_key] = value
 
         await self._notify_providers_store(node_id, cache_key, value)
@@ -223,6 +231,8 @@ class BasicCache:
         if not self.initialized:
             return None
         cache_key = self.cache_key_set.get_data_key(node_id)
+        if cache_key is None:
+            return None
 
         if cache_key in self.cache:
             return self.cache[cache_key]
