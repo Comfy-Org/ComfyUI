@@ -2,7 +2,7 @@
 name = "ComfyUI"
 version = "0.34.0"
 readme = "README.md"
-license = { file = "LICENSE" }
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 
 [project.urls]
