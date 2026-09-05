@@ -1663,7 +1663,7 @@ class Gemma4Model(sd1_clip.SDClipModel):
         self.dtypes.add(dtype)
         super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config={}, dtype=dtype, special_tokens={"start": 2, "pad": 0}, layer_norm_hidden_state=False, model_class=self.model_class, enable_attention_masks=attention_mask, return_attention_masks=attention_mask, model_options=model_options)
 
-    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0):
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, mtp=True):
         if isinstance(tokens, dict):
             tokens = next(iter(tokens.values()))
         tokens_only = [[t[0] for t in b] for b in tokens]
@@ -1707,9 +1707,6 @@ def gemma4_te(dtype_llama=None, llama_quantization_metadata=None, model_class=No
             if dtype_llama is not None:
                 dtype = dtype_llama
             super().__init__(device=device, dtype=dtype, name="gemma4", clip_model=clip_model, model_options=model_options)
-
-        def get_dynamic_vram__units(self):
-            return getattr(self, self.clip).transformer.model.get_dynamic_vram__units()
     return Gemma4TEModel_
 
 

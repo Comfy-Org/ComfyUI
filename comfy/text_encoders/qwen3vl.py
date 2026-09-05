@@ -127,7 +127,7 @@ class Qwen3VLClipModel(sd1_clip.SDClipModel):
                          model_class=_make_qwen3vl_model(model_type), enable_attention_masks=attention_mask,
                          return_attention_masks=attention_mask, model_options=model_options)
 
-    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0):
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, mtp=True):
         if isinstance(tokens, dict):
             tokens = next(iter(tokens.values()))
         tokens_only = [[t[0] for t in b] for b in tokens]
