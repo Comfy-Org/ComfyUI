@@ -58,6 +58,13 @@ class ListAssetsQuery(BaseModel):
     tags_none: list[str] = Field(default_factory=list)
     name_contains: str | None = None
 
+    # Filter by exact content hash (emitted as `asset_hash` in responses)
+    hash: str | None = None
+
+    # Accepted for API compatibility; has no effect, as there is no shared
+    # asset pool to include or exclude
+    include_public: bool = True
+
     # Accept either a JSON string (query param) or a dict
     metadata_filter: dict[str, Any] | None = None
 
@@ -91,6 +98,14 @@ class ListAssetsQuery(BaseModel):
                 if isinstance(item, str):
                     out.extend([t.strip() for t in item.split(",") if t.strip()])
             return out
+        return v
+
+    @field_validator("hash", mode="before")
+    @classmethod
+    def _normalize_hash(cls, v):
+        # Stored hashes are lowercase `blake3:<hex>`; no pattern is enforced
+        if isinstance(v, str):
+            return v.strip().lower()
         return v
 
     @field_validator("metadata_filter", mode="before")

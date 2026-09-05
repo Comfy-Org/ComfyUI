@@ -335,6 +335,7 @@ async def list_assets_route(request: web.Request) -> web.Response:
             any_tags=tags_any,
             name_contains=q.name_contains,
             metadata_filter=q.metadata_filter,
+            asset_hash=q.hash,
             limit=q.limit,
             offset=q.offset,
             sort=sort,
