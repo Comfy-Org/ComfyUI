@@ -238,7 +238,7 @@ def filter_files_content_types(files: list[str], content_types: List[Literal["im
     global extension_mimetypes_cache
     result = []
     for file in files:
-        extension = file.split('.')[-1]
+        extension = file.split('.')[-1].lower()
         if extension not in extension_mimetypes_cache:
             mime_type, _ = mimetypes.guess_type(file, strict=False)
             if not mime_type:

@@ -51,6 +51,14 @@ def test_categorizes_all_uniquely(mock_dir, file_extensions, patched_mimetype_ca
         assert len(filtered_files) == len(extensions)
 
 
+def test_categorizes_uppercase_extensions(patched_mimetype_cache):
+    # Extensions must be matched case-insensitively (like filter_files_extensions),
+    # so an uppercase 3D-model extension isn't dropped just because the mimetype
+    # cache keys and the OS mimetypes DB are lowercase.
+    files = ["sample_model.FBX", "sample_model.fbx"]
+    assert filter_files_content_types(files, ["model"]) == ["sample_model.FBX", "sample_model.fbx"]
+
+
 def test_handles_bad_extensions():
     files = ["file1.txt", "file2.py", "file3.example", "file4.pdf", "file5.ini", "file6.doc", "file7.md"]
     assert filter_files_content_types(files, ["image", "audio", "video"]) == []
