@@ -51,7 +51,9 @@ except ImportError:
         logging.error(f"\n\nTo use the `--use-flash-attention` feature, the `flash-attn` package must be installed first.\ncommand:\n\t{sys.executable} -m pip install flash-attn")
         exit(-1)
 
-COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE = comfy_kitchen.int8_attention_is_available()
+COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE = (
+    torch.version.hip is None and comfy_kitchen.int8_attention_is_available()
+)
 
 REGISTERED_ATTENTION_FUNCTIONS = {}
 def register_attention_function(name: str, func: Callable):
