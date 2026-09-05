@@ -63,7 +63,7 @@ class ClipVisionModel():
         return self.model.state_dict()
 
     def encode_image(self, image, crop=True):
-        comfy.model_management.load_model_gpu(self.patcher)
+        comfy.model_management.load_models_gpu([self.patcher])
         if self.model_type == "siglip2_vision_model":
             pixel_values = comfy.clip_model.siglip2_preprocess(image.to(self.load_device), size=self.image_size, patch_size=self.config.get("patch_size", 16), num_patches=self.config.get("num_patches", 256), mean=self.image_mean, std=self.image_std, crop=crop).float()
         else:
