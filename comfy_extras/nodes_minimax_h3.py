@@ -32,6 +32,8 @@ REF_IMAGE_SHORT_EDGE = 2048
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
+MiniMaxH3ReferenceImage = io.Custom("MINIMAX_H3_REFERENCE_IMAGE")
+
 
 def align_frame_count(n):
     while n % 17 != 5:
@@ -238,6 +240,23 @@ class MiniMaxH3AddGuide(io.ComfyNode):
         return io.NodeOutput(positive)
 
 
+class MiniMaxH3TextEncoderOnlyReference(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3TextEncoderOnlyReference",
+            display_name="MiniMax H3 Text Encoder Only Reference",
+            description="Mark a reference image to condition the MiniMax H3 text encoder without VAE encoding it for the diffusion model.",
+            category="model/conditioning/minimax",
+            inputs=[io.Image.Input("image")],
+            outputs=[MiniMaxH3ReferenceImage.Output(display_name="reference_image")],
+        )
+
+    @classmethod
+    def execute(cls, image) -> io.NodeOutput:
+        return io.NodeOutput({"image": image})
+
+
 class MiniMaxH3ReferenceToVideo(io.ComfyNode):
     """ref2va: prompt + reference images / videos / audio -> conditioning + AV latent.
 
@@ -266,7 +285,9 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
                     tooltip="Reference image sizing. 'match' scales each ref (down only, keeping aspect) to the generation's pixel area; 'max' uses the reference pipeline's 2048px short edge for best identity fidelity. Reference tokens ride through every sampling step, so 'max' can be several times slower."),
                 io.Autogrow.Input("ref_images", optional=True,
                     template=io.Autogrow.TemplatePrefix(
-                        input=io.Image.Input("ref_image", tooltip="Reference image (downscaled to 2048 short edge if larger, never upscaled)"),
+                        input=io.MultiType.Input(
+                            io.Image.Input("ref_image", tooltip="Reference image (downscaled to 2048 short edge if larger, never upscaled)"),
+                            types=[MiniMaxH3ReferenceImage]),
                         prefix="ref_image_", min=0, max=9)),
                 io.Autogrow.Input("ref_videos", optional=True,
                     template=io.Autogrow.TemplatePrefix(
@@ -290,11 +311,14 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
         latent, frame_count = _empty_av_latent(width, height, length)
 
         ref_items = []   # for the tokenizer presentation, in request order
-        ref_blocks = []  # for the DiT payload, same order
+        ref_blocks = []  # VAE-enabled subset for the DiT payload, in request order
+        picture_index = 0
 
-        for img in (ref_images or {}).values():
-            if img is None:
+        for ref_image in (ref_images or {}).values():
+            if ref_image is None:
                 continue
+            text_encoder_only = isinstance(ref_image, dict)
+            img = ref_image["image"] if text_encoder_only else ref_image
             h, w = img.shape[1], img.shape[2]
             if ref_image_size == "match":
                 # aspect-preserving scale (down only) to the generation's pixel area
@@ -305,9 +329,11 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
             th = max(CANVAS_MULTIPLE, round(h * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
             resized = _resize(img[:1], tw, th, "disabled")
             ref_items.append({"type": "image", "data": resized})
-            if vae is not None:
+            if vae is not None and not text_encoder_only:
                 z = vae.encode(resized)
-                ref_blocks.append({"kind": "image", "latent_h": th // 16, "latent_w": tw // 16, "latent": z})
+                ref_blocks.append({"kind": "image", "picture_index": picture_index,
+                                   "latent_h": th // 16, "latent_w": tw // 16, "latent": z})
+            picture_index += 1
 
         ref_video_audios = ref_video_audios or {}
         for name, video_frames in (ref_videos or {}).items():
@@ -616,6 +642,7 @@ class MiniMaxH3Extension(ComfyExtension):
             EmptyMiniMaxH3LatentAV,
             MiniMaxH3ImageToVideo,
             MiniMaxH3AddGuide,
+            MiniMaxH3TextEncoderOnlyReference,
             MiniMaxH3ReferenceToVideo,
             MiniMaxH3SigmaShift,
             MiniMaxH3FunControlNetApply,
