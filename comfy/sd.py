@@ -1355,13 +1355,14 @@ class VAE:
                 output = self.decode_tiled_3d(samples, **args)
         return output.movedim(1, -1)
 
-    def encode(self, pixel_samples):
+    def encode(self, pixel_samples, not_video=None):
         self.throw_exception_if_invalid()
         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
         pixel_samples = pixel_samples.movedim(-1, 1)
         do_tile = False
+        _not_video = self.not_video if not_video is None else not_video
         if self.latent_dim == 3 and pixel_samples.ndim < 5:
-            if not self.not_video:
+            if not _not_video:
                 pixel_samples = pixel_samples.movedim(1, 0).unsqueeze(0)
             else:
                 pixel_samples = pixel_samples.unsqueeze(2)
@@ -1413,13 +1414,15 @@ class VAE:
             samples = self.format_encoded(samples)
         return samples
 
-    def encode_tiled(self, pixel_samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
+    def encode_tiled(self, pixel_samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None, not_video=None):
         self.throw_exception_if_invalid()
         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
         dims = self.latent_dim
         pixel_samples = pixel_samples.movedim(-1, 1)
+
+        _not_video = self.not_video if not_video is None else not_video
         if dims == 3 and pixel_samples.ndim < 5:
-            if not self.not_video:
+            if not _not_video:
                 pixel_samples = pixel_samples.movedim(1, 0).unsqueeze(0)
             else:
                 pixel_samples = pixel_samples.unsqueeze(2)
@@ -2211,6 +2214,8 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
         vae_sd = model_config.process_vae_state_dict(vae_sd)
         vae_device = model_options.get("load_device", None)
         vae = VAE(sd=vae_sd, metadata=metadata, device=vae_device)
+        if getattr(model_config, 'vae_not_video', None) is not None:  # <-- add
+            vae.not_video = model_config.vae_not_video
 
     if output_clip:
         if te_model_options.get("custom_operations", None) is None:
