@@ -2218,6 +2218,137 @@ EXTENSION_WEB_DIRS = {}
 # Dictionary of successfully loaded module names and associated directories.
 LOADED_MODULE_DIRS = {}
 
+# Dictionary of custom node startup errors, keyed by "<source>:<module_name>"
+# so that name collisions across custom_nodes / comfy_extras / comfy_api_nodes
+# do not overwrite each other. Each value contains: source, module_name,
+# module_path, error, traceback, phase.
+#
+# `source` is the same string as the internal `module_parent` used at load
+# time (e.g. "custom_nodes", "comfy_extras", "comfy_api_nodes"). It is
+# intentionally a free-form string rather than a fixed enum so the contract
+# survives node-source layouts evolving (e.g. comfy_api_nodes eventually
+# moving out of core). Consumers should treat any new value as a new bucket
+# rather than rejecting it.
+NODE_STARTUP_ERRORS: dict[str, dict] = {}
+
+
+_EMPTY_LEAF_VALUES = (None, "", [], {})
+
+
+def _prune_empty(value):
+    """Recursively drop empty strings / lists / dicts / None from a nested structure.
+
+    Used to keep the on-wire pyproject payload tight without altering the
+    nesting that callers see (so consumers can still parse it back through
+    ``PyProjectConfig`` if they want a typed object).
+    """
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            cleaned = _prune_empty(v)
+            if cleaned not in _EMPTY_LEAF_VALUES:
+                out[k] = cleaned
+        return out
+    if isinstance(value, list):
+        return [
+            cleaned
+            for cleaned in (_prune_empty(v) for v in value)
+            if cleaned not in _EMPTY_LEAF_VALUES
+        ]
+    return value
+
+
+def _read_pyproject_metadata(module_path: str) -> dict | None:
+    """Best-effort extraction of pyproject.toml for a node module.
+
+    Returns a dict mirroring the ``PyProjectConfig`` shape produced by
+    ``comfy_config.config_parser.extract_node_configuration`` (i.e. with
+    ``project`` and ``tool_comfy`` nesting and the same field names) when the
+    module directory contains a pyproject.toml. Empty / default-valued leaves
+    are pruned so the API payload stays compact, but the nesting is kept
+    intact so API consumers can parse the result back through
+    ``PyProjectConfig`` directly.
+
+    Returns None when no toml is present or parsing fails for any reason —
+    startup-error tracking must never itself raise.
+    """
+    if not module_path or not os.path.isdir(module_path):
+        return None
+    toml_path = os.path.join(module_path, "pyproject.toml")
+    if not os.path.isfile(toml_path):
+        return None
+    try:
+        from comfy_config import config_parser
+
+        cfg = config_parser.extract_node_configuration(module_path)
+        if cfg is None:
+            return None
+        pruned = _prune_empty(cfg.model_dump())
+        return pruned or None
+    except Exception:
+        return None
+
+
+def record_node_startup_error(
+    *, module_path: str, source: str, phase: str, error: BaseException, tb: str
+) -> None:
+    """Record a startup error for a node module so it can be exposed via the API."""
+    module_name = get_module_name(module_path)
+    entry = {
+        "source": source,
+        "module_name": module_name,
+        "module_path": module_path,
+        "error": str(error),
+        "traceback": tb,
+        "phase": phase,
+    }
+    pyproject = _read_pyproject_metadata(module_path)
+    if pyproject:
+        entry["pyproject"] = pyproject
+    NODE_STARTUP_ERRORS[f"{source}:{module_name}"] = entry
+
+
+def filter_node_startup_errors(
+    *,
+    source: str | None = None,
+    module_name: str | None = None,
+    pack_id: str | None = None,
+) -> dict[str, dict[str, dict]]:
+    """Return `NODE_STARTUP_ERRORS` reshaped for the public HTTP endpoint.
+
+    Entries are grouped by their ``source`` bucket (the same string as the
+    internal ``module_parent`` used at load time). The on-disk
+    ``module_path`` is stripped from each entry — it's an internal detail
+    useful only for server-side logging and would leak absolute filesystem
+    layout otherwise.
+
+    Optional filters narrow the response and combine with AND:
+
+    * ``source``       — only entries from this source bucket.
+    * ``module_name``  — only entries whose module name matches exactly.
+    * ``pack_id``      — only entries whose ``pyproject.project.name``
+                         matches exactly. Entries without a parsed
+                         pyproject.toml can never match this filter.
+
+    A non-matching filter returns an empty dict, not an error — absence of
+    a failure is a valid answer for this query.
+    """
+    grouped: dict[str, dict[str, dict]] = {}
+    for entry in NODE_STARTUP_ERRORS.values():
+        entry_source = entry.get("source", "custom_nodes")
+        if source is not None and entry_source != source:
+            continue
+        if module_name is not None and entry.get("module_name") != module_name:
+            continue
+        if pack_id is not None:
+            pyproject = entry.get("pyproject") or {}
+            project = pyproject.get("project") or {}
+            if project.get("name") != pack_id:
+                continue
+        public_entry = {k: v for k, v in entry.items() if k != "module_path"}
+        grouped.setdefault(entry_source, {})[entry["module_name"]] = public_entry
+    return grouped
+
 
 def get_module_name(module_path: str) -> str:
     """
@@ -2327,14 +2458,30 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                         NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
                 return True
             except Exception as e:
+                tb = traceback.format_exc()
                 logging.warning(f"Error while calling comfy_entrypoint in {module_path}: {e}")
+                record_node_startup_error(
+                    module_path=module_path,
+                    source=module_parent,
+                    phase="entrypoint",
+                    error=e,
+                    tb=tb,
+                )
                 return False
         else:
             logging.warning(f"Skip {module_path} module for custom nodes due to the lack of NODE_CLASS_MAPPINGS or comfy_entrypoint (need one).")
             return False
     except Exception as e:
-        logging.warning(traceback.format_exc())
+        tb = traceback.format_exc()
+        logging.warning(tb)
         logging.warning(f"Cannot import {module_path} module for custom nodes: {e}")
+        record_node_startup_error(
+            module_path=module_path,
+            source=module_parent,
+            phase="import",
+            error=e,
+            tb=tb,
+        )
         return False
 
 async def init_external_custom_nodes():
