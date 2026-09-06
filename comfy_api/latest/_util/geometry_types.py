@@ -50,7 +50,8 @@ class MESH:
                  normal_map: torch.Tensor | None = None,
                  occlusion_in_mr: bool = False,
                  material: dict | None = None,
-                 emissive: torch.Tensor | None = None):
+                 emissive: torch.Tensor | None = None,
+                 texture_mr: torch.Tensor | None = None):
 
         assert (vertex_counts is None) == (face_counts is None), \
             "vertex_counts and face_counts must be provided together (both or neither)"
@@ -63,7 +64,8 @@ class MESH:
         self.normals = normals
         self.texture = texture              # texture (baseColor): (B, H, W, 3)
         # glTF metallicRoughness texture: (B, H, W, 3), R unused, G=roughness, B=metallic
-        self.metallic_roughness = metallic_roughness
+        self.metallic_roughness = metallic_roughness if metallic_roughness is not None else texture_mr
+        self.texture_mr = self.metallic_roughness
         # When vertices/faces are zero-padded to a common N/M across the batch (variable-size mesh batch),
         # these hold the real per-item lengths (B,). None means rows are uniform and no slicing is needed.
         self.vertex_counts = vertex_counts

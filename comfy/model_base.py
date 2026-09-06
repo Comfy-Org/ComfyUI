@@ -51,6 +51,7 @@ import comfy.ldm.wan.model_animate2
 import comfy.ldm.wan.ar_model
 import comfy.ldm.wan.model_wandancer
 import comfy.ldm.hunyuan3d.model
+import comfy.ldm.hunyuan3d.paint.unet
 import comfy.ldm.triposplat.model
 import comfy.ldm.hidream.model
 import comfy.ldm.chroma.model
@@ -2273,6 +2274,33 @@ class MiniMaxH3(BaseModel):
         x_blend_weight = (token_grid_mask - denoise_mask) / (1.0 - denoise_mask).clamp(min=1e-6)
         x_blend_weight = torch.where(denoise_mask < 1.0, x_blend_weight.clamp(0.0, 1.0), torch.zeros_like(x_blend_weight))
         return injected + x_blend_weight.to(injected.dtype) * (x - injected)
+
+class Hunyuan3DPaint(BaseModel):
+    """Hunyuan3D 2.1 paint UNet with packed multiview PBR latents."""
+
+    def __init__(self, model_config, model_type=ModelType.V_PREDICTION, device=None):
+        super().__init__(model_config, model_type, device=device,
+                         unet_model=comfy.ldm.hunyuan3d.paint.unet.UNet2p5DConditionModel)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        concat_latent_image = kwargs.get("concat_latent_image")
+        if concat_latent_image is not None:
+            out['c_concat'] = comfy.conds.CONDNoiseShape(self.process_latent_in(concat_latent_image))
+        ref_bank = kwargs.get("ref_bank")
+        if ref_bank is not None:
+            out['ref_bank'] = comfy.conds.CONDConstant(ref_bank)
+        dino_features = kwargs.get("dino_features")
+        if dino_features is not None:
+            out['dino_features'] = comfy.conds.CONDRegular(dino_features)
+        position_maps = kwargs.get("position_maps")
+        if position_maps is not None:
+            out['position_maps'] = comfy.conds.CONDRegular(position_maps)
+        ref_scale = kwargs.get("ref_scale")
+        if ref_scale is not None:
+            out['ref_scale'] = comfy.conds.CONDRegular(torch.FloatTensor([ref_scale]))
+        return out
+
 
 class TripoSplat(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):

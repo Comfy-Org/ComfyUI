@@ -1,4 +1,5 @@
 import json
+import comfy.ldm.hunyuan3d.paint.loader
 import comfy.memory_management
 import comfy.supported_models
 import comfy.supported_models_base
@@ -781,6 +782,12 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config.update(json.loads(metadata["config"]).get("transformer", {}))
 
         return dit_config
+
+    if '{}unet.conv_in.weight'.format(key_prefix) in state_dict_keys and '{}unet_dual.conv_in.weight'.format(key_prefix) in state_dict_keys:  # Hunyuan 3D 2.1 paint (multiview PBR)
+        unet_config = comfy.ldm.hunyuan3d.paint.loader.detect_paint_config(state_dict, prefix=key_prefix)
+        if unet_config is not None:
+            unet_config["image_model"] = "hunyuan3d_paint"
+            return unet_config
 
     if '{}latent_in.weight'.format(key_prefix) in state_dict_keys:  # Hunyuan 3D
         in_shape = state_dict['{}latent_in.weight'.format(key_prefix)].shape

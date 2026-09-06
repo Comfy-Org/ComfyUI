@@ -1624,6 +1624,39 @@ class Hunyuan3Dv2mini(Hunyuan3Dv2):
 
     latent_format = latent_formats.Hunyuan3Dv2mini
 
+class Hunyuan3DPaint(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "hunyuan3d_paint",
+    }
+
+    unet_extra_config = {}
+
+    # DDIM v-prediction, scaled-linear betas, zero terminal SNR - matching the
+    # released hunyuan3d-paintpbr-v2-1/scheduler_config.json (parity pinned by
+    # test_ddim_schedule_matches_core_model_sampling).
+    sampling_settings = {
+        "beta_schedule": "linear",
+        "linear_start": 0.00085,
+        "linear_end": 0.012,
+        "zsnr": True,
+    }
+
+    # Calibrated against a measured 6-view 512 px fp16 run (input (3, 4, 12, 64, 64),
+    # ~6.6 GiB activations); the packed view axis is part of input_shape so the
+    # estimate scales with the view count.
+    memory_usage_factor = 2.5
+
+    latent_format = latent_formats.Hunyuan3Dv2_1Paint
+
+    def model_type(self, state_dict, prefix=""):
+        return model_base.ModelType.V_PREDICTION
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.Hunyuan3DPaint(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        return None
+
 class TripoSplat(supported_models_base.BASE):
     # Image -> 3D gaussian splat flow denoiser
     unet_config = {
@@ -2573,6 +2606,7 @@ models = [
     Hunyuan3Dv2mini,
     Hunyuan3Dv2,
     Hunyuan3Dv2_1,
+    Hunyuan3DPaint,
     TripoSplat,
     HiDream,
     HiDreamO1,
