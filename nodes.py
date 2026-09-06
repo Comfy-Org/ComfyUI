@@ -2296,7 +2296,7 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     NODE_CLASS_MAPPINGS[name] = node_cls
                     node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
             if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS") and getattr(module, "NODE_DISPLAY_NAME_MAPPINGS") is not None:
-                NODE_DISPLAY_NAME_MAPPINGS.update(module.NODE_DISPLAY_NAME_MAPPINGS)
+                NODE_DISPLAY_NAME_MAPPINGS.update({name: display_name for name, display_name in module.NODE_DISPLAY_NAME_MAPPINGS.items() if name not in ignore})
             return True
         # V3 Extension Definition
         elif hasattr(module, "comfy_entrypoint"):
@@ -2323,8 +2323,8 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     if schema.node_id not in ignore:
                         NODE_CLASS_MAPPINGS[schema.node_id] = node_cls
                         node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
-                    if schema.display_name is not None:
-                        NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
+                        if schema.display_name is not None:
+                            NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
                 return True
             except Exception as e:
                 logging.warning(f"Error while calling comfy_entrypoint in {module_path}: {e}")
