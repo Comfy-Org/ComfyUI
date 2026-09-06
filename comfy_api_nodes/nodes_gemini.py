@@ -459,11 +459,14 @@ class GeminiNode(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="GeminiNode",
-            display_name="Google Gemini",
+            display_name="Google Gemini (legacy)",
             category="partner/text/Gemini",
             description="Generate text responses with Google's Gemini AI model. "
             "You can provide multiple types of inputs (text, images, audio, video) "
-            "as context for generating more relevant and meaningful responses.",
+            "as context for generating more relevant and meaningful responses. "
+            "This class name is historical and is kept only for compatibility with existing workflows; "
+            "it supports the current Gemini models, "
+            "so prefer the GeminiNodeV2 ('Google Gemini') node for new workflows.",
             inputs=[
                 IO.String.Input(
                     "prompt",
@@ -475,11 +478,11 @@ class GeminiNode(IO.ComfyNode):
                 IO.Combo.Input(
                     "model",
                     options=[
+                        "gemini-3-1-pro",
+                        "gemini-3-1-flash-lite",
                         "gemini-2.5-pro",
                         "gemini-2.5-flash",
                         "gemini-3-pro-preview",
-                        "gemini-3-1-pro",
-                        "gemini-3-1-flash-lite",
                     ],
                     default="gemini-3-1-pro",
                     tooltip="The Gemini model to use for generating responses.",
@@ -1199,9 +1202,14 @@ class GeminiNanoBanana2(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="GeminiNanoBanana2",
-            display_name="Nano Banana 2",
+            display_name="Nano Banana 2 (legacy)",
             category="partner/image/Gemini",
-            description="Generate or edit images synchronously via Google Vertex API.",
+            description=(
+                "Generate or edit images synchronously via Google Vertex API. "
+                "This class name is historical and is kept only for compatibility with existing workflows; "
+                "it supports the current models, "
+                "so prefer the GeminiNanoBanana2V2 ('Nano Banana 2') node for new workflows."
+            ),
             inputs=[
                 IO.String.Input(
                     "prompt",
