@@ -25,6 +25,7 @@ import comfy.ldm.minimax.model
 import comfy.ldm.minimax_music.dit
 import comfy.nested_tensor
 import comfy.ldm.lightricks.symmetric_patchifier
+import comfy.ldm.modules.attention
 import comfy.context_windows
 from comfy.ldm.modules.diffusionmodules.openaimodel import UNetModel, Timestep
 from comfy.ldm.cascade.stage_c import StageC
@@ -427,7 +428,7 @@ class BaseModel(torch.nn.Module):
                 if len(shape) > 0:
                     input_shapes += shape
 
-        if comfy.model_management.xformers_enabled() or comfy.model_management.pytorch_attention_flash_attention():
+        if comfy.ldm.modules.attention.optimized_attention_memory_efficient:
             dtype = self.get_dtype_inference()
             #TODO: this needs to be tweaked
             area = sum(map(lambda input_shape: input_shape[0] * math.prod(input_shape[2:]), input_shapes))
