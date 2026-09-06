@@ -372,6 +372,13 @@ class BaseModel(torch.nn.Module):
 
         if len(u) > 0:
             logging.warning("unet unexpected: {}".format(u))
+            quant_scale_keys = [k for k in u if k.endswith((".weight_scale", ".weight_scale_2", ".input_scale"))]
+            if len(quant_scale_keys) > 0:
+                raise RuntimeError(
+                    "This checkpoint contains {} unrecognized quantization scale tensors (e.g. {}) "
+                    "but no usable quantization metadata, so it can't be loaded as a quantized model. "
+                    "Loading it as unquantized would silently produce garbage output.".format(
+                        len(quant_scale_keys), quant_scale_keys[0]))
         del to_load
         return self
 
