@@ -76,6 +76,9 @@ def load_audio_encoder_from_sd(sd, prefix=""):
             raise RuntimeError("ERROR: audio encoder file is invalid or unsupported embed_dim: {}".format(embed_dim))
     elif "model.encoder.embed_positions.weight" in sd:
         sd = comfy.utils.state_dict_prefix_replace(sd, {"model.": ""})
+        # Full whisper checkpoints include decoder weights; discard them since
+        # WhisperLargeV3 is encoder-only.
+        sd = {k: v for k, v in sd.items() if not k.startswith("decoder.")}
         config = {
             "model_type": "whisper3",
         }
@@ -85,7 +88,18 @@ def load_audio_encoder_from_sd(sd, prefix=""):
     audio_encoder = AudioEncoderModel(config)
     m, u = audio_encoder.load_sd(sd)
     if len(m) > 0:
-        logging.warning("missing audio encoder: {}".format(m))
+        # torchaudio registers the mel-spectrogram window and filterbank as
+        # buffers whose values are deterministically computed from the config
+        # at init time; they are never saved in standard whisper checkpoints.
+        # Suppress warnings for these expected-missing buffers so that users
+        # are only alerted about genuinely unexpected missing weights.
+        whisper_computed_buffers = {
+            "feature_extractor.mel_spectrogram.spectrogram.window",
+            "feature_extractor.mel_spectrogram.mel_scale.fb",
+        }
+        significant_missing = [k for k in m if k not in whisper_computed_buffers]
+        if significant_missing:
+            logging.warning("missing audio encoder: {}".format(significant_missing))
     if len(u) > 0:
         logging.warning("unexpected audio encoder: {}".format(u))
 
