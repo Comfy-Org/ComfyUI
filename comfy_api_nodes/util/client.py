@@ -6,7 +6,7 @@ import math
 import time
 import uuid
 import weakref
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from io import BytesIO
@@ -18,6 +18,7 @@ from aiohttp.client_exceptions import ClientError, ContentTypeError
 from pydantic import BaseModel
 
 from comfy import utils
+from comfy.model_management import InterruptProcessingException, interrupt_current_processing
 from comfy_api.latest import IO
 from server import PromptServer
 
@@ -65,7 +66,6 @@ class _RequestConfig:
     retry_backoff: float
     wait_label: str = "Waiting"
     monitor_progress: bool = True
-    estimated_total: int | None = None
     final_label_on_success: str | None = "Completed"
     progress_origin_ts: float | None = None
     price_extractor: Callable[[dict[str, Any]], float | None] | None = None
@@ -80,6 +80,8 @@ class _PollUIState:
     is_queued: bool = True
     price: float | None = None
     estimated_duration: int | None = None
+    estimated_p90: int | None = None
+    estimate_includes_queue: bool = False
     base_processing_elapsed: float = 0.0  # sum of completed active intervals
     active_since: float | None = None  # start time of current active interval (None if queued)
 
@@ -91,8 +93,22 @@ PRICE_CREDITS_HEADER = "X-Comfy-Credits-Used"
 """Proxy response header with the actual cost in Comfy credits. When present on any successful proxied response,
 it takes precedence over ``price_extractor``."""
 
+ESTIMATED_DURATION_HEADER = "X-Comfy-Estimated-Duration-Seconds"
+ESTIMATED_DURATION_P90_HEADER = "X-Comfy-Estimated-Duration-P90-Seconds"
+ESTIMATE_SOURCE_HEADER = "X-Comfy-Estimate-Source"
+
 _credits_used_by_execution: "weakref.WeakKeyDictionary[type, float]" = weakref.WeakKeyDictionary()
 """Last PRICE_CREDITS_HEADER value per node execution, keyed by the node's per-execution class clone."""
+
+
+@dataclass
+class _ServerEstimate:
+    p50_seconds: int
+    p90_seconds: int | None
+    source: str | None
+
+
+_server_estimates_by_execution: "weakref.WeakKeyDictionary[type, _ServerEstimate]" = weakref.WeakKeyDictionary()
 COMPLETED_STATUSES = ["succeeded", "succeed", "success", "completed", "finished", "done", "complete"]
 FAILED_STATUSES = ["cancelled", "canceled", "canceling", "fail", "failed", "error"]
 QUEUED_STATUSES = ["created", "queued", "queueing", "submitted", "initializing", "wait", "in_queue"]
@@ -117,6 +133,32 @@ def _get_remembered_credits_used(node_cls: type[IO.ComfyNode]) -> float | None:
     return _credits_used_by_execution.get(node_cls)
 
 
+def _parse_estimate_seconds(header_value: str | None) -> int | None:
+    if not header_value:
+        return None
+    try:
+        seconds = int(header_value.strip())
+    except ValueError:
+        logging.debug("Ignoring malformed estimate header value: %r", header_value)
+        return None
+    if not 1 <= seconds <= 86400:
+        logging.debug("Ignoring out-of-range estimate header value: %r", header_value)
+        return None
+    return seconds
+
+
+def _maybe_remember_server_estimate(node_cls: type[IO.ComfyNode], headers: Mapping[str, str]) -> None:
+    p50 = _parse_estimate_seconds(headers.get(ESTIMATED_DURATION_HEADER))
+    if p50 is None:
+        return
+    p90 = _parse_estimate_seconds(headers.get(ESTIMATED_DURATION_P90_HEADER))
+    if p90 is not None and p90 < p50:
+        p90 = p50
+    source = headers.get(ESTIMATE_SOURCE_HEADER) or None
+    _server_estimates_by_execution[node_cls] = _ServerEstimate(p50, p90, source)
+    logging.debug("Server duration estimate: p50=%ss, p90=%s, source=%s", p50, p90, source)
+
+
 async def sync_op(
     cls: type[IO.ComfyNode],
     endpoint: ApiEndpoint,
@@ -132,7 +174,6 @@ async def sync_op(
     retry_delay: float = 1.0,
     retry_backoff: float = 2.0,
     wait_label: str = "Waiting for server",
-    estimated_duration: int | None = None,
     final_label_on_success: str | None = "Completed",
     progress_origin_ts: float | None = None,
     monitor_progress: bool = True,
@@ -152,7 +193,6 @@ async def sync_op(
         retry_delay=retry_delay,
         retry_backoff=retry_backoff,
         wait_label=wait_label,
-        estimated_duration=estimated_duration,
         as_binary=False,
         final_label_on_success=final_label_on_success,
         progress_origin_ts=progress_origin_ts,
@@ -228,7 +268,6 @@ async def sync_op_raw(
     retry_delay: float = 1.0,
     retry_backoff: float = 2.0,
     wait_label: str = "Waiting for server",
-    estimated_duration: int | None = None,
     as_binary: bool = False,
     final_label_on_success: str | None = "Completed",
     progress_origin_ts: float | None = None,
@@ -261,7 +300,6 @@ async def sync_op_raw(
         retry_backoff=retry_backoff,
         wait_label=wait_label,
         monitor_progress=monitor_progress,
-        estimated_total=estimated_duration,
         final_label_on_success=final_label_on_success,
         progress_origin_ts=progress_origin_ts,
         price_extractor=price_extractor,
@@ -311,11 +349,22 @@ async def poll_op_raw(
     progress_bar = utils.ProgressBar(100) if progress_extractor else None
     last_progress: int | None = None
 
-    state = _PollUIState(started=started, estimated_duration=estimated_duration)
+    server_estimate = _server_estimates_by_execution.pop(cls, None)
+    if server_estimate is not None:
+        state = _PollUIState(
+            started=started,
+            estimated_duration=server_estimate.p50_seconds,
+            estimated_p90=server_estimate.p90_seconds,
+            estimate_includes_queue=True,
+        )
+    else:
+        state = _PollUIState(started=started, estimated_duration=estimated_duration)
+    estimate_bar = utils.ProgressBar(100) if progress_bar is None and server_estimate is not None else None
     stop_ticker = asyncio.Event()
 
     async def _ticker():
         """Emit a UI update every second while polling is in progress."""
+        last_estimate_pct = -1
         try:
             while not stop_ticker.is_set():
                 if is_processing_interrupted():
@@ -324,6 +373,15 @@ async def poll_op_raw(
                 proc_elapsed = state.base_processing_elapsed + (
                     (now - state.active_since) if state.active_since is not None else 0.0
                 )
+                if estimate_bar is not None:
+                    pct = _estimate_progress_pct(now - state.started, state.estimated_duration, state.estimated_p90)
+                    if pct != last_estimate_pct:
+                        try:
+                            estimate_bar.update_absolute(pct, total=100)
+                        except InterruptProcessingException:
+                            interrupt_current_processing()
+                            break
+                        last_estimate_pct = pct
                 _display_time_progress(
                     cls,
                     status=state.status_label,
@@ -333,6 +391,8 @@ async def poll_op_raw(
                     is_queued=state.is_queued,
                     processing_elapsed_seconds=int(proc_elapsed),
                     extra_text=extra_text,
+                    estimated_p90=state.estimated_p90,
+                    estimate_includes_queue=state.estimate_includes_queue,
                 )
                 await asyncio.sleep(1.0)
         except Exception as exc:
@@ -351,7 +411,6 @@ async def poll_op_raw(
                     retry_delay=retry_delay_per_poll,
                     retry_backoff=retry_backoff_per_poll,
                     wait_label="Checking",
-                    estimated_duration=None,
                     as_binary=False,
                     final_label_on_success=None,
                     monitor_progress=False,
@@ -367,7 +426,6 @@ async def poll_op_raw(
                             timeout=cancel_timeout,
                             max_retries=0,
                             wait_label="Cancelling task",
-                            estimated_duration=None,
                             as_binary=False,
                             final_label_on_success=None,
                             monitor_progress=False,
@@ -381,14 +439,25 @@ async def poll_op_raw(
                 status = None
 
             if price_extractor:
-                new_price = price_extractor(resp_json)
+                try:
+                    new_price = price_extractor(resp_json)
+                except Exception as e:
+                    logging.error("Price extraction failed: %s", e)
+                    new_price = None
                 if new_price is not None:
                     state.price = new_price
 
             if progress_extractor:
-                new_progress = progress_extractor(resp_json)
+                try:
+                    new_progress = progress_extractor(resp_json)
+                except Exception as e:
+                    logging.error("Progress extraction failed: %s", e)
+                    new_progress = None
                 if new_progress is not None and last_progress != new_progress:
-                    progress_bar.update_absolute(new_progress, total=100)
+                    try:
+                        progress_bar.update_absolute(new_progress, total=100)
+                    except InterruptProcessingException:
+                        interrupt_current_processing()
                     last_progress = new_progress
 
             now_ts = time.monotonic()
@@ -412,14 +481,19 @@ async def poll_op_raw(
                 with contextlib.suppress(Exception):
                     await ticker_task
 
-                if progress_bar and last_progress != 100:
-                    progress_bar.update_absolute(100, total=100)
+                try:
+                    if progress_bar and last_progress != 100:
+                        progress_bar.update_absolute(100, total=100)
+                    if estimate_bar is not None:
+                        estimate_bar.update_absolute(100, total=100)
+                except InterruptProcessingException:
+                    logging.info("Interrupt raced task completion; returning the finished result")
 
                 _display_time_progress(
                     cls,
                     status=status if status else "Completed",
                     elapsed_seconds=int(now_ts - started),
-                    estimated_total=estimated_duration,
+                    estimated_total=None,
                     price=state.price,
                     is_queued=False,
                     processing_elapsed_seconds=int(state.base_processing_elapsed),
@@ -433,7 +507,7 @@ async def poll_op_raw(
                 raise Exception(msg)
 
             try:
-                await sleep_with_interrupt(poll_interval, cls, None, None, None)
+                await sleep_with_interrupt(poll_interval, cls, None, None)
             except ProcessingInterrupted:
                 if cancel_endpoint:
                     with contextlib.suppress(Exception):
@@ -443,7 +517,6 @@ async def poll_op_raw(
                             timeout=cancel_timeout,
                             max_retries=0,
                             wait_label="Cancelling task",
-                            estimated_duration=None,
                             as_binary=False,
                             final_label_on_success=None,
                             monitor_progress=False,
@@ -503,15 +576,35 @@ def _display_time_progress(
     is_queued: bool | None = None,
     processing_elapsed_seconds: int | None = None,
     extra_text: str | None = None,
+    estimated_p90: int | None = None,
+    estimate_includes_queue: bool = False,
 ) -> None:
-    if estimated_total is not None and estimated_total > 0 and is_queued is False:
-        pe = processing_elapsed_seconds if processing_elapsed_seconds is not None else elapsed_seconds
-        remaining = max(0, int(estimated_total) - int(pe))
-        time_line = f"Time elapsed: {int(elapsed_seconds)}s (~{remaining}s remaining)"
-    else:
-        time_line = f"Time elapsed: {int(elapsed_seconds)}s"
+    time_line = f"Time elapsed: {int(elapsed_seconds)}s"
+    if estimated_total is not None and estimated_total > 0:
+        if estimate_includes_queue:
+            if elapsed_seconds < estimated_total:
+                time_line += f" (~{int(estimated_total) - int(elapsed_seconds)}s remaining)"
+            elif estimated_p90 is not None and elapsed_seconds < estimated_p90:
+                time_line += " (should finish soon)"
+            else:
+                time_line += " (taking longer than usual)"
+        elif is_queued is False:
+            pe = processing_elapsed_seconds if processing_elapsed_seconds is not None else elapsed_seconds
+            remaining = max(0, int(estimated_total) - int(pe))
+            time_line += f" (~{remaining}s remaining)"
     text = f"{time_line}\n\n{extra_text}" if extra_text else time_line
     _display_text(node_cls, text, status=status, price=price)
+
+
+def _estimate_progress_pct(elapsed_seconds: float, p50_seconds: int | None, p90_seconds: int | None) -> int:
+    if not p50_seconds or p50_seconds <= 0 or elapsed_seconds <= 0:
+        return 0
+    if elapsed_seconds < p50_seconds:
+        return int(90.0 * elapsed_seconds / p50_seconds)
+    horizon = p90_seconds if p90_seconds is not None and p90_seconds > p50_seconds else p50_seconds
+    if elapsed_seconds >= horizon:
+        return 95
+    return 90 + int(5.0 * (elapsed_seconds - p50_seconds) / (horizon - p50_seconds))
 
 
 async def _diagnose_connectivity() -> dict[str, bool]:
@@ -667,9 +760,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                 if is_processing_interrupted():
                     return
                 if cfg.monitor_progress:
-                    _display_time_progress(
-                        cfg.node_cls, cfg.wait_label, int(time.monotonic() - start_ts), cfg.estimated_total
-                    )
+                    _display_time_progress(cfg.node_cls, cfg.wait_label, int(time.monotonic() - start_ts))
                 await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             return  # normal shutdown
@@ -824,7 +915,6 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                             cfg.node_cls,
                             cfg.wait_label if cfg.monitor_progress else None,
                             start_time if cfg.monitor_progress else None,
-                            cfg.estimated_total,
                             display_callback=_display_time_progress if cfg.monitor_progress else None,
                         )
                         continue
@@ -851,13 +941,12 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                             if is_processing_interrupted():
                                 raise ProcessingInterrupted("Task cancelled")
                             if cfg.monitor_progress:
-                                _display_time_progress(
-                                    cfg.node_cls, cfg.wait_label, int(now - start_time), cfg.estimated_total
-                                )
+                                _display_time_progress(cfg.node_cls, cfg.wait_label, int(now - start_time))
                     bytes_payload = bytes(buff)
                     resp_headers = {k.lower(): v for k, v in resp.headers.items()}
                     if is_comfy_api_request:
                         _maybe_remember_credits_used(cfg.node_cls, resp.headers.get(PRICE_CREDITS_HEADER))
+                        _maybe_remember_server_estimate(cfg.node_cls, resp.headers)
                     if cfg.price_extractor:
                         with contextlib.suppress(Exception):
                             extracted_price = cfg.price_extractor(resp_headers)
@@ -887,6 +976,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                         response_content_to_log = payload if isinstance(payload, dict) else text
                     if is_comfy_api_request:
                         _maybe_remember_credits_used(cfg.node_cls, resp.headers.get(PRICE_CREDITS_HEADER))
+                        _maybe_remember_server_estimate(cfg.node_cls, resp.headers)
                     with contextlib.suppress(Exception):
                         extracted_price = cfg.price_extractor(payload) if cfg.price_extractor else None
                     operation_succeeded = True
@@ -929,7 +1019,6 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                     cfg.node_cls,
                     cfg.wait_label if cfg.monitor_progress else None,
                     start_time if cfg.monitor_progress else None,
-                    cfg.estimated_total,
                     display_callback=_display_time_progress if cfg.monitor_progress else None,
                 )
                 delay *= cfg.retry_backoff
@@ -980,7 +1069,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                         if final_elapsed_seconds is not None
                         else int(time.monotonic() - start_time)
                     ),
-                    estimated_total=cfg.estimated_total,
+                    estimated_total=None,
                     price=extracted_price,
                     is_queued=False,
                     processing_elapsed_seconds=final_elapsed_seconds,
