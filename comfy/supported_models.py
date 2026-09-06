@@ -1413,7 +1413,7 @@ class WAN21_Vace(WAN21_T2V):
         self.memory_usage_factor = 1.2 * self.memory_usage_factor
 
     def get_model(self, state_dict, prefix="", device=None):
-        out = model_base.WAN21_Vace(self, image_to_video=False, device=device)
+        out = model_base.WAN21_Vace(self, image_to_video=self.unet_config.get("vace_image_input", False), device=device)
         return out
 
 class WAN21_HuMo(WAN21_T2V):
