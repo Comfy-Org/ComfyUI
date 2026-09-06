@@ -95,7 +95,7 @@ class ImageCropV2(IO.ComfyNode):
 
 def _crop_image_with_mask(item_image, item_mask, max_image_size=1024, pad_factor=1.1,
                           mask_offset=0, mask_threshold=0.05, bg_rgb=(0.0, 0.0, 0.0),
-                          aspect_ratio=1.0):
+                          aspect_ratio=1.0, crop_size=None):
     img = item_image.permute(2, 0, 1).unsqueeze(0).cpu().float().clamp(0, 1)
     mask = item_mask.unsqueeze(0).unsqueeze(0).cpu().float().clamp(0, 1)
 
@@ -146,7 +146,9 @@ def _crop_image_with_mask(item_image, item_mask, max_image_size=1024, pad_factor
         bh = y_max - y_min + 1
         # Grow the bbox so its aspect matches `aspect_ratio` (width/height),
         # anchored on the max side. Then apply pad_factor.
-        if bw / max(bh, 1) >= aspect_ratio:
+        if crop_size is not None:
+            crop_w, crop_h = crop_size, int(crop_size / aspect_ratio)
+        elif bw / max(bh, 1) >= aspect_ratio:
             crop_w = int(bw * pad_factor)
             crop_h = int(bw / aspect_ratio * pad_factor)
         else:
