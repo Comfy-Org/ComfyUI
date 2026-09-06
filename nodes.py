@@ -2218,6 +2218,10 @@ EXTENSION_WEB_DIRS = {}
 # Dictionary of successfully loaded module names and associated directories.
 LOADED_MODULE_DIRS = {}
 
+# Dictionary of import failure reasons keyed by module path.
+# Used to provide diagnostic information in the import summary.
+IMPORT_FAILED_REASONS: dict[str, str] = {}
+
 
 def get_module_name(module_path: str) -> str:
     """
@@ -2333,6 +2337,9 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
             logging.warning(f"Skip {module_path} module for custom nodes due to the lack of NODE_CLASS_MAPPINGS or comfy_entrypoint (need one).")
             return False
     except Exception as e:
+        # Capture one-line failure reason for the import summary
+        error_msg = str(e).split('\n')[0][:100]  # First line, max 100 chars
+        IMPORT_FAILED_REASONS[module_path] = f"{type(e).__name__}: {error_msg}"
         logging.warning(traceback.format_exc())
         logging.warning(f"Cannot import {module_path} module for custom nodes: {e}")
         return False
@@ -2383,7 +2390,12 @@ async def init_external_custom_nodes():
             if n[2]:
                 import_message = ""
             else:
-                import_message = " (IMPORT FAILED)"
+                # Include failure reason if available
+                reason = IMPORT_FAILED_REASONS.get(n[1], "")
+                if reason:
+                    import_message = f" (IMPORT FAILED: {reason})"
+                else:
+                    import_message = " (IMPORT FAILED)"
             logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
         logging.info("")
 
