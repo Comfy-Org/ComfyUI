@@ -782,6 +782,7 @@ class SD3(BaseModel):
         return kwargs["pooled_output"]
 
     def extra_conds(self, **kwargs):
+        """Prepare cross-attention text conditioning when provided."""
         out = super().extra_conds(**kwargs)
         cross_attn = kwargs.get("cross_attn", None)
         if cross_attn is not None:
@@ -1171,6 +1172,34 @@ class LTXV(BaseModel):
 
     def scale_latent_inpaint(self, sigma, noise, latent_image, **kwargs):
         return latent_image
+
+class LTXVImage(LTXV):
+    """Model wrapper for image-only LTXV checkpoints."""
+
+    def __init__(self, model_config, model_type=ModelType.FLUX, device=None):
+        """Initialize the wrapper with the image-only LTXV diffusion model."""
+        BaseModel.__init__(self, model_config, model_type, device=device, unet_model=comfy.ldm.lightricks.model.LTXVImageModel)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        cross_attn = out.get('c_crossattn', None)
+        if cross_attn is not None:
+            context = cross_attn.cond
+            if hasattr(self.diffusion_model, "preprocess_text_embeds"):
+                context = context.to(device=kwargs["device"], dtype=self.get_dtype_inference())
+                context = self.diffusion_model.preprocess_text_embeds(context, unprocessed=kwargs.get("unprocessed_ltxav_embeds", False))
+
+            target_dim = getattr(self.diffusion_model, "cross_attention_dim", None)
+            if target_dim is not None and context.shape[-1] != target_dim:
+                context = context[..., :target_dim]
+            out['c_crossattn'] = comfy.conds.CONDRegular(context)
+
+        frame_rate = out.get('frame_rate', None)
+        if frame_rate is not None:
+            value = frame_rate.cond
+            if (torch.is_tensor(value) and torch.any(value <= 0)) or (not torch.is_tensor(value) and value <= 0):
+                out['frame_rate'] = comfy.conds.CONDConstant(1)
+        return out
 
 class LTXAV(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLUX, device=None):
