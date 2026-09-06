@@ -118,6 +118,20 @@ _cli_flags = {k: v for k, v in _parse_cli_feature_flags().items() if k not in _C
 SERVER_FEATURE_FLAGS: dict[str, Any] = {**_CORE_FEATURE_FLAGS, **_cli_flags}
 
 
+def try_set_connection_feature_flags(
+    sockets_metadata: dict[str, dict[str, Any]],
+    sid: str,
+    connection_metadata: dict[str, Any],
+    client_flags: dict[str, Any],
+) -> bool:
+    """Store feature flags if the metadata still belongs to this connection."""
+    if sockets_metadata.get(sid) is not connection_metadata:
+        return False
+
+    connection_metadata["feature_flags"] = client_flags
+    return True
+
+
 def get_connection_feature(
     sockets_metadata: dict[str, dict[str, Any]],
     sid: str,
