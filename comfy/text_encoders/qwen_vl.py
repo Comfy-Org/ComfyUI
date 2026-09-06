@@ -157,10 +157,12 @@ def rotate_half(x):
 
 
 def apply_rotary_pos_emb_vision(q, k, cos, sin):
+    q_dtype = q.dtype
+    k_dtype = k.dtype
     cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
+    return q_embed.to(q_dtype), k_embed.to(k_dtype)
 
 
 class VisionRotaryEmbedding(nn.Module):
