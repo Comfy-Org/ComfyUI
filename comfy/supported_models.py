@@ -1743,10 +1743,6 @@ class SenseNovaU15(supported_models_base.BASE):
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.SenseNovaU15(self, device=device)
 
-    def process_unet_state_dict(self, state_dict):
-        state_dict.pop("language_model.lm_head.weight", None)
-        return state_dict
-
     def process_vae_state_dict(self, state_dict):
         return {"pixel_space_vae": torch.tensor(1.0)}
 

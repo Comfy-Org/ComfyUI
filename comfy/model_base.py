@@ -82,6 +82,7 @@ from comfy.ldm.sensenova.sampling import SenseNovaModelSampling, time_snr_shift
 import comfy.ldm.depth_anything_3.model
 
 import comfy.model_management
+import comfy.utils
 import comfy.patcher_extension
 import comfy.conds
 import comfy.ops
@@ -2352,11 +2353,15 @@ class SenseNovaSharedRegular(comfy.conds.CONDRegular):
         return self._copy_with(self.cond)
 
 class SenseNovaSharedList(comfy.conds.CONDList):
+    """Keep a list-valued SenseNova prefix at one copy per guidance branch."""
+
     def process_cond(self, batch_size, **kwargs):
         return self._copy_with(self.cond)
 
 class SenseNovaU15(BaseModel):
-    PATCH_SIZE = 32
+    """ComfyUI model wrapper for SenseNova U1.5 image generation."""
+
+    PATCH_SIZE = comfy.ldm.sensenova.model.MERGED_PATCH_SIZE
 
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.sensenova.model.SenseNovaU15)
@@ -2369,6 +2374,12 @@ class SenseNovaU15(BaseModel):
 
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
+        prefix_keys = kwargs.get("prefix_keys")
+        if prefix_keys is not None:
+            out["prefix_keys"] = SenseNovaSharedList(prefix_keys)
+            out["prefix_values"] = SenseNovaSharedList(kwargs["prefix_values"])
+            out["prefix_time"] = SenseNovaSharedRegular(kwargs["prefix_time"])
+            return out
         text_input_ids = kwargs.get("text_input_ids")
         if text_input_ids is not None:
             device = kwargs["device"]
@@ -2376,13 +2387,16 @@ class SenseNovaU15(BaseModel):
             if reference_images is not None:
                 reference_images = comfy.ldm.sensenova.conditioning.preprocess_references(reference_images)
             image_only = kwargs.get("prompt_type") == "negative"
+            thinking = bool(kwargs.get("sensenova_thinking", False)) and not image_only
+            thinking_result = kwargs.get("sensenova_thinking_result")
             indexes = None
             prefix_mask = None
             if reference_images:
+                patch_size = comfy.ldm.sensenova.model.MERGED_PATCH_SIZE
                 reference_grids = [
                     (
-                        max(1, math.ceil(image.shape[-2] / self.PATCH_SIZE)),
-                        max(1, math.ceil(image.shape[-1] / self.PATCH_SIZE)),
+                        max(1, math.ceil(image.shape[-2] / patch_size)),
+                        max(1, math.ceil(image.shape[-1] / patch_size)),
                     )
                     for image in reference_images
                 ]
@@ -2396,23 +2410,52 @@ class SenseNovaU15(BaseModel):
                     indexes, dtype=self.get_dtype_inference()
                 )
 
-            if kwargs.get("hooks") is None:
+            hooks = kwargs.get("hooks")
+            if hooks is None:
                 dtype = self.get_dtype_inference()
-                prefix_keys, prefix_values, prefix_time = (
-                    self.diffusion_model.preprocess_prefix(
-                        text_input_ids.to(device=device),
-                        [
-                            image.to(device=device, dtype=dtype)
-                            for image in reference_images
-                        ]
-                        if reference_images
-                        else None,
-                        indexes.to(device=device) if indexes is not None else None,
-                        prefix_mask.to(device=device)
-                        if prefix_mask is not None
-                        else None,
-                    )
+                prefix_args = (
+                    text_input_ids.to(device=device),
+                    [
+                        image.to(device=device, dtype=dtype)
+                        for image in reference_images
+                    ]
+                    if reference_images
+                    else None,
+                    indexes.to(device=device) if indexes is not None else None,
+                    prefix_mask.to(device=device)
+                    if prefix_mask is not None
+                    else None,
                 )
+                if thinking:
+                    max_think_tokens = int(
+                        kwargs.get("sensenova_max_think_tokens", 1024)
+                    )
+                    progress = comfy.utils.ProgressBar(max_think_tokens)
+                    if isinstance(thinking_result, dict):
+                        prefix_keys, prefix_values, prefix_time, token_ids = (
+                            self.diffusion_model.preprocess_thinking_prefix_with_tokens(
+                                *prefix_args,
+                                max_think_tokens=max_think_tokens,
+                                progress=progress.update_absolute,
+                                interrupt=comfy.model_management.throw_exception_if_processing_interrupted,
+                            )
+                        )
+                        thinking_result["token_ids"] = token_ids
+                    else:
+                        prefix_keys, prefix_values, prefix_time = (
+                            self.diffusion_model.preprocess_thinking_prefix(
+                                *prefix_args,
+                                max_think_tokens=max_think_tokens,
+                                progress=progress.update_absolute,
+                                interrupt=comfy.model_management.throw_exception_if_processing_interrupted,
+                            )
+                        )
+                else:
+                    prefix_keys, prefix_values, prefix_time = (
+                        self.diffusion_model.preprocess_prefix(
+                            *prefix_args,
+                        )
+                    )
                 out["prefix_keys"] = SenseNovaSharedList(prefix_keys)
                 out["prefix_values"] = SenseNovaSharedList(prefix_values)
                 out["prefix_time"] = SenseNovaSharedRegular(prefix_time)
@@ -2422,21 +2465,33 @@ class SenseNovaU15(BaseModel):
                     out["prefix_mask"] = SenseNovaSharedRegular(prefix_mask)
                     out["reference_images"] = SenseNovaSharedList(reference_images)
                 out["text_input_ids"] = SenseNovaSharedRegular(text_input_ids)
+                if thinking:
+                    out["sensenova_thinking"] = comfy.conds.CONDConstant(True)
+                    out["sensenova_max_think_tokens"] = comfy.conds.CONDConstant(
+                        int(kwargs.get("sensenova_max_think_tokens", 1024))
+                    )
+                    out["sensenova_thinking_interrupt"] = comfy.conds.CONDConstant(
+                        comfy.model_management.throw_exception_if_processing_interrupted
+                    )
+                    if isinstance(thinking_result, dict):
+                        out["sensenova_thinking_result"] = comfy.conds.CONDConstant(
+                            thinking_result
+                        )
         return out
 
     def extra_conds_shapes(self, **kwargs):
         images = kwargs.get("reference_latents")
         images = comfy.ldm.sensenova.conditioning.split_reference_batches(images) if images is not None else []
+        patch_size = comfy.ldm.sensenova.model.MERGED_PATCH_SIZE
         reference_grids = [
             (
-                max(1, math.ceil(image.shape[-3] / self.PATCH_SIZE)),
-                max(1, math.ceil(image.shape[-2] / self.PATCH_SIZE)),
+                max(1, math.ceil(image.shape[-3] / patch_size)),
+                max(1, math.ceil(image.shape[-2] / patch_size)),
             )
             for image in images
         ]
         reference_pixels = sum(
-            height * width * self.PATCH_SIZE**2
-            for height, width in reference_grids
+            height * width * patch_size**2 for height, width in reference_grids
         )
         out = {}
         if reference_pixels:
@@ -2452,7 +2507,13 @@ class SenseNovaU15(BaseModel):
             else:
                 length = text_input_ids.shape[1]
             out["prefix_mask"] = [1, 1, length, length]
-            if kwargs.get("hooks") is None:
+            image_only = kwargs.get("prompt_type") == "negative"
+            thinking = bool(kwargs.get("sensenova_thinking", False)) and not image_only
+            if kwargs.get("hooks") is None or thinking:
+                if thinking:
+                    length += int(kwargs.get("sensenova_max_think_tokens", 1024))
+                    length += 1
+                    length += len(comfy.ldm.sensenova.model.THINK_SUFFIX_TOKEN_IDS)
                 prefix_shape = [
                     1,
                     comfy.ldm.sensenova.model.NUM_KV_HEADS,

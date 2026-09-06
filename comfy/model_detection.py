@@ -818,13 +818,19 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
 
     vision_key = f"{key_prefix}fm_modules.vision_model_mot_gen.embeddings.patch_embedding.weight"
     query_key = f"{key_prefix}language_model.model.layers.0.self_attn.q_proj_mot_gen.weight"
+    pixel_head_key = f"{key_prefix}fm_modules.fm_head.conv1.weight"
     if (
         vision_key in state_dict
         and query_key in state_dict
+        and pixel_head_key in state_dict
         and state_dict[vision_key].shape[0] == 1024
         and state_dict[query_key].shape[0] == 4096
     ):  # SenseNova U1.5
-        return {"image_model": "sensenova_u15"}
+        return {
+            "image_model": "sensenova_u15",
+            "has_lm_head": f"{key_prefix}language_model.lm_head.weight"
+            in state_dict,
+        }
 
     if '{}caption_projection.0.linear.weight'.format(key_prefix) in state_dict_keys:  # HiDream
         dit_config = {}
