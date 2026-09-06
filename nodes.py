@@ -2456,6 +2456,7 @@ async def init_builtin_extra_nodes():
         "nodes_minimax_music.py",
         "nodes_minimax_h3.py",
         "nodes_lt.py",
+        "nodes_lt_keyframes.py",
         "nodes_hooks.py",
         "nodes_multigpu.py",
         "nodes_load_3d.py",
