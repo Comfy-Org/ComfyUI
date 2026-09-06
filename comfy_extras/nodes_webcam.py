@@ -26,6 +26,8 @@ class WebcamCapture(nodes.LoadImage):
 
     @classmethod
     def IS_CHANGED(cls, image, width, height, capture_on_queue):
+        if capture_on_queue:
+            return float("NaN")
         return super().IS_CHANGED(image)
 
 
