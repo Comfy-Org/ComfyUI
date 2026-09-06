@@ -1964,7 +1964,21 @@ def supports_fp8_compute(device=None):
     if SUPPORT_FP8_OPS:
         return True
 
-    if not is_nvidia():
+    if device is None:
+        device = get_torch_device()
+
+    if is_device_cpu(device) or is_device_mps(device):
+        return False
+
+    # Per-device check instead of the global is_nvidia(). On ROCm builds,
+    # is_device_cuda() returns True (AMD GPUs appear as cuda:N via HIP) but
+    # torch.version.cuda is None, so this correctly returns False for AMD.
+    # If PyTorch ever supports mixed-vendor GPUs in one process, these
+    # per-device checks remain correct unlike the global is_nvidia().
+    if not is_device_cuda(device):
+        return False
+
+    if not torch.version.cuda:
         return False
 
     props = torch.cuda.get_device_properties(device)
@@ -1985,7 +1999,10 @@ def supports_fp8_compute(device=None):
     return True
 
 def supports_nvfp4_compute(device=None):
-    if not is_nvidia():
+    if device is None:
+        device = get_torch_device()
+
+    if not is_device_cuda(device) or not torch.version.cuda:
         return False
 
     props = torch.cuda.get_device_properties(device)
