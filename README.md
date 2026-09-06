@@ -83,6 +83,7 @@ See what ComfyUI can do with the [newer template workflows](https://comfy.org/wo
 - Support for saving and loading HDR videos and images in various formats.
 
 
+
 ## Release Process
 
 ComfyUI follows a weekly release cycle targeting Monday but this regularly changes because of model releases or large changes to the codebase. There are three interconnected repositories:
@@ -304,6 +305,25 @@ For models compatible with Iluvatar Extension for PyTorch. Here's a step-by-step
 
 1. Install the Iluvatar Corex Toolkit by adhering to the platform-specific instructions on the [Installation](https://support.iluvatar.com/#/DocumentCentre?id=1&nameCenter=2&productId=520117912052801536)
 2. Launch ComfyUI by running `python main.py`
+
+## Monitoring
+
+Start ComfyUI with `--enable-prometheus` to expose metrics at `/metrics` on the
+normal server port. Use `--prometheus-port <port>` to expose them on a separate
+port instead. The optional [`prometheus_client`](https://pypi.org/project/prometheus-client/)
+package must be installed with `pip install prometheus_client`.
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `comfyui_queue_length` | Gauge | — | Pending workflows in the prompt queue. |
+| `comfyui_queue_wait_seconds` | Histogram | — | Time from workflow submission until processing starts. |
+| `comfyui_job_duration_seconds` | Histogram | — | Duration of completed workflow executions. |
+| `comfyui_jobs_total` | Counter | `status` | Workflow executions by `completed`, `failed`, or `interrupted` status. |
+| `comfyui_vram_bytes` | Gauge | `device`, `type` | GPU memory. `allocated` and `reserved` are PyTorch allocator values; CUDA-only `device_used` is device-wide CUDA driver usage and includes DynamicVRAM allocations. |
+| `comfyui_loaded_models_count` | Gauge | — | Models currently held in memory. |
+| `comfyui_model_swaps_total` | Counter | — | Model load and unload transfers. |
+| `comfyui_node_execution_seconds` | Histogram | `node_type` | Individual node execution duration. |
+| `comfyui_cache_requests_total` | Counter | `result` | Node-output cache lookups by `hit` or `miss`. |
 
 
 ## [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager/tree/manager-v4)
