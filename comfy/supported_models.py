@@ -971,7 +971,7 @@ class MiniMaxH3(supported_models_base.BASE):
     unet_extra_config = {}
     latent_format = latent_formats.MiniMaxH3AV
 
-    memory_usage_factor = 0.114
+    memory_usage_factor = 0.24
 
     supported_inference_dtypes = [torch.bfloat16, torch.float32]
 

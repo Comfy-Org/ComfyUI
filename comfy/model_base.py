@@ -2136,9 +2136,70 @@ class Hunyuan3Dv2_1(BaseModel):
             out['guidance'] = comfy.conds.CONDRegular(torch.FloatTensor([guidance]))
         return out
 
+class _MiniMaxH3Payload(comfy.conds.CONDConstant):
+    def __init__(self, cond, shape):
+        super().__init__(cond)
+        self.shape = shape
+
+    def _copy_with(self, cond):
+        return self.__class__(cond, self.shape)
+
+    def size(self):
+        return self.shape
+
+
 class MiniMaxH3(BaseModel):
+    MEMORY_BYTES_PER_PACKED_ROW = 151_000  # Rounded-up vanilla one-block Windows process allocation slope.
+
     def __init__(self, model_config, model_type=ModelType.FLOW_AV, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.minimax.model.MiniMaxH3Model)
+        self.memory_usage_factor_conds = ("minimax_payload",)
+
+    def _target_rows(self):
+        if self.latent_shapes is None or len(self.latent_shapes) < 2:
+            return None
+        video, audio = self.latent_shapes[:2]
+        frame_rows = ((video[3] + 1) // 2) * ((video[4] + 1) // 2)
+        return video[2] * frame_rows + audio[-1] * 2
+
+    def memory_required(self, input_shape, cond_shapes={}):
+        target_rows = self._target_rows()
+        if target_rows is None:
+            return super().memory_required(input_shape, cond_shapes)
+
+        rows = input_shape[0] * target_rows
+        for name in self.memory_usage_factor_conds:
+            for shape in cond_shapes.get(name, ()):
+                rows += shape[0] * math.prod(shape[2:])
+        return rows * self.MEMORY_BYTES_PER_PACKED_ROW
+
+    def extra_conds_shapes(self, **kwargs):
+        if self.latent_shapes is None or len(self.latent_shapes) < 2:
+            return {}
+
+        video = self.latent_shapes[0]
+        frame_rows = ((video[3] + 1) // 2) * ((video[4] + 1) // 2)
+        cross_attn = kwargs.get("cross_attn")
+        rows = cross_attn.shape[1] if cross_attn is not None else 0
+
+        for keyframe in kwargs.get("minimax_keyframes") or ():
+            latent = keyframe.get("latent")
+            if latent is not None:
+                rows += latent.shape[2] * frame_rows
+            audio_latent = keyframe.get("audio_latent")
+            if audio_latent is not None:
+                rows += audio_latent.shape[-1] * 2
+
+        for ref in kwargs.get("minimax_refs") or ():
+            kind = ref["kind"]
+            if kind in ("audio", "video", "video_audio"):
+                rows += ref["ref_audio_t"] * 2
+            if kind == "image":
+                rows += (ref["latent_h"] // 2) * (ref["latent_w"] // 2)
+            elif kind in ("video", "video_audio"):
+                rows += ref["latent_t"] * (ref["latent_h"] // 2) * (ref["latent_w"] // 2)
+
+        return {"minimax_payload": [1, 1, rows]}
 
     def audio_scale(self):
         """Scale the sampler carries the audio stream at, 1.0 when not sampling the packed latent."""
@@ -2212,7 +2273,8 @@ class MiniMaxH3(BaseModel):
                 cross_attn.shape[1], vs[2], (vs[3] + 1) // 2 * 2, (vs[4] + 1) // 2 * 2,
                 latent_shapes[1][-1], keyframes=payload.get("keyframes"),
                 refs=payload.get("refs"))
-        out['minimax_payload'] = comfy.conds.CONDConstant(payload)
+        payload_shape = self.extra_conds_shapes(**kwargs).get("minimax_payload", [1])
+        out['minimax_payload'] = _MiniMaxH3Payload(payload, payload_shape)
         return out
 
     def _pool_masks_to_token_grid(self, masks):
