@@ -23,6 +23,7 @@ def mock_dependencies():
     """Mock all external dependencies for isolated testing."""
     with (
         patch("app.assets.seeder.dependencies_available", return_value=True),
+        patch("app.assets.seeder.run_pending_semantics_steps", return_value=0),
         patch("app.assets.seeder.sync_root_safely", return_value=set()),
         patch("app.assets.seeder.collect_paths_for_roots", return_value=[]),
         patch("app.assets.seeder.build_asset_specs", return_value=([], set(), 0)),
@@ -454,6 +455,7 @@ class TestSeederMarkMissing:
 
         with (
             patch("app.assets.seeder.dependencies_available", return_value=True),
+            patch("app.assets.seeder.run_pending_semantics_steps", return_value=0),
             patch("app.assets.seeder.get_owned_prefixes", return_value=["/models"]),
             patch("app.assets.seeder.mark_missing_outside_prefixes_safely", side_effect=track_mark),
             patch("app.assets.seeder.sync_temp_references_safely"),
@@ -475,6 +477,7 @@ class TestSeederMarkMissing:
     ):
         with (
             patch("app.assets.seeder.dependencies_available", return_value=True),
+            patch("app.assets.seeder.run_pending_semantics_steps", return_value=0),
             patch("app.assets.seeder.get_owned_prefixes", return_value=["/models"]),
             patch("app.assets.seeder.mark_missing_outside_prefixes_safely", return_value=0),
             patch("app.assets.seeder.sync_temp_references_safely") as sync_temp,
@@ -492,6 +495,154 @@ class TestSeederMarkMissing:
                 "temp is not a scan root, so the scan must reconcile it explicitly "
                 "or files wiped at startup stay listed"
             )
+
+
+class TestSeederSemanticsReset:
+
+    def test_semantics_reset_runs_before_any_scan_work(
+        self, fresh_seeder: _AssetSeeder
+    ):
+        call_order = []
+
+        with (
+            patch("app.assets.seeder.dependencies_available", return_value=True),
+            patch(
+                "app.assets.seeder.run_pending_semantics_steps",
+                side_effect=lambda interrupt_check=None: call_order.append("reset"),
+            ),
+            patch("app.assets.seeder.get_owned_prefixes", return_value=["/models"]),
+            patch(
+                "app.assets.seeder.mark_missing_outside_prefixes_safely",
+                side_effect=lambda prefixes: call_order.append("prune") or 0,
+            ),
+            patch(
+                "app.assets.seeder.sync_temp_references_safely",
+                side_effect=lambda: call_order.append("sync_temp"),
+            ),
+            patch(
+                "app.assets.seeder.sync_root_safely",
+                side_effect=lambda root: call_order.append("sync") or set(),
+            ),
+            patch("app.assets.seeder.collect_paths_for_roots", return_value=[]),
+            patch("app.assets.seeder.build_asset_specs", return_value=([], set(), 0)),
+            patch("app.assets.seeder.insert_asset_specs", return_value=0),
+            patch("app.assets.seeder.get_unenriched_assets_for_roots", return_value=[]),
+            patch("app.assets.seeder.enrich_assets_batch", return_value=(0, 0)),
+        ):
+            fresh_seeder.start(roots=("models",), prune_first=True)
+            fresh_seeder.wait(timeout=5.0)
+
+        assert call_order[0] == "reset", (
+            "reprojection must finish before the scan reads or extends those rows"
+        )
+
+    def test_semantics_reset_can_be_cancelled(self, fresh_seeder: _AssetSeeder):
+        captured = {}
+
+        with (
+            patch("app.assets.seeder.dependencies_available", return_value=True),
+            patch(
+                "app.assets.seeder.run_pending_semantics_steps",
+                side_effect=lambda interrupt_check=None: captured.update(
+                    check=interrupt_check
+                ),
+            ),
+            patch("app.assets.seeder.sync_root_safely", return_value=set()),
+            patch("app.assets.seeder.collect_paths_for_roots", return_value=[]),
+            patch("app.assets.seeder.build_asset_specs", return_value=([], set(), 0)),
+            patch("app.assets.seeder.insert_asset_specs", return_value=0),
+            patch("app.assets.seeder.get_unenriched_assets_for_roots", return_value=[]),
+            patch("app.assets.seeder.enrich_assets_batch", return_value=(0, 0)),
+        ):
+            fresh_seeder.start(roots=("models",))
+            fresh_seeder.wait(timeout=5.0)
+
+        assert captured.get("check") is not None
+        assert captured["check"]() is False
+        fresh_seeder._cancel_event.set()
+        assert captured["check"]() is True
+
+
+    def test_semantics_reset_suspends_on_pause(self, fresh_seeder: _AssetSeeder):
+        captured = {}
+
+        with (
+            patch("app.assets.seeder.dependencies_available", return_value=True),
+            patch(
+                "app.assets.seeder.run_pending_semantics_steps",
+                side_effect=lambda interrupt_check=None: captured.update(
+                    check=interrupt_check
+                ),
+            ),
+            patch("app.assets.seeder.sync_root_safely", return_value=set()),
+            patch("app.assets.seeder.collect_paths_for_roots", return_value=[]),
+            patch("app.assets.seeder.build_asset_specs", return_value=([], set(), 0)),
+            patch("app.assets.seeder.insert_asset_specs", return_value=0),
+            patch("app.assets.seeder.get_unenriched_assets_for_roots", return_value=[]),
+            patch("app.assets.seeder.enrich_assets_batch", return_value=(0, 0)),
+        ):
+            fresh_seeder.start(roots=("models",))
+            fresh_seeder.wait(timeout=5.0)
+
+        check = captured.get("check")
+        assert check is not None
+
+        fresh_seeder._run_gate.clear()
+        returned = threading.Event()
+
+        def _call_check():
+            check()
+            returned.set()
+
+        threading.Thread(target=_call_check, daemon=True).start()
+        assert not returned.wait(timeout=0.5), (
+            "the seeder is paused while a prompt runs, so the walk must block "
+            "between batches rather than keep statting the whole table"
+        )
+
+        fresh_seeder._run_gate.set()
+        assert returned.wait(timeout=5.0)
+
+    def test_cancel_during_semantics_reset_stops_before_pruning(
+        self, fresh_seeder: _AssetSeeder
+    ):
+        calls = []
+
+        def _cancel_during_reset(interrupt_check=None):
+            calls.append("reset")
+            fresh_seeder._cancel_event.set()
+
+        with (
+            patch("app.assets.seeder.dependencies_available", return_value=True),
+            patch(
+                "app.assets.seeder.run_pending_semantics_steps",
+                side_effect=_cancel_during_reset,
+            ),
+            patch("app.assets.seeder.get_owned_prefixes", return_value=["/models"]),
+            patch(
+                "app.assets.seeder.mark_missing_outside_prefixes_safely",
+                side_effect=lambda prefixes: calls.append("prune") or 0,
+            ),
+            patch(
+                "app.assets.seeder.sync_temp_references_safely",
+                side_effect=lambda: calls.append("sync_temp"),
+            ),
+            patch(
+                "app.assets.seeder.sync_root_safely",
+                side_effect=lambda root: calls.append("sync") or set(),
+            ),
+            patch("app.assets.seeder.collect_paths_for_roots", return_value=[]),
+            patch("app.assets.seeder.build_asset_specs", return_value=([], set(), 0)),
+            patch("app.assets.seeder.insert_asset_specs", return_value=0),
+            patch("app.assets.seeder.get_unenriched_assets_for_roots", return_value=[]),
+            patch("app.assets.seeder.enrich_assets_batch", return_value=(0, 0)),
+        ):
+            fresh_seeder.start(roots=("models",), prune_first=True)
+            fresh_seeder.wait(timeout=5.0)
+
+        assert calls == ["reset"], (
+            f"cancel must stop the scan before the prune's writes, got {calls}"
+        )
 
 
 class TestSeederPhases:

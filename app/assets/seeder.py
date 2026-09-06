@@ -23,6 +23,7 @@ from app.assets.scanner import (
     sync_root_safely,
     sync_temp_references_safely,
 )
+from app.assets.semantics import run_pending_semantics_steps
 from app.database.db import dependencies_available
 
 
@@ -546,6 +547,17 @@ class _AssetSeeder:
                     "assets.seed.error",
                     {"message": "Database dependencies not available"},
                 )
+                return
+
+            # Must precede the prune and the scan: both read and extend these rows.
+            # _check_pause_and_cancel, not _is_cancelled: a pause has to suspend
+            # the walk between batches, or it keeps statting the whole table
+            # while the seeder reports PAUSED and a prompt runs.
+            run_pending_semantics_steps(interrupt_check=self._check_pause_and_cancel)
+
+            if self._is_cancelled():
+                logging.info("Asset scan cancelled during semantics reset")
+                cancelled = True
                 return
 
             if self._prune_first:
