@@ -816,7 +816,8 @@ class StableAudio1(BaseModel):
         device = kwargs["device"]
 
         seconds_start = kwargs.get("seconds_start", 0)
-        seconds_total = kwargs.get("seconds_total", int(noise.shape[-1] / 21.53))
+        ratio = self.latent_format.temporal_downscale_ratio
+        seconds_total = kwargs.get("seconds_total", round(noise.shape[-1] * ratio / 44100))
 
         seconds_start_embed = self.seconds_start_embedder([seconds_start])[0].to(device)
         seconds_total_embed = self.seconds_total_embedder([seconds_total])[0].to(device)
@@ -883,7 +884,8 @@ class StableAudio3(BaseModel):
         noise = kwargs.get("noise", None)
         device = kwargs["device"]
 
-        seconds_total = kwargs.get("seconds_total", int(noise.shape[-1] / 10.7666))
+        ratio = self.latent_format.temporal_downscale_ratio
+        seconds_total = kwargs.get("seconds_total", round(noise.shape[-1] * ratio / 44100))
         seconds_total_embed = self.seconds_total_embedder([seconds_total])[0].to(device)
 
         global_embed = seconds_total_embed.reshape((1, -1))
