@@ -2490,6 +2490,7 @@ async def init_builtin_extra_nodes():
         "nodes_easycache.py",
         "nodes_sparse_attention.py",
         "nodes_audio_encoder.py",
+        "nodes_gds.py",
         "nodes_rope.py",
         "nodes_logic.py",
         "nodes_resolution.py",
