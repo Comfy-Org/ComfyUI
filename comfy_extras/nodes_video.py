@@ -299,6 +299,11 @@ class LoadVideo(io.ComfyNode):
             has_intermediate_output=True,
             inputs=[
                 io.Combo.Input("file", options=sorted(files), upload=io.UploadType.video),
+                io.VideoEdit.Input(
+                    "edit",
+                    optional=True,
+                    tooltip="Trim (seconds) and crop (pixels) applied on load. Zero values leave the video unchanged.",
+                ),
             ],
             outputs=[
                 io.Video.Output(),
@@ -306,13 +311,17 @@ class LoadVideo(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, file) -> io.NodeOutput:
+    def execute(cls, file, edit=None) -> io.NodeOutput:
         video_path = folder_paths.get_annotated_filepath(file)
         source = InputImpl.VideoFromFile(video_path)
-        return io.NodeOutput(source, ui=preview_input_video(file, source))
+        video = apply_video_trim(source, (edit or {}).get("trim"))
+        video = apply_video_crop(video, (edit or {}).get("crop"))
+        if video is source:
+            return io.NodeOutput(video, ui=preview_input_video(file, source))
+        return io.NodeOutput(video, ui=save_video_preview(video))
 
     @classmethod
-    def fingerprint_inputs(s, file):
+    def fingerprint_inputs(s, file, edit=None):
         video_path = folder_paths.get_annotated_filepath(file)
         mod_time = os.path.getmtime(video_path)
         # Instead of hashing the file, we can just use the modification time to avoid
@@ -320,7 +329,7 @@ class LoadVideo(io.ComfyNode):
         return mod_time
 
     @classmethod
-    def validate_inputs(s, file):
+    def validate_inputs(s, file, edit=None):
         if not folder_paths.exists_annotated_filepath(file):
             return "Invalid video file: {}".format(file)
 
@@ -451,7 +460,7 @@ class VideoTrim(io.ComfyNode):
                 io.VideoEdit.Input(
                     "trim",
                     features=["trim"],
-                    tooltip="Trim window using start/end frames.",
+                    tooltip="Trim window in seconds. Duration 0 keeps the video until the end.",
                 ),
                 io.Boolean.Input(
                     "strict_duration",

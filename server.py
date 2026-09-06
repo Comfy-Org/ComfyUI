@@ -31,6 +31,7 @@ from io import BytesIO
 
 import aiohttp
 from aiohttp import web
+import av
 import logging
 
 import mimetypes
@@ -659,6 +660,88 @@ class PromptServer():
                         return web.FileResponse(file, headers=headers)
 
             return web.Response(status=404)
+
+        @routes.get("/video_metadata")
+        async def get_video_metadata(request):
+            if "filename" not in request.rel_url.query:
+                return web.Response(status=400)
+            filename = request.rel_url.query["filename"]
+
+            # Mirrors /view's filename resolution (blake3 asset hashes vs.
+            # on-disk output/input/temp paths) so /video_metadata can probe
+            # the same file the trim/crop widget is previewing.
+            if filename.startswith("blake3:"):
+                owner_id = self.user_manager.get_request_user_id(request)
+                result = resolve_hash_to_path(filename, owner_id=owner_id)
+                if result is None:
+                    return web.Response(status=404)
+                file = result.abs_path
+            else:
+                filename, output_dir = folder_paths.annotated_filepath(filename)
+
+                if not filename:
+                    return web.Response(status=400)
+
+                # validation for security: prevent accessing arbitrary path
+                if filename[0] == '/' or '..' in filename:
+                    return web.Response(status=400)
+
+                if output_dir is None:
+                    type = request.rel_url.query.get("type", "output")
+                    output_dir = folder_paths.get_directory_by_type(type)
+
+                if output_dir is None:
+                    return web.Response(status=400)
+
+                if "subfolder" in request.rel_url.query:
+                    full_output_dir = os.path.join(output_dir, request.rel_url.query["subfolder"])
+                    if os.path.commonpath((os.path.abspath(full_output_dir), output_dir)) != output_dir:
+                        return web.Response(status=403)
+                    output_dir = full_output_dir
+
+                filename = os.path.basename(filename)
+                file = os.path.join(output_dir, filename)
+
+            if not os.path.isfile(file):
+                return web.Response(status=404)
+
+            def probe_video_metadata():
+                with av.open(file) as container:
+                    stream = next((s for s in container.streams if s.type == "video"), None)
+                    if stream is None:
+                        return None
+
+                    fps = float(stream.average_rate) if stream.average_rate else None
+                    duration = None
+                    if stream.duration is not None and stream.time_base is not None:
+                        duration = float(stream.duration * stream.time_base)
+                    elif container.duration is not None:
+                        duration = float(container.duration * av.time_base)
+                    frame_count = stream.frames or None
+                    if frame_count is None and duration is not None and fps is not None:
+                        frame_count = round(duration * fps)
+
+                    return {
+                        "fps": fps,
+                        "duration": duration,
+                        "frame_count": frame_count,
+                        "width": stream.codec_context.width,
+                        "height": stream.codec_context.height,
+                        "size": os.path.getsize(file),
+                    }
+
+            try:
+                metadata = await asyncio.to_thread(probe_video_metadata)
+            except FileNotFoundError:
+                return web.Response(status=404)
+            except PermissionError:
+                return web.Response(status=403)
+            except av.error.FFmpegError:
+                return web.Response(status=415)
+            if metadata is None:
+                return web.Response(status=415)
+
+            return web.json_response(metadata)
 
         @routes.get("/view_metadata/{folder_name}")
         async def view_metadata(request):

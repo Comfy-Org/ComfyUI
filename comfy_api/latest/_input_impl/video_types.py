@@ -916,9 +916,9 @@ class VideoFromFile(VideoInput):
                                 g_sink = g.add("buffersink")
                                 tail.link_to(g_sink)
                                 g.configure()
-                                rotation_filter = (g_src, g_sink)
-                            rotation_filter[0].push(frame)
-                            frame = rotation_filter[1].pull()
+                                rotation_filter = (g, g_src, g_sink)
+                            rotation_filter[1].push(frame)
+                            frame = rotation_filter[2].pull()
                         if crop_rect is not None:
                             if crop_filter is None:
                                 g = av.filter.Graph()
@@ -929,9 +929,9 @@ class VideoFromFile(VideoInput):
                                 g_src.link_to(g_crop)
                                 g_crop.link_to(g_sink)
                                 g.configure()
-                                crop_filter = (g_src, g_sink)
-                            crop_filter[0].push(frame)
-                            frame = crop_filter[1].pull()
+                                crop_filter = (g, g_src, g_sink)
+                            crop_filter[1].push(frame)
+                            frame = crop_filter[2].pull()
                         if frame.color_range == ColorRange.JPEG and not preserve_source_color:
                             # compress full-range sources (yuvj/MJPEG) to limited range
                             frame = frame.reformat(format=pix_fmt, src_color_range="JPEG", dst_color_range="MPEG")
