@@ -321,6 +321,24 @@ class TestExecution:
         else:
             client.run(g)
 
+    @pytest.mark.parametrize("bad_index", [False, 0.0, -1])
+    def test_validation_rejects_invalid_link_index(
+        self,
+        bad_index,
+        client: ComfyClient,
+        builder: GraphBuilder,
+    ):
+        g = builder
+        producer = g.node("StubImage", content="BLACK", height=32, width=32, batch_size=1)
+        output = g.node("PreviewImage", images=producer.out(0))
+        prompt = g.finalize()
+        prompt[output.id]["inputs"]["images"][1] = bad_index
+
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            client.queue_prompt(prompt)
+
+        assert exc_info.value.code == 400
+
     @pytest.mark.parametrize("test_type, test_value", [
         ("StubInt", 5),
         ("StubMask", 5.0)
