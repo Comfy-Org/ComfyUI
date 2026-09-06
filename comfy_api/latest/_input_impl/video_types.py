@@ -1156,6 +1156,7 @@ class VideoFromComponents(VideoInput):
                 audio_sample_rate = 48000 if output_format == VideoContainer.WEBM else source_audio_sample_rate
                 waveform = self.__components.audio['waveform']
                 waveform = waveform[0, :, :math.ceil((source_audio_sample_rate / frame_rate) * self.__components.images.shape[0])]
+                waveform = torch.nan_to_num(waveform, nan=0.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
                 layout = {1: 'mono', 2: 'stereo', 6: '5.1'}.get(waveform.shape[0], 'stereo')
                 audio_codec = "libopus" if output_format == VideoContainer.WEBM else "aac"
                 audio_stream = output.add_stream(audio_codec, rate=audio_sample_rate, layout=layout)
@@ -1179,26 +1180,29 @@ class VideoFromComponents(VideoInput):
                 frame = frame.reformat(format=pix_fmt, dst_colorspace=dst_colorspace)
                 if color_space is not None:
                     set_video_color_properties(frame, color_space)
-                packet = video_stream.encode(frame)
-                output.mux(packet)
+                for packet in video_stream.encode(frame):
+                    output.mux(packet)
 
             # Flush video
-            packet = video_stream.encode(None)
-            output.mux(packet)
+            for packet in video_stream.encode(None):
+                output.mux(packet)
 
             if audio_stream and self.__components.audio:
-                frame = av.AudioFrame.from_ndarray(waveform.float().cpu().contiguous().numpy(), format='fltp', layout=layout)
-                frame.sample_rate = source_audio_sample_rate
-                frame.pts = 0
-                frames = [frame] if audio_resampler is None else audio_resampler.resample(frame)
-                for frame in frames:
-                    output.mux(audio_stream.encode(frame))
-                if audio_resampler is not None:
-                    for frame in audio_resampler.resample(None):
+                try:
+                    frame = av.AudioFrame.from_ndarray(waveform.float().cpu().contiguous().numpy(), format='fltp', layout=layout)
+                    frame.sample_rate = source_audio_sample_rate
+                    frame.pts = 0
+                    frames = [frame] if audio_resampler is None else audio_resampler.resample(frame)
+                    for frame in frames:
                         output.mux(audio_stream.encode(frame))
+                    if audio_resampler is not None:
+                        for frame in audio_resampler.resample(None):
+                            output.mux(audio_stream.encode(frame))
 
-                # Flush encoder
-                output.mux(audio_stream.encode(None))
+                    # Flush encoder
+                    output.mux(audio_stream.encode(None))
+                except Exception as e:
+                    logging.warning(f"[SaveVideo] Audio muxing exception suppressed: {e}")
 
     def as_trimmed(
         self,

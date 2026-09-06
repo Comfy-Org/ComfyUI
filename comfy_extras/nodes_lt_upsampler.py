@@ -1,7 +1,8 @@
+import torch
+import math
+from typing_extensions import override
 from comfy import model_management
 from comfy_api.latest import ComfyExtension, IO
-from typing_extensions import override
-import math
 
 
 class LTXVLatentUpsampler(IO.ComfyNode):
@@ -49,9 +50,21 @@ class LTXVLatentUpsampler(IO.ComfyNode):
 
         latents = latents.to(dtype=model_dtype, device=device)
 
-        """Upsample latents without tiling."""
+        """Upsample latents with temporal chunking if needed."""
         latents = vae.first_stage_model.per_channel_statistics.un_normalize(latents)
-        upsampled_latents = model(latents)
+        
+        # Temporal slicing for long sequences to prevent MPS buffer overflows
+        batch_size, channels, time_len, h, w = latents.shape
+        chunk_size = 16  # Process 16 latent frames at a time
+        if time_len > chunk_size:
+            out_chunks = []
+            for t_idx in range(0, time_len, chunk_size):
+                chunk = latents[:, :, t_idx:t_idx+chunk_size]
+                out_chunk = model(chunk)
+                out_chunks.append(out_chunk)
+            upsampled_latents = torch.cat(out_chunks, dim=2)
+        else:
+            upsampled_latents = model(latents)
 
         upsampled_latents = vae.first_stage_model.per_channel_statistics.normalize(
             upsampled_latents
