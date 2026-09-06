@@ -337,7 +337,7 @@ class BasicCache:
         subcache_key = self.cache_key_set.get_subcache_key(node_id)
         subcache = self.subcaches.get(subcache_key, None)
         if subcache is None:
-            subcache = BasicCache(self.key_class)
+            subcache = BasicCache(self.key_class, enable_providers=self.enable_providers)
             self.subcaches[subcache_key] = subcache
         await subcache.set_prompt(self.dynprompt, children_ids, self.is_changed_cache)
         return subcache
