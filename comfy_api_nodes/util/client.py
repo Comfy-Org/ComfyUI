@@ -65,7 +65,6 @@ class _RequestConfig:
     retry_backoff: float
     wait_label: str = "Waiting"
     monitor_progress: bool = True
-    estimated_total: int | None = None
     final_label_on_success: str | None = "Completed"
     progress_origin_ts: float | None = None
     price_extractor: Callable[[dict[str, Any]], float | None] | None = None
@@ -177,7 +176,6 @@ async def sync_op(
     retry_delay: float = 1.0,
     retry_backoff: float = 2.0,
     wait_label: str = "Waiting for server",
-    estimated_duration: int | None = None,
     final_label_on_success: str | None = "Completed",
     progress_origin_ts: float | None = None,
     monitor_progress: bool = True,
@@ -197,7 +195,6 @@ async def sync_op(
         retry_delay=retry_delay,
         retry_backoff=retry_backoff,
         wait_label=wait_label,
-        estimated_duration=estimated_duration,
         as_binary=False,
         final_label_on_success=final_label_on_success,
         progress_origin_ts=progress_origin_ts,
@@ -273,7 +270,6 @@ async def sync_op_raw(
     retry_delay: float = 1.0,
     retry_backoff: float = 2.0,
     wait_label: str = "Waiting for server",
-    estimated_duration: int | None = None,
     as_binary: bool = False,
     final_label_on_success: str | None = "Completed",
     progress_origin_ts: float | None = None,
@@ -306,7 +302,6 @@ async def sync_op_raw(
         retry_backoff=retry_backoff,
         wait_label=wait_label,
         monitor_progress=monitor_progress,
-        estimated_total=estimated_duration,
         final_label_on_success=final_label_on_success,
         progress_origin_ts=progress_origin_ts,
         price_extractor=price_extractor,
@@ -414,7 +409,6 @@ async def poll_op_raw(
                     retry_delay=retry_delay_per_poll,
                     retry_backoff=retry_backoff_per_poll,
                     wait_label="Checking",
-                    estimated_duration=None,
                     as_binary=False,
                     final_label_on_success=None,
                     monitor_progress=False,
@@ -430,7 +424,6 @@ async def poll_op_raw(
                             timeout=cancel_timeout,
                             max_retries=0,
                             wait_label="Cancelling task",
-                            estimated_duration=None,
                             as_binary=False,
                             final_label_on_success=None,
                             monitor_progress=False,
@@ -498,7 +491,7 @@ async def poll_op_raw(
                 raise Exception(msg)
 
             try:
-                await sleep_with_interrupt(poll_interval, cls, None, None, None)
+                await sleep_with_interrupt(poll_interval, cls, None, None)
             except ProcessingInterrupted:
                 if cancel_endpoint:
                     with contextlib.suppress(Exception):
@@ -508,7 +501,6 @@ async def poll_op_raw(
                             timeout=cancel_timeout,
                             max_retries=0,
                             wait_label="Cancelling task",
-                            estimated_duration=None,
                             as_binary=False,
                             final_label_on_success=None,
                             monitor_progress=False,
@@ -779,9 +771,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                 if is_processing_interrupted():
                     return
                 if cfg.monitor_progress:
-                    _display_time_progress(
-                        cfg.node_cls, cfg.wait_label, int(time.monotonic() - start_ts), cfg.estimated_total
-                    )
+                    _display_time_progress(cfg.node_cls, cfg.wait_label, int(time.monotonic() - start_ts))
                 await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             return  # normal shutdown
@@ -936,7 +926,6 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                             cfg.node_cls,
                             cfg.wait_label if cfg.monitor_progress else None,
                             start_time if cfg.monitor_progress else None,
-                            cfg.estimated_total,
                             display_callback=_display_time_progress if cfg.monitor_progress else None,
                         )
                         continue
@@ -963,9 +952,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                             if is_processing_interrupted():
                                 raise ProcessingInterrupted("Task cancelled")
                             if cfg.monitor_progress:
-                                _display_time_progress(
-                                    cfg.node_cls, cfg.wait_label, int(now - start_time), cfg.estimated_total
-                                )
+                                _display_time_progress(cfg.node_cls, cfg.wait_label, int(now - start_time))
                     bytes_payload = bytes(buff)
                     resp_headers = {k.lower(): v for k, v in resp.headers.items()}
                     if is_comfy_api_request:
@@ -1043,7 +1030,6 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                     cfg.node_cls,
                     cfg.wait_label if cfg.monitor_progress else None,
                     start_time if cfg.monitor_progress else None,
-                    cfg.estimated_total,
                     display_callback=_display_time_progress if cfg.monitor_progress else None,
                 )
                 delay *= cfg.retry_backoff
