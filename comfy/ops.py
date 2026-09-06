@@ -1209,6 +1209,11 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
                 raise ValueError(f"Missing W4A8 group scale (weight_s_rel) for layer {layer_name}")
             if scale.dtype == torch.uint8:
                 scale = scale.view(torch.float8_e4m3fn)
+            if device.type == "mps":
+                # MPS has no fp8 casts at all, so the eager dequant path dies on
+                # s_rel.float(). fp32 is the only other dtype the eager backend
+                # declares for s_rel, so fp16 is not an option here.
+                scale = scale.float()
             params_conf = layer_conf.get("params", {})
             if not isinstance(params_conf, dict):
                 params_conf = {}
