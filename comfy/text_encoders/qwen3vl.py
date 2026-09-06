@@ -151,6 +151,18 @@ class Qwen3VLSDTokenizer(sd1_clip.SDTokenizer):
                          has_start_token=False, has_end_token=False, pad_to_max_length=False, max_length=99999999, min_length=1, pad_token=151643, tokenizer_data=tokenizer_data)
 
 
+def add_image_entries(tokens, images):
+    key_name = next(iter(tokens))
+    embed_count = 0
+    for r in tokens[key_name]:
+        for i in range(len(r)):
+            if isinstance(r[i][0], (int, float)) and r[i][0] == 151655:  # <|image_pad|>
+                if len(images) > embed_count:
+                    r[i] = ({"type": "image", "data": images[embed_count], "original_type": "image"},) + r[i][1:]
+                    embed_count += 1
+    return tokens
+
+
 class Qwen3VLTokenizer(sd1_clip.SD1Tokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}, model_type="qwen3vl_8b"):
         embedding_size = 2560 if model_type == "qwen3vl_4b" else 4096
@@ -185,15 +197,7 @@ class Qwen3VLTokenizer(sd1_clip.SD1Tokenizer):
                 llama_text += "<think>\n\n</think>\n\n"
 
         tokens = super().tokenize_with_weights(llama_text, return_word_ids=return_word_ids, disable_weights=True, **kwargs)
-        key_name = next(iter(tokens))
-        embed_count = 0
-        for r in tokens[key_name]:
-            for i in range(len(r)):
-                if isinstance(r[i][0], (int, float)) and r[i][0] == 151655:  # <|image_pad|>
-                    if len(images) > embed_count:
-                        r[i] = ({"type": "image", "data": images[embed_count], "original_type": "image"},) + r[i][1:]
-                        embed_count += 1
-        return tokens
+        return add_image_entries(tokens, images)
 
 
 def tokenizer(model_type="qwen3vl_8b"):
