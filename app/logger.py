@@ -49,6 +49,10 @@ stderr_interceptor = None
 
 
 class LogInterceptor(io.TextIOWrapper):
+    # Maximum logs to buffer between flushes to prevent unbounded memory growth
+    # if callbacks persistently fail. 10000 entries is ~2-5MB depending on message size.
+    MAX_PENDING_LOGS = 10000
+
     def __init__(self, stream,  *args, **kwargs):
         buffer = stream.buffer
         encoding = stream.encoding
@@ -61,6 +65,9 @@ class LogInterceptor(io.TextIOWrapper):
         entry = {"t": datetime.now().isoformat(), "m": data}
         with self._lock:
             self._logs_since_flush.append(entry)
+            # Enforce max size to prevent OOM if callbacks persistently fail
+            if len(self._logs_since_flush) > self.MAX_PENDING_LOGS:
+                self._logs_since_flush = self._logs_since_flush[-self.MAX_PENDING_LOGS:]
 
             # Simple handling for cr to overwrite the last output if it isnt a full line
             # else logs just get full of progress messages
@@ -70,10 +77,21 @@ class LogInterceptor(io.TextIOWrapper):
         super().write(data)
 
     def flush(self):
-        super().flush()
+        try:
+            super().flush()
+        except OSError as e:
+            # errno 22 (EINVAL) can occur on Windows with piped/redirected streams
+            # This is safe to ignore as write() already succeeded
+            if e.errno != 22:
+                raise
+        if not self._logs_since_flush:
+            return
+        # Copy to prevent callback mutations from affecting retry on failure
+        logs_to_send = list(self._logs_since_flush)
         for cb in self._flush_callbacks:
-            cb(self._logs_since_flush)
-            self._logs_since_flush = []
+            cb(logs_to_send)
+        # Only clear after all callbacks succeed - if any raises, logs remain for retry
+        self._logs_since_flush = []
 
     def on_flush(self, callback):
         self._flush_callbacks.append(callback)
