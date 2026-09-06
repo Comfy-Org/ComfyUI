@@ -199,7 +199,11 @@ class LowVramPatch:
 
     def __call__(self, weight):
         patches = self.prepared_patches if self.prepared_patches is not None else self.patches[self.key]
-        return comfy.lora.calculate_weight(patches, weight, self.key, intermediate_dtype=weight.dtype)
+        temp_dtype = comfy.model_management.lora_compute_dtype(weight.device)
+        temp_weight = comfy.model_management.cast_to_device(weight, weight.device, temp_dtype, copy=True)
+        out_weight = comfy.lora.calculate_weight(patches, temp_weight, self.key)
+        return comfy.float.stochastic_rounding(out_weight, weight.dtype,
+                                               seed=comfy.utils.string_to_seed(self.key))
 
 LOWVRAM_PATCH_ESTIMATE_MATH_FACTOR = 2
 
