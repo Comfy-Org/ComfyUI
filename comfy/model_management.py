@@ -1719,11 +1719,6 @@ def pytorch_attention_enabled():
     global ENABLE_PYTORCH_ATTENTION
     return ENABLE_PYTORCH_ATTENTION
 
-def pytorch_attention_enabled_vae():
-    if is_amd():
-        return False  # enabling pytorch attention on AMD currently causes crash when doing high res
-    return pytorch_attention_enabled()
-
 def pytorch_attention_flash_attention():
     global ENABLE_PYTORCH_ATTENTION
     if ENABLE_PYTORCH_ATTENTION:
