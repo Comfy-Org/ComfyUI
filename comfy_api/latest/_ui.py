@@ -457,13 +457,17 @@ class PreviewUI3D(_UIOutput):
 
 
 class PreviewUI3DAdvanced(_UIOutput):
-    def __init__(self, model_file, camera_info, model_3d_info):
+    def __init__(self, model_file, camera_info, model_3d_info, folder_type: FolderType | None = None):
         self.model_file = model_file
         self.camera_info = camera_info
         self.model_3d_info = model_3d_info
+        self.folder_type = folder_type
 
     def as_dict(self):
-        return {"result": [self.model_file, self.camera_info, self.model_3d_info]}
+        model_file = self.model_file
+        if self.folder_type is not None:
+            model_file = f"{model_file} [{FolderType(self.folder_type).value}]"
+        return {"result": [model_file, self.camera_info, self.model_3d_info]}
 
 
 class PreviewText(_UIOutput):

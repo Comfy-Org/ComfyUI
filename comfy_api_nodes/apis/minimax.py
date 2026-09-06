@@ -215,3 +215,38 @@ class Hailuo03Task(BaseModel):
 
 class Hailuo03TaskQueryResponse(BaseModel):
     task: Hailuo03Task = Field(...)
+
+
+class Hailuo03MaxTaskCreationResponse(BaseModel):
+    request_id: str = Field(...)
+    status: str | None = Field(None)
+
+
+class Hailuo03MaxTaskStatusResponse(BaseModel):
+    status: str | None = Field(None)
+
+
+class Hailuo03MaxVideoFile(BaseModel):
+    url: str = Field(...)
+    content_type: str | None = Field(None)
+    file_name: str | None = Field(None)
+    file_size: int | None = Field(None)
+
+
+class Hailuo03MaxVideoRequest(BaseModel):
+    prompt: str = Field(...)
+    duration: int = Field(..., ge=5, le=15)
+    resolution: str = Field(...)
+    prompt_expansion_mode: str = Field(...)
+    seed: int = Field(...)
+    aspect_ratio: str | None = Field(None)
+    image_url: str | None = Field(None)
+    end_image_url: str | None = Field(None)
+    reference_image_urls: list[str] | None = Field(None)
+    reference_video_urls: list[str] | None = Field(None)
+    reference_audio_urls: list[str] | None = Field(None)
+
+
+class Hailuo03MaxVideoResult(BaseModel):
+    video: Hailuo03MaxVideoFile = Field(...)
+    expanded_prompt: str | None = Field(None)

@@ -469,9 +469,15 @@ class RecraftV4CreateStyleNode(IO.ComfyNode):
             inputs=[
                 IO.Combo.Input(
                     "model",
-                    options=["recraftv4_styles", "recraftv4_styles_vector"],
-                    tooltip="Output type the style is created for: recraftv4_styles for raster images, "
-                    "recraftv4_styles_vector for SVG.",
+                    options=[
+                        "recraftv4_styles",
+                        "recraftv4_styles_vector",
+                        "recraftv4_styles_pro",
+                        "recraftv4_styles_pro_vector",
+                    ],
+                    tooltip="Model the style is created for. Standard and Pro share one style pool: raster styles "
+                    "work with every Recraft V4 and V4.1 raster model, vector styles (*_vector) with every "
+                    "V4 and V4.1 vector model.",
                 ),
                 IO.Autogrow.Input(
                     "images",

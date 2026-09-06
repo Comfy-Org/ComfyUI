@@ -182,6 +182,8 @@ parser.add_argument("--disable-dynamic-vram", action="store_true", help="Disable
 parser.add_argument("--enable-dynamic-vram", action="store_true", help="Enable dynamic VRAM on systems where it's not enabled by default.")
 parser.add_argument("--fast-disk", action="store_true", help="Prefer disk-backed dynamic loading and offload over unpinned RAM. Can be faster for users with fast NVME disks.")
 parser.add_argument("--disable-cuda-graphs", action="store_true", help="Disable CUDA graphs.")
+parser.add_argument("--disable-comfy-compiler", action="store_true", help="Disable the Comfy model compiler, including its CUDA graph subfeature.")
+parser.add_argument("--assert-graph-breaks", action="store_true", help="Fail on Comfy model compiler graph breaks.")
 
 parser.add_argument("--force-non-blocking", action="store_true", help="Force ComfyUI to use non-blocking operations for all applicable tensors. This may improve performance on some non-Nvidia systems but can cause issues with some workflows.")
 
@@ -291,6 +293,9 @@ if args.windows_standalone_build:
 
 if args.disable_auto_launch:
     args.auto_launch = False
+
+if args.disable_comfy_compiler:
+    args.disable_cuda_graphs = True
 
 if args.force_fp16:
     args.fp16_unet = True

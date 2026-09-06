@@ -89,12 +89,12 @@ class Preview3D(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="Preview3D",
-            search_aliases=["view mesh", "3d viewer"],
-            display_name="Preview 3D & Animation",
+            display_name="Preview 3D & Animation (DEPRECATED)",
             category="3d",
             description="Preview a 3D model file without saving it to the ComfyUI output directory.",
             is_experimental=True,
             is_output_node=True,
+            is_deprecated=True, # This node is superseded by the Preview 3D (Advanced) node
             inputs=[
                 IO.MultiType.Input(
                     IO.String.Input("model_file", default="", multiline=False),
@@ -135,7 +135,7 @@ class Preview3DAdvanced(IO.ComfyNode):
         return IO.Schema(
             node_id="Preview3DAdvanced",
             display_name="Preview 3D (Advanced)",
-            search_aliases=["preview 3d", "3d viewer", "view mesh", "frame 3d", "3d camera output"],
+            search_aliases=["preview", "preview 3d", "3d viewer", "view mesh", "frame 3d", "3d camera output"],
             category="3d",
             description="Preview a 3D model file without saving it to the ComfyUI output directory.",
             is_experimental=True,
@@ -185,7 +185,7 @@ class Preview3DAdvanced(IO.ComfyNode):
             camera_info,
             width,
             height,
-            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info),
+            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info, folder_type=IO.FolderType.temp),
         )
 
 
@@ -200,17 +200,18 @@ class PreviewGaussianSplat(IO.ComfyNode):
             is_experimental=True,
             is_output_node=True,
             search_aliases=[
-                "view splat",
-                "view gaussian",
-                "view gaussian splat",
+                "preview",
+                "preview splat",
                 "preview gaussian",
                 "preview gaussian splat",
-                "view 3dgs",
                 "preview 3dgs",
                 "preview ply",
                 "preview spz",
-                "preview splat",
                 "preview ksplat",
+                "view splat",
+                "view gaussian",
+                "view gaussian splat",
+                "view 3dgs",
             ],
             inputs=[
                 IO.MultiType.Input(
@@ -255,7 +256,7 @@ class PreviewGaussianSplat(IO.ComfyNode):
             camera_info,
             width,
             height,
-            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info),
+            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info, folder_type=IO.FolderType.temp),
         )
 
 
@@ -270,11 +271,12 @@ class PreviewPointCloud(IO.ComfyNode):
             is_experimental=True,
             is_output_node=True,
             search_aliases=[
-                "view point cloud",
-                "view pointcloud",
+                "preview",
                 "preview point cloud",
                 "preview pointcloud",
                 "preview ply",
+                "view point cloud",
+                "view pointcloud",
             ],
             inputs=[
                 IO.MultiType.Input(
@@ -316,7 +318,7 @@ class PreviewPointCloud(IO.ComfyNode):
             camera_info,
             width,
             height,
-            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info),
+            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info, folder_type=IO.FolderType.temp),
         )
 
 

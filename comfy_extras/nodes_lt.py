@@ -1126,7 +1126,7 @@ class LTXVDurationPredictor(io.ComfyNode):
         return io.Schema(
             node_id="LTXVDurationPredictor",
             display_name="LTXV Duration Predictor",
-            category="conditioning/video_models",
+            category="model/conditioning/ltxv",
             description="Predicts the natural shot duration for a prompt using the LTX 2.4 duration "
                         "head (loaded with ModelPatchLoader), and snaps it to the VAE's 8k+1 frame grid.",
             search_aliases=["auto duration", "duration head", "num_frames"],

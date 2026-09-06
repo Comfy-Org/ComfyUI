@@ -1,3 +1,5 @@
+import json
+
 import torch
 from torch import nn
 import folder_paths
@@ -9,6 +11,7 @@ import comfy.latent_formats
 import comfy.ldm.lumina.controlnet
 import comfy.ldm.supir.supir_modules
 import comfy.ldm.anima.lllite
+import comfy.ldm.minimax.controlnet
 import comfy.ldm.wan.uni3c
 import comfy.ldm.lightricks.duration_head
 from comfy.ldm.wan.model_multitalk import WanMultiTalkAttentionBlock, MultiTalkAudioProjModel
@@ -266,6 +269,48 @@ class ModelPatchLoader:
                     if torch.count_nonzero(ref_weight) == 0:
                         config['broken'] = True
             model = comfy.ldm.lumina.controlnet.ZImage_Control(device=comfy.model_management.unet_offload_device(), dtype=dtype, operations=comfy.ops.manual_cast, **config)
+        elif comfy.ldm.minimax.controlnet.is_minimax_h3_fun_state_dict(sd):
+            load_device = comfy.model_management.get_torch_device()
+            quant = comfy.utils.detect_layer_quantization(sd, "")
+            if quant is not None:
+                dtype = torch.bfloat16
+                operations = comfy.ops.mixed_precision_ops(quant, dtype)
+            else:
+                dtype = comfy.model_management.unet_dtype(
+                    model_params=-1,
+                    supported_dtypes=[torch.bfloat16, torch.float32],
+                    weight_dtype=comfy.utils.weight_dtype(sd),
+                )
+                manual_cast_dtype = comfy.model_management.unet_manual_cast(
+                    dtype, load_device, supported_dtypes=[torch.bfloat16, torch.float32])
+                operations = comfy.ops.pick_operations(dtype, manual_cast_dtype)
+
+            num_blocks = 0
+            while "control_blocks.{}.after_proj.weight".format(num_blocks) in sd:
+                num_blocks += 1
+            injection_layers = tuple(range(0, num_blocks * 10, 10))
+            if metadata is not None and "control_blocks_places" in metadata:
+                injection_layers = tuple(json.loads(metadata["control_blocks_places"]))
+                if len(injection_layers) != num_blocks:
+                    raise ValueError("MiniMax H3 Fun control_blocks_places metadata does not match the checkpoint")
+            qkv = sd["control_blocks.0.attn.qkv_proj.weight"]
+            head_dim = sd["control_blocks.0.attn.q_norm.weight"].shape[0]
+            use_adaln_curves = metadata is not None and metadata.get("minimax_h3_fun_controlnet") == "adaln_basis"
+            time_embed_dim = 8 if use_adaln_curves else 2688
+            model = comfy.ldm.minimax.controlnet.MiniMaxH3FunControl(
+                control_in_dim=49,
+                injection_layers=injection_layers,
+                hidden_size=sd["control_proj_in.weight"].shape[0],
+                num_attention_heads=qkv.shape[0] // (3 * head_dim),
+                attention_head_dim=head_dim,
+                ffn_hidden_size=sd["control_blocks.0.mlp.fc1.weight"].shape[0] // 2,
+                time_embed_dim=time_embed_dim,
+                use_adaln_curves=use_adaln_curves,
+                operations=operations,
+                device=comfy.model_management.unet_offload_device(),
+                dtype=dtype,
+            )
+            model.requires_grad_(False)
         elif 'controlnet_patch_embedding.weight' in sd:  # Uni3C controlnet for Wan
             attn_key_replace = {".self_attn.to_q.": ".self_attn.q.",
                                 ".self_attn.to_k.": ".self_attn.k.",
@@ -352,7 +397,7 @@ class AnimaLLLiteApply:
     FUNCTION = "apply_patch"
     EXPERIMENTAL = True
 
-    CATEGORY = "model_patches/anima"
+    CATEGORY = "model/patch/anima"
 
     def apply_patch(self, model, model_patch, image, strength, start_percent, end_percent, mask=None):
         image = image[..., :3]

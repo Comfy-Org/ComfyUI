@@ -50,6 +50,7 @@ if __name__ == "__main__":
         and os.environ.get("CUDA_VISIBLE_DEVICES") is None
     ):
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        logging.warning("On windows we are currently forcing single GPU mode in ComfyUI due to a Nvidia related issue, if you want to disable this use: --cuda-device all")
 
 faulthandler.enable(file=sys.stderr, all_threads=args.debug_hang)
 if __name__ == "__main__" and args.debug_hang:

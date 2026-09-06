@@ -228,9 +228,8 @@ class Gemma4Attention(nn.Module):
             if fixed_cache is not None:
                 if seq_length == 1 and fixed_cache.index > 0:
                     # CUDA-graphable decode: write at the device-side ring/linear position
-                    position = fixed_cache.position.view(batch_size, 1, 1, 1).expand_as(xk)
-                    fixed_cache.key.scatter_(2, position, xk)
-                    fixed_cache.value.scatter_(2, position, xv)
+                    fixed_cache.key.index_copy_(2, fixed_cache.position, xk)
+                    fixed_cache.value.index_copy_(2, fixed_cache.position, xv)
                     output = self._decode_attention(xq, fixed_cache, attention_mask)
                     return self.o_proj(output), fixed_cache, None
 
@@ -516,61 +515,36 @@ class Gemma4Transformer(nn.Module):
 
         fixed_kv = (past_key_values is not None and len(past_key_values) > 0
                     and isinstance(past_key_values[0], FixedKV))
-        decode = fixed_kv and past_len > 0 and seq_len == 1
-        # mirror the conditions under which prefetch_queue_pop can actually capture, so
-        # eager fallbacks keep the sliced decode path instead of the full-capacity one
-        enable_graph = (decode and mask is None and self.graph_dynamic_vbar_blocks
+        decode = fixed_kv and seq_len == 1
+        # Compiled decode needs fixed-capacity attention for a stable allocation trace;
+        # CUDA graph capture has additional prefetch and device requirements.
+        compiled_decode = decode and past_len > 0 and mask is None and self.graph_dynamic_vbar_blocks
+        if compiled_decode:
+            x = x.clone()
+        enable_graph = (compiled_decode
                         and prefetch_queue is not None
                         and hasattr(self.layers[0], "_v_block")
                         and not comfy.model_management.args.disable_cuda_graphs
                         and comfy.model_management.is_device_cuda(x.device))
         decode_bias = None
         decode_masks = None
-        if fixed_kv:
+        if decode:
             prepared = set()
             for kv in past_key_values:
                 if isinstance(kv, FixedKV) and id(kv.position) not in prepared:
                     kv.prepare(seq_len)
                     prepared.add(id(kv.position))
-        if decode:
             if mask is not None:
                 decode_masks = {}
                 for kv in past_key_values:
                     if isinstance(kv, FixedKV) and id(kv.position) not in decode_masks:
                         decode_masks[id(kv.position)] = _fixed_kv_decode_mask(mask, kv, min_val)
-        if enable_graph:
-            # static buffers + per-capacity attention biases: layer graphs replay against
-            # stable storage, refreshed eagerly each step
+        if compiled_decode:
             capacities = tuple(sorted({kv.key.shape[2] for kv in past_key_values if isinstance(kv, FixedKV)}))
-            state_key = (x.shape, x.dtype, x.device, tuple(t.shape for t in freqs_cis), capacities,
-                         None if per_layer_inputs is None else per_layer_inputs.shape)
-            state = getattr(self, "_comfy_cross_step_state", None)
-            if state is None or state["key"] != state_key:
-                state = {"key": state_key,
-                         "x": torch.empty_like(x),
-                         "freqs_cis": [torch.empty_like(t) for t in freqs_cis],
-                         "bias": {c: torch.empty((1, 1, 1, c), dtype=x.dtype, device=x.device) for c in capacities},
-                         "per_layer": None if per_layer_inputs is None else torch.empty_like(per_layer_inputs),
-                         "bias_valid": -1}
-                self._comfy_cross_step_state = state
-                comfy.model_management._register_cross_step(self)
-            state["x"].copy_(x)
-            for source, target in zip(freqs_cis, state["freqs_cis"]):
-                target.copy_(source)
-            x = state["x"]
-            freqs_cis = state["freqs_cis"]
-            if per_layer_inputs is not None:
-                state["per_layer"].copy_(per_layer_inputs)
-                per_layer_inputs = state["per_layer"]
             valid = past_len + 1
-            for capacity, bias in state["bias"].items():
-                if state["bias_valid"] != past_len:
-                    bias.fill_(min_val)
-                    bias[..., :min(valid, capacity)] = 0
-                elif past_len < capacity:
-                    bias[..., past_len:valid] = 0
-            state["bias_valid"] = valid
-            decode_bias = state["bias"]
+            decode_bias = {capacity: torch.full((1, 1, 1, capacity), min_val, dtype=x.dtype, device=x.device) for capacity in capacities}
+            for capacity, bias in decode_bias.items():
+                bias[..., :min(valid, capacity)] = 0
 
         intermediate = None
         all_intermediate = None
@@ -606,7 +580,7 @@ class Gemma4Transformer(nn.Module):
                     if shared is not None:
                         layer_kwargs['shared_kv'] = shared
 
-            if enable_graph:
+            if compiled_decode:
                 bias_cache = layer_kwargs.get('shared_kv', past_kv)
                 layer_mask = decode_bias[bias_cache.key.shape[2]]
             elif decode:
@@ -619,10 +593,17 @@ class Gemma4Transformer(nn.Module):
 
             def core():
                 nonlocal x
-                x, current_kv, shareable_kv = layer(x=x, attention_mask=layer_mask, freqs_cis=freqs_cis, past_key_value=past_kv, **layer_kwargs)
+                output, current_kv, shareable_kv = layer(x=x, attention_mask=layer_mask, freqs_cis=freqs_cis, past_key_value=past_kv, **layer_kwargs)
+                if compiled_decode:
+                    x.copy_(output)
+                else:
+                    x = output
                 result.append((current_kv, shareable_kv))
 
-            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, layer, x.dtype, core=core, enable_graph=enable_graph)
+            comfy.model_prefetch.prefetch_queue_pop(
+                prefetch_queue, x.device, layer, x.dtype, core=core, enable_graph=enable_graph,
+                malloc_scope="block"
+            )
 
             if result:
                 current_kv, shareable_kv = result[0]
@@ -641,8 +622,10 @@ class Gemma4Transformer(nn.Module):
             if i == intermediate_output:
                 intermediate = x.clone()
 
-        if prefetch_queue is not None:
-            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None)
+        comfy.model_prefetch.prefetch_queue_pop(
+            prefetch_queue, x.device, None,
+            malloc_scope="block"
+        )
 
         if fixed_kv:
             for kv in past_key_values:
@@ -707,7 +690,7 @@ class Gemma4Base(BaseLlama, BaseGenerate, torch.nn.Module):
             cache_cls = RingKV if sliding else FixedKV
             tracker = trackers.get((cache_cls, length))
             if tracker is None:
-                tracker = (torch.empty((batch,), device=device, dtype=torch.int64),
+                tracker = (torch.empty((1,), device=device, dtype=torch.int64),
                            torch.zeros((batch,), device=device, dtype=torch.int32))
                 trackers[(cache_cls, length)] = tracker
             # zero-init: decode attends full capacity with masked tails, 0*0 stays finite

@@ -519,13 +519,13 @@ try:
         if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
             if aotriton_supported():  # AMD efficient attention implementation depends on aotriton.
                 if torch_version_numeric >= (2, 7):  # works on 2.6 but doesn't actually seem to improve much
-                    if any((a in arch) for a in ["gfx90a", "gfx942", "gfx950", "gfx1100", "gfx1101", "gfx1150", "gfx1151"]):  # TODO: more arches, TODO: gfx950
+                    if any((a in arch) for a in ["gfx90a", "gfx942", "gfx950", "gfx1100", "gfx1101", "gfx1150", "gfx1151", "gfx1170", "gfx1171"]):  # TODO: more arches, TODO: gfx950
                         ENABLE_PYTORCH_ATTENTION = True
                 if rocm_version >= (7, 0):
                     if any((a in arch) for a in ["gfx1200", "gfx1201"]):
                         ENABLE_PYTORCH_ATTENTION = True
         if torch_version_numeric >= (2, 7) and rocm_version >= (6, 4):
-            if any((a in arch) for a in ["gfx1200", "gfx1201", "gfx950"]):  # TODO: more arches, "gfx942" gives error on pytorch nightly 2.10 1013 rocm7.0
+            if any((a in arch) for a in ["gfx1200", "gfx1201", "gfx950", "gfx1170", "gfx1171"]):  # TODO: more arches, "gfx942" gives error on pytorch nightly 2.10 1013 rocm7.0
                 SUPPORT_FP8_OPS = True
 
 except:
@@ -1373,6 +1373,7 @@ LARGEST_CASTED_WEIGHT = (None, 0)
 STREAM_AIMDO_CAST_BUFFERS = {}
 LARGEST_AIMDO_CASTED_WEIGHT = (None, 0)
 CROSS_STEP_STATE = weakref.WeakSet()
+MALLOC_GRAPH_MODULES = weakref.WeakSet()
 
 DEFAULT_AIMDO_CAST_BUFFER_RESERVATION_SIZE = 16 * 1024 ** 3
 
@@ -1458,6 +1459,9 @@ def reset_cast_buffers():
 
     STREAM_CAST_BUFFERS.clear()
     STREAM_AIMDO_CAST_BUFFERS.clear()
+    for module in MALLOC_GRAPH_MODULES:
+        del module._comfy_malloc_graph
+    MALLOC_GRAPH_MODULES.clear()
     soft_empty_cache()
 
 def get_offload_stream(device):
@@ -2004,7 +2008,7 @@ def supports_mxfp8_compute(device=None):
     return True
 
 def supports_fp64(device=None):
-    if is_device_mps(device):
+    if (device is not None and is_device_mps(device)) or mps_mode():
         return False
 
     if is_intel_xpu():

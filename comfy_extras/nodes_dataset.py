@@ -1409,7 +1409,7 @@ class ShuffleVideoTextDatasetNode(io.ComfyNode):
             node_id="ShuffleVideoTextDataset",
             search_aliases=["shuffle", "randomize", "mix"],
             display_name="Shuffle Pairs of Video-Text",
-            category="dataset/video",
+            category="video/batch",
             description="Randomly shuffle the order of pairs of video-text in a list.",
             is_experimental=True,
             is_input_list=True,

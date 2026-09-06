@@ -50,10 +50,6 @@ ComfyUI is the AI creation engine for visual professionals who demand control ov
 - The easiest way to get started.
 - Available on Windows & macOS.
 
-#### [Windows Portable Package](#installing)
-- Get the latest commits and completely portable.
-- Available on Windows.
-
 #### [Manual Install](#manual-install-windows-linux)
 Supports all operating systems and GPU types (NVIDIA, AMD, Intel, Apple Silicon, Ascend).
 

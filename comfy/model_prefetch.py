@@ -1,7 +1,12 @@
-import torch
+import contextlib
+import logging
+import threading
 import warnings
 import weakref
 
+import torch
+
+import comfy_aimdo.malloc_graph
 import comfy_aimdo.model_vbar
 from comfy.cli_args import args
 import comfy.memory_management
@@ -12,6 +17,52 @@ PREFETCH_QUEUES = []
 GRAPH_MODULES = weakref.WeakSet()
 GRAPH_WARMED_MODULES = weakref.WeakSet()
 GRAPH_CAPTURE_STREAMS = {}
+ACTIVE_MALLOC_GRAPHS = {}
+MALLOC_GRAPH_BREAKS = 0
+MALLOC_GRAPH_USED = False
+
+def _malloc_graph_break():
+    global MALLOC_GRAPH_BREAKS
+    MALLOC_GRAPH_BREAKS += 1
+    logging.debug("Comfy model compiler graph break")
+
+def malloc_graph_enabled(device):
+    return not args.disable_comfy_compiler and comfy.memory_management.aimdo_enabled and comfy.model_management.is_device_cuda(device)
+
+@contextlib.contextmanager
+def pause_malloc_graph(sync=False):
+    graph = ACTIVE_MALLOC_GRAPHS.get(threading.get_ident())
+    if graph is not None:
+        graph.pause(sync=sync)
+    try:
+        yield
+    finally:
+        if graph is not None:
+            graph.resume(sync=sync)
+
+def malloc_graph_begin(module, device):
+    global MALLOC_GRAPH_USED
+    if not malloc_graph_enabled(device):
+        return
+    graph = getattr(module, "_comfy_malloc_graph", None)
+    if graph is None:
+        graph = comfy_aimdo.malloc_graph.record(
+            comfy.model_management.current_stream(device), args.assert_graph_breaks
+        )
+        module._comfy_malloc_graph = graph
+        comfy.model_management.MALLOC_GRAPH_MODULES.add(module)
+    else:
+        graph.push()
+    ACTIVE_MALLOC_GRAPHS[threading.get_ident()] = graph
+    MALLOC_GRAPH_USED = True
+
+def malloc_graph_end():
+    thread_id = threading.get_ident()
+    graph = ACTIVE_MALLOC_GRAPHS.get(thread_id)
+    if graph is not None:
+        if graph.pop():
+            _malloc_graph_break()
+        ACTIVE_MALLOC_GRAPHS.pop(thread_id)
 
 def cleanup_prefetched_modules(module, comfy_modules):
     for s in comfy_modules:
@@ -42,8 +93,13 @@ def _drop_graph(module):
     del module._comfy_graph
 
 def cleanup_prefetch_queues():
-    global PREFETCH_QUEUES, GRAPH_CAPTURE_STREAMS
+    global PREFETCH_QUEUES
+    global MALLOC_GRAPH_BREAKS
+    global MALLOC_GRAPH_USED
 
+    graph = ACTIVE_MALLOC_GRAPHS.pop(threading.get_ident(), None)
+    if graph is not None:
+        graph.abort()
     for queue in PREFETCH_QUEUES:
         for entry in queue:
             if entry is None or not isinstance(entry, tuple):
@@ -57,11 +113,18 @@ def cleanup_prefetch_queues():
         _drop_graph(module)
     GRAPH_MODULES.clear()
     GRAPH_WARMED_MODULES.clear()
-    GRAPH_CAPTURE_STREAMS = {}
+    if MALLOC_GRAPH_USED:
+        logging.info("Comfy model compiler graph breaks: %d", MALLOC_GRAPH_BREAKS)
+    MALLOC_GRAPH_BREAKS = 0
+    MALLOC_GRAPH_USED = False
 
-def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_graph=False, generator=None):
-    enable_graph = enable_graph and not args.disable_cuda_graphs and comfy.model_management.is_device_cuda(device) and getattr(module, "_v_block", None) is not None
+def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_graph=False, generator=None, malloc_scope=None):
+    malloc_graph = ACTIVE_MALLOC_GRAPHS.get(threading.get_ident())
+    enable_graph = enable_graph and malloc_graph is not None and not args.disable_cuda_graphs and comfy.model_management.is_device_cuda(device) and getattr(module, "_v_block", None) is not None
     if queue is None:
+        if malloc_graph is not None and malloc_scope is not None:
+            if malloc_graph.iterate(malloc_scope if module is not None else None):
+                _malloc_graph_break()
         if core is not None:
             core()
         return
@@ -71,6 +134,13 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
         capture_stream = GRAPH_CAPTURE_STREAMS.get(device)
         if capture_stream is None:
             capture_stream = torch.cuda.Stream(device=device)
+            # Keep PyTorch's persistent BLAS workspaces outside the allocation graph.
+            malloc_graph.pause()
+            with torch.cuda.stream(capture_stream):
+                torch.cuda.current_blas_handle()
+                one = torch.empty((2, 2), device=device)
+                torch.addmm(one[0], one, one)
+            malloc_graph.resume()
             GRAPH_CAPTURE_STREAMS[device] = capture_stream
 
     signature = None
@@ -81,6 +151,10 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
         if signature is not None:
             module._v_block_faulted = True
             graph_hit = comfy_aimdo.model_vbar.vbar_signature_compare(signature, graph["signature"])
+
+    if malloc_graph is not None and malloc_scope is not None:
+        if malloc_graph.iterate(malloc_scope if module is not None and not graph_hit else None):
+            _malloc_graph_break()
 
     consumed = queue.pop(0)
     if consumed is not None:
@@ -131,12 +205,21 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
                     module._v_block_faulted = True
             if signature is not None:
                 _drop_graph(module)
+                malloc_graph.pause()
                 graph = torch.cuda.CUDAGraph()
                 if generator is not None:
                     graph.register_generator_state(generator)
+                malloc_graph.resume()
+                # Capture-time VBAR eviction is safe after prior work completes.
+                comfy.model_management.synchronize()
                 capture_stream.wait_stream(comfy.model_management.current_stream(device))
-                with torch.cuda.graph(graph, stream=capture_stream, capture_error_mode="thread_local"):
-                    core()
+                malloc_graph.pause(sync=True)
+                with malloc_graph.use_stream(capture_stream):
+                    with torch.cuda.graph(graph, stream=capture_stream, capture_error_mode="thread_local"):
+                        malloc_graph.resume()
+                        core()
+                        malloc_graph.pause()
+                malloc_graph.resume(sync=True)
                 comfy.model_management.current_stream(device).wait_stream(capture_stream)
                 graph.replay()
                 module._comfy_graph = {"graph": graph, "signature": signature}
@@ -146,7 +229,7 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
             core()
         else:
             capture_stream.wait_stream(comfy.model_management.current_stream(device))
-            with torch.cuda.stream(capture_stream):
+            with torch.cuda.stream(capture_stream), malloc_graph.use_stream(capture_stream):
                 core()
             comfy.model_management.current_stream(device).wait_stream(capture_stream)
             GRAPH_WARMED_MODULES.add(module)

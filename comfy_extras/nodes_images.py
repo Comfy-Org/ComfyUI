@@ -720,7 +720,7 @@ class GetImageSize(IO.ComfyNode):
             node_id="GetImageSize",
             search_aliases=["dimensions", "resolution", "image info"],
             display_name="Get Image Size",
-            description="Returns width and height of the image, and passes it through unchanged.",
+            description="Returns the width, height, and batch size of the image.",
             category="image",
             inputs=[
                 IO.Image.Input("image"),
@@ -1053,6 +1053,124 @@ def hlg_to_linear(t: torch.Tensor) -> torch.Tensor:
     low = (t ** 2) / 3.0
     high = (torch.exp((t.clamp(min=0.5) - _HLG_C) / _HLG_A) + _HLG_B) / 12.0
     return torch.where(t <= 0.5, low, high)
+
+
+_REC709_TO_REC2020 = (
+    (0.6274038959346991, 0.3292830383778837, 0.0433130656874172),
+    (0.0690972893582320, 0.9195403950754587, 0.0113623155663092),
+    (0.0163914388751503, 0.0880133078772259, 0.8955952532476238),
+)
+_REC2020_TO_REC709 = (
+    (1.6604910021084338, -0.5876411387885494, -0.0728498633198846),
+    (-0.1245504745215905, 1.1328998971259600, -0.0083494226043695),
+    (-0.0181507633549053, -0.1005788980080076, 1.1187296613629125),
+)
+_REC709_LUMA = (0.2126390058715103, 0.7151686787677559, 0.0721923153607337)
+_REC2020_LUMA = (0.2627, 0.6780, 0.0593)
+_PQ_M1, _PQ_M2 = 2610 / 16384, 2523 / 32
+_PQ_C1, _PQ_C2, _PQ_C3 = 3424 / 4096, 2413 / 128, 2392 / 128
+_SDR_WHITE_NITS = 203.0
+_HLG_PEAK_NITS = 1000.0
+_HLG_GAMMA = 1.2
+
+
+def _convert_rgb_primaries(rgb, matrix):
+    r, g, b = rgb.unbind(dim=-1)
+    return torch.stack([r * row[0] + g * row[1] + b * row[2] for row in matrix], dim=-1)
+
+
+def _rgb_luminance(rgb, weights):
+    return (rgb * rgb.new_tensor(weights)).sum(dim=-1, keepdim=True)
+
+
+def _tone_map_luminance(rgb, weights):
+    luminance = _rgb_luminance(rgb, weights).clamp_min(0.0)
+    # Extended Reinhard, sharing a white point across the batch to avoid frame-by-frame exposure changes.
+    peak = luminance.amax().clamp_min(1.0)
+    scale = (1.0 + luminance / peak.square()) / (1.0 + luminance)
+    # Allow transfer-function roundoff at SDR white without engaging tone mapping.
+    return rgb * torch.where(peak > 1.0001, scale, 1.0)
+
+
+def _compress_rgb_gamut(rgb, weights):
+    luminance = _rgb_luminance(rgb, weights).clamp(0.0, 1.0)
+    chroma = rgb - luminance
+    tiny = torch.finfo(rgb.dtype).tiny
+    minimum = rgb.amin(dim=-1, keepdim=True)
+    maximum = rgb.amax(dim=-1, keepdim=True)
+    upper = (1.0 - luminance) / (maximum - luminance).clamp_min(tiny)
+    lower = luminance / (luminance - minimum).clamp_min(tiny)
+    saturation = torch.minimum(upper, lower).clamp(0.0, 1.0)
+    # Do not desaturate boundary colors for transfer-function roundoff.
+    in_gamut = (minimum >= -1e-5) & (maximum <= 1.00001)
+    return torch.where(in_gamut, rgb, torch.addcmul(luminance, chroma, saturation)).clamp(0.0, 1.0)
+
+
+class ImageColorSpace(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        spaces = ["sRGB", "HDR", "HDR PQ"]
+        return IO.Schema(
+            node_id="ImageColorSpace",
+            display_name="Convert Image Color Space",
+            category="image/color",
+            description="Convert sRGB (Rec.709), HDR (Rec.2020 HLG), and HDR PQ (Rec.2020 PQ). Uses 203-nit SDR white and a 1000-nit HLG reference display. Narrowing tone-maps excess luminance across the batch and compresses out-of-gamut colors. Conversions compute in float32 and return the intermediate device and dtype. Straight alpha is not color-transformed.",
+            inputs=[
+                IO.Image.Input("image"),
+                IO.Combo.Input("source", options=spaces, default="sRGB", tooltip="Color space of the input pixels."),
+                IO.Combo.Input("destination", options=spaces, default="sRGB", tooltip="Color space of the output pixels. Set the save node to this same color space."),
+            ],
+            outputs=[IO.Image.Output()],
+        )
+
+    @classmethod
+    def execute(cls, image, source, destination) -> IO.NodeOutput:
+        if source == destination:
+            return IO.NodeOutput(image.to(device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype()))
+
+        # PQ's exponents and near-cancelling constants need more precision than float16/bfloat16.
+        rgb = image[..., :3].float()
+
+        # Convert to display-linear Rec.2020 in cd/m² (BT.2100 EOTFs).
+        if source == "sRGB":
+            rgb = _convert_rgb_primaries(srgb_to_linear(rgb), _REC709_TO_REC2020) * _SDR_WHITE_NITS
+        elif source == "HDR":
+            rgb = hlg_to_linear(rgb)
+            luminance = _rgb_luminance(rgb, _REC2020_LUMA).clamp_min(0.0)
+            rgb = rgb * (luminance.pow(_HLG_GAMMA - 1.0) * _HLG_PEAK_NITS)
+        elif source == "HDR PQ":
+            # Evaluate PQ around 1 to avoid cancellation in float32.
+            p = (rgb.clamp_min(0.0).log() / _PQ_M2).expm1()
+            rgb = ((p + (1.0 - _PQ_C1)).clamp_min(0.0) / ((_PQ_C2 - _PQ_C3) - _PQ_C3 * p)).pow(1.0 / _PQ_M1) * 10000.0
+        else:
+            raise ValueError(f"Unsupported source color space: {source}")
+
+        if destination == "sRGB":
+            rgb = _convert_rgb_primaries(rgb / _SDR_WHITE_NITS, _REC2020_TO_REC709)
+            rgb = _tone_map_luminance(rgb, _REC709_LUMA)
+            rgb = _compress_rgb_gamut(rgb, _REC709_LUMA)
+            rgb = torch.where(rgb <= 0.0031308, rgb * 12.92, 1.055 * rgb.pow(1.0 / 2.4) - 0.055)
+        elif destination == "HDR":
+            rgb = rgb / _HLG_PEAK_NITS
+            if source == "HDR PQ":
+                rgb = _tone_map_luminance(rgb, _REC2020_LUMA)
+            luminance = _rgb_luminance(rgb, _REC2020_LUMA).clamp_min(torch.finfo(rgb.dtype).tiny)
+            rgb = rgb * luminance.pow(1.0 / _HLG_GAMMA - 1.0)
+            if source == "HDR PQ":
+                rgb = _compress_rgb_gamut(rgb, _REC2020_LUMA)
+            low = (3.0 * rgb.clamp_min(0.0)).sqrt()
+            high = _HLG_A * (12.0 * rgb.clamp_min(1.0 / 12.0) - _HLG_B).log() + _HLG_C
+            rgb = torch.where(rgb <= 1.0 / 12.0, low, high)
+        elif destination == "HDR PQ":
+            p = (rgb.clamp_min(0.0) / 10000.0).pow(_PQ_M1)
+            p = ((_PQ_C1 - 1.0) + (_PQ_C2 - _PQ_C3) * p) / (1.0 + _PQ_C3 * p)
+            rgb = (p.log1p() * _PQ_M2).exp()
+        else:
+            raise ValueError(f"Unsupported destination color space: {destination}")
+
+        if image.shape[-1] == 4:
+            rgb = torch.cat((rgb, image[..., 3:]), dim=-1)
+        return IO.NodeOutput(rgb.to(device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype()))
 
 
 # ---------------------------------------------------------------------------
@@ -1768,6 +1886,7 @@ class ImagesExtension(ComfyExtension):
             RepeatImageBatch,
             ImageFromBatch,
             ImageAddNoise,
+            ImageColorSpace,
             SaveAnimatedWEBP,
             SaveAnimatedPNG,
             SaveImageAdvanced,

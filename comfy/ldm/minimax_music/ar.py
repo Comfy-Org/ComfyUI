@@ -251,8 +251,13 @@ class MiniMaxMusic3AR(nn.Module):
         decode_limit = min(int(max_audio_frames), MAX_AUDIO_FRAMES)
         past = self.model.init_kv_cache(2, prompt_tokens + decode_limit + 1, device, execution_dtype)
         output = self.model(None, embeds=text_embeds, past_key_values=past, dtype=execution_dtype)
-        last_hidden = output[0][:, -1]
+        last_hidden = output[0][:, -1].clone()
         past = output[2]
+        del output
+        vbar = getattr(self, "dynamic_vbars", {}).get(device)
+        if vbar is not None:
+            comfy.model_management.reset_cast_buffers()
+            vbar.set_watermark(vbar.max_size)
 
         generator = torch.Generator(device=device).manual_seed(derive_seed(seed, "ar"))
         decoder = self.model.audio_decoder
@@ -263,13 +268,12 @@ class MiniMaxMusic3AR(nn.Module):
             "codes": torch.empty((last_hidden.shape[0], self.num_codebooks), dtype=torch.long, device=device),
             "depth_hidden": torch.empty((1, last_hidden.shape[-1] * (self.num_codebooks - 1)), dtype=execution_dtype, device=device),
         }
-        decoder._comfy_cross_step_state = depth_io
-        comfy.model_management._register_cross_step(decoder)
         hidden_frames = []
         pending_code = None
         stop_token = None
         pending_event = None
-        pending_hidden = None
+        pending_hidden = torch.empty(last_hidden.shape[-1] * self.num_codebooks, dtype=execution_dtype, device=device)
+        pending_hidden_valid = False
         progress = comfy.utils.ProgressBar(decode_limit)
         cuda_device = torch.device(device).type == "cuda"
         vocab_mask = None
@@ -284,14 +288,16 @@ class MiniMaxMusic3AR(nn.Module):
                 if pending_event is not None:
                     pending_event.synchronize()
                 if int(pending_code.item()) == stop_token:
-                    pending_hidden = None
+                    pending_hidden_valid = False
                     break
-                if pending_hidden is not None:
-                    hidden_frames.append(pending_hidden)
+                if pending_hidden_valid:
+                    hidden_frames.append(pending_hidden.clone())
                     progress.update_absolute(len(hidden_frames))
                     if len(hidden_frames) >= decode_limit:
                         break
 
+            if frame_index:
+                comfy.model_prefetch.malloc_graph_begin(self, device)
             c0, code_or_stop, stop_token = self._sample_c0(last_hidden, cfg_scale, top_k, generator, vocab_mask)
             if pending_code is None:
                 pending_code = torch.empty_like(code_or_stop, device="cpu", pin_memory=cuda_device)
@@ -318,25 +324,31 @@ class MiniMaxMusic3AR(nn.Module):
                 [[decoder, self.model.audio_extra_embedding]], device, {"prefetch_dynamic_vbars": True}
             )
             comfy.model_prefetch.prefetch_queue_pop(
-                depth_queue, device, decoder, execution_dtype, core=depth_core, enable_graph=True, generator=generator
+                depth_queue, device, decoder, execution_dtype, core=depth_core, enable_graph=True,
+                generator=generator, malloc_scope="depth"
             )
-            comfy.model_prefetch.prefetch_queue_pop(depth_queue, device, None)
+            comfy.model_prefetch.prefetch_queue_pop(
+                depth_queue, device, None, malloc_scope="depth"
+            )
             feedback_codes = depth_io["codes"]
             depth_hidden = depth_io["depth_hidden"]
             frame_hidden = torch.cat((last_hidden[:1].detach(), depth_hidden), dim=-1)
             if frame_index > 0:
-                pending_hidden = frame_hidden[0].clone()
+                pending_hidden.copy_(frame_hidden[0])
+                pending_hidden_valid = True
 
             feedback = self._embed_audio_frame(feedback_codes, execution_dtype)
             output = self.model(None, embeds=feedback, past_key_values=past, dtype=execution_dtype)
-            last_hidden = output[0][:, -1]
+            last_hidden.copy_(output[0][:, -1])
             past = output[2]
+            del output, feedback, frame_hidden, depth_hidden, feedback_codes, c0_embed, c0, code_or_stop
+            comfy.model_prefetch.malloc_graph_end()
 
-        if pending_hidden is not None and len(hidden_frames) < decode_limit:
+        if pending_hidden_valid and len(hidden_frames) < decode_limit:
             if pending_event is not None:
                 pending_event.synchronize()
             if int(pending_code.item()) != stop_token:
-                hidden_frames.append(pending_hidden)
+                hidden_frames.append(pending_hidden.clone())
 
         if not hidden_frames:
             raise ValueError("MiniMax Music3 generated zero audio frames")

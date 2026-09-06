@@ -21,6 +21,22 @@ def shape_norm(shape_latent, coords):
     return SparseTensor(feats=feats, coords=coords)
 
 
+def _move_sparse_tensor_uncached(tensor, device):
+    return SparseTensor(
+        feats=tensor.feats.to(device),
+        coords=tensor.coords.to(device),
+        shape=tensor.shape,
+        scale=tensor._scale,
+    )
+
+
+def _sparse_vae_decode_memory(point_count, dtype):
+    # Last 128-channel stage: feature intermediates plus 27 int32 neighbor indices,
+    # plus sparse-convolution workspace.
+    bytes_per_point = 896 * comfy.model_management.dtype_size(dtype) + 27 * 4
+    return 2 * 1024 ** 3 + int(point_count) * bytes_per_point
+
+
 def infer_batched_coord_layout(coords):
     if coords.ndim != 2 or coords.shape[1] != 4:
         raise ValueError(f"Expected Trellis2 coords with shape [N, 4], got {tuple(coords.shape)}")
@@ -127,7 +143,11 @@ class VaeDecodeShapeTrellis(IO.ComfyNode):
         sample_tensor = samples["samples"]
         device = comfy.model_management.get_torch_device()
         coords = samples["coords"]
-        vae.prepare_decode(sample_tensor.shape)
+        surface_point_estimate = resolution * resolution * 5 // 4
+        vae.prepare_decode(
+            sample_tensor.shape,
+            memory_required=_sparse_vae_decode_memory(surface_point_estimate, vae.vae_dtype),
+        )
         trellis_vae = vae.first_stage_model
         coord_counts = samples.get("coord_counts")
 
@@ -166,6 +186,8 @@ class VaeDecodeShapeTrellis(IO.ComfyNode):
             mesh = Types.MESH(vertices=torch.stack(vert_list), faces=torch.stack(face_list))
         else:
             mesh = pack_variable_mesh_batch(vert_list, face_list)
+        output_device = comfy.model_management.intermediate_device()
+        subs = [_move_sparse_tensor_uncached(sub, output_device) for sub in subs]
         return IO.NodeOutput(mesh, subs)
 
 class VaeDecodeTextureTrellis(IO.ComfyNode):
@@ -193,7 +215,10 @@ class VaeDecodeTextureTrellis(IO.ComfyNode):
         sample_tensor = samples["samples"]
         device = comfy.model_management.get_torch_device()
         coords = samples["coords"]
-        vae.prepare_decode(sample_tensor.shape)
+        vae.prepare_decode(
+            sample_tensor.shape,
+            memory_required=_sparse_vae_decode_memory(shape_subdivides[-1].feats.shape[0], vae.vae_dtype),
+        )
         trellis_vae = vae.first_stage_model
         coord_counts = samples.get("coord_counts")
         model_frame = samples.get("model_frame", "y_up")
@@ -204,6 +229,7 @@ class VaeDecodeTextureTrellis(IO.ComfyNode):
         samples = samples.to(device)
         feats = tex_slat_format.process_out(samples)
         samples = SparseTensor(feats=feats, coords=coords.to(device))
+        shape_subdivides = [_move_sparse_tensor_uncached(sub, device) for sub in shape_subdivides]
 
         voxel = trellis_vae.decode_tex_slat(samples.to(vae.vae_dtype), shape_subdivides)
         # Keep all decoded channels. The texture VAE emits 6: base_color (0:3),
@@ -239,6 +265,9 @@ class VaeDecodeTextureTrellis(IO.ComfyNode):
                     dim=-1,
                 )
 
+        output_device = comfy.model_management.intermediate_device()
+        voxel_coords = voxel_coords.to(output_device)
+        color_feats = color_feats.to(output_device)
         voxel = Types.VOXEL(voxel_coords, color_feats, tex_resolution)
         return IO.NodeOutput(voxel)
 

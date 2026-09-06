@@ -759,9 +759,10 @@ class LoraLoaderModelOnly(LoraLoader):
         return {"required": { "model": ("MODEL",),
                               "lora_name": (folder_paths.get_filename_list("loras"), ),
                               "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
-                              }}
+                            }}
     RETURN_TYPES = ("MODEL",)
     DESCRIPTION = "This LoRAs loader is used to modify the diffusion model, altering the way in which latents are denoised such as applying styles. Multiple LoRA nodes can be linked together."
+    SEARCH_ALIASES = ["lora", "load lora", "apply lora", "lora loader", "lora model"]
     FUNCTION = "load_lora_model_only"
 
     def load_lora_model_only(self, model, lora_name, strength_model):
@@ -2487,6 +2488,7 @@ async def init_builtin_extra_nodes():
         "nodes_pid.py",
         "nodes_model_patch.py",
         "nodes_easycache.py",
+        "nodes_sparse_attention.py",
         "nodes_audio_encoder.py",
         "nodes_rope.py",
         "nodes_logic.py",
@@ -2521,6 +2523,7 @@ async def init_builtin_extra_nodes():
         "nodes_void.py",
         "nodes_wandancer.py",
         "nodes_hidream_o1.py",
+        "nodes_sensenova.py",
         "nodes_save_3d.py",
         "nodes_mesh_io.py",
         "nodes_moge.py",

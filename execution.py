@@ -547,8 +547,8 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                 if comfy.memory_management.aimdo_enabled:
                     if get_console_log_level(args.verbose) == "DEBUG":
                         comfy_aimdo.control.analyze()
-                    comfy.model_management.reset_cast_buffers()
                     comfy.model_prefetch.cleanup_prefetch_queues()
+                    comfy.model_management.reset_cast_buffers()
                     comfy_aimdo.model_vbar.vbars_reset_watermark_limits()
 
             if has_pending_tasks:
