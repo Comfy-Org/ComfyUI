@@ -57,6 +57,7 @@ from app.subgraph_manager import SubgraphManager
 from app.node_replace_manager import NodeReplaceManager
 from typing import Optional, Union
 from api_server.routes.internal.internal_routes import InternalRoutes
+from api_server.utils.query_params import parse_optional_int_query_param
 from protocol import BinaryEventTypes
 
 # Import cache control middleware
@@ -1044,14 +1045,15 @@ class PromptServer():
 
         @routes.get("/history")
         async def get_history(request):
-            max_items = request.rel_url.query.get("max_items", None)
-            if max_items is not None:
-                max_items = int(max_items)
+            query = request.rel_url.query
 
-            offset = request.rel_url.query.get("offset", None)
-            if offset is not None:
-                offset = int(offset)
-            else:
+            try:
+                max_items = parse_optional_int_query_param(query, "max_items")
+                offset = parse_optional_int_query_param(query, "offset")
+            except ValueError as exc:
+                return web.json_response({"error": str(exc)}, status=400)
+
+            if offset is None:
                 offset = -1
 
             return web.json_response(self.prompt_queue.get_history(max_items=max_items, offset=offset))
