@@ -1,5 +1,8 @@
+import asyncio
 import pytest
 import os
+import threading
+import time
 from aiohttp import web
 from app.user_manager import UserManager
 from unittest.mock import patch
@@ -91,6 +94,27 @@ async def test_listuserdata_invalid_directory(aiohttp_client, app):
     client = await aiohttp_client(app)
     resp = await client.get("/userdata?dir=")
     assert resp.status == 400
+
+
+async def test_listuserdata_does_not_block_event_loop(aiohttp_client, app, tmp_path):
+    os.makedirs(tmp_path / "test_dir")
+    release = threading.Event()
+
+    def slow_glob(*args, **kwargs):
+        release.wait(timeout=1)
+        return []
+
+    client = await aiohttp_client(app)
+    with patch("app.user_manager.glob.glob", slow_glob):
+        started = time.monotonic()
+        request = asyncio.create_task(client.get("/userdata?dir=test_dir&recurse=true"))
+        await asyncio.sleep(0.05)
+        elapsed = time.monotonic() - started
+        release.set()
+        resp = await request
+
+    assert elapsed < 0.5
+    assert resp.status == 200
 
 
 async def test_listuserdata_normalized_separator(aiohttp_client, app, tmp_path):
@@ -259,6 +283,27 @@ async def test_listuserdata_v2_default(aiohttp_client, app, tmp_path):
     data = await resp.json()
     file_paths = {item["path"] for item in data if item["type"] == "file"}
     assert file_paths == {"test_dir/file1.txt", "test_dir/subdir/file2.txt"}
+
+
+async def test_listuserdata_v2_does_not_block_event_loop(aiohttp_client, app, tmp_path):
+    os.makedirs(tmp_path / "test_dir")
+    release = threading.Event()
+
+    def slow_walk(*args, **kwargs):
+        release.wait(timeout=1)
+        return iter(())
+
+    client = await aiohttp_client(app)
+    with patch("app.user_manager.os.walk", slow_walk):
+        started = time.monotonic()
+        request = asyncio.create_task(client.get("/v2/userdata?path=test_dir"))
+        await asyncio.sleep(0.05)
+        elapsed = time.monotonic() - started
+        release.set()
+        resp = await request
+
+    assert elapsed < 0.5
+    assert resp.status == 200
 
 
 async def test_listuserdata_v2_normalized_separators(aiohttp_client, app, tmp_path, monkeypatch):
