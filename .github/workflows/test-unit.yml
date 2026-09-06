@@ -9,10 +9,10 @@ on:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-2022, macos-latest]
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python      
