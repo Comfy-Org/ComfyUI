@@ -247,6 +247,18 @@ class CLIP:
         if dtype is None:
             dtype = model_management.text_encoder_dtype(load_device)
 
+        if not model_management.supports_cast(load_device, dtype):
+            load_device = offload_device
+
+        if load_device != offload_device and not model_management.supports_cast(load_device, torch.float8_e4m3fn):
+            # Quantized state dicts can contain weights in dtypes the declared
+            # model dtypes never reflect (e.g. fp8 layers behind comfy_quant
+            # metadata), which devices like mps cannot cast.
+            for c in (state_dict if isinstance(state_dict, list) else [state_dict]):
+                if any(k.endswith("comfy_quant") or (isinstance(w, torch.Tensor) and w.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)) for k, w in c.items()):
+                    load_device = offload_device
+                    break
+
         params['dtype'] = dtype
         params['device'] = model_options.get("initial_device", model_management.text_encoder_initial_device(load_device, offload_device, parameters * model_management.dtype_size(dtype)))
         params['model_options'] = model_options
@@ -258,6 +270,7 @@ class CLIP:
                 load_device = offload_device
                 if params['device'] != offload_device:
                     self.cond_stage_model.to(offload_device)
+                    params['device'] = offload_device
                     logging.warning("Had to shift TE back.")
 
         model_management.archive_model_dtypes(self.cond_stage_model)
