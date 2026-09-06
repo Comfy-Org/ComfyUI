@@ -3,6 +3,8 @@ from typing import Type, Literal
 import nodes
 import asyncio
 import inspect
+from comfy_api.internal import _ComfyNodeInternal
+from comfy_api.latest import _io
 from comfy_execution.graph_utils import is_link, ExecutionBlocker
 from comfy.comfy_types.node_typing import ComfyNodeABC, InputTypeDict, InputTypeOptions
 
@@ -109,13 +111,20 @@ class TopologicalSort:
         self.pendingNodes = {}
         self.blockCount = {} # Number of nodes this node is directly blocked by
         self.blocking = {} # Which nodes are blocked by this node
+        self.input_types = {}
         self.externalBlocks = 0
         self.unblockedEvent = asyncio.Event()
 
     def get_input_info(self, unique_id, input_name):
         class_type = self.dynprompt.get_node(unique_id)["class_type"]
         class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-        return get_input_info(class_def, input_name)
+        if unique_id not in self.input_types:
+            valid_inputs = class_def.INPUT_TYPES()
+            if issubclass(class_def, _ComfyNodeInternal):
+                live_inputs = self.dynprompt.get_node(unique_id)["inputs"]
+                valid_inputs, _, _ = _io.get_finalized_class_inputs(valid_inputs, live_inputs)
+            self.input_types[unique_id] = valid_inputs
+        return get_input_info(class_def, input_name, self.input_types[unique_id])
 
     def make_input_strong_link(self, to_node_id, to_input):
         inputs = self.dynprompt.get_node(to_node_id)["inputs"]
