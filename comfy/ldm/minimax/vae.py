@@ -427,8 +427,13 @@ class MiniMaxH3VideoVAE(nn.Module):
             return [0], [input_len], []
 
         N = math.ceil(input_len / tile_size)
+        # Guard: each tile must advance by at least one latent step past the
+        # previous tile's start, otherwise the constraint below can never be
+        # satisfied and the search hangs forever (reproduced with
+        # tile_size=64, tile_overlap_min=64).
+        tile_overlap = max(0, min(self.tile_overlap_min, tile_size - self.vae_ratio))
         while True:
-            overlaps = [self.tile_overlap_min] * (N - 1)
+            overlaps = [tile_overlap] * (N - 1)
             remaining = tile_size * N - sum(overlaps) - input_len
             if remaining < 0:
                 N += 1
