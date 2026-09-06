@@ -99,6 +99,20 @@ import comfy.latent_formats
 
 import comfy.ldm.flux.redux
 
+def is_twinflow_z_image_model(state_dict):
+    """Check if model state dict is TwinFlow-Z-Image."""
+    return any(k.startswith("t_embedder_2.") for k in state_dict)
+
+
+def get_twinflow_z_image_config(state_dict):
+    """Extract TwinFlow-Z-Image configuration from state dict."""
+    if not is_twinflow_z_image_model(state_dict):
+        return {}
+    return {
+        "image_model": "twinflow_z_image",
+        "architecture": "TwinFlow_Z_Image",
+    }
+    
 def load_lora_for_models(model, clip, lora, strength_model, strength_clip, lora_metadata=None):
     key_map = {}
     if model is not None:

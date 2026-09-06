@@ -355,6 +355,15 @@ def model_lora_keys_unet(model, key_map={}):
                 key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = to
                 key_map[key_lora] = to
 
+    # TwinFlow-Z-Image LoRAs can target t_embedder_2.* keys.
+    # Alias them back to t_embedder.* targets for compatibility.
+    if isinstance(model, comfy.model_base.TwinFlow_Z_Image):
+        for key in list(key_map.keys()):
+            if "t_embedder." in key and "t_embedder_2." not in key:
+                key_2 = key.replace("t_embedder.", "t_embedder_2.", 1)
+                if key_2 not in key_map:
+                    key_map[key_2] = key_map[key]
+                
     if isinstance(model, comfy.model_base.Kandinsky5):
         for k in sdk:
             if k.startswith("diffusion_model.") and k.endswith(".weight"):
