@@ -583,6 +583,19 @@ def start_comfyui(asyncio_loop=None):
 
 
 if __name__ == "__main__":
+    # Early port check before loading custom nodes (which can be slow)
+    import socket
+    try:
+        test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        test_socket.settimeout(1)
+        result = test_socket.connect_ex(('127.0.0.1', args.port))
+        test_socket.close()
+        if result == 0:
+            logging.error("Port {} is already in use. Please specify a different port with --port or stop the process using this port.".format(args.port))
+            sys.exit(1)
+    except OSError as e:
+        logging.warning("Could not check port {}: {}".format(args.port, e))
+
     # Running directly, just start ComfyUI.
     logging.info("Python version: {}".format(sys.version))
     logging.info("ComfyUI version: {}".format(comfyui_version.__version__))
