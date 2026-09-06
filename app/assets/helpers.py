@@ -1,26 +1,39 @@
 import os
 from datetime import datetime, timezone
-from typing import Sequence
+
+import sqlalchemy as sa
+from sqlalchemy.sql import ColumnElement
 
 
-def select_best_live_path(states: Sequence) -> str:
+def sql_path_under_prefix(
+    column: ColumnElement[str], prefix: str
+) -> ColumnElement[bool]:
+    """SQL predicate for ``Path(column).is_relative_to(prefix)`` on this platform.
+
+    Case-SENSITIVE and component-bounded: prefix ``/a/b`` matches ``/a/b`` and
+    ``/a/b/c`` but not ``/a/bc``, ``/a/b-other`` or ``/a/B/c``.
+
+    ``LIKE`` cannot express this. SQLite's ``LIKE`` is ASCII case-insensitive by
+    default, so ``'/data/TEMP/f' LIKE '/data/temp/%'`` is TRUE — which let the
+    temp wipe hard-delete records under a case-different persistent directory,
+    and let the enrichment scan mutate rows outside the requested root.
+    ``GLOB`` is case-sensitive but carries its own metacharacters (``*``, ``?``,
+    ``[``) with no ESCAPE clause, so every caller would need bracket-quoting.
+    ``substr(column, 1, n) = <prefix>`` compares under the column's BINARY
+    collation and has no metacharacters at all, so a path containing ``%``,
+    ``_``, ``*``, ``?`` or ``[`` needs no escaping and cannot inject.
+
+    Only the PREFIX is normalized here. That is sound because the column holds
+    normalized absolute paths — ``records.create_content`` is the sole writer
+    and normalizes there. Normalizing the column in SQL is not an option anyway:
+    it would need a per-row Python call and would defeat the index.
     """
-    Return the best on-disk path among cache states:
-      1) Prefer a path that exists with needs_verify == False (already verified).
-      2) Otherwise, pick the first path that exists.
-      3) Otherwise return empty string.
-    """
-    alive = [
-        s
-        for s in states
-        if getattr(s, "file_path", None) and os.path.isfile(s.file_path)
-    ]
-    if not alive:
-        return ""
-    for s in alive:
-        if not getattr(s, "needs_verify", False):
-            return s.file_path
-    return alive[0].file_path
+    base = os.path.abspath(prefix)
+    stem = base if base.endswith(os.sep) else base + os.sep
+    return sa.or_(
+        column == base,
+        sa.func.substr(column, 1, len(stem)) == stem,
+    )
 
 
 def escape_sql_like_string(s: str, escape: str = "!") -> tuple[str, str]:
@@ -45,6 +58,10 @@ def normalize_tags(tags: list[str] | None) -> list[str]:
       - Removing exact duplicates while preserving order and case.
     """
     return list(dict.fromkeys(t.strip() for t in (tags or []) if (t or "").strip()))
+
+
+def to_stored_hash(digest: str) -> str:
+    return f"blake3:{digest}"
 
 
 def validate_blake3_hash(s: str) -> str:

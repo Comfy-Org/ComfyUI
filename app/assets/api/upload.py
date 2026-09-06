@@ -91,20 +91,6 @@ async def parse_multipart_upload(
             file_present = True
             file_client_name = (field.filename or "").strip()
 
-            if provided_hash and provided_hash_exists is True:
-                # Hash exists - drain file but don't write to disk
-                try:
-                    while True:
-                        chunk = await field.read_chunk(8 * 1024 * 1024)
-                        if not chunk:
-                            break
-                        file_written += len(chunk)
-                except Exception:
-                    raise UploadError(
-                        500, "UPLOAD_IO_ERROR", "Failed to receive uploaded file."
-                    )
-                continue
-
             uploads_root = os.path.join(folder_paths.get_temp_directory(), "uploads")
             unique_dir = os.path.join(uploads_root, uuid.uuid4().hex)
             os.makedirs(unique_dir, exist_ok=True)

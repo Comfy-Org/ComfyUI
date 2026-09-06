@@ -9,8 +9,6 @@ from enum import Enum
 from typing import Callable
 
 from app.assets.scanner import (
-    ENRICHMENT_METADATA,
-    ENRICHMENT_STUB,
     RootType,
     build_asset_specs,
     collect_paths_for_roots,
@@ -22,8 +20,11 @@ from app.assets.scanner import (
     mark_missing_outside_prefixes_safely,
     sync_root_safely,
     sync_temp_references_safely,
+    drain_pending_verifications,
+    tick_watch_list,
 )
-from app.database.db import dependencies_available
+from app.assets.services.hash_mode_state import drain_transition_queue
+from app.database.db import create_session, dependencies_available
 
 
 class ScanInProgressError(Exception):
@@ -370,16 +371,26 @@ class _AssetSeeder:
                 errors=list(self._errors),
             )
 
-    def shutdown(self, timeout: float = 5.0) -> None:
+    def shutdown(self, timeout: float = 5.0) -> bool:
         """Gracefully shutdown: cancel any running scan and wait for thread.
 
         Args:
             timeout: Maximum seconds to wait for thread to exit
+
+        Returns:
+            True if the scan thread joined cleanly; False on timeout.
         """
         self.cancel()
-        self.wait(timeout=timeout)
+        joined = self.wait(timeout=timeout)
+        if not joined:
+            logging.warning(
+                "Asset seeder thread did not exit within %ss; skipping temp cleanup",
+                timeout,
+            )
         with self._lock:
-            self._thread = None
+            if joined:
+                self._thread = None
+        return joined
 
     def mark_missing_outside_prefixes(self) -> int:
         """Mark references as missing when outside all known root prefixes.
@@ -698,7 +709,6 @@ class _AssetSeeder:
             paths,
             existing_paths,
             enable_metadata_extraction=False,
-            compute_hashes=False,
         )
         logging.debug(
             "Fast scan: build_asset_specs took %.3fs (%d specs, %d skipped)",
@@ -751,6 +761,9 @@ class _AssetSeeder:
                 last_progress_time = now
 
         self._update_progress(scanned=len(specs), created=total_created)
+        with create_session() as session:
+            tick_watch_list(session)
+            session.commit()
         logging.info(
             "Fast scan complete: %.3fs total (created=%d, skipped=%d, total_paths=%d)",
             time.perf_counter() - t_fast_start,
@@ -767,15 +780,14 @@ class _AssetSeeder:
             Tuple of (cancelled, total_enriched)
         """
         total_enriched = 0
+        with create_session() as session:
+            drain_pending_verifications(session)
+            tick_watch_list(session)
+            drain_transition_queue(session)
+            session.commit()
         batch_size = 100
         last_progress_time = time.perf_counter()
         progress_interval = 1.0
-
-        # Get the target enrichment level based on compute_hashes
-        if not self._compute_hashes:
-            target_max_level = ENRICHMENT_STUB
-        else:
-            target_max_level = ENRICHMENT_METADATA
 
         self._emit_event(
             "assets.seed.started",
@@ -786,10 +798,6 @@ class _AssetSeeder:
         consecutive_empty = 0
         max_consecutive_empty = 3
 
-        # Hash checkpoints survive across batches so interrupted hashes
-        # can be resumed without re-reading the entire file.
-        hash_checkpoints: dict[str, object] = {}
-
         while True:
             if self._check_pause_and_cancel():
                 logging.info("Enrich scan cancelled after %d assets", total_enriched)
@@ -798,13 +806,13 @@ class _AssetSeeder:
             # Fetch next batch of unenriched assets
             unenriched = get_unenriched_assets_for_roots(
                 roots,
-                max_level=target_max_level,
+                compute_hashes=self._compute_hashes,
                 limit=batch_size,
             )
 
             # Filter out previously failed references
             if skip_ids:
-                unenriched = [r for r in unenriched if r.reference_id not in skip_ids]
+                unenriched = [row for row in unenriched if row.record_id not in skip_ids]
 
             if not unenriched:
                 break
@@ -814,7 +822,6 @@ class _AssetSeeder:
                 extract_metadata=True,
                 compute_hash=self._compute_hashes,
                 interrupt_check=self._is_paused_or_cancelled,
-                hash_checkpoints=hash_checkpoints,
             )
             total_enriched += enriched
             skip_ids.update(failed_ids)

@@ -1,64 +1,79 @@
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, TypedDict
 
 import folder_paths
+import sqlalchemy as sa
+from sqlalchemy.orm import Session
+from app.assets import mode
 from app.assets.database.queries import (
-    add_missing_tag_for_asset_id,
-    bulk_update_enrichment_level,
-    bulk_update_is_missing,
-    bulk_update_needs_verify,
-    delete_orphaned_seed_asset,
-    delete_references_by_ids,
-    ensure_tags_exist,
-    get_asset_by_hash,
-    get_reference_by_id,
-    get_references_for_prefixes,
-    get_unenriched_references,
-    mark_references_missing_outside_prefixes,
-    reassign_asset_references,
-    remove_missing_tag_for_asset_id,
-    set_reference_system_metadata,
-    update_asset_hash_and_mime,
+    mark_content_missing,
+    create_content,
+    create_record,
 )
-from app.assets.services.bulk_ingest import (
-    SeedAssetSpec,
-    batch_insert_seed_assets,
+from app.assets.database.models import Asset, AssetContent
+from app.assets.helpers import sql_path_under_prefix, to_stored_hash
+from app.assets.lifecycle import get_excluded_scan_roots
+from app.assets.scanner_changes import (
+    clear_pending_verifications,
+    detect_content_change,
+    drain_pending_verifications,
+    is_path_under_prefixes,
+    live_contents_under_prefixes,
+    pending_recovery_count,
+    recover_missing_content,
 )
-from app.assets.services.file_utils import (
-    get_mtime_ns,
-    is_visible,
-    list_files_recursively,
-    verify_file_unchanged,
+from app.assets.scanner_admission import (
+    PARTIAL_DOWNLOAD_EXTENSIONS as PARTIAL_DOWNLOAD_EXTENSIONS,
+    _WATCH_LIST as _WATCH_LIST,
+    _WatchEntry as _WatchEntry,
+    _should_skip_extension,
+    _two_stat_admit,
+    tick_watch_list as tick_watch_list,
 )
-from app.assets.services.hashing import HashCheckpoint, compute_blake3_hash
+from app.assets.services.file_utils import get_mtime_ns, is_visible, list_files_recursively
 from app.assets.services.image_dimensions import extract_image_dimensions
-from app.assets.services.metadata_extract import extract_file_metadata
+from app.assets.services.metadata_extract import ExtractedMetadata, extract_file_metadata
 from app.assets.services.path_utils import (
     compute_loader_path,
     get_comfy_models_folders,
     get_name_and_tags_from_asset_path,
 )
+from app.assets.services.ingest import _discard_unreferenced_content
+from app.assets.services.snapshot_hash import snapshot_hash
 from app.database.db import create_session
 
-
-class _RefInfo(TypedDict):
-    ref_id: str
-    file_path: str
-    exists: bool
-    stat_unchanged: bool
-    needs_verify: bool
-
-
-class _AssetAccumulator(TypedDict):
-    hash: str | None
-    size_db: int
-    refs: list[_RefInfo]
+__all__ = [
+    "clear_pending_verifications",
+    "drain_pending_verifications",
+    "pending_recovery_count",
+]
 
 
 # Temp is deliberately absent: it is wiped before every scan, so walking it finds nothing.
 RootType = Literal["models", "input", "output"]
+
+
+class SeedAssetSpec(TypedDict):
+
+    abs_path: str
+    size_bytes: int
+    mtime_ns: int
+    info_name: str
+    tags: list[str]
+    fname: str | None
+    metadata: ExtractedMetadata | None
+    mime_type: str | None
+    job_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class UnenrichedContent:
+    content_id: str
+    record_id: str
+    file_path: str
 
 
 def get_scan_prefixes_for_root(root: RootType) -> list[str]:
@@ -82,7 +97,10 @@ def get_owned_prefixes() -> list[str]:
 
 
 def get_temp_prefixes() -> list[str]:
-    return [os.path.abspath(folder_paths.get_temp_directory())]
+    temp_dir = os.path.abspath(folder_paths.get_temp_directory())
+    if temp_dir in get_excluded_scan_roots():
+        return []
+    return [temp_dir]
 
 
 def collect_models_files() -> list[str]:
@@ -111,143 +129,47 @@ def sync_references_with_filesystem(
     session,
     root: RootType,
     collect_existing_paths: bool = False,
-    update_missing_tags: bool = False,
 ) -> set[str] | None:
     return sync_prefixes_with_filesystem(
         session,
         get_scan_prefixes_for_root(root),
         collect_existing_paths=collect_existing_paths,
-        update_missing_tags=update_missing_tags,
     )
 
 
 def sync_prefixes_with_filesystem(
-    session,
+    session: Session,
     prefixes: list[str],
     collect_existing_paths: bool = False,
-    update_missing_tags: bool = False,
 ) -> set[str] | None:
-    """Reconcile asset references with filesystem under the given prefixes.
-
-    - Toggle needs_verify per reference using mtime/size stat check
-    - For hashed assets with at least one stat-unchanged ref: delete stale missing refs
-    - For seed assets with all refs missing: delete Asset and its references
-    - Optionally add/remove 'missing' tags based on stat check in this root
-    - Optionally return surviving absolute paths
-
-    Args:
-        session: Database session
-        prefixes: Absolute directory prefixes whose references to reconcile
-        collect_existing_paths: If True, return set of surviving file paths
-        update_missing_tags: If True, update 'missing' tags based on file status
-
-    Returns:
-        Set of surviving absolute paths if collect_existing_paths=True, else None
-    """
     if not prefixes:
         return set() if collect_existing_paths else None
 
-    rows = get_references_for_prefixes(
-        session, prefixes, include_missing=update_missing_tags
-    )
-
-    by_asset: dict[str, _AssetAccumulator] = {}
-    for row in rows:
-        acc = by_asset.get(row.asset_id)
-        if acc is None:
-            acc = {"hash": row.asset_hash, "size_db": row.size_bytes, "refs": []}
-            by_asset[row.asset_id] = acc
-
-        stat_unchanged = False
-        try:
-            exists = True
-            stat_unchanged = verify_file_unchanged(
-                mtime_db=row.mtime_ns,
-                size_db=acc["size_db"],
-                stat_result=os.stat(row.file_path, follow_symlinks=True),
-            )
-        except FileNotFoundError:
-            exists = False
-        except PermissionError:
-            exists = True
-            logging.debug("Permission denied accessing %s", row.file_path)
-        except OSError as e:
-            exists = False
-            logging.debug("OSError checking %s: %s", row.file_path, e)
-
-        acc["refs"].append(
-            {
-                "ref_id": row.reference_id,
-                "file_path": row.file_path,
-                "exists": exists,
-                "stat_unchanged": stat_unchanged,
-                "needs_verify": row.needs_verify,
-            }
-        )
-
-    to_set_verify: list[str] = []
-    to_clear_verify: list[str] = []
-    stale_ref_ids: list[str] = []
-    to_mark_missing: list[str] = []
-    to_clear_missing: list[str] = []
     survivors: set[str] = set()
-
-    for aid, acc in by_asset.items():
-        a_hash = acc["hash"]
-        refs = acc["refs"]
-        any_unchanged = any(r["stat_unchanged"] for r in refs)
-        all_missing = all(not r["exists"] for r in refs)
-
-        for r in refs:
-            if not r["exists"]:
-                to_mark_missing.append(r["ref_id"])
-                continue
-            if r["stat_unchanged"]:
-                to_clear_missing.append(r["ref_id"])
-                if r["needs_verify"]:
-                    to_clear_verify.append(r["ref_id"])
-            if not r["stat_unchanged"] and not r["needs_verify"]:
-                to_set_verify.append(r["ref_id"])
-
-        if a_hash is None:
-            if refs and all_missing:
-                delete_orphaned_seed_asset(session, aid)
-            else:
-                for r in refs:
-                    if r["exists"]:
-                        survivors.add(os.path.abspath(r["file_path"]))
-            continue
-
-        if any_unchanged:
-            for r in refs:
-                if not r["exists"]:
-                    stale_ref_ids.append(r["ref_id"])
-            if update_missing_tags:
-                try:
-                    remove_missing_tag_for_asset_id(session, asset_id=aid)
-                except Exception as e:
-                    logging.warning(
-                        "Failed to remove missing tag for asset %s: %s", aid, e
-                    )
-        elif update_missing_tags:
-            try:
-                add_missing_tag_for_asset_id(session, asset_id=aid, origin="automatic")
-            except Exception as e:
-                logging.warning("Failed to add missing tag for asset %s: %s", aid, e)
-
-        for r in refs:
-            if r["exists"]:
-                survivors.add(os.path.abspath(r["file_path"]))
-
-    delete_references_by_ids(session, stale_ref_ids)
-    stale_set = set(stale_ref_ids)
-    to_mark_missing = [ref_id for ref_id in to_mark_missing if ref_id not in stale_set]
-    bulk_update_is_missing(session, to_mark_missing, value=True)
-    bulk_update_is_missing(session, to_clear_missing, value=False)
-    bulk_update_needs_verify(session, to_set_verify, value=True)
-    bulk_update_needs_verify(session, to_clear_verify, value=False)
+    for content in live_contents_under_prefixes(session, prefixes):
+        try:
+            stat_result = os.stat(content.path, follow_symlinks=True)
+        except FileNotFoundError:
+            mark_content_missing(session, content.id)
+        except PermissionError:
+            logging.debug("Permission denied accessing %s", content.path)
+        except OSError as e:
+            logging.debug("OSError checking %s: %s", content.path, e)
+            mark_content_missing(session, content.id)
+        else:
+            detect_content_change(
+                session,
+                content,
+                stat_result,
+                hashing_is_enabled=mode.hashing_enabled(),
+            )
+            survivors.add(os.path.abspath(content.path))
 
     return survivors if collect_existing_paths else None
+
+
+def _is_under_prefixes(path: str, prefixes: list[str]) -> bool:
+    return is_path_under_prefixes(path, prefixes)
 
 
 def sync_root_safely(root: RootType) -> set[str]:
@@ -261,7 +183,6 @@ def sync_root_safely(root: RootType) -> set[str]:
                 sess,
                 root,
                 collect_existing_paths=True,
-                update_missing_tags=True,
             )
             sess.commit()
             return survivors or set()
@@ -287,12 +208,24 @@ def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int:
     """
     try:
         with create_session() as sess:
-            count = mark_references_missing_outside_prefixes(sess, prefixes)
+            count = mark_contents_missing_outside_prefixes(sess, prefixes)
             sess.commit()
             return count
     except Exception as e:
         logging.exception("marking missing assets failed: %s", e)
         return 0
+
+
+def mark_contents_missing_outside_prefixes(
+    session: Session, prefixes: list[str]
+) -> int:
+    contents = session.scalars(
+        sa.select(AssetContent).where(AssetContent.is_missing.is_(False))
+    )
+    missing = [content for content in contents if not _is_under_prefixes(content.path, prefixes)]
+    for content in missing:
+        mark_content_missing(session, content.id)
+    return len(missing)
 
 
 def collect_paths_for_roots(roots: tuple[RootType, ...]) -> list[str]:
@@ -311,7 +244,6 @@ def build_asset_specs(
     paths: list[str],
     existing_paths: set[str],
     enable_metadata_extraction: bool = True,
-    compute_hashes: bool = False,
 ) -> tuple[list[SeedAssetSpec], set[str], int]:
     """Build asset specs from paths, returning (specs, tag_pool, skipped_count).
 
@@ -319,14 +251,17 @@ def build_asset_specs(
         paths: List of file paths to process
         existing_paths: Set of paths that already exist in the database
         enable_metadata_extraction: If True, extract tier 1 & 2 metadata
-        compute_hashes: If True, compute blake3 hashes (slow for large files)
     """
     specs: list[SeedAssetSpec] = []
     tag_pool: set[str] = set()
     skipped = 0
+    candidates: list[tuple[str, os.stat_result]] = []
 
     for p in paths:
         abs_p = os.path.abspath(p)
+        if _should_skip_extension(abs_p):
+            skipped += 1
+            continue
         if abs_p in existing_paths:
             skipped += 1
             continue
@@ -336,6 +271,12 @@ def build_asset_specs(
             continue
         if not stat_p.st_size:
             continue
+        candidates.append((abs_p, stat_p))
+
+    admitted_paths, _ = _two_stat_admit(candidates)
+    candidate_stats = dict(candidates)
+    for abs_p in admitted_paths:
+        stat_p = candidate_stats[abs_p]
         name, tags = get_name_and_tags_from_asset_path(abs_p)
         rel_fname = compute_loader_path(abs_p)
 
@@ -348,15 +289,6 @@ def build_asset_specs(
                 relative_filename=rel_fname,
             )
 
-        # Compute hash if requested
-        asset_hash: str | None = None
-        if compute_hashes:
-            try:
-                digest, _ = compute_blake3_hash(abs_p)
-                asset_hash = "blake3:" + digest
-            except Exception as e:
-                logging.warning("Failed to hash %s: %s", abs_p, e)
-
         mime_type = metadata.content_type if metadata else None
         specs.append(
             {
@@ -367,7 +299,6 @@ def build_asset_specs(
                 "tags": tags,
                 "fname": rel_fname,
                 "metadata": metadata,
-                "hash": asset_hash,
                 "mime_type": mime_type,
                 "job_id": None,
             }
@@ -377,40 +308,74 @@ def build_asset_specs(
     return specs, tag_pool, skipped
 
 
+def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
+    created = 0
+    created_content_ids: list[str] = []
+    try:
+        for spec in specs:
+            path = os.path.abspath(spec["abs_path"])
+            try:
+                stat_result = os.stat(path, follow_symlinks=True)
+            except OSError:
+                logging.warning("Skipping vanished asset during scan: %s", path)
+                continue
+            try:
+                recovery = recover_missing_content(
+                    session,
+                    path,
+                    stat_result,
+                    hashing_is_enabled=mode.hashing_enabled(),
+                )
+            except OSError:
+                logging.warning("Skipping vanished asset during scan: %s", path)
+                continue
+            if recovery != "no_match":
+                continue
+            content = create_content(
+                session,
+                path=path,
+                hash=None,
+                size_bytes=spec["size_bytes"],
+                mtime_ns=spec["mtime_ns"],
+            )
+            created_content_ids.append(content.id)
+            existing_record = session.scalar(
+                sa.select(Asset.id).where(Asset.content_id == content.id).limit(1)
+            )
+            if existing_record is not None:
+                continue
+            create_record(
+                session,
+                content_id=content.id,
+                name=spec["info_name"],
+                mime_type=spec["mime_type"],
+                job_id=spec["job_id"],
+                loader_path=spec["fname"],
+                tags=spec["tags"],
+            )
+            created += 1
+    except Exception:
+        session.rollback()
+        for content_id in created_content_ids:
+            _discard_unreferenced_content(session, content_id)
+        raise
+    return created
 
-def insert_asset_specs(specs: list[SeedAssetSpec], tag_pool: set[str]) -> int:
-    """Insert asset specs into database, returning count of created refs."""
+
+def insert_asset_specs(specs: list[SeedAssetSpec], _tag_pool: set[str]) -> int:
     if not specs:
         return 0
     with create_session() as sess:
-        if tag_pool:
-            ensure_tags_exist(sess, tag_pool)
-        result = batch_insert_seed_assets(sess, specs=specs, owner_id="")
+        created = seed_asset_specs(sess, specs)
         sess.commit()
-        return result.inserted_refs
-
-
-# Enrichment level constants
-ENRICHMENT_STUB = 0  # Fast scan: path, size, mtime only
-ENRICHMENT_METADATA = 1  # Metadata extracted (safetensors header, mime type)
-ENRICHMENT_HASHED = 2  # Hash computed (blake3)
+        return created
 
 
 def get_unenriched_assets_for_roots(
     roots: tuple[RootType, ...],
-    max_level: int = ENRICHMENT_STUB,
+    compute_hashes: bool,
     limit: int = 1000,
-) -> list:
-    """Get assets that need enrichment for the given roots.
-
-    Args:
-        roots: Tuple of root types to scan
-        max_level: Maximum enrichment level to include
-        limit: Maximum number of rows to return
-
-    Returns:
-        List of UnenrichedReferenceRow
-    """
+) -> list[UnenrichedContent]:
     prefixes: list[str] = []
     for root in roots:
         prefixes.extend(get_scan_prefixes_for_root(root))
@@ -419,44 +384,58 @@ def get_unenriched_assets_for_roots(
         return []
 
     with create_session() as sess:
-        return get_unenriched_references(
-            sess, prefixes, max_level=max_level, limit=limit
+        query = (
+            sa.select(AssetContent.id, Asset.id, AssetContent.path)
+            .join(Asset, Asset.content_id == AssetContent.id)
+            .where(AssetContent.is_missing.is_(False))
         )
+        if compute_hashes:
+            query = query.where(
+                sa.or_(
+                    AssetContent.hash.is_(None),
+                    Asset.system_metadata.is_(None),
+                )
+            )
+        else:
+            query = query.where(Asset.system_metadata.is_(None))
+        query = query.where(
+            sa.or_(
+                *(sql_path_under_prefix(AssetContent.path, p) for p in prefixes)
+            )
+        )
+        rows = sess.execute(query.order_by(Asset.id).limit(limit)).all()
+
+    return [
+        UnenrichedContent(content_id, record_id, file_path)
+        for content_id, record_id, file_path in rows
+    ]
 
 
 def enrich_asset(
     session,
     file_path: str,
-    reference_id: str,
-    asset_id: str,
+    content_id: str,
+    record_id: str,
     extract_metadata: bool = True,
     compute_hash: bool = False,
-    interrupt_check: Callable[[], bool] | None = None,
-    hash_checkpoints: dict[str, HashCheckpoint] | None = None,
-) -> int:
+) -> bool:
     """Enrich a single asset with metadata and/or hash.
 
     Args:
         session: Database session (caller manages lifecycle)
         file_path: Absolute path to the file
-        reference_id: ID of the reference to update
-        asset_id: ID of the asset to update (for mime_type and hash)
+        content_id: ID of the content to update
+        record_id: ID of the record to update
         extract_metadata: If True, extract safetensors header and mime type
         compute_hash: If True, compute blake3 hash
-        interrupt_check: Optional non-blocking callable that returns True if
-            the operation should be interrupted (e.g. paused or cancelled)
-        hash_checkpoints: Optional dict for saving/restoring hash progress
-            across interruptions, keyed by file path
 
     Returns:
-        New enrichment level achieved
+        Whether enrichment changed the B-schema record or content
     """
-    new_level = ENRICHMENT_STUB
-
     try:
         stat_p = os.stat(file_path, follow_symlinks=True)
     except OSError:
-        return new_level
+        return False
 
     initial_mtime_ns = get_mtime_ns(stat_p)
     rel_fname = compute_loader_path(file_path)
@@ -471,68 +450,48 @@ def enrich_asset(
         )
         if metadata:
             mime_type = metadata.content_type
-            new_level = ENRICHMENT_METADATA
 
-    full_hash: str | None = None
-    if compute_hash:
+    content = session.get(AssetContent, content_id)
+
+    digest: str | None = None
+    stored_hash: str | None = None
+    verified_stat: os.stat_result | None = None
+    if compute_hash and content is not None and content.hash is None:
         try:
-            mtime_before = get_mtime_ns(stat_p)
-            size_before = stat_p.st_size
-
-            # Restore checkpoint if available and file unchanged
-            checkpoint = None
-            if hash_checkpoints is not None:
-                checkpoint = hash_checkpoints.get(file_path)
-                if checkpoint is not None:
-                    cur_stat = os.stat(file_path, follow_symlinks=True)
-                    if (checkpoint.mtime_ns != get_mtime_ns(cur_stat)
-                            or checkpoint.file_size != cur_stat.st_size):
-                        checkpoint = None
-                        hash_checkpoints.pop(file_path, None)
-                    else:
-                        mtime_before = get_mtime_ns(cur_stat)
-
-            digest, new_checkpoint = compute_blake3_hash(
-                file_path,
-                interrupt_check=interrupt_check,
-                checkpoint=checkpoint,
-            )
-
-            if digest is None:
-                # Interrupted — save checkpoint for later resumption
-                if hash_checkpoints is not None and new_checkpoint is not None:
-                    new_checkpoint.mtime_ns = mtime_before
-                    new_checkpoint.file_size = size_before
-                    hash_checkpoints[file_path] = new_checkpoint
-                return new_level
-
-            # Completed — clear any saved checkpoint
-            if hash_checkpoints is not None:
-                hash_checkpoints.pop(file_path, None)
-
-            stat_after = os.stat(file_path, follow_symlinks=True)
-            mtime_after = get_mtime_ns(stat_after)
-            if mtime_before != mtime_after:
-                logging.warning("File modified during hashing, discarding hash: %s", file_path)
-            else:
-                full_hash = f"blake3:{digest}"
-                metadata_ok = not extract_metadata or metadata is not None
-                if metadata_ok:
-                    new_level = ENRICHMENT_HASHED
+            snapshot = snapshot_hash(file_path)
+            if snapshot is None:
+                logging.warning(
+                    "File modified during hashing (snapshot unstable), discarding hash: %s",
+                    file_path,
+                )
+                return False
+            digest, verified_stat = snapshot
+            stored_hash = to_stored_hash(digest)
         except Exception as e:
             logging.warning("Failed to hash %s: %s", file_path, e)
 
-    # Optimistic guard: if the reference's mtime_ns changed since we
-    # started (e.g. ingest_existing_file updated it), our results are
-    # stale — discard them to avoid overwriting fresh registration data.
-    ref = get_reference_by_id(session, reference_id)
-    if ref is None or ref.mtime_ns != initial_mtime_ns:
+    record = session.get(Asset, record_id)
+    if content is None or record is None or content.mtime_ns != initial_mtime_ns:
         session.rollback()
         logging.info(
-            "Ref %s mtime changed during enrichment, discarding stale result",
-            reference_id,
+            "Content %s mtime changed during enrichment, discarding stale result",
+            content_id,
         )
-        return ENRICHMENT_STUB
+        return False
+
+    # Non-NULL system_metadata permanently excludes the row from re-enrichment, so a
+    # disagreement here must discard the metadata too, not just the hash.
+    if verified_stat is not None and (
+        get_mtime_ns(verified_stat) != initial_mtime_ns
+        or verified_stat.st_size != stat_p.st_size
+    ):
+        session.rollback()
+        logging.info(
+            "Content %s changed between its metadata read and its hash read, "
+            "discarding stale result",
+            content_id,
+        )
+        return False
 
     if extract_metadata and metadata:
         system_metadata = metadata.to_user_metadata()
@@ -540,32 +499,23 @@ def enrich_asset(
             dims = extract_image_dimensions(file_path, mime_type=mime_type)
             if dims:
                 system_metadata.update(dims)
-        set_reference_system_metadata(session, reference_id, system_metadata)
+        record.system_metadata = {**(record.system_metadata or {}), **system_metadata}
 
-    if full_hash:
-        existing = get_asset_by_hash(session, full_hash)
-        if existing and existing.id != asset_id:
-            reassign_asset_references(session, asset_id, existing.id, reference_id)
-            delete_orphaned_seed_asset(session, asset_id)
-            if mime_type:
-                update_asset_hash_and_mime(session, existing.id, mime_type=mime_type)
-        else:
-            update_asset_hash_and_mime(session, asset_id, full_hash, mime_type)
-    elif mime_type:
-        update_asset_hash_and_mime(session, asset_id, mime_type=mime_type)
+    if stored_hash:
+        content.hash = stored_hash
+    if mime_type:
+        record.mime_type = mime_type
 
-    bulk_update_enrichment_level(session, [reference_id], new_level)
     session.commit()
 
-    return new_level
+    return stored_hash is not None or metadata is not None or mime_type is not None
 
 
 def enrich_assets_batch(
-    rows: list,
+    rows: list[UnenrichedContent],
     extract_metadata: bool = True,
     compute_hash: bool = False,
     interrupt_check: Callable[[], bool] | None = None,
-    hash_checkpoints: dict[str, HashCheckpoint] | None = None,
 ) -> tuple[int, list[str]]:
     """Enrich a batch of assets.
 
@@ -579,8 +529,6 @@ def enrich_assets_batch(
         compute_hash: If True, compute hash for each asset
         interrupt_check: Optional non-blocking callable that returns True if
             the operation should be interrupted (e.g. paused or cancelled)
-        hash_checkpoints: Optional dict for saving/restoring hash progress
-            across interruptions, keyed by file path
 
     Returns:
         Tuple of (enriched_count, failed_reference_ids)
@@ -594,23 +542,21 @@ def enrich_assets_batch(
                 break
 
             try:
-                new_level = enrich_asset(
+                updated = enrich_asset(
                     sess,
                     file_path=row.file_path,
-                    reference_id=row.reference_id,
-                    asset_id=row.asset_id,
+                    content_id=row.content_id,
+                    record_id=row.record_id,
                     extract_metadata=extract_metadata,
                     compute_hash=compute_hash,
-                    interrupt_check=interrupt_check,
-                    hash_checkpoints=hash_checkpoints,
                 )
-                if new_level > row.enrichment_level:
+                if updated:
                     enriched += 1
                 else:
-                    failed_ids.append(row.reference_id)
+                    failed_ids.append(row.record_id)
             except Exception as e:
                 logging.warning("Failed to enrich %s: %s", row.file_path, e)
                 sess.rollback()
-                failed_ids.append(row.reference_id)
+                failed_ids.append(row.record_id)
 
     return enriched, failed_ids

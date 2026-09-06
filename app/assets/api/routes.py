@@ -6,6 +6,7 @@ import mimetypes
 import os
 import urllib.parse
 import uuid
+from datetime import timezone
 from typing import Any
 
 from aiohttp import web
@@ -13,6 +14,7 @@ from pydantic import ValidationError
 
 import folder_paths
 from app import user_manager
+from app.assets import mode
 from app.assets.api import schemas_in, schemas_out
 from app.assets.services import schemas
 from app.assets.api.schemas_in import (
@@ -24,30 +26,54 @@ from app.assets.api.upload import (
     delete_temp_file_if_exists,
     parse_multipart_upload,
 )
+from app.assets.database.models import Asset
+from app.assets.database.queries.records import (
+    RecordCursorBoundary,
+    RecordPageSpec,
+    RecordSortField,
+    RecordSortOrder,
+    get_preview_file_paths_by_ids,
+    list_records_page,
+)
 from app.assets.seeder import ScanInProgressError, asset_seeder
 from app.assets.services import (
     DependencyMissingError,
     HashMismatchError,
+    UploadUnstableError,
     apply_tags,
     asset_exists,
     create_from_hash,
     delete_asset_reference,
     get_asset_detail,
     get_preview_file_paths,
-    list_assets_page,
     list_tags,
     remove_tags,
     resolve_asset_for_download,
     update_asset_metadata,
     upload_from_temp_path,
 )
-from app.assets.services.cursor import InvalidCursorError
 from app.assets.services.path_utils import compute_asset_response_paths
+from app.assets.services.cursor import (
+    InvalidCursorError,
+    decode_cursor,
+    decode_cursor_int,
+    decode_cursor_time,
+    encode_cursor,
+    encode_cursor_from_time,
+)
 from app.assets.services.tagging import list_tag_histogram
+from app.database.db import create_session
 
 ROUTES = web.RouteTableDef()
 USER_MANAGER: user_manager.UserManager | None = None
 _ASSETS_ENABLED = False
+SYSTEM_TAGS = frozenset({"missing"})
+_CURSOR_SORT_FIELDS: tuple[RecordSortField, ...] = (
+    "created_at",
+    "updated_at",
+    "name",
+    "size",
+)
 
 
 def _require_assets_feature_enabled(handler):
@@ -117,6 +143,14 @@ def _build_error_response(
 def _build_validation_error_response(code: str, ve: ValidationError) -> web.Response:
     errors = json.loads(ve.json())
     return _build_error_response(400, code, "Validation failed.", {"errors": errors})
+
+
+def _reject_system_tags(tags: list[str]) -> None:
+    for tag in tags:
+        if tag in SYSTEM_TAGS:
+            raise web.HTTPBadRequest(
+                reason=f"Tag '{tag}' is system-managed and cannot be modified via the API"
+            )
 
 
 class InvalidTagFilterError(Exception):
@@ -200,13 +234,22 @@ def _resolve_tag_filters(
     return all_list, tags_any, none_list
 
 
-def _validate_sort_field(requested: str | None) -> str:
+def _validate_sort_field(requested: str | None) -> RecordSortField:
     if not requested:
         return "created_at"
-    v = requested.lower()
-    if v in {"name", "created_at", "updated_at", "size", "last_access_time"}:
-        return v
-    return "created_at"
+    match requested.lower():
+        case "name":
+            return "name"
+        case "created_at":
+            return "created_at"
+        case "updated_at":
+            return "updated_at"
+        case "size":
+            return "size"
+        case "last_access_time":
+            return "last_access_time"
+        case _:
+            return "created_at"
 
 
 # What a client can render from the bytes themselves; anything else needs a nominated preview.
@@ -258,6 +301,8 @@ def _build_asset_response(
     if result.ref.preview_id:
         # A nominated preview is one whatever it holds, so no media check here.
         preview_url = _build_view_url(preview_paths.get(result.ref.preview_id))
+    elif result.asset is not None and result.asset.is_missing:
+        preview_url = None
     elif _has_previewable_content(result.asset, result.ref.file_path):
         preview_url = _build_view_url(result.ref.file_path)
     else:
@@ -268,7 +313,8 @@ def _build_asset_response(
         # In-root loader path (model category dropped): what model loaders consume.
         loader_path = result.ref.loader_path
     else:
-        display_name, loader_path = None, None
+        display_name = None
+        loader_path = None
     asset_content_hash = result.asset.hash if result.asset else None
     return schemas_out.Asset(
         id=result.ref.id,
@@ -276,7 +322,6 @@ def _build_asset_response(
         hash=asset_content_hash,
         loader_path=loader_path,
         display_name=display_name,
-        asset_hash=asset_content_hash,
         size=int(result.asset.size_bytes) if result.asset else None,
         mime_type=result.asset.mime_type if result.asset else None,
         tags=result.tags,
@@ -289,6 +334,111 @@ def _build_asset_response(
         created_at=result.ref.created_at,
         updated_at=result.ref.updated_at,
         last_access_time=result.ref.last_access_time,
+    )
+
+
+def _build_record_response(
+    record: Asset,
+    tags: list[str],
+    preview_paths: dict[str, str],
+) -> schemas_out.Asset:
+    content = record.content
+    paths = compute_asset_response_paths(content.path)
+    display_name = paths[1] if paths else None
+    if record.preview_id:
+        preview_url = _build_view_url(preview_paths.get(record.preview_id))
+    elif content.is_missing:
+        preview_url = None
+    else:
+        mime_type = record.mime_type or mimetypes.guess_type(content.path)[0] or ""
+        if mime_type.split(";", 1)[0].strip().lower().startswith(
+            PREVIEWABLE_MIME_PREFIXES
+        ):
+            preview_url = _build_view_url(content.path)
+        else:
+            preview_url = None
+
+    return schemas_out.Asset(
+        id=record.id,
+        name=record.name,
+        hash=content.hash,
+        loader_path=record.loader_path,
+        display_name=display_name,
+        size=content.size_bytes,
+        mime_type=record.mime_type,
+        tags=tags,
+        preview_url=preview_url,
+        preview_id=record.preview_id,
+        user_metadata=record.user_metadata or {},
+        metadata=record.system_metadata,
+        job_id=record.job_id,
+        prompt_id=record.job_id,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        last_access_time=record.last_access_time,
+    )
+
+
+def _decode_record_cursor(
+    after: str | None,
+    sort: RecordSortField,
+    order: RecordSortOrder,
+) -> RecordCursorBoundary | None:
+    if after is None:
+        return None
+    if sort not in _CURSOR_SORT_FIELDS:
+        raise InvalidCursorError(
+            f"cursor pagination is not supported for sort={sort!r}"
+        )
+    payload = decode_cursor(
+        after,
+        _CURSOR_SORT_FIELDS,
+        expected_order=order,
+    )
+    if payload.sort_field != sort:
+        raise InvalidCursorError(
+            f"cursor sort field {payload.sort_field!r} does not match request sort {sort!r}"
+        )
+    match payload.sort_field:
+        case "created_at" | "updated_at":
+            value = decode_cursor_time(payload).replace(tzinfo=None)
+        case "size":
+            value = decode_cursor_int(payload)
+        case "name":
+            value = payload.value
+        case unsupported:
+            raise InvalidCursorError(f"unsupported sort field {unsupported!r}")
+    return RecordCursorBoundary(value=value, id=payload.id)
+
+
+def _encode_record_cursor(
+    record: Asset,
+    sort: RecordSortField,
+    order: RecordSortOrder,
+) -> str:
+    match sort:
+        case "name":
+            return encode_cursor("name", record.name, record.id, order=order)
+        case "size":
+            return encode_cursor(
+                "size",
+                str(record.content.size_bytes),
+                record.id,
+                order=order,
+            )
+        case "created_at":
+            timestamp = record.created_at
+        case "updated_at":
+            timestamp = record.updated_at
+        case "last_access_time":
+            raise InvalidCursorError(
+                "cursor pagination is not supported for sort='last_access_time'"
+            )
+    return encode_cursor_from_time(
+        sort,
+        timestamp.replace(tzinfo=timezone.utc),
+        record.id,
+        order=order,
     )
 
 
@@ -312,6 +462,11 @@ async def list_assets_route(request: web.Request) -> web.Response:
     """
     GET request to list assets.
     """
+    if "metadata_filter" in request.query:
+        return _build_error_response(
+            400, "UNSUPPORTED_PARAM", "metadata_filter is no longer supported"
+        )
+
     query_dict = get_query_dict(request)
     try:
         q = schemas_in.ListAssetsQuery.model_validate(query_dict)
@@ -324,42 +479,57 @@ async def list_assets_route(request: web.Request) -> web.Response:
         return _build_error_response(400, "INVALID_TAG_FILTER", str(e), e.details)
 
     sort = _validate_sort_field(q.sort)
-    order_candidate = (q.order or "desc").lower()
-    order = order_candidate if order_candidate in {"asc", "desc"} else "desc"
+    order = q.order
 
     try:
-        result = list_assets_page(
-            owner_id=USER_MANAGER.get_request_user_id(request),
-            include_tags=tags_all,
-            exclude_tags=tags_none,
-            any_tags=tags_any,
-            name_contains=q.name_contains,
-            metadata_filter=q.metadata_filter,
-            limit=q.limit,
-            offset=q.offset,
-            sort=sort,
-            order=order,
-            after=q.after,
-        )
+        cursor_boundary = _decode_record_cursor(q.after, sort, order)
+        cursor_supported = sort in _CURSOR_SORT_FIELDS
+        fetch_limit = q.limit + 1 if cursor_supported else q.limit
+        with create_session() as session:
+            records, tag_map, total = list_records_page(
+                session,
+                RecordPageSpec(
+                    all_tags=tuple(tags_all),
+                    any_tags=tuple(tags_any),
+                    none_tags=tuple(tags_none),
+                    name_contains=q.name_contains,
+                    limit=fetch_limit,
+                    offset=q.offset,
+                    sort=sort,
+                    order=order,
+                    after=cursor_boundary,
+                ),
+            )
+            next_cursor = None
+            if cursor_supported and len(records) > q.limit:
+                records = records[: q.limit]
+                next_cursor = _encode_record_cursor(records[-1], sort, order)
+
+            preview_ids = sorted(
+                {record.preview_id for record in records if record.preview_id}
+            )
+            preview_paths = get_preview_file_paths_by_ids(session, preview_ids)
+            summaries = [
+                _build_record_response(
+                    record,
+                    tag_map.get(record.id, []),
+                    preview_paths,
+                )
+                for record in records
+            ]
     except InvalidCursorError as e:
         return _build_error_response(400, "INVALID_CURSOR", str(e))
 
-    preview_paths = _resolve_preview_paths(result.items)
-    summaries = [_build_asset_response(item, preview_paths) for item in result.items]
-
-    # has_more semantics differ by mode:
-    #   - cursor mode: a non-empty next_cursor means there are more results.
-    #   - offset mode: derived from total - (offset + page size).
     if q.after is not None:
-        has_more = result.next_cursor is not None
+        has_more = next_cursor is not None
     else:
-        has_more = (q.offset + len(summaries)) < result.total
+        has_more = q.offset + len(summaries) < total
 
     payload = schemas_out.AssetsList(
         assets=summaries,
-        total=result.total,
+        total=total,
         has_more=has_more,
-        next_cursor=result.next_cursor,
+        next_cursor=next_cursor,
     )
     return web.json_response(payload.model_dump(mode="json", exclude_none=True))
 
@@ -374,7 +544,6 @@ async def get_asset_route(request: web.Request) -> web.Response:
     try:
         result = get_asset_detail(
             reference_id=reference_id,
-            owner_id=USER_MANAGER.get_request_user_id(request),
         )
         if not result:
             return _build_error_response(
@@ -391,7 +560,7 @@ async def get_asset_route(request: web.Request) -> web.Response:
         )
     except Exception:
         logging.exception(
-            "get_asset failed for reference_id=%s, owner_id=%s",
+            "get_asset failed for reference_id=%s, tenant_id=%s",
             reference_id,
             USER_MANAGER.get_request_user_id(request),
         )
@@ -409,7 +578,6 @@ async def download_asset_content(request: web.Request) -> web.Response:
     try:
         result = resolve_asset_for_download(
             reference_id=str(uuid.UUID(request.match_info["id"])),
-            owner_id=USER_MANAGER.get_request_user_id(request),
         )
         abs_path = result.abs_path
         content_type = result.content_type
@@ -501,15 +669,22 @@ async def create_asset_from_hash_route(request: web.Request) -> web.Response:
     if name is None:
         name = body.hash.split(":", 1)[1] if ":" in body.hash else body.hash
 
-    result = create_from_hash(
-        hash_str=body.hash,
-        name=name,
-        tags=body.tags,
-        user_metadata=body.user_metadata,
-        owner_id=USER_MANAGER.get_request_user_id(request),
-        mime_type=body.mime_type,
-        preview_id=body.preview_id,
-    )
+    if not mode.hashing_enabled():
+        return _build_error_response(
+            400, "FEATURE_DISABLED", "Asset hashing is disabled."
+        )
+
+    try:
+        result = create_from_hash(
+            hash_str=body.hash,
+            name=name,
+            tags=body.tags,
+            user_metadata=body.user_metadata,
+            mime_type=body.mime_type,
+            preview_id=body.preview_id,
+        )
+    except ValueError as e:
+        return _build_error_response(400, "INVALID_BODY", str(e))
     if result is None:
         return _build_error_response(
             404, "ASSET_NOT_FOUND", f"Asset content {body.hash} does not exist"
@@ -532,7 +707,7 @@ async def upload_asset(request: web.Request) -> web.Response:
     except UploadError as e:
         return _build_error_response(e.status, e.code, e.message)
 
-    owner_id = USER_MANAGER.get_request_user_id(request)
+    tenant_id = USER_MANAGER.get_request_user_id(request)
 
     try:
         spec = schemas_in.UploadAssetSpec.model_validate(
@@ -552,42 +727,35 @@ async def upload_asset(request: web.Request) -> web.Response:
         )
 
     try:
-        # Fast path: hash exists, create AssetReference without writing anything
-        if spec.hash and parsed.provided_hash_exists is True:
+        if not parsed.file_present and spec.hash:
             result = create_from_hash(
                 hash_str=spec.hash,
                 name=spec.name or (spec.hash.split(":", 1)[1]),
                 tags=spec.tags,
                 user_metadata=spec.user_metadata or {},
-                owner_id=owner_id,
                 mime_type=spec.mime_type,
                 preview_id=spec.preview_id,
             )
             if result is None:
-                delete_temp_file_if_exists(parsed.tmp_path)
                 return _build_error_response(
                     404, "ASSET_NOT_FOUND", f"Asset content {spec.hash} does not exist"
                 )
-            delete_temp_file_if_exists(parsed.tmp_path)
-        else:
-            # Otherwise, we must have a temp file path to ingest
-            if not parsed.tmp_path or not os.path.exists(parsed.tmp_path):
-                return _build_error_response(
-                    400,
-                    "MISSING_INPUT",
-                    "Provided hash not found and no file uploaded.",
-                )
-
+        elif parsed.tmp_path and os.path.exists(parsed.tmp_path):
             result = upload_from_temp_path(
                 temp_path=parsed.tmp_path,
                 name=spec.name,
                 tags=spec.tags,
                 user_metadata=spec.user_metadata or {},
                 client_filename=parsed.file_client_name,
-                owner_id=owner_id,
                 expected_hash=spec.hash,
                 mime_type=spec.mime_type,
                 preview_id=spec.preview_id,
+            )
+        else:
+            return _build_error_response(
+                400,
+                "MISSING_INPUT",
+                "Provided hash not found and no file uploaded.",
             )
     except AssetValidationError as e:
         delete_temp_file_if_exists(parsed.tmp_path)
@@ -598,12 +766,15 @@ async def upload_asset(request: web.Request) -> web.Response:
     except HashMismatchError as e:
         delete_temp_file_if_exists(parsed.tmp_path)
         return _build_error_response(400, "HASH_MISMATCH", str(e))
+    except UploadUnstableError as e:
+        delete_temp_file_if_exists(parsed.tmp_path)
+        return _build_error_response(500, "UPLOAD_UNSTABLE", str(e))
     except DependencyMissingError as e:
         delete_temp_file_if_exists(parsed.tmp_path)
         return _build_error_response(503, "DEPENDENCY_MISSING", e.message)
     except Exception:
         delete_temp_file_if_exists(parsed.tmp_path)
-        logging.exception("upload_asset failed for owner_id=%s", owner_id)
+        logging.exception("upload_asset failed for tenant_id=%s", tenant_id)
         return _build_error_response(500, "INTERNAL", "Unexpected server error.")
 
     asset = _build_asset_response(result, _resolve_preview_paths([result]))
@@ -633,7 +804,6 @@ async def update_asset_route(request: web.Request) -> web.Response:
             reference_id=reference_id,
             name=body.name,
             user_metadata=body.user_metadata,
-            owner_id=USER_MANAGER.get_request_user_id(request),
             preview_id=body.preview_id,
         )
         payload = _build_asset_response(result, _resolve_preview_paths([result]))
@@ -645,7 +815,7 @@ async def update_asset_route(request: web.Request) -> web.Response:
         )
     except Exception:
         logging.exception(
-            "update_asset failed for reference_id=%s, owner_id=%s",
+            "update_asset failed for reference_id=%s, tenant_id=%s",
             reference_id,
             USER_MANAGER.get_request_user_id(request),
         )
@@ -659,16 +829,12 @@ async def delete_asset_route(request: web.Request) -> web.Response:
     reference_id = str(uuid.UUID(request.match_info["id"]))
 
     try:
-        # Deleting an asset is a soft delete of the reference; the underlying
-        # content is preserved (it may be shared with other references).
         deleted = delete_asset_reference(
             reference_id=reference_id,
-            owner_id=USER_MANAGER.get_request_user_id(request),
-            delete_content_if_orphan=False,
         )
     except Exception:
         logging.exception(
-            "delete_asset_reference failed for reference_id=%s, owner_id=%s",
+            "delete_asset_reference failed for reference_id=%s, tenant_id=%s",
             reference_id,
             USER_MANAGER.get_request_user_id(request),
         )
@@ -705,7 +871,6 @@ async def get_tags(request: web.Request) -> web.Response:
         offset=query.offset,
         order=query.order,
         include_zero=query.include_zero,
-        owner_id=USER_MANAGER.get_request_user_id(request),
     )
 
     tags = [
@@ -737,12 +902,13 @@ async def add_asset_tags(request: web.Request) -> web.Response:
             400, "INVALID_JSON", "Request body must be valid JSON."
         )
 
+    _reject_system_tags(data.tags)
+
     try:
         result = apply_tags(
             reference_id=reference_id,
             tags=data.tags,
             origin="manual",
-            owner_id=USER_MANAGER.get_request_user_id(request),
         )
         payload = schemas_out.TagsAdd(
             added=result.added,
@@ -757,7 +923,7 @@ async def add_asset_tags(request: web.Request) -> web.Response:
         )
     except Exception:
         logging.exception(
-            "add_tags_to_asset failed for reference_id=%s, owner_id=%s",
+            "add_tags_to_asset failed for reference_id=%s, tenant_id=%s",
             reference_id,
             USER_MANAGER.get_request_user_id(request),
         )
@@ -785,16 +951,18 @@ async def delete_asset_tags(request: web.Request) -> web.Response:
             400, "INVALID_JSON", "Request body must be valid JSON."
         )
 
+    _reject_system_tags(data.tags)
+
     try:
         result = remove_tags(
             reference_id=reference_id,
             tags=data.tags,
-            owner_id=USER_MANAGER.get_request_user_id(request),
         )
         payload = schemas_out.TagsRemove(
             removed=result.removed,
             not_present=result.not_present,
             total_tags=result.total_tags,
+            protected=result.protected,
         )
     except PermissionError as pe:
         return _build_error_response(403, "FORBIDDEN", str(pe), {"id": reference_id})
@@ -804,7 +972,7 @@ async def delete_asset_tags(request: web.Request) -> web.Response:
         )
     except Exception:
         logging.exception(
-            "remove_tags_from_asset failed for reference_id=%s, owner_id=%s",
+            "remove_tags_from_asset failed for reference_id=%s, tenant_id=%s",
             reference_id,
             USER_MANAGER.get_request_user_id(request),
         )
@@ -817,6 +985,11 @@ async def delete_asset_tags(request: web.Request) -> web.Response:
 @_require_assets_feature_enabled
 async def get_tags_refine(request: web.Request) -> web.Response:
     """GET request to get tag histogram for filtered assets."""
+    if "metadata_filter" in request.query:
+        return _build_error_response(
+            400, "UNSUPPORTED_PARAM", "metadata_filter is no longer supported"
+        )
+
     query_dict = get_query_dict(request)
     try:
         q = schemas_in.TagsRefineQuery.model_validate(query_dict)
@@ -829,12 +1002,10 @@ async def get_tags_refine(request: web.Request) -> web.Response:
         return _build_error_response(400, "INVALID_TAG_FILTER", str(e), e.details)
 
     tag_counts = list_tag_histogram(
-        owner_id=USER_MANAGER.get_request_user_id(request),
         include_tags=tags_all,
         exclude_tags=tags_none,
         any_tags=tags_any,
         name_contains=q.name_contains,
-        metadata_filter=q.metadata_filter,
         limit=q.limit,
     )
     payload = schemas_out.TagHistogram(tag_counts=tag_counts)
@@ -867,7 +1038,9 @@ async def seed_assets(request: web.Request) -> web.Response:
     wait_param = request.query.get("wait", "").lower()
     should_wait = wait_param in ("true", "1", "yes")
 
-    started = asset_seeder.start(roots=valid_roots)
+    started = asset_seeder.start(
+        roots=valid_roots, compute_hashes=mode.hashing_enabled()
+    )
     if not started:
         return web.json_response({"status": "already_running"}, status=409)
 
