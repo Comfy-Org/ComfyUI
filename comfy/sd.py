@@ -1268,6 +1268,9 @@ class VAE:
                     if self.handles_tiling:
                         tile = 256 // self.spacial_compression_decode()
                         overlap = tile // 4
+                        # decode_tiled is identical to decode for these VAEs, so freeing the
+                        # memory other models hold onto is the only thing that can make the retry succeed.
+                        model_management.free_memory(1e30, self.device, keep_loaded=[model_management.LoadedModel(self.patcher)])
                         pixel_samples = self._decode_tiled_owned(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
                     else:
                         pixel_samples = self.decode_tiled_(samples_in)
@@ -1275,6 +1278,9 @@ class VAE:
                     tile = 256 // self.spacial_compression_decode()
                     overlap = tile // 4
                     if self.handles_tiling:
+                        # decode_tiled is identical to decode for these VAEs, so freeing the
+                        # memory other models hold onto is the only thing that can make the retry succeed.
+                        model_management.free_memory(1e30, self.device, keep_loaded=[model_management.LoadedModel(self.patcher)])
                         memory_used = self.memory_used_decode(self._tile_bounded_shape(samples_in.shape, tile, tile, None), self.vae_dtype)
                         model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
                         pixel_samples = self._decode_tiled_owned(samples_in, tile_x=tile, tile_y=tile, overlap=overlap)
@@ -1401,6 +1407,9 @@ class VAE:
                     tile = 256
                     overlap = tile // 4
                     if self.handles_tiling:
+                        # encode_tiled is identical to encode for these VAEs, so freeing the
+                        # memory other models hold onto is the only thing that can make the retry succeed.
+                        model_management.free_memory(1e30, self.device, keep_loaded=[model_management.LoadedModel(self.patcher)])
                         samples = self._encode_tiled_owned(pixel_samples, tile_x=tile, tile_y=tile, overlap=overlap)
                     else:
                         samples = self.encode_tiled_3d(pixel_samples, tile_x=tile, tile_y=tile, overlap=(1, overlap, overlap))
