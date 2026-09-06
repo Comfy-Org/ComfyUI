@@ -65,6 +65,7 @@ def cuda_malloc_supported():
 
 
 version = ""
+cuda_available = False
 
 try:
     torch_spec = importlib.util.find_spec("torch")
@@ -75,6 +76,7 @@ try:
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             version = module.__version__
+            cuda_available = module.cuda is not None
 except:
     pass
 
@@ -89,7 +91,7 @@ def get_raw_cuda_version(version_str):
 
 if not args.cuda_malloc:
     try:
-        if int(version[0]) >= 2 and "+cu" in version:  # enable by default for torch version 2.0 and up only on cuda torch
+        if int(version[0]) >= 2 and cuda_available:  # enable by default for torch version 2.0 and up only on cuda torch
             if PerformanceFeature.AutoTune not in args.fast:  # Autotune has issues with cuda malloc
                 cuda_version = get_raw_cuda_version(version)
                 if cuda_version is not None and cuda_version >= 130:
