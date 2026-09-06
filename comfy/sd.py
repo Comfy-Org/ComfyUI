@@ -1039,6 +1039,7 @@ class VAE:
                 self.process_output = lambda audio: audio
                 self.process_input = lambda audio: audio
                 self.working_dtypes = [torch.float32]
+                self.disable_offload = True
                 # encode gets the waveform shape [B, 2, samples], decode the latent shape [B, 32, 2, T]
                 def estimate_encode_memory(samples, dtype):
                     return (900 * samples + 105_000_000) * model_management.dtype_size(dtype) * 1.03
