@@ -111,6 +111,49 @@ class EmptyMiniMaxH3LatentAV(io.ComfyNode):
         return io.NodeOutput(latent)
 
 
+class MiniMaxH3AVLatent(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MiniMaxH3AVLatent",
+            display_name="MiniMax H3 AV Latent",
+            category="model/latent/minimax",
+            description="Combine separately encoded MiniMax H3 video and audio latents into the model's joint AV latent.",
+            inputs=[
+                io.Latent.Input("video_latent"),
+                io.Latent.Input("audio_latent"),
+            ],
+            outputs=[io.Latent.Output()],
+        )
+
+    @classmethod
+    def execute(cls, video_latent, audio_latent) -> io.NodeOutput:
+        video = video_latent.get("samples") if isinstance(video_latent, dict) else None
+        audio = audio_latent.get("samples") if isinstance(audio_latent, dict) else None
+        if not torch.is_tensor(video):
+            raise ValueError("video_latent must contain a tensor in samples")
+        if not torch.is_tensor(audio):
+            raise ValueError("audio_latent must contain a tensor in samples")
+
+        if video.ndim != 5 or video.shape[1] != 24 or any(size <= 0 for size in (video.shape[0], *video.shape[2:])):
+            raise ValueError(f"MiniMax H3 video latent must have shape [B, 24, T, H, W] with positive dimensions, got {tuple(video.shape)}")
+        if audio.ndim != 4 or audio.shape[1] != 32 or audio.shape[2] != 2 or any(size <= 0 for size in (audio.shape[0], audio.shape[3])):
+            raise ValueError(f"MiniMax H3 audio latent must have shape [B, 32, 2, T] with positive dimensions, got {tuple(audio.shape)}")
+        if video.shape[0] != audio.shape[0]:
+            raise ValueError(f"MiniMax H3 video and audio latent batch sizes must match, got {video.shape[0]} and {audio.shape[0]}")
+
+        cycles, remainder = divmod(video.shape[2], len(FRAME_PER_TOKEN))
+        frame_count = cycles * sum(FRAME_PER_TOKEN) + sum(FRAME_PER_TOKEN[:remainder])
+        expected_audio_t = round(frame_count / FPS * AUDIO_LATENT_FPS)
+        if abs(audio.shape[3] - expected_audio_t) > 1:
+            raise ValueError(
+                f"MiniMax H3 video/audio latent timelines do not match: video T={video.shape[2]} "
+                f"represents {frame_count} frames and expects audio T={expected_audio_t} (±1), got {audio.shape[3]}"
+            )
+
+        return io.NodeOutput({"samples": comfy.nested_tensor.NestedTensor((video, audio))})
+
+
 class MiniMaxH3ImageToVideo(io.ComfyNode):
     """t2va and fl2va: prompt (+ optional first/last keyframes) -> conditioning + AV latent."""
 
@@ -614,6 +657,7 @@ class MiniMaxH3Extension(ComfyExtension):
     async def get_node_list(self):
         return [
             EmptyMiniMaxH3LatentAV,
+            MiniMaxH3AVLatent,
             MiniMaxH3ImageToVideo,
             MiniMaxH3AddGuide,
             MiniMaxH3ReferenceToVideo,
