@@ -1,4 +1,5 @@
 """Tests for ingest services."""
+import os
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session as SASession, Session
 from app.assets.database.models import Asset, AssetReference, AssetReferenceTag, Tag
 from app.assets.database.queries import get_reference_tags
 from app.assets.helpers import get_utc_now
+from app.assets.scanner import ENRICHMENT_HASHED, ENRICHMENT_STUB
+from app.assets.services.file_utils import get_mtime_ns
 from app.assets.services.ingest import (
     _ingest_file_from_path,
     _register_existing_asset,
@@ -566,3 +569,205 @@ class TestRegisterExistingAssetBackfill:
         assert ref.system_metadata.get("kind") == "image"
         assert ref.system_metadata.get("width") == 1024
         assert ref.system_metadata.get("height") == 768
+
+
+@pytest.fixture
+def output_root(temp_dir: Path):
+    input_dir = temp_dir / "input"
+    output_dir = temp_dir / "output"
+    temp_root = temp_dir / "temp"
+    for directory in (input_dir, output_dir, temp_root):
+        directory.mkdir()
+    with (
+        patch("app.assets.services.path_utils.folder_paths") as mock_fp,
+        patch(
+            "app.assets.services.path_utils.get_comfy_models_folders",
+            return_value=[],
+        ),
+    ):
+        mock_fp.get_input_directory.return_value = str(input_dir)
+        mock_fp.get_output_directory.return_value = str(output_dir)
+        mock_fp.get_temp_directory.return_value = str(temp_root)
+        yield output_dir
+
+
+def _write_output(output_root: Path, name: str, content: bytes) -> Path:
+    path = output_root / name
+    path.write_bytes(content)
+    return path
+
+
+def _seed_hashed_reference(
+    session: Session,
+    file_path: Path,
+    *,
+    asset: Asset | None = None,
+    asset_hash: str = "blake3:seeded",
+    deleted_at=None,
+) -> tuple[Asset, AssetReference]:
+    stat_result = os.stat(file_path)
+    if asset is None:
+        asset = Asset(
+            hash=asset_hash,
+            size_bytes=stat_result.st_size,
+            mime_type="image/png",
+        )
+        session.add(asset)
+        session.flush()
+    ref = AssetReference(
+        asset_id=asset.id,
+        name=file_path.name,
+        owner_id="",
+        file_path=str(file_path),
+        mtime_ns=get_mtime_ns(stat_result),
+        enrichment_level=ENRICHMENT_HASHED,
+        deleted_at=deleted_at,
+    )
+    session.add(ref)
+    session.commit()
+    return asset, ref
+
+
+def _rewrite_with_newer_mtime(file_path: Path, content: bytes) -> None:
+    mtime_ns = os.stat(file_path).st_mtime_ns
+    file_path.write_bytes(content)
+    os.utime(file_path, ns=(mtime_ns + 1_000_000_000, mtime_ns + 1_000_000_000))
+
+
+class TestIngestExistingFileContentState:
+    def test_unchanged_file_keeps_hash_and_enrichment(
+        self, mock_create_session, output_root: Path, session: Session
+    ):
+        file_path = _write_output(output_root, "ComfyUI_00001_.png", b"image data")
+        asset, ref = _seed_hashed_reference(session, file_path)
+
+        assert ingest_existing_file(str(file_path), job_id="job-1") is True
+
+        session.expire_all()
+        assert asset.hash == "blake3:seeded"
+        assert asset.size_bytes == len(b"image data")
+        assert ref.enrichment_level == ENRICHMENT_HASHED
+        assert ref.job_id == "job-1"
+        assert ref.is_missing is False
+
+    def test_rewritten_file_resets_hash_and_enrichment(
+        self, mock_create_session, output_root: Path, session: Session
+    ):
+        file_path = _write_output(output_root, "ComfyUI_00001_.png", b"image data")
+        asset, ref = _seed_hashed_reference(session, file_path)
+        _rewrite_with_newer_mtime(file_path, b"replacement image data")
+
+        assert ingest_existing_file(str(file_path), job_id="job-2") is True
+
+        session.expire_all()
+        assert asset.hash is None
+        assert asset.size_bytes == len(b"replacement image data")
+        assert ref.enrichment_level == ENRICHMENT_STUB
+        assert ref.job_id == "job-2"
+
+    def test_same_size_rewrite_resets_hash(
+        self, mock_create_session, output_root: Path, session: Session
+    ):
+        file_path = _write_output(output_root, "ComfyUI_00001_.png", b"image data")
+        asset, ref = _seed_hashed_reference(session, file_path)
+        _rewrite_with_newer_mtime(file_path, b"other data")
+
+        assert ingest_existing_file(str(file_path)) is True
+
+        session.expire_all()
+        assert asset.hash is None, "mtime alone must invalidate a same-size rewrite"
+        assert ref.enrichment_level == ENRICHMENT_STUB
+
+    def test_unchanged_file_stays_on_shared_asset(
+        self, mock_create_session, output_root: Path, session: Session
+    ):
+        content = b"image data"
+        first = _write_output(output_root, "ComfyUI_00001_.png", content)
+        second = _write_output(output_root, "ComfyUI_00002_.png", content)
+        asset, first_ref = _seed_hashed_reference(session, first)
+        _, second_ref = _seed_hashed_reference(session, second, asset=asset)
+
+        assert ingest_existing_file(str(first)) is True
+
+        session.expire_all()
+        assert (
+            session.query(Asset).count() == 1
+        ), "an unchanged file has nothing to detach from"
+        assert first_ref.asset_id == asset.id
+        assert second_ref.asset_id == asset.id
+        assert asset.hash == "blake3:seeded"
+
+    def test_rewritten_file_detaches_from_shared_asset(
+        self, mock_create_session, output_root: Path, session: Session
+    ):
+        content = b"image data"
+        first = _write_output(output_root, "ComfyUI_00001_.png", content)
+        second = _write_output(output_root, "ComfyUI_00002_.png", content)
+        asset, first_ref = _seed_hashed_reference(session, first)
+        _, second_ref = _seed_hashed_reference(session, second, asset=asset)
+        _rewrite_with_newer_mtime(first, b"replacement image data")
+
+        assert ingest_existing_file(str(first)) is True
+
+        session.expire_all()
+        assert first_ref.asset_id != asset.id
+        assert second_ref.asset_id == asset.id
+        assert asset.hash == "blake3:seeded"
+        assert session.get(Asset, first_ref.asset_id).hash is None
+
+    def test_soft_deleted_reference_is_restored_with_hash_intact(
+        self, mock_create_session, output_root: Path, session: Session
+    ):
+        file_path = _write_output(output_root, "ComfyUI_00001_.png", b"image data")
+        asset, ref = _seed_hashed_reference(
+            session, file_path, deleted_at=get_utc_now()
+        )
+
+        assert ingest_existing_file(str(file_path)) is True
+
+        session.expire_all()
+        assert ref.deleted_at is None
+        assert ref.is_missing is False
+        assert asset.hash == "blake3:seeded"
+
+    def test_restored_reference_is_re_enriched_when_its_asset_lost_its_hash(
+        self, mock_create_session, output_root: Path, session: Session
+    ):
+        content = b"image data"
+        first = _write_output(output_root, "ComfyUI_00001_.png", content)
+        second = _write_output(output_root, "ComfyUI_00002_.png", content)
+        asset, first_ref = _seed_hashed_reference(session, first)
+        _, second_ref = _seed_hashed_reference(session, second, asset=asset)
+        second_ref.deleted_at = get_utc_now()
+        session.commit()
+
+        _rewrite_with_newer_mtime(first, b"other data")
+        assert ingest_existing_file(str(first)) is True
+        session.expire_all()
+        assert asset.hash is None
+
+        assert ingest_existing_file(str(second)) is True
+
+        session.expire_all()
+        assert second_ref.deleted_at is None
+        assert (
+            second_ref.enrichment_level == ENRICHMENT_STUB
+        ), "a reference that lost its hash must be re-enriched, not left at HASHED"
+        assert second_ref.asset_id != asset.id
+
+    def test_soft_deleted_reference_with_rewritten_file_is_restored_and_reset(
+        self, mock_create_session, output_root: Path, session: Session
+    ):
+        file_path = _write_output(output_root, "ComfyUI_00001_.png", b"image data")
+        asset, ref = _seed_hashed_reference(
+            session, file_path, deleted_at=get_utc_now()
+        )
+        _rewrite_with_newer_mtime(file_path, b"replacement image data")
+
+        assert ingest_existing_file(str(file_path)) is True
+
+        session.expire_all()
+        assert ref.deleted_at is None
+        assert ref.is_missing is False
+        assert asset.hash is None
+        assert ref.enrichment_level == ENRICHMENT_STUB

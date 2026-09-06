@@ -30,7 +30,11 @@ from app.assets.database.queries import (
 )
 from app.assets.helpers import get_utc_now, normalize_tags
 from app.assets.services.bulk_ingest import batch_insert_seed_assets
-from app.assets.services.file_utils import get_size_and_mtime_ns
+from app.assets.services.file_utils import (
+    get_mtime_ns,
+    get_size_and_mtime_ns,
+    verify_file_unchanged,
+)
 from app.assets.services.image_dimensions import extract_image_dimensions
 from app.assets.services.path_utils import (
     compute_loader_path,
@@ -194,8 +198,11 @@ def ingest_existing_file(
 ) -> bool:
     """Register an existing on-disk file as an asset stub.
 
-    If a reference already exists for this path, updates mtime_ns, job_id,
-    size_bytes, and resets enrichment so the enricher will re-hash it.
+    If a reference already exists for this path, updates mtime_ns and job_id.
+    A file whose mtime and size still match what was recorded keeps its hash,
+    size and enrichment state. If the file was rewritten, or there is no
+    recorded hash left to keep, that state is discarded and the enricher
+    re-hashes it.
 
     For brand-new paths, inserts a stub record (hash=NULL) for immediate
     UX visibility.
@@ -203,7 +210,8 @@ def ingest_existing_file(
     Returns True if a row was inserted or updated, False otherwise.
     """
     locator = os.path.abspath(abs_path)
-    size_bytes, mtime_ns = get_size_and_mtime_ns(abs_path)
+    stat_result = os.stat(abs_path, follow_symlinks=True)
+    size_bytes, mtime_ns = stat_result.st_size, get_mtime_ns(stat_result)
     mime_type = mimetypes.guess_type(abs_path, strict=False)[0]
     name, path_tags = get_name_and_tags_from_asset_path(abs_path)
     tags = list(dict.fromkeys(path_tags + list(extra_tags)))
@@ -211,31 +219,44 @@ def ingest_existing_file(
     with create_session() as session:
         existing_ref = get_reference_by_file_path(session, locator)
         if existing_ref is not None:
+            asset = existing_ref.asset
+            # mtime + size is the subsystem-wide staleness test (see
+            # verify_file_unchanged); strengthening it is not a local decision.
+            unchanged = (
+                asset is not None
+                and asset.hash is not None
+                and verify_file_unchanged(
+                    mtime_db=existing_ref.mtime_ns,
+                    size_db=asset.size_bytes,
+                    stat_result=stat_result,
+                )
+            )
+
             now = get_utc_now()
             existing_ref.mtime_ns = mtime_ns
             existing_ref.job_id = job_id
             existing_ref.is_missing = False
             existing_ref.deleted_at = None
             existing_ref.updated_at = now
-            existing_ref.enrichment_level = 0
 
-            asset = existing_ref.asset
-            if asset:
-                # If other refs share this asset, detach to a new stub
-                # instead of mutating the shared row.
-                siblings = count_active_siblings(session, asset.id, existing_ref.id)
-                if siblings > 0:
-                    new_asset = create_stub_asset(
-                        session,
-                        size_bytes=size_bytes,
-                        mime_type=mime_type or asset.mime_type,
-                    )
-                    existing_ref.asset_id = new_asset.id
-                else:
-                    asset.hash = None
-                    asset.size_bytes = size_bytes
-                    if mime_type:
-                        asset.mime_type = mime_type
+            if not unchanged:
+                existing_ref.enrichment_level = 0
+                if asset:
+                    # If other refs share this asset, detach to a new stub
+                    # instead of mutating the shared row.
+                    siblings = count_active_siblings(session, asset.id, existing_ref.id)
+                    if siblings > 0:
+                        new_asset = create_stub_asset(
+                            session,
+                            size_bytes=size_bytes,
+                            mime_type=mime_type or asset.mime_type,
+                        )
+                        existing_ref.asset_id = new_asset.id
+                    else:
+                        asset.hash = None
+                        asset.size_bytes = size_bytes
+                        if mime_type:
+                            asset.mime_type = mime_type
             session.commit()
             return True
 
