@@ -1507,6 +1507,14 @@ def sync_stream(device, stream):
     current_stream(device).wait_stream(stream)
 
 
+FILE_READ_PANIC_RELEASE_MEMORY = 1024 * 1024 * 1024
+
+def panic_recover_memory(device):
+    discard_cuda_async_error()
+    free_pins(FILE_READ_PANIC_RELEASE_MEMORY, evict_active=True)
+    ensure_pin_registerable(FILE_READ_PANIC_RELEASE_MEMORY)
+
+
 def cast_to_gathered(tensors, r, non_blocking=False, stream=None, r2=None):
     wf_context = nullcontext()
     if stream is not None:
@@ -1522,7 +1530,7 @@ def cast_to_gathered(tensors, r, non_blocking=False, stream=None, r2=None):
             dest2_view = dest2_views.pop(0) if dest2_views is not None else None
             if tensor is None:
                 continue
-            if comfy.memory_management.read_tensor_file_slice_into(tensor, dest_view, stream=stream, destination2=dest2_view):
+            if comfy.memory_management.read_tensor_file_slice_into(tensor, dest_view, stream=stream, destination2=dest2_view, recover_memory=panic_recover_memory):
                 continue
             storage = tensor._qdata.untyped_storage() if isinstance(tensor, comfy.quant_ops.QuantizedTensor) else tensor.untyped_storage()
             mark_mmap_dirty(storage)
@@ -1611,7 +1619,10 @@ def discard_cuda_async_error():
         synchronize()
     except RuntimeError:
         #Dump it! We already know about it from the synchronous return
-        pass
+        try:
+            synchronize()
+        except RuntimeError:
+            pass
 
 def pin_memory(tensor):
     global TOTAL_PINNED_MEMORY
