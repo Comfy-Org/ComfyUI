@@ -393,7 +393,9 @@ class ModelAttentionBackend:
         attention_function = comfy.ldm.modules.attention.get_attention_function(attention_name, None)
         if attention_function is None:
             logging.warning("Attention backend '%s' is unavailable; using PyTorch attention.", attention)
+            attention = "pytorch attention"
             attention_function = comfy.ldm.modules.attention.get_attention_function("pytorch")
+        logging.info("Attention backend enabled: using %s.", attention)
         m = model.clone()
         m.set_model_optimized_attention(attention_function)
         return (m, )
