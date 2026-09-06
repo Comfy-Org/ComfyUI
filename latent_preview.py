@@ -41,12 +41,14 @@ class TAESDPreviewerImpl(LatentPreviewer):
         self.taesd = taesd
 
     def decode_latent_to_preview(self, x0):
-        x_sample = self.taesd.decode(x0[:1])[0].movedim(0, 2)
+        # Clone to prevent the decoder from modifying the latent in-place
+        x_sample = self.taesd.decode(x0[:1].clone())[0].movedim(0, 2)
         return preview_to_image(x_sample)
 
 class TAEHVPreviewerImpl(TAESDPreviewerImpl):
     def decode_latent_to_preview(self, x0):
-        x_sample = self.taesd.decode(x0[:1, :, :1])[0][0]
+        # Clone to prevent the decoder from modifying the latent in-place
+        x_sample = self.taesd.decode(x0[:1, :, :1].clone())[0][0]
         return preview_to_image(x_sample, do_scale=False)
 
 class Latent2RGBPreviewer(LatentPreviewer):
