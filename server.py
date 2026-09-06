@@ -39,6 +39,7 @@ from comfy.deploy_environment import get_deploy_environment
 import comfy.utils
 import comfy.model_management
 from comfy_api import feature_flags
+from comfy_api.billing_capabilities import relay_billing_capabilities
 from comfy.comfy_api_env import get_environment_overrides
 import node_helpers
 from comfyui_version import __version__
@@ -743,6 +744,11 @@ class PromptServer():
             if overrides:
                 features.update(overrides)
             return web.json_response(features)
+
+        if not args.disable_api_nodes:
+            @routes.get("/billing/capabilities")
+            async def get_billing_capabilities(request):
+                return await relay_billing_capabilities(request, self.client_session)
 
         @routes.get("/prompt")
         async def get_prompt(request):
