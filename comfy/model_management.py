@@ -499,19 +499,31 @@ try:
 
             can_use_flash_attention() evaluates runtime eligibility for the given
             parameters; on a ROCm build that includes checking the gpu arch against the
-            kernel images AOTriton was compiled for. Querying it avoids assuming where
-            those images live inside the torch install. The probe tensor is shaped and
+            arches AOTriton was built for. Querying it avoids assuming where the kernel
+            images live inside the torch install. The probe tensor is shaped and
             typed to pass the unrelated SDPA checks, so False means no hardware support
             rather than a rejected shape.
+
+            It answers True on a supported arch whose kernel image was never shipped,
+            and that only fails at launch, without raising. So run one attention
+            through the flash backend and force the pending error check.
             """
             try:
+                device = get_torch_device()
                 if not torch.backends.cuda.is_flash_attention_available():  # not built with flash attention
                     return False
-                q = torch.empty((1, 1, 8, 64), dtype=torch.float16, device=get_torch_device())
+                q = torch.zeros((1, 1, 8, 64), dtype=torch.float16, device=device)
                 params = torch.backends.cuda.SDPAParams(q, q, q, None, 0.0, False, False)
-                return torch.backends.cuda.can_use_flash_attention(params, False)
-            except (AttributeError, RuntimeError, TypeError) as e:
-                logging.warning("Could not query aotriton support: {}".format(e))
+                if not torch.backends.cuda.can_use_flash_attention(params, False):
+                    return False
+                from torch.nn.attention import SDPBackend, sdpa_kernel
+                with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                    torch.nn.functional.scaled_dot_product_attention(q, q, q)
+                torch.cuda.synchronize()
+                torch.zeros(1, device=device).add_(1).item()  # raises if the launch above failed
+                return True
+            except Exception as e:
+                logging.warning("Could not run flash attention, disabling it: {}".format(e))
                 return False
 
         logging.info("AMD arch: {}".format(arch))
