@@ -18,7 +18,11 @@ from aiohttp.client_exceptions import ClientError, ContentTypeError
 from pydantic import BaseModel
 
 from comfy import utils
-from comfy.model_management import InterruptProcessingException, interrupt_current_processing
+from comfy.model_management import (
+    InterruptProcessingException,
+    interrupt_current_processing,
+    throw_exception_if_processing_interrupted,
+)
 from comfy_api.latest import IO
 from server import PromptServer
 
@@ -96,9 +100,6 @@ it takes precedence over ``price_extractor``."""
 ESTIMATED_DURATION_HEADER = "X-Comfy-Estimated-Duration-Seconds"
 ESTIMATED_DURATION_P90_HEADER = "X-Comfy-Estimated-Duration-P90-Seconds"
 ESTIMATE_SOURCE_HEADER = "X-Comfy-Estimate-Source"
-"""Proxy response headers on 2xx async submission acknowledgements: p50/p90 duration estimates in whole
-seconds (submit acceptance to result availability, partner queue time included) and their source,
-``historical`` or ``default``."""
 
 _credits_used_by_execution: "weakref.WeakKeyDictionary[type, float]" = weakref.WeakKeyDictionary()
 """Last PRICE_CREDITS_HEADER value per node execution, keyed by the node's per-execution class clone."""
@@ -140,8 +141,8 @@ def _parse_estimate_seconds(header_value: str | None) -> int | None:
     if not header_value:
         return None
     try:
-        seconds = int(str(header_value).strip())
-    except (TypeError, ValueError):
+        seconds = int(header_value.strip())
+    except ValueError:
         logging.debug("Ignoring malformed estimate header value: %r", header_value)
         return None
     if not 1 <= seconds <= 86400:
@@ -159,7 +160,7 @@ def _maybe_remember_server_estimate(node_cls: type[IO.ComfyNode], headers: Mappi
         p90 = p50
     source = headers.get(ESTIMATE_SOURCE_HEADER) or None
     _server_estimates_by_execution[node_cls] = _ServerEstimate(p50, p90, source)
-    logging.debug("Server duration estimate: p50=%ss, p90=%ss, source=%s", p50, p90, source)
+    logging.debug("Server duration estimate: p50=%ss, p90=%s, source=%s", p50, p90, source)
 
 
 async def sync_op(
@@ -502,6 +503,7 @@ async def poll_op_raw(
                 return resp_json
 
             if status in failed_states:
+                throw_exception_if_processing_interrupted()
                 msg = f"Task failed: {json.dumps(resp_json)}"
                 logging.error(msg)
                 raise Exception(msg)
@@ -600,11 +602,11 @@ def _estimate_progress_pct(elapsed_seconds: float, p50_seconds: int | None, p90_
     if not p50_seconds or p50_seconds <= 0 or elapsed_seconds <= 0:
         return 0
     if elapsed_seconds < p50_seconds:
-        return min(90, int(90.0 * elapsed_seconds / p50_seconds))
+        return int(90.0 * elapsed_seconds / p50_seconds)
     horizon = p90_seconds if p90_seconds is not None and p90_seconds > p50_seconds else p50_seconds
     if elapsed_seconds >= horizon:
         return 95
-    return min(95, 90 + int(5.0 * (elapsed_seconds - p50_seconds) / (horizon - p50_seconds)))
+    return 90 + int(5.0 * (elapsed_seconds - p50_seconds) / (horizon - p50_seconds))
 
 
 async def _diagnose_connectivity() -> dict[str, bool]:
