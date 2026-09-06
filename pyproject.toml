@@ -2,13 +2,56 @@
 name = "ComfyUI"
 version = "0.34.0"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+dependencies = [
+    "comfyui-frontend-package==1.49.6",
+    "comfyui-workflow-templates==0.11.44",
+    "comfyui-embedded-docs==0.5.10",
+    "torch",
+    "torchsde",
+    "torchvision",
+    "torchaudio",
+    "numpy>=1.25.0",
+    "einops",
+    "transformers>=4.50.3",
+    "tokenizers>=0.13.3",
+    "sentencepiece",
+    "safetensors>=0.4.2",
+    "aiohttp>=3.11.8",
+    "yarl>=1.18.0",
+    "pyyaml",
+    "Pillow",
+    "scipy",
+    "tqdm",
+    "psutil",
+    "alembic",
+    "SQLAlchemy>=2.0.0",
+    "filelock",
+    "av>=16.0.0",
+    "comfy-kitchen==0.2.31",
+    "comfy-aimdo==0.4.13",
+    "requests",
+    "simpleeval>=1.0.0",
+    "blake3",
+]
 
 [project.urls]
 homepage = "https://www.comfy.org/"
 repository = "https://github.com/comfyanonymous/ComfyUI"
 documentation = "https://docs.comfy.org/"
+
+[project.optional-dependencies]
+# non essential dependencies
+non-essential = [
+    "kornia>=0.7.1",
+    "spandrel",
+    "pydantic~=2.0",
+    "pydantic-settings~=2.0",
+    "PyOpenGL>=3.1.8",
+    "comfy-angle",
+]
 
 [tool.ruff]
 lint.select = [
