@@ -133,6 +133,12 @@ class _TensorCoreFP8LayoutBase(_CKFp8Layout):
         if not isinstance(scale, torch.Tensor):
             scale = torch.tensor(scale, device=tensor.device, dtype=torch.float32)
 
+        # MPS does not support FP8 dtypes — move to CPU for quantization.
+        on_mps = tensor.device.type == "mps"
+        if on_mps:
+            tensor = tensor.cpu()
+            scale = scale.cpu()
+
         if stochastic_rounding > 0:
             if inplace_ops:
                 tensor *= (1.0 / scale).to(tensor.dtype)

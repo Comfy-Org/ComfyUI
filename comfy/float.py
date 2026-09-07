@@ -70,6 +70,11 @@ def stochastic_rounding(value, dtype, seed=0):
     if dtype == torch.bfloat16:
         return value.to(dtype=torch.bfloat16)
     if dtype == torch.float8_e4m3fn or dtype == torch.float8_e5m2:
+        # MPS does not support FP8 dtypes — perform rounding on CPU and return the result there.
+        on_mps = value.device.type == "mps"
+        if on_mps:
+            value = value.cpu()
+
         generator = torch.Generator(device=value.device)
         generator.manual_seed(seed)
         if _CK_STOCHASTIC_ROUNDING_AVAILABLE:
@@ -178,6 +183,12 @@ def stochastic_round_quantize_nvfp4(x, per_tensor_scale, pad_16x, seed=0):
         """Round up x to the nearest multiple."""
         return ((x + multiple - 1) // multiple) * multiple
 
+    # MPS does not support FP8 dtypes used for block scales — perform on CPU.
+    on_mps = x.device.type == "mps"
+    if on_mps:
+        x = x.cpu()
+        per_tensor_scale = per_tensor_scale.cpu() if isinstance(per_tensor_scale, torch.Tensor) else per_tensor_scale
+
     generator = torch.Generator(device=x.device)
     generator.manual_seed(seed)
 
@@ -197,6 +208,12 @@ def stochastic_round_quantize_nvfp4_by_block(x, per_tensor_scale, pad_16x, seed=
     def roundup(x: int, multiple: int) -> int:
         """Round up x to the nearest multiple."""
         return ((x + multiple - 1) // multiple) * multiple
+
+    # MPS does not support FP8 dtypes used for block scales — perform on CPU.
+    on_mps = x.device.type == "mps"
+    if on_mps:
+        x = x.cpu()
+        per_tensor_scale = per_tensor_scale.cpu() if isinstance(per_tensor_scale, torch.Tensor) else per_tensor_scale
 
     orig_shape = x.shape
 
