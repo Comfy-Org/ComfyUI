@@ -748,6 +748,45 @@ class GetImageSize(IO.ComfyNode):
     get_size = execute  # TODO: remove
 
 
+class GetLatentSize(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="GetLatentSize",
+            search_aliases=["dimensions", "resolution", "latent info", "video latent size"],
+            display_name="Get Image/Video Latent Size",
+            description="Returns the width, height, frame count, and batch size of an image or video latent.",
+            category="latent",
+            inputs=[
+                IO.Latent.Input("latent", tooltip="The image or video latent to inspect."),
+            ],
+            outputs=[
+                IO.Int.Output(display_name="width", tooltip="The latent width."),
+                IO.Int.Output(display_name="height", tooltip="The latent height."),
+                IO.Int.Output(display_name="frames", tooltip="The latent frame count. Image latents have one frame."),
+                IO.Int.Output(display_name="batch_size", tooltip="The number of latents in the batch."),
+            ],
+            hidden=[IO.Hidden.unique_id],
+        )
+
+    @classmethod
+    def execute(cls, latent) -> IO.NodeOutput:
+        samples = latent["samples"]
+        if samples.is_nested:
+            samples = samples.unbind()[0]
+
+        if samples.ndim == 5:
+            batch_size, _, frames, height, width = samples.shape
+        else:
+            batch_size, _, height, width = samples.shape
+            frames = 1
+
+        if cls.hidden.unique_id:
+            PromptServer.instance.send_progress_text(f"width: {width}, height: {height}\n frames: {frames}, batch size: {batch_size}", cls.hidden.unique_id)
+
+        return IO.NodeOutput(width, height, frames, batch_size)
+
+
 class ImageRotate(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -1894,6 +1933,7 @@ class ImagesExtension(ComfyExtension):
             ImageStitch,
             ResizeAndPadImage,
             GetImageSize,
+            GetLatentSize,
             ImageRotate,
             ImageFlip,
             ImageScaleToMaxDimension,
