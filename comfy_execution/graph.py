@@ -22,17 +22,26 @@ class DynamicPrompt:
     def __init__(self, original_prompt):
         # The original prompt provided by the user
         self.original_prompt = original_prompt
+        # Runtime replacements for original nodes, without mutating the submitted prompt.
+        self.node_overrides = {}
         # Any extra pieces of the graph created during execution
         self.ephemeral_prompt = {}
         self.ephemeral_parents = {}
         self.ephemeral_display = {}
 
     def get_node(self, node_id):
+        if node_id in self.node_overrides:
+            return self.node_overrides[node_id]
         if node_id in self.ephemeral_prompt:
             return self.ephemeral_prompt[node_id]
         if node_id in self.original_prompt:
             return self.original_prompt[node_id]
         raise NodeNotFoundError(f"Node {node_id} not found")
+
+    def override_node(self, node_id, node_info):
+        if not self.has_node(node_id):
+            raise NodeNotFoundError(f"Node {node_id} not found")
+        self.node_overrides[node_id] = node_info
 
     def has_node(self, node_id):
         return node_id in self.original_prompt or node_id in self.ephemeral_prompt
@@ -239,6 +248,28 @@ class ExecutionList(TopologicalSort):
         super().add_strong_link(from_node_id, from_socket, to_node_id)
         self.cache_link(from_node_id, to_node_id, from_socket)
 
+    def inhibit_nodes(self, node_ids):
+        """Remove pending nodes selected by the currently executing control node."""
+        assert self.staged_node_id is not None, "Nodes may only be inhibited while a control node is staged"
+        node_ids = set(node_ids).intersection(self.pendingNodes)
+        assert self.staged_node_id not in node_ids, "A control node cannot inhibit itself"
+
+        for from_node_id, blocked_nodes in self.blocking.items():
+            if from_node_id not in node_ids:
+                for node_id in node_ids:
+                    blocked_nodes.pop(node_id, None)
+        for node_id in node_ids:
+            for blocked_node_id in self.blocking[node_id]:
+                if blocked_node_id not in node_ids:
+                    self.blockCount[blocked_node_id] -= 1
+            del self.pendingNodes[node_id]
+            del self.blockCount[node_id]
+            del self.blocking[node_id]
+            self.execution_cache.pop(node_id, None)
+            self.execution_cache_listeners.pop(node_id, None)
+        for listeners in self.execution_cache_listeners.values():
+            listeners.difference_update({listener for listener in listeners if listener[0] in node_ids})
+
     async def stage_node_execution(self):
         assert self.staged_node_id is None
         if self.is_empty():
@@ -314,6 +345,10 @@ class ExecutionList(TopologicalSort):
     def unstage_node_execution(self):
         assert self.staged_node_id is not None
         self.staged_node_id = None
+
+    def is_staged_node_blocked(self):
+        assert self.staged_node_id is not None
+        return self.blockCount[self.staged_node_id] > 0
 
     def complete_node_execution(self):
         node_id = self.staged_node_id
