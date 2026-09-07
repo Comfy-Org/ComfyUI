@@ -89,6 +89,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
                  freeze=True, layer="last", layer_idx=None, textmodel_json_config=None, dtype=None, model_class=comfy.clip_model.CLIPTextModel,
                  special_tokens={"start": 49406, "end": 49407, "pad": 49407}, layer_norm_hidden_state=True, enable_attention_masks=False, zero_out_masked=False,
                  return_projected_pooled=True, return_attention_masks=False, model_options={}):  # clip-vit-base-patch32
+        """Initialize a text encoder with device-aware quantized operations."""
         super().__init__()
 
         if textmodel_json_config is None:
@@ -111,7 +112,18 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
 
         if operations is None:
             if quant_config is not None:
-                operations = comfy.ops.mixed_precision_ops(quant_config, dtype, full_precision_mm=True)
+                load_device = model_options.get("load_device", model_management.text_encoder_device())
+                disabled = {"float8_e4m3fn", "float8_e5m2", "nvfp4", "mxfp8"}
+                if model_management.is_device_cuda(load_device):
+                    if model_management.supports_fp8_compute(load_device):
+                        disabled.difference_update(("float8_e4m3fn", "float8_e5m2"))
+                    if model_management.supports_nvfp4_compute(load_device):
+                        disabled.remove("nvfp4")
+                    if model_management.supports_mxfp8_compute(load_device):
+                        disabled.remove("mxfp8")
+                operations = comfy.ops.mixed_precision_ops(
+                    quant_config, dtype, disabled=disabled,
+                )
                 logging.info("Using MixedPrecisionOps for text encoder")
             else:
                 operations = comfy.ops.manual_cast

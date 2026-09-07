@@ -73,6 +73,7 @@ def get_attention_function(name: str, default: Any=...) -> Union[Callable, None]
 
 from comfy.cli_args import args
 import comfy.ops
+import comfy.quant_ops
 ops = comfy.ops.disable_weight_init
 
 FORCE_UPCAST_ATTENTION_DTYPE = model_management.force_upcast_attention_dtype()
@@ -585,6 +586,76 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
             ).transpose(1, 2).reshape(-1, q.shape[2], heads * dim_head)
     return out
 
+_KITCHEN_ATTENTION_ROUTE_LOGGED = set()
+
+def _attention_kitchen(kernel_name, support_name, q, k, v, heads, mask,
+                       attn_precision, skip_reshape, skip_output_reshape,
+                       **kwargs):
+    """Dispatch supported calls to Kitchen HIP or PyTorch SDPA."""
+    kitchen = getattr(comfy.quant_ops, "ck", None)
+    support = None if kitchen is None else getattr(kitchen, support_name, None)
+    supported = (
+        model_management.is_amd()
+        and callable(support)
+        and mask is None and skip_reshape
+        and not kwargs.get("enable_gqa", False)
+        and q.ndim == 4 and q.shape[1] == heads
+        and support(q, k, v)
+    )
+    route_key = (kernel_name, "hip" if supported else "sdpa", None if q is None else tuple(q.shape), None if q is None else str(q.dtype))
+    if route_key not in _KITCHEN_ATTENTION_ROUTE_LOGGED:
+        _KITCHEN_ATTENTION_ROUTE_LOGGED.add(route_key)
+        logging.info(
+            "Kitchen %s route=%s shape=%s dtype=%s mask=%s skip_reshape=%s",
+            kernel_name,
+            "hip" if supported else "pytorch-sdpa",
+            None if q is None else tuple(q.shape),
+            None if q is None else q.dtype,
+            mask is not None,
+            skip_reshape,
+        )
+    if not supported:
+        return attention_pytorch(
+            q, k, v, heads, mask=mask, attn_precision=attn_precision,
+            skip_reshape=skip_reshape,
+            skip_output_reshape=skip_output_reshape, **kwargs,
+        )
+
+    out = getattr(kitchen, kernel_name)(q, k, v, kwargs.get("scale"))
+    if not skip_output_reshape:
+        out = out.transpose(1, 2).reshape(
+            q.shape[0], q.shape[2], heads * q.shape[3]
+        )
+    return out
+
+@wrap_attn
+def attention_kitchen_bf16(q, k, v, heads, mask=None, attn_precision=None,
+                           skip_reshape=False, skip_output_reshape=False,
+                           **kwargs):
+    """Run Kitchen BF16 attention with PyTorch SDPA fallback."""
+    return _attention_kitchen(
+        "hip_attention", "hip_attention_is_supported",
+        q, k, v, heads, mask, attn_precision,
+        skip_reshape, skip_output_reshape, **kwargs,
+    )
+
+@wrap_attn
+def attention_kitchen_int8(q, k, v, heads, mask=None, attn_precision=None,
+                           skip_reshape=False, skip_output_reshape=False,
+                           **kwargs):
+    """Run Kitchen INT8 attention when low-precision attention is allowed."""
+    if kwargs.get("low_precision_attention", True) is False:
+        return attention_kitchen_bf16(
+            q, k, v, heads, mask=mask, attn_precision=attn_precision,
+            skip_reshape=skip_reshape,
+            skip_output_reshape=skip_output_reshape, **kwargs,
+        )
+    return _attention_kitchen(
+        "hip_int8_attention", "hip_int8_attention_is_supported",
+        q, k, v, heads, mask, attn_precision,
+        skip_reshape, skip_output_reshape, **kwargs,
+    )
+
 def _comfy_kitchen_int8_inputs(q, k, v, heads, mask, skip_reshape, enable_gqa):
     dim_head = q.shape[-1] if skip_reshape else q.shape[-1] // heads
     b = q.shape[0]
@@ -856,7 +927,16 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
 
 optimized_attention = attention_basic
 
-if model_management.sage_attention_enabled():
+if (args.use_kitchen_bf16_attention or args.use_kitchen_int8_attention) and not model_management.is_amd():
+    logging.warning("Comfy Kitchen HIP attention is AMD ROCm-only; ignoring the selected Kitchen attention flag")
+
+if args.use_kitchen_bf16_attention and model_management.is_amd():
+    logging.info("Using Comfy Kitchen FP16/BF16 attention")
+    optimized_attention = attention_kitchen_bf16
+elif args.use_kitchen_int8_attention and model_management.is_amd():
+    logging.info("Using Comfy Kitchen INT8 attention")
+    optimized_attention = attention_kitchen_int8
+elif model_management.sage_attention_enabled():
     logging.info("Using sage attention")
     optimized_attention = attention_sage
 elif model_management.flash_attention_enabled():
@@ -888,6 +968,8 @@ optimized_attention_masked = optimized_attention
 
 
 # register core-supported attention functions
+register_attention_function("kitchen_bf16", attention_kitchen_bf16)
+register_attention_function("kitchen_int8", attention_kitchen_int8)
 if COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE:
     register_attention_function("comfy_kitchen_int8", attention_comfy_kitchen_int8)
 if SAGE_ATTENTION_IS_AVAILABLE:
