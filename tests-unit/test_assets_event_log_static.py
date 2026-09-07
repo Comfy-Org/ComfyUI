@@ -21,8 +21,6 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
-import pytest
-
 from app.assets.event_log import ALLOWED_FIELDS, EVENT_NAME_PATTERN, TAG
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -40,48 +38,47 @@ class CallSite(NamedTuple):
     event: str
 
 
-# The manifest of every tagged event this branch is expected to emit, mapped to
-# the plan todo that lands it. ``None`` means landed: those triples must be
-# present in the tree exactly as written. A number means the call site does not
-# exist yet — when that todo lands it flips its own entries to ``None``, which
-# also removes its pending marker below.
-EXPECTED_CALL_SITES: dict[CallSite, int | None] = {
-    # todo 10 - seeder lifecycle + the single assets.enabled site
-    CallSite("server.py", "__init__", "assets.enabled"): None,
-    CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_started"): None,
-    CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_completed"): None,
-    CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_failed"): None,
-    CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_cancelled"): None,
-    CallSite("app/assets/seeder.py", "_run_scan", "seeder.marked_missing"): None,
-    CallSite("app/assets/seeder.py", "mark_missing_outside_prefixes", "seeder.marked_missing"): None,
-    CallSite("app/assets/seeder.py", "_run_fast_phase", "seeder.batch_insert_failed"): None,
-    # todo 11 - scanner and ingest failure paths
-    CallSite("app/assets/scanner.py", "sync_root_safely", "scanner.fast_scan_failed"): None,
-    CallSite("app/assets/scanner.py", "sync_temp_references_safely", "scanner.temp_sync_failed"): None,
-    CallSite(
-        "app/assets/scanner.py", "mark_missing_outside_prefixes_safely", "scanner.mark_missing_failed"
-    ): None,
-    CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_failed"): None,
-    CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_discarded_modified"): None,
-    CallSite("app/assets/scanner.py", "enrich_assets_batch", "scanner.enrich_failed"): None,
-    CallSite(
-        "app/assets/services/ingest.py", "register_cached_output", "ingest.register_output_failed"
-    ): None,
-    CallSite(
-        "app/assets/services/ingest.py", "register_executed_output", "ingest.register_output_failed"
-    ): None,
-    CallSite(
-        "app/assets/services/ingest.py", "_discard_unreferenced_content", "ingest.discard_orphan_failed"
-    ): None,
-    # todo 12 - one api.request_failed per route handler, seven handlers
-    CallSite("app/assets/api/routes.py", "get_asset_route", "api.request_failed"): None,
-    CallSite("app/assets/api/routes.py", "upload_asset", "api.request_failed"): None,
-    CallSite("app/assets/api/routes.py", "update_asset_route", "api.request_failed"): None,
-    CallSite("app/assets/api/routes.py", "delete_asset_route", "api.request_failed"): None,
-    CallSite("app/assets/api/routes.py", "add_asset_tags", "api.request_failed"): None,
-    CallSite("app/assets/api/routes.py", "delete_asset_tags", "api.request_failed"): None,
-    CallSite("app/assets/api/upload.py", "parse_multipart_upload", "api.request_failed"): None,
-}
+# The manifest of every tagged event this branch emits: (file, enclosing
+# function, event) triples that must be present in the tree exactly as written.
+EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
+    {
+        # todo 10 - seeder lifecycle + the single assets.enabled site
+        CallSite("server.py", "__init__", "assets.enabled"),
+        CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_started"),
+        CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_completed"),
+        CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_failed"),
+        CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_cancelled"),
+        CallSite("app/assets/seeder.py", "_run_scan", "seeder.marked_missing"),
+        CallSite("app/assets/seeder.py", "mark_missing_outside_prefixes", "seeder.marked_missing"),
+        CallSite("app/assets/seeder.py", "_run_fast_phase", "seeder.batch_insert_failed"),
+        # todo 11 - scanner and ingest failure paths
+        CallSite("app/assets/scanner.py", "sync_root_safely", "scanner.fast_scan_failed"),
+        CallSite("app/assets/scanner.py", "sync_temp_references_safely", "scanner.temp_sync_failed"),
+        CallSite(
+            "app/assets/scanner.py", "mark_missing_outside_prefixes_safely", "scanner.mark_missing_failed"
+        ),
+        CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_failed"),
+        CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_discarded_modified"),
+        CallSite("app/assets/scanner.py", "enrich_assets_batch", "scanner.enrich_failed"),
+        CallSite(
+            "app/assets/services/ingest.py", "register_cached_output", "ingest.register_output_failed"
+        ),
+        CallSite(
+            "app/assets/services/ingest.py", "register_executed_output", "ingest.register_output_failed"
+        ),
+        CallSite(
+            "app/assets/services/ingest.py", "_discard_unreferenced_content", "ingest.discard_orphan_failed"
+        ),
+        # todo 12 - one api.request_failed per route handler, seven handlers
+        CallSite("app/assets/api/routes.py", "get_asset_route", "api.request_failed"),
+        CallSite("app/assets/api/routes.py", "upload_asset", "api.request_failed"),
+        CallSite("app/assets/api/routes.py", "update_asset_route", "api.request_failed"),
+        CallSite("app/assets/api/routes.py", "delete_asset_route", "api.request_failed"),
+        CallSite("app/assets/api/routes.py", "add_asset_tags", "api.request_failed"),
+        CallSite("app/assets/api/routes.py", "delete_asset_tags", "api.request_failed"),
+        CallSite("app/assets/api/upload.py", "parse_multipart_upload", "api.request_failed"),
+    }
+)
 
 REQUEST_FAILED_HANDLERS = frozenset(
     {
@@ -94,9 +91,6 @@ REQUEST_FAILED_HANDLERS = frozenset(
         ("app/assets/api/upload.py", "parse_multipart_upload"),
     }
 )
-
-LANDED_CALL_SITES = Counter(site for site, todo in EXPECTED_CALL_SITES.items() if todo is None)
-PENDING_TODOS = sorted({todo for todo in EXPECTED_CALL_SITES.values() if todo is not None})
 
 
 class Aliases(NamedTuple):
@@ -283,11 +277,12 @@ def test_no_other_log_line_carries_the_event_tag() -> None:
 
 
 def test_call_sites_match_the_manifest() -> None:
-    unexpected = SCAN.call_sites - LANDED_CALL_SITES
-    missing = LANDED_CALL_SITES - SCAN.call_sites
+    manifest = Counter(EXPECTED_CALL_SITES)
+    unexpected = SCAN.call_sites - manifest
+    missing = manifest - SCAN.call_sites
     assert not unexpected, (
-        f"emit call sites not in the manifest: {sorted(unexpected)} — add them, or flip their "
-        "EXPECTED_CALL_SITES entry from its pending todo number to None"
+        f"emit call sites not in the manifest: {sorted(unexpected)} — add them to "
+        "EXPECTED_CALL_SITES"
     )
     assert not missing, f"manifest call sites absent from the tree: {sorted(missing)}"
 
@@ -298,15 +293,3 @@ def test_manifest_declares_one_request_failed_site_per_route_handler() -> None:
     )
     assert set(declared) == REQUEST_FAILED_HANDLERS
     assert set(declared.values()) == {1}
-
-
-@pytest.mark.parametrize(
-    "todo",
-    [
-        pytest.param(t, marks=pytest.mark.xfail(strict=True, reason=f"todo {t} has not landed yet"))
-        for t in PENDING_TODOS
-    ],
-)
-def test_pending_call_sites_have_landed(todo: int) -> None:
-    expected = Counter(site for site, owner in EXPECTED_CALL_SITES.items() if owner == todo)
-    assert not expected - SCAN.call_sites
