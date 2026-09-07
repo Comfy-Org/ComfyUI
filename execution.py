@@ -205,6 +205,8 @@ def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=
                 hidden_inputs_v3[io.Hidden.api_key_comfy_org] = extra_data.get("api_key_comfy_org", None)
             if io.Hidden.comfy_usage_source.name in hidden:
                 hidden_inputs_v3[io.Hidden.comfy_usage_source] = extra_data.get("comfy_usage_source", None)
+            if io.Hidden.execution_list.name in hidden:
+                hidden_inputs_v3[io.Hidden.execution_list] = execution_list
     else:
         if "hidden" in valid_inputs:
             h = valid_inputs["hidden"]
@@ -213,6 +215,8 @@ def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=
                     input_data_all[x] = [dynprompt.get_original_prompt() if dynprompt is not None else {}]
                 if h[x] == "DYNPROMPT":
                     input_data_all[x] = [dynprompt]
+                if h[x] == "EXECUTION_LIST":
+                    input_data_all[x] = [execution_list]
                 if h[x] == "EXTRA_PNGINFO":
                     input_data_all[x] = [extra_data.get('extra_pnginfo', None)]
                 if h[x] == "UNIQUE_ID":
