@@ -55,8 +55,6 @@ _original_load_custom_node: Callable[[str, set[str], str], Awaitable[bool]] | No
 _custom_node_mode: str | None = None
 _denied_packs: frozenset[str] = frozenset()
 _allowed_packs: Mapping[str, str] = MappingProxyType({})
-# Message attribution only. Enforcement continues to use _disabled_nodes.
-_partner_provider_map: Mapping[str, str] = MappingProxyType({})
 
 
 def load_disabled_nodes(path: str) -> set[str]:
@@ -75,24 +73,6 @@ def load_disabled_nodes(path: str) -> set[str]:
         raise ValueError("disabled_nodes entries must be strings")
 
     return set(disabled_nodes)
-
-
-def set_partner_provider_map(mapping: dict[str, str]) -> None:
-    global _partner_provider_map
-    _partner_provider_map = MappingProxyType(mapping.copy())
-
-
-def partner_provider_for_node(node_id: str) -> str | None:
-    return _partner_provider_map.get(node_id)
-
-
-def node_policy_message(node_id: str) -> str | None:
-    provider_id = partner_provider_for_node(node_id)
-    if provider_id is not None:
-        return f"Provider '{provider_id}' is not permitted by your organization's policy."
-    if node_id in _disabled_nodes:
-        return f"Node '{node_id}' is not permitted by your organization's policy."
-    return None
 
 
 def set_custom_node_policy(mode: str | None, denied_packs: frozenset[str], allowed_packs: dict[str, str]) -> None:
@@ -129,7 +109,6 @@ def pack_allowed(module_path: str) -> bool:
     if _custom_node_mode == "allowlist":
         return digest in _allowed_packs.values()
     return digest == expected_digest
-
 
 def pack_digest(pack_path: str) -> str:
     # Keep local: hashing imports comfy.cli_args, which would freeze CLI defaults before main enables argument parsing.
@@ -354,9 +333,8 @@ def _apply_policy(policy: dict) -> None:
     custom_node_mode = policy.get("customNodeMode") if "customNode" in active_forms else None
     allowed_packs = {pack["name"]: pack["digest"] for pack in policy.get("packs", ())}
     set_custom_node_policy(custom_node_mode, frozenset(policy.get("deniedPacks", ())), allowed_packs)
-    partner_provider_map = {entry["nodeId"]: entry["providerId"] for entry in policy.get("disabledPartnerNodes", ())}
-    set_partner_provider_map(partner_provider_map)
-    _disabled_nodes = frozenset(policy.get("disabledNodes", ())).union(partner_provider_map)
+    partner_node_ids = {entry["nodeId"] for entry in policy.get("disabledPartnerNodes", ())}
+    _disabled_nodes = frozenset(policy.get("disabledNodes", ())).union(partner_node_ids)
 
 
 def initialize() -> None:
