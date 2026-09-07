@@ -1960,6 +1960,30 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
 
     return False
 
+FP8_CAST_SUPPORT = {}
+
+def supports_fp8_cast(device=None):
+    """Whether the device can cast an fp8 tensor to a wider dtype at all.
+
+    Weaker than supports_fp8_compute, which asks whether fp8 matmuls run
+    natively. Some backends (MPS) can allocate and copy fp8 tensors but
+    implement no fp8 kernels, so even `fp8_tensor.to(torch.float16)` raises.
+    The emulated fp8 path used when native compute is unsupported dequantizes
+    via exactly that cast, so callers use this to decide whether to upcast
+    fp8 weights to compute_dtype at load time instead.
+    """
+    if device is None:
+        device = get_torch_device()
+    dev = torch.device(device)
+    if dev.type not in FP8_CAST_SUPPORT:
+        try:
+            torch.empty((1,), dtype=torch.float8_e4m3fn, device=dev).to(torch.float32)
+            FP8_CAST_SUPPORT[dev.type] = True
+        except Exception:
+            logging.info("Device {} cannot cast fp8 tensors; fp8 weights will be upcast at load time.".format(dev.type))
+            FP8_CAST_SUPPORT[dev.type] = False
+    return FP8_CAST_SUPPORT[dev.type]
+
 def supports_fp8_compute(device=None):
     if SUPPORT_FP8_OPS:
         return True
