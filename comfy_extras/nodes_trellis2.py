@@ -309,7 +309,8 @@ class VaeDecodeStructureTrellis2(IO.ComfyNode):
         return IO.NodeOutput(Types.VOXEL(voxel_data))
 
 class Trellis2UpsampleStage(IO.ComfyNode):
-    """Cascade-upsamples a 512-resolution shape latent into high-resolution
+    """Cascade-upsamples a shape latent (512- or 1024-resolution, matching the
+    structure resolution of the first shape stage) into high-resolution
     sparse coords and sets up the second shape-stage sampling pass at the
     target resolution, attaching per-stage metadata to the conditioning for
     the model to consume via extra_conds."""
@@ -322,7 +323,7 @@ class Trellis2UpsampleStage(IO.ComfyNode):
             inputs=[
                 IO.Conditioning.Input("positive"),
                 IO.Conditioning.Input("negative"),
-                IO.Latent.Input("shape_latent", tooltip="The 512-resolution shape latent output from the first shape-stage KSampler."),
+                IO.Latent.Input("shape_latent", tooltip="The shape latent output from the first shape-stage KSampler (any supported structure resolution)."),
                 IO.Vae.Input("vae"),
                 IO.Int.Input("target_resolution", default=1024, min=1024, max=2048, step=128,
                              tooltip="Voxel resolution of the upsampled shape. Higher = more detail, more VRAM."),
@@ -355,7 +356,12 @@ class Trellis2UpsampleStage(IO.ComfyNode):
 
         coord_counts = shape_latent.get("coord_counts")
         shape_vae = vae.first_stage_model
-        lr_resolution = 512
+        # Dense coord range after the x16 upsample depends on the structure
+        # resolution the first shape stage ran at (32 -> 512, 64 -> 1024);
+        # take coord_resolution from the latent dict the same way
+        # VaeDecodeShapeTrellis does. Default 32 (= 512) matches the old
+        # constant for latents that don't carry coord_resolution.
+        lr_resolution = int(shape_latent.get("coord_resolution", 32)) * 16
         proj_pack = _proj_pack_from_conditioning(positive)
         pixal3d_mode = proj_pack is not None
 
