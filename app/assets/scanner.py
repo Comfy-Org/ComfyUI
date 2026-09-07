@@ -61,6 +61,13 @@ class _AssetAccumulator(TypedDict):
 RootType = Literal["models", "input", "output"]
 
 
+def _log_scan_error(phase: str, error: OSError) -> None:
+    error_type = (
+        "permission_denied" if isinstance(error, PermissionError) else "os_error"
+    )
+    logging.warning("Asset scan error: phase=%s error_type=%s", phase, error_type)
+
+
 def get_scan_prefixes_for_root(root: RootType) -> list[str]:
     if root == "models":
         bases: list[str] = []
@@ -168,11 +175,13 @@ def sync_prefixes_with_filesystem(
             )
         except FileNotFoundError:
             exists = False
-        except PermissionError:
+        except PermissionError as e:
             exists = True
+            _log_scan_error("reference_stat", e)
             logging.debug("Permission denied accessing %s", row.file_path)
         except OSError as e:
             exists = False
+            _log_scan_error("reference_stat", e)
             logging.debug("OSError checking %s: %s", row.file_path, e)
 
         acc["refs"].append(
@@ -332,7 +341,10 @@ def build_asset_specs(
             continue
         try:
             stat_p = os.stat(abs_p, follow_symlinks=True)
-        except OSError:
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            _log_scan_error("discovery_stat", e)
             continue
         if not stat_p.st_size:
             continue
@@ -455,7 +467,10 @@ def enrich_asset(
 
     try:
         stat_p = os.stat(file_path, follow_symlinks=True)
-    except OSError:
+    except FileNotFoundError:
+        return new_level
+    except OSError as e:
+        _log_scan_error("enrichment_stat", e)
         return new_level
 
     initial_mtime_ns = get_mtime_ns(stat_p)
@@ -520,7 +535,10 @@ def enrich_asset(
                 if metadata_ok:
                     new_level = ENRICHMENT_HASHED
         except Exception as e:
-            logging.warning("Failed to hash %s: %s", file_path, e)
+            if isinstance(e, OSError):
+                _log_scan_error("hashing", e)
+            else:
+                logging.warning("Failed to hash %s: %s", file_path, e)
 
     # Optimistic guard: if the reference's mtime_ns changed since we
     # started (e.g. ingest_existing_file updated it), our results are
