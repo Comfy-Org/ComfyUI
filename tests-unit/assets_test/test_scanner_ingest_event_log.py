@@ -257,6 +257,44 @@ def test_enrich_failures_emit_once_per_scan_and_reset_with_new_scan(
     ]
 
 
+def test_enrich_exception_counts_one_failure_per_raising_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = [
+        UnenrichedContent("content-1", "record-1", "/private/assets/one.bin"),
+        UnenrichedContent("content-2", "record-2", "/private/assets/two.bin"),
+    ]
+    monkeypatch.setattr(scanner, "create_session", lambda: nullcontext(Mock()))
+
+    def fail_enrich(*_args, **_kwargs):
+        raise FileNotFoundError("/private/assets/secret.bin")
+
+    monkeypatch.setattr(scanner, "enrich_asset", fail_enrich)
+    progress = Progress()
+
+    enriched, failed_ids = scanner.enrich_assets_batch(rows, progress=progress)
+
+    assert enriched == 0
+    assert failed_ids == ["record-1", "record-2"]
+    assert progress.enrich_failed == 2
+
+
+def test_benign_enrich_no_op_is_skipped_without_counting_a_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    deleted = tmp_path / "gone.safetensors"
+    rows = [UnenrichedContent("content-1", "record-1", str(deleted))]
+    monkeypatch.setattr(scanner, "create_session", lambda: nullcontext(Mock()))
+    progress = Progress()
+
+    enriched, failed_ids = scanner.enrich_assets_batch(rows, progress=progress)
+
+    assert enriched == 0
+    assert failed_ids == ["record-1"]
+    assert progress.enrich_failed == 0
+
+
 def test_both_register_output_failures_emit_the_shared_line_shape(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

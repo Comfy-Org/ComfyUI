@@ -125,7 +125,7 @@ def test_scan_completed_reports_per_scan_failure_counts(
     assert completed[0]["permission_denied"] == 1
 
 
-def test_enrich_phase_counts_every_failed_reference(
+def test_enrich_phase_does_not_count_returned_ids_as_failures(
     scan_seeder: _AssetSeeder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -160,7 +160,7 @@ def test_enrich_phase_counts_every_failed_reference(
     assert cancelled is False
     assert enriched == 0
     assert scan_seeder._progress is not None
-    assert scan_seeder._progress.enrich_failed == 2
+    assert scan_seeder._progress.enrich_failed == 0
 
 
 def test_starting_a_scan_installs_fresh_per_scan_failure_state(
