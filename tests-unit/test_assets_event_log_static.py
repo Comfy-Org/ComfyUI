@@ -77,6 +77,9 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite("app/assets/api/routes.py", "add_asset_tags", "api.request_failed"),
         CallSite("app/assets/api/routes.py", "delete_asset_tags", "api.request_failed"),
         CallSite("app/assets/api/upload.py", "parse_multipart_upload", "api.request_failed"),
+        # todo 16 - discovery/enrich stat failures, emit-once per scan per site
+        CallSite("app/assets/scanner.py", "build_asset_specs", "scanner.stat_failed"),
+        CallSite("app/assets/scanner.py", "enrich_asset", "scanner.stat_failed"),
     }
 )
 

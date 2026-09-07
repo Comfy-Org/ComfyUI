@@ -301,6 +301,7 @@ def build_asset_specs(
     paths: list[str],
     existing_paths: set[str],
     enable_metadata_extraction: bool = True,
+    progress: _ScanProgress | None = None,
 ) -> tuple[list[SeedAssetSpec], set[str], int]:
     """Build asset specs from paths, returning (specs, tag_pool, skipped_count).
 
@@ -308,6 +309,7 @@ def build_asset_specs(
         paths: List of file paths to process
         existing_paths: Set of paths that already exist in the database
         enable_metadata_extraction: If True, extract tier 1 & 2 metadata
+        progress: Optional per-scan state for emit-once bookkeeping
     """
     specs: list[SeedAssetSpec] = []
     tag_pool: set[str] = set()
@@ -328,6 +330,8 @@ def build_asset_specs(
             continue
         except OSError as e:
             _log_scan_error("discovery_stat", e)
+            if progress is not None and progress.mark_emitted("stat_failed:discovery"):
+                emit("scanner.stat_failed", site="discovery", error_type=error_type(e))
             continue
         if not stat_p.st_size:
             continue
@@ -505,6 +509,8 @@ def enrich_asset(
         return False
     except OSError as e:
         _log_scan_error("enrichment_stat", e)
+        if progress is not None and progress.mark_emitted("stat_failed:enrich"):
+            emit("scanner.stat_failed", site="enrich", error_type=error_type(e))
         return False
 
     initial_mtime_ns = get_mtime_ns(stat_p)
