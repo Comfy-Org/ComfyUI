@@ -657,7 +657,11 @@ class _AssetSeeder:
                     },
                 )
 
-            if self._check_pause_and_cancel(_ScanStage.FINALIZE):
+            # Deliberately non-blocking, unlike every other checkpoint: no work
+            # remains, so pausing here would hold the scan open with nothing to
+            # do until main.py's next resume (a whole gc_collect_interval away).
+            if self._is_cancelled():
+                self._record_cancel_stage(_ScanStage.FINALIZE)
                 cancelled = True
                 return
 
