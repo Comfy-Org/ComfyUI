@@ -526,7 +526,10 @@ class ModelPatcher:
         # backup/object_patches_backup/pinned would just propagate dead state that
         # no longer corresponds to anything in n.model.
         model_override = (temp_model_patcher.model, ({}, {}, {}, set()))
-        n = self.clone(model_override=model_override)
+        try:
+            n = self.clone(model_override=model_override)
+        finally:
+            comfy.model_management.unload_model_and_clones(temp_model_patcher)
         # clone() copies hook_backup by reference from self; reset since model is pristine.
         n.hook_backup = {}
         # set load device, if present
