@@ -65,7 +65,14 @@ try:
         ck.registry.disable("triton")
     for k, v in ck.list_backends().items():
         logging.info(f"Found comfy_kitchen backend {k}: {v}")
-except ImportError as e:
+except (ImportError, ValueError) as e:
+    # comfy_kitchen can also fail with ValueError instead of ImportError: its custom ops are
+    # annotated with PEP 585 generics (e.g. list[int]) that torch.library.infer_schema only
+    # accepts from torch>=2.7, so importing it on an older torch raises ValueError there.
+    # Only that specific schema-inference failure should degrade gracefully; any other
+    # ValueError (e.g. from backend configuration or ck.list_backends()) is a real bug.
+    if isinstance(e, ValueError) and "infer_schema" not in str(e):
+        raise
     logging.error(f"Failed to import comfy_kitchen, Error: {e}, fp8 and fp4 support will not be available.")
     _CK_AVAILABLE = False
 
