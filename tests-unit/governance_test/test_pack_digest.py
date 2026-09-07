@@ -90,6 +90,8 @@ def test_pack_digest_rejects_normalized_relative_path_collision(tmp_path: Path) 
     pack_path.mkdir()
     (pack_path / "cafe\u0301.py").write_bytes(b"decomposed\n")
     (pack_path / "caf\u00e9.py").write_bytes(b"composed\n")
+    if len(list(pack_path.iterdir())) < 2:
+        pytest.skip("filesystem normalizes Unicode filenames")
 
     # When the pack is measured, then the ambiguous record name is rejected
     with pytest.raises(ValueError):
