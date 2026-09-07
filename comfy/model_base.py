@@ -1927,6 +1927,8 @@ class WAN22(WAN21):
 class Trellis2(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None, unet_model=comfy.ldm.trellis2.model.Trellis2):
         super().__init__(model_config, model_type, device, unet_model)
+        if comfy.model_management.comfy_kitchen_attention_enabled():
+            logging.warning("TRELLIS.2 produces corrupted meshes with --use-ck-attention; run without that flag for correct results.")
 
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
