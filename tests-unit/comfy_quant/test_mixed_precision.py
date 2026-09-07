@@ -193,7 +193,8 @@ class TestMixedPrecisionOps(unittest.TestCase):
             lora_delta = torch.randn_like(weight) * 0.01
             return weight + lora_delta
 
-        model.layer1.weight_function.append(apply_lora)
+        model.layer1.weight_function = [apply_lora]
+        self.assertNotIn(apply_lora, ops.CastWeightBiasOp.weight_function)
 
         # Forward pass should work with LoRA (triggers weight_function path)
         input_tensor = torch.randn(5, 10, dtype=torch.bfloat16)
