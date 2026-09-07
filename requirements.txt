@@ -7,7 +7,10 @@ torchvision
 torchaudio
 numpy>=1.25.0
 einops
-transformers>=4.50.3
+# Keep Florence-2/GroundingDINO custom nodes on the tested 4.x API.  The
+# unbounded requirement previously pulled Transformers 5.12 and caused the
+# RMBG Florence SDPA path to fail with a CUDA device-side assertion.
+transformers==4.50.3
 tokenizers>=0.13.3
 sentencepiece
 safetensors>=0.4.2
