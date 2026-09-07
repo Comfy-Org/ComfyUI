@@ -69,6 +69,7 @@ RootType = Literal["models", "input", "output"]
 
 class _ScanProgress(Protocol):
     hash_failed: int
+    enrich_failed: int
     enrich_failure_emitted: bool
     permission_denied: int
 
@@ -620,6 +621,8 @@ def enrich_assets_batch(
                 else:
                     failed_ids.append(row.record_id)
             except Exception as exc:
+                if progress is not None:
+                    progress.enrich_failed += 1
                 if progress is None or not progress.enrich_failure_emitted:
                     emit("scanner.enrich_failed", error_type=error_type(exc))
                     if progress is not None:

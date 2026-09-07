@@ -867,7 +867,6 @@ class _AssetSeeder:
             Tuple of (cancelled, total_enriched)
         """
         total_enriched = 0
-        assert self._progress is not None
         progress = self._progress
         with create_session() as session:
             drain_pending_verifications(session)
@@ -918,7 +917,6 @@ class _AssetSeeder:
             )
             total_enriched += enriched
             skip_ids.update(failed_ids)
-            progress.enrich_failed += len(failed_ids)
 
             if enriched == 0:
                 consecutive_empty += 1
