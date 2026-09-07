@@ -6,6 +6,23 @@ import math
 from comfy.ldm.modules.attention import optimized_attention_for_device
 
 
+def qwen2vl_image_size(height, width, min_pixels=3136, max_pixels=12845056, patch_size=14, merge_size=2):
+    factor = patch_size * merge_size
+    resized_height = round(height / factor) * factor
+    resized_width = round(width / factor) * factor
+
+    if resized_height * resized_width > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
+        resized_height = max(factor, math.floor(height / beta / factor) * factor)
+        resized_width = max(factor, math.floor(width / beta / factor) * factor)
+    elif resized_height * resized_width < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
+        resized_height = math.ceil(height * beta / factor) * factor
+        resized_width = math.ceil(width * beta / factor) * factor
+
+    return resized_height, resized_width
+
+
 def process_qwen2vl_images(
     images: torch.Tensor,
     min_pixels: int = 3136,
@@ -31,19 +48,7 @@ def process_qwen2vl_images(
     grid_thw_list = []
     img = images[0]
 
-    factor = patch_size * merge_size
-
-    h_bar = round(height / factor) * factor
-    w_bar = round(width / factor) * factor
-
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = max(factor, math.floor(height / beta / factor) * factor)
-        w_bar = max(factor, math.floor(width / beta / factor) * factor)
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
-        h_bar = math.ceil(height * beta / factor) * factor
-        w_bar = math.ceil(width * beta / factor) * factor
+    h_bar, w_bar = qwen2vl_image_size(height, width, min_pixels, max_pixels, patch_size, merge_size)
 
     img_resized = F.interpolate(
         img.unsqueeze(0),
