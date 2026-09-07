@@ -26,12 +26,14 @@ from app.assets.api.upload import (
 )
 from app.assets.seeder import ScanInProgressError, asset_seeder
 from app.assets.services import (
+    AssetFileDeleteForbiddenError,
     DependencyMissingError,
     HashMismatchError,
     apply_tags,
     asset_exists,
     create_from_hash,
     delete_asset_reference,
+    delete_asset_reference_with_file,
     get_asset_detail,
     get_preview_file_paths,
     list_assets_page,
@@ -42,6 +44,10 @@ from app.assets.services import (
     upload_from_temp_path,
 )
 from app.assets.services.cursor import InvalidCursorError
+from app.assets.services.file_location import (
+    is_loopback_address,
+    reveal_file_in_file_manager,
+)
 from app.assets.services.path_utils import compute_asset_response_paths
 from app.assets.services.tagging import list_tag_histogram
 
@@ -657,20 +663,62 @@ async def update_asset_route(request: web.Request) -> web.Response:
 @_require_assets_feature_enabled
 async def delete_asset_route(request: web.Request) -> web.Response:
     reference_id = str(uuid.UUID(request.match_info["id"]))
+    delete_content = request.query.get("delete_content") == "true"
+    owner_id = None
 
     try:
-        # Deleting an asset is a soft delete of the reference; the underlying
-        # content is preserved (it may be shared with other references).
-        deleted = delete_asset_reference(
-            reference_id=reference_id,
-            owner_id=USER_MANAGER.get_request_user_id(request),
-            delete_content_if_orphan=False,
+        owner_id = USER_MANAGER.get_request_user_id(request)
+        if delete_content:
+            detail = get_asset_detail(reference_id=reference_id, owner_id=owner_id)
+            if detail is None:
+                return _build_error_response(
+                    404,
+                    "ASSET_NOT_FOUND",
+                    f"AssetReference {reference_id} not found.",
+                )
+
+            allowed_roots = []
+            if "input" in detail.tags:
+                allowed_roots.append(folder_paths.get_input_directory())
+            if "output" in detail.tags:
+                allowed_roots.append(folder_paths.get_output_directory())
+
+            if not detail.ref.file_path or not any(
+                folder_paths.is_within_directory(root, detail.ref.file_path)
+                for root in allowed_roots
+            ):
+                return _build_error_response(
+                    403,
+                    "ASSET_DELETE_FORBIDDEN",
+                    "Only tagged files inside the input or output directory can be deleted with their content.",
+                )
+
+            deleted = delete_asset_reference_with_file(
+                reference_id=reference_id,
+                owner_id=owner_id,
+                staging_directory=folder_paths.get_temp_directory(),
+                expected_file_path=detail.ref.file_path,
+                allowed_directories=allowed_roots,
+                allow_ownerless=not user_manager.args.multi_user,
+            )
+        else:
+            deleted = delete_asset_reference(
+                reference_id=reference_id,
+                owner_id=owner_id,
+                delete_content_if_orphan=False,
+            )
+    except AssetFileDeleteForbiddenError as error:
+        return _build_error_response(
+            403,
+            "ASSET_DELETE_FORBIDDEN",
+            str(error),
+            {"id": reference_id},
         )
     except Exception:
         logging.exception(
             "delete_asset_reference failed for reference_id=%s, owner_id=%s",
             reference_id,
-            USER_MANAGER.get_request_user_id(request),
+            owner_id,
         )
         return _build_error_response(500, "INTERNAL", "Unexpected server error.")
 
@@ -678,6 +726,82 @@ async def delete_asset_route(request: web.Request) -> web.Response:
         return _build_error_response(
             404, "ASSET_NOT_FOUND", f"AssetReference {reference_id} not found."
         )
+    return web.Response(status=204)
+
+
+@ROUTES.post(f"/api/assets/{{id:{UUID_RE}}}/open-location")
+@_require_assets_feature_enabled
+async def open_asset_location_route(request: web.Request) -> web.Response:
+    """Open an output in the host file manager for a direct local client.
+
+    The transport peer is the trust boundary. Operators must not forward this
+    endpoint through a same-host reverse proxy without an additional access
+    control that restricts it to the host operator.
+    """
+    reference_id = str(uuid.UUID(request.match_info["id"]))
+    if not is_loopback_address(request.remote):
+        return _build_error_response(
+            403,
+            "LOCAL_ACCESS_REQUIRED",
+            "Opening a file location is only available from the ComfyUI host machine.",
+        )
+
+    if request.headers.get("Sec-Fetch-Site") not in (None, "same-origin"):
+        return _build_error_response(
+            403,
+            "CROSS_SITE_REQUEST_FORBIDDEN",
+            "Cross-site requests cannot open local file locations.",
+        )
+
+    owner_id = None
+    try:
+        owner_id = USER_MANAGER.get_request_user_id(request)
+        detail = get_asset_detail(reference_id=reference_id, owner_id=owner_id)
+    except Exception:
+        logging.exception(
+            "get_asset_detail failed for reference_id=%s, owner_id=%s",
+            reference_id,
+            owner_id,
+        )
+        return _build_error_response(500, "INTERNAL", "Unexpected server error.")
+    if detail is None:
+        return _build_error_response(
+            404,
+            "ASSET_NOT_FOUND",
+            f"AssetReference {reference_id} not found.",
+        )
+
+    file_path = detail.ref.file_path
+    output_root = folder_paths.get_output_directory()
+    if (
+        "output" not in detail.tags
+        or not file_path
+        or not folder_paths.is_within_directory(output_root, file_path)
+    ):
+        return _build_error_response(
+            403,
+            "ASSET_LOCATION_FORBIDDEN",
+            "Only generated files inside the output directory can be opened.",
+        )
+
+    try:
+        await asyncio.to_thread(reveal_file_in_file_manager, file_path)
+    except FileNotFoundError:
+        return _build_error_response(
+            404,
+            "ASSET_FILE_NOT_FOUND",
+            "The generated source file no longer exists on disk.",
+        )
+    except OSError:
+        logging.exception(
+            "Failed to reveal asset file for reference_id=%s", reference_id
+        )
+        return _build_error_response(
+            500,
+            "FILE_MANAGER_ERROR",
+            "Unable to open the system file manager.",
+        )
+
     return web.Response(status=204)
 
 
