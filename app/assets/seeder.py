@@ -71,7 +71,7 @@ class _ScanStage(Enum):
 
 @dataclass
 class Progress:
-    """Progress information for a scan operation."""
+    """Public snapshot of a scan's progress. Carries counters only."""
 
     scanned: int = 0
     total: int = 0
@@ -80,8 +80,6 @@ class Progress:
     hash_failed: int = 0
     enrich_failed: int = 0
     permission_denied: int = 0
-    enrich_failure_emitted: bool = False
-    cancel_stage: _ScanStage | None = None
 
 
 @dataclass
@@ -94,6 +92,46 @@ class ScanStatus:
 
 
 ProgressCallback = Callable[[Progress], None]
+
+
+@dataclass
+class _ScanState:
+    """Mutable in-flight state for one scan; never exposed outside this module.
+
+    Satisfies scanner.py's `_ScanProgress` Protocol. `cancel_stage` stores the
+    stage's string value (not the `_ScanStage` enum) so scanner.py never needs
+    to import `_ScanStage`. Take a `Progress` snapshot before exposing state.
+    """
+
+    scanned: int = 0
+    total: int = 0
+    created: int = 0
+    skipped: int = 0
+    hash_failed: int = 0
+    enrich_failed: int = 0
+    permission_denied: int = 0
+    cancel_stage: str | None = None
+    _emitted_keys: set[str] = field(default_factory=set)
+
+    def mark_emitted(self, key: str) -> bool:
+        """Return True the first call with `key` this scan, False every call after."""
+        if key in self._emitted_keys:
+            return False
+        self._emitted_keys.add(key)
+        return True
+
+
+def _snapshot_progress(state: _ScanState) -> Progress:
+    """Build the public counters-only `Progress` snapshot from live scan state."""
+    return Progress(
+        scanned=state.scanned,
+        total=state.total,
+        created=state.created,
+        skipped=state.skipped,
+        hash_failed=state.hash_failed,
+        enrich_failed=state.enrich_failed,
+        permission_denied=state.permission_denied,
+    )
 
 
 class _AssetSeeder:
@@ -109,7 +147,7 @@ class _AssetSeeder:
         # holding _lock and re-enters start() which also acquires _lock.
         self._lock = threading.RLock()
         self._state = State.IDLE
-        self._progress: Progress | None = None
+        self._scan_state: _ScanState | None = None
         self._last_progress: Progress | None = None
         self._errors: list[str] = []
         self._thread: threading.Thread | None = None
@@ -169,7 +207,7 @@ class _AssetSeeder:
                 logging.info("Asset seeder already running, skipping start")
                 return False
             self._state = State.PAUSED if _start_paused else State.RUNNING
-            self._progress = Progress()
+            self._scan_state = _ScanState()
             self._errors = []
             self._roots = roots
             self._phase = phase
@@ -369,22 +407,14 @@ class _AssetSeeder:
     def get_status(self) -> ScanStatus:
         """Get the current status and progress of the seeder."""
         with self._lock:
-            src = self._progress or self._last_progress
+            progress = (
+                _snapshot_progress(self._scan_state)
+                if self._scan_state is not None
+                else self._last_progress
+            )
             return ScanStatus(
                 state=self._state,
-                progress=Progress(
-                    scanned=src.scanned,
-                    total=src.total,
-                    created=src.created,
-                    skipped=src.skipped,
-                    hash_failed=src.hash_failed,
-                    enrich_failed=src.enrich_failed,
-                    permission_denied=src.permission_denied,
-                    enrich_failure_emitted=src.enrich_failure_emitted,
-                    cancel_stage=src.cancel_stage,
-                )
-                if src
-                else None,
+                progress=progress,
                 errors=list(self._errors),
             )
 
@@ -458,9 +488,10 @@ class _AssetSeeder:
 
     def _reset_to_idle(self) -> None:
         """Reset state to IDLE, preserving last progress. Caller must hold _lock."""
-        self._last_progress = self._progress
+        if self._scan_state is not None:
+            self._last_progress = _snapshot_progress(self._scan_state)
         self._state = State.IDLE
-        self._progress = None
+        self._scan_state = None
 
     def _is_cancelled(self) -> bool:
         """Check if cancellation has been requested."""
@@ -481,8 +512,8 @@ class _AssetSeeder:
 
     def _record_cancel_stage(self, stage: _ScanStage) -> None:
         with self._lock:
-            if self._progress is not None and self._progress.cancel_stage is None:
-                self._progress.cancel_stage = stage
+            if self._scan_state is not None and self._scan_state.cancel_stage is None:
+                self._scan_state.cancel_stage = stage.value
 
     def _check_pause_and_cancel(self, stage: _ScanStage) -> bool:
         """Block while paused, then check if cancelled.
@@ -522,28 +553,19 @@ class _AssetSeeder:
         progress: Progress | None = None
 
         with self._lock:
-            if self._progress is None:
+            if self._scan_state is None:
                 return
             if scanned is not None:
-                self._progress.scanned = scanned
+                self._scan_state.scanned = scanned
             if total is not None:
-                self._progress.total = total
+                self._scan_state.total = total
             if created is not None:
-                self._progress.created = created
+                self._scan_state.created = created
             if skipped is not None:
-                self._progress.skipped = skipped
+                self._scan_state.skipped = skipped
             if self._progress_callback:
                 callback = self._progress_callback
-                progress = Progress(
-                    scanned=self._progress.scanned,
-                    total=self._progress.total,
-                    created=self._progress.created,
-                    skipped=self._progress.skipped,
-                    hash_failed=self._progress.hash_failed,
-                    enrich_failed=self._progress.enrich_failed,
-                    permission_denied=self._progress.permission_denied,
-                    enrich_failure_emitted=self._progress.enrich_failure_emitted,
-                )
+                progress = _snapshot_progress(self._scan_state)
 
         if callback and progress:
             try:
@@ -596,8 +618,8 @@ class _AssetSeeder:
                 return
 
             emit("seeder.scan_started", phase=phase.value, root=root)
-            assert self._progress is not None
-            progress = self._progress
+            assert self._scan_state is not None
+            scan_state = self._scan_state
 
             if self._prune_first:
                 all_prefixes = get_owned_prefixes()
@@ -609,7 +631,7 @@ class _AssetSeeder:
                 )
                 if marked > 0:
                     logging.info("Marked %d refs as missing before scan", marked)
-                sync_temp_references_safely(progress)
+                sync_temp_references_safely(scan_state)
 
             if self._check_pause_and_cancel(_ScanStage.PRUNING):
                 logging.info("Asset scan cancelled after pruning phase")
@@ -682,9 +704,9 @@ class _AssetSeeder:
                 created=total_created,
                 enriched=total_enriched,
                 skipped=skipped_existing,
-                hash_failed=progress.hash_failed,
-                enrich_failed=progress.enrich_failed,
-                permission_denied=progress.permission_denied,
+                hash_failed=scan_state.hash_failed,
+                enrich_failed=scan_state.enrich_failed,
+                permission_denied=scan_state.permission_denied,
                 root=root,
             )
 
@@ -713,18 +735,18 @@ class _AssetSeeder:
         finally:
             try:
                 if cancelled:
-                    stage = self._progress.cancel_stage if self._progress else None
+                    stage = self._scan_state.cancel_stage if self._scan_state else None
                     if stage is not None:
                         emit(
                             "seeder.scan_cancelled",
                             phase=phase.value,
-                            stage=stage.value,
+                            stage=stage,
                             root=root,
                         )
                         self._emit_event(
                             "assets.seed.cancelled",
                             {
-                                "scanned": self._progress.scanned if self._progress else 0,
+                                "scanned": self._scan_state.scanned if self._scan_state else 0,
                                 "total": total_paths,
                                 "created": total_created,
                             },
@@ -761,12 +783,12 @@ class _AssetSeeder:
 
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()
-        assert self._progress is not None
-        progress = self._progress
+        assert self._scan_state is not None
+        scan_state = self._scan_state
         for r in roots:
             if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
                 return total_created, skipped_existing, 0
-            existing_paths.update(sync_root_safely(r, progress))
+            existing_paths.update(sync_root_safely(r, scan_state))
         logging.debug(
             "Fast scan: sync_root phase took %.3fs (%d existing paths)",
             time.perf_counter() - t_sync,
@@ -869,7 +891,7 @@ class _AssetSeeder:
             Tuple of (cancelled, total_enriched)
         """
         total_enriched = 0
-        progress = self._progress
+        scan_state = self._scan_state
         with create_session() as session:
             drain_pending_verifications(session)
             tick_watch_list(session)
@@ -915,7 +937,7 @@ class _AssetSeeder:
                 extract_metadata=True,
                 compute_hash=self._compute_hashes,
                 interrupt_check=self._is_paused_or_cancelled,
-                progress=progress,
+                progress=scan_state,
             )
             total_enriched += enriched
             skip_ids.update(failed_ids)

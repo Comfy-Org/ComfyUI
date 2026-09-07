@@ -11,7 +11,7 @@ import pytest
 from app.assets import scanner
 from app.assets.event_log import TAG
 from app.assets.scanner import UnenrichedContent
-from app.assets.seeder import Progress
+from app.assets.seeder import _ScanState
 from app.assets.services import ingest
 
 
@@ -55,7 +55,7 @@ def hash_session(path: Path) -> Mock:
     return session
 
 
-def run_hash_failure(session: Mock, path: Path, progress: Progress) -> bool:
+def run_hash_failure(session: Mock, path: Path, progress: _ScanState) -> bool:
     return scanner.enrich_asset(
         session,
         file_path=str(path),
@@ -121,7 +121,7 @@ def test_permission_error_in_reference_sync_increments_scan_counter(
 ) -> None:
     secret_path = "/private/assets/unreadable.safetensors"
     content = SimpleNamespace(id="content", path=secret_path)
-    progress = Progress()
+    progress = _ScanState()
 
     def deny_stat(*_args, **_kwargs):
         raise PermissionError(secret_path)
@@ -141,7 +141,7 @@ def test_hash_failures_emit_once_per_scan_and_count_every_failure(
 ) -> None:
     path = tmp_path / "model.safetensors"
     path.write_bytes(b"model")
-    progress = Progress()
+    progress = _ScanState()
 
     def fail_hash(_path: str):
         raise FileNotFoundError(str(path))
@@ -174,8 +174,8 @@ def test_hash_failure_first_occurrence_resets_with_new_scan(
     session = hash_session(path)
 
     with caplog.at_level(logging.INFO):
-        run_hash_failure(session, path, Progress())
-        run_hash_failure(session, path, Progress())
+        run_hash_failure(session, path, _ScanState())
+        run_hash_failure(session, path, _ScanState())
 
     assert events_named(caplog, "scanner.hash_failed") == [
         {"error_type": "OSError"},
@@ -197,7 +197,7 @@ def test_hash_failure_tagged_line_does_not_leak_exception_path(
     monkeypatch.setattr(scanner, "snapshot_hash", fail_hash)
 
     with caplog.at_level(logging.INFO):
-        run_hash_failure(hash_session(path), path, Progress())
+        run_hash_failure(hash_session(path), path, _ScanState())
 
     assert events_named(caplog, "scanner.hash_failed") == [
         {"error_type": "FileNotFoundError"}
@@ -223,7 +223,7 @@ def test_modified_during_hash_emits_fieldless_discard_event(
             record_id="record",
             extract_metadata=False,
             compute_hash=True,
-            progress=Progress(),
+            progress=_ScanState(),
         )
 
     assert updated is False
@@ -246,8 +246,8 @@ def test_enrich_failures_emit_once_per_scan_and_reset_with_new_scan(
     monkeypatch.setattr(scanner, "enrich_asset", fail_enrich)
 
     with caplog.at_level(logging.INFO):
-        first_result = scanner.enrich_assets_batch(rows, progress=Progress())
-        second_result = scanner.enrich_assets_batch(rows[:1], progress=Progress())
+        first_result = scanner.enrich_assets_batch(rows, progress=_ScanState())
+        second_result = scanner.enrich_assets_batch(rows[:1], progress=_ScanState())
 
     assert first_result == (0, ["record-1", "record-2"])
     assert second_result == (0, ["record-1"])
@@ -270,7 +270,7 @@ def test_enrich_exception_counts_one_failure_per_raising_row(
         raise FileNotFoundError("/private/assets/secret.bin")
 
     monkeypatch.setattr(scanner, "enrich_asset", fail_enrich)
-    progress = Progress()
+    progress = _ScanState()
 
     enriched, failed_ids = scanner.enrich_assets_batch(rows, progress=progress)
 
@@ -286,7 +286,7 @@ def test_benign_enrich_no_op_is_skipped_without_counting_a_failure(
     deleted = tmp_path / "gone.safetensors"
     rows = [UnenrichedContent("content-1", "record-1", str(deleted))]
     monkeypatch.setattr(scanner, "create_session", lambda: nullcontext(Mock()))
-    progress = Progress()
+    progress = _ScanState()
 
     enriched, failed_ids = scanner.enrich_assets_batch(rows, progress=progress)
 

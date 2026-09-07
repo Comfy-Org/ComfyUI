@@ -13,7 +13,7 @@ from app.assets import seeder as seeder_module
 from app.assets.database.models import Base
 from app.assets.database.queries import create_content, create_record, mark_content_missing
 from app.assets.event_log import TAG
-from app.assets.seeder import Progress, ScanPhase, State, _AssetSeeder, _ScanStage
+from app.assets.seeder import ScanPhase, State, _AssetSeeder, _ScanStage, _ScanState
 
 
 EVENT_LINE_PATTERN = re.compile(
@@ -30,7 +30,7 @@ SCAN_JOIN_TIMEOUT = 5.0
 def scan_seeder(monkeypatch: pytest.MonkeyPatch) -> _AssetSeeder:
     instance = _AssetSeeder()
     instance._state = State.RUNNING
-    instance._progress = Progress()
+    instance._scan_state = _ScanState()
     instance._roots = ("models", "input")
     instance._phase = ScanPhase.FULL
     monkeypatch.setattr(seeder_module, "dependencies_available", lambda: True)
@@ -105,7 +105,7 @@ def test_scan_completed_reports_per_scan_failure_counts(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    scan_seeder._progress = Progress(
+    scan_seeder._scan_state = _ScanState(
         hash_failed=2,
         enrich_failed=3,
         permission_denied=1,
@@ -159,20 +159,20 @@ def test_enrich_phase_does_not_count_returned_ids_as_failures(
 
     assert cancelled is False
     assert enriched == 0
-    assert scan_seeder._progress is not None
-    assert scan_seeder._progress.enrich_failed == 0
+    assert scan_seeder._scan_state is not None
+    assert scan_seeder._scan_state.enrich_failed == 0
 
 
 def test_starting_a_scan_installs_fresh_per_scan_failure_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     instance = _AssetSeeder()
-    instance._progress = Progress(
+    instance._scan_state = _ScanState(
         hash_failed=7,
         enrich_failed=4,
         permission_denied=2,
-        enrich_failure_emitted=True,
     )
+    instance._scan_state.mark_emitted("enrich_failed")
     monkeypatch.setattr(instance, "_run_scan", lambda: None)
 
     started = instance.start(roots=("models",), phase=ScanPhase.FAST)
@@ -180,7 +180,7 @@ def test_starting_a_scan_installs_fresh_per_scan_failure_state(
     assert started is True
     assert instance._thread is not None
     instance._thread.join(timeout=5)
-    assert instance._progress == Progress()
+    assert instance._scan_state == _ScanState()
 
 
 def test_single_root_scan_emits_root_and_phase(
@@ -315,7 +315,7 @@ def test_idle_reset_survives_a_raising_cancellation_emit(
         scan_seeder._run_scan()
 
     assert scan_seeder._state is State.IDLE
-    assert scan_seeder._progress is None
+    assert scan_seeder._scan_state is None
     assert scan_seeder.mark_missing_outside_prefixes() == 0
 
 
@@ -357,9 +357,9 @@ def test_enrich_interrupt_records_the_enrich_cancellation_stage(
     scan_seeder._cancel_event.set()
 
     assert scan_seeder._is_paused_or_cancelled() is True
-    assert scan_seeder._progress is not None
-    assert scan_seeder._progress.cancel_stage is not None
-    assert scan_seeder._progress.cancel_stage.value == "enrich"
+    assert scan_seeder._scan_state is not None
+    assert scan_seeder._scan_state.cancel_stage is not None
+    assert scan_seeder._scan_state.cancel_stage == "enrich"
 
 
 def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
