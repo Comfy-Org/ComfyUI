@@ -1035,6 +1035,7 @@ class VAE:
                 self.audio_sample_rate = 32000
                 self.upscale_ratio = 800
                 self.downscale_ratio = 800
+                self.crop_input = False
                 self.latent_dim = 2  # [B, 32, stereo 2, T]
                 self.process_output = lambda audio: audio
                 self.process_input = lambda audio: audio
