@@ -860,6 +860,14 @@ class MiniTrainDIT(nn.Module):
         **kwargs,
     ):
         orig_shape = list(x.shape)
+
+        ref_latents = kwargs.get('ref_latents', None)
+        if ref_latents is not None:
+            for ref in ref_latents:
+                if ref.ndim == 4:
+                    ref = ref.unsqueeze(2)
+                x = torch.cat([x, ref.to(dtype=x.dtype, device=x.device)], dim=2)
+
         x = comfy.ldm.common_dit.pad_to_patch_size(x, (self.patch_temporal, self.patch_spatial, self.patch_spatial))
         x_B_C_T_H_W = x
         timesteps_B_T = timesteps
