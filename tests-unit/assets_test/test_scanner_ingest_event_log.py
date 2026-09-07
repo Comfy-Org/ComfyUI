@@ -230,6 +230,122 @@ def test_modified_during_hash_emits_fieldless_discard_event(
     assert events_named(caplog, "scanner.hash_discarded_modified") == [{}]
 
 
+def test_locked_files_during_discovery_emit_stat_failed_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def deny_stat(*_args, **_kwargs):
+        raise PermissionError("/private/assets/secret.bin")
+
+    monkeypatch.setattr(scanner, "os", SimpleNamespace(stat=deny_stat, path=scanner.os.path))
+    progress = _ScanState()
+    paths = [f"/private/assets/locked-{i}.bin" for i in range(3)]
+
+    with caplog.at_level(logging.INFO):
+        specs, _tag_pool, _skipped = scanner.build_asset_specs(paths, set(), progress=progress)
+
+    assert specs == []
+    assert events_named(caplog, "scanner.stat_failed") == [
+        {"error_type": "PermissionError", "site": "discovery"}
+    ]
+
+
+def test_missing_files_during_discovery_emit_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def vanish_stat(*_args, **_kwargs):
+        raise FileNotFoundError("/private/assets/gone.bin")
+
+    monkeypatch.setattr(scanner, "os", SimpleNamespace(stat=vanish_stat, path=scanner.os.path))
+    progress = _ScanState()
+
+    with caplog.at_level(logging.INFO):
+        specs, _tag_pool, _skipped = scanner.build_asset_specs(
+            ["/private/assets/gone.bin"], set(), progress=progress
+        )
+
+    assert specs == []
+    assert events_named(caplog, "scanner.stat_failed") == []
+
+
+def test_discovery_stat_failure_emits_nothing_when_progress_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def deny_stat(*_args, **_kwargs):
+        raise PermissionError("/private/assets/secret.bin")
+
+    monkeypatch.setattr(scanner, "os", SimpleNamespace(stat=deny_stat, path=scanner.os.path))
+
+    with caplog.at_level(logging.INFO):
+        scanner.build_asset_specs(["/private/assets/locked.bin"], set(), progress=None)
+
+    assert events_named(caplog, "scanner.stat_failed") == []
+
+
+def test_locked_files_during_enrichment_emit_stat_failed_exactly_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def deny_stat(*_args, **_kwargs):
+        raise PermissionError("/private/assets/secret.bin")
+
+    monkeypatch.setattr(scanner, "os", SimpleNamespace(stat=deny_stat, path=scanner.os.path))
+    progress = _ScanState()
+
+    with caplog.at_level(logging.INFO):
+        first = scanner.enrich_asset(
+            Mock(),
+            file_path="/private/assets/locked-1.bin",
+            content_id="content-1",
+            record_id="record-1",
+            extract_metadata=False,
+            compute_hash=False,
+            progress=progress,
+        )
+        second = scanner.enrich_asset(
+            Mock(),
+            file_path="/private/assets/locked-2.bin",
+            content_id="content-2",
+            record_id="record-2",
+            extract_metadata=False,
+            compute_hash=False,
+            progress=progress,
+        )
+
+    assert first is False
+    assert second is False
+    assert events_named(caplog, "scanner.stat_failed") == [
+        {"error_type": "PermissionError", "site": "enrich"}
+    ]
+
+
+def test_missing_file_during_enrichment_returns_false_without_emitting(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def vanish_stat(*_args, **_kwargs):
+        raise FileNotFoundError("/private/assets/gone.bin")
+
+    monkeypatch.setattr(scanner, "os", SimpleNamespace(stat=vanish_stat, path=scanner.os.path))
+    progress = _ScanState()
+
+    with caplog.at_level(logging.INFO):
+        updated = scanner.enrich_asset(
+            Mock(),
+            file_path="/private/assets/gone.bin",
+            content_id="content",
+            record_id="record",
+            extract_metadata=False,
+            compute_hash=False,
+            progress=progress,
+        )
+
+    assert updated is False
+    assert events_named(caplog, "scanner.stat_failed") == []
+
+
 def test_enrich_failures_emit_once_per_scan_and_reset_with_new_scan(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

@@ -36,18 +36,17 @@ VALID_VALUES: dict[str, list[object]] = {
         "delete_asset_tags",
         "parse_multipart_upload",
     ],
-    "size_bucket": ["lt_1m", "lt_100m", "lt_1g", "ge_1g"],
     "elapsed_ms": [0, 8123],
     "created": [0, 12],
     "enriched": [4],
     "skipped": [3],
-    "marked_missing": [7],
     "hash_failed": [2],
     "enrich_failed": [0],
     "permission_denied": [0],
     "count": [1],
     "error_type": ["ValueError", "FileNotFoundError"],
     "hashing_enabled": [True, False],
+    "site": ["discovery", "enrich"],
 }
 
 
@@ -86,11 +85,11 @@ def go_to_production_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- the shared cross-repo fixture -------------------------------------------------
 
 
-def test_shared_fixture_file_holds_three_newline_terminated_lines():
+def test_shared_fixture_file_holds_four_newline_terminated_lines():
     raw = FIXTURE_PATH.read_text(encoding="utf-8")
 
     assert raw.endswith("\n")
-    assert len(raw.splitlines()) == 3
+    assert len(raw.splitlines()) == 4
 
 
 @pytest.mark.parametrize("line", fixture_lines())
@@ -180,7 +179,7 @@ def test_a_string_value_carrying_a_path_separator_raises(value):
         ("phase", None),
         ("stage", "scanning"),
         ("route", "list_assets"),
-        ("size_bucket", "huge"),
+        ("site", "reference"),
         ("error_type", "x" * 65),
         ("error_type", 7),
         ("elapsed_ms", "8123"),
@@ -196,7 +195,7 @@ def test_a_string_value_carrying_a_path_separator_raises(value):
         "none-phase",
         "bad-stage",
         "bad-route",
-        "bad-size-bucket",
+        "bad-site",
         "oversized-string",
         "non-string-error-type",
         "string-into-int-field",

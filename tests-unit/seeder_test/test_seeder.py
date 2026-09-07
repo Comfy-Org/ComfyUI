@@ -421,7 +421,11 @@ def test_batch_insert_failure_emits_only_the_exception_type(
     monkeypatch.setattr(
         seeder_module,
         "build_asset_specs",
-        lambda paths, existing_paths, enable_metadata_extraction: ([{"tags": []}], {}, 0),
+        lambda paths, existing_paths, enable_metadata_extraction, progress=None: (
+            [{"tags": []}],
+            {},
+            0,
+        ),
     )
 
     def fail_insert(batch, batch_tags) -> int:

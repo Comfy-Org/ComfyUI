@@ -819,6 +819,7 @@ class _AssetSeeder:
             paths,
             existing_paths,
             enable_metadata_extraction=False,
+            progress=scan_state,
         )
         logging.debug(
             "Fast scan: build_asset_specs took %.3fs (%d specs, %d skipped)",

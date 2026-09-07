@@ -40,7 +40,7 @@ ROUTES = frozenset(
         "parse_multipart_upload",
     }
 )
-SIZE_BUCKETS = frozenset({"lt_1m", "lt_100m", "lt_1g", "ge_1g"})
+STAT_SITES = frozenset({"discovery", "enrich"})
 
 
 class EventLogError(ValueError):
@@ -76,18 +76,17 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "phase": _one_of(PHASES),
     "stage": _one_of(STAGES),
     "route": _one_of(ROUTES),
-    "size_bucket": _one_of(SIZE_BUCKETS),
     "elapsed_ms": _is_count,
     "created": _is_count,
     "enriched": _is_count,
     "skipped": _is_count,
-    "marked_missing": _is_count,
     "hash_failed": _is_count,
     "enrich_failed": _is_count,
     "permission_denied": _is_count,
     "count": _is_count,
     "error_type": _is_safe_string,
     "hashing_enabled": _is_flag,
+    "site": _one_of(STAT_SITES),
 }
 
 _warned_call_sites: set[tuple[str, int]] = set()
