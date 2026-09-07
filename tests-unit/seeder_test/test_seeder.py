@@ -13,7 +13,7 @@ from app.assets import seeder as seeder_module
 from app.assets.database.models import Base
 from app.assets.database.queries import create_content, create_record, mark_content_missing
 from app.assets.event_log import TAG
-from app.assets.seeder import Progress, ScanPhase, State, _AssetSeeder
+from app.assets.seeder import Progress, ScanPhase, State, _AssetSeeder, _ScanStage
 
 
 EVENT_LINE_PATTERN = re.compile(
@@ -283,6 +283,40 @@ def test_scan_cancellation_emits_the_checkpoint_stage(
     assert events_named(caplog, "seeder.scan_cancelled") == [
         {"phase": phase.value, "stage": stage}
     ]
+
+
+def test_idle_reset_survives_a_raising_cancellation_emit(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_check = scan_seeder._check_pause_and_cancel
+
+    def cancel_at_pruning(stage) -> bool:
+        if stage == _ScanStage.PRUNING:
+            scan_seeder._cancel_event.set()
+        return original_check(stage)
+
+    monkeypatch.setattr(scan_seeder, "_check_pause_and_cancel", cancel_at_pruning)
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
+    monkeypatch.setattr(
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 0
+    )
+
+    original_emit = seeder_module.emit
+
+    def raise_on_scan_cancelled(event, **kwargs):
+        if event == "seeder.scan_cancelled":
+            raise RuntimeError("event bus down")
+        return original_emit(event, **kwargs)
+
+    monkeypatch.setattr(seeder_module, "emit", raise_on_scan_cancelled)
+
+    with pytest.raises(RuntimeError, match="event bus down"):
+        scan_seeder._run_scan()
+
+    assert scan_seeder._state is State.IDLE
+    assert scan_seeder._progress is None
+    assert scan_seeder.mark_missing_outside_prefixes() == 0
 
 
 def test_scan_paused_after_its_last_phase_still_completes(

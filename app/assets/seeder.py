@@ -711,41 +711,43 @@ class _AssetSeeder:
             )
             self._emit_event("assets.seed.error", {"message": str(e)})
         finally:
-            if cancelled:
-                assert self._progress is not None
-                assert self._progress.cancel_stage is not None
-                emit(
-                    "seeder.scan_cancelled",
-                    phase=phase.value,
-                    stage=self._progress.cancel_stage.value,
-                    root=root,
-                )
-                self._emit_event(
-                    "assets.seed.cancelled",
-                    {
-                        "scanned": self._progress.scanned if self._progress else 0,
-                        "total": total_paths,
-                        "created": total_created,
-                    },
-                )
-            with self._lock:
-                start_paused = self._state is State.PAUSED
-                self._reset_to_idle()
-                pending = self._pending_scan
-                if pending is not None:
-                    self._pending_scan = None
-                    if not self.start(
-                        roots=pending["roots"],
-                        phase=pending["phase"],
-                        prune_first=False,
-                        compute_hashes=pending["compute_hashes"],
-                        _start_paused=start_paused,
-                    ):
-                        logging.warning(
-                            "Pending scan could not start (roots=%s, phase=%s)",
-                            pending["roots"],
-                            pending["phase"].value,
+            try:
+                if cancelled:
+                    stage = self._progress.cancel_stage if self._progress else None
+                    if stage is not None:
+                        emit(
+                            "seeder.scan_cancelled",
+                            phase=phase.value,
+                            stage=stage.value,
+                            root=root,
                         )
+                        self._emit_event(
+                            "assets.seed.cancelled",
+                            {
+                                "scanned": self._progress.scanned if self._progress else 0,
+                                "total": total_paths,
+                                "created": total_created,
+                            },
+                        )
+            finally:
+                with self._lock:
+                    start_paused = self._state is State.PAUSED
+                    self._reset_to_idle()
+                    pending = self._pending_scan
+                    if pending is not None:
+                        self._pending_scan = None
+                        if not self.start(
+                            roots=pending["roots"],
+                            phase=pending["phase"],
+                            prune_first=False,
+                            compute_hashes=pending["compute_hashes"],
+                            _start_paused=start_paused,
+                        ):
+                            logging.warning(
+                                "Pending scan could not start (roots=%s, phase=%s)",
+                                pending["roots"],
+                                pending["phase"].value,
+                            )
 
     def _run_fast_phase(self, roots: tuple[RootType, ...]) -> tuple[int, int, int]:
         """Run phase 1: fast scan to create stub records.
