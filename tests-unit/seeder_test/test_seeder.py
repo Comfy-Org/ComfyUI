@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import threading
 from contextlib import nullcontext
 from unittest.mock import Mock
 
@@ -20,6 +21,9 @@ EVENT_LINE_PATTERN = re.compile(
     r"(?P<fields>\{.*\})$"
 )
 EventFields = dict[str, bool | int | str]
+
+# Hang detector: a checkpoint that parks the scan fails the test, not the suite.
+SCAN_JOIN_TIMEOUT = 5.0
 
 
 @pytest.fixture
@@ -262,9 +266,16 @@ def test_scan_cancellation_emits_the_checkpoint_stage(
             scan_seeder._cancel_event.set()
         return original_check(checkpoint_stage)
 
+    def run_enrich(roots) -> tuple[bool, int]:
+        # The finalize checkpoint is non-blocking and never routes through
+        # _check_pause_and_cancel, so its cancel has to land before it.
+        if stage == "finalize":
+            scan_seeder._cancel_event.set()
+        return (False, 0)
+
     monkeypatch.setattr(scan_seeder, "_check_pause_and_cancel", cancel_at_stage)
     monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
-    monkeypatch.setattr(scan_seeder, "_run_enrich_phase", lambda roots: (False, 0))
+    monkeypatch.setattr(scan_seeder, "_run_enrich_phase", run_enrich)
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_scan()
@@ -272,6 +283,38 @@ def test_scan_cancellation_emits_the_checkpoint_stage(
     assert events_named(caplog, "seeder.scan_cancelled") == [
         {"phase": phase.value, "stage": stage}
     ]
+
+
+def test_scan_paused_after_its_last_phase_still_completes(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scan_seeder._phase = ScanPhase.ENRICH
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
+    monkeypatch.setattr(
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 0
+    )
+
+    def pause_while_finishing(roots) -> tuple[bool, int]:
+        scan_seeder.pause()
+        return (False, 0)
+
+    monkeypatch.setattr(scan_seeder, "_run_enrich_phase", pause_while_finishing)
+    events: list[str] = []
+    scan_seeder.set_event_sink(lambda event_type, data: events.append(event_type))
+
+    scan = threading.Thread(target=scan_seeder._run_scan, daemon=True)
+    scan.start()
+    try:
+        scan.join(timeout=SCAN_JOIN_TIMEOUT)
+
+        assert scan.is_alive() is False, "paused scan parked at the finalize checkpoint"
+        assert "assets.seed.completed" in events
+        assert "assets.seed.paused" not in events
+        assert scan_seeder.mark_missing_outside_prefixes() == 0
+    finally:
+        scan_seeder._run_gate.set()
+        scan.join(timeout=SCAN_JOIN_TIMEOUT)
 
 
 def test_enrich_interrupt_records_the_enrich_cancellation_stage(
