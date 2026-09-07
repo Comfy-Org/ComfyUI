@@ -70,8 +70,9 @@ RootType = Literal["models", "input", "output"]
 class _ScanProgress(Protocol):
     hash_failed: int
     enrich_failed: int
-    enrich_failure_emitted: bool
     permission_denied: int
+
+    def mark_emitted(self, key: str) -> bool: ...
 
 
 class SeedAssetSpec(TypedDict):
@@ -527,7 +528,7 @@ def enrich_asset(
             emit_failure = progress is None
             if progress is not None:
                 progress.hash_failed += 1
-                emit_failure = progress.hash_failed == 1
+                emit_failure = progress.mark_emitted("hash_failed")
             if emit_failure:
                 emit("scanner.hash_failed", error_type=error_type(exc))
             logging.warning("Failed to hash %s: %s", file_path, exc)
@@ -623,10 +624,8 @@ def enrich_assets_batch(
             except Exception as exc:
                 if progress is not None:
                     progress.enrich_failed += 1
-                if progress is None or not progress.enrich_failure_emitted:
+                if progress is None or progress.mark_emitted("enrich_failed"):
                     emit("scanner.enrich_failed", error_type=error_type(exc))
-                    if progress is not None:
-                        progress.enrich_failure_emitted = True
                 logging.warning("Failed to enrich %s: %s", row.file_path, exc)
                 sess.rollback()
                 failed_ids.append(row.record_id)
