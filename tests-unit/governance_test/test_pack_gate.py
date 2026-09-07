@@ -134,6 +134,33 @@ async def test_posture_matrix_applies_at_both_gates_with_manager_disabled(
 
 
 @pytest.mark.asyncio
+async def test_loose_bytecode_beside_source_denies_the_pack(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Given an approved pack shipping bytecode outside __pycache__
+    custom_nodes_path = tmp_path / "custom_nodes"
+    pack_path, prestartup_sentinel, import_sentinel = _make_directory_pack(custom_nodes_path)
+    digest = governance.pack_digest(str(pack_path))
+    (pack_path / "shadow.pyc").write_bytes(b"sourceless\n")
+    governance.set_custom_node_policy("allowlist", frozenset(), {pack_path.name: digest})
+
+    # When both gates enumerate the pack
+    result = await _run_both_gates(monkeypatch, custom_nodes_path, prestartup_sentinel, import_sentinel)
+
+    # Then neither entry point executes
+    assert result == (False, False)
+
+
+def test_pack_gate_denies_pack_when_digest_cannot_be_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Given a governed pack that cannot be measured
+    pack_path = tmp_path / "pack"
+    pack_path.mkdir()
+    governance.set_custom_node_policy("allowlist", frozenset(), {pack_path.name: "blake3:" + "0" * 64})
+    monkeypatch.setattr(governance, "pack_digest", lambda _path: (_ for _ in ()).throw(OSError("unreadable")))
+
+    # When the pack gate measures it, then the pack is denied closed
+    assert governance.pack_allowed(str(pack_path)) is False
+
+
+@pytest.mark.asyncio
 async def test_blocklist_denied_basename_matching_is_case_insensitive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # Given a mixed-case pack denied by its lowercase basename
     custom_nodes_path = tmp_path / "custom_nodes"

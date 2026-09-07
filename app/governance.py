@@ -102,13 +102,14 @@ def pack_allowed(module_path: str) -> bool:
 
     try:
         digest = pack_digest(module_path)
-    except ValueError as error:
+    except (ValueError, OSError) as error:
         logging.warning("Cannot verify custom node pack '%s': %s", basename, error)
         return False
 
     if _custom_node_mode == "allowlist":
         return digest in _allowed_packs.values()
     return digest == expected_digest
+
 
 def pack_digest(pack_path: str) -> str:
     # Keep local: hashing imports comfy.cli_args, which would freeze CLI defaults before main enables argument parsing.
