@@ -23,6 +23,7 @@ import struct
 import ctypes
 import os
 import comfy.memory_management
+import comfy.model_readahead
 import safetensors.torch
 import numpy as np
 from PIL import Image
@@ -160,6 +161,7 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
         device = torch.device("cpu")
     metadata = None
     if ckpt.lower().endswith(".safetensors") or ckpt.lower().endswith(".sft"):
+        comfy.model_readahead.request(ckpt)
         try:
             if comfy.memory_management.aimdo_enabled:
                 sd, metadata = load_safetensors(ckpt)
