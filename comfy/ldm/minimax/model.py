@@ -85,6 +85,11 @@ def mask_row_values(mask, latent_t, lat_h, lat_w):
     return values
 
 
+def _pad_even(n):
+    # mirrors comfy.ldm.common_dit.pad_to_patch_size's effect on a spatial dim for patch size 2
+    return n + n % 2
+
+
 def _frame_grid(h, w):
     # area-normalized (h, w) coordinates of one latent frame's 2x2-patch rows
     area = math.sqrt(h * w)
@@ -397,7 +402,7 @@ class PackedLayout:
             for blk in refs:
                 kind = blk["kind"]
                 if kind == "image":
-                    r_frame, _ = _frame_grid(blk["latent_h"], blk["latent_w"])
+                    r_frame, _ = _frame_grid(_pad_even(blk["latent_h"]), _pad_even(blk["latent_w"]))
                     n = r_frame.shape[0]
                     g = torch.empty(n, 3, dtype=torch.float64)
                     g[:, 0] = cursor
@@ -422,7 +427,7 @@ class PackedLayout:
                     # rows, both sharing the cursor origin
                     rt = blk["ref_audio_t"]
                     vt = blk["latent_t"]
-                    r_frame, r_w_grid = _frame_grid(blk["latent_h"], blk["latent_w"])
+                    r_frame, r_w_grid = _frame_grid(_pad_even(blk["latent_h"]), _pad_even(blk["latent_w"]))
                     if rt > 0:
                         segments.append(("ref_audio", rt * 2))
                         pos.append(_audio_grid(cursor, rt, float(r_w_grid[0]), float(r_w_grid[-1])))
@@ -536,7 +541,8 @@ class MiniMaxH3Model(nn.Module):
         seed = int(payload.get("seed", 0))
         # every condition intentionally restarts the same RNG stream
         for z in payload.get("cond_video_latents", []):
-            r = patchify_video(z.to(torch.float32), self.patch_size)
+            z = comfy.ldm.common_dit.pad_to_patch_size(z.to(torch.float32), self.patch_size)
+            r = patchify_video(z, self.patch_size)
             if aug < 1.0:
                 gen = torch.Generator("cpu").manual_seed(seed)
                 noise = torch.randn(r.shape, generator=gen, dtype=torch.float32)
