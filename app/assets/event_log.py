@@ -1,17 +1,18 @@
 """Structured event log lines for the assets system.
 
-Every line is ``[assets-event] <event> <compact-json>`` on the standard logging
-INFO channel, mirroring the ``assets.seed.*`` events the seeder already puts on
-the PromptServer bus. A log-tailing launcher can pick assets health signals out
-of core's output without parsing prose, and the existing human-readable lines
-stay exactly as they are.
+Every line is ``[assets-event] <event> key=value ...`` on the standard logging
+INFO channel, with fields sorted by name and omitted when an event has none. This
+mirrors the ``assets.seed.*`` events the seeder already puts on the PromptServer
+bus. A log-tailing launcher can pick assets health signals out of core's output
+without parsing prose, and the existing human-readable lines stay exactly as
+they are.
 
 The field vocabulary is closed. Only the names in :data:`ALLOWED_FIELDS` may be
-carried, each has a validator, and no value may contain a path separator — so
-file names, paths, asset ids and content hashes cannot ride along.
+carried, each has a validator, and no string value may contain a path separator
+or logfmt delimiter — so file names, paths, asset ids and content hashes cannot
+ride along.
 """
 
-import json
 import logging
 import os
 import re
@@ -22,7 +23,7 @@ from typing import Any
 TAG = "[assets-event]"
 
 MAX_STRING_LENGTH = 64
-FORBIDDEN_STRING_CHARS = ("/", "\\", ":")
+FORBIDDEN_STRING_CHARS = ("/", "\\", ":", " ", "=", '"')
 
 EVENT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
 
@@ -118,12 +119,12 @@ def emit(event: str, *, root: str | None = None, **fields: Any) -> None:
 
     problem = _find_problem(event, fields)
     if problem is None:
-        logging.info(
-            "%s %s %s",
-            TAG,
-            event,
-            json.dumps(fields, sort_keys=True, separators=(",", ":")),
+        pairs = " ".join(
+            f"{name}={str(value).lower() if isinstance(value, bool) else value}"
+            for name, value in sorted(fields.items())
         )
+        line = f"{TAG} {event}" + (f" {pairs}" if pairs else "")
+        logging.info("%s", line)
         return
 
     if _strict_mode():

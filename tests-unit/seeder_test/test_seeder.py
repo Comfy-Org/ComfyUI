@@ -1,4 +1,3 @@
-import json
 import logging
 import re
 import threading
@@ -17,8 +16,8 @@ from app.assets.seeder import ScanPhase, State, _AssetSeeder, _ScanStage, _ScanS
 
 
 EVENT_LINE_PATTERN = re.compile(
-    rf"^{re.escape(TAG)} (?P<event>[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*) "
-    r"(?P<fields>\{.*\})$"
+    rf"^{re.escape(TAG)} (?P<event>[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)"
+    r"(?P<fields>(?: [a-z_]+=[^ =]+)*)$"
 )
 EventFields = dict[str, bool | int | str]
 
@@ -38,12 +37,27 @@ def scan_seeder(monkeypatch: pytest.MonkeyPatch) -> _AssetSeeder:
     return instance
 
 
+def parse_fields(raw: str) -> EventFields:
+    fields: EventFields = {}
+    for pair in raw.split():
+        name, value = pair.split("=", maxsplit=1)
+        if value == "true":
+            fields[name] = True
+        elif value == "false":
+            fields[name] = False
+        elif value.removeprefix("-").isdigit():
+            fields[name] = int(value)
+        else:
+            fields[name] = value
+    return fields
+
+
 def tagged_events(caplog: pytest.LogCaptureFixture) -> list[tuple[str, EventFields]]:
     events: list[tuple[str, EventFields]] = []
     for record in caplog.records:
         match = EVENT_LINE_PATTERN.match(record.getMessage())
         if match is not None:
-            events.append((match.group("event"), json.loads(match.group("fields"))))
+            events.append((match.group("event"), parse_fields(match.group("fields"))))
     return events
 
 
