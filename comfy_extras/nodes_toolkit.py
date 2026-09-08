@@ -5,9 +5,8 @@ from comfy_api.latest import ComfyExtension, io
 class CreateList(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        template_matchtype = io.MatchType.Template("type")
         template_autogrow = io.Autogrow.TemplatePrefix(
-            input=io.MatchType.Input("input", template=template_matchtype),
+            input=io.AnyType.Input("input"),
             prefix="input",
         )
         return io.Schema(
@@ -18,8 +17,7 @@ class CreateList(io.ComfyNode):
             search_aliases=["Image Iterator", "Text Iterator", "Iterator"],
             inputs=[io.Autogrow.Input("inputs", template=template_autogrow)],
             outputs=[
-                io.MatchType.Output(
-                    template=template_matchtype,
+                io.AnyType.Output(
                     is_output_list=True,
                     display_name="list",
                 ),
