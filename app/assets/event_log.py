@@ -29,17 +29,6 @@ EVENT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
 ROOTS = frozenset({"models", "input", "output", "user", "temp"})
 PHASES = frozenset({"fast", "enrich", "full"})
 STAGES = frozenset({"mark_missing", "pruning", "fast_scan", "enrich", "finalize"})
-ROUTES = frozenset(
-    {
-        "get_asset_route",
-        "upload_asset",
-        "update_asset_route",
-        "delete_asset_route",
-        "add_asset_tags",
-        "delete_asset_tags",
-        "parse_multipart_upload",
-    }
-)
 STAT_SITES = frozenset({"discovery", "enrich"})
 
 
@@ -75,7 +64,6 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "root": _one_of(ROOTS),
     "phase": _one_of(PHASES),
     "stage": _one_of(STAGES),
-    "route": _one_of(ROUTES),
     "elapsed_ms": _is_count,
     "created": _is_count,
     "enriched": _is_count,

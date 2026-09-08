@@ -27,15 +27,6 @@ VALID_VALUES: dict[str, list[object]] = {
     "root": ["models", "input", "output", "user", "temp"],
     "phase": ["fast", "enrich", "full"],
     "stage": ["mark_missing", "pruning", "fast_scan", "enrich", "finalize"],
-    "route": [
-        "get_asset_route",
-        "upload_asset",
-        "update_asset_route",
-        "delete_asset_route",
-        "add_asset_tags",
-        "delete_asset_tags",
-        "parse_multipart_upload",
-    ],
     "elapsed_ms": [0, 8123],
     "created": [0, 12],
     "enriched": [4],
@@ -85,11 +76,11 @@ def go_to_production_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- the shared cross-repo fixture -------------------------------------------------
 
 
-def test_shared_fixture_file_holds_four_newline_terminated_lines():
+def test_shared_fixture_file_holds_three_newline_terminated_lines():
     raw = FIXTURE_PATH.read_text(encoding="utf-8")
 
     assert raw.endswith("\n")
-    assert len(raw.splitlines()) == 4
+    assert len(raw.splitlines()) == 3
 
 
 @pytest.mark.parametrize("line", fixture_lines())
@@ -119,7 +110,7 @@ def test_a_fieldless_event_still_matches_the_shared_pattern(caplog):
 
 
 def test_the_emitted_record_is_a_single_line(caplog):
-    line = emit_line(caplog, "api.request_failed", route="upload_asset", error_type="ValueError")
+    line = emit_line(caplog, "seeder.scan_failed", error_type="ValueError")
 
     assert "\n" not in line
     assert "\r" not in line
@@ -133,9 +124,7 @@ def test_error_type_is_the_class_name_and_the_path_never_reaches_the_line(caplog
 
     assert error_type(exc) == "FileNotFoundError"
 
-    line = emit_line(
-        caplog, "api.request_failed", route="upload_asset", error_type=error_type(exc)
-    )
+    line = emit_line(caplog, "seeder.scan_failed", error_type=error_type(exc))
     assert "/home/x/model.safetensors" not in line
     assert "model.safetensors" not in line
 
@@ -167,7 +156,7 @@ def test_unknown_field_raises_under_pytest():
 @pytest.mark.parametrize("value", ["a/b", "a\\b", "a:b"])
 def test_a_string_value_carrying_a_path_separator_raises(value):
     with pytest.raises(EventLogError):
-        emit("api.request_failed", error_type=value)
+        emit("seeder.scan_failed", error_type=value)
 
 
 @pytest.mark.parametrize(
@@ -178,7 +167,6 @@ def test_a_string_value_carrying_a_path_separator_raises(value):
         ("phase", "quick"),
         ("phase", None),
         ("stage", "scanning"),
-        ("route", "list_assets"),
         ("site", "reference"),
         ("error_type", "x" * 65),
         ("error_type", 7),
@@ -194,7 +182,6 @@ def test_a_string_value_carrying_a_path_separator_raises(value):
         "bad-phase",
         "none-phase",
         "bad-stage",
-        "bad-route",
         "bad-site",
         "oversized-string",
         "non-string-error-type",
