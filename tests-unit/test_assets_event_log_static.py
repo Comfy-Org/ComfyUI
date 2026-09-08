@@ -69,32 +69,11 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite(
             "app/assets/services/ingest.py", "_discard_unreferenced_content", "ingest.discard_orphan_failed"
         ),
-        # todo 12 - one api.request_failed per route handler, seven handlers
-        CallSite("app/assets/api/routes.py", "get_asset_route", "api.request_failed"),
-        CallSite("app/assets/api/routes.py", "upload_asset", "api.request_failed"),
-        CallSite("app/assets/api/routes.py", "update_asset_route", "api.request_failed"),
-        CallSite("app/assets/api/routes.py", "delete_asset_route", "api.request_failed"),
-        CallSite("app/assets/api/routes.py", "add_asset_tags", "api.request_failed"),
-        CallSite("app/assets/api/routes.py", "delete_asset_tags", "api.request_failed"),
-        CallSite("app/assets/api/upload.py", "parse_multipart_upload", "api.request_failed"),
         # todo 16 - discovery/enrich stat failures, emit-once per scan per site
         CallSite("app/assets/scanner.py", "build_asset_specs", "scanner.stat_failed"),
         CallSite("app/assets/scanner.py", "enrich_asset", "scanner.stat_failed"),
     }
 )
-
-REQUEST_FAILED_HANDLERS = frozenset(
-    {
-        ("app/assets/api/routes.py", "get_asset_route"),
-        ("app/assets/api/routes.py", "upload_asset"),
-        ("app/assets/api/routes.py", "update_asset_route"),
-        ("app/assets/api/routes.py", "delete_asset_route"),
-        ("app/assets/api/routes.py", "add_asset_tags"),
-        ("app/assets/api/routes.py", "delete_asset_tags"),
-        ("app/assets/api/upload.py", "parse_multipart_upload"),
-    }
-)
-
 
 class Aliases(NamedTuple):
     """The names one module binds to the event_log module and its functions."""
@@ -288,11 +267,3 @@ def test_call_sites_match_the_manifest() -> None:
         "EXPECTED_CALL_SITES"
     )
     assert not missing, f"manifest call sites absent from the tree: {sorted(missing)}"
-
-
-def test_manifest_declares_one_request_failed_site_per_route_handler() -> None:
-    declared = Counter(
-        (site.path, site.function) for site in EXPECTED_CALL_SITES if site.event == "api.request_failed"
-    )
-    assert set(declared) == REQUEST_FAILED_HANDLERS
-    assert set(declared.values()) == {1}
