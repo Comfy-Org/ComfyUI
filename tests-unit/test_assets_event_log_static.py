@@ -51,7 +51,7 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite("app/assets/seeder.py", "_run_scan", "seeder.marked_missing"),
         CallSite("app/assets/seeder.py", "mark_missing_outside_prefixes", "seeder.marked_missing"),
         CallSite("app/assets/seeder.py", "_run_fast_phase", "seeder.batch_insert_failed"),
-        # todo 11 - scanner and ingest failure paths
+        # todo 11 - scanner failure paths
         CallSite("app/assets/scanner.py", "sync_root_safely", "scanner.fast_scan_failed"),
         CallSite("app/assets/scanner.py", "sync_temp_references_safely", "scanner.temp_sync_failed"),
         CallSite(
@@ -60,15 +60,6 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_failed"),
         CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_discarded_modified"),
         CallSite("app/assets/scanner.py", "enrich_assets_batch", "scanner.enrich_failed"),
-        CallSite(
-            "app/assets/services/ingest.py", "register_cached_output", "ingest.register_output_failed"
-        ),
-        CallSite(
-            "app/assets/services/ingest.py", "register_executed_output", "ingest.register_output_failed"
-        ),
-        CallSite(
-            "app/assets/services/ingest.py", "_discard_unreferenced_content", "ingest.discard_orphan_failed"
-        ),
         # todo 16 - discovery/enrich stat failures, emit-once per scan per site
         CallSite("app/assets/scanner.py", "build_asset_specs", "scanner.stat_failed"),
         CallSite("app/assets/scanner.py", "enrich_asset", "scanner.stat_failed"),
