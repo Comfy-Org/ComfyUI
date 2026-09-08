@@ -1,6 +1,5 @@
 """Tests for the structured assets event log lines (``app/assets/event_log.py``)."""
 
-import json
 import logging
 import re
 from pathlib import Path
@@ -16,7 +15,8 @@ from app.assets.event_log import ALLOWED_FIELDS, TAG, EventLogError, emit, error
 # byte-identical copy of that repo's `src/main/lib/__fixtures__/assets-event-lines.txt`.
 # Neither side may change without the other.
 EVENT_LINE_PATTERN = re.compile(
-    r"^\[assets-event\] (?P<event>[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*) (?P<fields>\{.*\})$"
+    r"^\[assets-event\] (?P<event>[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)"
+    r"(?P<fields>(?: [a-z_]+=[^ =]+)*)$"
 )
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "assets_event_lines.txt"
@@ -56,6 +56,21 @@ def fixture_lines() -> list[str]:
     return FIXTURE_PATH.read_text(encoding="utf-8").splitlines()
 
 
+def parse_fields(raw: str) -> dict[str, bool | int | str]:
+    fields: dict[str, bool | int | str] = {}
+    for pair in raw.split():
+        name, value = pair.split("=", maxsplit=1)
+        if value == "true":
+            fields[name] = True
+        elif value == "false":
+            fields[name] = False
+        elif value.removeprefix("-").isdigit():
+            fields[name] = int(value)
+        else:
+            fields[name] = value
+    return fields
+
+
 def emit_line(caplog: pytest.LogCaptureFixture, event: str, **fields: object) -> str:
     """Emit one event and return the single tagged line it produced."""
     caplog.clear()
@@ -88,7 +103,7 @@ def test_emit_reproduces_each_shared_fixture_line_byte_for_byte(caplog, line):
     """Given a canonical line, When its fields are re-emitted, Then the bytes match."""
     match = EVENT_LINE_PATTERN.match(line)
     assert match is not None, line
-    fields = json.loads(match.group("fields"))
+    fields = parse_fields(match.group("fields"))
 
     assert emit_line(caplog, match.group("event"), **fields) == line
 
@@ -96,16 +111,16 @@ def test_emit_reproduces_each_shared_fixture_line_byte_for_byte(caplog, line):
 # --- line shape ---------------------------------------------------------------------
 
 
-def test_fields_are_serialized_sorted_and_compact(caplog):
+def test_fields_are_serialized_as_sorted_logfmt(caplog):
     line = emit_line(caplog, "seeder.scan_started", root="models", phase="fast")
 
-    assert line == '[assets-event] seeder.scan_started {"phase":"fast","root":"models"}'
+    assert line == "[assets-event] seeder.scan_started phase=fast root=models"
 
 
 def test_a_fieldless_event_still_matches_the_shared_pattern(caplog):
-    line = emit_line(caplog, "assets.enabled")
+    line = emit_line(caplog, "scanner.hash_discarded_modified")
 
-    assert line == "[assets-event] assets.enabled {}"
+    assert line == "[assets-event] scanner.hash_discarded_modified"
     assert EVENT_LINE_PATTERN.match(line) is not None
 
 
@@ -145,7 +160,7 @@ def test_every_allowed_field_value_round_trips(caplog, field, value):
 
     match = EVENT_LINE_PATTERN.match(line)
     assert match is not None, line
-    assert json.loads(match.group("fields")) == {field: value}
+    assert parse_fields(match.group("fields")) == {field: value}
 
 
 def test_unknown_field_raises_under_pytest():
@@ -153,8 +168,8 @@ def test_unknown_field_raises_under_pytest():
         emit("seeder.scan_started", path="/home/x/models")
 
 
-@pytest.mark.parametrize("value", ["a/b", "a\\b", "a:b"])
-def test_a_string_value_carrying_a_path_separator_raises(value):
+@pytest.mark.parametrize("value", ["a/b", "a\\b", "a:b", "a b", "a=b", 'a"b'])
+def test_a_string_value_carrying_a_forbidden_character_raises(value):
     with pytest.raises(EventLogError):
         emit("seeder.scan_failed", error_type=value)
 
@@ -260,4 +275,4 @@ def test_production_mode_still_emits_valid_events_after_a_dropped_one(caplog, mo
         emit("seeder.scan_started", phase="fast")
 
     tagged = [r.getMessage() for r in caplog.records if r.getMessage().startswith(TAG)]
-    assert tagged == ['[assets-event] seeder.scan_started {"phase":"fast"}']
+    assert tagged == ["[assets-event] seeder.scan_started phase=fast"]

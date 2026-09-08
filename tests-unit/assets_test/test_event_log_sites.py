@@ -57,7 +57,7 @@ def test_enabled_assets_emits_once_with_the_hashing_flag(
     lines = [line for line in output.splitlines() if f"{TAG} assets.enabled " in line]
 
     assert len(lines) == 1
-    assert f'{{"hashing_enabled":{str(expected).lower()}}}' in lines[0]
+    assert f"hashing_enabled={str(expected).lower()}" in lines[0]
 
 
 def test_noassets_emits_no_enabled_event(tmp_path: Path) -> None:
