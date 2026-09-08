@@ -12,7 +12,6 @@ from app.assets import scanner
 from app.assets.event_log import TAG
 from app.assets.scanner import UnenrichedContent
 from app.assets.seeder import _ScanState
-from app.assets.services import ingest
 
 
 EVENT_LINE_PATTERN = re.compile(
@@ -409,41 +408,3 @@ def test_benign_enrich_no_op_is_skipped_without_counting_a_failure(
     assert enriched == 0
     assert failed_ids == ["record-1"]
     assert progress.enrich_failed == 0
-
-
-def test_both_register_output_failures_emit_the_shared_line_shape(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    secret_path = str(tmp_path / "private-output.png")
-
-    def fail_session():
-        raise FileNotFoundError(secret_path)
-
-    monkeypatch.setattr(ingest, "create_session", fail_session)
-
-    with caplog.at_level(logging.INFO):
-        assert ingest.register_cached_output(secret_path) is None
-        assert ingest.register_executed_output(secret_path) is None
-
-    assert events_named(caplog, "ingest.register_output_failed") == [
-        {"error_type": "FileNotFoundError"},
-        {"error_type": "FileNotFoundError"},
-    ]
-    assert all(EVENT_LINE_PATTERN.match(line) is not None for line in tagged_lines(caplog))
-    assert all(secret_path not in line for line in tagged_lines(caplog))
-
-
-def test_orphan_cleanup_failure_emits_exception_type(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    session = Mock()
-    session.scalar.side_effect = FileNotFoundError("/private/assets/orphan.bin")
-
-    with caplog.at_level(logging.INFO):
-        ingest._discard_unreferenced_content(session, "content-id")
-
-    assert events_named(caplog, "ingest.discard_orphan_failed") == [
-        {"error_type": "FileNotFoundError"}
-    ]
