@@ -40,7 +40,7 @@ from comfy_execution.graph import (
     get_input_info,
 )
 from comfy_execution.graph_utils import GraphBuilder, is_link
-from comfy_execution.validation import validate_node_input
+from comfy_execution.validation import LoopValidationError, validate_loops, validate_node_input
 from comfy_execution.progress import get_progress_state, reset_progress_state, add_progress_handler, WebUIProgressHandler
 from comfy_execution.utils import CurrentNodeContext
 from comfy_execution.asset_enrichment import enrich_output_with_assets
@@ -1179,6 +1179,15 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
         }
         return (False, error, [], {})
 
+    start_nodes = set()
+    end_nodes = set()
+    for node_id, node in prompt.items():
+        boundary = getattr(nodes.NODE_CLASS_MAPPINGS[node["class_type"]], "LOOP_BOUNDARY", None)
+        if boundary == "start":
+            start_nodes.add(node_id)
+        elif boundary == "end":
+            end_nodes.add(node_id)
+
     good_outputs = set()
     errors = []
     node_errors = {}
@@ -1233,6 +1242,31 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
                             logging.error(f"  - {reason['message']}: {reason['details']}")
                     node_errors[node_id]["dependent_outputs"].append(o)
             logging.error("Output will be ignored")
+
+    has_dependency_cycle = any(
+        reason["type"] == "dependency_cycle"
+        for valid, reasons, _ in validated.values()
+        for reason in reasons
+    )
+    if not has_dependency_cycle:
+        try:
+            validate_loops(prompt, outputs, validated, start_nodes, end_nodes)
+        except LoopValidationError as ex:
+            dependent_outputs = ex.error["extra_info"]["output_ids"]
+            for node_id in ex.error["extra_info"]["node_ids"]:
+                if node_id not in node_errors:
+                    node_errors[node_id] = {
+                        "errors": [],
+                        "dependent_outputs": [],
+                        "class_type": prompt[node_id]["class_type"],
+                    }
+                node_errors[node_id]["errors"].append(ex.error)
+                node_errors[node_id]["dependent_outputs"] = sorted(
+                    set(node_errors[node_id]["dependent_outputs"]).union(dependent_outputs)
+                )
+            for output_id in dependent_outputs:
+                good_outputs.discard(output_id)
+            errors.append((dependent_outputs[0], [ex.error]))
 
     if len(good_outputs) == 0:
         errors_list = []
