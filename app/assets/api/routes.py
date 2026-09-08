@@ -29,7 +29,6 @@ from app.assets.api.schemas_in import (
     AssetValidationError,
     UploadError,
 )
-from app.assets.event_log import emit, error_type
 from app.assets.helpers import normalize_tags, validate_blake3_hash
 from app.assets.api.upload import (
     delete_temp_file_if_exists,
@@ -567,13 +566,12 @@ async def get_asset_route(request: web.Request) -> web.Response:
         return _build_error_response(
             404, "ASSET_NOT_FOUND", str(e), {"id": reference_id}
         )
-    except Exception as exc:
+    except Exception:
         logging.exception(
             "get_asset failed for reference_id=%s, tenant_id=%s",
             reference_id,
             USER_MANAGER.get_request_user_id(request),
         )
-        emit("api.request_failed", route="get_asset_route", error_type=error_type(exc))
         return _build_error_response(500, "INTERNAL", "Unexpected server error.")
     return web.json_response(payload.model_dump(mode="json", exclude_none=True), status=200)
 
@@ -786,10 +784,9 @@ async def upload_asset(request: web.Request) -> web.Response:
     except DependencyMissingError as e:
         delete_temp_file_if_exists(parsed.tmp_path)
         return _build_error_response(503, "DEPENDENCY_MISSING", e.message)
-    except Exception as exc:
+    except Exception:
         delete_temp_file_if_exists(parsed.tmp_path)
         logging.exception("upload_asset failed for tenant_id=%s", tenant_id)
-        emit("api.request_failed", route="upload_asset", error_type=error_type(exc))
         return _build_error_response(500, "INTERNAL", "Unexpected server error.")
 
     asset = _build_asset_response(result, _resolve_preview_paths([result]))
@@ -828,13 +825,12 @@ async def update_asset_route(request: web.Request) -> web.Response:
         return _build_error_response(
             404, "ASSET_NOT_FOUND", str(ve), {"id": reference_id}
         )
-    except Exception as exc:
+    except Exception:
         logging.exception(
             "update_asset failed for reference_id=%s, tenant_id=%s",
             reference_id,
             USER_MANAGER.get_request_user_id(request),
         )
-        emit("api.request_failed", route="update_asset_route", error_type=error_type(exc))
         return _build_error_response(500, "INTERNAL", "Unexpected server error.")
     return web.json_response(payload.model_dump(mode="json", exclude_none=True), status=200)
 
@@ -848,13 +844,12 @@ async def delete_asset_route(request: web.Request) -> web.Response:
         deleted = delete_asset_reference(
             reference_id=reference_id,
         )
-    except Exception as exc:
+    except Exception:
         logging.exception(
             "delete_asset_reference failed for reference_id=%s, tenant_id=%s",
             reference_id,
             USER_MANAGER.get_request_user_id(request),
         )
-        emit("api.request_failed", route="delete_asset_route", error_type=error_type(exc))
         return _build_error_response(500, "INTERNAL", "Unexpected server error.")
 
     if not deleted:
@@ -941,13 +936,12 @@ async def add_asset_tags(request: web.Request) -> web.Response:
         return _build_error_response(
             404, "ASSET_NOT_FOUND", str(ve), {"id": reference_id}
         )
-    except Exception as exc:
+    except Exception:
         logging.exception(
             "add_tags_to_asset failed for reference_id=%s, tenant_id=%s",
             reference_id,
             USER_MANAGER.get_request_user_id(request),
         )
-        emit("api.request_failed", route="add_asset_tags", error_type=error_type(exc))
         return _build_error_response(500, "INTERNAL", "Unexpected server error.")
 
     return web.json_response(payload.model_dump(mode="json", exclude_none=True), status=200)
@@ -994,13 +988,12 @@ async def delete_asset_tags(request: web.Request) -> web.Response:
         return _build_error_response(
             404, "ASSET_NOT_FOUND", str(ve), {"id": reference_id}
         )
-    except Exception as exc:
+    except Exception:
         logging.exception(
             "remove_tags_from_asset failed for reference_id=%s, tenant_id=%s",
             reference_id,
             USER_MANAGER.get_request_user_id(request),
         )
-        emit("api.request_failed", route="delete_asset_tags", error_type=error_type(exc))
         return _build_error_response(500, "INTERNAL", "Unexpected server error.")
 
     return web.json_response(payload.model_dump(mode="json", exclude_none=True), status=200)
