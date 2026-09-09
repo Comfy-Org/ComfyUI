@@ -501,7 +501,7 @@ def controlnet_config(sd, model_options={}):
 
     operations = model_options.get("custom_operations", None)
     if operations is None:
-        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, disable_fast_fp8=True)
+        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, load_device=load_device, disable_fast_fp8=True)
 
     offload_device = comfy.model_management.unet_offload_device()
     return model_config, operations, load_device, unet_dtype, manual_cast_dtype, offload_device
@@ -585,7 +585,7 @@ def load_controlnet_sd35(sd, model_options={}):
 
     operations = model_options.get("custom_operations", None)
     if operations is None:
-        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, disable_fast_fp8=True)
+        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, load_device=load_device, disable_fast_fp8=True)
 
     control_model = comfy.cldm.dit_embedder.ControlNetEmbedder(img_size=None,
                                                                patch_size=2,
@@ -683,7 +683,7 @@ def load_controlnet_qwen_fun(sd, model_options={}):
 
     operations = model_options.get("custom_operations", None)
     if operations is None:
-        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, disable_fast_fp8=True)
+        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, load_device=load_device, disable_fast_fp8=True)
 
     in_features = sd["control_img_in.weight"].shape[1]
     inner_dim = sd["control_img_in.weight"].shape[0]
@@ -838,7 +838,7 @@ def load_controlnet_state_dict(state_dict, model=None, model_options={}):
     manual_cast_dtype = comfy.model_management.unet_manual_cast(unet_dtype, load_device)
     operations = model_options.get("custom_operations", None)
     if operations is None:
-        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype)
+        operations = comfy.ops.pick_operations(unet_dtype, manual_cast_dtype, load_device=load_device, disable_fast_fp8=True)
 
     controlnet_config["operations"] = operations
     controlnet_config["dtype"] = unet_dtype

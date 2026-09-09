@@ -583,6 +583,26 @@ def _is_terminal_service_refusal(body: Any) -> bool:
     return isinstance(body, dict) and body.get("error") in _TERMINAL_SERVICE_REFUSALS
 
 
+def _provider_error_detail(metadata: Any) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("raw")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return raw.strip()[:500]
+        if isinstance(parsed, dict):
+            inner = parsed.get("error")
+            if isinstance(inner, dict) and isinstance(inner.get("message"), str):
+                return inner["message"]
+            if isinstance(parsed.get("message"), str):
+                return parsed["message"]
+        return raw.strip()[:500]
+    code = metadata.get("provider_error_code")
+    return code if isinstance(code, str) and code else None
+
+
 def _friendly_http_message(status: int, body: Any) -> str:
     if status == 401:
         return "Unauthorized: Please login first to use this node."
@@ -602,7 +622,14 @@ def _friendly_http_message(status: int, body: Any) -> str:
                     return msg
             if isinstance(err, dict):
                 msg = err.get("message")
+                if msg is not None and not isinstance(msg, str):
+                    msg = str(msg)
                 typ = err.get("type")
+                detail = _provider_error_detail(err.get("metadata"))
+                if detail and not msg:
+                    msg = detail
+                elif msg and detail and detail not in msg:
+                    msg = f"{msg}: {detail}"
                 if msg and typ:
                     return f"API Error: {msg} (Type: {typ})"
                 if msg:

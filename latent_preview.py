@@ -4,6 +4,7 @@ from comfy.cli_args import args, LatentPreviewMethod
 from comfy.taesd.taesd import TAESD
 from comfy.sd import VAE
 import comfy.model_management
+import comfy.model_prefetch
 import folder_paths
 import comfy.utils
 import logging
@@ -45,8 +46,16 @@ class TAESDPreviewerImpl(LatentPreviewer):
         return preview_to_image(x_sample)
 
 class TAEHVPreviewerImpl(TAESDPreviewerImpl):
+    def __init__(self, taesd, compile_preview=False):
+        super().__init__(taesd)
+        self.compile_preview = compile_preview
+
     def decode_latent_to_preview(self, x0):
-        x_sample = self.taesd.decode(x0[:1, :, :1])[0][0]
+        samples = x0[:1, :, :1]
+        if self.compile_preview and comfy.model_prefetch.malloc_graph_enabled(self.taesd.device):
+            comfy.model_prefetch.malloc_graph_begin(self.taesd.device)
+        x_sample = self.taesd.decode(samples)[0][0]
+        comfy.model_prefetch.malloc_graph_end()
         return preview_to_image(x_sample, do_scale=False)
 
 class Latent2RGBPreviewer(LatentPreviewer):
@@ -97,7 +106,7 @@ def get_previewer(device, latent_format):
                 if latent_format.taesd_decoder_name in VIDEO_TAES:
                     taesd = VAE(comfy.utils.load_torch_file(taesd_decoder_path))
                     taesd.first_stage_model.show_progress_bar = False
-                    previewer = TAEHVPreviewerImpl(taesd)
+                    previewer = TAEHVPreviewerImpl(taesd, compile_preview=latent_format.compile_preview)
                 else:
                     taesd = TAESD(None, taesd_decoder_path, latent_channels=latent_format.latent_channels).to(device)
                     previewer = TAESDPreviewerImpl(taesd)

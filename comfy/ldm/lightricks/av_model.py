@@ -938,7 +938,7 @@ class LTXAVModel(LTXVModel):
         stg_self_attn_blocks = transformer_options.get("stg_self_attn_blocks", ())
 
         # Process transformer blocks
-        comfy.model_prefetch.malloc_graph_begin(self, vx.device)
+        comfy.model_prefetch.malloc_graph_begin(vx.device)
         for i, block in enumerate(self.transformer_blocks):
             comfy.model_prefetch.prefetch_queue_pop(
                 prefetch_queue, vx.device, block, malloc_scope="block"

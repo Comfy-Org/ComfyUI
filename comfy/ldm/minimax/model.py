@@ -573,7 +573,7 @@ class MiniMaxH3Model(nn.Module):
         compile_allocations = comfy.model_prefetch.malloc_graph_enabled(x[0].device)
         if compile_allocations:
             out = [torch.empty_like(x[0]), torch.empty_like(x[1])]
-            comfy.model_prefetch.malloc_graph_begin(self, x[0].device)
+            comfy.model_prefetch.malloc_graph_begin(x[0].device)
         graph_out = comfy.patcher_extension.WrapperExecutor.new_class_executor(
             self._forward,
             self,
@@ -587,6 +587,12 @@ class MiniMaxH3Model(nn.Module):
             comfy.model_prefetch.malloc_graph_end()
         else:
             out = graph_out
+
+        # Masked rows predict at mask * sigma; scale their velocity to match the outer x0 conversion.
+        if denoise_mask is not None:
+            out[0] = out[0] * denoise_mask
+        if audio_denoise_mask is not None:
+            out[1] = out[1] * audio_denoise_mask
 
         if scale != 1.0:
             # d/d(sigma_v) of the carried variable
