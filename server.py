@@ -217,7 +217,7 @@ class PromptServer():
         PromptServer.instance = self
 
         self.user_manager = UserManager()
-        self.model_file_manager = ModelFileManager()
+        self.model_file_manager = ModelFileManager(is_download_model_enabled=lambda: self.user_manager.settings.get_settings(None).get("Comfy.ModelDownloadEnabled", False))
         self.custom_node_manager = CustomNodeManager()
         self.subgraph_manager = SubgraphManager()
         self.node_replace_manager = NodeReplaceManager()
