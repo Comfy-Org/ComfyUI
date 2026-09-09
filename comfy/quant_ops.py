@@ -4,21 +4,6 @@ import logging
 from comfy.cli_args import args
 
 
-def _rocm_kitchen_arch_supported():
-    """comfy-kitchen's INT8 Triton kernels compile tl.dot to matrix-core instructions.
-    RDNA3/3.5/4 (gfx11xx/gfx12xx) have WMMA and CDNA (gfx9xx) has MFMA; RDNA1/RDNA2
-    (gfx10xx) have neither, so the INT8 path hangs the GPU there. Gates the automatic
-    ROCm default so those cards stay on the eager fallback (an explicit
-    --enable-triton-backend still forces it on any arch)."""
-    try:
-        arch = torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName.split(":")[0]
-    except Exception:
-        return False
-    if arch.startswith(("gfx11", "gfx12")):
-        return True
-    return arch in ("gfx908", "gfx90a", "gfx940", "gfx941", "gfx942", "gfx950")
-
-
 try:
     import comfy_kitchen as ck
     from comfy_kitchen.tensor import (
@@ -42,22 +27,13 @@ try:
             ck.registry.disable("cuda")
             logging.warning("WARNING: You need pytorch with cu130 or higher to use optimized CUDA operations.\nWARNING WARNING WARNING\nIf you are on nvidia 20 series and above it is required that you update your pytorch to cu130 or higher.\n")
 
-    # On ROCm/AMD the CUDA backend is unavailable, so Triton is the only accelerated
-    # comfy-kitchen backend. Enable it by default there, but only on Triton >= 3.7 AND a
-    # matrix-core GPU (RDNA3+ WMMA gfx11xx/gfx12xx, CDNA MFMA gfx9xx). RDNA1/RDNA2
-    # (gfx10xx) have no WMMA -> the INT8 tl.dot path hangs the GPU, so they stay eager.
-    # older Triton lacks libdevice.rint on the HIP backend and hard-crashes the INT8 path.
-    if args.disable_triton_backend:
-        ck.registry.disable("triton")
-    elif args.enable_triton_backend: # or (torch.version.hip is not None and _rocm_kitchen_arch_supported()):
+    # comfy-kitchen picks its accelerated backend on import: the HIP backend registers
+    # itself on a supported AMD device and takes dispatch priority there, CUDA on NVIDIA.
+    # Triton is an opt-in override, off by default on every platform.
+    if args.enable_triton_backend and not args.disable_triton_backend:
         try:
             import triton
-            triton_version = tuple(int(v) for v in triton.__version__.split(".")[:2])
-            if args.enable_triton_backend or triton_version >= (3, 7):
-                logging.info("Found triton %s. Enabling comfy-kitchen triton backend.", triton.__version__)
-            else:
-                logging.info("Triton %s is too old for the ROCm INT8 path (needs >= 3.7); comfy-kitchen triton backend disabled.", triton.__version__)
-                ck.registry.disable("triton")
+            logging.info("Found triton %s. Enabling comfy-kitchen triton backend.", triton.__version__)
         except ImportError as e:
             logging.error(f"Failed to import triton, Error: {e}, the comfy-kitchen triton backend will not be available.")
             ck.registry.disable("triton")
