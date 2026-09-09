@@ -1,5 +1,5 @@
 from typing import TypedDict, Dict, Optional, Tuple
-from typing_extensions import override
+from typing_extensions import override, NotRequired
 from PIL import Image
 from enum import Enum
 from abc import ABC
@@ -27,6 +27,7 @@ class NodeProgressState(TypedDict):
     state: NodeState
     value: float
     max: float
+    activity: NotRequired[str]  # what a running node is spending time on, e.g. "loading"
 
 
 class ProgressHandler(ABC):
@@ -163,8 +164,11 @@ class WebUIProgressHandler(ProgressHandler):
             return
 
         # Only send info for non-pending nodes
-        active_nodes = {
-            node_id: {
+        active_nodes = {}
+        for node_id, state in nodes.items():
+            if state["state"] == NodeState.Pending:
+                continue
+            active_nodes[node_id] = {
                 "value": state["value"],
                 "max": state["max"],
                 "state": state["state"].value,
@@ -174,9 +178,8 @@ class WebUIProgressHandler(ProgressHandler):
                 "parent_node_id": self.registry.dynprompt.get_parent_node_id(node_id),
                 "real_node_id": self.registry.dynprompt.get_real_node_id(node_id),
             }
-            for node_id, state in nodes.items()
-            if state["state"] != NodeState.Pending
-        }
+            if "activity" in state:
+                active_nodes[node_id]["activity"] = state["activity"]
 
         # Send a combined progress_state message with all node states
         # Include client_id to ensure message is only sent to the initiating client
@@ -299,6 +302,23 @@ class ProgressRegistry:
             if handler.enabled:
                 handler.update_handler(
                     node_id, value, max_value, entry, self.prompt_id, image
+                )
+
+    def set_activity(self, node_id: str, activity: str | None) -> None:
+        """Set what a running node is spending time on, or None to clear it"""
+        entry = self.ensure_entry(node_id)
+        if entry.get("activity") == activity:
+            return
+        if activity is None:
+            entry.pop("activity", None)
+        else:
+            entry["activity"] = activity
+
+        # Notify all enabled handlers
+        for handler in self.handlers.values():
+            if handler.enabled:
+                handler.update_handler(
+                    node_id, entry["value"], entry["max"], entry, self.prompt_id
                 )
 
     def finish_progress(self, node_id: str) -> None:

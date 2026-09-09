@@ -483,7 +483,14 @@ def hijack_progress(server_instance):
                     server_instance.client_id,
                 )
 
+    def activity_hook(activity):
+        executing_context = get_executing_context()
+        if executing_context is None:
+            return
+        get_progress_state().set_activity(executing_context.node_id, activity)
+
     comfy.utils.set_progress_bar_global_hook(hook)
+    comfy.utils.set_progress_activity_global_hook(activity_hook)
 
 
 def cleanup_temp():
