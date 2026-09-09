@@ -130,6 +130,8 @@ class _AssetSeeder:
         progress_callback: ProgressCallback | None = None,
         prune_first: bool = False,
         compute_hashes: bool = False,
+        *,
+        _start_paused: bool = False,
     ) -> bool:
         """Start a background scan for the given roots.
 
@@ -139,6 +141,7 @@ class _AssetSeeder:
             progress_callback: Optional callback called with progress updates
             prune_first: If True, prune orphaned assets before scanning
             compute_hashes: If True, compute blake3 hashes (slow)
+            _start_paused: Start with phase work blocked until resume()
 
         Returns:
             True if scan was started, False if already running
@@ -151,7 +154,7 @@ class _AssetSeeder:
             if self._state != State.IDLE:
                 logging.info("Asset seeder already running, skipping start")
                 return False
-            self._state = State.RUNNING
+            self._state = State.PAUSED if _start_paused else State.RUNNING
             self._progress = Progress()
             self._errors = []
             self._roots = roots
@@ -160,7 +163,10 @@ class _AssetSeeder:
             self._compute_hashes = compute_hashes
             self._progress_callback = progress_callback
             self._cancel_event.clear()
-            self._run_gate.set()  # Ensure unpaused when starting
+            if _start_paused:
+                self._run_gate.clear()
+            else:
+                self._run_gate.set()
             self._thread = threading.Thread(
                 target=self._run_scan,
                 name="_AssetSeeder",
@@ -640,6 +646,7 @@ class _AssetSeeder:
                     },
                 )
             with self._lock:
+                start_paused = self._state is State.PAUSED
                 self._reset_to_idle()
                 pending = self._pending_scan
                 if pending is not None:
@@ -649,6 +656,7 @@ class _AssetSeeder:
                         phase=pending["phase"],
                         prune_first=False,
                         compute_hashes=pending["compute_hashes"],
+                        _start_paused=start_paused,
                     ):
                         logging.warning(
                             "Pending scan could not start (roots=%s, phase=%s)",

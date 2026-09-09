@@ -236,9 +236,100 @@ class TestPendingScanDrain:
                 phase=ScanPhase.FULL,
                 prune_first=False,
                 compute_hashes=True,
+                _start_paused=False,
             )
 
         assert seeder._pending_scan is None
+
+    @patch("app.assets.seeder.dependencies_available", return_value=True)
+    def test_pause_is_preserved_when_pending_scan_drains(self, _dependencies):
+        seeder = _AssetSeeder()
+        phase_ready = threading.Event()
+        allow_phase_return = threading.Event()
+        drained_phase_calls: list[tuple[str, ...]] = []
+
+        def gated_enrich(roots):
+            if roots == ("models",):
+                phase_ready.set()
+                allow_phase_return.wait(timeout=5)
+                allow_phase_return.clear()
+            else:
+                drained_phase_calls.append(roots)
+                phase_ready.set()
+                allow_phase_return.wait(timeout=5)
+            return False, 0
+
+        seeder._pending_scan = {
+            "roots": ("output",),
+            "phase": ScanPhase.ENRICH,
+            "compute_hashes": False,
+        }
+        real_start = seeder.start
+
+        def start_and_signal(**kwargs):
+            started = real_start(**kwargs)
+            if started and kwargs["roots"] == ("output",):
+                if seeder._state is State.PAUSED:
+                    phase_ready.set()
+                else:
+                    phase_ready.wait(timeout=5)
+            return started
+
+        observed = {}
+        with (
+            patch.object(seeder, "_log_scan_config"),
+            patch.object(seeder, "_run_enrich_phase", side_effect=gated_enrich),
+            patch.object(seeder, "start", side_effect=start_and_signal),
+        ):
+            try:
+                assert seeder.start(
+                    roots=("models",), phase=ScanPhase.ENRICH
+                ) is True
+                assert phase_ready.wait(timeout=5)
+                assert seeder.pause() is True
+                phase_ready.clear()
+                allow_phase_return.set()
+                assert phase_ready.wait(timeout=5)
+
+                with seeder._lock:
+                    state_before_resume = seeder._state
+                    gate_set_before_resume = seeder._run_gate.is_set()
+                    calls_before_resume = len(drained_phase_calls)
+
+                phase_ready.clear()
+                resume_return = seeder.resume()
+                if calls_before_resume == 0:
+                    assert phase_ready.wait(timeout=5)
+                allow_phase_return.set()
+                assert seeder.wait(timeout=5)
+
+                observed = {
+                    "state_before_resume": state_before_resume,
+                    "gate_set_before_resume": gate_set_before_resume,
+                    "resume_return": resume_return,
+                    "drained_phase_calls_before_resume": calls_before_resume,
+                    "drained_phase_calls_after_resume": len(drained_phase_calls),
+                }
+            finally:
+                allow_phase_return.set()
+                seeder.resume()
+                seeder.wait(timeout=5)
+
+        assert observed == {
+            "state_before_resume": State.PAUSED,
+            "gate_set_before_resume": False,
+            "resume_return": True,
+            "drained_phase_calls_before_resume": 0,
+            "drained_phase_calls_after_resume": 1,
+        }, (
+            f"state_before_resume={observed['state_before_resume']!r}, "
+            f"gate_set_before_resume={observed['gate_set_before_resume']!r}, "
+            f"resume_return={observed['resume_return']!r}, "
+            "drained_phase_calls_before_resume="
+            f"{observed['drained_phase_calls_before_resume']!r}, "
+            "drained_phase_calls_after_resume="
+            f"{observed['drained_phase_calls_after_resume']!r}"
+        )
 
     @patch("app.assets.seeder.dependencies_available", return_value=True)
     @patch("app.assets.seeder.get_owned_prefixes", return_value=[])
