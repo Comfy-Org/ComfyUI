@@ -109,6 +109,7 @@ def test_queue_output_scan_registers_undeclared_output(
                 .where(AssetContent.path == str(output_path.resolve()))
             )
         )
+        assert rows[0].job_id is None
     assert len(rows) == 1
 
 
@@ -147,6 +148,8 @@ def test_queue_output_scan_does_not_duplicate_declared_output(
                 .where(AssetContent.path == str(undeclared_path.resolve()))
             )
         )
+        assert rows[0].job_id == "declared-job"
+        assert undeclared_rows[0].job_id is None
     assert len(rows) == 1
     assert len(undeclared_rows) == 1, (
         "the undeclared sibling proves the walk ran, so the declared row's count of 1 is a real skip rather than a silently-failed scan"
