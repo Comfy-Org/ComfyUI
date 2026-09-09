@@ -1976,6 +1976,22 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     # filled in during execution
     hidden: HiddenHolder = None
 
+    # filled in by GET_SCHEMA per node class
+    _SCHEMA_CACHE_ATTRS = (
+        "SCHEMA", "_DESCRIPTION", "_CATEGORY", "_EXPERIMENTAL", "_DEPRECATED", "_DEV_ONLY", "_API_NODE",
+        "_OUTPUT_NODE", "_HAS_INTERMEDIATE_OUTPUT", "_INPUT_IS_LIST", "_OUTPUT_IS_LIST", "_RETURN_TYPES",
+        "_RETURN_NAMES", "_OUTPUT_TOOLTIPS", "_NOT_IDEMPOTENT", "_ACCEPT_ALL_INPUTS",
+    )
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # A subclass must not inherit the values GET_SCHEMA computed for its parent, otherwise the
+        # `is None` guards never fire and it keeps the parent's RETURN_TYPES etc. Class clones copy
+        # the parent's __dict__ on purpose, so only reset what the new class does not define itself.
+        for name in cls._SCHEMA_CACHE_ATTRS:
+            if name not in cls.__dict__:
+                setattr(cls, name, None)
+
     @classmethod
     @abstractmethod
     def define_schema(cls) -> Schema:
