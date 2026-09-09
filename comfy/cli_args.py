@@ -69,9 +69,9 @@ parser.add_argument("--max-upload-size", type=float, default=100, help="Set the 
 
 parser.add_argument("--base-directory", type=str, default=None, help="Set the ComfyUI base directory for models, custom_nodes, input, output, temp, and user directories.")
 parser.add_argument("--extra-model-paths-config", type=str, default=None, metavar="PATH", nargs='+', action='append', help="Load one or more extra_model_paths.yaml files.")
-parser.add_argument("--output-directory", type=str, default=None, help="Set the ComfyUI output directory. Overrides --base-directory.")
-parser.add_argument("--temp-directory", type=str, default=None, help="Set the ComfyUI temp directory (default is in the ComfyUI directory). Overrides --base-directory.")
-parser.add_argument("--input-directory", type=str, default=None, help="Set the ComfyUI input directory. Overrides --base-directory.")
+parser.add_argument("--output-directory", type=str, default=None, help="Set the ComfyUI output directory (defaults to <base-directory>/output). Overrides --base-directory.")
+parser.add_argument("--temp-directory", type=str, default=None, help="Set the ComfyUI temp directory (defaults to <base-directory>/temp). Overrides --base-directory.")
+parser.add_argument("--input-directory", type=str, default=None, help="Set the ComfyUI input directory (defaults to <base-directory>/input). Overrides --base-directory.")
 parser.add_argument("--auto-launch", action="store_true", help="Automatically launch ComfyUI in the default browser.")
 parser.add_argument("--disable-auto-launch", action="store_true", help="Disable auto launching the browser.")
 parser.add_argument("--cuda-device", type=str, default=None, metavar="DEVICE_ID", help="Set the ids of cuda devices this instance will use, as a comma-separated list (e.g. '0' or '0,1'), or 'all' to leave all currently visible devices available. All other devices will not be visible.")
@@ -82,7 +82,7 @@ cm_group.add_argument("--disable-cuda-malloc", action="store_true", help="Disabl
 
 
 fp_group = parser.add_mutually_exclusive_group()
-fp_group.add_argument("--force-fp32", action="store_true", help="Force fp32 (If this makes your GPU work better please report it).")
+fp_group.add_argument("--force-fp32", action="store_true", help="Force fp32 (If this makes your GPU work better, please report it).")
 fp_group.add_argument("--force-fp16", action="store_true", help="Force fp16.")
 
 fpunet_group = parser.add_mutually_exclusive_group()
@@ -115,8 +115,8 @@ parser.add_argument("--force-channels-last", action="store_true", help="Force ch
 parser.add_argument("--directml", type=int, nargs="?", metavar="DIRECTML_DEVICE", const=-1, help="Use torch-directml.")
 
 parser.add_argument("--oneapi-device-selector", type=str, default=None, metavar="SELECTOR_STRING", help="Sets the oneAPI device(s) this instance will use.")
-parser.add_argument("--supports-fp8-compute", action="store_true", help="ComfyUI will act like if the device supports fp8 compute.")
-parser.add_argument("--enable-triton-backend", action="store_true", help="ComfyUI will enable the use of Triton backend in comfy-kitchen. Is disabled at launch by default.")
+parser.add_argument("--supports-fp8-compute", action="store_true", help="ComfyUI will act like the device supports fp8 compute.")
+parser.add_argument("--enable-triton-backend", action="store_true", help="ComfyUI will enable the use of Triton backend in comfy-kitchen. Triton backend is disabled at launch by default.")
 parser.add_argument("--disable-triton-backend", action="store_true", help="Force-disable the comfy-kitchen Triton backend, overriding the automatic ROCm/AMD default and --enable-triton-backend.")
 
 class LatentPreviewMethod(enum.Enum):
@@ -166,10 +166,10 @@ manager_group.add_argument("--enable-manager-legacy-ui", action="store_true", he
 
 vram_group = parser.add_mutually_exclusive_group()
 vram_group.add_argument("--gpu-only", action="store_true", help="Store and run everything (text encoders/CLIP models, etc... on the GPU).")
-vram_group.add_argument("--highvram", action="store_true", help="By default models will be unloaded to CPU memory after being used. This option keeps them in GPU memory.")
+vram_group.add_argument("--highvram", action="store_true", help="By default, models will be unloaded to CPU memory after being used. This option keeps them in GPU memory.")
 vram_group.add_argument("--lowvram", action="store_true", help="Doesn't do anything if dynamic vram is enabled. If dynamic vram isn't being used this option makes the text encoders run on the CPU.")
 vram_group.add_argument("--novram", action="store_true", help="When lowvram isn't enough.")
-vram_group.add_argument("--cpu", action="store_true", help="To use the CPU for everything (slow).")
+vram_group.add_argument("--cpu", action="store_true", help="Use the CPU for everything (slow).")
 
 parser.add_argument("--reserve-vram", type=float, default=None, help="Set the amount of vram in GB you want to reserve for use by your OS/other software. By default some amount is reserved depending on your OS.")
 parser.add_argument("--vram-headroom", type=float, default=0, help="Set the amount of vram in GB for DynamicVRAM to maintain as extra headroom above default. ComfyUI will try and keep this much VRAM completely free and unused, even counting VRAM from other apps.")
