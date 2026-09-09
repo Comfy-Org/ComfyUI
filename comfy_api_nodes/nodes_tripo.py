@@ -1244,7 +1244,8 @@ class TripoRetargetNode(IO.ComfyNode):
                     "animation",
                     options=[*[a.value for a in TripoAnimation], *TRIPO_BIPED_ANIMATIONS],
                     tooltip="preset:* animations work with both rig models. preset:biped:* animations are made for rigs "
-                    "from model v1.0-20240301; a v2.5 rig accepts only those that also exist as preset:*.",
+                    "from model v1.0-20240301; a v2.5 rig accepts only chop, climb, dive, fall, hurt, idle, jump, run, "
+                    "shoot, slash, turn and walk.",
                 ),
                 IO.Combo.Input(
                     "out_format",
@@ -1568,7 +1569,7 @@ class TripoSmartSegmentNode(IO.ComfyNode):
                             [
                                 IO.Custom("MODEL_TASK_ID").Input(
                                     "model_task_id",
-                                    tooltip="A GLB result. Quad meshes and FBX imports must go through Tripo: Convert model (GLTF) first.",
+                                    tooltip="A GLB result. Quad (FBX) meshes must go through Tripo: Convert model (GLTF) first.",
                                 ),
                                 *smart_segment_inputs(),
                             ],
@@ -1628,7 +1629,7 @@ class TripoSmartSegmentNode(IO.ComfyNode):
             url = get_model_url_from_response(task)
             if Path(urlparse(url).path).suffix.lower() != ".glb":
                 raise ValueError(
-                    "Tripo: Smart Segment accepts GLB models only. Convert quad meshes and FBX imports with "
+                    "Tripo: Smart Segment accepts GLB models only. Convert quad (FBX) meshes with "
                     "Tripo: Convert model (GLTF) first."
                 )
             request = TripoMeshSmartSegmentRequest(
