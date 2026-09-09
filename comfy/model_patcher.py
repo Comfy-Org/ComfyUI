@@ -1814,6 +1814,7 @@ class ModelPatcherDynamic(ModelPatcher):
         return size
 
     def _vbar_get(self, create=False):
+        #One VBAR per (model, load_device); do not replace it while modules still hold _v / _v_reservations.
         if self.load_device == torch.device("cpu"):
             return None
         vbar = self.model.dynamic_vbars.get(self.load_device, None)
@@ -1981,9 +1982,6 @@ class ModelPatcherDynamic(ModelPatcher):
                     set_dirty(m, dirty)
                     if not hasattr(m, "_v_reservations"):
                         m._v_reservations = {}
-                    if hasattr(m, "_v") and m._v[0] is not vbar:
-                        comfy_aimdo.model_vbar.vbar_unpin(m._v)
-                        delattr(m, "_v")
 
                     #Models that mix tiny and giant weights can causing lopsided stream buffer
                     #rotations and stall. force the tinys over.
