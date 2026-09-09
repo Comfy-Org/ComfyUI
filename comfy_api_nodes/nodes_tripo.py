@@ -13,14 +13,15 @@ from comfy_api_nodes.apis.tripo import (
     TripoAnimateRigRequest,
     TripoConvertModelRequest,
     TripoEditMultiviewImageRequest,
-    TripoFileEmptyReference,
     TripoFileReference,
+    TripoFileResponse,
     TripoGenerateMultiviewImageRequest,
     TripoHighpolyToLowpolyRequest,
     TripoImageToModelRequest,
     TripoImportModelRequest,
     TripoMeshCompletionRequest,
     TripoMeshSegmentationRequest,
+    TripoMeshSmartSegmentRequest,
     TripoModelVersion,
     TripoMultiviewEditPrompt,
     TripoMultiviewToModelRequest,
@@ -35,7 +36,6 @@ from comfy_api_nodes.apis.tripo import (
     TripoStyle,
     TripoTaskResponse,
     TripoTaskStatus,
-    TripoTaskType,
     TripoTextToModelRequest,
     TripoTextureModelRequest,
     TripoTextureModelVersion,
@@ -48,6 +48,7 @@ from comfy_api_nodes.util import (
     download_url_to_image_tensor,
     poll_op,
     sync_op,
+    tensor_to_bytesio,
     upload_3d_model_to_comfyapi,
     upload_images_to_comfyapi,
 )
@@ -64,10 +65,8 @@ FACE_LIMIT_TOOLTIP = (
 
 
 def get_model_url_from_response(response: TripoTaskResponse) -> str:
-    if response.data is not None:
-        for key in ["pbr_model", "model", "base_model"]:
-            if getattr(response.data.output, key, None) is not None:
-                return getattr(response.data.output, key)
+    if response.data is not None and response.data.output is not None and response.data.output.model_url:
+        return response.data.output.model_url
     raise RuntimeError(f"Failed to get model url from response: {response}")
 
 
@@ -81,7 +80,7 @@ async def poll_task(
         raise RuntimeError(f"Failed to create Tripo task: {response}")
     response_poll = await poll_op(
         node_cls,
-        poll_endpoint=ApiEndpoint(path=f"/proxy/tripo/v2/openapi/task/{response.data.task_id}"),
+        poll_endpoint=ApiEndpoint(path=f"/proxy/tripo/v3/tasks/{response.data.task_id}"),
         response_model=TripoTaskResponse,
         completed_statuses=[TripoTaskStatus.SUCCESS],
         failed_statuses=[
@@ -116,12 +115,12 @@ async def poll_until_finished(
 async def check_riggable(node_cls: type[IO.ComfyNode], model_task_id: str) -> tuple[bool, str]:
     response = await sync_op(
         node_cls,
-        endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+        endpoint=ApiEndpoint(path="/proxy/tripo/v3/animations/rig-check", method="POST"),
         response_model=TripoTaskResponse,
-        data=TripoAnimatePrerigcheckRequest(original_model_task_id=model_task_id),
+        data=TripoAnimatePrerigcheckRequest(input=model_task_id),
     )
     output = (await poll_task(node_cls, response, average_duration=5)).data.output
-    return bool(output.riggable), output.rig_type or output.topology or ""
+    return bool(output.riggable), output.rig_type or ""
 
 
 async def upload_image_reference(node_cls: type[IO.ComfyNode], image: Input.Image) -> TripoFileReference:
@@ -129,9 +128,20 @@ async def upload_image_reference(node_cls: type[IO.ComfyNode], image: Input.Imag
     return TripoFileReference(root=TripoUrlReference(url=url, type="jpeg"))
 
 
-async def multiview_output(node_cls: type[IO.ComfyNode], response: TripoTaskResponse, with_task_id: bool) -> IO.NodeOutput:
+async def multiview_output(
+    node_cls: type[IO.ComfyNode], response: TripoTaskResponse, with_task_id: bool, source_task_id: str | None = None
+) -> IO.NodeOutput:
     response_poll = await poll_task(node_cls, response, average_duration=25)
-    views = response_poll.data.output.generate_multiview_image or {}
+    views = dict(response_poll.data.output.generate_multiview_image or {})
+    if source_task_id and any(not views.get(key) for key in MULTIVIEW_KEYS):
+        source = await sync_op(
+            node_cls,
+            endpoint=ApiEndpoint(path=f"/proxy/tripo/v3/tasks/{source_task_id}"),
+            response_model=TripoTaskResponse,
+        )
+        for key, url in (source.data.output.generate_multiview_image or {}).items():
+            if not views.get(key):
+                views[key] = url
     if any(not views.get(key) for key in MULTIVIEW_KEYS):
         raise RuntimeError(f"Tripo returned incomplete multiview images: {response_poll}")
     images = [await download_url_to_image_tensor(views[key], cls=node_cls) for key in MULTIVIEW_KEYS]
@@ -320,13 +330,12 @@ class TripoTextToModelNode(IO.ComfyNode):
         check_smart_low_poly_face_limit(smart_low_poly, face_limit, quad)
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/generation/text-to-model", method="POST"),
             response_model=TripoTaskResponse,
             data=TripoTextToModelRequest(
-                type=TripoTaskType.TEXT_TO_MODEL,
                 prompt=prompt,
                 negative_prompt=negative_prompt if negative_prompt else None,
-                model_version=model_version,
+                model=model_version or TripoModelVersion.v3_1_20260211,
                 texture=texture,
                 pbr=False if texture is False else pbr,
                 image_seed=image_seed,
@@ -501,20 +510,14 @@ class TripoImageToModelNode(IO.ComfyNode):
         if image is None:
             raise RuntimeError("Image is required")
         check_smart_low_poly_face_limit(smart_low_poly, face_limit, quad)
-        tripo_file = TripoFileReference(
-            root=TripoUrlReference(
-                url=(await upload_images_to_comfyapi(cls, image, max_images=1))[0],
-                type="jpeg",
-            )
-        )
+        image_url = (await upload_images_to_comfyapi(cls, image, max_images=1))[0]
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/generation/image-to-model", method="POST"),
             response_model=TripoTaskResponse,
             data=TripoImageToModelRequest(
-                type=TripoTaskType.IMAGE_TO_MODEL,
-                file=tripo_file,
-                model_version=model_version,
+                input=image_url,
+                model=model_version or TripoModelVersion.v3_1_20260211,
                 texture=texture,
                 pbr=False if texture is False else pbr,
                 model_seed=model_seed,
@@ -688,30 +691,19 @@ class TripoMultiviewToModelNode(IO.ComfyNode):
         if image is None:
             raise RuntimeError("front image for multiview is required")
         images = []
-        image_dict = {"image": image, "image_left": image_left, "image_back": image_back, "image_right": image_right}
         if image_left is None and image_back is None and image_right is None:
             raise RuntimeError("At least one of left, back, or right image must be provided for multiview")
         check_smart_low_poly_face_limit(smart_low_poly, face_limit, quad)
-        for image_name in ["image", "image_left", "image_back", "image_right"]:
-            image_ = image_dict[image_name]
+        for view, image_ in zip(("front", "left", "back", "right"), (image, image_left, image_back, image_right)):
             if image_ is not None:
-                images.append(
-                    TripoFileReference(
-                        root=TripoUrlReference(
-                            url=(await upload_images_to_comfyapi(cls, image_, max_images=1))[0], type="jpeg"
-                        )
-                    )
-                )
-            else:
-                images.append(TripoFileEmptyReference())
+                images.append({view: (await upload_images_to_comfyapi(cls, image_, max_images=1))[0]})
         response = await sync_op(
             cls,
-            ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            ApiEndpoint(path="/proxy/tripo/v3/generation/multiview-to-model", method="POST"),
             response_model=TripoTaskResponse,
             data=TripoMultiviewToModelRequest(
-                type=TripoTaskType.MULTIVIEW_TO_MODEL,
-                files=images,
-                model_version=model_version,
+                inputs=images,
+                model=model_version or TripoModelVersion.v3_1_20260211,
                 orientation=orientation,
                 texture=texture,
                 pbr=False if texture is False else pbr,
@@ -762,9 +754,9 @@ class TripoImageToMultiviewNode(IO.ComfyNode):
     async def execute(cls, image: Input.Image) -> IO.NodeOutput:
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/generation/image-to-multiview", method="POST"),
             response_model=TripoTaskResponse,
-            data=TripoGenerateMultiviewImageRequest(file=await upload_image_reference(cls, image)),
+            data=TripoGenerateMultiviewImageRequest(input=(await upload_images_to_comfyapi(cls, image, max_images=1))[0]),
         )
         return await multiview_output(cls, response, with_task_id=True)
 
@@ -826,11 +818,11 @@ class TripoEditMultiviewNode(IO.ComfyNode):
             raise ValueError("Provide an edit instruction for at least one view.")
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/generation/edit-multiview", method="POST"),
             response_model=TripoTaskResponse,
-            data=TripoEditMultiviewImageRequest(original_task_id=multiview_task_id, prompts=prompts),
+            data=TripoEditMultiviewImageRequest(input=multiview_task_id, prompts=prompts),
         )
-        return await multiview_output(cls, response, with_task_id=False)
+        return await multiview_output(cls, response, with_task_id=False, source_task_id=multiview_task_id)
 
 
 class TripoTextureNode(IO.ComfyNode):
@@ -972,7 +964,7 @@ class TripoTextureNode(IO.ComfyNode):
         if not text:
             source = await sync_op(
                 cls,
-                endpoint=ApiEndpoint(path=f"/proxy/tripo/v2/openapi/task/{model_task_id}"),
+                endpoint=ApiEndpoint(path=f"/proxy/tripo/v3/tasks/{model_task_id}"),
                 response_model=TripoTaskResponse,
             )
             if source.data.type not in TEXTURE_SOURCE_TYPES_WITH_IMAGE:
@@ -995,12 +987,11 @@ class TripoTextureNode(IO.ComfyNode):
             prompt = None
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/models/texture", method="POST"),
             response_model=TripoTaskResponse,
             data=TripoTextureModelRequest(
-                original_model_task_id=model_task_id,
-                model_version=model_version,
-                texture=True,
+                input=model_task_id,
+                model=model_version,
                 pbr=pbr,
                 texture_seed=texture_seed,
                 texture_quality=texture_quality,
@@ -1088,11 +1079,11 @@ class TripoRigNode(IO.ComfyNode):
             raise ValueError(f"Rig model v1.0-20240301 only supports biped skeletons; use v2.5-20260210 for {rig_type}.")
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/animations/rig", method="POST"),
             response_model=TripoTaskResponse,
             data=TripoAnimateRigRequest(
-                original_model_task_id=original_model_task_id,
-                model_version=model_version,
+                input=original_model_task_id,
+                model=model_version,
                 rig_type=rig_type,
                 out_format=out_format,
                 spec=spec,
@@ -1168,7 +1159,7 @@ class TripoRetargetNode(IO.ComfyNode):
     ) -> IO.NodeOutput:
         rig = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path=f"/proxy/tripo/v2/openapi/task/{original_model_task_id}"),
+            endpoint=ApiEndpoint(path=f"/proxy/tripo/v3/tasks/{original_model_task_id}"),
             response_model=TripoTaskResponse,
         )
         rig_input = rig.data.input or {}
@@ -1176,10 +1167,10 @@ class TripoRetargetNode(IO.ComfyNode):
             raise ValueError("Tripo cannot retarget animation presets onto a v1.0 rig made with the mixamo spec.")
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/animations/retarget", method="POST"),
             response_model=TripoTaskResponse,
             data=TripoAnimateRetargetRequest(
-                original_model_task_id=original_model_task_id,
+                input=original_model_task_id,
                 animation=animation,
                 out_format=out_format,
                 export_with_geometry=export_with_geometry,
@@ -1257,9 +1248,9 @@ class TripoSegmentNode(IO.ComfyNode):
     async def execute(cls, model_task_id) -> IO.NodeOutput:
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/mesh/segment", method="POST"),
             response_model=TripoTaskResponse,
-            data=TripoMeshSegmentationRequest(original_model_task_id=model_task_id),
+            data=TripoMeshSegmentationRequest(input=model_task_id),
         )
         task_id, model = await poll_until_finished(cls, response, average_duration=160)
         return IO.NodeOutput(f"{task_id}.glb", task_id, model, ",".join(part_names_from_glb(model)))
@@ -1304,10 +1295,10 @@ class TripoMeshCompleteNode(IO.ComfyNode):
     async def execute(cls, segment_task_id, part_names: str = "") -> IO.NodeOutput:
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/mesh/complete", method="POST"),
             response_model=TripoTaskResponse,
             data=TripoMeshCompletionRequest(
-                original_model_task_id=segment_task_id,
+                input=segment_task_id,
                 part_names=split_part_names(part_names),
             ),
         )
@@ -1384,10 +1375,10 @@ class TripoRetopologyNode(IO.ComfyNode):
             raise ValueError("face_limit must be between 500 and 20,000 for triangles or 500 and 10,000 for quads.")
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/mesh/decimate", method="POST"),
             response_model=TripoTaskResponse,
             data=TripoHighpolyToLowpolyRequest(
-                original_model_task_id=model_task_id,
+                input=model_task_id,
                 face_limit=face_limit if face_limit != -1 else None,
                 quad=quad,
                 bake=bake,
@@ -1395,6 +1386,125 @@ class TripoRetopologyNode(IO.ComfyNode):
             ),
         )
         return glb_or_fbx_output(*await poll_until_finished(cls, response, average_duration=200))
+
+
+IDENTITY_TRANSFORM = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+
+class TripoSmartSegmentNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="TripoSmartSegmentNode",
+            display_name="Tripo: Smart Segment",
+            category="partner/3d/Tripo",
+            description="Splits a model into semantically meaningful parts and names them. From an image, Tripo first "
+            "generates the model. The segment task_id feeds Tripo: Complete Mesh Parts, Tripo: Retopology, "
+            "Tripo: Texture model and Tripo: Convert model like a Tripo: Segment Model result.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "source",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "model",
+                            [
+                                IO.Custom("MODEL_TASK_ID").Input(
+                                    "model_task_id",
+                                    tooltip="A GLB result. Quad meshes and FBX imports must go through Tripo: Convert model (GLTF) first.",
+                                )
+                            ],
+                        ),
+                        IO.DynamicCombo.Option("image", [IO.Image.Input("image")]),
+                    ],
+                    tooltip="Segment an existing model, or generate a model from an image and segment it.",
+                ),
+                IO.Combo.Input("granularity", options=["coarse", "medium", "fine"], default="medium", optional=True),
+                IO.String.Input(
+                    "hint",
+                    default="",
+                    multiline=True,
+                    optional=True,
+                    tooltip="Optional text naming the parts to look for, e.g. 'game character with sword and armor'.",
+                ),
+            ],
+            outputs=[
+                IO.Custom("SEGMENT_TASK_ID").Output(display_name="segment task_id"),
+                IO.Custom("MODEL_TASK_ID").Output(
+                    display_name="model task_id", tooltip="The model that was segmented (generated from the image, or imported)."
+                ),
+                IO.File3DGLB.Output(display_name="GLB"),
+                IO.String.Output(display_name="part_names", tooltip="Comma-separated names of the parts."),
+                IO.String.Output(display_name="parts", tooltip="Tripo's description of the parts it found."),
+                IO.Image.Output(display_name="mask"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            is_output_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["source"]),
+                expr="""{"type":"usd","usd": (widgets.source = "image" ? 0.85 : 0.55), "format": {"approximate": true}}""",
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, source: dict, granularity: str = "medium", hint: str = "") -> IO.NodeOutput:
+        if source["source"] == "image":
+            uploaded = await sync_op(
+                cls,
+                endpoint=ApiEndpoint(path="/proxy/tripo/v3/files", method="POST"),
+                response_model=TripoFileResponse,
+                files={"file": ("image.png", tensor_to_bytesio(source["image"]), "image/png")},
+                content_type="multipart/form-data",
+            )
+            request = TripoMeshSmartSegmentRequest(
+                input=uploaded.data.file_token,
+                seg_type="image",
+                granularity=granularity,
+                hint=hint.strip() or None,
+            )
+        else:
+            task = await sync_op(
+                cls,
+                endpoint=ApiEndpoint(path=f"/proxy/tripo/v3/tasks/{source['model_task_id']}"),
+                response_model=TripoTaskResponse,
+            )
+            url = get_model_url_from_response(task)
+            if Path(urlparse(url).path).suffix.lower() != ".glb":
+                raise ValueError(
+                    "Tripo: Smart Segment accepts GLB models only. Convert quad meshes and FBX imports with "
+                    "Tripo: Convert model (GLTF) first."
+                )
+            request = TripoMeshSmartSegmentRequest(
+                input=url,
+                seg_type="model",
+                transform=IDENTITY_TRANSFORM,
+                granularity=granularity,
+                hint=hint.strip() or None,
+            )
+        response = await sync_op(
+            cls,
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/mesh/smartsegment", method="POST"),
+            response_model=TripoTaskResponse,
+            data=request,
+        )
+        output = (await poll_task(cls, response, average_duration=180)).data.output
+        if not (output.seg_task_id and output.seg_model_url and output.mask_url):
+            raise RuntimeError(f"Tripo returned an incomplete smart segmentation result: {output}")
+        model = await download_url_to_file_3d(output.seg_model_url, "glb", task_id=output.seg_task_id)
+        mask = await download_url_to_image_tensor(output.mask_url, cls=cls)
+        return IO.NodeOutput(
+            output.seg_task_id,
+            output.model_task_id,
+            model,
+            ",".join(part_names_from_glb(model)),
+            output.prompt or "",
+            mask,
+        )
 
 
 class TripoConversionNode(IO.ComfyNode):
@@ -1563,10 +1673,10 @@ class TripoConversionNode(IO.ComfyNode):
 
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/models/convert", method="POST"),
             response_model=TripoTaskResponse,
             data=TripoConvertModelRequest(
-                original_model_task_id=original_model_task_id,
+                input=original_model_task_id,
                 format=format,
                 quad=quad if quad else None,
                 force_symmetry=force_symmetry if force_symmetry else None,
@@ -1647,17 +1757,17 @@ class TripoImportModelNode(IO.ComfyNode):
         url = await upload_3d_model_to_comfyapi(cls, model_3d, file_format)
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/import", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/models/import", method="POST"),
             response_model=TripoTaskResponse,
-            data=TripoImportModelRequest(url=url, format=file_format),
+            data=TripoImportModelRequest(input=url),
         )
         if response.code != 0:
-            raise RuntimeError(f"Failed to import model: {response.error}")
+            raise RuntimeError(f"Failed to import model: {response}")
 
         task_id = response.data.task_id
         response_poll = await poll_op(
             cls,
-            poll_endpoint=ApiEndpoint(path=f"/proxy/tripo/v2/openapi/task/{task_id}"),
+            poll_endpoint=ApiEndpoint(path=f"/proxy/tripo/v3/tasks/{task_id}"),
             response_model=TripoTaskResponse,
             failed_statuses=[
                 TripoTaskStatus.FAILED,
@@ -1875,7 +1985,7 @@ class TripoP1TextToModelNode(IO.ComfyNode):
         )
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/generation/text-to-model", method="POST"),
             response_model=TripoTaskResponse,
             data=request,
         )
@@ -1934,12 +2044,7 @@ class TripoP1ImageToModelNode(IO.ComfyNode):
     ) -> IO.NodeOutput:
         if image is None:
             raise RuntimeError("Image is required")
-        tripo_file = TripoFileReference(
-            root=TripoUrlReference(
-                url=(await upload_images_to_comfyapi(cls, image, max_images=1))[0],
-                type="jpeg",
-            )
-        )
+        image_url = (await upload_images_to_comfyapi(cls, image, max_images=1))[0]
         common = _build_p1_request_kwargs(
             output_mode=output_mode,
             face_limit=face_limit,
@@ -1949,13 +2054,13 @@ class TripoP1ImageToModelNode(IO.ComfyNode):
             compress_geometry=compress_geometry,
         )
         request = TripoP1ImageToModelRequest(
-            file=tripo_file,
+            input=image_url,
             enable_image_autofix=enable_image_autofix,
             **common,
         )
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/generation/image-to-model", method="POST"),
             response_model=TripoTaskResponse,
             data=request,
         )
@@ -2023,13 +2128,10 @@ class TripoP1MultiviewToModelNode(IO.ComfyNode):
         if sum(1 for v in views if v is not None) < 2:
             raise RuntimeError("Tripo P1 multiview requires at least 2 images (front plus one of left/back/right).")
 
-        files: list[TripoFileReference] = []
-        for view in views:
-            if view is None:
-                files.append(TripoFileReference(root=TripoFileEmptyReference()))
-                continue
-            url = (await upload_images_to_comfyapi(cls, view, max_images=1))[0]
-            files.append(TripoFileReference(root=TripoUrlReference(url=url, type="jpeg")))
+        inputs: list[dict[str, str]] = []
+        for name, view in zip(("front", "left", "back", "right"), views):
+            if view is not None:
+                inputs.append({name: (await upload_images_to_comfyapi(cls, view, max_images=1))[0]})
 
         common = _build_p1_request_kwargs(
             output_mode=output_mode,
@@ -2039,10 +2141,10 @@ class TripoP1MultiviewToModelNode(IO.ComfyNode):
             export_uv=export_uv,
             compress_geometry=compress_geometry,
         )
-        request = TripoP1MultiviewToModelRequest(files=files, **common)
+        request = TripoP1MultiviewToModelRequest(inputs=inputs, **common)
         response = await sync_op(
             cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v2/openapi/task", method="POST"),
+            endpoint=ApiEndpoint(path="/proxy/tripo/v3/generation/multiview-to-model", method="POST"),
             response_model=TripoTaskResponse,
             data=request,
         )
@@ -2069,6 +2171,7 @@ class TripoExtension(ComfyExtension):
             TripoSegmentNode,
             TripoMeshCompleteNode,
             TripoRetopologyNode,
+            TripoSmartSegmentNode,
             TripoConversionNode,
         ]
 
