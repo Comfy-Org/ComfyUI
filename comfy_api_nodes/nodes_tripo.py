@@ -174,15 +174,222 @@ def check_smart_low_poly_face_limit(smart_low_poly: bool | None, face_limit: int
         )
 
 
-def glb_or_fbx_output(task_id: str, model: Types.File3D) -> IO.NodeOutput:
+def glb_or_fbx_output(task_id: str, model: Types.File3D, legacy: bool = True) -> IO.NodeOutput:
     if model.format not in ("glb", "fbx"):
         raise RuntimeError(f"Tripo returned a file of type {model.format.upper() or 'unknown'} where GLB or FBX was expected")
-    return IO.NodeOutput(
-        f"{task_id}.{model.format}",
-        task_id,
-        model if model.format == "glb" else None,
-        model if model.format == "fbx" else None,
+    outputs = (task_id, model if model.format == "glb" else None, model if model.format == "fbx" else None)
+    return IO.NodeOutput(f"{task_id}.{model.format}", *outputs) if legacy else IO.NodeOutput(*outputs)
+
+
+def model_outputs(
+    legacy: bool,
+    glb_tooltip: str = "Empty when quad is enabled.",
+    fbx_tooltip: str = "Only populated when quad is enabled.",
+) -> list:
+    outputs = [
+        IO.Custom("MODEL_TASK_ID").Output(display_name="model task_id"),
+        IO.File3DGLB.Output(display_name="GLB", tooltip=glb_tooltip),
+        IO.File3DFBX.Output(display_name="FBX", tooltip=fbx_tooltip),
+    ]
+    return [IO.String.Output(display_name="model_file"), *outputs] if legacy else outputs
+
+
+def style_input() -> IO.Combo.Input:
+    return IO.Combo.Input(
+        "style",
+        options=TripoStyle,
+        default="None",
+        optional=True,
+        tooltip="No longer supported by Tripo and ignored. Kept for older workflows.",
     )
+
+
+def texture_inputs() -> list:
+    return [
+        IO.Boolean.Input(
+            "texture",
+            default=True,
+            optional=True,
+            tooltip="Generate texture maps. Off returns bare geometry and ignores pbr.",
+        ),
+        IO.Boolean.Input(
+            "pbr",
+            default=True,
+            optional=True,
+            tooltip="PBR material maps (base color, metallic, roughness, normal). Requires texture.",
+        ),
+    ]
+
+
+def seed_input(name: str) -> IO.Int.Input:
+    return IO.Int.Input(name, default=42, min=0, max=SEED_MAX, optional=True, advanced=True)
+
+
+def texture_quality_input() -> IO.Combo.Input:
+    return IO.Combo.Input(
+        "texture_quality",
+        default="standard",
+        options=["standard", "detailed", "extreme"],
+        optional=True,
+        advanced=True,
+        tooltip="detailed = HD textures, extreme = 8K Ultra textures.",
+    )
+
+
+def texture_alignment_input() -> IO.Combo.Input:
+    return IO.Combo.Input(
+        "texture_alignment",
+        default="original_image",
+        options=["original_image", "geometry"],
+        optional=True,
+        advanced=True,
+    )
+
+
+def orientation_input() -> IO.Combo.Input:
+    return IO.Combo.Input(
+        "orientation",
+        options=TripoOrientation,
+        default=TripoOrientation.DEFAULT,
+        optional=True,
+        advanced=True,
+    )
+
+
+def geometry_inputs(auto_size: bool) -> list:
+    return [
+        IO.Int.Input("face_limit", default=-1, min=-1, max=2000000, optional=True, advanced=True, tooltip=FACE_LIMIT_TOOLTIP),
+        IO.Boolean.Input(
+            "quad",
+            default=False,
+            optional=True,
+            advanced=True,
+            tooltip="Quad mesh output. Tripo delivers quad meshes as FBX, so the result "
+            "arrives on the FBX output and the GLB output stays empty.",
+        ),
+        IO.Combo.Input(
+            "geometry_quality",
+            default="standard",
+            options=["standard", "detailed"],
+            optional=True,
+            advanced=True,
+        ),
+        IO.Boolean.Input(
+            "smart_low_poly",
+            default=False,
+            optional=True,
+            advanced=True,
+            tooltip="Low-poly mesh with clean, hand-crafted style topology (500-20,000 faces, quad 500-10,000). "
+            "Best for simple subjects; complex ones may fail.",
+        ),
+        IO.Boolean.Input(
+            "auto_size",
+            default=auto_size,
+            optional=True,
+            advanced=True,
+            tooltip="Scale textured models to their real-world size in meters. Tripo stores the size as the model's "
+            "scene transform and bakes it in when the model is converted, rigged or retargeted; ignored without texture.",
+        ),
+    ]
+
+
+def generation_price_badge(untextured: int, textured: int) -> IO.PriceBadge:
+    return IO.PriceBadge(
+        depends_on=IO.PriceBadgeDepends(
+            widgets=[
+                "model_version",
+                "texture",
+                "quad",
+                "smart_low_poly",
+                "texture_quality",
+                "geometry_quality",
+            ],
+        ),
+        expr=f"""
+                (
+                  $isV3OrLater := $contains(widgets.model_version,"v3.");
+                  $tq := widgets.texture_quality;
+                  $textureAddon := widgets.texture ? ($tq = "extreme" ? 20 : ($tq = "detailed" ? 10 : 0)) : 0;
+                  $geometryAddon := (widgets.geometry_quality = "detailed" and $isV3OrLater) ? 20 : 0;
+                  $credits := (widgets.texture ? {textured} : {untextured})
+                    + (widgets.quad ? 5 : 0)
+                    + (widgets.smart_low_poly ? 10 : 0)
+                    + $textureAddon
+                    + $geometryAddon;
+                  {{"type":"usd","usd": $credits * 0.01, "format": {{"approximate": true}}}}
+                )
+                """,
+    )
+
+
+def hidden_inputs() -> list:
+    return [
+        IO.Hidden.auth_token_comfy_org,
+        IO.Hidden.api_key_comfy_org,
+        IO.Hidden.unique_id,
+    ]
+
+
+def text_to_model_inputs(legacy: bool) -> list:
+    return [
+        IO.String.Input("prompt", multiline=True),
+        IO.String.Input("negative_prompt", multiline=True, optional=True, tooltip="Up to 255 characters."),
+        IO.Combo.Input(
+            "model_version", options=TripoModelVersion, default=TripoModelVersion.v3_1_20260211, optional=True
+        ),
+        *([style_input()] if legacy else []),
+        *texture_inputs(),
+        seed_input("image_seed"),
+        seed_input("model_seed"),
+        seed_input("texture_seed"),
+        texture_quality_input(),
+        *geometry_inputs(auto_size=True),
+    ]
+
+
+async def text_to_model(
+    cls: type[IO.ComfyNode],
+    *,
+    prompt: str,
+    negative_prompt: str | None,
+    model_version,
+    texture: bool | None,
+    pbr: bool | None,
+    image_seed: int | None,
+    model_seed: int | None,
+    texture_seed: int | None,
+    texture_quality: str | None,
+    geometry_quality: str | None,
+    face_limit: int | None,
+    quad: bool | None,
+    smart_low_poly: bool | None,
+    auto_size: bool,
+) -> tuple[str, Types.File3D]:
+    if not prompt.strip():
+        raise RuntimeError("Prompt is required")
+    check_smart_low_poly_face_limit(smart_low_poly, face_limit, quad)
+    response = await sync_op(
+        cls,
+        endpoint=ApiEndpoint(path="/proxy/tripo/v3/generation/text-to-model", method="POST"),
+        response_model=TripoTaskResponse,
+        data=TripoTextToModelRequest(
+            prompt=prompt,
+            negative_prompt=negative_prompt if negative_prompt else None,
+            model=model_version or TripoModelVersion.v3_1_20260211,
+            texture=texture,
+            pbr=False if texture is False else pbr,
+            image_seed=image_seed,
+            model_seed=model_seed,
+            texture_seed=texture_seed,
+            texture_quality=texture_quality,
+            face_limit=face_limit if face_limit != -1 else None,
+            geometry_quality=geometry_quality,
+            auto_size=auto_size,
+            quad=quad,
+            smart_low_poly=smart_low_poly,
+        ),
+    )
+    return await poll_until_finished(cls, response, average_duration=80)
 
 
 class TripoTextToModelNode(IO.ComfyNode):
@@ -194,116 +401,15 @@ class TripoTextToModelNode(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="TripoTextToModelNode",
-            display_name="Tripo: Text to Model",
+            display_name="Tripo: Text to Model (Legacy)",
             category="partner/3d/Tripo",
-            inputs=[
-                IO.String.Input("prompt", multiline=True),
-                IO.String.Input("negative_prompt", multiline=True, optional=True, tooltip="Up to 255 characters."),
-                IO.Combo.Input(
-                    "model_version", options=TripoModelVersion, default=TripoModelVersion.v3_1_20260211, optional=True
-                ),
-                IO.Combo.Input(
-                    "style",
-                    options=TripoStyle,
-                    default="None",
-                    optional=True,
-                    tooltip="No longer supported by Tripo and ignored. Kept for older workflows.",
-                ),
-                IO.Boolean.Input(
-                    "texture",
-                    default=True,
-                    optional=True,
-                    tooltip="Generate texture maps. Off returns bare geometry and ignores pbr.",
-                ),
-                IO.Boolean.Input(
-                    "pbr",
-                    default=True,
-                    optional=True,
-                    tooltip="PBR material maps (base color, metallic, roughness, normal). Requires texture.",
-                ),
-                IO.Int.Input("image_seed", default=42, min=0, max=SEED_MAX, optional=True, advanced=True),
-                IO.Int.Input("model_seed", default=42, min=0, max=SEED_MAX, optional=True, advanced=True),
-                IO.Int.Input("texture_seed", default=42, min=0, max=SEED_MAX, optional=True, advanced=True),
-                IO.Combo.Input(
-                    "texture_quality",
-                    default="standard",
-                    options=["standard", "detailed", "extreme"],
-                    optional=True,
-                    advanced=True,
-                    tooltip="detailed = HD textures, extreme = 8K Ultra textures.",
-                ),
-                IO.Int.Input("face_limit", default=-1, min=-1, max=2000000, optional=True, advanced=True, tooltip=FACE_LIMIT_TOOLTIP),
-                IO.Boolean.Input(
-                    "quad",
-                    default=False,
-                    optional=True,
-                    advanced=True,
-                    tooltip="Quad mesh output. Tripo delivers quad meshes as FBX, so the result "
-                    "arrives on the FBX output and the GLB output stays empty.",
-                ),
-                IO.Combo.Input(
-                    "geometry_quality",
-                    default="standard",
-                    options=["standard", "detailed"],
-                    optional=True,
-                    advanced=True,
-                ),
-                IO.Boolean.Input(
-                    "smart_low_poly",
-                    default=False,
-                    optional=True,
-                    advanced=True,
-                    tooltip="Low-poly mesh with clean, hand-crafted style topology (500-20,000 faces, quad 500-10,000). "
-                    "Best for simple subjects; complex ones may fail.",
-                ),
-                IO.Boolean.Input(
-                    "auto_size",
-                    default=True,
-                    optional=True,
-                    advanced=True,
-                    tooltip="Scale textured models to their real-world size in meters. Tripo stores the size as the model's "
-                    "scene transform and bakes it in when the model is converted, rigged or retargeted; ignored without texture.",
-                ),
-            ],
-            outputs=[
-                IO.String.Output(display_name="model_file"),  # for backward compatibility only
-                IO.Custom("MODEL_TASK_ID").Output(display_name="model task_id"),
-                IO.File3DGLB.Output(display_name="GLB", tooltip="Empty when quad is enabled."),
-                IO.File3DFBX.Output(display_name="FBX", tooltip="Only populated when quad is enabled."),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
+            inputs=text_to_model_inputs(legacy=True),
+            outputs=model_outputs(legacy=True),
+            hidden=hidden_inputs(),
             is_api_node=True,
             is_output_node=True,
-            price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(
-                    widgets=[
-                        "model_version",
-                        "texture",
-                        "quad",
-                        "smart_low_poly",
-                        "texture_quality",
-                        "geometry_quality",
-                    ],
-                ),
-                expr="""
-                (
-                  $isV3OrLater := $contains(widgets.model_version,"v3.");
-                  $tq := widgets.texture_quality;
-                  $textureAddon := widgets.texture ? ($tq = "extreme" ? 20 : ($tq = "detailed" ? 10 : 0)) : 0;
-                  $geometryAddon := (widgets.geometry_quality = "detailed" and $isV3OrLater) ? 20 : 0;
-                  $credits := (widgets.texture ? 20 : 10)
-                    + (widgets.quad ? 5 : 0)
-                    + (widgets.smart_low_poly ? 10 : 0)
-                    + $textureAddon
-                    + $geometryAddon;
-                  {"type":"usd","usd": $credits * 0.01, "format": {"approximate": true}}
-                )
-                """,
-            ),
+            is_deprecated=True,
+            price_badge=generation_price_badge(untextured=10, textured=20),
         )
 
     @classmethod
@@ -325,31 +431,147 @@ class TripoTextToModelNode(IO.ComfyNode):
         smart_low_poly: bool | None = None,
         auto_size: bool = True,
     ) -> IO.NodeOutput:
-        if not prompt.strip():
-            raise RuntimeError("Prompt is required")
-        check_smart_low_poly_face_limit(smart_low_poly, face_limit, quad)
-        response = await sync_op(
-            cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v3/generation/text-to-model", method="POST"),
-            response_model=TripoTaskResponse,
-            data=TripoTextToModelRequest(
+        return glb_or_fbx_output(
+            *await text_to_model(
+                cls,
                 prompt=prompt,
-                negative_prompt=negative_prompt if negative_prompt else None,
-                model=model_version or TripoModelVersion.v3_1_20260211,
+                negative_prompt=negative_prompt,
+                model_version=model_version,
                 texture=texture,
-                pbr=False if texture is False else pbr,
+                pbr=pbr,
                 image_seed=image_seed,
                 model_seed=model_seed,
                 texture_seed=texture_seed,
                 texture_quality=texture_quality,
-                face_limit=face_limit if face_limit != -1 else None,
                 geometry_quality=geometry_quality,
-                auto_size=auto_size,
+                face_limit=face_limit,
                 quad=quad,
                 smart_low_poly=smart_low_poly,
-            ),
+                auto_size=auto_size,
+            )
         )
-        return glb_or_fbx_output(*await poll_until_finished(cls, response, average_duration=80))
+
+
+class TripoTextToModelNodeV2(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="TripoTextToModelNodeV2",
+            display_name="Tripo: Text to Model",
+            category="partner/3d/Tripo",
+            inputs=text_to_model_inputs(legacy=False),
+            outputs=model_outputs(legacy=False),
+            hidden=hidden_inputs(),
+            is_api_node=True,
+            is_output_node=True,
+            price_badge=generation_price_badge(untextured=10, textured=20),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        prompt: str,
+        negative_prompt: str | None = None,
+        model_version=None,
+        texture: bool | None = None,
+        pbr: bool | None = None,
+        image_seed: int | None = None,
+        model_seed: int | None = None,
+        texture_seed: int | None = None,
+        texture_quality: str | None = None,
+        geometry_quality: str | None = None,
+        face_limit: int | None = None,
+        quad: bool | None = None,
+        smart_low_poly: bool | None = None,
+        auto_size: bool = True,
+    ) -> IO.NodeOutput:
+        return glb_or_fbx_output(
+            *await text_to_model(
+                cls,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                model_version=model_version,
+                texture=texture,
+                pbr=pbr,
+                image_seed=image_seed,
+                model_seed=model_seed,
+                texture_seed=texture_seed,
+                texture_quality=texture_quality,
+                geometry_quality=geometry_quality,
+                face_limit=face_limit,
+                quad=quad,
+                smart_low_poly=smart_low_poly,
+                auto_size=auto_size,
+            ),
+            legacy=False,
+        )
+
+
+def image_to_model_inputs(legacy: bool) -> list:
+    return [
+        IO.Image.Input("image"),
+        IO.Combo.Input(
+            "model_version",
+            options=TripoModelVersion,
+            tooltip="The model version to use for generation",
+            optional=True,
+        ),
+        *([style_input()] if legacy else []),
+        *texture_inputs(),
+        seed_input("model_seed"),
+        orientation_input(),
+        seed_input("texture_seed"),
+        texture_quality_input(),
+        texture_alignment_input(),
+        *geometry_inputs(auto_size=True),
+    ]
+
+
+async def image_to_model(
+    cls: type[IO.ComfyNode],
+    *,
+    image: Input.Image,
+    model_version: str | None,
+    texture: bool | None,
+    pbr: bool | None,
+    model_seed: int | None,
+    orientation,
+    texture_seed: int | None,
+    texture_quality: str | None,
+    geometry_quality: str | None,
+    texture_alignment: str | None,
+    face_limit: int | None,
+    quad: bool | None,
+    smart_low_poly: bool | None,
+    auto_size: bool,
+) -> tuple[str, Types.File3D]:
+    if image is None:
+        raise RuntimeError("Image is required")
+    check_smart_low_poly_face_limit(smart_low_poly, face_limit, quad)
+    image_url = (await upload_images_to_comfyapi(cls, image, max_images=1))[0]
+    response = await sync_op(
+        cls,
+        endpoint=ApiEndpoint(path="/proxy/tripo/v3/generation/image-to-model", method="POST"),
+        response_model=TripoTaskResponse,
+        data=TripoImageToModelRequest(
+            input=image_url,
+            model=model_version or TripoModelVersion.v3_1_20260211,
+            texture=texture,
+            pbr=False if texture is False else pbr,
+            model_seed=model_seed,
+            orientation=orientation,
+            geometry_quality=geometry_quality,
+            texture_alignment=texture_alignment,
+            texture_seed=texture_seed,
+            texture_quality=texture_quality,
+            face_limit=face_limit if face_limit != -1 else None,
+            auto_size=auto_size,
+            quad=quad,
+            smart_low_poly=smart_low_poly,
+        ),
+    )
+    return await poll_until_finished(cls, response, average_duration=80)
 
 
 class TripoImageToModelNode(IO.ComfyNode):
@@ -361,131 +583,15 @@ class TripoImageToModelNode(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="TripoImageToModelNode",
-            display_name="Tripo: Image to Model",
+            display_name="Tripo: Image to Model (Legacy)",
             category="partner/3d/Tripo",
-            inputs=[
-                IO.Image.Input("image"),
-                IO.Combo.Input(
-                    "model_version",
-                    options=TripoModelVersion,
-                    tooltip="The model version to use for generation",
-                    optional=True,
-                ),
-                IO.Combo.Input(
-                    "style",
-                    options=TripoStyle,
-                    default="None",
-                    optional=True,
-                    tooltip="No longer supported by Tripo and ignored. Kept for older workflows.",
-                ),
-                IO.Boolean.Input(
-                    "texture",
-                    default=True,
-                    optional=True,
-                    tooltip="Generate texture maps. Off returns bare geometry and ignores pbr.",
-                ),
-                IO.Boolean.Input(
-                    "pbr",
-                    default=True,
-                    optional=True,
-                    tooltip="PBR material maps (base color, metallic, roughness, normal). Requires texture.",
-                ),
-                IO.Int.Input("model_seed", default=42, min=0, max=SEED_MAX, optional=True, advanced=True),
-                IO.Combo.Input(
-                    "orientation",
-                    options=TripoOrientation,
-                    default=TripoOrientation.DEFAULT,
-                    optional=True,
-                    advanced=True,
-                ),
-                IO.Int.Input("texture_seed", default=42, min=0, max=SEED_MAX, optional=True, advanced=True),
-                IO.Combo.Input(
-                    "texture_quality",
-                    default="standard",
-                    options=["standard", "detailed", "extreme"],
-                    optional=True,
-                    advanced=True,
-                    tooltip="detailed = HD textures, extreme = 8K Ultra textures.",
-                ),
-                IO.Combo.Input(
-                    "texture_alignment",
-                    default="original_image",
-                    options=["original_image", "geometry"],
-                    optional=True,
-                    advanced=True,
-                ),
-                IO.Int.Input("face_limit", default=-1, min=-1, max=2000000, optional=True, advanced=True, tooltip=FACE_LIMIT_TOOLTIP),
-                IO.Boolean.Input(
-                    "quad",
-                    default=False,
-                    optional=True,
-                    advanced=True,
-                    tooltip="Quad mesh output. Tripo delivers quad meshes as FBX, so the result "
-                    "arrives on the FBX output and the GLB output stays empty.",
-                ),
-                IO.Combo.Input(
-                    "geometry_quality",
-                    default="standard",
-                    options=["standard", "detailed"],
-                    optional=True,
-                    advanced=True,
-                ),
-                IO.Boolean.Input(
-                    "smart_low_poly",
-                    default=False,
-                    optional=True,
-                    advanced=True,
-                    tooltip="Low-poly mesh with clean, hand-crafted style topology (500-20,000 faces, quad 500-10,000). "
-                    "Best for simple subjects; complex ones may fail.",
-                ),
-                IO.Boolean.Input(
-                    "auto_size",
-                    default=True,
-                    optional=True,
-                    advanced=True,
-                    tooltip="Scale textured models to their real-world size in meters. Tripo stores the size as the model's "
-                    "scene transform and bakes it in when the model is converted, rigged or retargeted; ignored without texture.",
-                ),
-            ],
-            outputs=[
-                IO.String.Output(display_name="model_file"),  # for backward compatibility only
-                IO.Custom("MODEL_TASK_ID").Output(display_name="model task_id"),
-                IO.File3DGLB.Output(display_name="GLB", tooltip="Empty when quad is enabled."),
-                IO.File3DFBX.Output(display_name="FBX", tooltip="Only populated when quad is enabled."),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
+            inputs=image_to_model_inputs(legacy=True),
+            outputs=model_outputs(legacy=True),
+            hidden=hidden_inputs(),
             is_api_node=True,
             is_output_node=True,
-            price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(
-                    widgets=[
-                        "model_version",
-                        "texture",
-                        "quad",
-                        "smart_low_poly",
-                        "texture_quality",
-                        "geometry_quality",
-                    ],
-                ),
-                expr="""
-                (
-                  $isV3OrLater := $contains(widgets.model_version,"v3.");
-                  $tq := widgets.texture_quality;
-                  $textureAddon := widgets.texture ? ($tq = "extreme" ? 20 : ($tq = "detailed" ? 10 : 0)) : 0;
-                  $geometryAddon := (widgets.geometry_quality = "detailed" and $isV3OrLater) ? 20 : 0;
-                  $credits := (widgets.texture ? 30 : 20)
-                    + (widgets.quad ? 5 : 0)
-                    + (widgets.smart_low_poly ? 10 : 0)
-                    + $textureAddon
-                    + $geometryAddon;
-                  {"type":"usd","usd": $credits * 0.01, "format": {"approximate": true}}
-                )
-                """,
-            ),
+            is_deprecated=True,
+            price_badge=generation_price_badge(untextured=20, textured=30),
         )
 
     @classmethod
@@ -507,32 +613,81 @@ class TripoImageToModelNode(IO.ComfyNode):
         smart_low_poly: bool | None = None,
         auto_size: bool = True,
     ) -> IO.NodeOutput:
-        if image is None:
-            raise RuntimeError("Image is required")
-        check_smart_low_poly_face_limit(smart_low_poly, face_limit, quad)
-        image_url = (await upload_images_to_comfyapi(cls, image, max_images=1))[0]
-        response = await sync_op(
-            cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v3/generation/image-to-model", method="POST"),
-            response_model=TripoTaskResponse,
-            data=TripoImageToModelRequest(
-                input=image_url,
-                model=model_version or TripoModelVersion.v3_1_20260211,
+        return glb_or_fbx_output(
+            *await image_to_model(
+                cls,
+                image=image,
+                model_version=model_version,
                 texture=texture,
-                pbr=False if texture is False else pbr,
+                pbr=pbr,
                 model_seed=model_seed,
                 orientation=orientation,
-                geometry_quality=geometry_quality,
-                texture_alignment=texture_alignment,
                 texture_seed=texture_seed,
                 texture_quality=texture_quality,
-                face_limit=face_limit if face_limit != -1 else None,
-                auto_size=auto_size,
+                geometry_quality=geometry_quality,
+                texture_alignment=texture_alignment,
+                face_limit=face_limit,
                 quad=quad,
                 smart_low_poly=smart_low_poly,
-            ),
+                auto_size=auto_size,
+            )
         )
-        return glb_or_fbx_output(*await poll_until_finished(cls, response, average_duration=80))
+
+
+class TripoImageToModelNodeV2(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="TripoImageToModelNodeV2",
+            display_name="Tripo: Image to Model",
+            category="partner/3d/Tripo",
+            inputs=image_to_model_inputs(legacy=False),
+            outputs=model_outputs(legacy=False),
+            hidden=hidden_inputs(),
+            is_api_node=True,
+            is_output_node=True,
+            price_badge=generation_price_badge(untextured=20, textured=30),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        image: Input.Image,
+        model_version: str | None = None,
+        texture: bool | None = None,
+        pbr: bool | None = None,
+        model_seed: int | None = None,
+        orientation=None,
+        texture_seed: int | None = None,
+        texture_quality: str | None = None,
+        geometry_quality: str | None = None,
+        texture_alignment: str | None = None,
+        face_limit: int | None = None,
+        quad: bool | None = None,
+        smart_low_poly: bool | None = None,
+        auto_size: bool = True,
+    ) -> IO.NodeOutput:
+        return glb_or_fbx_output(
+            *await image_to_model(
+                cls,
+                image=image,
+                model_version=model_version,
+                texture=texture,
+                pbr=pbr,
+                model_seed=model_seed,
+                orientation=orientation,
+                texture_seed=texture_seed,
+                texture_quality=texture_quality,
+                geometry_quality=geometry_quality,
+                texture_alignment=texture_alignment,
+                face_limit=face_limit,
+                quad=quad,
+                smart_low_poly=smart_low_poly,
+                auto_size=auto_size,
+            ),
+            legacy=False,
+        )
 
 
 class TripoMultiviewToModelNode(IO.ComfyNode):
@@ -557,114 +712,19 @@ class TripoMultiviewToModelNode(IO.ComfyNode):
                     optional=True,
                     tooltip="The model version to use for generation",
                 ),
-                IO.Combo.Input(
-                    "orientation",
-                    options=TripoOrientation,
-                    default=TripoOrientation.DEFAULT,
-                    optional=True,
-                    advanced=True,
-                ),
-                IO.Boolean.Input(
-                    "texture",
-                    default=True,
-                    optional=True,
-                    tooltip="Generate texture maps. Off returns bare geometry and ignores pbr.",
-                ),
-                IO.Boolean.Input(
-                    "pbr",
-                    default=True,
-                    optional=True,
-                    tooltip="PBR material maps (base color, metallic, roughness, normal). Requires texture.",
-                ),
-                IO.Int.Input("model_seed", default=42, min=0, max=SEED_MAX, optional=True, advanced=True),
-                IO.Int.Input("texture_seed", default=42, min=0, max=SEED_MAX, optional=True, advanced=True),
-                IO.Combo.Input(
-                    "texture_quality",
-                    default="standard",
-                    options=["standard", "detailed", "extreme"],
-                    optional=True,
-                    advanced=True,
-                    tooltip="detailed = HD textures, extreme = 8K Ultra textures.",
-                ),
-                IO.Combo.Input(
-                    "texture_alignment",
-                    default="original_image",
-                    options=["original_image", "geometry"],
-                    optional=True,
-                    advanced=True,
-                ),
-                IO.Int.Input("face_limit", default=-1, min=-1, max=2000000, optional=True, advanced=True, tooltip=FACE_LIMIT_TOOLTIP),
-                IO.Boolean.Input(
-                    "quad",
-                    default=False,
-                    optional=True,
-                    advanced=True,
-                    tooltip="Quad mesh output. Tripo delivers quad meshes as FBX, so the result "
-                    "arrives on the FBX output and the GLB output stays empty.",
-                ),
-                IO.Combo.Input(
-                    "geometry_quality",
-                    default="standard",
-                    options=["standard", "detailed"],
-                    optional=True,
-                    advanced=True,
-                ),
-                IO.Boolean.Input(
-                    "smart_low_poly",
-                    default=False,
-                    optional=True,
-                    advanced=True,
-                    tooltip="Low-poly mesh with clean, hand-crafted style topology (500-20,000 faces, quad 500-10,000). "
-                    "Best for simple subjects; complex ones may fail.",
-                ),
-                IO.Boolean.Input(
-                    "auto_size",
-                    default=False,
-                    optional=True,
-                    advanced=True,
-                    tooltip="Scale textured models to their real-world size in meters. Tripo stores the size as the model's "
-                    "scene transform and bakes it in when the model is converted, rigged or retargeted; ignored without texture.",
-                ),
+                orientation_input(),
+                *texture_inputs(),
+                seed_input("model_seed"),
+                seed_input("texture_seed"),
+                texture_quality_input(),
+                texture_alignment_input(),
+                *geometry_inputs(auto_size=False),
             ],
-            outputs=[
-                IO.String.Output(display_name="model_file"),  # for backward compatibility only
-                IO.Custom("MODEL_TASK_ID").Output(display_name="model task_id"),
-                IO.File3DGLB.Output(display_name="GLB", tooltip="Empty when quad is enabled."),
-                IO.File3DFBX.Output(display_name="FBX", tooltip="Only populated when quad is enabled."),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
+            outputs=model_outputs(legacy=True),
+            hidden=hidden_inputs(),
             is_api_node=True,
             is_output_node=True,
-            price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(
-                    widgets=[
-                        "model_version",
-                        "texture",
-                        "quad",
-                        "smart_low_poly",
-                        "texture_quality",
-                        "geometry_quality",
-                    ],
-                ),
-                expr="""
-                (
-                  $isV3OrLater := $contains(widgets.model_version,"v3.");
-                  $tq := widgets.texture_quality;
-                  $textureAddon := widgets.texture ? ($tq = "extreme" ? 20 : ($tq = "detailed" ? 10 : 0)) : 0;
-                  $geometryAddon := (widgets.geometry_quality = "detailed" and $isV3OrLater) ? 20 : 0;
-                  $credits := (widgets.texture ? 30 : 20)
-                    + (widgets.quad ? 5 : 0)
-                    + (widgets.smart_low_poly ? 10 : 0)
-                    + $textureAddon
-                    + $geometryAddon;
-                  {"type":"usd","usd": $credits * 0.01, "format": {"approximate": true}}
-                )
-                """,
-            ),
+            price_badge=generation_price_badge(untextured=20, textured=30),
         )
 
     @classmethod
@@ -825,119 +885,179 @@ class TripoEditMultiviewNode(IO.ComfyNode):
         return await multiview_output(cls, response, with_task_id=False, source_task_id=multiview_task_id)
 
 
+def texture_model_inputs(legacy: bool) -> list:
+    return [
+        IO.Custom("MODEL_TASK_ID,SEGMENT_TASK_ID").Input("model_task_id"),
+        *(
+            [
+                IO.Boolean.Input(
+                    "texture",
+                    default=True,
+                    optional=True,
+                    tooltip="Ignored: this node always generates textures. Kept for older workflows.",
+                )
+            ]
+            if legacy
+            else []
+        ),
+        IO.Boolean.Input(
+            "pbr",
+            default=True,
+            optional=True,
+            tooltip="PBR material maps (base color, metallic, roughness, normal); off gives a plain color texture.",
+        ),
+        seed_input("texture_seed"),
+        texture_quality_input(),
+        texture_alignment_input(),
+        IO.String.Input(
+            "texture_prompt",
+            default="",
+            multiline=True,
+            optional=True,
+            tooltip="Optional text guidance for texturing. Required in practice for imported "
+            "models (Tripo: Import Model), which carry no source image to infer colors from. "
+            "Cannot be combined with reference images.",
+        ),
+        IO.Combo.Input(
+            "model_version",
+            options=TripoTextureModelVersion,
+            default=TripoTextureModelVersion.v3_0_20250812,
+            optional=True,
+            tooltip="Texture model: v3.0 for meshes generated with v3.x, v2.5 for meshes generated with v2.5.",
+        ),
+        IO.Image.Input(
+            "style_image",
+            optional=True,
+            tooltip="Reference image for the artistic style of the textures. Only used together with texture_prompt.",
+        ),
+        IO.DynamicCombo.Input(
+            "reference",
+            options=[
+                IO.DynamicCombo.Option("none", []),
+                IO.DynamicCombo.Option(
+                    "image",
+                    [IO.Image.Input("reference_image", tooltip="Single reference image the textures should follow.")],
+                ),
+                IO.DynamicCombo.Option(
+                    "multiview",
+                    [
+                        IO.Image.Input("image_front", tooltip="Front view (0°)."),
+                        IO.Image.Input("image_left", tooltip="Left view (90°)."),
+                        IO.Image.Input("image_back", tooltip="Back view (180°)."),
+                        IO.Image.Input("image_right", tooltip="Right view (270°)."),
+                    ],
+                ),
+            ],
+            optional=True,
+            tooltip="Reference images guiding the textures. Cannot be combined with texture_prompt or style_image.",
+        ),
+        IO.String.Input(
+            "part_names",
+            default="",
+            optional=True,
+            advanced=True,
+            tooltip="Comma-separated part names from Tripo: Segment Model to texture. Empty textures every part.",
+        ),
+    ]
+
+
+def texture_model_outputs(legacy: bool) -> list:
+    return model_outputs(
+        legacy,
+        glb_tooltip="Empty when the source is a quad mesh or an FBX import.",
+        fbx_tooltip="Tripo returns FBX for quad meshes and FBX imports; empty otherwise.",
+    )
+
+
+def texture_price_badge() -> IO.PriceBadge:
+    return IO.PriceBadge(
+        depends_on=IO.PriceBadgeDepends(widgets=["texture_quality"]),
+        expr="""
+                (
+                  $tq := widgets.texture_quality;
+                  {"type":"usd","usd": ($tq = "extreme" ? 0.3 : ($tq = "detailed" ? 0.2 : 0.1)), "format": {"approximate": true}}
+                )
+                """,
+    )
+
+
+async def texture_model(
+    cls: type[IO.ComfyNode],
+    *,
+    model_task_id,
+    pbr: bool | None,
+    texture_seed: int | None,
+    texture_quality: str | None,
+    texture_alignment: str | None,
+    texture_prompt: str,
+    model_version: str | None,
+    style_image: Input.Image | None,
+    reference: dict | None,
+    part_names: str,
+) -> tuple[str, Types.File3D]:
+    text = texture_prompt.strip()
+    mode = reference["reference"] if reference else "none"
+    if mode != "none" and (text or style_image is not None):
+        raise ValueError("Reference images cannot be combined with texture_prompt or style_image.")
+    if style_image is not None and not text:
+        raise ValueError("style_image requires a texture_prompt.")
+    if not text:
+        source = await sync_op(
+            cls,
+            endpoint=ApiEndpoint(path=f"/proxy/tripo/v3/tasks/{model_task_id}"),
+            response_model=TripoTaskResponse,
+        )
+        if source.data.type not in TEXTURE_SOURCE_TYPES_WITH_IMAGE:
+            raise ValueError(
+                "This model has no source image to texture from (imported, segmented, completed or retopologized). "
+                "Give a texture_prompt; Tripo accepts reference images only for models it generated itself."
+            )
+    if mode == "image":
+        prompt = TripoTexturePrompt(image=await upload_image_reference(cls, reference["reference_image"]))
+    elif mode == "multiview":
+        views = [reference[k] for k in ("image_front", "image_left", "image_back", "image_right")]
+        urls = await upload_images_to_comfyapi(cls, views, max_images=4)
+        prompt = TripoTexturePrompt(images=[TripoFileReference(root=TripoUrlReference(url=u, type="jpeg")) for u in urls])
+    elif text:
+        prompt = TripoTexturePrompt(
+            text=text,
+            style_image=await upload_image_reference(cls, style_image) if style_image is not None else None,
+        )
+    else:
+        prompt = None
+    response = await sync_op(
+        cls,
+        endpoint=ApiEndpoint(path="/proxy/tripo/v3/models/texture", method="POST"),
+        response_model=TripoTaskResponse,
+        data=TripoTextureModelRequest(
+            input=model_task_id,
+            model=model_version,
+            pbr=pbr,
+            texture_seed=texture_seed,
+            texture_quality=texture_quality,
+            texture_alignment=texture_alignment,
+            texture_prompt=prompt,
+            part_names=split_part_names(part_names),
+        ),
+    )
+    return await poll_until_finished(cls, response, average_duration=80)
+
+
 class TripoTextureNode(IO.ComfyNode):
 
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="TripoTextureNode",
-            display_name="Tripo: Texture model",
+            display_name="Tripo: Texture model (Legacy)",
             category="partner/3d/Tripo",
-            inputs=[
-                IO.Custom("MODEL_TASK_ID,SEGMENT_TASK_ID").Input("model_task_id"),
-                IO.Boolean.Input(
-                    "texture",
-                    default=True,
-                    optional=True,
-                    tooltip="Ignored: this node always generates textures. Kept for older workflows.",
-                ),
-                IO.Boolean.Input(
-                    "pbr",
-                    default=True,
-                    optional=True,
-                    tooltip="PBR material maps (base color, metallic, roughness, normal); off gives a plain color texture.",
-                ),
-                IO.Int.Input("texture_seed", default=42, min=0, max=SEED_MAX, optional=True, advanced=True),
-                IO.Combo.Input(
-                    "texture_quality",
-                    default="standard",
-                    options=["standard", "detailed", "extreme"],
-                    optional=True,
-                    advanced=True,
-                    tooltip="detailed = HD textures, extreme = 8K Ultra textures.",
-                ),
-                IO.Combo.Input(
-                    "texture_alignment",
-                    default="original_image",
-                    options=["original_image", "geometry"],
-                    optional=True,
-                    advanced=True,
-                ),
-                IO.String.Input(
-                    "texture_prompt",
-                    default="",
-                    multiline=True,
-                    optional=True,
-                    tooltip="Optional text guidance for texturing. Required in practice for imported "
-                    "models (Tripo: Import Model), which carry no source image to infer colors from. "
-                    "Cannot be combined with reference images.",
-                ),
-                IO.Combo.Input(
-                    "model_version",
-                    options=TripoTextureModelVersion,
-                    default=TripoTextureModelVersion.v3_0_20250812,
-                    optional=True,
-                    tooltip="Texture model: v3.0 for meshes generated with v3.x, v2.5 for meshes generated with v2.5.",
-                ),
-                IO.Image.Input(
-                    "style_image",
-                    optional=True,
-                    tooltip="Reference image for the artistic style of the textures. Only used together with texture_prompt.",
-                ),
-                IO.DynamicCombo.Input(
-                    "reference",
-                    options=[
-                        IO.DynamicCombo.Option("none", []),
-                        IO.DynamicCombo.Option(
-                            "image",
-                            [IO.Image.Input("reference_image", tooltip="Single reference image the textures should follow.")],
-                        ),
-                        IO.DynamicCombo.Option(
-                            "multiview",
-                            [
-                                IO.Image.Input("image_front", tooltip="Front view (0°)."),
-                                IO.Image.Input("image_left", tooltip="Left view (90°)."),
-                                IO.Image.Input("image_back", tooltip="Back view (180°)."),
-                                IO.Image.Input("image_right", tooltip="Right view (270°)."),
-                            ],
-                        ),
-                    ],
-                    optional=True,
-                    tooltip="Reference images guiding the textures. Cannot be combined with texture_prompt or style_image.",
-                ),
-                IO.String.Input(
-                    "part_names",
-                    default="",
-                    optional=True,
-                    advanced=True,
-                    tooltip="Comma-separated part names from Tripo: Segment Model to texture. Empty textures every part.",
-                ),
-            ],
-            outputs=[
-                IO.String.Output(display_name="model_file"),  # for backward compatibility only
-                IO.Custom("MODEL_TASK_ID").Output(display_name="model task_id"),
-                IO.File3DGLB.Output(display_name="GLB", tooltip="Empty when the source is a quad mesh or an FBX import."),
-                IO.File3DFBX.Output(
-                    display_name="FBX",
-                    tooltip="Tripo returns FBX for quad meshes and FBX imports; empty otherwise.",
-                ),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
+            inputs=texture_model_inputs(legacy=True),
+            outputs=texture_model_outputs(legacy=True),
+            hidden=hidden_inputs(),
             is_api_node=True,
             is_output_node=True,
-            price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["texture_quality"]),
-                expr="""
-                (
-                  $tq := widgets.texture_quality;
-                  {"type":"usd","usd": ($tq = "extreme" ? 0.3 : ($tq = "detailed" ? 0.2 : 0.1)), "format": {"approximate": true}}
-                )
-                """,
-            ),
+            is_deprecated=True,
+            price_badge=texture_price_badge(),
         )
 
     @classmethod
@@ -955,52 +1075,69 @@ class TripoTextureNode(IO.ComfyNode):
         reference: dict | None = None,
         part_names: str = "",
     ) -> IO.NodeOutput:
-        text = texture_prompt.strip()
-        mode = reference["reference"] if reference else "none"
-        if mode != "none" and (text or style_image is not None):
-            raise ValueError("Reference images cannot be combined with texture_prompt or style_image.")
-        if style_image is not None and not text:
-            raise ValueError("style_image requires a texture_prompt.")
-        if not text:
-            source = await sync_op(
+        return glb_or_fbx_output(
+            *await texture_model(
                 cls,
-                endpoint=ApiEndpoint(path=f"/proxy/tripo/v3/tasks/{model_task_id}"),
-                response_model=TripoTaskResponse,
-            )
-            if source.data.type not in TEXTURE_SOURCE_TYPES_WITH_IMAGE:
-                raise ValueError(
-                    "This model has no source image to texture from (imported, segmented, completed or retopologized). "
-                    "Give a texture_prompt; Tripo accepts reference images only for models it generated itself."
-                )
-        if mode == "image":
-            prompt = TripoTexturePrompt(image=await upload_image_reference(cls, reference["reference_image"]))
-        elif mode == "multiview":
-            views = [reference[k] for k in ("image_front", "image_left", "image_back", "image_right")]
-            urls = await upload_images_to_comfyapi(cls, views, max_images=4)
-            prompt = TripoTexturePrompt(images=[TripoFileReference(root=TripoUrlReference(url=u, type="jpeg")) for u in urls])
-        elif text:
-            prompt = TripoTexturePrompt(
-                text=text,
-                style_image=await upload_image_reference(cls, style_image) if style_image is not None else None,
-            )
-        else:
-            prompt = None
-        response = await sync_op(
-            cls,
-            endpoint=ApiEndpoint(path="/proxy/tripo/v3/models/texture", method="POST"),
-            response_model=TripoTaskResponse,
-            data=TripoTextureModelRequest(
-                input=model_task_id,
-                model=model_version,
+                model_task_id=model_task_id,
                 pbr=pbr,
                 texture_seed=texture_seed,
                 texture_quality=texture_quality,
                 texture_alignment=texture_alignment,
-                texture_prompt=prompt,
-                part_names=split_part_names(part_names),
-            ),
+                texture_prompt=texture_prompt,
+                model_version=model_version,
+                style_image=style_image,
+                reference=reference,
+                part_names=part_names,
+            )
         )
-        return glb_or_fbx_output(*await poll_until_finished(cls, response, average_duration=80))
+
+
+class TripoTextureNodeV2(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="TripoTextureNodeV2",
+            display_name="Tripo: Texture model",
+            category="partner/3d/Tripo",
+            inputs=texture_model_inputs(legacy=False),
+            outputs=texture_model_outputs(legacy=False),
+            hidden=hidden_inputs(),
+            is_api_node=True,
+            is_output_node=True,
+            price_badge=texture_price_badge(),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model_task_id,
+        pbr: bool | None = None,
+        texture_seed: int | None = None,
+        texture_quality: str | None = None,
+        texture_alignment: str | None = None,
+        texture_prompt: str = "",
+        model_version: str | None = None,
+        style_image: Input.Image | None = None,
+        reference: dict | None = None,
+        part_names: str = "",
+    ) -> IO.NodeOutput:
+        return glb_or_fbx_output(
+            *await texture_model(
+                cls,
+                model_task_id=model_task_id,
+                pbr=pbr,
+                texture_seed=texture_seed,
+                texture_quality=texture_quality,
+                texture_alignment=texture_alignment,
+                texture_prompt=texture_prompt,
+                model_version=model_version,
+                style_image=style_image,
+                reference=reference,
+                part_names=part_names,
+            ),
+            legacy=False,
+        )
 
 
 class TripoRigNode(IO.ComfyNode):
@@ -2156,7 +2293,9 @@ class TripoExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
         return [
             TripoTextToModelNode,
+            TripoTextToModelNodeV2,
             TripoImageToModelNode,
+            TripoImageToModelNodeV2,
             TripoMultiviewToModelNode,
             TripoP1TextToModelNode,
             TripoP1ImageToModelNode,
@@ -2165,6 +2304,7 @@ class TripoExtension(ComfyExtension):
             TripoImageToMultiviewNode,
             TripoEditMultiviewNode,
             TripoTextureNode,
+            TripoTextureNodeV2,
             TripoRigCheckNode,
             TripoRigNode,
             TripoRetargetNode,
