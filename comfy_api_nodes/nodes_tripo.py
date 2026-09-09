@@ -1535,6 +1535,19 @@ class TripoRetopologyNode(IO.ComfyNode):
 IDENTITY_TRANSFORM = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 
 
+def smart_segment_inputs() -> list:
+    return [
+        IO.Combo.Input("granularity", options=["coarse", "medium", "fine"], default="medium", optional=True),
+        IO.String.Input(
+            "hint",
+            default="",
+            multiline=True,
+            optional=True,
+            tooltip="Optional text naming the parts to look for, e.g. 'game character with sword and armor'.",
+        ),
+    ]
+
+
 class TripoSmartSegmentNode(IO.ComfyNode):
 
     @classmethod
@@ -1556,20 +1569,13 @@ class TripoSmartSegmentNode(IO.ComfyNode):
                                 IO.Custom("MODEL_TASK_ID").Input(
                                     "model_task_id",
                                     tooltip="A GLB result. Quad meshes and FBX imports must go through Tripo: Convert model (GLTF) first.",
-                                )
+                                ),
+                                *smart_segment_inputs(),
                             ],
                         ),
-                        IO.DynamicCombo.Option("image", [IO.Image.Input("image")]),
+                        IO.DynamicCombo.Option("image", [IO.Image.Input("image"), *smart_segment_inputs()]),
                     ],
                     tooltip="Segment an existing model, or generate a model from an image and segment it.",
-                ),
-                IO.Combo.Input("granularity", options=["coarse", "medium", "fine"], default="medium", optional=True),
-                IO.String.Input(
-                    "hint",
-                    default="",
-                    multiline=True,
-                    optional=True,
-                    tooltip="Optional text naming the parts to look for, e.g. 'game character with sword and armor'.",
                 ),
             ],
             outputs=[
@@ -1596,7 +1602,9 @@ class TripoSmartSegmentNode(IO.ComfyNode):
         )
 
     @classmethod
-    async def execute(cls, source: dict, granularity: str = "medium", hint: str = "") -> IO.NodeOutput:
+    async def execute(cls, source: dict) -> IO.NodeOutput:
+        granularity = source.get("granularity", "medium")
+        hint = source.get("hint", "")
         if source["source"] == "image":
             uploaded = await sync_op(
                 cls,
