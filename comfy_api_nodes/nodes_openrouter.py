@@ -1,8 +1,11 @@
-"""API Nodes for OpenRouter LLM chat completions."""
+"""API Nodes for OpenRouter chat completions: LLM text generation and image generation."""
 
+import base64
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Literal
 
+import torch
 from typing_extensions import override
 
 from comfy_api.latest import IO, ComfyExtension, Input
@@ -10,7 +13,11 @@ from comfy_api_nodes.apis.openrouter import (
     OpenRouterChatRequest,
     OpenRouterChatResponse,
     OpenRouterContentBlock,
+    OpenRouterError,
     OpenRouterImageContent,
+    OpenRouterImageData,
+    OpenRouterImageRequest,
+    OpenRouterImageResponse,
     OpenRouterImageUrl,
     OpenRouterMessage,
     OpenRouterReasoningConfig,
@@ -21,7 +28,9 @@ from comfy_api_nodes.apis.openrouter import (
 )
 from comfy_api_nodes.util import (
     ApiEndpoint,
+    bytesio_to_image_tensor,
     get_number_of_images,
+    pad_images_to_common_channels,
     sync_op,
     upload_images_to_comfyapi,
     upload_video_to_comfyapi,
@@ -29,6 +38,7 @@ from comfy_api_nodes.util import (
 )
 
 OPENROUTER_CHAT_ENDPOINT = "/proxy/openrouter/api/v1/chat/completions"
+OPENROUTER_IMAGES_ENDPOINT = "/proxy/openrouter/api/v1/images"
 
 
 Profile = Literal["standard", "reasoning", "frontier_reasoning", "perplexity", "perplexity_reasoning"]
@@ -251,10 +261,14 @@ def _build_request(
     )
 
 
+def _raise_on_error(error: OpenRouterError | None) -> None:
+    if error:
+        code = error.code if error.code is not None else "unknown"
+        raise ValueError(f"OpenRouter error ({code}): {error.message or 'no message'}")
+
+
 def _extract_text(response: OpenRouterChatResponse) -> str:
-    if response.error:
-        code = response.error.code if response.error.code is not None else "unknown"
-        raise ValueError(f"OpenRouter error ({code}): {response.error.message or 'no message'}")
+    _raise_on_error(response.error)
     if not response.choices:
         raise ValueError("Empty response from OpenRouter (no choices).")
     message = response.choices[0].message
@@ -263,6 +277,21 @@ def _extract_text(response: OpenRouterChatResponse) -> str:
     if message.refusal:
         raise ValueError(f"Model refused to respond: {message.refusal}")
     return message.content or ""
+
+
+def _image_data_to_tensor(item: OpenRouterImageData) -> torch.Tensor:
+    try:
+        return bytesio_to_image_tensor(BytesIO(base64.b64decode(item.b64_json)))
+    except Exception as e:
+        raise ValueError(f"OpenRouter returned an image that could not be decoded: {e}") from e
+
+
+def _extract_images(response: OpenRouterImageResponse) -> torch.Tensor:
+    _raise_on_error(response.error)
+    tensors = [_image_data_to_tensor(item) for item in response.data or [] if item.b64_json]
+    if not tensors:
+        raise ValueError("OpenRouter returned no image.")
+    return torch.cat(pad_images_to_common_channels(tensors))
 
 
 class OpenRouterLLMNode(IO.ComfyNode):
@@ -370,10 +399,228 @@ class OpenRouterLLMNode(IO.ComfyNode):
         return IO.NodeOutput(_extract_text(response))
 
 
+@dataclass(frozen=True)
+class _ImageModelSpec:
+    slug: str
+    price_text: float
+    price_image_in: float
+    price_image_out: float
+
+
+IMAGE_MODELS: list[_ImageModelSpec] = [
+    _ImageModelSpec("microsoft/mai-image-2.6", 0.000005, 0.000008, 0.000038),
+    _ImageModelSpec("microsoft/mai-image-2.6-flash", 0.00000175, 0.0000025, 0.000019),
+]
+
+_IMAGE_MODELS_BY_SLUG: dict[str, _ImageModelSpec] = {m.slug: m for m in IMAGE_MODELS}
+_IMAGE_SIZES: dict[str, dict[str, tuple[int, int]]] = {
+    "1K": {
+        "1:1": (1024, 1024),
+        "16:9": (1360, 768),
+        "9:16": (768, 1360),
+        "3:2": (1152, 768),
+        "2:3": (768, 1152),
+        "4:3": (1024, 768),
+        "3:4": (768, 1024),
+    },
+    "1.5K": {
+        "1:1": (1536, 1536),
+        "16:9": (2048, 1152),
+        "9:16": (1152, 2048),
+        "3:2": (1872, 1248),
+        "2:3": (1248, 1872),
+        "4:3": (1760, 1312),
+        "3:4": (1312, 1760),
+    },
+}
+_IMAGE_ASPECT_RATIOS = list(_IMAGE_SIZES["1K"])
+_IMAGE_PROMPT_MAX_CHARS = 20000
+_IMAGE_MAX_REFERENCES = 5
+_IMAGE_REFERENCE_MAX_PIXELS = 2048 * 2048
+_IMAGE_REFERENCE_TEXT_OVERHEAD_TOKENS = 256
+
+
+def _image_tokens(width: int, height: int) -> int:
+    return width * height // 1024
+
+
+def _image_model_option(spec: _ImageModelSpec) -> IO.DynamicCombo.Option:
+    return IO.DynamicCombo.Option(
+        spec.slug,
+        [
+            IO.String.Input(
+                "prompt",
+                multiline=True,
+                default="",
+                tooltip="Describes the image to generate, or the edit to apply to the reference images. "
+                f"Up to {_IMAGE_PROMPT_MAX_CHARS} characters.",
+            ),
+            IO.Combo.Input(
+                "aspect_ratio",
+                options=_IMAGE_ASPECT_RATIOS,
+                default="1:1",
+                tooltip="Aspect ratio of the generated image, also applied when reference images are connected.",
+            ),
+            IO.Combo.Input(
+                "resolution",
+                options=list(_IMAGE_SIZES),
+                default="1K",
+                tooltip="Output size tier. 1K is about 1 megapixel (1:1 is 1024x1024, 16:9 is 1360x768); "
+                "1.5K is about 2.3 megapixels (1:1 is 1536x1536, 16:9 is 2048x1152).",
+            ),
+            IO.Autogrow.Input(
+                "images",
+                template=IO.Autogrow.TemplateNames(
+                    IO.Image.Input("image"),
+                    names=[f"image_{i}" for i in range(1, _IMAGE_MAX_REFERENCES + 1)],
+                    min=0,
+                ),
+                tooltip=f"Up to {_IMAGE_MAX_REFERENCES} reference images for image-guided editing; "
+                "a batched input counts once per image.",
+            ),
+            IO.Int.Input(
+                "seed",
+                default=42,
+                min=0,
+                max=2147483647,
+                step=1,
+                display_mode=IO.NumberDisplay.number,
+                control_after_generate=True,
+                tooltip="Seed to determine if node should re-run; the API has no seed, "
+                "so actual results are nondeterministic regardless of this value.",
+            ),
+        ],
+    )
+
+
+def _image_price_badge_jsonata() -> str:
+    rates_pairs = []
+    for spec in IMAGE_MODELS:
+        per_million = [spec.price_text * 1e6, spec.price_image_in * 1e6, spec.price_image_out * 1e6]
+        rates_pairs.append(f'    "{spec.slug}": [{", ".join(f"{p:.8g}" for p in per_million)}]')
+    rates_block = ",\n".join(rates_pairs)
+    size_tables = []
+    for tier, table in _IMAGE_SIZES.items():
+        ratio_tokens = ", ".join(f'"{ratio}": {_image_tokens(w, h)}' for ratio, (w, h) in table.items())
+        size_tables.append(f'"{tier.lower()}": {{{ratio_tokens}}}')
+    default_out = _image_tokens(*_IMAGE_SIZES["1K"]["1:1"])
+    ref_max_tokens = _IMAGE_REFERENCE_MAX_PIXELS // 1024
+    return (
+        "(\n"
+        "  $rates := {\n"
+        f"{rates_block}\n"
+        "  };\n"
+        f"  $outTokens := {{{', '.join(size_tables)}}};\n"
+        "  $r := $lookup($rates, widgets.model);\n"
+        '  $ar := $lookup(widgets, "model.aspect_ratio");\n'
+        '  $res := $lookup(widgets, "model.resolution");\n'
+        '  $prompt := $lookup(widgets, "model.prompt");\n'
+        '  $links := $lookup(inputGroups, "model.images");\n'
+        '  $refs := $type($links) = "number" ? $links : 0;\n'
+        '  $promptTokens := $type($prompt) = "string"\n'
+        "    ? ($length($prompt) + 2 * $count($match($prompt, /[^\\x00-\\x7F]/))) / 4 : 0;\n"
+        '  $table := $type($res) = "string" ? $lookup($outTokens, $res) : null;\n'
+        '  $sized := ($type($table) = "object" and $type($ar) = "string") ? $lookup($table, $ar) : null;\n'
+        f'  $out := $type($sized) = "number" ? $sized : {default_out};\n'
+        "  $r ? ($refs > 0 ? {\n"
+        '    "type": "range_usd",\n'
+        '    "min_usd": ($promptTokens * $r[0] + $out * $r[2]) * 1.43 / 1000000,\n'
+        f'    "max_usd": (($promptTokens + $refs * {_IMAGE_REFERENCE_TEXT_OVERHEAD_TOKENS}) * $r[0]'
+        f" + $refs * {ref_max_tokens} * $r[1] + $out * $r[2]) * 1.43 / 1000000,\n"
+        '    "format": {"approximate": true}\n'
+        "  } : {\n"
+        '    "type": "usd",\n'
+        '    "usd": ($promptTokens * $r[0] + $out * $r[2]) * 1.43 / 1000000,\n'
+        '    "format": {"approximate": true}\n'
+        '  }) : {"type": "text", "text": "Token-based"}\n'
+        ")"
+    )
+
+
+class OpenRouterImageNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="OpenRouterImageNode",
+            display_name="OpenRouter Image",
+            category="partner/image/OpenRouter",
+            description=(
+                "Generate or edit images through OpenRouter with Microsoft's MAI-Image-2.6 models: "
+                "text to image, or image-guided editing with up to five reference images, "
+                "in seven aspect ratios at 1K or 1.5K."
+            ),
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[_image_model_option(spec) for spec in IMAGE_MODELS],
+                    tooltip="The OpenRouter image model used to generate the image.",
+                ),
+            ],
+            outputs=[IO.Image.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(
+                    widgets=["model", "model.aspect_ratio", "model.resolution", "model.prompt"],
+                    input_groups=["model.images"],
+                ),
+                expr=_image_price_badge_jsonata(),
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        slug: str = model["model"]
+        if slug not in _IMAGE_MODELS_BY_SLUG:
+            raise ValueError(f"Unknown OpenRouter model: {slug}")
+        prompt: str = model["prompt"]
+        validate_string(prompt, strip_whitespace=True, min_length=1)
+        validate_string(prompt, strip_whitespace=False, max_length=_IMAGE_PROMPT_MAX_CHARS)
+        width, height = _IMAGE_SIZES[model["resolution"]][model["aspect_ratio"]]
+
+        reference_images = [
+            image for images in (model.get("images") or {}).values() if images is not None for image in images
+        ]
+        if len(reference_images) > _IMAGE_MAX_REFERENCES:
+            raise ValueError(
+                f"A maximum of {_IMAGE_MAX_REFERENCES} reference images is supported; got {len(reference_images)} "
+                "(a batched input counts once per image)."
+            )
+        input_references: list[OpenRouterImageContent] | None = None
+        if reference_images:
+            urls = await upload_images_to_comfyapi(
+                cls,
+                [image[..., :3] for image in reference_images],
+                max_images=_IMAGE_MAX_REFERENCES,
+                mime_type="image/png",
+                total_pixels=_IMAGE_REFERENCE_MAX_PIXELS,
+                wait_label="Uploading reference images",
+            )
+            input_references = [OpenRouterImageContent(image_url=OpenRouterImageUrl(url=url)) for url in urls]
+
+        response = await sync_op(
+            cls,
+            ApiEndpoint(path=OPENROUTER_IMAGES_ENDPOINT, method="POST"),
+            response_model=OpenRouterImageResponse,
+            data=OpenRouterImageRequest(
+                model=slug,
+                prompt=prompt,
+                size=f"{width}x{height}",
+                input_references=input_references,
+            ),
+        )
+        return IO.NodeOutput(_extract_images(response))
+
+
 class OpenRouterExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
-        return [OpenRouterLLMNode]
+        return [OpenRouterLLMNode, OpenRouterImageNode]
 
 
 async def comfy_entrypoint() -> OpenRouterExtension:

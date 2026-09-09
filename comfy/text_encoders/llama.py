@@ -1036,7 +1036,7 @@ class BaseGenerate:
         for step in tqdm(range(max_length), desc="Generating tokens"):
             if step > 0:
                 if compile_allocations:
-                    comfy.model_prefetch.malloc_graph_begin(self, device)
+                    comfy.model_prefetch.malloc_graph_begin(device)
                 embeds = self.model.embed_tokens(decode_tokens).to(execution_dtype)
                 current_input_ids = decode_tokens if initial_input_ids is not None else None
                 position_ids = torch.tensor([[next_pos]], device=device) if next_pos is not None else None
