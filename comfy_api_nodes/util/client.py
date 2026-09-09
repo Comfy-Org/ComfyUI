@@ -85,6 +85,23 @@ class _PollUIState:
 
 
 _RETRY_STATUS = {408, 500, 502, 503, 504}  # status 429 is handled separately
+
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _connection_error_is_retryable(method: str, err: BaseException) -> bool:
+    """Whether repeating ``method`` after ``err`` is free or can charge the user twice.
+
+    Repeating a GET costs nothing. Repeating a POST is a second submission, and on a
+    proxied partner call that is a second paid generation: the provider bills every
+    request it accepts, so a request the server already received must not be sent
+    again. ClientConnectorError (and its DNS, proxy and TLS subclasses) is raised
+    before the request is written, so it stays retryable for every method.
+    """
+    if method.upper() in _SAFE_METHODS:
+        return True
+    return isinstance(err, aiohttp.ClientConnectorError)
+
 _MAX_RETRY_AFTER_WAIT = 150.0  # Cap a server Retry-After at this many seconds so a large hint can't block execution
 
 PRICE_CREDITS_HEADER = "X-Comfy-Credits-Used"
@@ -905,7 +922,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
             logging.debug("Polling was interrupted by user")
             raise
         except (ClientError, OSError) as e:
-            if (attempt - rate_limit_attempts) <= cfg.max_retries:
+            if (attempt - rate_limit_attempts) <= cfg.max_retries and _connection_error_is_retryable(method, e):
                 logging.warning(
                     "Connection error calling %s %s. Retrying in %.2fs (%d/%d): %s",
                     method,
