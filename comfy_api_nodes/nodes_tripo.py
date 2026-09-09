@@ -56,6 +56,7 @@ from comfy_api_nodes.util import (
 MULTIVIEW_KEYS = ("front_view_url", "left_view_url", "back_view_url", "right_view_url")
 SEED_MAX = 2**31 - 1
 TEXTURE_SOURCE_TYPES_WITH_IMAGE = ("text_to_model", "image_to_model", "multiview_to_model", "texture_model")
+MIXAMO_RETARGET_ERROR = "Tripo cannot retarget animation presets onto a v1.0 rig made with the mixamo spec."
 
 
 FACE_LIMIT_TOOLTIP = (
@@ -1242,8 +1243,8 @@ class TripoRetargetNode(IO.ComfyNode):
                 IO.Combo.Input(
                     "animation",
                     options=[*[a.value for a in TripoAnimation], *TRIPO_BIPED_ANIMATIONS],
-                    tooltip="preset:* animations work with both rig models; "
-                    "preset:biped:* animations require a rig made with model v1.0-20240301.",
+                    tooltip="preset:* animations work with both rig models. preset:biped:* animations are made for rigs "
+                    "from model v1.0-20240301; a v2.5 rig accepts only those that also exist as preset:*.",
                 ),
                 IO.Combo.Input(
                     "out_format",
@@ -1300,8 +1301,9 @@ class TripoRetargetNode(IO.ComfyNode):
             response_model=TripoTaskResponse,
         )
         rig_input = rig.data.input or {}
-        if rig_input.get("spec") == "mixamo" and str(rig_input.get("model_version", "")).startswith("v1.0"):
-            raise ValueError("Tripo cannot retarget animation presets onto a v1.0 rig made with the mixamo spec.")
+        mixamo = rig_input.get("spec") == "mixamo"
+        if mixamo and str(rig_input.get("model_version", "")).startswith("v1.0"):
+            raise ValueError(MIXAMO_RETARGET_ERROR)
         response = await sync_op(
             cls,
             endpoint=ApiEndpoint(path="/proxy/tripo/v3/animations/retarget", method="POST"),
@@ -1314,7 +1316,12 @@ class TripoRetargetNode(IO.ComfyNode):
                 animate_in_place=animate_in_place,
             ),
         )
-        return glb_or_fbx_output(*await poll_until_finished(cls, response, average_duration=30))
+        try:
+            return glb_or_fbx_output(*await poll_until_finished(cls, response, average_duration=30))
+        except Exception as error:
+            if mixamo and "mixamo" in str(error):
+                raise ValueError(MIXAMO_RETARGET_ERROR) from error
+            raise
 
 
 class TripoRigCheckNode(IO.ComfyNode):
