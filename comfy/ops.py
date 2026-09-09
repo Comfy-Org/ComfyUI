@@ -1287,6 +1287,16 @@ def _quantized_weight_state_dict(module, sd, prefix, extra_quant_conf=None, extr
     return sd
 
 
+class MixedPrecisionOp(CastWeightBiasOp):
+    quant_format = None
+
+    def can_use_quantized_matmul(self, disabled_formats):
+        return (self.quant_format in QUANT_ALGOS
+                and not self._full_precision_mm_config
+                and self.quant_format not in self._disabled_formats
+                and self.quant_format not in disabled_formats)
+
+
 def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_precision_mm=False, disabled=[]):
     class MixedPrecisionOps(manual_cast):
         _quant_config = quant_config
@@ -1294,7 +1304,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
         _full_precision_mm = full_precision_mm
         _disabled = disabled
 
-        class Linear(torch.nn.Module, CastWeightBiasOp):
+        class Linear(torch.nn.Module, MixedPrecisionOp):
             _disabled_formats = disabled
 
             def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None):
@@ -1343,10 +1353,6 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         want_requant=want_requant,
                     ) as (weight, bias):
                         if self._full_precision_mm and isinstance(weight, QuantizedTensor):
-                            # cast_bias_weight only dequantizes on a dtype change, which is a
-                            # no-op here when the quantized weight's orig_dtype already equals
-                            # the compute dtype. Force it so the disabled/unsupported-format
-                            # fallback doesn't hand a QuantizedTensor to a plain linear() call.
                             weight = weight.dequantize()
                         return self._forward(input, weight, bias)
 
@@ -1450,7 +1456,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def _apply(self, fn, recurse=True):  # This is to get torch.compile + moving weights to another device working
                 return _quantized_apply(self, fn, recurse)
 
-        class MoEExperts(torch.nn.Module, CastWeightBiasOp):
+        class MoEExperts(torch.nn.Module, MixedPrecisionOp):
             """Container for E quantized expert weights, indexed via expert_weight(i).
 
             The bank lives on self.weight as a single 3D tensor — either a
@@ -1654,29 +1660,45 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 
     return MixedPrecisionOps
 
-def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_fp8=False, fp8_optimizations=False, model_config=None):
-    fp8_compute = comfy.model_management.supports_fp8_compute(load_device) # TODO: if we support more ops this needs to be more granular
-    nvfp4_compute = comfy.model_management.supports_nvfp4_compute(load_device)
-    mxfp8_compute = comfy.model_management.supports_mxfp8_compute(load_device)
-    int8_compute = comfy.model_management.supports_int8_compute(load_device)
+def get_disabled_quant_formats(device=None):
+    disabled = set()
+    if not comfy.model_management.supports_nvfp4_compute(device):
+        disabled.add("nvfp4")
+    if not comfy.model_management.supports_mxfp8_compute(device):
+        disabled.add("mxfp8")
+    if not comfy.model_management.supports_fp8_compute(device):
+        disabled.add("float8_e4m3fn")
+        disabled.add("float8_e5m2")
+    if not comfy.model_management.supports_int8_compute(device):
+        disabled.add("int8_tensorwise")
+        disabled.add("convrot_w4a4")
+        disabled.add("asym_w4a8_int8")
+    return disabled
 
+
+@contextlib.contextmanager
+def use_quantized_matmul(model, device):
+    disabled = get_disabled_quant_formats(device)
+    previous = []
+    try:
+        for module in model.modules():
+            if isinstance(module, MixedPrecisionOp) and module.can_use_quantized_matmul(disabled):
+                previous.append((module, module._full_precision_mm))
+                module._full_precision_mm = False
+        yield
+    finally:
+        for module, full_precision_mm in previous:
+            module._full_precision_mm = full_precision_mm
+
+
+def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_fp8=False, fp8_optimizations=False, model_config=None):
     if model_config and hasattr(model_config, 'quant_config') and model_config.quant_config:
         logging.info("Using mixed precision operations")
-        disabled = set()
-        if not nvfp4_compute:
-            disabled.add("nvfp4")
-        if not mxfp8_compute:
-            disabled.add("mxfp8")
-        if not fp8_compute:
-            disabled.add("float8_e4m3fn")
-            disabled.add("float8_e5m2")
-        if not int8_compute:
-            disabled.add("int8_tensorwise")
-            disabled.add("convrot_w4a4")
-            disabled.add("asym_w4a8_int8")
+        disabled = get_disabled_quant_formats(load_device)
         logging.info("Native ops: {} {}".format(", ".join(QUANT_ALGOS.keys() - disabled), ", emulated ops: {}".format(", ".join(disabled)) if len(disabled) > 0 else ""))
         return mixed_precision_ops(model_config.quant_config, compute_dtype, disabled=disabled)
 
+    fp8_compute = comfy.model_management.supports_fp8_compute(load_device)
     if (
         fp8_compute and
         (fp8_optimizations or PerformanceFeature.Fp8MatrixMultiplication in args.fast) and

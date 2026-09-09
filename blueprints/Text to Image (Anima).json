@@ -1077,7 +1077,7 @@
           }
         ],
         "extra": {},
-        "category": "Image generation and editing/Text to image",
+        "category": "Image generation/Text to image",
         "description": "This subgraph converts text prompts into non-photorealistic illustrations using a 2-billion-parameter model optimized for anime and artistic styles. It is ideal for generating concept art, character designs, or stylized illustrations where photorealism is not required. The model excels with anime and artistic content but performs poorly on realistic subjects."
       }
     ]
