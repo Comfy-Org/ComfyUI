@@ -15,12 +15,22 @@ import comfy.model_prefetch
 import comfy.patcher_extension
 from comfy.ldm.minimax.model import MiniMaxH3Model
 from comfy_api.latest import ComfyExtension, io
+from comfy_extras.sparse_attention_history import (
+    H3_BLOCK_SCOPE,
+    SparseAttentionHistoryPolicy,
+    append_history_receipt,
+    append_scoped_h3_receipt,
+    install_history_policy,
+    mark_attention_override,
+    mark_h3_block_patch,
+)
 
 HEAD_DIM = 128
 BLOCK_SIZE = 64
 PRODUCER_CHUNK = 4096
 VSA_CUBE = (4, 4, 4)
 VSA_PLAN_CACHE = 4
+_MISSING = object()
 
 
 def parse_block_list(text):
@@ -52,6 +62,8 @@ class SparseAttnPatch:
         self.sink_conditioning = sink_conditioning
         self.verbose = verbose
         self.installed = set()    # the override closures this patch has put on the hook
+        self.h3_block_count = None
+        self.history_policy = SparseAttentionHistoryPolicy(self)
         self.reset()
 
     def reset(self):
@@ -180,7 +192,10 @@ def make_attention_override(patch: SparseAttnPatch, previous):
             args = (q, k, v, heads)
             kw = dict(mask=mask, attn_precision=attn_precision, skip_reshape=skip_reshape,
                       skip_output_reshape=skip_output_reshape, **kwargs)
-            return func(*args, **kw) if previous is None else previous(func, *args, **kw)
+            out = func(*args, **kw) if previous is None else previous(func, *args, **kw)
+            tokens = q.shape[2] if skip_reshape else q.shape[1]
+            append_scoped_h3_receipt(transformer_options, patch, "h3_dense", tokens)
+            return out
 
         if mask is not None or patch.vsa:
             return dense()
@@ -207,11 +222,14 @@ def make_attention_override(patch: SparseAttnPatch, previous):
                           sink_blocks=list(sink), sink_q=list(sink_q), topk_ratio=patch.topk_ratio,
                           token_aug=patch.extra_tokens).to(q.dtype)
         patch.log_once(("sparse", tuple(qs.shape)), f"sparse {tuple(qs.shape)}, sinks {sink}/{sink_q}")
+        append_scoped_h3_receipt(
+            transformer_options, patch, "h3_override_sparse", tokens, sink, sink_q
+        )
         if skip_output_reshape:
             return out.transpose(1, 2)
         return out.reshape(b, -1, heads * dim_head)
 
-    return override
+    return mark_attention_override(override, patch, previous)
 
 
 def install_override(patch: SparseAttnPatch, transformer_options):
@@ -304,20 +322,47 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
     out = out.view(n, heads * head_dim)
     if plan is not None:
         out = out[plan["inv"]]
-    return attn.out_proj(out)
+    out = attn.out_proj(out)
+    append_history_receipt(
+        transformer_options,
+        patch,
+        block_index,
+        "h3_chunked_sparse_cold" if first else "h3_chunked_sparse_primed",
+        n_tokens,
+        sink,
+        sink_q,
+    )
+    return out
 
 
-def make_h3_block_patch(block, block_index, patch: SparseAttnPatch):
-    """Runs the block with its attention swapped for the sparse producer."""
+def make_h3_block_patch(block, block_index, patch: SparseAttnPatch, previous=None):
+    """Runs the block with its attention swapped for the sparse producer.
+
+    Preserve an existing H3 block replacement rather than overwriting it. The
+    scoped marker lets the generic fallback emit exactly one receipt for this main
+    H3 block while excluding token-refiner or unrelated attention calls.
+    """
     def attention(h, rope_freqs=None, transformer_options={}):
         return h3_sparse_attention(block.attn, h, rope_freqs, transformer_options, patch, block_index)
 
     def block_patch(args, extra):
-        if h3_eligible(block.attn, args["img"], args["rope_freqs"], args["transformer_options"], patch, block_index):
-            args = {**args, "attention": attention}
-        return extra["original_block"](args)
+        transformer_options = args["transformer_options"]
+        old_scope = transformer_options.get(H3_BLOCK_SCOPE, _MISSING)
+        transformer_options[H3_BLOCK_SCOPE] = (patch, block_index)
+        try:
+            call_args = args
+            if h3_eligible(block.attn, args["img"], args["rope_freqs"], transformer_options, patch, block_index):
+                call_args = {**args, "attention": attention}
+            if previous is None:
+                return extra["original_block"](call_args)
+            return previous(call_args, extra)
+        finally:
+            if old_scope is _MISSING:
+                transformer_options.pop(H3_BLOCK_SCOPE, None)
+            else:
+                transformer_options[H3_BLOCK_SCOPE] = old_scope
 
-    return block_patch
+    return mark_h3_block_patch(block_patch, patch, block_index, previous)
 
 
 def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, end_percent, min_tokens,
@@ -334,15 +379,31 @@ def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, 
                             sink_conditioning=sink_conditioning, extra_tokens=extra_tokens, verbose=verbose)
     m = model.clone()
     install_override(patch, m.model_options["transformer_options"])
+    install_history_policy(patch, m.model_options["transformer_options"])
+
+    def prepare_state(model_patcher, timestep, model_options):
+        transformer_options = model_options["transformer_options"]
+        install_override(patch, transformer_options)
+        install_history_policy(patch, transformer_options)
+
     m.add_callback_with_key(comfy.patcher_extension.CallbacksMP.ON_PREPARE_STATE, "block_sparse_attention",
-                            lambda model_patcher, timestep, model_options: install_override(patch, model_options["transformer_options"]))
+                            prepare_state)
     m.add_callback_with_key(comfy.patcher_extension.CallbacksMP.ON_CLEANUP,
                             "block_sparse_attention", lambda model_patcher: patch.reset())
 
     diffusion_model = model.get_model_object("diffusion_model")
     if isinstance(diffusion_model, MiniMaxH3Model):
+        patch.h3_block_count = len(diffusion_model.blocks)
+        previous_blocks = dict(
+            m.model_options.get("transformer_options", {})
+            .get("patches_replace", {})
+            .get("dit", {})
+        )
         for i, block in enumerate(diffusion_model.blocks):
-            m.set_model_patch_replace(make_h3_block_patch(block, i, patch), "dit", "double_block", i)
+            previous = previous_blocks.get(("double_block", i))
+            m.set_model_patch_replace(
+                make_h3_block_patch(block, i, patch, previous), "dit", "double_block", i
+            )
         if vsa and diffusion_model.blocks[0].attn.to_gate_compress is None:
             logging.warning("VSA: the model has no to_gate_compress layers; running the fine stage without the coarse branch")
     elif vsa:
