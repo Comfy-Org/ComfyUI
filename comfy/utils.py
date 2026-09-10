@@ -1349,6 +1349,7 @@ def reshape_mask(input_mask, output_shape):
     dims = len(output_shape) - 2
 
     if dims == 1:
+        input_mask = input_mask.reshape((-1, 1, input_mask.shape[-1]))
         scale_mode = "linear"
 
     if dims == 2:
