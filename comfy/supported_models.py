@@ -2040,6 +2040,7 @@ class QwenImage(supported_models_base.BASE):
 
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
+    vae_not_video = True
 
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.QwenImage(self, device=device)
