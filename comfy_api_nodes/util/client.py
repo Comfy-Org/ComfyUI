@@ -71,6 +71,7 @@ class _RequestConfig:
     price_extractor: Callable[[dict[str, Any]], float | None] | None = None
     is_rate_limited: Callable[[int, Any], bool] | None = None
     response_header_validator: Callable[[dict[str, str]], None] | None = None
+    repeatable: bool = False
 
 
 @dataclass
@@ -89,7 +90,7 @@ _RETRY_STATUS = {408, 500, 502, 503, 504}  # status 429 is handled separately
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
-def _connection_error_is_retryable(method: str, err: BaseException) -> bool:
+def _connection_error_is_retryable(method: str, err: BaseException, repeatable: bool = False) -> bool:
     """Whether repeating ``method`` after ``err`` is free or can charge the user twice.
 
     Repeating a GET costs nothing. Repeating a POST is a second submission, and on a
@@ -97,8 +98,12 @@ def _connection_error_is_retryable(method: str, err: BaseException) -> bool:
     request it accepts, so a request the server already received must not be sent
     again. ClientConnectorError (and its DNS, proxy and TLS subclasses) is raised
     before the request is written, so it stays retryable for every method.
+
+    ``repeatable`` is the caller's statement that this particular request has no
+    side effect worth paying for twice -- a status poll, or an upload URL request --
+    which is the case for a POST that only reads.
     """
-    if method.upper() in _SAFE_METHODS:
+    if repeatable or method.upper() in _SAFE_METHODS:
         return True
     return isinstance(err, aiohttp.ClientConnectorError)
 
@@ -155,6 +160,7 @@ async def sync_op(
     monitor_progress: bool = True,
     max_retries_on_rate_limit: int = 16,
     is_rate_limited: Callable[[int, Any], bool] | None = None,
+    repeatable: bool = False,
 ) -> M:
     raw = await sync_op_raw(
         cls,
@@ -176,6 +182,7 @@ async def sync_op(
         monitor_progress=monitor_progress,
         max_retries_on_rate_limit=max_retries_on_rate_limit,
         is_rate_limited=is_rate_limited,
+            repeatable=repeatable,
     )
     if not isinstance(raw, dict):
         raise Exception("Expected JSON response to validate into a Pydantic model, got non-JSON (binary or text).")
@@ -253,6 +260,7 @@ async def sync_op_raw(
     max_retries_on_rate_limit: int = 16,
     is_rate_limited: Callable[[int, Any], bool] | None = None,
     response_header_validator: Callable[[dict[str, str]], None] | None = None,
+    repeatable: bool = False,
 ) -> dict[str, Any] | bytes:
     """
     Make a single network request.
@@ -285,6 +293,7 @@ async def sync_op_raw(
         max_retries_on_rate_limit=max_retries_on_rate_limit,
         is_rate_limited=is_rate_limited,
         response_header_validator=response_header_validator,
+        repeatable=repeatable,
     )
     return await _request_base(cfg, expect_binary=as_binary)
 
@@ -372,6 +381,7 @@ async def poll_op_raw(
                     as_binary=False,
                     final_label_on_success=None,
                     monitor_progress=False,
+                    repeatable=True,
                 )
                 if not isinstance(resp_json, dict):
                     raise Exception("Polling endpoint returned non-JSON response.")
@@ -922,7 +932,9 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
             logging.debug("Polling was interrupted by user")
             raise
         except (ClientError, OSError) as e:
-            if (attempt - rate_limit_attempts) <= cfg.max_retries and _connection_error_is_retryable(method, e):
+            if (attempt - rate_limit_attempts) <= cfg.max_retries and _connection_error_is_retryable(
+                method, e, cfg.repeatable
+            ):
                 logging.warning(
                     "Connection error calling %s %s. Retrying in %.2fs (%d/%d): %s",
                     method,

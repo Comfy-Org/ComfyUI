@@ -28,3 +28,11 @@ def test_unsafe_methods_do_not_repeat_a_request_the_server_received(method):
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
 def test_unsafe_methods_still_retry_when_the_request_was_never_sent(method):
     assert _connection_error_is_retryable(method, _ConnectorError())
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+def test_a_repeatable_call_keeps_retrying(method):
+    # Status polls and the upload-URL request cost nothing to repeat, so they keep
+    # the retry the paid submits give up.
+    assert _connection_error_is_retryable(method, aiohttp.ServerDisconnectedError(), repeatable=True)
+    assert _connection_error_is_retryable(method, aiohttp.ClientOSError("broken pipe"), repeatable=True)
