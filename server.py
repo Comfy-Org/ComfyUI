@@ -1061,6 +1061,8 @@ class PromptServer():
             prompt_id = request.match_info.get("prompt_id", None)
             return web.json_response(self.prompt_queue.get_history(prompt_id=prompt_id))
 
+        @routes.get("/history_v2/{prompt_id}")(get_history_prompt_id)
+
         @routes.get("/queue")
         async def get_queue(request):
             queue_info = {}
