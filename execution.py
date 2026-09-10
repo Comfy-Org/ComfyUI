@@ -423,7 +423,9 @@ def format_value(x):
 
 def _is_intermediate_output(dynprompt, node_id):
     class_type = dynprompt.get_node(node_id)["class_type"]
-    class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
+    class_def = nodes.NODE_CLASS_MAPPINGS.get(class_type)
+    if class_def is None:
+        return False
     return getattr(class_def, 'HAS_INTERMEDIATE_OUTPUT', False)
 
 
