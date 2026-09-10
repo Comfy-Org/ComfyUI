@@ -153,6 +153,10 @@ class AudioVAE(torch.nn.Module):
             waveform, waveform_sample_rate, device=waveform.device
         )
 
+        # Cast mel spectrogram to match encoder weight dtype (bf16 VAE + float32 audio input)
+        encoder_dtype = next(self.autoencoder.encoder.parameters()).dtype
+        mel_spec = mel_spec.to(dtype=encoder_dtype)
+
         latents = self.autoencoder.encode(mel_spec)
         posterior = DiagonalGaussianDistribution(latents)
         latent_mode = posterior.mode()
