@@ -2539,6 +2539,7 @@ async def init_builtin_extra_nodes():
         "nodes_seed.py",
         "nodes_text.py",
         "nodes_sam3d_body.py",
+        "nodes_marigold.py",
     ]
 
     import_failed = []

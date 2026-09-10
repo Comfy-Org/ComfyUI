@@ -1,5 +1,7 @@
 from typing_extensions import override
 
+import comfy.utils
+import folder_paths
 from comfy_api.latest import ComfyExtension, io
 
 
@@ -57,12 +59,34 @@ class T5TokenizerOptions(io.ComfyNode):
         return io.NodeOutput(clip)
 
 
+class ConditioningLoader(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="ConditioningLoader",
+            display_name="Load Conditioning",
+            category="model/loaders",
+            description="Loads a precomputed conditioning from the embeddings folder: the 'conditioning' tensor of a safetensors file, other tensors in it become conditioning options.",
+            inputs=[
+                io.Combo.Input("conditioning_name", options=folder_paths.get_filename_list("embeddings")),
+            ],
+            outputs=[io.Conditioning.Output()],
+        )
+
+    @classmethod
+    def execute(cls, conditioning_name) -> io.NodeOutput:
+        sd = comfy.utils.load_torch_file(folder_paths.get_full_path_or_raise("embeddings", conditioning_name), safe_load=True)
+        cond = sd.pop("conditioning")
+        return io.NodeOutput([[cond, sd]])
+
+
 class CondExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             CLIPTextEncodeControlnet,
             T5TokenizerOptions,
+            ConditioningLoader,
         ]
 
 
