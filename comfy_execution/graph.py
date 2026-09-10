@@ -119,6 +119,7 @@ class TopologicalSort:
         self.blockCount = {} # Number of nodes this node is directly blocked by
         self.blocking = {} # Which nodes are blocked by this node
         self.externalBlocks = 0
+        self.externalBlockResults = {}
         self.unblockedEvent = asyncio.Event()
 
     def get_input_info(self, unique_id, input_name):
@@ -178,11 +179,19 @@ class TopologicalSort:
         assert node_id in self.blockCount, "Can't add external block to a node that isn't pending"
         self.externalBlocks += 1
         self.blockCount[node_id] += 1
-        def unblock():
-            self.externalBlocks -= 1
-            self.blockCount[node_id] -= 1
-            self.unblockedEvent.set()
+        def unblock(value=None):
+            self.release_external_block(node_id, value)
         return unblock
+
+    def release_external_block(self, node_id, value=None):
+        self.externalBlocks -= 1
+        self.blockCount[node_id] -= 1
+        if value is not None:
+            self.externalBlockResults[node_id] = value
+        self.unblockedEvent.set()
+
+    def get_external_block_result(self, node_id):
+        return self.externalBlockResults.get(node_id)
 
     def is_cached(self, node_id):
         return False
@@ -195,6 +204,7 @@ class TopologicalSort:
         for blocked_node_id in self.blocking[unique_id]:
             self.blockCount[blocked_node_id] -= 1
         del self.blocking[unique_id]
+        self.externalBlockResults.pop(unique_id, None)
 
     def is_empty(self):
         return len(self.pendingNodes) == 0
