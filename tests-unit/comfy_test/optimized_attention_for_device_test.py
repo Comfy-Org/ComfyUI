@@ -2,7 +2,12 @@ from unittest.mock import patch
 
 import torch
 
-from comfy.ldm.modules.attention import (
+from comfy.cli_args import args
+
+if not torch.cuda.is_available():
+    args.cpu = True
+
+from comfy.ldm.modules.attention import (  # noqa: E402
     attention_basic,
     attention_sub_quad,
     optimized_attention_for_device,
