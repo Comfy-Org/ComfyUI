@@ -841,7 +841,8 @@ class LoadedModel:
             self._patcher_finalizer.detach()
 
     def is_dead(self):
-        return self.real_model() is not None and self.model is None
+        real_model = self.real_model
+        return real_model is not None and (real_model() is None or self.model is None)
 
 
 def use_more_memory(extra_memory, loaded_models, device):
@@ -884,30 +885,37 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
     can_unload = []
     unloaded_models = []
 
-    for i in range(len(current_loaded_models) -1, -1, -1):
-        shift_model = current_loaded_models[i]
+    for shift_model in list(current_loaded_models):
         if device is None or shift_model.device == device:
-            if shift_model not in keep_loaded and not shift_model.is_dead():
-                can_unload.append((-shift_model.model_offloaded_memory(), sys.getrefcount(shift_model.model), shift_model.model_memory(), i))
+            model = shift_model.model
+            if model is not None and shift_model not in keep_loaded and not shift_model.is_dead():
+                can_unload.append((-shift_model.model_offloaded_memory(), sys.getrefcount(model), shift_model.model_memory(), shift_model))
                 shift_model.currently_used = False
 
-    can_unload_sorted = sorted(can_unload)
+    can_unload_sorted = sorted(can_unload, key=lambda a: a[:3])
     for x in can_unload_sorted:
-        i = x[-1]
+        shift_model = x[-1]
+        model = shift_model.model
+        if model is None:
+            continue
         memory_to_free = 1e32
         if not DISABLE_SMART_MEMORY or device is None:
             memory_to_free = 0 if device is None else memory_required - get_free_memory(device)
-            if current_loaded_models[i].model.is_dynamic() and for_dynamic:
+            if model.is_dynamic() and for_dynamic:
                 #don't actually unload dynamic models for the sake of other dynamic models
                 #as that works on-demand.
-                memory_required -= current_loaded_models[i].model.loaded_size()
+                memory_required -= model.loaded_size()
                 memory_to_free = 0
-        if memory_to_free > 0 and current_loaded_models[i].model_unload(memory_to_free):
-            logging.debug(f"Unloading {current_loaded_models[i].model.model.__class__.__name__}")
-            unloaded_model.append(i)
+        if memory_to_free > 0 and shift_model.model_unload(memory_to_free):
+            logging.debug(f"Unloading {model.model.__class__.__name__}")
+            unloaded_model.append(shift_model)
 
-    for i in sorted(unloaded_model, reverse=True):
-        unloaded_models.append(current_loaded_models.pop(i))
+    for shift_model in unloaded_model:
+        unloaded_models.append(shift_model)
+        for _idx in range(len(current_loaded_models) - 1, -1, -1):
+            if current_loaded_models[_idx] is shift_model:
+                current_loaded_models.pop(_idx)
+                break
 
     if not for_dynamic and pins_required > 0:
         ensure_pin_budget(pins_required)
@@ -1068,13 +1076,16 @@ def archive_model_dtypes(model):
 
 def cleanup_models():
     to_delete = []
-    for i in range(len(current_loaded_models)):
-        if current_loaded_models[i].real_model() is None:
-            to_delete = [i] + to_delete
+    for loaded_model in list(current_loaded_models):
+        real_model = loaded_model.real_model
+        if real_model is not None and real_model() is None:
+            to_delete.append(loaded_model)
 
-    for i in to_delete:
-        x = current_loaded_models.pop(i)
-        del x
+    for loaded_model in to_delete:
+        for i in range(len(current_loaded_models) - 1, -1, -1):
+            if current_loaded_models[i] is loaded_model:
+                del current_loaded_models[i]
+                break
 
 def dtype_size(dtype):
     dtype_size = 4
