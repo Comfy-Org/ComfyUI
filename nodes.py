@@ -1764,6 +1764,25 @@ class LoadImage:
 
         # This code is left here to handle animated webp which pyav does not support loading
         img = node_helpers.pillow(Image.open, image_path)
+        import io
+        from PIL import ImageCms
+
+        try: 
+            if "icc_profile" in img.info:
+                icc_bytes = img.info["icc_profile"]
+
+                src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc_bytes))
+                dst_profile = ImageCms.createProfile("sRGB")
+
+                img = ImageCms.profileToProfile(
+                    img,
+                    src_profile,
+                    dst_profile,
+                    outputMode="RGB"
+                )
+        except Exception as e:
+             print("Icc color profile conversion failed:",e)
+
 
         output_images = []
         output_masks = []
