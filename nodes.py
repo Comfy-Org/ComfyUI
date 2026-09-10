@@ -11,7 +11,7 @@ import inspect
 import traceback
 import math
 import time
-import random
+import uuid
 import logging
 
 from PIL import Image, ImageOps, ImageSequence
@@ -1722,7 +1722,7 @@ class PreviewImage(SaveImage):
     def __init__(self):
         self.output_dir = folder_paths.get_temp_directory()
         self.type = "temp"
-        self.prefix_append = "_temp_" + ''.join(random.choice("abcdefghijklmnopqrstupvxyz") for x in range(5))
+        self.prefix_append = "_temp_" + uuid.uuid4().hex[:5]
         self.compress_level = 1
 
     SEARCH_ALIASES = ["preview", "preview image", "show image", "view image", "display image", "image viewer"]
