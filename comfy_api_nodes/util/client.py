@@ -43,11 +43,17 @@ class ApiEndpoint:
         *,
         query_params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
+        idempotent: bool | None = None,
     ):
         self.path = path
         self.method = method
         self.query_params = query_params or {}
         self.headers = headers or {}
+        # Whether sending this request twice is harmless. None means "decide by
+        # method": GET/HEAD/OPTIONS are, anything else is not. A paid submission is
+        # never idempotent; a status poll that happens to use POST is, and the poll
+        # loop marks it so.
+        self.idempotent = idempotent
 
 
 @dataclass
@@ -71,9 +77,6 @@ class _RequestConfig:
     price_extractor: Callable[[dict[str, Any]], float | None] | None = None
     is_rate_limited: Callable[[int, Any], bool] | None = None
     response_header_validator: Callable[[dict[str, str]], None] | None = None
-    # Set only by the poll loop. A resent request must cost nothing: a status poll
-    # does, a paid submission never does, so no public helper exposes this.
-    resend_is_free: bool = False
 
 
 @dataclass
@@ -96,19 +99,23 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _RAISED_BEFORE_SEND = (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError)
 
 
-def _connection_error_is_retryable(method: str, err: BaseException, resend_is_free: bool = False) -> bool:
-    """Whether repeating ``method`` after ``err`` is free or can charge the user twice.
+def _is_idempotent(endpoint: ApiEndpoint) -> bool:
+    if endpoint.idempotent is not None:
+        return endpoint.idempotent
+    return endpoint.method.upper() in _SAFE_METHODS
 
-    Repeating a GET costs nothing. Repeating a POST is a second submission, and on a
-    proxied partner call that is a second paid generation: the provider bills every
-    request it accepts, so a request the server already received must not be sent
-    again. ClientConnectorError (and its DNS, proxy and TLS subclasses) is raised
-    before the request is written, so it stays retryable for every method.
 
-    ``resend_is_free`` is the poll loop saying its request only reads status, so a
-    POST there costs nothing to send again.
+def _connection_error_is_retryable(endpoint: ApiEndpoint, err: BaseException) -> bool:
+    """Whether resending ``endpoint`` after ``err`` is harmless or can charge the user twice.
+
+    Resending an idempotent request costs nothing. Resending a submission is a
+    second submission, and on a proxied partner call that is a second paid
+    generation: the provider bills every request it accepts, so a request the
+    server already received must not be sent again. ClientConnectorError (and its
+    DNS, proxy and TLS subclasses) and the connect-phase timeout are raised before
+    the request is written, so those stay retryable for every endpoint.
     """
-    if resend_is_free or method.upper() in _SAFE_METHODS:
+    if _is_idempotent(endpoint):
         return True
     return isinstance(err, _RAISED_BEFORE_SEND)
 
@@ -270,52 +277,6 @@ async def sync_op_raw(
       - If as_binary=True: returns bytes.
       - response_header_validator: optional callback receiving response headers dict
     """
-    cfg = _request_config(
-        cls,
-        endpoint,
-        price_extractor=price_extractor,
-        data=data,
-        files=files,
-        content_type=content_type,
-        timeout=timeout,
-        multipart_parser=multipart_parser,
-        max_retries=max_retries,
-        retry_delay=retry_delay,
-        retry_backoff=retry_backoff,
-        wait_label=wait_label,
-        estimated_duration=estimated_duration,
-        final_label_on_success=final_label_on_success,
-        progress_origin_ts=progress_origin_ts,
-        monitor_progress=monitor_progress,
-        max_retries_on_rate_limit=max_retries_on_rate_limit,
-        is_rate_limited=is_rate_limited,
-        response_header_validator=response_header_validator,
-    )
-    return await _request_base(cfg, expect_binary=as_binary)
-
-
-def _request_config(
-    cls: type[IO.ComfyNode],
-    endpoint: ApiEndpoint,
-    *,
-    price_extractor: Callable[[dict[str, Any]], float | None] | None = None,
-    data: dict[str, Any] | BaseModel | None = None,
-    files: dict[str, Any] | list[tuple[str, Any]] | None = None,
-    content_type: str = "application/json",
-    timeout: float = 3600.0,
-    multipart_parser: Callable | None = None,
-    max_retries: int = 3,
-    retry_delay: float = 1.0,
-    retry_backoff: float = 2.0,
-    wait_label: str = "Waiting for server",
-    estimated_duration: int | None = None,
-    final_label_on_success: str | None = "Completed",
-    progress_origin_ts: float | None = None,
-    monitor_progress: bool = True,
-    max_retries_on_rate_limit: int = 16,
-    is_rate_limited: Callable[[int, Any], bool] | None = None,
-    response_header_validator: Callable[[dict[str, str]], None] | None = None,
-) -> _RequestConfig:
     if isinstance(data, BaseModel):
         data = data.model_dump(exclude_none=True)
         for k, v in list(data.items()):
@@ -342,7 +303,7 @@ def _request_config(
         is_rate_limited=is_rate_limited,
         response_header_validator=response_header_validator,
     )
-    return cfg
+    return await _request_base(cfg, expect_binary=as_binary)
 
 
 async def poll_op_raw(
@@ -411,11 +372,21 @@ async def poll_op_raw(
         except Exception as exc:
             logging.debug("Polling ticker exited: %s", exc)
 
+    # A poll only reads the task's status, whatever its method: resending it is free.
+    if poll_endpoint.idempotent is None:
+        poll_endpoint = ApiEndpoint(
+            poll_endpoint.path,
+            poll_endpoint.method,
+            query_params=poll_endpoint.query_params,
+            headers=poll_endpoint.headers,
+            idempotent=True,
+        )
+
     ticker_task = asyncio.create_task(_ticker())
     try:
         while consumed_attempts < max_poll_attempts:
             try:
-                poll_cfg = _request_config(
+                resp_json = await sync_op_raw(
                     cls,
                     poll_endpoint,
                     data=data,
@@ -425,11 +396,10 @@ async def poll_op_raw(
                     retry_backoff=retry_backoff_per_poll,
                     wait_label="Checking",
                     estimated_duration=None,
+                    as_binary=False,
                     final_label_on_success=None,
                     monitor_progress=False,
                 )
-                poll_cfg.resend_is_free = True  # a status poll only reads
-                resp_json = await _request_base(poll_cfg, expect_binary=False)
                 if not isinstance(resp_json, dict):
                     raise Exception("Polling endpoint returned non-JSON response.")
             except ProcessingInterrupted:
@@ -979,7 +949,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
             logging.debug("Polling was interrupted by user")
             raise
         except (ClientError, OSError) as e:
-            retryable = _connection_error_is_retryable(method, e, cfg.resend_is_free)
+            retryable = _connection_error_is_retryable(cfg.endpoint, e)
             if retryable and (attempt - rate_limit_attempts) <= cfg.max_retries:
                 logging.warning(
                     "Connection error calling %s %s. Retrying in %.2fs (%d/%d): %s",
@@ -1017,11 +987,11 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                     request_headers=dict(payload_headers) if payload_headers else None,
                     request_params=dict(params) if params else None,
                     request_data=request_body_log,
-                    error_message=f"{type(e).__name__}: {str(e)} (not retried: the request had been sent)",
+                    error_message=f"{type(e).__name__}: {str(e)} (not retried: the request may have been received)",
                 )
                 raise ApiServerError(
-                    f"The connection to {default_base_url()} dropped after the request was sent. "
-                    "It was not sent again, because the provider may already have run and billed it. "
+                    f"The connection to {default_base_url()} dropped while the request was in flight. "
+                    "It was not sent again, because the provider may have run and billed it. "
                     "Check your usage history before trying again."
                 ) from e
             diag = await _diagnose_connectivity()
