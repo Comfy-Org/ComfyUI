@@ -212,7 +212,6 @@ async def upload_file_to_comfyapi(
         response_model=UploadResponse,
         final_label_on_success=None,
         monitor_progress=False,
-        repeatable=True,  # mints an upload URL; nothing is charged for asking twice
     )
     await upload_file(
         cls,

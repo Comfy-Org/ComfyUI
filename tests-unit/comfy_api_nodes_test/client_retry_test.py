@@ -39,8 +39,7 @@ def test_a_read_timeout_after_send_is_not_repeated(method):
 
 
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
-def test_a_repeatable_call_keeps_retrying(method):
-    # Status polls and the upload-URL request cost nothing to repeat, so they keep
-    # the retry the paid submits give up.
-    assert _connection_error_is_retryable(method, aiohttp.ServerDisconnectedError(), repeatable=True)
-    assert _connection_error_is_retryable(method, aiohttp.ClientOSError("broken pipe"), repeatable=True)
+def test_a_status_poll_keeps_retrying(method):
+    # The poll loop marks its requests: a status read costs nothing to send again.
+    assert _connection_error_is_retryable(method, aiohttp.ServerDisconnectedError(), resend_is_free=True)
+    assert _connection_error_is_retryable(method, aiohttp.ClientOSError("broken pipe"), resend_is_free=True)
