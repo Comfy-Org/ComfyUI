@@ -74,7 +74,7 @@ def _remove_sensitive_from_queue(queue: list) -> list:
 async def send_socket_catch_exception(function, message):
     try:
         await function(message)
-    except (aiohttp.ClientError, aiohttp.ClientPayloadError, ConnectionResetError, BrokenPipeError, ConnectionError) as err:
+    except (aiohttp.ClientError, aiohttp.ClientPayloadError, OSError) as err:
         logging.warning("send error: {}".format(err))
 
 # Track deprecated paths that have been warned about to only warn once per file
