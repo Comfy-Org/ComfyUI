@@ -621,6 +621,7 @@ class GeminiNode(IO.ComfyNode):
 
 
 GEMINI_V2_MODELS: dict[str, str] = {
+    "Gemini 3.8 Flash": "gemini-3.8-flash",
     "Gemini 3.7 Flash": "gemini-3.7-flash",
     "Gemini 3.1 Pro": "gemini-3.1-pro-preview",
     "Gemini 3.5 Flash": "gemini-3.5-flash",
@@ -628,8 +629,37 @@ GEMINI_V2_MODELS: dict[str, str] = {
 }
 
 
-def _gemini_text_model_inputs(thinking_default: str, thinking_options: list[str] | None = None) -> list[Input]:
-    """Per-model inputs revealed by the model DynamicCombo (shared media + sampling controls)."""
+def _gemini_text_model_inputs(
+    thinking_default: str,
+    thinking_options: list[str] | None = None,
+    *,
+    sampling: bool = True,
+) -> list[Input]:
+    sampling_inputs: list[Input] = (
+        [
+            IO.Float.Input(
+                "temperature",
+                default=1.0,
+                min=0.0,
+                max=2.0,
+                step=0.01,
+                tooltip="Controls randomness. Lower is more focused/deterministic, higher is more creative.",
+                advanced=True,
+            ),
+            IO.Float.Input(
+                "top_p",
+                default=0.95,
+                min=0.0,
+                max=1.0,
+                step=0.01,
+                tooltip="Nucleus sampling: sample from the smallest token set whose cumulative "
+                "probability reaches top_p.",
+                advanced=True,
+            ),
+        ]
+        if sampling
+        else []
+    )
     return [
         IO.Autogrow.Input(
             "images",
@@ -671,24 +701,7 @@ def _gemini_text_model_inputs(thinking_default: str, thinking_options: list[str]
             tooltip="How hard the model reasons internally before answering. "
             "HIGH improves quality on difficult tasks but costs more (thinking) tokens and is slower.",
         ),
-        IO.Float.Input(
-            "temperature",
-            default=1.0,
-            min=0.0,
-            max=2.0,
-            step=0.01,
-            tooltip="Controls randomness. Lower is more focused/deterministic, higher is more creative.",
-            advanced=True,
-        ),
-        IO.Float.Input(
-            "top_p",
-            default=0.95,
-            min=0.0,
-            max=1.0,
-            step=0.01,
-            tooltip="Nucleus sampling: sample from the smallest token set whose cumulative probability reaches top_p.",
-            advanced=True,
-        ),
+        *sampling_inputs,
         IO.Int.Input(
             "max_output_tokens",
             default=32768,
@@ -724,6 +737,10 @@ class GeminiNodeV2(IO.ComfyNode):
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
+                        IO.DynamicCombo.Option(
+                            "Gemini 3.8 Flash",
+                            _gemini_text_model_inputs("MEDIUM", ["LOW", "MEDIUM", "HIGH"], sampling=False),
+                        ),
                         IO.DynamicCombo.Option(
                             "Gemini 3.7 Flash",
                             _gemini_text_model_inputs("MEDIUM", ["LOW", "MEDIUM", "HIGH"]),
@@ -773,9 +790,9 @@ class GeminiNodeV2(IO.ComfyNode):
                     "usd": [0.00025, 0.0015],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
                   }
-                  : $contains($m, "3.7 flash") ? {
+                  : ($contains($m, "3.7 flash") or $contains($m, "3.8 flash")) ? {
                     "type": "list_usd",
-                    "usd": [0.00215, 0.01073],
+                    "usd": [0.002145, 0.010725],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
                   }
                   : $contains($m, "3.5 flash") ? {
@@ -829,8 +846,8 @@ class GeminiNodeV2(IO.ComfyNode):
                     )
                 ],
                 generationConfig=GeminiGenerationConfig(
-                    temperature=model["temperature"],
-                    topP=model["top_p"],
+                    temperature=model.get("temperature"),
+                    topP=model.get("top_p"),
                     maxOutputTokens=model["max_output_tokens"],
                     seed=seed if seed > 0 else None,
                     thinkingConfig=GeminiThinkingConfig(thinkingLevel=model["thinking_level"]),
