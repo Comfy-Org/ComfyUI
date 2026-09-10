@@ -106,6 +106,11 @@ def _parse_cli_feature_flags() -> dict[str, Any]:
 _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "supports_preview_metadata": True,
     "supports_model_type_tags": True,
+    "comfy_api_credentials": {
+        "version": 1,
+        "endpoint": "/api/credentials",
+        "websocket_auth_message": "credential_auth",
+    },
     "max_upload_size": args.max_upload_size * 1024 * 1024, # Convert MB to bytes
     "extension": {"manager": {"supports_v4": True}},
     "node_replacements": True,
@@ -161,11 +166,14 @@ def supports_feature(
     return get_connection_feature(sockets_metadata, sid, feature_name, False) is True
 
 
-def get_server_features() -> dict[str, Any]:
+def get_server_features(*, include_credentials: bool = True) -> dict[str, Any]:
     """
     Get the server's feature flags.
 
     Returns:
         Dictionary of server feature flags
     """
-    return SERVER_FEATURE_FLAGS.copy()
+    features = SERVER_FEATURE_FLAGS.copy()
+    if not include_credentials:
+        features.pop("comfy_api_credentials", None)
+    return features

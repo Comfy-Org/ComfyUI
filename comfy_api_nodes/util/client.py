@@ -25,7 +25,7 @@ from . import request_logger
 from ._helpers import (
     _retry_after_wait,
     default_base_url,
-    get_comfy_api_headers,
+    get_comfy_api_headers_with_generation,
     get_node_id,
     is_processing_interrupted,
     sleep_with_interrupt,
@@ -71,6 +71,7 @@ class _RequestConfig:
     price_extractor: Callable[[dict[str, Any]], float | None] | None = None
     is_rate_limited: Callable[[int, Any], bool] | None = None
     response_header_validator: Callable[[dict[str, str]], None] | None = None
+    retry_401_on_auth_change: bool = False
 
 
 @dataclass
@@ -236,6 +237,7 @@ async def sync_op_raw(
     max_retries_on_rate_limit: int = 16,
     is_rate_limited: Callable[[int, Any], bool] | None = None,
     response_header_validator: Callable[[dict[str, str]], None] | None = None,
+    retry_401_on_auth_change: bool = False,
 ) -> dict[str, Any] | bytes:
     """
     Make a single network request.
@@ -268,6 +270,7 @@ async def sync_op_raw(
         max_retries_on_rate_limit=max_retries_on_rate_limit,
         is_rate_limited=is_rate_limited,
         response_header_validator=response_header_validator,
+        retry_401_on_auth_change=retry_401_on_auth_change,
     )
     return await _request_base(cfg, expect_binary=as_binary)
 
@@ -355,6 +358,7 @@ async def poll_op_raw(
                     as_binary=False,
                     final_label_on_success=None,
                     monitor_progress=False,
+                    retry_401_on_auth_change=True,
                 )
                 if not isinstance(resp_json, dict):
                     raise Exception("Polling endpoint returned non-JSON response.")
@@ -709,6 +713,8 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
     operation_succeeded: bool = False
     final_elapsed_seconds: int | None = None
     extracted_price: float | None = None
+    retried_after_auth_change = False
+    auth_change_attempts = 0
     while True:
         attempt += 1
         stop_event = asyncio.Event()
@@ -719,10 +725,15 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
         logging.debug("[DEBUG] HTTP %s %s (attempt %d)", method, url, attempt)
 
         payload_headers = {"Accept": "*/*"} if expect_binary else {"Accept": "application/json"}
+        auth_generation: int | None = None
         if is_comfy_api_request:
-            payload_headers.update(get_comfy_api_headers(cfg.node_cls))
+            comfy_headers, auth_generation = get_comfy_api_headers_with_generation(cfg.node_cls)
+            payload_headers.update(comfy_headers)
         if cfg.endpoint.headers:
             payload_headers.update(cfg.endpoint.headers)
+            endpoint_header_names = {name.lower() for name in cfg.endpoint.headers}
+            if "authorization" in endpoint_header_names or "x-api-key" in endpoint_header_names:
+                auth_generation = None
 
         payload_kw: dict[str, Any] = {"headers": payload_headers}
         if method == "GET":
@@ -811,6 +822,19 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                     is_rl = resp.status == 429 or (
                         cfg.is_rate_limited is not None and cfg.is_rate_limited(resp.status, body)
                     )
+                    if (
+                        resp.status == 401
+                        and cfg.retry_401_on_auth_change
+                        and method.upper() in {"GET", "HEAD"}
+                        and auth_generation is not None
+                        and not retried_after_auth_change
+                    ):
+                        latest_headers, latest_generation = get_comfy_api_headers_with_generation(cfg.node_cls)
+                        if latest_generation != auth_generation and "Authorization" in latest_headers:
+                            retried_after_auth_change = True
+                            auth_change_attempts += 1
+                            retry_label = "credential refresh retry"
+                            should_retry = True
                     if is_rl and rate_limit_attempts < cfg.max_retries_on_rate_limit:
                         rate_limit_attempts += 1
                         wait_time = min(rate_limit_delay, 30.0)
@@ -820,11 +844,11 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                     elif (
                         resp.status in _RETRY_STATUS
                         and not _is_terminal_service_refusal(body)
-                        and (attempt - rate_limit_attempts) <= cfg.max_retries
+                        and (attempt - rate_limit_attempts - auth_change_attempts) <= cfg.max_retries
                     ):
                         wait_time = delay
                         delay *= cfg.retry_backoff
-                        retry_label = f"retry {attempt - rate_limit_attempts} of {cfg.max_retries}"
+                        retry_label = f"retry {attempt - rate_limit_attempts - auth_change_attempts} of {cfg.max_retries}"
                         should_retry = True
 
                     if should_retry:
@@ -932,13 +956,13 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
             logging.debug("Polling was interrupted by user")
             raise
         except (ClientError, OSError) as e:
-            if (attempt - rate_limit_attempts) <= cfg.max_retries:
+            if (attempt - rate_limit_attempts - auth_change_attempts) <= cfg.max_retries:
                 logging.warning(
                     "Connection error calling %s %s. Retrying in %.2fs (%d/%d): %s",
                     method,
                     url,
                     delay,
-                    attempt - rate_limit_attempts,
+                    attempt - rate_limit_attempts - auth_change_attempts,
                     cfg.max_retries,
                     str(e),
                 )

@@ -36,8 +36,18 @@ class TestFeatureFlags:
         assert features["supports_preview_metadata"] is True
         assert "supports_model_type_tags" in features
         assert features["supports_model_type_tags"] is True
+        assert features["comfy_api_credentials"] == {
+            "version": 1,
+            "endpoint": "/api/credentials",
+            "websocket_auth_message": "credential_auth",
+        }
         assert "max_upload_size" in features
         assert isinstance(features["max_upload_size"], (int, float))
+
+    def test_get_server_features_can_omit_credentials(self):
+        features = get_server_features(include_credentials=False)
+        assert "comfy_api_credentials" not in features
+        assert features["supports_preview_metadata"] is True
 
     def test_get_connection_feature_with_missing_sid(self):
         """Test getting feature for non-existent session ID."""
