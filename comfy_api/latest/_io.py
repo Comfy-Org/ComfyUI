@@ -31,6 +31,46 @@ from comfy_execution.graph_utils import ExecutionBlocker
 from ._util import MESH, VOXEL, SPLAT, SVG as _SVG, File3D
 
 
+class EmptyInputSentinel:
+    """
+    Sentinel class indicating an empty/missing input.
+
+    Use the class itself (not an instance) as the sentinel.
+    Compare using 'is' or 'is not' only.
+    """
+
+    def __new__(cls):
+        raise TypeError("EmptyInputSentinel cannot be instantiated, use the class itself")
+
+    def __init_subclass__(cls, **kwargs):
+        raise TypeError("EmptyInputSentinel cannot be subclassed")
+
+    @classmethod
+    def __class_getitem__(cls, item):
+        raise TypeError("EmptyInputSentinel cannot be subscripted")
+
+    def __repr__(self):
+        return "<EmptyInput>"
+
+    def __bool__(self):
+        raise TypeError("EmptyInputSentinel cannot be used in boolean context")
+
+    def __eq__(self, other):
+        raise TypeError("EmptyInputSentinel cannot be compared with ==, use 'is' instead")
+
+    def __ne__(self, other):
+        raise TypeError("EmptyInputSentinel cannot be compared with !=, use 'is not' instead")
+
+    def __hash__(self):
+        raise TypeError("EmptyInputSentinel cannot be hashed")
+
+    def __iter__(self):
+        raise TypeError("EmptyInputSentinel cannot be iterated")
+
+    def __len__(self):
+        raise TypeError("EmptyInputSentinel has no length")
+
+
 class FolderType(str, Enum):
     input = "input"
     output = "output"
@@ -2532,6 +2572,7 @@ __all__ = [
     "DynamicCombo",
     "Autogrow",
     # Other classes
+    "EmptyInputSentinel",
     "HiddenHolder",
     "Hidden",
     "NodeInfoV1",
