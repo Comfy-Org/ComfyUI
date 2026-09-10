@@ -43,7 +43,7 @@ jobs:
       
       - name: Create Pull Request
         if: steps.git-check.outputs.changes == 'true'
-        uses: peter-evans/create-pull-request@v5
+        uses: peter-evans/create-pull-request@4e1beaa7521e8b457b572c090b25bd3db56bf1c5 # v5
         with:
           commit-message: 'chore: update API models from OpenAPI spec'
           title: 'Update API models from api.comfy.org'
