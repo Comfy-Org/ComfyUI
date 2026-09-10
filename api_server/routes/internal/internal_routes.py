@@ -2,7 +2,9 @@ from aiohttp import web
 from typing import Optional
 from folder_paths import folder_names_and_paths, get_directory_by_type
 from api_server.services.terminal_service import TerminalService
+from app.model_download import ModelDownloadError, download_model_to_destination, parse_model_download_request, resolve_model_download_destination
 import app.logger
+import logging
 import os
 
 class InternalRoutes:
@@ -50,6 +52,32 @@ class InternalRoutes:
             for key in folder_names_and_paths:
                 response[key] = folder_names_and_paths[key][0]
             return web.json_response(response)
+
+        @self.routes.post('/models/download')
+        async def download_model(request):
+            try:
+                try:
+                    json_data = await request.json()
+                except Exception as err:
+                    raise ModelDownloadError("Expected a JSON request body.") from err
+
+                download_request = parse_model_download_request(json_data)
+                destination = resolve_model_download_destination(download_request)
+                if self.prompt_server.client_session is None:
+                    raise ModelDownloadError("HTTP client session is not ready.", status=503)
+                result = await download_model_to_destination(
+                    self.prompt_server.client_session,
+                    download_request,
+                    destination,
+                )
+            except ModelDownloadError as err:
+                return web.json_response({"error": str(err)}, status=err.status)
+            except Exception as err:
+                logging.exception("Failed to download model: %s", err)
+                return web.json_response({"error": "Failed to download model."}, status=500)
+
+            response_status = 200 if result["status"] == "already_exists" else 201
+            return web.json_response(result, status=response_status)
 
         @self.routes.get('/files/{directory_type}')
         async def get_files(request: web.Request) -> web.Response:
