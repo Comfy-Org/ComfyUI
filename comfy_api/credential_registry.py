@@ -18,7 +18,7 @@ class _ClientCredential:
     token: str | None = field(repr=False)
     generation: int
     updated_at: float
-    connected: bool = True
+    connected: bool = False
 
 
 @dataclass
@@ -53,9 +53,13 @@ class CredentialRegistry:
                 generation = current.generation + 1
             else:
                 current.updated_at = now
-                current.connected = True
                 return current.generation
-            self._clients[client_id] = _ClientCredential(token, generation, now)
+            if current is None:
+                self._clients[client_id] = _ClientCredential(token, generation, now)
+            else:
+                current.token = token
+                current.generation = generation
+                current.updated_at = now
             return generation
 
     def bind_prompt(self, prompt_id: str, client_id: str) -> bool:
@@ -65,15 +69,16 @@ class CredentialRegistry:
             if prompt_id in self._prompts:
                 return False
             self._prompts[prompt_id] = _PromptClient(client_id, now)
-            current = self._clients.get(client_id)
-            if current is not None:
-                current.connected = True
             return True
 
     def connect(self, client_id: str) -> None:
+        now = self._clock()
         with self._lock:
+            self._cleanup(now)
             current = self._clients.get(client_id)
-            if current is not None:
+            if current is None:
+                self._clients[client_id] = _ClientCredential(None, 0, now, connected=True)
+            else:
                 current.connected = True
 
     def get_for_prompt(self, prompt_id: str) -> Credential | None:

@@ -30,7 +30,7 @@ from ._helpers import (
     is_processing_interrupted,
     sleep_with_interrupt,
 )
-from .common_exceptions import ApiServerError, LocalNetworkError, ProcessingInterrupted
+from .common_exceptions import ApiResponseError, ApiServerError, LocalNetworkError, ProcessingInterrupted
 
 M = TypeVar("M", bound=BaseModel)
 
@@ -432,9 +432,11 @@ async def poll_op_raw(
                 return resp_json
 
             if status in failed_states:
-                msg = f"Task failed: {json.dumps(resp_json)}"
+                sensitive_values = getattr(resp_json, "sensitive_values", ())
+                redacted_response = _redact_sensitive_data(resp_json, sensitive_values)
+                msg = f"Task failed: {json.dumps(redacted_response)}"
                 logging.error(msg)
-                raise Exception(msg)
+                raise ApiResponseError(msg, sensitive_values)
 
             try:
                 await sleep_with_interrupt(poll_interval, cls, None, None, None)
@@ -463,6 +465,8 @@ async def poll_op_raw(
     except ProcessingInterrupted:
         raise
     except (LocalNetworkError, ApiServerError):
+        raise
+    except ApiResponseError:
         raise
     except Exception as e:
         raise Exception(f"Polling aborted due to error: {e}") from e
@@ -648,6 +652,46 @@ def _friendly_http_message(status: int, body: Any) -> str:
         return f"HTTP {status}: Unknown error"
 
 
+def _request_auth_values(headers: dict[str, str]) -> tuple[str, ...]:
+    values = []
+    normalized_headers = {name.lower(): value for name, value in headers.items()}
+    authorization = normalized_headers.get("authorization")
+    if authorization:
+        values.append(authorization)
+        _, _, bearer_token = authorization.partition(" ")
+        if bearer_token:
+            values.append(bearer_token)
+    api_key = normalized_headers.get("x-api-key")
+    if api_key:
+        values.append(api_key)
+    return tuple(dict.fromkeys(values))
+
+
+def _redact_sensitive_data(data: Any, sensitive_values: tuple[str, ...]) -> Any:
+    if isinstance(data, str):
+        for value in sensitive_values:
+            data = data.replace(value, "***")
+        return data
+    if isinstance(data, bytes):
+        for value in sensitive_values:
+            data = data.replace(value.encode(), b"***")
+        return data
+    if isinstance(data, dict):
+        return {
+            _redact_sensitive_data(key, sensitive_values): _redact_sensitive_data(value, sensitive_values)
+            for key, value in data.items()
+        }
+    if isinstance(data, list):
+        return [_redact_sensitive_data(value, sensitive_values) for value in data]
+    return data
+
+
+class _AuthenticatedResponse(dict):
+    def __init__(self, data: dict[str, Any], sensitive_values: tuple[str, ...]):
+        super().__init__(data)
+        self.sensitive_values = sensitive_values
+
+
 def _generate_operation_id(method: str, path: str, attempt: int) -> str:
     slug = path.strip("/").replace("/", "_") or "op"
     return f"{method}_{slug}_try{attempt}_{uuid.uuid4().hex[:8]}"
@@ -734,6 +778,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
             endpoint_header_names = {name.lower() for name in cfg.endpoint.headers}
             if "authorization" in endpoint_header_names or "x-api-key" in endpoint_header_names:
                 auth_generation = None
+        request_auth_values = _request_auth_values(payload_headers)
 
         payload_kw: dict[str, Any] = {"headers": payload_headers}
         if method == "GET":
@@ -816,6 +861,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                         body = await resp.json()
                     except (ContentTypeError, json.JSONDecodeError):
                         body = await resp.text()
+                    redacted_body = _redact_sensitive_data(body, request_auth_values)
                     should_retry = False
                     wait_time = 0.0
                     retry_label = ""
@@ -866,8 +912,8 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                             request_method=method,
                             request_url=url,
                             response_status_code=resp.status,
-                            response_headers=dict(resp.headers),
-                            response_content=body,
+                            response_headers=_redact_sensitive_data(dict(resp.headers), request_auth_values),
+                            response_content=redacted_body,
                             error_message=f"HTTP {resp.status} ({retry_label}, will retry in {wait_time:.1f}s)",
                         )
                         await sleep_with_interrupt(
@@ -879,17 +925,17 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                             display_callback=_display_time_progress if cfg.monitor_progress else None,
                         )
                         continue
-                    msg = _friendly_http_message(resp.status, body)
+                    msg = _friendly_http_message(resp.status, redacted_body)
                     request_logger.log_request_response(
                         operation_id=operation_id,
                         request_method=method,
                         request_url=url,
                         response_status_code=resp.status,
-                        response_headers=dict(resp.headers),
-                        response_content=body,
+                        response_headers=_redact_sensitive_data(dict(resp.headers), request_auth_values),
+                        response_content=redacted_body,
                         error_message=msg,
                     )
-                    raise Exception(msg)
+                    raise ApiResponseError(msg, request_auth_values)
 
                 if expect_binary:
                     buff = bytearray()
@@ -921,8 +967,8 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                         request_method=method,
                         request_url=url,
                         response_status_code=resp.status,
-                        response_headers=resp_headers,
-                        response_content=bytes_payload,
+                        response_headers=_redact_sensitive_data(resp_headers, request_auth_values),
+                        response_content=_redact_sensitive_data(bytes_payload, request_auth_values),
                     )
                     return bytes_payload
                 else:
@@ -936,6 +982,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                         except json.JSONDecodeError:
                             payload = {"_raw": text}
                         response_content_to_log = payload if isinstance(payload, dict) else text
+                    response_content_to_log = _redact_sensitive_data(response_content_to_log, request_auth_values)
                     if is_comfy_api_request:
                         _maybe_remember_credits_used(cfg.node_cls, resp.headers.get(PRICE_CREDITS_HEADER))
                     with contextlib.suppress(Exception):
@@ -947,9 +994,11 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                         request_method=method,
                         request_url=url,
                         response_status_code=resp.status,
-                        response_headers=dict(resp.headers),
+                        response_headers=_redact_sensitive_data(dict(resp.headers), request_auth_values),
                         response_content=response_content_to_log,
                     )
+                    if isinstance(payload, dict) and request_auth_values:
+                        payload = _AuthenticatedResponse(payload, request_auth_values)
                     return payload
 
         except ProcessingInterrupted:

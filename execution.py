@@ -432,22 +432,30 @@ def format_input_data(input_data_all):
     return formatted
 
 
-def redact_sensitive_text(text, extra_data):
+def redact_sensitive_text(text, extra_data, additional_sensitive_values=()):
     sensitive_values = [
         value
         for key in SENSITIVE_EXTRA_DATA_KEYS
         if isinstance((value := extra_data.get(key)), str) and value
     ]
+    sensitive_values.extend(
+        value for value in additional_sensitive_values if isinstance(value, str) and value
+    )
     for value in sorted(sensitive_values, key=len, reverse=True):
         text = text.replace(value, "***")
     return text
 
 
 def log_execution_exception(ex, tb, extra_data):
-    exception_message = redact_sensitive_text(str(ex), extra_data)
-    traceback_lines = [redact_sensitive_text(line, extra_data) for line in traceback.format_tb(tb)]
+    request_sensitive_values = getattr(ex, "sensitive_values", ())
+    exception_message = redact_sensitive_text(str(ex), extra_data, request_sensitive_values)
+    traceback_lines = [
+        redact_sensitive_text(line, extra_data, request_sensitive_values)
+        for line in traceback.format_tb(tb)
+    ]
     formatted_exception = "".join(
-        redact_sensitive_text(line, extra_data) for line in traceback.format_exception(type(ex), ex, tb)
+        redact_sensitive_text(line, extra_data, request_sensitive_values)
+        for line in traceback.format_exception(type(ex), ex, tb)
     )
     logging.error("!!! Exception during processing !!! %s", exception_message)
     logging.error(formatted_exception)
