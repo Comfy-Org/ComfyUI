@@ -613,10 +613,15 @@ class ResizeAndPadImage(IO.ComfyNode):
 
         scale_w = target_width / orig_width
         scale_h = target_height / orig_height
-        scale = min(scale_w, scale_h)
 
-        new_width = int(orig_width * scale)
-        new_height = int(orig_height * scale)
+        # When aspect ratios match, scale directly to target to avoid precision loss from float multiplication
+        if scale_w == scale_h:
+            new_width = target_width
+            new_height = target_height
+        else:
+            scale = min(scale_w, scale_h)
+            new_width = int(orig_width * scale)
+            new_height = int(orig_height * scale)
 
         image_permuted = image.permute(0, 3, 1, 2)
 
