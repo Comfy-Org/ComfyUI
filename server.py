@@ -1142,6 +1142,43 @@ class PromptServer():
                     "extra_info": {}
                 }
                 return web.json_response({"error": error, "node_errors": {}}, status=400)
+            
+        @routes.post("/validate_prompt")
+        async def validate_prompt(request):
+            logging.info("validate prompt request")
+            json_data = await request.json()
+
+            if "prompt" not in json_data:
+                error = {
+                    "type": "no_prompt",
+                    "message": "No prompt provided",
+                    "details": "No prompt provided",
+                    "extra_info": {}
+                }
+                return web.json_response({"error": error, "node_errors": {}}, status=400)
+            
+            prompt = json_data["prompt"]
+            prompt_id = str(json_data.get("prompt_id", uuid.uuid4()))
+
+            partial_execution_targets = json_data.get("partial_execution_targets", None)
+
+            is_valid, error_info, good_outputs, node_errors = await execution.validate_prompt(prompt_id, prompt, partial_execution_targets)
+
+            if is_valid:
+                response = {
+                    "valid": True,
+                    "prompt_id": prompt_id,
+                    "outputs": good_outputs,
+                    "node_errors": node_errors
+                }
+                return web.json_response(response)
+            else:
+                response = {
+                    "valid": False,
+                    "error": error_info,
+                    "node_errors": node_errors
+                }
+                return web.json_response(response, status=400)
 
         @routes.post("/queue")
         async def post_queue(request):
