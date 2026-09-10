@@ -7,6 +7,7 @@ from comfy_extras.nodes_mesh_postprocess import pack_variable_mesh_batch
 import comfy.latent_formats
 import comfy.model_management
 import comfy.utils
+import logging
 import math
 import torch
 
@@ -19,6 +20,22 @@ tex_slat_format = comfy.latent_formats.Trellis2TexSLAT()
 def shape_norm(shape_latent, coords):
     feats = shape_slat_format.process_out(shape_latent)
     return SparseTensor(feats=feats, coords=coords)
+
+
+def _move_sparse_tensor_uncached(tensor, device):
+    return SparseTensor(
+        feats=tensor.feats.to(device),
+        coords=tensor.coords.to(device),
+        shape=tensor.shape,
+        scale=tensor._scale,
+    )
+
+
+def _sparse_vae_decode_memory(point_count, dtype):
+    # Last 128-channel stage: feature intermediates plus 27 int32 neighbor indices,
+    # plus sparse-convolution workspace.
+    bytes_per_point = 896 * comfy.model_management.dtype_size(dtype) + 27 * 4
+    return 2 * 1024 ** 3 + int(point_count) * bytes_per_point
 
 
 def infer_batched_coord_layout(coords):
@@ -127,7 +144,11 @@ class VaeDecodeShapeTrellis(IO.ComfyNode):
         sample_tensor = samples["samples"]
         device = comfy.model_management.get_torch_device()
         coords = samples["coords"]
-        vae.prepare_decode(sample_tensor.shape)
+        surface_point_estimate = resolution * resolution * 5 // 4
+        vae.prepare_decode(
+            sample_tensor.shape,
+            memory_required=_sparse_vae_decode_memory(surface_point_estimate, vae.vae_dtype),
+        )
         trellis_vae = vae.first_stage_model
         coord_counts = samples.get("coord_counts")
 
@@ -166,6 +187,8 @@ class VaeDecodeShapeTrellis(IO.ComfyNode):
             mesh = Types.MESH(vertices=torch.stack(vert_list), faces=torch.stack(face_list))
         else:
             mesh = pack_variable_mesh_batch(vert_list, face_list)
+        output_device = comfy.model_management.intermediate_device()
+        subs = [_move_sparse_tensor_uncached(sub, output_device) for sub in subs]
         return IO.NodeOutput(mesh, subs)
 
 class VaeDecodeTextureTrellis(IO.ComfyNode):
@@ -193,7 +216,10 @@ class VaeDecodeTextureTrellis(IO.ComfyNode):
         sample_tensor = samples["samples"]
         device = comfy.model_management.get_torch_device()
         coords = samples["coords"]
-        vae.prepare_decode(sample_tensor.shape)
+        vae.prepare_decode(
+            sample_tensor.shape,
+            memory_required=_sparse_vae_decode_memory(shape_subdivides[-1].feats.shape[0], vae.vae_dtype),
+        )
         trellis_vae = vae.first_stage_model
         coord_counts = samples.get("coord_counts")
         model_frame = samples.get("model_frame", "y_up")
@@ -204,6 +230,7 @@ class VaeDecodeTextureTrellis(IO.ComfyNode):
         samples = samples.to(device)
         feats = tex_slat_format.process_out(samples)
         samples = SparseTensor(feats=feats, coords=coords.to(device))
+        shape_subdivides = [_move_sparse_tensor_uncached(sub, device) for sub in shape_subdivides]
 
         voxel = trellis_vae.decode_tex_slat(samples.to(vae.vae_dtype), shape_subdivides)
         # Keep all decoded channels. The texture VAE emits 6: base_color (0:3),
@@ -239,6 +266,9 @@ class VaeDecodeTextureTrellis(IO.ComfyNode):
                     dim=-1,
                 )
 
+        output_device = comfy.model_management.intermediate_device()
+        voxel_coords = voxel_coords.to(output_device)
+        color_feats = color_feats.to(output_device)
         voxel = Types.VOXEL(voxel_coords, color_feats, tex_resolution)
         return IO.NodeOutput(voxel)
 
@@ -661,6 +691,73 @@ def _dino_encode_batch(clip_vision_model, image, out_device, *, want_patches=Fal
         out["composites"] = composite_list
     return out
 
+def _naf_upsample(naf_model, lr_feat, composites, image_size, naf_target, out_device, compute_device):
+    """NAF-upsample each item's DINO patch grid to naf_target, guided by its composite."""
+    if naf_model is None:
+        return None
+    comfy.model_management.load_model_gpu(naf_model)
+    inner = naf_model.model
+    model_dtype = next(inner.parameters()).dtype
+    out = torch.empty((len(composites), lr_feat.shape[1], *naf_target), device=out_device, dtype=model_dtype)
+    for i, c in enumerate(composites):
+        img_i = comfy.utils.common_upscale(c, image_size, image_size, "lanczos", "disabled").to(compute_device, model_dtype)
+        lr_i = lr_feat[i:i + 1].to(compute_device, model_dtype)
+        inner(img_i, lr_i, naf_target, output=out[i:i + 1])
+    return out
+
+
+def _build_pixal3d_conditioning(clip_vision_model, image, transform_matrix, camera_angle_x, mesh_scale, num_views=1):
+    """Per-item inputs hold B*num_views entries with each object's views consecutive; mesh_scale holds B."""
+    naf_model = clip_vision_model.naf
+    out_device = comfy.model_management.intermediate_device()
+    compute_device = comfy.model_management.get_torch_device()
+
+    cond = _dino_encode_batch(clip_vision_model, image, out_device, want_patches=True)
+    batch_size = cond["batch_size"] // num_views
+    fm_512_dino, fm_1024_dino = cond["patches_512"], cond["patches_1024"]
+    composite_list = cond["composites"]
+
+    # NAF HR targets per stage: shape_512=512, shape_1024=512, tex_1024=1024
+    hr_shape_512  = _naf_upsample(naf_model, fm_512_dino,  composite_list, 512,  (512, 512), out_device, compute_device)
+    hr_shape_1024 = _naf_upsample(naf_model, fm_1024_dino, composite_list, 1024, (512, 512), out_device, compute_device)
+    hr_tex_1024   = _naf_upsample(naf_model, fm_1024_dino, composite_list, 1024, (1024, 1024), out_device, compute_device)
+
+    # CLS + register tokens averaged over each object's views
+    global_512 = cond["global_512"].unflatten(0, (batch_size, num_views)).mean(dim=1)
+    global_1024 = cond["global_1024"].unflatten(0, (batch_size, num_views)).mean(dim=1)
+
+    proj_pack = {
+        "stages": {
+            "ss":         {"feature_map": fm_512_dino,    "feature_map_hr": None,         "image_resolution": 512},
+            "shape_512":  {"feature_map": fm_512_dino,    "feature_map_hr": hr_shape_512, "image_resolution": 512},
+            "shape_1024": {"feature_map": fm_1024_dino,   "feature_map_hr": hr_shape_1024,"image_resolution": 1024},
+            "tex_1024":   {"feature_map": fm_1024_dino,   "feature_map_hr": hr_tex_1024,  "image_resolution": 1024},
+        },
+        "transform_matrix": transform_matrix.to(out_device),
+        "camera_angle_x": camera_angle_x.to(out_device),
+        "mesh_scale": mesh_scale.to(out_device),
+        "num_views": num_views,
+        "patch_size": 16,
+    }
+
+    # global_512 -> SS/shape_512 cross-attn; global_1024 -> shape_1024/tex_1024.
+    ss_proj_feats = compute_stage_proj_feats(
+        proj_pack, "ss", dense_grid_resolution=16, batch_size=batch_size,
+        device=compute_device,
+    )
+    base_extras = {
+        "embeds": global_1024, "proj_feat_pack": proj_pack,
+        "trellis2_proj_feats": ss_proj_feats,
+    }
+    neg_extras = {
+        "embeds": torch.zeros_like(global_1024), "proj_feat_pack": proj_pack,
+        "trellis2_proj_feats": ss_proj_feats,
+    }
+    positive = [[global_512, base_extras]]
+    negative = [[torch.zeros_like(global_512), neg_extras]]
+    return IO.NodeOutput(positive, negative)
+
+
 class Pixal3DConditioning(IO.ComfyNode):
 
     @classmethod
@@ -686,79 +783,85 @@ class Pixal3DConditioning(IO.ComfyNode):
 
     @classmethod
     def execute(cls, clip_vision_model, image, camera_angle_x) -> IO.NodeOutput:
-        naf_model = clip_vision_model.naf
-        out_device = comfy.model_management.intermediate_device()
-        compute_device = comfy.model_management.get_torch_device()
-
-        cond = _dino_encode_batch(clip_vision_model, image, out_device, want_patches=True)
-        batch_size = cond["batch_size"]
-        global_512, global_1024 = cond["global_512"], cond["global_1024"]
-        fm_512_dino, fm_1024_dino = cond["patches_512"], cond["patches_1024"]
-        composite_list = cond["composites"]
-
-        # The LR DINO grid AND the NAF HR grid are sampled separately
-        # NAF targets per stage: shape_512=512, shape_1024=512, tex_1024=1024.
-        def _naf_hr(lr_feat, composites, image_size, naf_target):
-            if naf_model is None or naf_target is None:
-                return None
-            comfy.model_management.load_model_gpu(naf_model)
-            inner = naf_model.model
-            model_dtype = next(inner.parameters()).dtype  # set at load time (see clip_vision NAF)
-            hrs = []
-            for i, c in enumerate(composites):
-                img_i = comfy.utils.common_upscale(c, image_size, image_size, "lanczos", "disabled")\
-                    .to(compute_device).to(model_dtype)
-                lr_i = lr_feat[i:i + 1].to(compute_device).to(model_dtype)
-                output = torch.empty((1, lr_i.shape[1], *naf_target), device=out_device, dtype=model_dtype)
-                hr_i = inner(img_i, lr_i, naf_target, output=output)
-                hrs.append(hr_i)
-            return torch.cat(hrs, dim=0)
-
-        hr_shape_512  = _naf_hr(fm_512_dino,  composite_list, 512,  (512, 512))
-        hr_shape_1024 = _naf_hr(fm_1024_dino, composite_list, 1024, (512, 512))
-        hr_tex_1024   = _naf_hr(fm_1024_dino, composite_list, 1024, (1024, 1024))
-
+        batch_size = image.shape[0]
         # distance_from_fov: grid_point (-1, 0, 0) projects to pixel (0, image_resolution-1).
         # FOV widget is in degrees for UX; trig + downstream projection expect radians.
         camera_angle_x = math.radians(float(camera_angle_x))
         distance = 0.5 / math.tan(camera_angle_x / 2.0)
-        cam_angle_t = torch.tensor([camera_angle_x] * batch_size, device=out_device, dtype=torch.float32)
-        dist_t = torch.tensor([distance] * batch_size, device=out_device, dtype=torch.float32)
-        scale_t = torch.ones(batch_size, device=out_device, dtype=torch.float32)
-        T = build_proj_transform_matrix(dist_t, batch_size, device=out_device, dtype=torch.float32)
+        cam_angle_t = torch.full((batch_size,), camera_angle_x)
+        dist_t = torch.full((batch_size,), distance)
+        T = build_proj_transform_matrix(dist_t, batch_size, dist_t.device)
+        return _build_pixal3d_conditioning(clip_vision_model, image, T, cam_angle_t, torch.ones(batch_size))
 
-        proj_pack = {
-            "stages": {
-                "ss":         {"feature_map": fm_512_dino,    "feature_map_hr": None,         "image_resolution": 512},
-                "shape_512":  {"feature_map": fm_512_dino,    "feature_map_hr": hr_shape_512, "image_resolution": 512},
-                "shape_1024": {"feature_map": fm_1024_dino,   "feature_map_hr": hr_shape_1024,"image_resolution": 1024},
-                "tex_1024":   {"feature_map": fm_1024_dino,   "feature_map_hr": hr_tex_1024,  "image_resolution": 1024},
-            },
-            "transform_matrix": T,
-            "camera_angle_x": cam_angle_t,
-            "mesh_scale": scale_t,
-            "distance": dist_t,
-            "patch_size": 16,
-        }
 
-        # global_512 → SS/shape_512 cross-attn; global_1024 → shape_1024/tex_1024.
-        ss_proj_feats = compute_stage_proj_feats(
-            proj_pack, "ss", dense_grid_resolution=16, batch_size=batch_size,
-            device=compute_device,
+_VIEW_AZIMUTHS = {"front": 0.0, "left": 90.0, "back": 180.0, "right": 270.0}
+_VIEW_PAD = 1.1  # unit cube spans 1/1.1 of the frame, upstream's example rig
+
+
+def _orbit_camera_to_world(azimuths_deg, elevations_deg, distance):
+    """Z-up orbit cameras looking at the origin; azimuth 0 / elevation 0 is the front view."""
+    az = torch.deg2rad(torch.tensor(azimuths_deg, dtype=torch.float32))
+    el = torch.deg2rad(torch.tensor(elevations_deg, dtype=torch.float32))
+    back = torch.stack([torch.sin(az) * torch.cos(el), -torch.cos(az) * torch.cos(el), torch.sin(el)], dim=-1)
+    right = torch.stack([torch.cos(az), torch.sin(az), torch.zeros_like(az)], dim=-1)
+    c2w = torch.eye(4).repeat(az.shape[0], 1, 1)
+    c2w[:, :3, :3] = torch.stack([right, torch.cross(back, right, dim=-1), back], dim=-1)
+    c2w[:, :3, 3] = back * distance
+    return c2w
+
+
+class Pixal3DMultiViewConditioning(IO.ComfyNode):
+    """Fixed orbit rig: front, left, back and right views 90 degrees apart, used as framed."""
+
+    @classmethod
+    def define_schema(cls):
+        views = [IO.Image.Input(name, optional=True,
+                                tooltip=f"Square view of the object's {name} side, with alpha or on a black background, "
+                                        "framed like the rig: the object spans about 1/1.1 of the frame at its widest, "
+                                        "the same scale in every view. The first connected view (front, left, back, "
+                                        "right order) is the front the mesh is posed to.")
+                 for name in _VIEW_AZIMUTHS]
+        return IO.Schema(
+            node_id="Pixal3DMultiViewConditioning",
+            display_name="Pixal3D Multi-View Conditioning",
+            category="model/conditioning/trellis2",
+            inputs=[IO.ClipVision.Input("clip_vision_model", tooltip="DINOv3 ViT-L/16 ClipVision with bundled NAF weights."),
+                    IO.Float.Input("fov", default=20.0, min=1.0, max=170.0, step=0.01, round=False,
+                                   tooltip="Horizontal FOV in degrees of the views as framed: 20 for rig renders and most "
+                                           "multi-view generators, or MoGeGeometryToFOV on one of the views for photos.")]
+                   + views,
+            outputs=[
+                IO.Conditioning.Output(display_name="positive"),
+                IO.Conditioning.Output(display_name="negative"),
+            ],
         )
-        neg_global = torch.zeros_like(global_512)
-        neg_embeds = torch.zeros_like(global_1024)
-        base_extras = {
-            "embeds": global_1024, "proj_feat_pack": proj_pack,
-            "trellis2_proj_feats": ss_proj_feats,
-        }
-        neg_extras = {
-            "embeds": neg_embeds, "proj_feat_pack": proj_pack,
-            "trellis2_proj_feats": ss_proj_feats,
-        }
-        positive = [[global_512, base_extras]]
-        negative = [[neg_global, neg_extras]]
-        return IO.NodeOutput(positive, negative)
+
+    @classmethod
+    def execute(cls, clip_vision_model, fov, front=None, left=None, back=None, right=None) -> IO.NodeOutput:
+        views = {"front": front, "left": left, "back": back, "right": right}
+        names = [name for name in _VIEW_AZIMUTHS if views[name] is not None]
+        if not names:
+            raise ValueError("Pixal3DMultiViewConditioning needs at least one view")
+        batch_size = views[names[0]].shape[0]
+        num_views = len(names)
+        # the first connected view is the front (upstream re-bases the rig onto view 0; on an orbit that is an azimuth shift)
+        if names[0] != "front":
+            logging.warning(f"Pixal3DMultiViewConditioning: no front view, the mesh will be posed with the {names[0]} view as its front")
+        azimuths = [_VIEW_AZIMUTHS[name] - _VIEW_AZIMUTHS[names[0]] for name in names]
+        items = []
+        for b in range(batch_size):
+            for name in names:
+                view = views[name][b % views[name].shape[0]][None]
+                if view.shape[-1] == 4:
+                    view = view[..., :3] * view[..., 3:4]
+                if view.shape[1:3] != (1024, 1024):
+                    view = comfy.utils.common_upscale(view.movedim(-1, 1), 1024, 1024, "lanczos", "disabled").movedim(1, -1)
+                items.append(view)
+        fov = math.radians(fov)
+        c2w = _orbit_camera_to_world(azimuths, [0.0] * num_views, _VIEW_PAD * 0.5 / math.tan(fov / 2.0))
+        return _build_pixal3d_conditioning(clip_vision_model, torch.cat(items, dim=0), c2w.repeat(batch_size, 1, 1),
+                                           torch.full((batch_size * num_views,), fov), torch.ones(batch_size),
+                                           num_views=num_views)
 
 
 class Trellis2Extension(ComfyExtension):
@@ -767,6 +870,7 @@ class Trellis2Extension(ComfyExtension):
         return [
             Trellis2Conditioning,
             Pixal3DConditioning,
+            Pixal3DMultiViewConditioning,
             Trellis2ShapeStage,
             EmptyTrellis2LatentStructure,
             Trellis2TextureStage,

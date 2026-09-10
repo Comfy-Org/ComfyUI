@@ -12,6 +12,9 @@ class VOXEL:
         self.voxel_colors = voxel_colors
         self.resolution = resolution # each 3d model has its own resolution
 
+    def _comfy_cache_tensors(self):
+        return self.data, self.voxel_colors
+
 class SPLAT:
     """A batch of 3D Gaussian splats in render-ready (activated, world-space) form.
 
@@ -28,6 +31,9 @@ class SPLAT:
         self.opacities = opacities    # (B, N, 1) in [0, 1]
         self.sh = sh                  # (B, N, K, 3) spherical-harmonic color coefficients
         self.counts = counts          # (B,) real lengths, or None
+
+    def _comfy_cache_tensors(self):
+        return self.positions, self.scales, self.rotations, self.opacities, self.sh, self.counts
 
 
 class MESH:
@@ -71,6 +77,23 @@ class MESH:
         self.occlusion_in_mr = occlusion_in_mr  # True = R channel of metallic_roughness holds AO (ORM)
         self.material = material             # SetMeshMaterial scalar/factor overrides
         self.emissive = emissive             # emissive map: (B, H, W, 3)
+
+    def _comfy_cache_tensors(self):
+        return (
+            self.vertices,
+            self.faces,
+            self.uvs,
+            self.vertex_colors,
+            self.texture,
+            self.metallic_roughness,
+            self.vertex_counts,
+            self.face_counts,
+            self.normals,
+            self.tangents,
+            self.normal_map,
+            self.material,
+            self.emissive,
+        )
 
 
 class File3D:

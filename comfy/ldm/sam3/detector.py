@@ -423,11 +423,15 @@ class SAM3Detector(nn.Module):
                 points=None, boxes=None):
         """Shared detection: geometry encoding, transformer, scoring, segmentation."""
         B = features[0].shape[0]
-        # Scalp for encoder (use top-level feature), but keep all levels for segmentation head
-        seg_features = features
+        # Scalp the segmentation head inputs together with the encoder:
+        # SAM3 (non-multiplex) has 4 FPN levels but scalp=1 keeps only 3. Passing the
+        # 4th level (the smallest one) to SegmentationHead makes it replace that level
+        # with a spatially-wrong crop of encoder_visual, which biases all mask logits
+        # negative and produces empty masks. SAM3.1 (multiplex, scalp=0) is unaffected.
         if self.scalp > 0:
             features = features[:-self.scalp]
             positions = positions[:-self.scalp]
+        seg_features = features
         enc_feat, enc_pos = features[-1], positions[-1]
         _, _, H, W = enc_feat.shape
         img_flat = enc_feat.flatten(2).permute(0, 2, 1)

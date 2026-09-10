@@ -759,9 +759,10 @@ class LoraLoaderModelOnly(LoraLoader):
         return {"required": { "model": ("MODEL",),
                               "lora_name": (folder_paths.get_filename_list("loras"), ),
                               "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
-                              }}
+                            }}
     RETURN_TYPES = ("MODEL",)
     DESCRIPTION = "This LoRAs loader is used to modify the diffusion model, altering the way in which latents are denoised such as applying styles. Multiple LoRA nodes can be linked together."
+    SEARCH_ALIASES = ["lora", "load lora", "apply lora", "lora loader", "lora model"]
     FUNCTION = "load_lora_model_only"
 
     def load_lora_model_only(self, model, lora_name, strength_model):
@@ -1947,6 +1948,8 @@ class ImageInvert:
 
     def invert(self, image):
         s = 1.0 - image
+        if image.shape[-1] == 4:  # alpha stores transparency, not color
+            s[..., 3] = image[..., 3]
         return (s,)
 
 class ImageBatch:
@@ -2295,7 +2298,9 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     NODE_CLASS_MAPPINGS[name] = node_cls
                     node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
             if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS") and getattr(module, "NODE_DISPLAY_NAME_MAPPINGS") is not None:
-                NODE_DISPLAY_NAME_MAPPINGS.update(module.NODE_DISPLAY_NAME_MAPPINGS)
+                for name, display_name in module.NODE_DISPLAY_NAME_MAPPINGS.items():
+                    if name not in ignore:
+                        NODE_DISPLAY_NAME_MAPPINGS[name] = display_name
             return True
         # V3 Extension Definition
         elif hasattr(module, "comfy_entrypoint"):
@@ -2322,8 +2327,8 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     if schema.node_id not in ignore:
                         NODE_CLASS_MAPPINGS[schema.node_id] = node_cls
                         node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
-                    if schema.display_name is not None:
-                        NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
+                        if schema.display_name is not None:
+                            NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
                 return True
             except Exception as e:
                 logging.warning(f"Error while calling comfy_entrypoint in {module_path}: {e}")
@@ -2455,6 +2460,7 @@ async def init_builtin_extra_nodes():
         "nodes_minimax_music.py",
         "nodes_minimax_h3.py",
         "nodes_lt.py",
+        "nodes_lt_keyframes.py",
         "nodes_hooks.py",
         "nodes_multigpu.py",
         "nodes_load_3d.py",
@@ -2487,6 +2493,7 @@ async def init_builtin_extra_nodes():
         "nodes_pid.py",
         "nodes_model_patch.py",
         "nodes_easycache.py",
+        "nodes_sparse_attention.py",
         "nodes_audio_encoder.py",
         "nodes_rope.py",
         "nodes_logic.py",
@@ -2521,7 +2528,9 @@ async def init_builtin_extra_nodes():
         "nodes_void.py",
         "nodes_wandancer.py",
         "nodes_hidream_o1.py",
+        "nodes_sensenova.py",
         "nodes_save_3d.py",
+        "nodes_mesh_io.py",
         "nodes_moge.py",
         "nodes_mediapipe.py",
         "nodes_gaussian_splat.py",

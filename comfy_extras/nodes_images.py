@@ -11,10 +11,13 @@ import numpy as np
 import struct
 import torch
 import logging
+import tempfile
 
 import zlib
 import comfy.utils
+from av.video.reformatter import ColorPrimaries, ColorRange, ColorTrc
 from fractions import Fraction
+from PIL.Image import Exif
 
 from server import PromptServer
 from comfy_api.latest import ComfyExtension, IO, UI
@@ -717,7 +720,7 @@ class GetImageSize(IO.ComfyNode):
             node_id="GetImageSize",
             search_aliases=["dimensions", "resolution", "image info"],
             display_name="Get Image Size",
-            description="Returns width and height of the image, and passes it through unchanged.",
+            description="Returns the width, height, and batch size of the image.",
             category="image",
             inputs=[
                 IO.Image.Input("image"),
@@ -1002,6 +1005,12 @@ _FORMAT_SPECS = {
     ("exr", "32-bit float", 4): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "gbrapf32le", "stream_fmt": "gbrapf32le"},
 }
 
+_AVIF_COLOR_PROPERTIES = {
+    "sRGB": (ColorPrimaries.BT709, ColorTrc.IEC61966_2_1, 1),
+    "HDR": (ColorPrimaries.BT2020, ColorTrc.ARIB_STD_B67, 9),
+    "HDR PQ": (ColorPrimaries.BT2020, ColorTrc.SMPTE2084, 9),
+}
+
 
 # ---------------------------------------------------------------------------
 # Color transforms
@@ -1044,6 +1053,124 @@ def hlg_to_linear(t: torch.Tensor) -> torch.Tensor:
     low = (t ** 2) / 3.0
     high = (torch.exp((t.clamp(min=0.5) - _HLG_C) / _HLG_A) + _HLG_B) / 12.0
     return torch.where(t <= 0.5, low, high)
+
+
+_REC709_TO_REC2020 = (
+    (0.6274038959346991, 0.3292830383778837, 0.0433130656874172),
+    (0.0690972893582320, 0.9195403950754587, 0.0113623155663092),
+    (0.0163914388751503, 0.0880133078772259, 0.8955952532476238),
+)
+_REC2020_TO_REC709 = (
+    (1.6604910021084338, -0.5876411387885494, -0.0728498633198846),
+    (-0.1245504745215905, 1.1328998971259600, -0.0083494226043695),
+    (-0.0181507633549053, -0.1005788980080076, 1.1187296613629125),
+)
+_REC709_LUMA = (0.2126390058715103, 0.7151686787677559, 0.0721923153607337)
+_REC2020_LUMA = (0.2627, 0.6780, 0.0593)
+_PQ_M1, _PQ_M2 = 2610 / 16384, 2523 / 32
+_PQ_C1, _PQ_C2, _PQ_C3 = 3424 / 4096, 2413 / 128, 2392 / 128
+_SDR_WHITE_NITS = 203.0
+_HLG_PEAK_NITS = 1000.0
+_HLG_GAMMA = 1.2
+
+
+def _convert_rgb_primaries(rgb, matrix):
+    r, g, b = rgb.unbind(dim=-1)
+    return torch.stack([r * row[0] + g * row[1] + b * row[2] for row in matrix], dim=-1)
+
+
+def _rgb_luminance(rgb, weights):
+    return (rgb * rgb.new_tensor(weights)).sum(dim=-1, keepdim=True)
+
+
+def _tone_map_luminance(rgb, weights):
+    luminance = _rgb_luminance(rgb, weights).clamp_min(0.0)
+    # Extended Reinhard, sharing a white point across the batch to avoid frame-by-frame exposure changes.
+    peak = luminance.amax().clamp_min(1.0)
+    scale = (1.0 + luminance / peak.square()) / (1.0 + luminance)
+    # Allow transfer-function roundoff at SDR white without engaging tone mapping.
+    return rgb * torch.where(peak > 1.0001, scale, 1.0)
+
+
+def _compress_rgb_gamut(rgb, weights):
+    luminance = _rgb_luminance(rgb, weights).clamp(0.0, 1.0)
+    chroma = rgb - luminance
+    tiny = torch.finfo(rgb.dtype).tiny
+    minimum = rgb.amin(dim=-1, keepdim=True)
+    maximum = rgb.amax(dim=-1, keepdim=True)
+    upper = (1.0 - luminance) / (maximum - luminance).clamp_min(tiny)
+    lower = luminance / (luminance - minimum).clamp_min(tiny)
+    saturation = torch.minimum(upper, lower).clamp(0.0, 1.0)
+    # Do not desaturate boundary colors for transfer-function roundoff.
+    in_gamut = (minimum >= -1e-5) & (maximum <= 1.00001)
+    return torch.where(in_gamut, rgb, torch.addcmul(luminance, chroma, saturation)).clamp(0.0, 1.0)
+
+
+class ImageColorSpace(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        spaces = ["sRGB", "HDR", "HDR PQ"]
+        return IO.Schema(
+            node_id="ImageColorSpace",
+            display_name="Convert Image Color Space",
+            category="image/color",
+            description="Convert sRGB (Rec.709), HDR (Rec.2020 HLG), and HDR PQ (Rec.2020 PQ). Uses 203-nit SDR white and a 1000-nit HLG reference display. Narrowing tone-maps excess luminance across the batch and compresses out-of-gamut colors. Conversions compute in float32 and return the intermediate device and dtype. Straight alpha is not color-transformed.",
+            inputs=[
+                IO.Image.Input("image"),
+                IO.Combo.Input("source", options=spaces, default="sRGB", tooltip="Color space of the input pixels."),
+                IO.Combo.Input("destination", options=spaces, default="sRGB", tooltip="Color space of the output pixels. Set the save node to this same color space."),
+            ],
+            outputs=[IO.Image.Output()],
+        )
+
+    @classmethod
+    def execute(cls, image, source, destination) -> IO.NodeOutput:
+        if source == destination:
+            return IO.NodeOutput(image.to(device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype()))
+
+        # PQ's exponents and near-cancelling constants need more precision than float16/bfloat16.
+        rgb = image[..., :3].float()
+
+        # Convert to display-linear Rec.2020 in cd/m² (BT.2100 EOTFs).
+        if source == "sRGB":
+            rgb = _convert_rgb_primaries(srgb_to_linear(rgb), _REC709_TO_REC2020) * _SDR_WHITE_NITS
+        elif source == "HDR":
+            rgb = hlg_to_linear(rgb)
+            luminance = _rgb_luminance(rgb, _REC2020_LUMA).clamp_min(0.0)
+            rgb = rgb * (luminance.pow(_HLG_GAMMA - 1.0) * _HLG_PEAK_NITS)
+        elif source == "HDR PQ":
+            # Evaluate PQ around 1 to avoid cancellation in float32.
+            p = (rgb.clamp_min(0.0).log() / _PQ_M2).expm1()
+            rgb = ((p + (1.0 - _PQ_C1)).clamp_min(0.0) / ((_PQ_C2 - _PQ_C3) - _PQ_C3 * p)).pow(1.0 / _PQ_M1) * 10000.0
+        else:
+            raise ValueError(f"Unsupported source color space: {source}")
+
+        if destination == "sRGB":
+            rgb = _convert_rgb_primaries(rgb / _SDR_WHITE_NITS, _REC2020_TO_REC709)
+            rgb = _tone_map_luminance(rgb, _REC709_LUMA)
+            rgb = _compress_rgb_gamut(rgb, _REC709_LUMA)
+            rgb = torch.where(rgb <= 0.0031308, rgb * 12.92, 1.055 * rgb.pow(1.0 / 2.4) - 0.055)
+        elif destination == "HDR":
+            rgb = rgb / _HLG_PEAK_NITS
+            if source == "HDR PQ":
+                rgb = _tone_map_luminance(rgb, _REC2020_LUMA)
+            luminance = _rgb_luminance(rgb, _REC2020_LUMA).clamp_min(torch.finfo(rgb.dtype).tiny)
+            rgb = rgb * luminance.pow(1.0 / _HLG_GAMMA - 1.0)
+            if source == "HDR PQ":
+                rgb = _compress_rgb_gamut(rgb, _REC2020_LUMA)
+            low = (3.0 * rgb.clamp_min(0.0)).sqrt()
+            high = _HLG_A * (12.0 * rgb.clamp_min(1.0 / 12.0) - _HLG_B).log() + _HLG_C
+            rgb = torch.where(rgb <= 1.0 / 12.0, low, high)
+        elif destination == "HDR PQ":
+            p = (rgb.clamp_min(0.0) / 10000.0).pow(_PQ_M1)
+            p = ((_PQ_C1 - 1.0) + (_PQ_C2 - _PQ_C3) * p) / (1.0 + _PQ_C3 * p)
+            rgb = (p.log1p() * _PQ_M2).exp()
+        else:
+            raise ValueError(f"Unsupported destination color space: {destination}")
+
+        if image.shape[-1] == 4:
+            rgb = torch.cat((rgb, image[..., 3:]), dim=-1)
+        return IO.NodeOutput(rgb.to(device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype()))
 
 
 # ---------------------------------------------------------------------------
@@ -1225,6 +1352,236 @@ def inject_exr_metadata(
     )
 
 
+def _bmff_box(box_type: bytes, payload: bytes) -> bytes:
+    size = 8 + len(payload)
+    if size > 0xFFFFFFFF:
+        raise ValueError("AVIF metadata box is too large.")
+    return struct.pack(">I4s", size, box_type) + payload
+
+
+def _bmff_boxes(data: bytes, start: int, end: int) -> list[tuple[int, int, bytes, int]]:
+    boxes = []
+    pos = start
+    while pos < end:
+        if pos + 8 > end:
+            raise ValueError("Invalid AVIF box structure.")
+        size, box_type = struct.unpack_from(">I4s", data, pos)
+        header_size = 8
+        if size == 1:
+            if pos + 16 > end:
+                raise ValueError("Invalid AVIF extended-size box.")
+            size = struct.unpack_from(">Q", data, pos + 8)[0]
+            header_size = 16
+        elif size == 0:
+            size = end - pos
+        if size < header_size or pos + size > end:
+            raise ValueError("Invalid AVIF box size.")
+        boxes.append((pos, size, box_type, header_size))
+        pos += size
+    return boxes
+
+
+def _avif_exif(metadata: dict) -> bytes:
+    exif = Exif()
+    if "prompt" in metadata:
+        exif[0x0110] = f"prompt:{json.dumps(metadata['prompt'])}"
+    next_tag = 0x010F
+    for key, value in metadata.items():
+        if key == "prompt":
+            continue
+        exif[next_tag] = f"{key}:{json.dumps(value)}"
+        next_tag -= 1
+    return b"\x00\x00\x00\x00" + exif.tobytes()[6:]
+
+
+def _add_avif_exif_item(meta: bytes, exif_offset: int, exif_length: int, offset_delta: int) -> bytes:
+    if meta[4:8] != b"meta" or len(meta) < 12:
+        raise ValueError("AVIF metadata requires a valid meta box.")
+    children = _bmff_boxes(meta, 12, len(meta))
+    child_by_type = {box_type: (pos, size, header_size) for pos, size, box_type, header_size in children}
+    if not all(box_type in child_by_type for box_type in (b"pitm", b"iloc", b"iinf")):
+        raise ValueError("AVIF metadata boxes are incomplete.")
+
+    pitm_pos, pitm_size, _ = child_by_type[b"pitm"]
+    pitm = meta[pitm_pos:pitm_pos + pitm_size]
+    if pitm[8] != 0:
+        raise ValueError("Unsupported AVIF primary-item format.")
+    primary_item_id = struct.unpack_from(">H", pitm, 12)[0]
+
+    iloc_pos, iloc_size, _ = child_by_type[b"iloc"]
+    iloc = bytearray(meta[iloc_pos:iloc_pos + iloc_size])
+    if iloc[8] != 0 or iloc[12] != 0x44 or iloc[13] != 0:
+        raise ValueError("Unsupported AVIF item-location format.")
+    item_count = struct.unpack_from(">H", iloc, 14)[0]
+    cursor = 16
+    item_ids = []
+    for _ in range(item_count):
+        item_id, _, extent_count = struct.unpack_from(">HHH", iloc, cursor)
+        cursor += 6
+        item_ids.append(item_id)
+        for _ in range(extent_count):
+            extent_offset = struct.unpack_from(">I", iloc, cursor)[0]
+            struct.pack_into(">I", iloc, cursor, extent_offset + offset_delta)
+            cursor += 8
+    if cursor != len(iloc):
+        raise ValueError("Unsupported AVIF item-location entries.")
+    exif_item_id = max(item_ids) + 1
+    if exif_item_id > 0xFFFF or exif_offset > 0xFFFFFFFF or exif_length > 0xFFFFFFFF:
+        raise ValueError("AVIF metadata exceeds 32-bit item limits.")
+    struct.pack_into(">H", iloc, 14, item_count + 1)
+    iloc.extend(struct.pack(">HHHII", exif_item_id, 0, 1, exif_offset, exif_length))
+    struct.pack_into(">I", iloc, 0, len(iloc))
+
+    iinf_pos, iinf_size, _ = child_by_type[b"iinf"]
+    iinf = bytearray(meta[iinf_pos:iinf_pos + iinf_size])
+    if iinf[8] != 0:
+        raise ValueError("Unsupported AVIF item-information format.")
+    iinf_count = struct.unpack_from(">H", iinf, 12)[0]
+    struct.pack_into(">H", iinf, 12, iinf_count + 1)
+    infe_payload = b"\x02\x00\x00\x00" + struct.pack(">HH4s", exif_item_id, 0, b"Exif") + b"\x00"
+    iinf.extend(_bmff_box(b"infe", infe_payload))
+    struct.pack_into(">I", iinf, 0, len(iinf))
+
+    cdsc = _bmff_box(b"cdsc", struct.pack(">HHH", exif_item_id, 1, primary_item_id))
+    if b"iref" in child_by_type:
+        iref_pos, iref_size, _ = child_by_type[b"iref"]
+        iref = bytearray(meta[iref_pos:iref_pos + iref_size])
+        if iref[8] != 0:
+            raise ValueError("Unsupported AVIF item-reference format.")
+        iref.extend(cdsc)
+        struct.pack_into(">I", iref, 0, len(iref))
+    else:
+        iref = _bmff_box(b"iref", b"\x00\x00\x00\x00" + cdsc)
+
+    output = bytearray(meta[:12])
+    for pos, size, box_type, _ in children:
+        if box_type == b"iloc":
+            output.extend(iloc)
+        elif box_type == b"iinf":
+            output.extend(iinf)
+            if b"iref" not in child_by_type:
+                output.extend(iref)
+        elif box_type == b"iref":
+            output.extend(iref)
+        else:
+            output.extend(meta[pos:pos + size])
+    struct.pack_into(">I", output, 0, len(output))
+    return bytes(output)
+
+
+def _adjust_avif_chunk_offsets(moov: bytes, offset_delta: int) -> bytes:
+    output = bytearray(moov)
+    containers = {b"moov", b"trak", b"mdia", b"minf", b"stbl"}
+
+    def adjust(start: int, end: int) -> None:
+        for pos, size, box_type, header_size in _bmff_boxes(output, start, end):
+            if box_type in containers:
+                adjust(pos + header_size, pos + size)
+            elif box_type in (b"stco", b"co64"):
+                entry_size = 4 if box_type == b"stco" else 8
+                entry_count = struct.unpack_from(">I", output, pos + header_size + 4)[0]
+                cursor = pos + header_size + 8
+                if cursor + entry_count * entry_size != pos + size:
+                    raise ValueError("Invalid AVIF chunk-offset table.")
+                value_format = ">I" if entry_size == 4 else ">Q"
+                for _ in range(entry_count):
+                    value = struct.unpack_from(value_format, output, cursor)[0]
+                    struct.pack_into(value_format, output, cursor, value + offset_delta)
+                    cursor += entry_size
+
+    adjust(0, len(output))
+    return bytes(output)
+
+
+def _copy_file_bytes(source, destination, size: int) -> None:
+    remaining = size
+    while remaining:
+        chunk = source.read(min(remaining, 1024 * 1024))
+        if not chunk:
+            raise ValueError("Unexpected end of AVIF file.")
+        destination.write(chunk)
+        remaining -= len(chunk)
+
+
+def inject_avif_metadata(path: str, metadata: dict) -> None:
+    """Add a ComfyUI-compatible EXIF item without loading media data into memory."""
+    if not metadata:
+        return
+    exif = _avif_exif(metadata)
+    file_size = os.path.getsize(path)
+    top_level_boxes = []
+    with open(path, "rb") as source:
+        pos = 0
+        while pos < file_size:
+            source.seek(pos)
+            header = source.read(8)
+            if len(header) != 8:
+                raise ValueError("Invalid AVIF box header.")
+            size, box_type = struct.unpack(">I4s", header)
+            header_size = 8
+            size_field = size
+            if size == 1:
+                extended_size = source.read(8)
+                if len(extended_size) != 8:
+                    raise ValueError("Invalid AVIF extended-size box.")
+                size = struct.unpack(">Q", extended_size)[0]
+                header_size = 16
+            elif size == 0:
+                size = file_size - pos
+            if size < header_size or pos + size > file_size:
+                raise ValueError("Invalid AVIF top-level box size.")
+            top_level_boxes.append((pos, size, box_type, header_size, size_field))
+            pos += size
+
+        meta_box = next((box for box in top_level_boxes if box[2] == b"meta"), None)
+        mdat_box = next((box for box in top_level_boxes if box[2] == b"mdat"), None)
+        if meta_box is None or mdat_box is None or mdat_box[0] + mdat_box[1] != file_size or meta_box[0] > mdat_box[0]:
+            raise ValueError("Unsupported AVIF file layout for metadata.")
+        source.seek(meta_box[0])
+        meta = source.read(meta_box[1])
+
+    provisional_meta = _add_avif_exif_item(meta, 0, len(exif), 0)
+    offset_delta = len(provisional_meta) - len(meta)
+    exif_offset = mdat_box[0] + mdat_box[1] + offset_delta
+    updated_meta = _add_avif_exif_item(meta, exif_offset, len(exif), offset_delta)
+
+    fd, temp_path = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "wb") as destination, open(path, "rb") as source:
+            for pos, size, box_type, header_size, size_field in top_level_boxes:
+                source.seek(pos)
+                if box_type == b"ftyp":
+                    ftyp = bytearray(source.read(size))
+                    # The frontend metadata reader recognizes the avif major brand; avis remains a compatible sequence brand.
+                    if ftyp[8:12] == b"avis" and b"avif" in ftyp[16:]:
+                        ftyp[8:12] = b"avif"
+                    destination.write(ftyp)
+                elif box_type == b"meta":
+                    destination.write(updated_meta)
+                elif box_type == b"moov":
+                    destination.write(_adjust_avif_chunk_offsets(source.read(size), offset_delta))
+                elif box_type == b"mdat":
+                    new_size = size + len(exif)
+                    if size_field == 1:
+                        destination.write(struct.pack(">I4sQ", 1, b"mdat", new_size))
+                    elif size_field == 0:
+                        destination.write(struct.pack(">I4s", 0, b"mdat"))
+                    elif new_size <= 0xFFFFFFFF:
+                        destination.write(struct.pack(">I4s", new_size, b"mdat"))
+                    else:
+                        raise ValueError("AVIF media-data box exceeds its 32-bit size field.")
+                    source.seek(pos + header_size)
+                    _copy_file_bytes(source, destination, size - header_size)
+                    destination.write(exif)
+                else:
+                    _copy_file_bytes(source, destination, size)
+        os.chmod(temp_path, os.stat(path).st_mode)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
 # ---------------------------------------------------------------------------
 # Encoding
 # ---------------------------------------------------------------------------
@@ -1292,6 +1649,69 @@ def _encode_image(
     return b"".join(bytes(p) for p in packets)
 
 
+def _set_avif_color_properties(target, colorspace: str) -> None:
+    color_primaries, color_trc, yuv_colorspace = _AVIF_COLOR_PROPERTIES[colorspace]
+    target.color_primaries = color_primaries
+    target.color_trc = color_trc
+    target.colorspace = yuv_colorspace
+    target.color_range = ColorRange.MPEG
+
+
+def _avif_frame(image: torch.Tensor, bit_depth: str, colorspace: str, pixel_format: str) -> av.VideoFrame:
+    if image.ndim == 2:
+        image = image.unsqueeze(-1)
+    num_channels = image.shape[-1]
+    if num_channels not in (1, 3):
+        raise ValueError("AVIF saving supports 1-channel grayscale and 3-channel RGB images; PyAV's SVT-AV1 encoder does not support alpha.")
+
+    if bit_depth == "10-bit YUV420":
+        image_np = (image * 65535.0).clamp(0, 65535).to(torch.int32).cpu().numpy().astype(np.uint16)
+        frame_format = "gray16le" if num_channels == 1 else "rgb48le"
+    else:
+        image_np = (image * 255.0).clamp(0, 255).to(torch.uint8).cpu().numpy()
+        frame_format = "gray" if num_channels == 1 else "rgb24"
+    if num_channels == 1:
+        image_np = image_np[..., 0]
+
+    frame = av.VideoFrame.from_ndarray(image_np, format=frame_format)
+    frame = frame.reformat(format=pixel_format, dst_colorspace=_AVIF_COLOR_PROPERTIES[colorspace][2])
+    _set_avif_color_properties(frame, colorspace)
+    return frame
+
+
+def _save_avif(
+    images: torch.Tensor,
+    output_path: str,
+    bit_depth: str,
+    colorspace: str,
+    crf: int,
+    fps: float = 1.0,
+    loop_count: int | None = None,
+    metadata: dict | None = None,
+) -> None:
+    if bit_depth == "auto":
+        bit_depth = "10-bit YUV420" if colorspace in ("HDR", "HDR PQ") else "8-bit YUV420"
+    pixel_format = "yuv420p10le" if bit_depth == "10-bit YUV420" else "yuv420p"
+    options = {"loop": str(loop_count)} if loop_count is not None else None
+
+    with av.open(output_path, mode="w", format="avif", options=options) as container:
+        frame_rate = Fraction(round(fps * 1000), 1000)
+        stream = container.add_stream("libsvtav1", rate=frame_rate)
+        stream.width = images.shape[2]
+        stream.height = images.shape[1]
+        stream.pix_fmt = pixel_format
+        stream.options = {"crf": str(crf), "preset": "8"}
+        _set_avif_color_properties(stream.codec_context, colorspace)
+
+        for image in images:
+            for packet in stream.encode(_avif_frame(image, bit_depth, colorspace, pixel_format)):
+                container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+    if metadata:
+        inject_avif_metadata(output_path, metadata)
+
+
 # ---------------------------------------------------------------------------
 # Node
 # ---------------------------------------------------------------------------
@@ -1335,6 +1755,48 @@ class SaveImageAdvanced(IO.ComfyNode):
                                 ),
                             ),
                         ]),
+                        IO.DynamicCombo.Option("avif", [
+                            IO.Combo.Input(
+                                "bit_depth",
+                                options=["auto", "8-bit YUV420", "10-bit YUV420"],
+                                default="auto",
+                                advanced=True,
+                                tooltip="Auto uses 8-bit YUV420 for sRGB and 10-bit YUV420 for HDR.",
+                            ),
+                            IO.Combo.Input(
+                                "input_color_space",
+                                options=["sRGB", "HDR", "HDR PQ"],
+                                default="sRGB",
+                                advanced=True,
+                                tooltip="Colorspace of the input images. HDR selects BT.2020/HLG and HDR PQ selects BT.2020/PQ.",
+                            ),
+                            IO.Int.Input(
+                                "crf",
+                                default=18,
+                                min=1,
+                                max=63,
+                                advanced=True,
+                                tooltip="Lower values produce higher quality and larger files.",
+                            ),
+                            IO.DynamicCombo.Input(
+                                "save_mode",
+                                display_name="save mode",
+                                options=[
+                                    IO.DynamicCombo.Option("still images", []),
+                                    IO.DynamicCombo.Option("animated", [
+                                        IO.Float.Input("fps", default=6.0, min=0.01, max=1000.0, step=0.01),
+                                        IO.Int.Input(
+                                            "loop_count",
+                                            default=0,
+                                            min=0,
+                                            max=1000,
+                                            advanced=True,
+                                            tooltip="Number of times to loop the animation. 0 loops forever.",
+                                        ),
+                                    ]),
+                                ],
+                            ),
+                        ]),
                     ],
                     tooltip="The file format in which to save the image.",
                 ),
@@ -1362,6 +1824,37 @@ class SaveImageAdvanced(IO.ComfyNode):
         write_metadata = not args.disable_metadata
 
         results = []
+        if file_format == "avif":
+            metadata = None
+            if write_metadata:
+                metadata = {}
+                if prompt is not None:
+                    metadata["prompt"] = prompt
+                if extra_pnginfo:
+                    metadata.update(extra_pnginfo)
+            save_mode = format["save_mode"]
+            animated = save_mode["save_mode"] == "animated"
+            batches = [images] if animated else images.unsqueeze(1)
+            for batch_number, batch in enumerate(batches):
+                name = filename.replace("%batch_num%", str(batch_number))
+                file = f"{name}_{counter:05}.avif"
+                _save_avif(
+                    batch,
+                    os.path.join(full_output_folder, file),
+                    bit_depth,
+                    colorspace,
+                    format["crf"],
+                    fps=save_mode.get("fps", 1.0),
+                    loop_count=save_mode.get("loop_count") if animated else None,
+                    metadata=metadata,
+                )
+                results.append({"filename": file, "subfolder": subfolder, "type": "output"})
+                counter += 1
+            ui = {"images": results}
+            if animated and len(images) > 1:
+                ui["animated"] = (True,)
+            return IO.NodeOutput(images, ui=ui)
+
         for batch_number, image in enumerate(images):
             encoded = _encode_image(image, file_format, bit_depth, colorspace)
 
@@ -1393,6 +1886,7 @@ class ImagesExtension(ComfyExtension):
             RepeatImageBatch,
             ImageFromBatch,
             ImageAddNoise,
+            ImageColorSpace,
             SaveAnimatedWEBP,
             SaveAnimatedPNG,
             SaveImageAdvanced,

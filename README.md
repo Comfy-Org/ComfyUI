@@ -50,10 +50,6 @@ ComfyUI is the AI creation engine for visual professionals who demand control ov
 - The easiest way to get started.
 - Available on Windows & macOS.
 
-#### [Windows Portable Package](#installing)
-- Get the latest commits and completely portable.
-- Available on Windows.
-
 #### [Manual Install](#manual-install-windows-linux)
 Supports all operating systems and GPU types (NVIDIA, AMD, Intel, Apple Silicon, Ascend).
 
@@ -83,6 +79,8 @@ See what ComfyUI can do with the [newer template workflows](https://comfy.org/wo
 - Runs fully offline: core does not download anything unless you request it. Use `--disable-api-nodes` to disable the optional paid [Comfy API nodes](https://docs.comfy.org/tutorials/api-nodes/overview) and force all built-in functionality to stay offline.
 - Extend ComfyUI with custom nodes
 - Configure additional model locations with [`extra_model_paths.yaml`](extra_model_paths.yaml.example).
+- Support for saving and loading high bit depth images and videos: 16 bit PNG images, 32 bit EXR, 10 bit AVIF are supported and more.
+- Support for saving and loading HDR videos and images in various formats.
 
 
 ## Release Process
@@ -216,21 +214,30 @@ This is the command to install the nightly with ROCm 7.2 which might have some p
 ```pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/rocm7.2```
 
 
-### AMD GPUs (Experimental: Windows and Linux), RDNA 3, 3.5 and 4 only.
+### AMD GPUs (Windows, ROCm 10.0)
 
-These have less hardware support than the builds above but they work on windows. You also need to install the pytorch version specific to your hardware.
+Use AMD's [multi-architecture PyTorch packages](https://rocm.docs.amd.com/projects/ai-ecosystem/en/latest/frameworks/pytorch/install.html). The `device-*` extras install your GPU's kernels and the matching ROCm runtime automatically; a separate HIP SDK installation is not needed.
 
-RDNA 3 (RX 7000 series):
+Use Windows 11, a current [AMD graphics driver](https://www.amd.com/en/support/download/drivers.html), and 64-bit Python 3.13.
 
-```pip install --pre torch torchvision torchaudio --index-url https://rocm.nightlies.amd.com/v2/gfx110X-all/```
+The install command below uses `device-all` to install kernels for all supported GPUs. To reduce download size and disk usage, optionally replace **both** occurrences of `device-all` with the target for your GPU:
 
-RDNA 3.5 (Strix halo/Ryzen AI Max+ 365):
+| GPU | Device extra |
+| --- | --- |
+| RX 9070 / XT, Radeon AI PRO R9700 | `device-gfx1201` |
+| RX 9060 / XT | `device-gfx1200` |
+| RX 7900 XT / XTX | `device-gfx1100` |
+| RX 7700 XT / 7800 XT | `device-gfx1101` |
+| RX 7600 / XT | `device-gfx1102` |
+| Ryzen AI Max / Max+ (Strix Halo) | `device-gfx1151` |
 
-```pip install --pre torch torchvision torchaudio --index-url https://rocm.nightlies.amd.com/v2/gfx1151/```
+**Note:** This table only lists examples. A GPU missing from it may still be supported: supported architectures include RDNA 2, RDNA 3, RDNA 3.5, and RDNA 4. Keep `device-all` to install kernels for all supported targets. For other models, see AMD's [GPU target table](https://github.com/ROCm/TheRock/blob/main/RELEASES.md#gfx-target-lookup-table) and [ROCm compatibility matrix](https://rocm.docs.amd.com/en/docs-10.0.0/compatibility/compatibility-matrix.html).
 
-RDNA 4 (RX 9000 series):
+**ROCm 10.0.0 with PyTorch 2.13:**
 
-```pip install --pre torch torchvision torchaudio --index-url https://rocm.nightlies.amd.com/v2/gfx120X-all/```
+```bat
+pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "torch[device-all]==2.13.0+rocm10.0.0" "torchvision[device-all]==0.28.0+rocm10.0.0" "torchaudio==2.11.0.2+rocm10.0.0"
+```
 
 ### Intel GPUs (Windows and Linux)
 

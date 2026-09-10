@@ -8,6 +8,7 @@ import io
 import numpy as np
 from fractions import Fraction
 from comfy_api.input_impl.video_types import VideoFromFile, VideoFromComponents
+from comfy_api.latest._util.video_types import normalize_crop_rect
 from comfy_api.util.video_types import VideoComponents, VideoContainer, VideoCodec
 from comfy_api.input.basic_types import AudioInput
 from av.error import InvalidDataError
@@ -1289,6 +1290,171 @@ def test_save_to_transcode_bakes_rotation():
         os.unlink(file_path)
 
 
+def hevc_encoder_available():
+    try:
+        av.Codec("libx265", "w")
+        return True
+    except av.codec.codec.UnknownCodecError:
+        return False
+
+
+hevc_remux_test = pytest.mark.skipif(not hevc_encoder_available(), reason="libx265 encoder not available")
+
+
+def create_hevc_mp4(codec_tag=None, x265_params=None):
+    """In-memory HEVC mp4, which FFmpeg tags 'hev1' unless codec_tag is given."""
+    buffer = io.BytesIO()
+    options = {"x265-params": ":".join(["log-level=none"] + ([x265_params] if x265_params else []))}
+    with av.open(buffer, mode="w", format="mp4") as container:
+        stream = container.add_stream("libx265", rate=30, options=options)
+        stream.width = 64
+        stream.height = 64
+        stream.pix_fmt = "yuv420p"
+        if codec_tag is not None:
+            stream.codec_context.codec_tag = codec_tag
+        for i in range(3):
+            frame = av.VideoFrame.from_ndarray(
+                torch.ones(64, 64, 3, dtype=torch.uint8).numpy() * (i * 85),
+                format="rgb24",
+            ).reformat(format="yuv420p")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    buffer.seek(0)
+    return buffer
+
+
+def filter_hvcc_arrays(source: io.BytesIO, keep_nal_types: tuple = ()) -> io.BytesIO:
+    """hev1 whose hvcC keeps only the given NAL array types (32=VPS, 33=SPS, 34=PPS, 39=SEI)."""
+    output = io.BytesIO()
+    with av.open(source) as container, av.open(output, mode="w", format="mp4") as output_container:
+        stream = container.streams.video[0]
+        extradata = stream.codec_context.extradata
+        rebuilt, pos = bytearray(extradata[:22] + b"\x00"), 23
+        for _ in range(extradata[22]):
+            array_start = pos
+            num_nalus = int.from_bytes(extradata[pos + 1:pos + 3], "big")
+            pos += 3
+            for _ in range(num_nalus):
+                pos += 2 + int.from_bytes(extradata[pos:pos + 2], "big")
+            if extradata[array_start] & 0x3F in keep_nal_types:
+                rebuilt += extradata[array_start:pos]
+                rebuilt[22] += 1
+        out_stream = output_container.add_stream_from_template(template=stream, opaque=True)
+        out_stream.codec_context.extradata = bytes(rebuilt)
+        for packet in container.demux(stream):
+            if packet.dts is not None:
+                packet.stream = out_stream
+                output_container.mux(packet)
+    output.seek(0)
+    return output
+
+
+def concat_hevc_sample_descriptions(first: io.BytesIO, second: io.BytesIO, codec_tag=None) -> io.BytesIO:
+    """mp4 with two sample descriptions, the second created from new_extradata packet side data."""
+    output = io.BytesIO()
+    with av.open(first) as a, av.open(second) as b, av.open(output, mode="w", format="mp4") as output_container:
+        out_stream = output_container.add_stream_from_template(template=a.streams.video[0], opaque=True)
+        if codec_tag is not None:
+            out_stream.codec_context.codec_tag = codec_tag
+        end = 0
+        for packet in a.demux(a.streams.video[0]):
+            if packet.dts is not None:
+                packet.stream = out_stream
+                output_container.mux(packet)
+                end = max(end, packet.pts + packet.duration)
+        extradata = b.streams.video[0].codec_context.extradata
+        packets = [packet for packet in b.demux(b.streams.video[0]) if packet.dts is not None]
+        sidedata = av.packet.PacketSideData(av.packet.packet_sidedata_type_from_literal("new_extradata"), len(extradata))
+        sidedata.update(extradata)
+        packets[0].set_sidedata(sidedata)
+        for packet in packets:
+            packet.pts += end
+            packet.dts += end
+            packet.stream = out_stream
+            output_container.mux(packet)
+    output.seek(0)
+    return output
+
+
+def sample_description_count(data: bytes, start: int = 0, end: int | None = None) -> int:
+    """Number of 'stsd' entries; a broken orphan entry is invisible to decoders but not to players."""
+    pos, end, count = start, len(data) if end is None else end, 0
+    while pos + 8 <= end:
+        size, box = int.from_bytes(data[pos:pos + 4], "big"), data[pos + 4:pos + 8]
+        if box == b"stsd":
+            count += int.from_bytes(data[pos + 12:pos + 16], "big")
+        elif box in (b"moov", b"trak", b"mdia", b"minf", b"stbl"):
+            count += sample_description_count(data, pos + 8, pos + size)
+        pos += size
+    return count
+
+
+def probe_hevc(source: io.BytesIO) -> dict:
+    source.seek(0)
+    with av.open(source) as container:
+        stream = container.streams.video[0]
+        return {
+            "tag": stream.codec_context.codec_tag,
+            "frames": sum(1 for packet in container.demux(stream) for _ in packet.decode()),
+            "sample_descriptions": sample_description_count(source.getvalue()),
+        }
+
+
+def remux_and_probe(source: io.BytesIO, **save_kwargs) -> dict:
+    output = io.BytesIO()
+    source.seek(0)
+    VideoFromFile(source).save_to(output, **save_kwargs)
+    return probe_hevc(output)
+
+
+@hevc_remux_test
+@pytest.mark.parametrize("save_kwargs", [pytest.param({}, id="mov"), pytest.param({"format": VideoContainer.MP4}, id="mp4")])
+@pytest.mark.parametrize("codec_tag", [None, "dvh1"], ids=["hev1", "dvh1"])
+def test_save_to_remux_retags_hevc_as_hvc1(codec_tag, save_kwargs):
+    """Remuxed HEVC gets 'hvc1' instead of FFmpeg's default 'hev1', Dolby Vision included: PyAV
+    resets the source tag and the muxer drops the DV boxes anyway, so skipping 'dvh1' means 'hev1'."""
+    source = create_hevc_mp4(codec_tag=codec_tag)
+    assert probe_hevc(source)["tag"] == (codec_tag or "hev1")
+    assert remux_and_probe(source, **save_kwargs) == {"tag": "hvc1", "frames": 3, "sample_descriptions": 1}
+
+
+@hevc_remux_test
+@pytest.mark.parametrize(
+    "keep_nal_types",
+    [pytest.param((), id="empty-hvcc"), pytest.param((33, 34), id="missing-vps"), pytest.param((39,), id="sei-only")],
+)
+def test_save_to_remux_rebuilds_hvcc_from_inband_parameter_sets(keep_nal_types):
+    """Parameter sets missing from hvcC but present in-band yield one valid hvcC, not an empty one."""
+    source = filter_hvcc_arrays(create_hevc_mp4(x265_params="repeat-headers=1"), keep_nal_types)
+    output = io.BytesIO()
+    VideoFromFile(source).save_to(output)
+    output.seek(0)
+    with av.open(output) as container:
+        assert container.streams.video[0].codec_context.extradata[22] > 0  # hvcC numOfArrays
+    assert probe_hevc(output) == {"tag": "hvc1", "frames": 3, "sample_descriptions": 1}
+
+
+@hevc_remux_test
+def test_save_to_remux_keeps_hvc1_sources_untouched():
+    """'hvc1' sources skip the bitstream filter, so their sample descriptions survive as they are."""
+    source = concat_hevc_sample_descriptions(
+        create_hevc_mp4(codec_tag="hvc1"), create_hevc_mp4(codec_tag="hvc1", x265_params="no-sao=1"), codec_tag="hvc1"
+    )
+    assert probe_hevc(source) == {"tag": "hvc1", "frames": 6, "sample_descriptions": 2}
+    assert remux_and_probe(source) == {"tag": "hvc1", "frames": 6, "sample_descriptions": 2}
+
+
+@hevc_remux_test
+def test_save_to_remux_rejects_hevc_with_multiple_sample_descriptions():
+    """hevc_mp4toannexb ignores mid-stream parameter set changes, so such sources must be re-encoded."""
+    source = concat_hevc_sample_descriptions(create_hevc_mp4(), create_hevc_mp4(x265_params="no-sao=1"))
+    assert probe_hevc(source) == {"tag": "hev1", "frames": 6, "sample_descriptions": 2}
+    with pytest.raises(ValueError, match="multiple sample descriptions"):
+        remux_and_probe(source)
+
+
 def test_save_to_transcode_skips_undecodable_audio():
     """Streaming transcode keeps the decodable audio track and drops undecodable ones;
     with no decodable audio at all the output is video-only instead of crashing."""
@@ -1304,3 +1470,106 @@ def test_save_to_transcode_skips_undecodable_audio():
         for path in (mixed, all_bad):
             if path:
                 os.unlink(path)
+
+
+def test_as_trimmed_strict_duration_gates_unavailable_length(simple_video_file):
+    video = VideoFromFile(simple_video_file)
+
+    assert video.as_trimmed(0.0, 10.0, strict_duration=True) is None
+
+    relaxed = video.as_trimmed(0.0, 10.0, strict_duration=False)
+    assert relaxed is not None
+    assert relaxed.get_duration() < 10.0
+    assert relaxed.get_duration() == pytest.approx(video.get_duration(), abs=EPSILON)
+
+
+def test_normalize_crop_rect_aligns_odd_origin_to_chroma_grid():
+    assert normalize_crop_rect(1, 1, 100, 100, 1920, 1080) == (0, 0, 100, 100)
+    assert normalize_crop_rect(3, 5, 10, 9, 64, 48) == (2, 4, 10, 8)
+    assert normalize_crop_rect(0, 0, 64, 48, 64, 48) is None
+
+
+def _create_marker_video(path, width=64, height=48, marker_x=2, frames=3, fps=8):
+    with av.open(path, mode="w") as container:
+        stream = container.add_stream("h264", rate=fps)
+        stream.width = width
+        stream.height = height
+        stream.pix_fmt = "yuv420p"
+        pixels = torch.zeros(height, width, 3, dtype=torch.uint8).numpy()
+        pixels[:, marker_x:marker_x + 2, :] = 255
+        for _ in range(frames):
+            frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
+            frame = frame.reformat(format="yuv420p")
+            container.mux(stream.encode(frame))
+        container.mux(stream.encode(None))
+
+
+def _brightest_column(images):
+    return images[0].float().mean(dim=(0, 2)).argmax().item()
+
+
+def test_cropped_decode_and_save_paths_select_same_pixels(tmp_path):
+    source = str(tmp_path / "marker.mp4")
+    _create_marker_video(source, marker_x=4)
+
+    cropped = VideoFromFile(source).as_cropped(3, 1, 16, 16)
+
+    components = cropped.get_components()
+    assert tuple(components.images.shape[1:3]) == (16, 16)
+    decode_column = _brightest_column(components.images)
+    assert decode_column in (2, 3)
+
+    saved = str(tmp_path / "cropped.mp4")
+    cropped.save_to(saved)
+    saved_components = VideoFromFile(saved).get_components()
+    assert tuple(saved_components.images.shape[1:3]) == (16, 16)
+    save_column = _brightest_column(saved_components.images)
+    assert save_column in (2, 3)
+
+    assert decode_column == save_column
+
+
+def test_as_cropped_components_releases_uncropped_storage():
+    images = torch.rand(2, 8, 8, 3)
+    video = VideoFromComponents(
+        VideoComponents(images=images, frame_rate=Fraction(8))
+    )
+
+    cropped = video.as_cropped(0, 0, 4, 4)
+    cropped_images = cropped.get_components().images
+
+    assert tuple(cropped_images.shape[1:3]) == (4, 4)
+    assert (
+        cropped_images.untyped_storage().data_ptr()
+        != images.untyped_storage().data_ptr()
+    )
+
+
+def test_video_encoder_options_applies_h264_preset():
+    from comfy_api.latest._input_impl.video_types import video_encoder_options
+
+    assert video_encoder_options(VideoCodec.H264, None, "ultrafast") == {
+        "preset": "ultrafast"
+    }
+    assert video_encoder_options(VideoCodec.H264, 23.0, "ultrafast") == {
+        "preset": "ultrafast",
+        "crf": "23.0",
+    }
+    assert video_encoder_options(VideoCodec.H264, 23.0, None) == {"crf": "23.0"}
+    assert video_encoder_options(VideoCodec.AV1, None, "ultrafast") == {}
+    assert video_encoder_options(VideoCodec.AV1, 0, "ultrafast") == {
+        "svtav1-params": "lossless=1"
+    }
+
+
+def test_save_to_preset_transcodes_playable_output(tmp_path):
+    source = create_test_video(width=32, height=32)
+    try:
+        out = str(tmp_path / "preset.mp4")
+        VideoFromFile(source).as_cropped(0, 0, 16, 16).save_to(
+            out, preset="ultrafast"
+        )
+        saved = VideoFromFile(out).get_components()
+        assert tuple(saved.images.shape[1:3]) == (16, 16)
+    finally:
+        os.unlink(source)

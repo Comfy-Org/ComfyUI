@@ -70,10 +70,7 @@ class MathExpressionNode(io.ComfyNode):
             node_id="ComfyMathExpression",
             display_name="Math Expression",
             category="utilities",
-            search_aliases=[
-                "expression", "formula", "calculate", "calculator",
-                "eval", "math",
-            ],
+            search_aliases=["math", "expression", "formula", "calculate", "calculator", "eval"],
             inputs=[
                 io.String.Input("expression", default="a + b", multiline=True),
                 io.Autogrow.Input("values", template=autogrow),

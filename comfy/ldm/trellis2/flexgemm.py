@@ -19,7 +19,7 @@ class TorchHashMap:
 
     def __init__(self, keys: torch.Tensor, values: torch.Tensor):
         self.sorted_keys, order = torch.sort(keys.to(torch.long))
-        self.sorted_vals = values.to(torch.long)[order]
+        self.sorted_vals = values[order]
         self._n = self.sorted_keys.numel()
 
     # Chunk size for lookup_flat, caps each transient to ~CHUNK rows.
@@ -54,9 +54,9 @@ def build_submanifold_neighbor_map(
     # Chunked over voxels so the [chunk, V, 3] candidate transient stays bounded.
     device = coords.device
     M = coords.shape[0]
-    offsets = compute_kernel_offsets(Kw, Kh, Kd, Dw, Dh, Dd, device).long()      # [V, 3]
+    offsets = compute_kernel_offsets(Kw, Kh, Kd, Dw, Dh, Dd, device)             # [V, 3]
     V = offsets.shape[0]
-    center = torch.tensor([(Kw // 2) * Dw, (Kh // 2) * Dh, (Kd // 2) * Dd], device=device)
+    center = torch.tensor([(Kw // 2) * Dw, (Kh // 2) * Dh, (Kd // 2) * Dd], dtype=torch.int32, device=device)
     WHD, HD = W * H * D, H * D
 
     neighbor = torch.empty((M, V), dtype=torch.int32, device=device)
@@ -66,11 +66,12 @@ def build_submanifold_neighbor_map(
     for s in range(0, M, chunk):
         e = min(s + chunk, M)
         b = coords[s:e, 0].long()
-        cand = coords[s:e, 1:4].long()[:, None, :] + offsets[None, :, :] - center  # [c, V, 3]
+        cand = coords[s:e, 1:4][:, None, :] + offsets[None, :, :] - center  # [c, V, 3]
         x, y, z = cand[..., 0], cand[..., 1], cand[..., 2]
         in_bounds = (x >= 0) & (x < W) & (y >= 0) & (y < H) & (z >= 0) & (z < D)   # [c, V]
-        flat = b[:, None] * WHD + x * HD + y * D + z                               # [c, V]
-        flat = torch.where(in_bounds, flat, torch.full_like(flat, -1))            # OOB -> guaranteed miss
+        flat = x.long().mul_(HD)
+        flat.add_(y.long().mul_(D)).add_(z).add_(b[:, None] * WHD)
+        flat.masked_fill_(~in_bounds, -1)                                         # OOB -> guaranteed miss
         neighbor[s:e] = hashmap.lookup_flat(flat.reshape(-1)).view(e - s, V)
     return neighbor
 
@@ -78,7 +79,7 @@ def get_recommended_chunk_mem(
     device=None,
     safety_fraction: float = 0.2,
     min_gb: float = 0.25,
-    max_gb: float = 2.0,
+    max_gb: float = 0.5,
 ):
     """Pick a chunk-memory budget (in GB) for sparse conv batching."""
     free_gb = comfy.model_management.get_free_memory(device) / (1024 ** 3)
@@ -92,6 +93,7 @@ def sparse_submanifold_conv3d(
     bias: Optional[torch.Tensor],
     neighbor_cache: Optional[torch.Tensor],
     dilation: tuple,
+    cache_neighbor_map: bool = True,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     if feats.shape[0] == 0:
         Co = weight.shape[0]
@@ -103,23 +105,27 @@ def sparse_submanifold_conv3d(
     V = Kw * Kh * Kd
     device = feats.device
 
+    hashmap = None
     if neighbor_cache is None:
         b_stride = W * H * D
         x_stride = H * D
         y_stride = D
         z_stride = 1
 
-        flat_keys = (coords[:, 0].long() * b_stride +
-                     coords[:, 1].long() * x_stride +
-                     coords[:, 2].long() * y_stride +
-                     coords[:, 3].long() * z_stride)
+        flat_keys = coords[:, 0].long() * b_stride
+        flat_keys.add_(coords[:, 1], alpha=x_stride)
+        flat_keys.add_(coords[:, 2], alpha=y_stride)
+        flat_keys.add_(coords[:, 3], alpha=z_stride)
         vals = torch.arange(coords.shape[0], dtype=torch.int32, device=device)
         hashmap = TorchHashMap(flat_keys, vals)
 
-        neighbor = build_submanifold_neighbor_map(
-            hashmap, coords, W, H, D, Kw, Kh, Kd,
-            dilation[0], dilation[1], dilation[2]
-        )
+        if cache_neighbor_map:
+            neighbor = build_submanifold_neighbor_map(
+                hashmap, coords, W, H, D, Kw, Kh, Kd,
+                dilation[0], dilation[1], dilation[2]
+            )
+        else:
+            neighbor = None
     else:
         neighbor = neighbor_cache
 
@@ -128,9 +134,6 @@ def sparse_submanifold_conv3d(
     weight_T = weight.view(Co, V * Ci).T
 
     output = torch.empty(N_pts, Co, device=device, dtype=feats.dtype)
-
-    # Zero row at index N_pts; missing neighbors (-1) gather it -> no separate masking.
-    feats_padded = torch.cat([feats, feats.new_zeros(1, Ci)], dim=0)
 
     # Chunk over voxels to bound the (chunk, V, Ci) gather.
     max_chunk_mem_gb = get_recommended_chunk_mem(device)
@@ -143,8 +146,17 @@ def sparse_submanifold_conv3d(
         end = min(start + chunk_size, N_pts)
         actual_chunk = end - start
 
-        chunk_idx = torch.where(neighbor[start:end] < 0, N_pts, neighbor[start:end])  # -1 -> zero row
-        gathered = feats_padded[chunk_idx]                  # (chunk, V, Ci)
+        if neighbor is None:
+            neighbor_chunk = build_submanifold_neighbor_map(
+                hashmap, coords[start:end], W, H, D, Kw, Kh, Kd,
+                dilation[0], dilation[1], dilation[2]
+            )
+        else:
+            neighbor_chunk = neighbor[start:end]
+
+        chunk_idx = neighbor_chunk.clamp_min(0)
+        gathered = feats[chunk_idx]                         # (chunk, V, Ci)
+        gathered.masked_fill_(neighbor_chunk[:, :, None] < 0, 0)
         gathered_flat = gathered.view(actual_chunk, V * Ci)
         output[start:end] = torch.matmul(gathered_flat, weight_T)  # (chunk, V*Ci) @ (V*Ci, Co)
 

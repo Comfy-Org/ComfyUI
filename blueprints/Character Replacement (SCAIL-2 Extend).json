@@ -4445,7 +4445,7 @@
           }
         ],
         "extra": {},
-        "category": "Video generation and editing/Video Edit",
+        "category": "Video editing/Video Edit",
         "description": "Replaces a character in a video with a reference image using the SCAIL-2 model for end-to-end controlled animation without intermediate pose maps. Key inputs include a source video, a reference character image, and optional text prompts for style or context. Suitable for animated or live-action footage, multi-character scenes, and creative video editing where direct pose-free animation is needed; works best with moderate-length videos."
       }
     ]

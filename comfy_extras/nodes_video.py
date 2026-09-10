@@ -3,6 +3,7 @@ import av
 import torch
 import folder_paths
 import json
+import weakref
 from typing import Optional
 from typing_extensions import override
 from fractions import Fraction
@@ -295,6 +296,7 @@ class LoadVideo(io.ComfyNode):
             display_name="Load Video",
             category="video",
             essentials_category="Basics",
+            has_intermediate_output=True,
             inputs=[
                 io.Combo.Input("file", options=sorted(files), upload=io.UploadType.video),
             ],
@@ -306,7 +308,8 @@ class LoadVideo(io.ComfyNode):
     @classmethod
     def execute(cls, file) -> io.NodeOutput:
         video_path = folder_paths.get_annotated_filepath(file)
-        return io.NodeOutput(InputImpl.VideoFromFile(video_path))
+        source = InputImpl.VideoFromFile(video_path)
+        return io.NodeOutput(source, ui=preview_input_video(file, source))
 
     @classmethod
     def fingerprint_inputs(s, file):
@@ -322,6 +325,67 @@ class LoadVideo(io.ComfyNode):
             return "Invalid video file: {}".format(file)
 
         return True
+
+_preview_results: "weakref.WeakKeyDictionary[Input.Video, tuple[str, ui.SavedResult]]" = weakref.WeakKeyDictionary()
+
+
+def preview_input_video(file: str, video: Input.Video | None = None) -> ui.PreviewVideo:
+    name, _ = folder_paths.annotated_filepath(file)
+    subfolder, _, filename = name.replace("\\", "/").rpartition("/")
+    result = ui.SavedResult(filename, subfolder, io.FolderType.input)
+    if video is not None:
+        _preview_results[video] = (folder_paths.get_annotated_filepath(file), result)
+    return ui.PreviewVideo([result])
+
+
+def save_video_preview(video: Input.Video) -> ui.PreviewVideo:
+    cached = _preview_results.get(video)
+    if cached is not None and os.path.isfile(cached[0]):
+        return ui.PreviewVideo([cached[1]])
+
+    full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+        "ComfyUI_temp_video", folder_paths.get_temp_directory(), 0, 0
+    )
+    preview_format = Types.VideoContainer.MP4
+    file = f"{filename}_{counter:05}_.{Types.VideoContainer.get_extension(preview_format)}"
+    full_path = os.path.join(full_output_folder, file)
+    video.save_to(
+        full_path,
+        format=preview_format,
+        codec="auto",
+        preset="ultrafast",
+    )
+    result = ui.SavedResult(file, subfolder, io.FolderType.temp)
+    _preview_results[video] = (full_path, result)
+    return ui.PreviewVideo([result])
+
+
+def apply_video_trim(video: Input.Video, trim, strict_duration: bool = False) -> Input.Video:
+    trim = trim or {}
+    start_time = float(trim.get("start_time", 0.0))
+    duration = float(trim.get("duration", 0.0))
+    if duration < 0:
+        raise ValueError(f"Trim duration must be >= 0, got {duration}")
+    if start_time == 0.0 and duration == 0.0:
+        return video
+
+    trimmed = video.as_trimmed(start_time, duration, strict_duration=strict_duration)
+    if trimmed is None:
+        raise ValueError(
+            f"Failed to trim video:\nSource duration: {video.get_duration()}\nStart time: {start_time}\nTarget duration: {duration}"
+        )
+    return trimmed
+
+
+def apply_video_crop(video: Input.Video, crop) -> Input.Video:
+    crop = crop or {}
+    return video.as_cropped(
+        int(crop.get("x", 0)),
+        int(crop.get("y", 0)),
+        int(crop.get("width", 0)),
+        int(crop.get("height", 0)),
+    )
+
 
 class VideoSlice(io.ComfyNode):
     @classmethod
@@ -370,6 +434,74 @@ class VideoSlice(io.ComfyNode):
         )
 
 
+class VideoTrim(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="VideoTrim",
+            display_name="Trim Video (Advanced)",
+            search_aliases=["trim video duration", "skip first frames", "cut video", "start time"],
+            category="video",
+            is_experimental=True,
+            is_output_node=True,
+            essentials_category="Video Tools",
+            has_intermediate_output=True,
+            inputs=[
+                io.Video.Input("video"),
+                io.VideoEdit.Input(
+                    "trim",
+                    features=["trim"],
+                    tooltip="Trim window using start/end frames.",
+                ),
+                io.Boolean.Input(
+                    "strict_duration",
+                    default=False,
+                    advanced=True,
+                    tooltip="If True, when the specified duration is not possible, an error will be raised.",
+                ),
+            ],
+            outputs=[
+                io.Video.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, video: io.Video.Type, trim: io.VideoEdit.Type, strict_duration: bool) -> io.NodeOutput:
+        trimmed = apply_video_trim(video, (trim or {}).get("trim"), strict_duration=strict_duration)
+        return io.NodeOutput(trimmed, ui=save_video_preview(trimmed))
+
+
+class VideoCrop(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="VideoCrop",
+            display_name="Crop Video",
+            search_aliases=["crop video", "cut region", "spatial crop"],
+            category="video",
+            is_experimental=True,
+            is_output_node=True,
+            essentials_category="Video Tools",
+            has_intermediate_output=True,
+            inputs=[
+                io.Video.Input("video"),
+                io.VideoEdit.Input(
+                    "crop",
+                    features=["crop"],
+                    tooltip="Crop region in pixels. Zero width/height keeps the full frame.",
+                ),
+            ],
+            outputs=[
+                io.Video.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, video: io.Video.Type, crop: io.VideoEdit.Type) -> io.NodeOutput:
+        cropped = apply_video_crop(video, (crop or {}).get("crop"))
+        return io.NodeOutput(cropped, ui=save_video_preview(cropped))
+
+
 class VideoExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -380,6 +512,8 @@ class VideoExtension(ComfyExtension):
             GetVideoComponents,
             LoadVideo,
             VideoSlice,
+            VideoTrim,
+            VideoCrop,
         ]
 
 async def comfy_entrypoint() -> VideoExtension:
