@@ -70,6 +70,10 @@ def stochastic_rounding(value, dtype, seed=0):
     if dtype == torch.bfloat16:
         return value.to(dtype=torch.bfloat16)
     if dtype == torch.float8_e4m3fn or dtype == torch.float8_e5m2:
+        # Apple MPS cannot create FP8 tensors.  Keep FP8 storage on CPU; the
+        # model loader will dequantize it before sending float weights to MPS.
+        if value.device.type == "mps":
+            value = value.cpu()
         generator = torch.Generator(device=value.device)
         generator.manual_seed(seed)
         if _CK_STOCHASTIC_ROUNDING_AVAILABLE:

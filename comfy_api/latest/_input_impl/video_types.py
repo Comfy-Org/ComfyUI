@@ -1030,6 +1030,7 @@ class VideoFromComponents(VideoInput):
                 audio_sample_rate = 48000 if output_format == VideoContainer.WEBM else source_audio_sample_rate
                 waveform = self.__components.audio['waveform']
                 waveform = waveform[0, :, :math.ceil((source_audio_sample_rate / frame_rate) * self.__components.images.shape[0])]
+                waveform = waveform.float().nan_to_num(nan=0.0, posinf=1.0, neginf=-1.0).clamp(-1.0, 1.0)
                 layout = {1: 'mono', 2: 'stereo', 6: '5.1'}.get(waveform.shape[0], 'stereo')
                 audio_codec = "libopus" if output_format == VideoContainer.WEBM else "aac"
                 audio_stream = output.add_stream(audio_codec, rate=audio_sample_rate, layout=layout)
