@@ -88,6 +88,10 @@ class _PollUIState:
 _RETRY_STATUS = {408, 500, 502, 503, 504}  # status 429 is handled separately
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+# Failures aiohttp raises before any request byte is written: DNS, TCP connect, TLS,
+# proxy (all ClientConnectorError subclasses) and the connect-phase timeout. Every
+# other ClientError means the server may have taken the request.
+_RAISED_BEFORE_SEND = (aiohttp.ClientConnectorError, aiohttp.ConnectionTimeoutError)
 
 
 def _connection_error_is_retryable(method: str, err: BaseException, repeatable: bool = False) -> bool:
@@ -105,7 +109,7 @@ def _connection_error_is_retryable(method: str, err: BaseException, repeatable: 
     """
     if repeatable or method.upper() in _SAFE_METHODS:
         return True
-    return isinstance(err, aiohttp.ClientConnectorError)
+    return isinstance(err, _RAISED_BEFORE_SEND)
 
 _MAX_RETRY_AFTER_WAIT = 150.0  # Cap a server Retry-After at this many seconds so a large hint can't block execution
 
@@ -932,9 +936,8 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
             logging.debug("Polling was interrupted by user")
             raise
         except (ClientError, OSError) as e:
-            if (attempt - rate_limit_attempts) <= cfg.max_retries and _connection_error_is_retryable(
-                method, e, cfg.repeatable
-            ):
+            retryable = _connection_error_is_retryable(method, e, cfg.repeatable)
+            if retryable and (attempt - rate_limit_attempts) <= cfg.max_retries:
                 logging.warning(
                     "Connection error calling %s %s. Retrying in %.2fs (%d/%d): %s",
                     method,
@@ -963,6 +966,21 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                 )
                 delay *= cfg.retry_backoff
                 continue
+            if not retryable:
+                request_logger.log_request_response(
+                    operation_id=operation_id,
+                    request_method=method,
+                    request_url=url,
+                    request_headers=dict(payload_headers) if payload_headers else None,
+                    request_params=dict(params) if params else None,
+                    request_data=request_body_log,
+                    error_message=f"{type(e).__name__}: {str(e)} (not retried: the request had been sent)",
+                )
+                raise ApiServerError(
+                    f"The connection to {default_base_url()} dropped after the request was sent. "
+                    "It was not sent again, because the provider may already have run and billed it. "
+                    "Check your usage history before trying again."
+                ) from e
             diag = await _diagnose_connectivity()
             if not diag["internet_accessible"]:
                 request_logger.log_request_response(

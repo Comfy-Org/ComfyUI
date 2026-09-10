@@ -28,6 +28,14 @@ def test_unsafe_methods_do_not_repeat_a_request_the_server_received(method):
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
 def test_unsafe_methods_still_retry_when_the_request_was_never_sent(method):
     assert _connection_error_is_retryable(method, _ConnectorError())
+    assert _connection_error_is_retryable(method, aiohttp.ConnectionTimeoutError())
+
+
+@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
+def test_a_read_timeout_after_send_is_not_repeated(method):
+    # sock_read timed out: the request was written, the provider may be running it.
+    assert not _connection_error_is_retryable(method, aiohttp.SocketTimeoutError())
+    assert not _connection_error_is_retryable(method, aiohttp.ClientPayloadError("truncated body"))
 
 
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
