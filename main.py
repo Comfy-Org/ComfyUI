@@ -138,9 +138,21 @@ if args.enable_manager:
 
 
 def apply_custom_paths():
-    # extra model paths
-    extra_model_paths_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "extra_model_paths.yaml")
-    if os.path.isfile(extra_model_paths_config_path):
+    install_dir = os.path.dirname(os.path.realpath(__file__))
+
+    # extra_paths.yaml — primary config (superset of extra_model_paths.yaml)
+    extra_paths_config_path = os.path.join(install_dir, "extra_paths.yaml")
+    extra_model_paths_config_path = os.path.join(install_dir, "extra_model_paths.yaml")
+
+    if os.path.isfile(extra_paths_config_path):
+        utils.extra_config.load_extra_path_config(extra_paths_config_path, allow_system_dirs=True)
+        if os.path.isfile(extra_model_paths_config_path):
+            logging.warning(
+                "Both extra_paths.yaml and extra_model_paths.yaml found; "
+                "ignoring the deprecated extra_model_paths.yaml. "
+                "Please remove or migrate its entries to extra_paths.yaml."
+            )
+    elif os.path.isfile(extra_model_paths_config_path):
         utils.extra_config.load_extra_path_config(extra_model_paths_config_path)
 
     if args.extra_model_paths_config:
