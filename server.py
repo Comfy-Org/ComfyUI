@@ -2,6 +2,7 @@ import errno
 import os
 import sys
 import asyncio
+from pathlib import PurePosixPath, PureWindowsPath
 import traceback
 import time
 
@@ -479,7 +480,11 @@ class PromptServer():
                     return web.Response(status=400)
 
                 # validation for security: prevent accessing arbitrary path
-                if filename[0] == '/' or '..' in filename:
+                # Normalize backslashes and use standard library to parse path components
+                normalized = filename.replace('\\', '/')
+                path = PurePosixPath(normalized)
+                win_path = PureWindowsPath(normalized)
+                if path.is_absolute() or win_path.is_absolute() or win_path.drive or '..' in path.parts:
                     return web.Response(status=400)
 
                 if output_dir is None:
@@ -536,7 +541,10 @@ class PromptServer():
                         return web.Response(status=400)
 
                     # validation for security: prevent accessing arbitrary path
-                    if filename[0] == '/' or '..' in filename:
+                    # Normalize backslashes and use standard library to parse path components
+                    normalized = filename.replace('\\', '/')
+                    path = PurePosixPath(normalized)
+                    if path.is_absolute() or '..' in path.parts:
                         return web.Response(status=400)
 
                     if output_dir is None:
