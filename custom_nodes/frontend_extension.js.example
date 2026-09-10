@@ -1,0 +1,113 @@
+/*
+Example frontend extension for a ComfyUI custom node.
+
+To try this with custom_nodes/example_node.py.example:
+
+1. Copy example_node.py.example to your custom node package as __init__.py.
+2. Set WEB_DIRECTORY = "./js" in that Python file.
+3. Create a js directory next to __init__.py.
+4. Copy this file to js/frontend_extension.js.
+
+ComfyUI loads every .js file in WEB_DIRECTORY in the browser. This JavaScript
+does not run your Python node. It customizes the frontend representation of
+nodes after the backend has registered their schemas.
+*/
+
+import { app } from "../../scripts/app.js";
+
+const EXTENSION_NAME = "comfy.example.frontend_extension";
+const EXAMPLE_NODE_CLASS = "Example";
+
+app.registerExtension({
+    name: EXTENSION_NAME,
+
+    /*
+    setup() runs once after the frontend has initialized. Use it for extension
+    level initialization that is not tied to one specific node instance.
+    */
+    async setup() {
+        console.log(`${EXTENSION_NAME} loaded`);
+    },
+
+    /*
+    beforeRegisterNodeDef() runs when the frontend is about to register a node
+    class. This is the safest place to wrap prototype methods, because every
+    node instance created later will inherit the wrapped behavior.
+
+    nodeData.name is the class name sent by the Python node schema. For the
+    Python example node this is "Example".
+    */
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+        if (nodeData.name !== EXAMPLE_NODE_CLASS) {
+            return;
+        }
+
+        const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
+
+        nodeType.prototype.onNodeCreated = function () {
+            const result = originalOnNodeCreated?.apply(this, arguments);
+
+            /*
+            This function runs for each frontend node instance. At this point
+            `this` is the LiteGraph node object shown on the canvas.
+
+            Use properties for data that should be serialized with the workflow.
+            Plain fields on `this` are useful for transient UI state.
+            */
+            this.properties = this.properties || {};
+            this.properties.example_frontend_extension_enabled ??= true;
+
+            /*
+            addWidget() adds a control to the node body. This button only logs
+            information, so it is safe as an example and does not change queueing
+            or execution behavior.
+            */
+            this.addWidget("button", "Log node info", null, () => {
+                console.log("Node id:", this.id);
+                console.log("Node title:", this.title);
+                console.log("Node properties:", this.properties);
+                console.log("Output images:", this.imgs);
+            });
+
+            return result;
+        };
+
+        /*
+        Prototype methods can be hooked by saving the original method and
+        calling it from your replacement. Keep the original call unless you
+        intentionally want to replace ComfyUI's default behavior.
+
+        onExecuted() is called after this node receives execution results from
+        the backend. If the node produced image previews, ComfyUI may expose
+        those images on node.imgs. The field can be undefined or empty before
+        the node has executed, or for nodes that do not display images.
+        */
+        const originalOnExecuted = nodeType.prototype.onExecuted;
+
+        nodeType.prototype.onExecuted = function (message) {
+            const result = originalOnExecuted?.apply(this, arguments);
+
+            if (this.imgs?.length) {
+                console.log(`Node ${this.id} is displaying ${this.imgs.length} image(s).`);
+            } else {
+                console.log(`Node ${this.id} executed without frontend images.`);
+            }
+
+            console.debug("Execution message:", message);
+            return result;
+        };
+    },
+
+    /*
+    nodeCreated() is another lifecycle hook. It runs for each node instance
+    after creation. Use it for per-node setup that does not need to alter the
+    node class prototype.
+    */
+    async nodeCreated(node) {
+        if (node.comfyClass !== EXAMPLE_NODE_CLASS) {
+            return;
+        }
+
+        node.exampleFrontendExtensionLoaded = true;
+    },
+});
