@@ -38,23 +38,6 @@ class TripoStyle(str, Enum):
     NONE = "None"
 
 
-class TripoTaskType(str, Enum):
-    TEXT_TO_MODEL = "text_to_model"
-    IMAGE_TO_MODEL = "image_to_model"
-    MULTIVIEW_TO_MODEL = "multiview_to_model"
-    TEXTURE_MODEL = "texture_model"
-    ANIMATE_PRERIGCHECK = "animate_prerigcheck"
-    ANIMATE_RIG = "animate_rig"
-    ANIMATE_RETARGET = "animate_retarget"
-    STYLIZE_MODEL = "stylize_model"
-    CONVERT_MODEL = "convert_model"
-    MESH_SEGMENTATION = "mesh_segmentation"
-    MESH_COMPLETION = "mesh_completion"
-    HIGHPOLY_TO_LOWPOLY = "highpoly_to_lowpoly"
-    GENERATE_MULTIVIEW_IMAGE = "generate_multiview_image"
-    EDIT_MULTIVIEW_IMAGE = "edit_multiview_image"
-
-
 class TripoTextureAlignment(str, Enum):
     ORIGINAL_IMAGE = "original_image"
     GEOMETRY = "geometry"
@@ -269,29 +252,18 @@ class TripoUrlReference(BaseModel):
     url: str
 
 
-class TripoObjectStorage(BaseModel):
-    bucket: str
-    key: str
-
-
-class TripoObjectReference(BaseModel):
-    type: str
-    object: TripoObjectStorage
-
-
 class TripoFileEmptyReference(BaseModel):
     pass
 
 
 class TripoFileReference(RootModel):
-    root: TripoFileTokenReference | TripoUrlReference | TripoObjectReference | TripoFileEmptyReference
+    root: TripoFileTokenReference | TripoUrlReference | TripoFileEmptyReference
 
 
 class TripoTextToModelRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.TEXT_TO_MODEL, description="Type of task")
     prompt: str = Field(..., description="The text prompt describing the model to generate", max_length=1024)
+    model: TripoModelVersion = TripoModelVersion.v3_1_20260211
     negative_prompt: str | None = Field(None, description="The negative text prompt", max_length=255)
-    model_version: TripoModelVersion | None = TripoModelVersion.v2_5_20250123
     face_limit: int | None = Field(None, description="The number of faces to limit the generation to")
     texture: bool | None = Field(True, description="Whether to apply texture to the generated model")
     pbr: bool | None = Field(True, description="Whether to apply PBR to the generated model")
@@ -300,16 +272,14 @@ class TripoTextToModelRequest(BaseModel):
     texture_seed: int | None = Field(None, description="The seed for the texture")
     texture_quality: TripoTextureQuality | None = TripoTextureQuality.standard
     geometry_quality: TripoGeometryQuality | None = TripoGeometryQuality.standard
-    style: TripoStyle | None = None
     auto_size: bool | None = Field(False, description="Whether to auto-size the model")
     quad: bool | None = Field(False, description="Whether to apply quad to the generated model")
     smart_low_poly: bool | None = Field(None, description="Low-poly output with clean, hand-crafted style topology")
 
 
 class TripoImageToModelRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.IMAGE_TO_MODEL, description="Type of task")
-    file: TripoFileReference = Field(..., description="The file reference to convert to a model")
-    model_version: TripoModelVersion | None = Field(None, description="The model version to use for generation")
+    input: str = Field(..., description="Image URL or file token")
+    model: TripoModelVersion = TripoModelVersion.v3_1_20260211
     face_limit: int | None = Field(None, description="The number of faces to limit the generation to")
     texture: bool | None = Field(True, description="Whether to apply texture to the generated model")
     pbr: bool | None = Field(True, description="Whether to apply PBR to the generated model")
@@ -320,7 +290,6 @@ class TripoImageToModelRequest(BaseModel):
     texture_alignment: TripoTextureAlignment | None = Field(
         TripoTextureAlignment.ORIGINAL_IMAGE, description="The texture alignment method"
     )
-    style: TripoStyle | None = Field(None, description="The style to apply to the generated model")
     auto_size: bool | None = Field(False, description="Whether to auto-size the model")
     orientation: TripoOrientation | None = TripoOrientation.DEFAULT
     quad: bool | None = Field(False, description="Whether to apply quad to the generated model")
@@ -328,10 +297,8 @@ class TripoImageToModelRequest(BaseModel):
 
 
 class TripoMultiviewToModelRequest(BaseModel):
-    type: TripoTaskType = TripoTaskType.MULTIVIEW_TO_MODEL
-    files: list[TripoFileReference] = Field(..., description="The file references to convert to a model")
-    model_version: TripoModelVersion | None = Field(None, description="The model version to use for generation")
-    orthographic_projection: bool | None = Field(False, description="Whether to use orthographic projection")
+    inputs: list[dict[str, str]] = Field(..., description="View-keyed image references: front, left, back, right")
+    model: TripoModelVersion = TripoModelVersion.v3_1_20260211
     face_limit: int | None = Field(None, description="The number of faces to limit the generation to")
     texture: bool | None = Field(True, description="Whether to apply texture to the generated model")
     pbr: bool | None = Field(True, description="Whether to apply PBR to the generated model")
@@ -354,42 +321,32 @@ class TripoTexturePrompt(BaseModel):
 
 
 class TripoTextureModelRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.TEXTURE_MODEL, description="Type of task")
-    original_model_task_id: str = Field(..., description="The task ID of the original model")
-    model_version: TripoTextureModelVersion | None = Field(None, description="Texture model version")
-    texture: bool | None = Field(True, description="Whether to apply texture to the model")
+    input: str = Field(..., description="The task ID of the model to texture")
+    model: TripoTextureModelVersion | None = Field(None, description="Texture model version")
     pbr: bool | None = Field(True, description="Whether to apply PBR to the model")
-    model_seed: int | None = Field(None, description="The seed for the model")
     texture_seed: int | None = Field(None, description="The seed for the texture")
     texture_quality: TripoTextureQuality | None = Field(None, description="The quality of the texture")
     texture_alignment: TripoTextureAlignment | None = Field(
         TripoTextureAlignment.ORIGINAL_IMAGE, description="The texture alignment method"
     )
-    texture_prompt: TripoTexturePrompt | None = Field(
-        None,
-        description="Optional guidance for texturing. Required in practice for imported models, "
-        "which carry no source image to infer texture from.",
-    )
+    texture_prompt: TripoTexturePrompt | None = Field(None, description="Optional guidance for texturing")
     part_names: list[str] | None = Field(None, description="Parts of a segmented model to texture; all parts when omitted")
 
 
 class TripoAnimatePrerigcheckRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.ANIMATE_PRERIGCHECK, description="Type of task")
-    original_model_task_id: str = Field(..., description="The task ID of the original model")
+    input: str = Field(..., description="The task ID of the model")
 
 
 class TripoAnimateRigRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.ANIMATE_RIG, description="Type of task")
-    original_model_task_id: str = Field(..., description="The task ID of the original model")
-    model_version: TripoRigModelVersion | None = Field(None, description="Rigging model version")
+    input: str = Field(..., description="The task ID of the model")
+    model: TripoRigModelVersion | None = Field(None, description="Rigging model version")
     rig_type: TripoRigType | None = Field(None, description="Skeleton type")
     out_format: TripoOutFormat | None = Field(TripoOutFormat.GLB, description="The output format")
     spec: TripoSpec | None = Field(TripoSpec.TRIPO, description="The specification for rigging")
 
 
 class TripoAnimateRetargetRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.ANIMATE_RETARGET, description="Type of task")
-    original_model_task_id: str = Field(..., description="The task ID of the original model")
+    input: str = Field(..., description="The task ID of the rigged model")
     animation: str = Field(..., description="The animation preset to apply")
     out_format: TripoOutFormat | None = Field(TripoOutFormat.GLB, description="The output format")
     export_with_geometry: bool | None = Field(None, description="Whether to export geometry with the animation")
@@ -397,19 +354,16 @@ class TripoAnimateRetargetRequest(BaseModel):
 
 
 class TripoMeshSegmentationRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.MESH_SEGMENTATION, description="Type of task")
-    original_model_task_id: str = Field(..., description="The task ID of the original model")
+    input: str = Field(..., description="The task ID of the model to segment")
 
 
 class TripoMeshCompletionRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.MESH_COMPLETION, description="Type of task")
-    original_model_task_id: str = Field(..., description="The task ID of a mesh segmentation task")
+    input: str = Field(..., description="The task ID of a mesh segmentation task")
     part_names: list[str] | None = Field(None, description="Parts to complete; all parts when omitted")
 
 
 class TripoHighpolyToLowpolyRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.HIGHPOLY_TO_LOWPOLY, description="Type of task")
-    original_model_task_id: str = Field(..., description="The task ID of the original model")
+    input: str = Field(..., description="The task ID of the model to retopologize")
     face_limit: int | None = Field(None, description="Target face count; adaptive when omitted")
     quad: bool | None = Field(None, description="Whether to output a quad mesh")
     bake: bool | None = Field(None, description="Whether to bake textures onto the low-poly mesh")
@@ -417,8 +371,7 @@ class TripoHighpolyToLowpolyRequest(BaseModel):
 
 
 class TripoGenerateMultiviewImageRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.GENERATE_MULTIVIEW_IMAGE, description="Type of task")
-    file: TripoFileReference = Field(..., description="The source image")
+    input: str = Field(..., description="URL or file token of the source image")
 
 
 class TripoMultiviewEditPrompt(BaseModel):
@@ -427,15 +380,21 @@ class TripoMultiviewEditPrompt(BaseModel):
 
 
 class TripoEditMultiviewImageRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.EDIT_MULTIVIEW_IMAGE, description="Type of task")
-    original_task_id: str = Field(..., description="The task ID of the multiview images to edit")
+    input: str = Field(..., description="The task ID of the multiview images to edit")
     prompts: list[TripoMultiviewEditPrompt] = Field(..., description="Per-view edit instructions")
 
 
+class TripoMeshSmartSegmentRequest(BaseModel):
+    input: str = Field(..., description="URL or file token of a GLB model, or of an image")
+    seg_type: str = Field(..., description='"model" or "image"')
+    transform: list[float] | None = Field(None, description="Column-major 4x4 matrix, required for models")
+    granularity: str | None = Field(None, description="coarse, medium or fine")
+    hint: str | None = Field(None, description="Text naming the parts to look for")
+
+
 class TripoConvertModelRequest(BaseModel):
-    type: TripoTaskType = Field(TripoTaskType.CONVERT_MODEL, description="Type of task")
+    input: str = Field(..., description="The task ID of the model to convert")
     format: TripoConvertFormat = Field(..., description="The format to convert to")
-    original_model_task_id: str = Field(..., description="The task ID of the original model")
     quad: bool | None = Field(None, description="Whether to apply quad to the model")
     force_symmetry: bool | None = Field(None, description="Whether to force symmetry")
     face_limit: int | None = Field(None, description="The number of faces to limit the conversion to")
@@ -458,7 +417,7 @@ class TripoConvertModelRequest(BaseModel):
 class TripoP1CommonRequest(BaseModel):
     """Fields supported by Tripo P1 across all input types."""
 
-    model_version: str = Field("P1-20260311")
+    model: str = Field("P1-20260311")
     model_seed: int | None = Field(None, description="Random seed for geometry generation")
     face_limit: int | None = Field(None, ge=48, le=20000, description="Target face count (48-20000)")
     texture: bool | None = Field(None, description="Enable texturing; pbr=True forces this true")
@@ -471,53 +430,40 @@ class TripoP1CommonRequest(BaseModel):
 
 
 class TripoP1TextToModelRequest(TripoP1CommonRequest):
-    type: str = "text_to_model"
     prompt: str = Field(..., max_length=1024)
     negative_prompt: str | None = Field(None, max_length=255)
     image_seed: int | None = None
 
 
 class TripoP1ImageToModelRequest(TripoP1CommonRequest):
-    type: str = "image_to_model"
-    file: TripoFileReference
+    input: str
     enable_image_autofix: bool | None = None
     texture_alignment: str | None = Field(None, description='"original_image" or "geometry"')
     orientation: str | None = Field(None, description='"default" or "align_image"; needs texture=true')
 
 
 class TripoP1MultiviewToModelRequest(TripoP1CommonRequest):
-    """P1 multiview generation.
-
-    Tripo requires `files` to be exactly four entries in [front, left, back, right] order with `{}`
-    (TripoFileEmptyReference) for omitted slots; front is required and at least two images total must be provided.
-    """
-
-    type: str = "multiview_to_model"
-    files: list[TripoFileReference]
+    inputs: list[dict[str, str]]
     texture_alignment: str | None = None
     orientation: str | None = None
 
 
 class TripoImportModelRequest(BaseModel):
-    """Request for the comfy-api composite import endpoint (/proxy/tripo/v2/openapi/import).
-
-    The model file is uploaded to ComfyUI API storage first; the backend downloads it from
-    `url`, re-uploads it to Tripo's storage and creates the import_model task server-side.
-    """
-
-    url: str = Field(..., description="ComfyUI API storage download URL of the model file")
-    format: str = Field(..., description='File format: "glb", "fbx", "obj" or "stl"')
+    input: str = Field(..., description="URL or file token of the model file")
 
 
 class TripoTaskOutput(BaseModel):
-    model: str | None = Field(None, description="URL to the model")
-    base_model: str | None = Field(None, description="URL to the base model")
-    pbr_model: str | None = Field(None, description="URL to the PBR model")
-    rendered_image: str | None = Field(None, description="URL to the rendered image")
+    model_url: str | None = Field(None, description="URL to the model")
+    rendered_image_url: str | None = Field(None, description="URL to the rendered preview")
+    generated_image_url: str | None = Field(None, description="URL to the intermediate image of text-to-model")
     riggable: bool | None = Field(None, description="Whether the model is riggable")
     rig_type: str | None = Field(None, description="Recommended rig type")
-    topology: str | None = Field(None, description="Legacy name of rig_type")
     generate_multiview_image: dict[str, str] | None = Field(None, description="View name to image URL")
+    prompt: str | None = Field(None, description="Smart segmentation: the parts Tripo found")
+    mask_url: str | None = Field(None, description="Smart segmentation: part mask image")
+    seg_model_url: str | None = Field(None, description="Smart segmentation: segmented GLB")
+    seg_task_id: str | None = Field(None, description="Smart segmentation: the mesh_segmentation task")
+    model_task_id: str | None = Field(None, description="Smart segmentation: the imported or generated model task")
 
 
 class TripoTask(BaseModel):
@@ -527,15 +473,25 @@ class TripoTask(BaseModel):
     input: dict[str, Any] | None = Field(None, description="The input parameters for the task")
     output: TripoTaskOutput | None = Field(None, description="The output of the task")
     progress: int | None = Field(None, description="The progress of the task", ge=0, le=100)
-    create_time: int | None = Field(None, description="The creation time of the task")
-    running_left_time: int | None = Field(None, description="The estimated time left for the task")
-    queue_position: int | None = Field(None, description="The position in the queue")
-    consumed_credit: float | None = Field(None)
+    created_at: str | None = Field(None, description="The creation time of the task")
+    completed_at: str | None = Field(None, description="The completion time of the task")
+    credits_consumed: float | None = Field(None)
+    error_code: int | None = Field(None)
+    error_message: str | None = Field(None)
 
 
 class TripoTaskResponse(BaseModel):
     code: int = Field(0, description="The response code")
     data: TripoTask = Field(..., description="The task data")
+
+
+class TripoFileData(BaseModel):
+    file_token: str
+
+
+class TripoFileResponse(BaseModel):
+    code: int = Field(0, description="The response code")
+    data: TripoFileData
 
 
 class TripoErrorResponse(BaseModel):
