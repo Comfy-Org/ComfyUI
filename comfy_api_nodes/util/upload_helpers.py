@@ -207,7 +207,8 @@ async def upload_file_to_comfyapi(
         request_object = UploadRequest(file_name=filename, content_type=upload_mime_type)
     create_resp = await sync_op(
         cls,
-        endpoint=ApiEndpoint(path="/customers/storage", method="POST"),
+        # Asks for an upload URL; nothing is billed, so asking twice is harmless.
+        endpoint=ApiEndpoint(path="/customers/storage", method="POST", idempotent=True),
         data=request_object,
         response_model=UploadResponse,
         final_label_on_success=None,
