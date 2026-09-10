@@ -932,6 +932,34 @@ class TestExecution:
 
         assert len(result) <= 1, "Should return at most 1 item when offset is near end"
 
+    @pytest.mark.parametrize("invalid_value", ["foo", "abc", "notanint"])
+    def test_history_max_items_invalid_returns_400(
+        self, client: ComfyClient, builder: GraphBuilder, invalid_value
+    ):
+        """Test that non-integer max_items returns 400 error"""
+        url = "http://{}/history?max_items={}".format(
+            client.server_address, invalid_value
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(url)
+        assert exc_info.value.code == 400
+        body = json.loads(exc_info.value.read())
+        assert "max_items must be an integer" in body.get("error", "")
+
+    @pytest.mark.parametrize("invalid_value", ["foo", "abc", "notanint"])
+    def test_history_offset_invalid_returns_400(
+        self, client: ComfyClient, builder: GraphBuilder, invalid_value
+    ):
+        """Test that non-integer offset returns 400 error"""
+        url = "http://{}/history?offset={}".format(
+            client.server_address, invalid_value
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(url)
+        assert exc_info.value.code == 400
+        body = json.loads(exc_info.value.read())
+        assert "offset must be an integer" in body.get("error", "")
+
     # Jobs API tests
     def test_jobs_api_job_structure(
         self, client: ComfyClient, builder: GraphBuilder
