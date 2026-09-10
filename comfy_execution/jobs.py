@@ -31,6 +31,12 @@ class JobStatus:
     ALL = [PENDING, IN_PROGRESS, COMPLETED, FAILED, CANCELLED]
 
 
+# Maximum number of (distinct) ids accepted by the `ids` filter on the jobs
+# listing. Caps request size; the bounded id-lookup in get_all_jobs then keeps
+# a batch-poll request at O(requested ids), not O(total history).
+MAX_JOB_IDS_FILTER = 100
+
+
 def validate_job_id(value) -> str:
     """Validate a client-supplied job (prompt) id.
 
@@ -48,6 +54,56 @@ def validate_job_id(value) -> str:
     if str(uuid.UUID(value)) != value:
         raise ValueError("job id must be a UUID in canonical lowercase hyphenated form")
     return value
+
+
+class JobIdsFilterError(ValueError):
+    """Raised when the ``ids`` query-param value is malformed.
+
+    Carries an HTTP-ready ``payload`` dict so the caller can return it verbatim
+    with a 400 without re-deriving the message.
+    """
+
+    def __init__(self, payload: dict):
+        self.payload = payload
+        super().__init__(payload.get("error", "invalid ids"))
+
+
+def parse_ids_filter(ids_param: Optional[str]) -> Optional[list[str]]:
+    """Parse the ``ids`` query-param value into a filter list.
+
+    Single source of truth for ``ids`` parsing/validation, shared by the HTTP
+    handler and its tests so the two cannot drift.
+
+    Returns:
+        - ``None`` when the param is absent (``ids_param is None``) -> no filter.
+        - A de-duplicated list when present. An empty/blank value (``?ids=``,
+          ``?ids=,,``) yields ``[]``, which ``get_all_jobs`` treats as a
+          zero-match filter -- NOT "return everything".
+
+    Raises:
+        JobIdsFilterError: more than ``MAX_JOB_IDS_FILTER`` distinct ids, or any
+            id not in canonical UUID form. ``.payload`` is a 400-ready dict.
+    """
+    if ids_param is None:
+        return None
+    # De-dupe up front: a repeated id must not count toward the cap or be
+    # looked up twice. dict.fromkeys keeps first-seen order.
+    ids_filter = list(dict.fromkeys(i.strip() for i in ids_param.split(',') if i.strip()))
+    if len(ids_filter) > MAX_JOB_IDS_FILTER:
+        raise JobIdsFilterError(
+            {"error": f"ids must contain at most {MAX_JOB_IDS_FILTER} values"}
+        )
+    invalid_ids = []
+    for jid in ids_filter:
+        try:
+            validate_job_id(jid)
+        except (ValueError, AttributeError):
+            invalid_ids.append(jid)
+    if invalid_ids:
+        raise JobIdsFilterError(
+            {"error": "ids contains invalid id(s)", "invalid_ids": invalid_ids}
+        )
+    return ids_filter
 
 
 # Media types that can be previewed in the frontend
@@ -424,6 +480,7 @@ def get_all_jobs(
     history: dict,
     status_filter: Optional[list[str]] = None,
     workflow_id: Optional[str] = None,
+    ids: Optional[list[str]] = None,
     sort_by: str = "created_at",
     sort_order: str = "desc",
     limit: Optional[int] = None,
@@ -438,6 +495,8 @@ def get_all_jobs(
         history: Dict of history items keyed by prompt_id
         status_filter: List of statuses to include (from JobStatus.ALL)
         workflow_id: Filter by workflow ID
+        ids: Restrict the result to these job ids. None = no filter; a present
+            list (including empty) restricts to that set, so [] = zero matches
         sort_by: Field to sort by ('created_at', 'execution_duration')
         sort_order: 'asc' or 'desc'
         limit: Maximum number of items to return
@@ -451,6 +510,10 @@ def get_all_jobs(
     if status_filter is None:
         status_filter = JobStatus.ALL
 
+    # None => no id filter; a present list (including empty) restricts to that
+    # set (empty => zero matches).
+    id_set = set(ids) if ids is not None else None
+
     if JobStatus.IN_PROGRESS in status_filter:
         for item in running:
             jobs.append(normalize_queue_item(item, JobStatus.IN_PROGRESS))
@@ -462,13 +525,29 @@ def get_all_jobs(
     history_statuses = {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
     requested_history_statuses = history_statuses & set(status_filter)
     if requested_history_statuses:
-        for prompt_id, history_item in history.items():
-            job = normalize_history_item(prompt_id, history_item)
-            if job.get('status') in requested_history_statuses:
-                jobs.append(job)
+        if id_set is not None:
+            # Batch-poll fast path: history is keyed by id, so look up only the
+            # requested ids instead of normalizing the whole (unbounded) history.
+            for prompt_id in id_set:
+                history_item = history.get(prompt_id)
+                if history_item is None:
+                    continue
+                job = normalize_history_item(prompt_id, history_item)
+                if job.get('status') in requested_history_statuses:
+                    jobs.append(job)
+        else:
+            for prompt_id, history_item in history.items():
+                job = normalize_history_item(prompt_id, history_item)
+                if job.get('status') in requested_history_statuses:
+                    jobs.append(job)
 
     if workflow_id:
         jobs = [j for j in jobs if j.get('workflow_id') == workflow_id]
+
+    if id_set is not None:
+        # `.get('id')` (not `j['id']`): prune_dict can drop a None id, and a
+        # job missing its id should degrade to "no match", not raise KeyError.
+        jobs = [j for j in jobs if j.get('id') in id_set]
 
     jobs = apply_sorting(jobs, sort_by, sort_order)
 

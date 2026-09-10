@@ -16,6 +16,8 @@ from comfy_execution.jobs import (
     cancel_job,
     CANCEL_PENDING,
     CANCEL_RUNNING,
+    parse_ids_filter,
+    JobIdsFilterError,
 )
 import uuid
 import urllib
@@ -825,6 +827,7 @@ class PromptServer():
             Query parameters:
                 status: Filter by status (comma-separated): pending, in_progress, completed, failed
                 workflow_id: Filter by workflow ID
+                ids: Filter by job id (comma-separated UUIDs, max 100)
                 sort_by: Sort field: created_at (default), execution_duration
                 sort_order: Sort direction: asc, desc (default)
                 limit: Max items to return (positive integer)
@@ -834,6 +837,7 @@ class PromptServer():
 
             status_param = query.get('status')
             workflow_id = query.get('workflow_id')
+            ids_param = query.get('ids')
             sort_by = query.get('sort_by', 'created_at').lower()
             sort_order = query.get('sort_order', 'desc').lower()
 
@@ -846,6 +850,16 @@ class PromptServer():
                         {"error": f"Invalid status value(s): {', '.join(invalid_statuses)}. Valid values: {', '.join(JobStatus.ALL)}"},
                         status=400
                     )
+
+            # Optional batch filter: narrow the result to a known set of job ids
+            # (e.g. polling a submitted batch in one request). Parsing/validation
+            # lives in parse_ids_filter so this handler and its tests share one
+            # implementation. Absent => no filter; present-but-empty (`?ids=`,
+            # `?ids=,,`) => zero matches, not "everything".
+            try:
+                ids_filter = parse_ids_filter(ids_param)
+            except JobIdsFilterError as e:
+                return web.json_response(e.payload, status=400)
 
             if sort_by not in {'created_at', 'execution_duration'}:
                 return web.json_response(
@@ -898,6 +912,7 @@ class PromptServer():
                 running, queued, history,
                 status_filter=status_filter,
                 workflow_id=workflow_id,
+                ids=ids_filter,
                 sort_by=sort_by,
                 sort_order=sort_order,
                 limit=limit,
