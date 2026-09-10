@@ -31,6 +31,7 @@ import faulthandler
 import logging
 import signal
 import sys
+import traceback
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
@@ -180,7 +181,20 @@ def apply_custom_paths():
         folder_paths.set_user_directory(user_dir)
 
 
+# Buffer for prestartup failures. Recorded into `nodes.NODE_STARTUP_ERRORS`
+# only AFTER the normal `import nodes` line below, so a failing prestartup
+# script never triggers an early `import nodes` (and therefore `import torch`)
+# on the error path.
+_PRESTARTUP_FAILURES: list[dict] = []
+
+
 def execute_prestartup_script():
+    """Run every custom_nodes/*/prestartup_script.py once, before importing nodes.
+
+    Failures are buffered into the module-level ``_PRESTARTUP_FAILURES`` list and
+    must be flushed via ``record_node_startup_error`` after ``import nodes`` has
+    happened at its normal bootstrap point.
+    """
     if args.disable_all_custom_nodes and len(args.whitelist_custom_nodes) == 0:
         return
 
@@ -193,6 +207,15 @@ def execute_prestartup_script():
             return True
         except Exception as e:
             logging.error(f"Failed to execute startup-script: {script_path} / {e}")
+            # Buffer the failure - do NOT `import nodes` here, that would drag
+            # torch in before the intended bootstrap point.
+            _PRESTARTUP_FAILURES.append({
+                "module_path": os.path.dirname(script_path),
+                "source": "custom_nodes",
+                "phase": "prestartup",
+                "error": e,
+                "tb": traceback.format_exc(),
+            })
         return False
 
     node_paths = folder_paths.get_folder_paths("custom_nodes")
@@ -252,6 +275,16 @@ import execution
 import server
 from protocol import BinaryEventTypes
 import nodes
+
+# Flush any prestartup failures that were buffered before `nodes` was
+# importable. Doing this here (rather than from the prestartup error
+# handler) keeps the bootstrap order deterministic: `nodes` (and torch)
+# import at this single line whether prestartup succeeded or failed.
+if _PRESTARTUP_FAILURES:
+    for _failure in _PRESTARTUP_FAILURES:
+        nodes.record_node_startup_error(**_failure)
+    _PRESTARTUP_FAILURES.clear()
+
 import comfy.model_management
 import comfyui_version
 import app.logger

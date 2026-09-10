@@ -818,6 +818,46 @@ class PromptServer():
                 out[node_class] = node_info(node_class)
             return web.json_response(out)
 
+        @routes.get("/node_startup_errors")
+        async def get_node_startup_errors(request):
+            """Return startup errors recorded during node loading, grouped by source.
+
+            Group errors by source so the frontend/Manager can render them in
+            distinct sections. ``source`` is the same string as the
+            ``module_parent`` used at load time (e.g. ``"custom_nodes"``,
+            ``"comfy_extras"``, ``"comfy_api_nodes"``) and is left as a
+            free-form string so the contract survives node-source layouts
+            evolving. The response only contains source buckets that actually
+            had a failure; consumers should not assume any particular set of
+            keys is always present.
+
+            ``module_path`` is stripped because the absolute on-disk path is
+            internal detail that the frontend has no use for.
+
+            Optional query parameters narrow the response:
+
+            * ``source``        — only entries from this source bucket.
+            * ``module_name``   — only entries whose module name matches exactly.
+                                  (Folder name for directory-style packs, file
+                                  stem for single-file modules.)
+            * ``pack_id``       — only entries whose ``pyproject.project.name``
+                                  matches exactly. Entries without a parsed
+                                  pyproject.toml are skipped under this filter.
+
+            Filters are combined with AND. Filtering an empty / non-matching
+            result still returns ``{}`` with HTTP 200 rather than 404 — absence
+            of an error is a valid answer for this endpoint.
+            """
+            # Coalesce empty-string query values to None so `?source=` (param
+            # present but blank) is treated the same as the param being absent
+            # — rather than filtering for entries whose source is literally "".
+            grouped = nodes.filter_node_startup_errors(
+                source=request.query.get("source") or None,
+                module_name=request.query.get("module_name") or None,
+                pack_id=request.query.get("pack_id") or None,
+            )
+            return web.json_response(grouped)
+
         @routes.get("/api/jobs")
         async def get_jobs(request):
             """List all jobs with filtering, sorting, and pagination.
