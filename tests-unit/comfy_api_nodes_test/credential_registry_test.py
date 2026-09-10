@@ -17,8 +17,9 @@ from comfy_api.credential_registry import CredentialRegistry, api_node_credentia
 from comfy_api_nodes.util import _helpers
 from comfy_api_nodes.util import client as api_client
 from comfy_api_nodes.util import request_logger
+from comfy_api_nodes.util.common_exceptions import ApiResponseError
 from comfy_execution.utils import CurrentNodeContext
-from server import PromptServer, _authenticated_client_id, _credential_transport_enabled
+from server import PromptServer, _authenticated_client_id, _credential_keys_match, _credential_transport_enabled
 
 
 class _Node:
@@ -86,6 +87,43 @@ def test_registry_cleanup_on_completion_disconnect_and_ttl():
     assert registry.get_for_prompt("stale-prompt") is None
 
 
+def test_registry_placeholder_and_disconnected_ttl_semantics():
+    now = [0.0]
+    registry = CredentialRegistry(credential_ttl=10, prompt_ttl=20, clock=lambda: now[0])
+
+    registry.connect("connected")
+    registry.bind_prompt("connected-prompt", "connected")
+    assert registry.get_for_prompt("connected-prompt").token is None
+    assert registry.get_for_prompt("connected-prompt").generation == 0
+    registry.release_prompt("connected-prompt")
+
+    now[0] = 11
+    registry.bind_prompt("still-connected", "connected")
+    assert registry.get_for_prompt("still-connected").generation == 0
+
+    registry.update("detached", "secret")
+    assert registry.is_protected("detached") is True
+    now[0] = 22
+    assert registry.is_protected("detached") is False
+
+
+def test_active_prompt_preserves_disconnected_credential_until_prompt_ttl():
+    now = [0.0]
+    registry = CredentialRegistry(credential_ttl=10, prompt_ttl=20, clock=lambda: now[0])
+    registry.connect("client")
+    registry.update("client", "secret")
+    registry.bind_prompt("prompt", "client")
+    assert registry.disconnect("client") is True
+
+    now[0] = 11
+    assert registry.get_for_prompt("prompt").token == "secret"
+    now[0] = 30
+    assert registry.get_for_prompt("prompt").token == "secret"
+    now[0] = 51
+    assert registry.get_for_prompt("prompt") is None
+    assert registry.is_protected("client") is False
+
+
 def test_connected_registry_credentials_do_not_expire():
     now = [0.0]
     registry = CredentialRegistry(credential_ttl=10, clock=lambda: now[0])
@@ -97,6 +135,20 @@ def test_connected_registry_credentials_do_not_expire():
     now[0] = 11
     registry.bind_prompt("next-prompt", "client")
     assert registry.get_for_prompt("next-prompt").token == "secret"
+
+
+def test_update_after_disconnect_does_not_restore_connected_state():
+    registry = CredentialRegistry()
+    registry.connect("client")
+    registry.update("client", "old-token")
+    registry.bind_prompt("prompt", "client")
+    assert registry.disconnect("client") is True
+
+    registry.update("client", "new-token")
+    assert registry.bind_prompt("other-prompt", "client") is True
+    registry.release_prompt("prompt")
+    assert registry.release_prompt("other-prompt") == "client"
+    assert registry.is_protected("client") is False
 
 
 def test_auth_header_uses_registry_then_falls_back_and_preserves_api_key():
@@ -135,10 +187,29 @@ def test_auth_header_uses_registry_then_falls_back_and_preserves_api_key():
 def test_client_request_authentication_requires_matching_session_key():
     request = SimpleNamespace(headers={"X-Comfy-Client-Id": "client", "X-Comfy-Credential-Key": "key"})
     metadata = {"client": {"credential_key": "key"}}
+    assert _authenticated_client_id(request, metadata) is None
+
+    api_node_credentials.connect("client")
     assert _authenticated_client_id(request, metadata) == "client"
 
     request.headers["X-Comfy-Credential-Key"] = "wrong"
     assert _authenticated_client_id(request, metadata) is None
+
+
+@pytest.mark.parametrize(
+    ("presented", "expected"),
+    [
+        ("é", "key"),
+        ("key", "é"),
+        (b"key", "key"),
+        ("key", b"key"),
+        (None, "key"),
+        ("key", None),
+    ],
+)
+def test_malformed_credential_keys_are_safely_rejected(presented, expected):
+    assert _credential_keys_match(presented, expected) is False
+    assert _credential_keys_match("key", "key") is True
 
 
 @pytest.mark.parametrize("peername", [("127.0.0.1", 8188), ("::1", 8188, 0, 0)])
@@ -167,6 +238,7 @@ def test_credential_transport_rejects_plaintext_remote_and_ignores_forwarded_pro
 async def test_credential_endpoint_updates_and_clears_without_returning_secret(aiohttp_client):
     prompt_server = PromptServer(None)
     prompt_server.sockets_metadata["client"] = {"credential_key": "key", "feature_flags": {}}
+    api_node_credentials.connect("client")
     route = next(route for route in prompt_server.routes if route.path == "/credentials")
     app = web.Application()
     app.router.add_post("/api/credentials", route.handler)
@@ -197,6 +269,93 @@ async def test_credential_endpoint_updates_and_clears_without_returning_secret(a
         json={"auth_token_comfy_org": "stolen"},
     )
     assert response.status == 403
+
+
+@pytest.mark.asyncio
+async def test_credential_endpoint_rechecks_session_after_reading_body(aiohttp_client, monkeypatch):
+    calls = 0
+
+    def authenticate(*args):
+        nonlocal calls
+        calls += 1
+        return "client" if calls == 1 else None
+
+    monkeypatch.setattr("server._authenticated_client_id", authenticate)
+    prompt_server = PromptServer(None)
+    route = next(route for route in prompt_server.routes if route.path == "/credentials")
+    app = web.Application()
+    app.router.add_post("/api/credentials", route.handler)
+    http_client = await aiohttp_client(app)
+
+    response = await http_client.post(
+        "/api/credentials",
+        headers={"X-Comfy-Client-Id": "client", "X-Comfy-Credential-Key": "old-key"},
+        json={"auth_token_comfy_org": "stolen"},
+    )
+
+    assert response.status == 403
+    assert api_node_credentials.is_protected("client") is False
+
+
+@pytest.mark.asyncio
+async def test_websocket_placeholder_updates_and_survives_only_for_running_prompt(aiohttp_client):
+    prompt_server = PromptServer(None)
+    routes = {route.path: route for route in prompt_server.routes}
+    app = web.Application()
+    app.router.add_get("/ws", routes["/ws"].handler)
+    app.router.add_post("/api/credentials", routes["/credentials"].handler)
+    http_client = await aiohttp_client(app)
+
+    websocket = await http_client.ws_connect("/ws?clientId=client")
+    status = await websocket.receive_json()
+    credential_key = status["data"]["credential_key"]
+    headers = {"X-Comfy-Client-Id": "client", "X-Comfy-Credential-Key": credential_key}
+    assert api_node_credentials.is_protected("client") is True
+
+    response = await http_client.post(
+        "/api/credentials",
+        headers=headers,
+        json={"auth_token_comfy_org": "first-token"},
+    )
+    assert response.status == 200
+    assert await response.json() == {"generation": 1}
+
+    assert api_node_credentials.bind_prompt("running-prompt", "client") is True
+    await websocket.close()
+    await asyncio.sleep(0)
+    assert "client" in prompt_server.sockets_metadata
+    assert api_node_credentials.is_protected("client") is True
+
+    response = await http_client.post(
+        "/api/credentials",
+        headers=headers,
+        json={"auth_token_comfy_org": "second-token"},
+    )
+    assert response.status == 200
+    assert await response.json() == {"generation": 2}
+    assert api_node_credentials.get_for_prompt("running-prompt").token == "second-token"
+
+    prompt_server.release_api_node_prompt("running-prompt")
+    assert api_node_credentials.is_protected("client") is False
+    assert "client" not in prompt_server.sockets_metadata
+
+
+@pytest.mark.asyncio
+async def test_websocket_placeholder_is_removed_on_disconnect_without_prompt(aiohttp_client):
+    prompt_server = PromptServer(None)
+    route = next(route for route in prompt_server.routes if route.path == "/ws")
+    app = web.Application()
+    app.router.add_get("/ws", route.handler)
+    http_client = await aiohttp_client(app)
+
+    websocket = await http_client.ws_connect("/ws?clientId=client")
+    await websocket.receive_json()
+    assert api_node_credentials.is_protected("client") is True
+
+    await websocket.close()
+    await asyncio.sleep(0)
+    assert api_node_credentials.is_protected("client") is False
+    assert "client" not in prompt_server.sockets_metadata
 
 
 @pytest.mark.asyncio
@@ -394,17 +553,18 @@ def test_execution_exception_message_and_traceback_are_redacted(caplog):
         "api_key_comfy_org": "api-secret",
     }
     try:
-        raise RuntimeError("failed with top-secret and api-secret")
-    except RuntimeError as ex:
+        raise ApiResponseError(
+            "failed with top-secret, api-secret, and refreshed-token",
+            ("refreshed-token",),
+        )
+    except ApiResponseError as ex:
         _, _, tb = sys.exc_info()
         message, traceback_lines = execution.log_execution_exception(ex, tb, extra_data)
 
-    assert "top-secret" not in message
-    assert "api-secret" not in message
-    assert "top-secret" not in "".join(traceback_lines)
-    assert "api-secret" not in "".join(traceback_lines)
-    assert "top-secret" not in caplog.text
-    assert "api-secret" not in caplog.text
+    for secret in ("top-secret", "api-secret", "refreshed-token"):
+        assert secret not in message
+        assert secret not in "".join(traceback_lines)
+        assert secret not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -543,6 +703,131 @@ async def test_endpoint_auth_401_does_not_retry_after_registry_change(headers, a
             )
 
     assert request_count == 1
+
+
+@pytest.mark.parametrize("response_kind", ["json", "text"])
+@pytest.mark.parametrize(
+    ("endpoint_headers", "secret", "header_name"),
+    [
+        ({}, "registry-token", "Authorization"),
+        ({"Authorization": "Bearer endpoint-token"}, "endpoint-token", "Authorization"),
+        ({"X-API-KEY": "endpoint-key"}, "endpoint-key", "X-API-KEY"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_api_error_redacts_request_auth_from_logs_exception_and_execution(
+    endpoint_headers,
+    secret,
+    header_name,
+    response_kind,
+    aiohttp_client,
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    async def fail(request):
+        echoed_auth = request.headers[header_name]
+        message = f"provider echoed {echoed_auth}"
+        if response_kind == "json":
+            return web.json_response(
+                {"error": "provider_error", "message": message},
+                headers={"X-Echo": echoed_auth},
+                status=400,
+            )
+        return web.Response(text=message, headers={"X-Echo": echoed_auth}, status=400)
+
+    app = web.Application()
+    app.router.add_get("/fail", fail)
+    http_client = await aiohttp_client(app)
+    monkeypatch.setattr(api_client, "default_base_url", lambda: str(http_client.make_url("/")))
+    monkeypatch.setattr(request_logger, "get_log_directory", lambda: str(tmp_path))
+    api_node_credentials.update("client", "registry-token")
+    api_node_credentials.bind_prompt("prompt", "client")
+
+    with CurrentNodeContext("prompt", "node"):
+        with pytest.raises(ApiResponseError) as error:
+            await api_client.sync_op_raw(
+                _Node,
+                api_client.ApiEndpoint("/fail", headers=endpoint_headers),
+                max_retries=0,
+            )
+
+    message, traceback_lines = execution.log_execution_exception(
+        error.value,
+        error.value.__traceback__,
+        {},
+    )
+    request_logs = "".join(path.read_text() for path in tmp_path.iterdir())
+    assert secret not in request_logs
+    assert secret not in str(error.value)
+    assert secret not in message
+    assert secret not in "".join(traceback_lines)
+    assert secret not in caplog.text
+
+
+@pytest.mark.parametrize("as_binary", [False, True])
+@pytest.mark.asyncio
+async def test_success_response_log_redacts_echoed_endpoint_auth(
+    as_binary,
+    aiohttp_client,
+    monkeypatch,
+    tmp_path,
+):
+    secret = "endpoint-key"
+
+    async def echo(request):
+        echoed = request.headers["X-API-KEY"]
+        if as_binary:
+            return web.Response(
+                body=f"echoed {echoed}".encode(),
+                headers={"X-Echo": echoed},
+                content_type="application/octet-stream",
+            )
+        return web.json_response({"echoed": echoed}, headers={"X-Echo": echoed})
+
+    app = web.Application()
+    app.router.add_get("/echo", echo)
+    http_client = await aiohttp_client(app)
+    monkeypatch.setattr(api_client, "default_base_url", lambda: str(http_client.make_url("/")))
+    monkeypatch.setattr(request_logger, "get_log_directory", lambda: str(tmp_path))
+
+    response = await api_client.sync_op_raw(
+        _Node,
+        api_client.ApiEndpoint("/echo", headers={"X-API-KEY": secret}),
+        max_retries=0,
+        as_binary=as_binary,
+    )
+
+    assert secret in str(response)
+    request_logs = "".join(path.read_text() for path in tmp_path.iterdir())
+    assert secret not in request_logs
+
+
+@pytest.mark.asyncio
+async def test_failed_poll_redacts_auth_echoed_in_success_response(aiohttp_client, monkeypatch, caplog):
+    async def poll(request):
+        token = request.headers["Authorization"].removeprefix("Bearer ")
+        return web.json_response({"status": "failed", "message": f"echoed {token}"})
+
+    app = web.Application()
+    app.router.add_get("/poll", poll)
+    http_client = await aiohttp_client(app)
+    monkeypatch.setattr(api_client, "default_base_url", lambda: str(http_client.make_url("/")))
+    monkeypatch.setattr(api_client.request_logger, "log_request_response", lambda **kwargs: None)
+    api_node_credentials.update("client", "refreshed-token")
+    api_node_credentials.bind_prompt("prompt", "client")
+
+    with CurrentNodeContext("prompt", "node"):
+        with pytest.raises(ApiResponseError) as error:
+            await api_client.poll_op_raw(
+                _Node,
+                api_client.ApiEndpoint("/poll"),
+                status_extractor=lambda response: response["status"],
+                poll_interval=0,
+            )
+
+    assert "refreshed-token" not in str(error.value)
+    assert "refreshed-token" not in caplog.text
 
 
 @pytest.mark.asyncio

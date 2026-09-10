@@ -180,6 +180,16 @@ def _credential_transport_enabled(request: web.Request) -> bool:
         return False
 
 
+def _credential_keys_match(presented: object, expected: object) -> bool:
+    return (
+        isinstance(presented, str)
+        and isinstance(expected, str)
+        and presented.isascii()
+        and expected.isascii()
+        and hmac.compare_digest(presented, expected)
+    )
+
+
 def _authenticated_client_id(request: web.Request, sockets_metadata: dict) -> str | None:
     client_id = request.headers.get(_CLIENT_ID_HEADER)
     credential_key = request.headers.get(_CREDENTIAL_KEY_HEADER)
@@ -187,7 +197,9 @@ def _authenticated_client_id(request: web.Request, sockets_metadata: dict) -> st
         return None
     metadata = sockets_metadata.get(client_id)
     expected_key = metadata.get("credential_key") if metadata else None
-    if not expected_key or not hmac.compare_digest(credential_key, expected_key):
+    if not _credential_keys_match(credential_key, expected_key):
+        return None
+    if not api_node_credentials.is_protected(client_id):
         return None
     return client_id
 
@@ -336,11 +348,7 @@ class PromptServer():
                     else None
                 )
                 expected_key = existing_metadata.get("credential_key")
-                if (
-                    not isinstance(presented_key, str)
-                    or not isinstance(expected_key, str)
-                    or not hmac.compare_digest(presented_key, expected_key)
-                ):
+                if not _credential_keys_match(presented_key, expected_key):
                     await ws.close(code=aiohttp.WSCloseCode.POLICY_VIOLATION, message=b"Invalid client credentials")
                     return ws
 
@@ -873,6 +881,8 @@ class PromptServer():
             if token is not None and (not isinstance(token, str) or not token or len(token) > 16384):
                 return web.json_response({"error": "auth_token_comfy_org must be a non-empty string or null"}, status=400)
 
+            if _authenticated_client_id(request, self.sockets_metadata) != client_id:
+                return web.json_response({"error": "Invalid client credentials"}, status=403)
             generation = api_node_credentials.update(client_id, token)
             return web.json_response({"generation": generation})
 
@@ -1266,6 +1276,11 @@ class PromptServer():
                         extra_data["comfy_usage_source"] = usage_source
                 if valid[0]:
                     outputs_to_execute = valid[2]
+                    if (
+                        authenticated_client is not None
+                        and _authenticated_client_id(request, self.sockets_metadata) != authenticated_client
+                    ):
+                        return web.json_response({"error": "Invalid client credentials"}, status=403)
                     sensitive = {}
                     for sensitive_val in execution.SENSITIVE_EXTRA_DATA_KEYS:
                         if sensitive_val in extra_data:
