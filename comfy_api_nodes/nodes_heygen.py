@@ -1,5 +1,3 @@
-import uuid
-
 import torch
 from typing_extensions import override
 
@@ -70,7 +68,7 @@ async def _create_and_poll_video(cls: type[IO.ComfyNode], payload: dict) -> dict
     """POST a /v3/videos payload, poll until terminal, and return the final video data."""
     created = await sync_op_raw(
         cls,
-        ApiEndpoint(path=_VIDEOS_PATH, method="POST", headers={"Idempotency-Key": uuid.uuid4().hex}),
+        ApiEndpoint(path=_VIDEOS_PATH, method="POST"),
         data=payload,
     )
     video_id = (created.get("data") or {}).get("video_id")
