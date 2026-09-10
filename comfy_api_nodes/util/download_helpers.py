@@ -10,6 +10,7 @@ import aiohttp
 import torch
 from aiohttp.client_exceptions import ClientError, ContentTypeError
 
+import comfy.utils
 from comfy_api.latest import IO as COMFY_IO
 from comfy_api.latest import InputImpl, Types
 from folder_paths import get_output_directory
@@ -158,24 +159,29 @@ async def download_url_to_bytesio(
                     sink = dest  # BytesIO or file-like
 
                 written = 0
-                while True:
-                    try:
-                        chunk = await asyncio.wait_for(resp.content.read(1024 * 1024), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        chunk = b""
-                    except asyncio.CancelledError:
-                        raise ProcessingInterrupted("Task cancelled") from None
+                total = resp.content_length
+                pbar = comfy.utils.ProgressBar(total) if total else None
+                with comfy.utils.progress_activity("downloading"):
+                    while True:
+                        try:
+                            chunk = await asyncio.wait_for(resp.content.read(1024 * 1024), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            chunk = b""
+                        except asyncio.CancelledError:
+                            raise ProcessingInterrupted("Task cancelled") from None
 
-                    if is_processing_interrupted():
-                        raise ProcessingInterrupted("Task cancelled")
+                        if is_processing_interrupted():
+                            raise ProcessingInterrupted("Task cancelled")
 
-                    if not chunk:
-                        if resp.content.at_eof():
-                            break
-                        continue
+                        if not chunk:
+                            if resp.content.at_eof():
+                                break
+                            continue
 
-                    sink.write(chunk)
-                    written += len(chunk)
+                        sink.write(chunk)
+                        written += len(chunk)
+                        if pbar is not None:
+                            pbar.update_absolute(written)
 
                 if isinstance(dest, BytesIO):
                     with contextlib.suppress(Exception):
