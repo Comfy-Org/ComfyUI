@@ -35,6 +35,7 @@ import os
 
 import comfy.utils
 import comfy.ops
+import comfy.model_prefetch
 
 from . import clip_vision
 from . import gligen
@@ -474,7 +475,7 @@ class CLIP:
         self.cond_stage_model.set_clip_options({"layer": None})
         self.cond_stage_model.set_clip_options({"execution_device": device})
 
-        with model_management.cuda_device_context(device):
+        with model_management.cuda_device_context(device), comfy.ops.use_quantized_matmul(self.cond_stage_model, device):
             return self.cond_stage_model.generate(tokens, do_sample=do_sample, max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty, seed=seed, presence_penalty=presence_penalty)
 
     def decode(self, token_ids, skip_special_tokens=True):
@@ -1227,7 +1228,8 @@ class VAE:
         with model_management.cuda_device_context(self.device):
             try:
                 memory_used = self.memory_used_decode(samples_in.shape, self.vae_dtype)
-                model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
+                with comfy.model_prefetch.pause_malloc_graph():
+                    model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=self.disable_offload)
                 free_memory = self.patcher.get_free_memory(self.device)
                 batch_number = int(free_memory / memory_used)
                 batch_number = max(1, batch_number)
@@ -1235,7 +1237,8 @@ class VAE:
                 # Pre-allocate output for VAEs that support direct buffer writes
                 preallocated = False
                 if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
-                    pixel_samples = torch.empty(self.first_stage_model.decode_output_shape(samples_in.shape), device=self.output_device, dtype=self.vae_output_dtype())
+                    with comfy.model_prefetch.pause_malloc_graph():
+                        pixel_samples = torch.empty(self.first_stage_model.decode_output_shape(samples_in.shape), device=self.output_device, dtype=self.vae_output_dtype())
                     preallocated = True
 
                 for x in range(0, samples_in.shape[0], batch_number):
@@ -1245,7 +1248,8 @@ class VAE:
                     else:
                         out = self.first_stage_model.decode(samples, **vae_options).to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True)
                         if pixel_samples is None:
-                            pixel_samples = torch.empty((samples_in.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
+                            with comfy.model_prefetch.pause_malloc_graph():
+                                pixel_samples = torch.empty((samples_in.shape[0],) + tuple(out.shape[1:]), device=self.output_device, dtype=self.vae_output_dtype())
                         pixel_samples[x:x+batch_number].copy_(out)
                         del out
                     self.process_output(pixel_samples[x:x+batch_number])

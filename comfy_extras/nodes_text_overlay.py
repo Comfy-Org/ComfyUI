@@ -44,6 +44,14 @@ class TextOverlay(IO.ComfyNode):
         overlay_rgb = overlay_rgb.to(device=images.device, dtype=images.dtype)
         overlay_alpha = overlay_alpha.to(device=images.device, dtype=images.dtype)
 
+        if images.shape[-1] == 4:
+            # Source over, premultiplied, as in porter_duff_composite's SRC_OVER.
+            rgb, dst_alpha = images[..., :3], images[..., 3:]
+            out_alpha = overlay_alpha + (1.0 - overlay_alpha) * dst_alpha
+            out_rgb = overlay_rgb * overlay_alpha + (1.0 - overlay_alpha) * rgb * dst_alpha
+            out_rgb = torch.where(out_alpha > 1e-5, out_rgb / out_alpha, torch.zeros_like(out_rgb))
+            return IO.NodeOutput(torch.cat((torch.clamp(out_rgb, 0, 1), out_alpha), dim=-1))
+
         result = images * (1.0 - overlay_alpha) + overlay_rgb * overlay_alpha
         return IO.NodeOutput(result)
 

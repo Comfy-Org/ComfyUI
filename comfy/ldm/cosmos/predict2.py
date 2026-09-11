@@ -881,13 +881,6 @@ class MiniTrainDIT(nn.Module):
         t_embedding_B_T_D, adaln_lora_B_T_3D = self.t_embedder[1](self.t_embedder[0](timesteps_B_T).to(x_B_T_H_W_D.dtype))
         t_embedding_B_T_D = self.t_embedding_norm(t_embedding_B_T_D)
 
-        # for logging purpose
-        affline_scale_log_info = {}
-        affline_scale_log_info["t_embedding_B_T_D"] = t_embedding_B_T_D.detach()
-        self.affline_scale_log_info = affline_scale_log_info
-        self.affline_emb = t_embedding_B_T_D
-        self.crossattn_emb = crossattn_emb
-
         if extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D is not None:
             assert (
                 x_B_T_H_W_D.shape == extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D.shape

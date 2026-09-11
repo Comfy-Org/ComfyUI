@@ -412,6 +412,7 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["time_embed_hidden_size"] = te.shape[0]
             dit_config["time_embed_dim"] = state_dict['{}time_embedder.proj_out.weight'.format(key_prefix)].shape[0]
         dit_config["rope_inv_freq_len"] = state_dict['{}rope.inv_freq'.format(key_prefix)].shape[0]
+        dit_config["gate_compress"] = '{}blocks.0.attn.to_gate_compress.weight'.format(key_prefix) in state_dict_keys  # VSA-trained
         if metadata is not None and "config" in metadata:
             dit_config.update(json.loads(metadata["config"]).get("transformer", {}))
         return dit_config

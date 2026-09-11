@@ -558,7 +558,7 @@
           }
         ],
         "extra": {},
-        "category": "Conditioning & Preprocessors/Depth",
+        "category": "Preprocessors/Depth",
         "description": "This subgraph takes an input image and produces a depth map using the Depth Anything 3 model, which recovers spatially consistent geometry from any number of views. It is ideal for single or multi-view images, videos, and 3D scenes where accurate depth estimation is needed for tasks like SLAM, novel view synthesis, or spatial perception. The model uses a plain transformer backbone and supports both monocular and multi-view inputs without."
       }
     ]

@@ -162,7 +162,8 @@ def generate_audio_codes(model, positive, negative, min_tokens=1, max_tokens=102
     else:
         ids = [positive]
 
-    return sample_manual_loop_no_classes(model, ids, cfg_scale=cfg_scale, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, seed=seed, min_tokens=min_tokens, max_new_tokens=max_tokens)
+    with comfy.ops.use_quantized_matmul(model, model.execution_device):
+        return sample_manual_loop_no_classes(model, ids, cfg_scale=cfg_scale, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, seed=seed, min_tokens=min_tokens, max_new_tokens=max_tokens)
 
 
 class ACE15Tokenizer(sd1_clip.SD1Tokenizer):
