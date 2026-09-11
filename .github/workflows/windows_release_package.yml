@@ -63,6 +63,7 @@ jobs:
             curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
             ./python.exe get-pip.py
             ./python.exe -s -m pip install ../cu${{ inputs.cu }}_python_deps/*
+            ./python.exe -s -m pip install -r ../ComfyUI/manager_requirements.txt
             sed -i '1i../ComfyUI' ./python3${{ inputs.python_minor }}._pth
 
             rm ./Lib/site-packages/torch/lib/dnnl.lib #I don't think this is actually used and I need the space
@@ -90,7 +91,7 @@ jobs:
             mv ComfyUI_windows_portable.7z ComfyUI/new_ComfyUI_windows_portable_nvidia_cu${{ inputs.cu }}_or_cpu.7z
 
             cd ComfyUI_windows_portable
-            python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu
+            python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu --enable-manager
 
             python_embeded/python.exe -s ./update/update.py ComfyUI/
 
