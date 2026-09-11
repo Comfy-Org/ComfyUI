@@ -6,15 +6,11 @@ import os
 def enrich_output_with_assets(output_ui: dict) -> dict:
     """Register file-type output entries as assets and inject their ``id``.
 
-    Runs at output-processing time, once per produced output, when
-    --enable-assets is set. Returns a new dict; entries without a resolvable
-    on-disk file path are left unchanged. Errors are caught per-entry so a
-    failure never blocks execution or the other entries.
+    Runs at output-processing time, once per produced output. Returns a new
+    dict; entries without a resolvable on-disk file path are left unchanged.
+    Errors are caught per-entry so a failure never blocks execution or the
+    other entries.
     """
-    from comfy.cli_args import args
-    if not args.enable_assets:
-        return output_ui
-
     import folder_paths
     from app.assets.services.ingest import register_file_in_place, DependencyMissingError
 

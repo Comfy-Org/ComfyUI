@@ -57,7 +57,7 @@ def _require_assets_feature_enabled(handler):
             return _build_error_response(
                 503,
                 "SERVICE_DISABLED",
-                "Assets system is disabled. Start the server with --enable-assets to use this feature.",
+                "Assets system is unavailable.",
             )
         return await handler(request)
 
@@ -103,6 +103,15 @@ def disable_assets_routes() -> None:
     """Disable asset routes at runtime (e.g. after DB init failure)."""
     global _ASSETS_ENABLED
     _ASSETS_ENABLED = False
+
+
+def assets_enabled() -> bool:
+    """Return whether the asset routes are currently serving requests.
+
+    Reflects live backend availability: False once disable_assets_routes() has
+    been called (e.g. after a database init failure or missing dependencies).
+    """
+    return _ASSETS_ENABLED
 
 
 def _build_error_response(

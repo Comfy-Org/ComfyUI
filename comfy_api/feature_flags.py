@@ -109,7 +109,7 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "max_upload_size": args.max_upload_size * 1024 * 1024, # Convert MB to bytes
     "extension": {"manager": {"supports_v4": True}},
     "node_replacements": True,
-    "assets": args.enable_assets,
+    "assets": True,
 }
 
 # CLI-provided flags cannot overwrite core flags
@@ -168,4 +168,13 @@ def get_server_features() -> dict[str, Any]:
     Returns:
         Dictionary of server feature flags
     """
-    return SERVER_FEATURE_FLAGS.copy()
+    features = SERVER_FEATURE_FLAGS.copy()
+    # Advertise the assets capability based on live backend availability rather
+    # than a static default, so clients degrade gracefully when the database
+    # failed to initialize or its dependencies are missing.
+    try:
+        from app.assets.api.routes import assets_enabled
+        features["assets"] = assets_enabled()
+    except Exception:
+        features["assets"] = False
+    return features
