@@ -4,7 +4,27 @@ from comfy import sd1_clip
 import torch
 import math
 import yaml
+import comfy.ops
 import comfy.utils
+
+
+def _audio_logits(model, x, audio_start, audio_end, eos_token=None):
+    input = x[:, -1:]
+    module = model.embed_tokens
+
+    offload_stream = None
+    if module.comfy_cast_weights:
+        weight, _, offload_stream = comfy.ops.cast_bias_weight(module, input, offloadable=True)
+    else:
+        weight = module.weight.to(x)
+
+    logits = torch.nn.functional.linear(input, weight[audio_start:audio_end], None)[:, -1]
+    eos_logits = None
+    if eos_token is not None:
+        eos_logits = torch.nn.functional.linear(input, weight[eos_token:eos_token + 1], None)[:, -1]
+
+    comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
+    return logits, eos_logits
 
 
 def sample_manual_loop_no_classes(
@@ -34,48 +54,43 @@ def sample_manual_loop_no_classes(
             execution_dtype = torch.float32
 
     embeds, attention_mask, num_tokens, embeds_info = model.process_tokens(ids, device)
+    embeds = embeds.to(execution_dtype)
     embeds_batch = embeds.shape[0]
 
-    output_audio_codes = []
-    past_key_values = []
+    output_audio_codes = torch.empty((max_new_tokens,), device=device, dtype=torch.long)
+    generated_tokens = 0
     generator = torch.Generator(device=device)
     generator.manual_seed(seed)
-    model_config = model.transformer.model.config
-    past_kv_shape = [embeds_batch, model_config.num_key_value_heads, embeds.shape[1] + min_tokens, model_config.head_dim]
-
-    for x in range(model_config.num_hidden_layers):
-        past_key_values.append((torch.empty(past_kv_shape, device=device, dtype=execution_dtype), torch.empty(past_kv_shape, device=device, dtype=execution_dtype), 0))
+    past_key_values = model.transformer.model.init_kv_cache(embeds_batch, embeds.shape[1] + max_new_tokens, device, execution_dtype)
+    fixed_kv = isinstance(past_key_values[0], comfy.text_encoders.llama.FixedKV)
 
     progress_bar = comfy.utils.ProgressBar(max_new_tokens)
+    sampling_logits = None
 
     for step in comfy.utils.model_trange(max_new_tokens, desc="LM sampling"):
-        outputs = model.transformer(None, attention_mask, embeds=embeds.to(execution_dtype), num_tokens=num_tokens, intermediate_output=None, dtype=execution_dtype, embeds_info=embeds_info, past_key_values=past_key_values)
-        next_token_logits = model.transformer.logits(outputs[0])[:, -1]
+        outputs = model.transformer(None, attention_mask, embeds=embeds, num_tokens=num_tokens, intermediate_output=None, dtype=execution_dtype, embeds_info=embeds_info, past_key_values=past_key_values)
         past_key_values = outputs[2]
 
-        if cfg_scale != 1.0:
-            cond_logits = next_token_logits[0:1]
-            uncond_logits = next_token_logits[1:2]
-            cfg_logits = uncond_logits + cfg_scale * (cond_logits - uncond_logits)
-        else:
-            cfg_logits = next_token_logits[0:1]
-
         use_eos_score = eos_token_id is not None and eos_token_id < audio_start_id and min_tokens < step
-        if use_eos_score:
-            eos_score = cfg_logits[:, eos_token_id].clone()
+        audio_logits, eos_logits = _audio_logits(model.transformer.model, outputs[0], audio_start_id, audio_end_id, eos_token_id if use_eos_score else None)
+        if cfg_scale != 1.0:
+            cfg_logits = audio_logits[1:2] + cfg_scale * (audio_logits[0:1] - audio_logits[1:2])
+            if use_eos_score:
+                cond_eos = eos_logits[0:1, 0]
+                uncond_eos = eos_logits[1:2, 0]
+                eos_score = uncond_eos + cfg_scale * (cond_eos - uncond_eos)
+        else:
+            cfg_logits = audio_logits[0:1]
+            if use_eos_score:
+                eos_score = eos_logits[0:1, 0]
 
         remove_logit_value = torch.finfo(cfg_logits.dtype).min
-        # Only generate audio tokens
-        cfg_logits[:, :audio_start_id] = remove_logit_value
-        cfg_logits[:, audio_end_id:] = remove_logit_value
-
         if use_eos_score:
-            cfg_logits[:, eos_token_id] = eos_score
+            cfg_logits = torch.cat((eos_score.unsqueeze(1), cfg_logits), dim=1)
 
         if top_k is not None and top_k > 0:
-            top_k_vals, _ = torch.topk(cfg_logits, top_k)
-            min_val = top_k_vals[..., -1, None]
-            cfg_logits[cfg_logits < min_val] = remove_logit_value
+            top_k_values = torch.topk(cfg_logits, min(top_k, cfg_logits.shape[-1])).values
+            cfg_logits[cfg_logits < top_k_values[..., -1, None]] = remove_logit_value
 
         if min_p is not None and min_p > 0:
             probs = torch.softmax(cfg_logits, dim=-1)
@@ -89,28 +104,40 @@ def sample_manual_loop_no_classes(
             sorted_indices_to_remove = cumulative_probs > top_p
             sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
             sorted_indices_to_remove[..., 0] = 0
-            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+            indices_to_remove = torch.zeros_like(cfg_logits, dtype=torch.bool)
+            indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
             cfg_logits[indices_to_remove] = remove_logit_value
 
         if temperature > 0:
             cfg_logits = cfg_logits / temperature
-            next_token = torch.multinomial(torch.softmax(cfg_logits, dim=-1), num_samples=1, generator=generator).squeeze(1)
+            if sampling_logits is None:
+                sampling_logits = cfg_logits.new_empty((cfg_logits.shape[0], model.transformer.model.vocab_size))
+            sampling_logits.fill_(remove_logit_value)
+            if use_eos_score:
+                sampling_logits[:, eos_token_id] = cfg_logits[:, 0]
+                cfg_logits = cfg_logits[:, 1:]
+            sampling_logits[:, audio_start_id:audio_end_id] = cfg_logits
+            next_token = torch.multinomial(torch.softmax(sampling_logits, dim=-1), num_samples=1, generator=generator).squeeze(1)
         else:
             next_token = torch.argmax(cfg_logits, dim=-1)
+            if use_eos_score:
+                next_token = torch.where(next_token == 0, eos_token_id, next_token + audio_start_id - 1)
+            else:
+                next_token += audio_start_id
 
-        token = next_token.item()
-
-        if token == eos_token_id:
+        if eos_token_id is not None and next_token.item() == eos_token_id:
             break
 
-        embed, _, _, _ = model.process_tokens([[token]], device)
-        embeds = embed.repeat(embeds_batch, 1, 1)
-        attention_mask = torch.cat([attention_mask, torch.ones((embeds_batch, 1), device=device, dtype=attention_mask.dtype)], dim=1)
+        input_ids = next_token.repeat(embeds_batch).unsqueeze(1)
+        embeds = model.transformer.get_input_embeddings()(input_ids, out_dtype=execution_dtype)
+        if not fixed_kv:
+            attention_mask = torch.cat([attention_mask, torch.ones((embeds_batch, 1), device=device, dtype=attention_mask.dtype)], dim=1)
 
-        output_audio_codes.append(token - audio_start_id)
+        output_audio_codes[generated_tokens] = next_token[0] - audio_start_id
+        generated_tokens += 1
         progress_bar.update_absolute(step)
 
-    return output_audio_codes
+    return output_audio_codes[:generated_tokens].tolist()
 
 
 def generate_audio_codes(model, positive, negative, min_tokens=1, max_tokens=1024, seed=0, cfg_scale=2.0, temperature=0.85, top_p=0.9, top_k=0, min_p=0.000):
@@ -135,7 +162,8 @@ def generate_audio_codes(model, positive, negative, min_tokens=1, max_tokens=102
     else:
         ids = [positive]
 
-    return sample_manual_loop_no_classes(model, ids, cfg_scale=cfg_scale, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, seed=seed, min_tokens=min_tokens, max_new_tokens=max_tokens)
+    with comfy.ops.use_quantized_matmul(model, model.execution_device):
+        return sample_manual_loop_no_classes(model, ids, cfg_scale=cfg_scale, temperature=temperature, top_p=top_p, top_k=top_k, min_p=min_p, seed=seed, min_tokens=min_tokens, max_new_tokens=max_tokens)
 
 
 class ACE15Tokenizer(sd1_clip.SD1Tokenizer):
@@ -286,7 +314,10 @@ class ACE15TEModel(torch.nn.Module):
         self.qwen3_06b = Qwen3_06BModel(device=device, dtype=dtype, model_options=model_options)
         if model is not None:
             setattr(self, self.lm_model, model(device=device, dtype=dtype_llama, model_options=model_options))
-
+            ar_model = getattr(self, self.lm_model)
+            ar_model.transformer.model.fixed_kv = True
+            ar_model.transformer.model.prefetch_dynamic_vbars = True
+            ar_model.transformer.model.graph_dynamic_vbar_blocks = True
         self.dtypes = set([dtype, dtype_llama])
 
     def encode_token_weights(self, token_weight_pairs):
@@ -318,6 +349,12 @@ class ACE15TEModel(torch.nn.Module):
         lm_model = getattr(self, self.lm_model, None)
         if lm_model is not None:
             lm_model.reset_clip_options()
+
+    def get_dynamic_vram__units(self):
+        if self.lm_model is None:
+            return ([], [])
+        model = getattr(self, self.lm_model)
+        return model.transformer.model.get_dynamic_vram__units()
 
     def load_sd(self, sd):
         if "model.layers.0.post_attention_layernorm.weight" in sd:

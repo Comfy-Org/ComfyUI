@@ -7,6 +7,7 @@ import comfy.ldm.modules.attention
 import nodes
 import torch
 import node_helpers
+from comfy_api.latest import io
 
 
 class LCM(comfy.model_sampling.EPS):
@@ -280,13 +281,30 @@ class RescaleCFG:
     CATEGORY = "model/patch"
 
     def patch(self, model, multiplier):
+        model_sampling = model.get_model_object("model_sampling")
+        is_flow = isinstance(model_sampling, comfy.model_sampling.CONST)
+
         def rescale_cfg(args):
+            x_orig = args["input"]
+            cond_scale = args["cond_scale"]
+
+            if is_flow:
+                # Flow-matching models: cond_denoised/uncond_denoised are x_0 estimates,
+                # so the eps↔v conversion below would be wrong. Rescale directly in x_0 space.
+                x_0_cond = args["cond_denoised"]
+                x_0_uncond = args["uncond_denoised"]
+                x_0_cfg = x_0_uncond + cond_scale * (x_0_cond - x_0_uncond)
+                dims = tuple(range(1, x_0_cond.ndim))
+                ro_pos = x_0_cond.std(dim=dims, keepdim=True)
+                ro_cfg = x_0_cfg.std(dim=dims, keepdim=True).clamp(min=1e-8)
+                x_0_rescaled = x_0_cfg * (ro_pos / ro_cfg)
+                x_0_final = multiplier * x_0_rescaled + (1.0 - multiplier) * x_0_cfg
+                return x_orig - x_0_final
+
             cond = args["cond"]
             uncond = args["uncond"]
-            cond_scale = args["cond_scale"]
             sigma = args["sigma"]
             sigma = sigma.view(sigma.shape[:1] + (1,) * (cond.ndim - 1))
-            x_orig = args["input"]
 
             #rescale cfg has to be done on v-pred model output
             x = x_orig / (sigma * sigma + 1.0)
@@ -349,26 +367,34 @@ class ModelComputeDtype:
         return (m, )
 
 
-class ModelAttentionBackend:
+class ModelAttentionBackend(io.ComfyNode):
     @classmethod
-    def INPUT_TYPES(s):
+    def define_schema(cls):
         backends = ["pytorch attention"]
         if comfy.ldm.modules.attention.COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE:
             backends.append("comfy kitchen attention")
-        return {"required": {"model": ("MODEL",),
-                             "attention": (backends,),
-                             }}
+        return io.Schema(
+            node_id="ModelAttentionBackend",
+            display_name="Model Attention Backend",
+            category="model/patch",
+            is_experimental=True,
+            description="Selects the dense attention implementation for the model. When used with Block Sparse Attention, this backend is used whenever sparse attention is inactive or unsupported.",
+            inputs=[
+                io.Model.Input("model", tooltip="The model to patch."),
+                io.Combo.Input("attention", display_name="backend", options=backends, default="pytorch attention",
+                               tooltip="The dense attention backend. Comfy Kitchen attention uses quantized INT8 attention and is available only on Nvidia and AMD GPUs."),
+            ],
+            outputs=[
+                io.Model.Output(display_name="model", tooltip="The model with the selected attention backend."),
+            ],
+        )
 
     @classmethod
-    def VALIDATE_INPUTS(s, attention):
+    def validate_inputs(cls, attention):
         return True
 
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "patch"
-
-    CATEGORY = "model/patch"
-
-    def patch(self, model, attention):
+    @classmethod
+    def execute(cls, model, attention):
         attention_name = {
             "comfy kitchen attention": "comfy_kitchen_int8",
             "pytorch attention": "pytorch",
@@ -379,7 +405,7 @@ class ModelAttentionBackend:
             attention_function = comfy.ldm.modules.attention.get_attention_function("pytorch")
         m = model.clone()
         m.set_model_optimized_attention(attention_function)
-        return (m, )
+        return io.NodeOutput(m)
 
 
 NODE_CLASS_MAPPINGS = {

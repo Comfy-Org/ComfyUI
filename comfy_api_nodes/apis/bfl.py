@@ -166,3 +166,13 @@ class Flux3VideoContinuationRequest(Flux3VideoRequest):
     start_video: str = Field(
         ..., description="MP4 (URL or base64); the new clip carries on from its final frames."
     )
+
+
+class BFLFluxVideoUpscaleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_video: str = Field(..., description="MP4 (URL or base64), 1 to 20 seconds.")
+    upscale_factor: float = Field(2.0, ge=1.5, le=3.0)
+    creativity: int = Field(1, description="0 preserves the source precisely, 1 enhances detail.")
+    prompt: str | None = Field(None)
+    safety_tolerance: int = Field(2, ge=0, le=4)

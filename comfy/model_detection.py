@@ -120,6 +120,27 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
                 unet_config['block_repeat'] = [[1, 1, 1, 1], [2, 2, 2, 2]]
         return unet_config
 
+    shape_key = '{}img2shape.t_embedder.mlp.0.weight'.format(key_prefix)
+    tex_key = '{}shape2txt.t_embedder.mlp.0.weight'.format(key_prefix)
+    if shape_key in state_dict_keys or tex_key in state_dict_keys:  # trellis2 / pixal3d
+        has_shape = shape_key in state_dict_keys
+        has_tex = tex_key in state_dict_keys
+        unet_config = {
+            "image_model": "trellis2",
+            "resolution": 32 if (metadata or {}).get("is_512") else 64,
+            "init_txt_model": has_tex,
+            "txt_only": has_tex and not has_shape,
+        }
+        # Per-submodel projection head (Pixal3D adds `proj_linear`; Trellis2 doesn't).
+        for sub, name, proj_in_channels in (("img2shape", "shape", 2048),
+                                            ("shape2txt", "texture", 2048),
+                                            ("structure_model", "structure", 1024)):
+            key = '{}{}.blocks.0.cross_attn.proj_linear.weight'.format(key_prefix, sub)
+            if key in state_dict_keys:
+                unet_config["image_attn_mode_{}".format(name)] = "proj"
+                unet_config["proj_in_channels_{}".format(name)] = proj_in_channels
+        return unet_config
+
     if '{}transformer.rotary_pos_emb.inv_freq'.format(key_prefix) in state_dict_keys: #stable audio dit
         unet_config = {}
         unet_config["audio_model"] = "dit1.0"
@@ -391,6 +412,7 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["time_embed_hidden_size"] = te.shape[0]
             dit_config["time_embed_dim"] = state_dict['{}time_embedder.proj_out.weight'.format(key_prefix)].shape[0]
         dit_config["rope_inv_freq_len"] = state_dict['{}rope.inv_freq'.format(key_prefix)].shape[0]
+        dit_config["gate_compress"] = '{}blocks.0.attn.to_gate_compress.weight'.format(key_prefix) in state_dict_keys  # VSA-trained
         if metadata is not None and "config" in metadata:
             dit_config.update(json.loads(metadata["config"]).get("transformer", {}))
         return dit_config
@@ -793,6 +815,16 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
 
     if '{}t_embedder1.mlp.0.weight'.format(key_prefix) in state_dict_keys and '{}x_embedder.proj1.weight'.format(key_prefix) in state_dict_keys:  # HiDream-O1
         return {"image_model": "hidream_o1"}
+
+    vision_key = f"{key_prefix}fm_modules.vision_model_mot_gen.embeddings.patch_embedding.weight"
+    query_key = f"{key_prefix}language_model.model.layers.0.self_attn.q_proj_mot_gen.weight"
+    if (
+        vision_key in state_dict
+        and query_key in state_dict
+        and state_dict[vision_key].shape[0] == 1024
+        and state_dict[query_key].shape[0] == 4096
+    ):  # SenseNova U1.5
+        return {"image_model": "sensenova_u15"}
 
     if '{}caption_projection.0.linear.weight'.format(key_prefix) in state_dict_keys:  # HiDream
         dit_config = {}
@@ -1278,6 +1310,13 @@ def model_config_from_unet(state_dict, unet_key_prefix, use_base_if_no_match=Fal
 def unet_prefix_from_state_dict(state_dict):
     # SAM3: detector.* and tracker.* at top level, no common prefix
     if any(k.startswith("detector.") for k in state_dict) and any(k.startswith("tracker.") for k in state_dict):
+        return ""
+
+    # SenseNova checkpoints store the diffusion and language backbones at top level.
+    if (
+        "fm_modules.vision_model_mot_gen.embeddings.patch_embedding.weight" in state_dict
+        and "language_model.model.layers.0.self_attn.q_proj_mot_gen.weight" in state_dict
+    ):
         return ""
 
     candidates = ["model.diffusion_model.", #ldm/sgm models

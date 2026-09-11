@@ -1,4 +1,5 @@
 import torch
+import comfy.nested_tensor
 
 class LatentFormat:
     scale_factor = 1.0
@@ -8,6 +9,7 @@ class LatentFormat:
     latent_rgb_factors_bias = None
     latent_rgb_factors_reshape = None
     taesd_decoder_name = None
+    compile_preview = False
     spacial_downscale_ratio = 8
     temporal_downscale_ratio = 1
 
@@ -16,6 +18,9 @@ class LatentFormat:
 
     def process_out(self, latent):
         return latent / self.scale_factor
+
+    def fix_empty_latent(self, latent):
+        return latent
 
 class SD15(LatentFormat):
     def __init__(self, scale_factor=0.18215):
@@ -248,6 +253,53 @@ class TripoSplat(LatentFormat):
 
     def process_out(self, latent):
         return latent
+
+class Trellis2(LatentFormat):
+    latent_channels = 32
+
+class Trellis2SLAT(Trellis2):
+    # Sparse structured latent: per-token feats [N, 32]. process_out denormalizes
+    # the decoded feats (latent * std + mean); subclasses carry each space's stats.
+    latents_mean = None
+    latents_std = None
+
+    def process_in(self, latent):
+        mean = self.latents_mean.to(latent.device, latent.dtype)
+        std = self.latents_std.to(latent.device, latent.dtype)
+        return (latent - mean) / std
+
+    def process_out(self, latent):
+        mean = self.latents_mean.to(latent.device, latent.dtype)
+        std = self.latents_std.to(latent.device, latent.dtype)
+        return latent * std + mean
+
+class Trellis2ShapeSLAT(Trellis2SLAT):
+    latents_mean = torch.tensor([
+        0.781296, 0.018091, -0.495192, -0.558457, 1.060530, 0.093252, 1.518149, -0.933218,
+        -0.732996, 2.604095, -0.118341, -2.143904, 0.495076, -2.179512, -2.130751, -0.996944,
+        0.261421, -2.217463, 1.260067, -0.150213, 3.790713, 1.481266, -1.046058, -1.523667,
+        -0.059621, 2.220780, 1.621212, 0.877230, 0.567247, -3.175944, -3.186688, 1.578665
+    ])[None]
+    latents_std = torch.tensor([
+        5.972266, 4.706852, 5.445010, 5.209927, 5.320220, 4.547237, 5.020802, 5.444004,
+        5.226681, 5.683095, 4.831436, 5.286469, 5.652043, 5.367606, 5.525084, 4.730578,
+        4.805265, 5.124013, 5.530808, 5.619001, 5.103930, 5.417670, 5.269677, 5.547194,
+        5.634698, 5.235274, 6.110351, 5.511298, 6.237273, 4.879207, 5.347008, 5.405691
+    ])[None]
+
+class Trellis2TexSLAT(Trellis2SLAT):
+    latents_mean = torch.tensor([
+        3.501659, 2.212398, 2.226094, 0.251093, -0.026248, -0.687364, 0.439898, -0.928075,
+        0.029398, -0.339596, -0.869527, 1.038479, -0.972385, 0.126042, -1.129303, 0.455149,
+        -1.209521, 2.069067, 0.544735, 2.569128, -0.323407, 2.293000, -1.925608, -1.217717,
+        1.213905, 0.971588, -0.023631, 0.106750, 2.021786, 0.250524, -0.662387, -0.768862
+    ])[None]
+    latents_std = torch.tensor([
+        2.665652, 2.743913, 2.765121, 2.595319, 3.037293, 2.291316, 2.144656, 2.911822,
+        2.969419, 2.501689, 2.154811, 3.163343, 2.621215, 2.381943, 3.186697, 3.021588,
+        2.295916, 3.234985, 3.233086, 2.260140, 2.874801, 2.810596, 3.292720, 2.674999,
+        2.680878, 2.372054, 2.451546, 2.353556, 2.995195, 2.379849, 2.786195, 2.775190
+    ])[None]
 
 class Mochi(LatentFormat):
     latent_channels = 12
@@ -573,6 +625,8 @@ class MiniMaxH3Video(LatentFormat):
     spacial_downscale_ratio = 16
     temporal_downscale_ratio = 4
     scale_factor = 1.0
+    taesd_decoder_name = "taeh3"
+    compile_preview = True
 
     latent_rgb_factors = [
         [-0.018555,  0.024344, -0.017536],
@@ -605,6 +659,19 @@ class MiniMaxH3Video(LatentFormat):
 class MiniMaxH3AV(MiniMaxH3Video):
     # max channels across the two streams (video 24, audio 32) so per-stream slices keep both streams whole
     latent_channels = 32
+
+    def fix_empty_latent(self, latent):
+        video_latent_channels = MiniMaxH3Video.latent_channels
+        audio_latent_channels = 32
+        audio_channels = 2
+        frames_per_token = (1, 4, 4, 4, 4)
+        audio_frame_rescale = 5.0 / 3.0
+
+        video = latent[:, :video_latent_channels].clone()
+        frame_count = sum(frames_per_token[i % len(frames_per_token)] for i in range(video.shape[2]))
+        audio_t = round(frame_count * audio_frame_rescale)
+        audio = latent.new_zeros((latent.shape[0], audio_latent_channels, audio_channels, audio_t))
+        return comfy.nested_tensor.NestedTensor((video, audio))
 
 class HunyuanVideo(LatentFormat):
     latent_channels = 16

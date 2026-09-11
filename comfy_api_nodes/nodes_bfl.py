@@ -13,18 +13,19 @@ from comfy_api_nodes.apis.bfl import (
     BFLFluxProGenerateResponse,
     BFLFluxProUltraGenerateRequest,
     BFLFluxStatusResponse,
+    BFLFluxVideoUpscaleRequest,
     BFLFluxVTORequest,
     BFLStatus,
     Flux2ProGenerateRequest,
     Flux3ImageToVideoRequest,
     Flux3TextToVideoRequest,
     Flux3VideoContinuationRequest,
-    Flux3VideoRequest,
 )
 from comfy_api_nodes.util import (
     ApiEndpoint,
     convert_mask_to_image,
     download_url_to_image_tensor,
+    downscale_video_to_max_pixels,
     download_url_to_video_output,
     get_number_of_images,
     poll_op,
@@ -36,6 +37,8 @@ from comfy_api_nodes.util import (
     validate_aspect_ratio_string,
     validate_image_dimensions,
     validate_string,
+    validate_video_dimensions,
+    validate_video_duration,
 )
 
 
@@ -588,16 +591,12 @@ class FluxEraseNode(IO.ComfyNode):
             ),
         )
 
-        def price_extractor(_r: BaseModel) -> float | None:
-            return None if initial_response.cost is None else initial_response.cost / 100
-
         response = await poll_op(
             cls,
             ApiEndpoint(initial_response.polling_url),
             response_model=BFLFluxStatusResponse,
             status_extractor=lambda r: r.status,
             progress_extractor=lambda r: r.progress,
-            price_extractor=price_extractor,
             completed_statuses=[BFLStatus.ready],
             failed_statuses=[
                 BFLStatus.request_moderated,
@@ -669,16 +668,12 @@ class FluxVTONode(IO.ComfyNode):
             ),
         )
 
-        def price_extractor(_r: BaseModel) -> float | None:
-            return None if initial_response.cost is None else initial_response.cost / 100
-
         response = await poll_op(
             cls,
             ApiEndpoint(initial_response.polling_url),
             response_model=BFLFluxStatusResponse,
             status_extractor=lambda r: r.status,
             progress_extractor=lambda r: r.progress,
-            price_extractor=price_extractor,
             completed_statuses=[BFLStatus.ready],
             failed_statuses=[
                 BFLStatus.request_moderated,
@@ -802,16 +797,12 @@ class Flux2ProImageNode(IO.ComfyNode):
             ),
         )
 
-        def price_extractor(_r: BaseModel) -> float | None:
-            return None if initial_response.cost is None else initial_response.cost / 100
-
         response = await poll_op(
             cls,
             ApiEndpoint(initial_response.polling_url),
             response_model=BFLFluxStatusResponse,
             status_extractor=lambda r: r.status,
             progress_extractor=lambda r: r.progress,
-            price_extractor=price_extractor,
             completed_statuses=[BFLStatus.ready],
             failed_statuses=[
                 BFLStatus.request_moderated,
@@ -994,16 +985,12 @@ class Flux2ImageNode(IO.ComfyNode):
             ),
         )
 
-        def price_extractor(_r: BaseModel) -> float | None:
-            return None if initial_response.cost is None else initial_response.cost / 100
-
         response = await poll_op(
             cls,
             ApiEndpoint(initial_response.polling_url),
             response_model=BFLFluxStatusResponse,
             status_extractor=lambda r: r.status,
             progress_extractor=lambda r: r.progress,
-            price_extractor=price_extractor,
             completed_statuses=[BFLStatus.ready],
             failed_statuses=[
                 BFLStatus.request_moderated,
@@ -1164,24 +1151,26 @@ class Flux3VideoNodeBase(IO.ComfyNode):
         )
 
 
-async def _flux3_execute(cls: type[IO.ComfyNode], request: Flux3VideoRequest) -> IO.NodeOutput:
-    initial_response = await sync_op(
-        cls,
-        ApiEndpoint(path="/proxy/bfl/v1/flux-3-video", method="POST"),
-        response_model=BFLFluxProGenerateResponse,
-        data=request,
+_FLUX3_VIDEO_ENDPOINT = ApiEndpoint(path="/proxy/bfl/v1/flux-3-video", method="POST")
+_FLUX_VIDEO_UPSCALE_ENDPOINT = ApiEndpoint(path="/proxy/bfl/v1/flux-tools/video-upscale-v1", method="POST")
+_BFL_POLL_PROXY_PATH = "/proxy/bfl/v1/get_result"
+
+
+async def _bfl_video_execute(
+    cls: type[IO.ComfyNode], endpoint: ApiEndpoint, request: BaseModel, poll_via_proxy: bool = False
+) -> IO.NodeOutput:
+    initial_response = await sync_op(cls, endpoint, response_model=BFLFluxProGenerateResponse, data=request)
+    poll_endpoint = (
+        ApiEndpoint(path=_BFL_POLL_PROXY_PATH, query_params={"polling_url": initial_response.polling_url})
+        if poll_via_proxy
+        else ApiEndpoint(initial_response.polling_url)
     )
-
-    def price_extractor(_r: BaseModel) -> float | None:
-        return None if initial_response.cost is None else initial_response.cost / 100
-
     response = await poll_op(
         cls,
-        ApiEndpoint(initial_response.polling_url),
+        poll_endpoint,
         response_model=BFLFluxStatusResponse,
         status_extractor=lambda r: r.status,
         progress_extractor=lambda r: r.progress,
-        price_extractor=price_extractor,
         completed_statuses=[BFLStatus.ready],
         failed_statuses=[
             BFLStatus.request_moderated,
@@ -1243,7 +1232,7 @@ class Flux3TextToVideoNode(Flux3VideoNodeBase):
         request = Flux3TextToVideoRequest(
             **cls.common_fields(prompt, aspect_ratio, duration, resolution, generate_audio, safety_tolerance)
         )
-        return await _flux3_execute(cls, request)
+        return await _bfl_video_execute(cls, _FLUX3_VIDEO_ENDPOINT, request)
 
 
 class Flux3ImageToVideoNode(Flux3VideoNodeBase):
@@ -1341,7 +1330,7 @@ class Flux3ImageToVideoNode(Flux3VideoNodeBase):
             keyframes=list(zip(times, urls)) if times is not None else urls,
             **fields,
         )
-        return await _flux3_execute(cls, request)
+        return await _bfl_video_execute(cls, _FLUX3_VIDEO_ENDPOINT, request)
 
 
 class Flux3VideoContinuationNode(Flux3VideoNodeBase):
@@ -1392,7 +1381,131 @@ class Flux3VideoContinuationNode(Flux3VideoNodeBase):
         fields = cls.common_fields(prompt, aspect_ratio, duration, resolution, generate_audio, safety_tolerance)
         url = await upload_video_to_comfyapi(cls, video, wait_label="Uploading source video")
         request = Flux3VideoContinuationRequest(start_video=url, **fields)
-        return await _flux3_execute(cls, request)
+        return await _bfl_video_execute(cls, _FLUX3_VIDEO_ENDPOINT, request)
+
+
+_FLUX_VIDEO_UPSCALE_MODES = {"creative": 1, "precise": 0}
+_FLUX_VIDEO_UPSCALE_MAX_INPUT_PIXELS = 3840 * 2160
+_FLUX_VIDEO_UPSCALE_MAX_ASPECT_RATIO = 4.0
+
+
+class FluxVideoUpscaleNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="FluxVideoUpscaleNode",
+            display_name="Flux Video Upscale",
+            category="partner/video/BFL",
+            description="Upscales a video 1.5 to 3 times with FLUX super-resolution, either preserving "
+            "the source precisely or creatively enhancing its detail.",
+            inputs=[
+                IO.Video.Input(
+                    "video",
+                    tooltip="Source clip of 1 to 20 seconds with an aspect ratio between 1:4 and 4:1. "
+                    "The output is rendered at 24 fps and capped at about 14.4 megapixels per frame.",
+                ),
+                IO.Float.Input(
+                    "upscale_factor",
+                    default=2.0,
+                    min=1.5,
+                    max=3.0,
+                    step=0.1,
+                    tooltip="Output size relative to the source. Very large sources are upscaled by "
+                    "less than the requested factor because of the per-frame cap.",
+                ),
+                IO.Combo.Input(
+                    "mode",
+                    options=list(_FLUX_VIDEO_UPSCALE_MODES),
+                    default="creative",
+                    tooltip="'creative' restores and invents fine detail, best for generated footage, "
+                    "textures and scenery. 'precise' sharpens the source without changing it, "
+                    "for faces, products and real footage.",
+                ),
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="Optional description of the clip that steers the enhanced detail. "
+                    "Leave empty for a neutral upscale.",
+                ),
+                IO.Boolean.Input(
+                    "auto_downscale",
+                    default=True,
+                    tooltip="Automatically downscale sources larger than 3840x2160 pixels in area to fit "
+                    "the input limit. Aspect ratio is preserved; smaller videos are untouched.",
+                ),
+                IO.Int.Input(
+                    "safety_tolerance",
+                    default=2,
+                    min=0,
+                    max=4,
+                    advanced=True,
+                    tooltip="Moderation tolerance, 0 is the strictest.",
+                ),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=0xFFFFFFFF,
+                    control_after_generate=True,
+                    tooltip="Seed to determine if node should re-run; FLUX picks its own seed, so "
+                    "actual results are nondeterministic regardless of this value.",
+                ),
+            ],
+            outputs=[IO.Video.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["mode"]),
+                expr="""
+                    (
+                      $precise := widgets.mode = "precise";
+                      {"type":"range_usd",
+                       "min_usd": $precise ? 0.212 : 0.297,
+                       "max_usd": $precise ? 0.848 : 1.188,
+                       "format": {"approximate": true, "suffix": "/s", "note": "(1080p-4K output)"}}
+                    )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        video: Input.Video,
+        upscale_factor: float,
+        mode: str,
+        prompt: str,
+        auto_downscale: bool,
+        safety_tolerance: int,
+        seed: int,
+    ) -> IO.NodeOutput:
+        validate_video_duration(video, min_duration=1.0, max_duration=20.0)
+        validate_video_dimensions(video, min_width=64, min_height=64)
+        width, height = video.get_dimensions()
+        if max(width, height) > _FLUX_VIDEO_UPSCALE_MAX_ASPECT_RATIO * min(width, height):
+            raise ValueError(f"Video aspect ratio must be between 1:4 and 4:1, got {width}x{height}.")
+        if auto_downscale:
+            video = downscale_video_to_max_pixels(video, _FLUX_VIDEO_UPSCALE_MAX_INPUT_PIXELS)
+        elif width * height > _FLUX_VIDEO_UPSCALE_MAX_INPUT_PIXELS:
+            raise ValueError(
+                f"Video must be at most 3840x2160 pixels in area, got {width}x{height}. "
+                "Enable auto_downscale or use a smaller video."
+            )
+        url = await upload_video_to_comfyapi(cls, video, wait_label="Uploading source video")
+        request = BFLFluxVideoUpscaleRequest(
+            input_video=url,
+            upscale_factor=round(upscale_factor, 1),
+            creativity=_FLUX_VIDEO_UPSCALE_MODES[mode],
+            prompt=prompt.strip() or None,
+            safety_tolerance=safety_tolerance,
+        )
+        return await _bfl_video_execute(cls, _FLUX_VIDEO_UPSCALE_ENDPOINT, request, poll_via_proxy=True)
 
 
 class BFLExtension(ComfyExtension):
@@ -1412,6 +1525,7 @@ class BFLExtension(ComfyExtension):
             Flux3TextToVideoNode,
             Flux3ImageToVideoNode,
             Flux3VideoContinuationNode,
+            FluxVideoUpscaleNode,
         ]
 
 

@@ -95,8 +95,8 @@ class SwitchNode(io.ComfyNode):
             is_experimental=True,
             inputs=[
                 io.Boolean.Input("switch"),
-                io.MatchType.Input("on_false", template=template, lazy=True),
-                io.MatchType.Input("on_true", template=template, lazy=True),
+                io.MatchType.Input("on_false", template=template, lazy=True, optional=True),
+                io.MatchType.Input("on_true", template=template, lazy=True, optional=True),
             ],
             outputs=[
                 io.MatchType.Output(template=template, display_name="output"),
@@ -104,15 +104,16 @@ class SwitchNode(io.ComfyNode):
         )
 
     @classmethod
-    def check_lazy_status(cls, switch, on_false=None, on_true=None):
+    def check_lazy_status(cls, switch, on_false=MISSING, on_true=MISSING):
         if switch and on_true is None:
             return ["on_true"]
         if not switch and on_false is None:
             return ["on_false"]
 
     @classmethod
-    def execute(cls, switch, on_true, on_false) -> io.NodeOutput:
-        return io.NodeOutput(on_true if switch else on_false)
+    def execute(cls, switch, on_true=MISSING, on_false=MISSING) -> io.NodeOutput:
+        selected = on_true if switch else on_false
+        return io.NodeOutput(None if selected is MISSING else selected)
 
 
 class SoftSwitchNode(io.ComfyNode):

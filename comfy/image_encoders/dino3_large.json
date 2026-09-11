@@ -1,0 +1,23 @@
+{
+  "model_type": "dinov3",
+  "hidden_size": 1024,
+  "image_size": 224,
+  "initializer_range": 0.02,
+  "intermediate_size": 4096,
+  "key_bias": false,
+  "layer_norm_eps": 1e-05,
+  "mlp_bias": true,
+  "num_attention_heads": 16,
+  "num_channels": 3,
+  "num_hidden_layers": 24,
+  "num_register_tokens": 4,
+  "patch_size": 16,
+  "pos_embed_rescale": 2.0,
+  "proj_bias": true,
+  "query_bias": true,
+  "rope_theta": 100.0,
+  "use_gated_mlp": false,
+  "value_bias": true,
+  "image_mean": [0.485, 0.456, 0.406],
+  "image_std": [0.229, 0.224, 0.225]
+}

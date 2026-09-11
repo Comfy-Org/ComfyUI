@@ -82,19 +82,47 @@ _TYPES = {
     "U16": torch.uint16,
 }
 
+_SAFETENSORS_MAX_HEADER_SIZE = 100_000_000
+
+
+def _invalid_safetensors_error(message, ckpt):
+    return ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt or invalid. Make sure this is actually a safetensors file and not a ckpt or pt or other filetype.".format(message, ckpt))
+
+
+def _incomplete_safetensors_error(message, ckpt):
+    return ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt/incomplete. Check the file size and make sure you have copied/downloaded it correctly.".format(message, ckpt))
+
+
 def load_safetensors(ckpt):
     import comfy_aimdo.model_mmap
+
+    file_size = os.path.getsize(ckpt)
+    if file_size < 8:
+        raise _incomplete_safetensors_error("The safetensors header is incomplete.", ckpt)
 
     file_lock = threading.Lock()
     model_mmap = comfy_aimdo.model_mmap.ModelMMAP(ckpt)
     f = model_mmap.get_file_handle()
-    file_size = os.path.getsize(ckpt)
     mv = memoryview((ctypes.c_uint8 * file_size).from_address(model_mmap.get()))
 
     header_size = struct.unpack("<Q", mv[:8])[0]
-    header = json.loads(mv[8:8 + header_size].tobytes().decode("utf-8"))
+    if header_size > _SAFETENSORS_MAX_HEADER_SIZE:
+        raise _invalid_safetensors_error("The safetensors header is too large.", ckpt)
 
-    mv = mv[(data_base_offset := 8 + header_size):]
+    data_base_offset = 8 + header_size
+    if data_base_offset > file_size:
+        raise _incomplete_safetensors_error("The safetensors header is incomplete.", ckpt)
+
+    try:
+        header = json.loads(mv[8:data_base_offset].tobytes().decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise _invalid_safetensors_error(str(e), ckpt) from e
+
+    if not isinstance(header, dict):
+        raise _invalid_safetensors_error("The safetensors header is invalid.", ckpt)
+
+    mv = mv[data_base_offset:]
+    data_size = len(mv)
 
     sd = {}
     for name, info in header.items():
@@ -102,13 +130,21 @@ def load_safetensors(ckpt):
             continue
 
         start, end = info["data_offsets"]
+        dtype = _TYPES[info["dtype"]]
+        if start < 0 or end < start:
+            raise _invalid_safetensors_error("Tensor '{}' has invalid data offsets.".format(name), ckpt)
+        if end > data_size:
+            raise _incomplete_safetensors_error("Tensor '{}' extends past the end of the file.".format(name), ckpt)
+        if math.prod(info["shape"]) * dtype.itemsize != end - start:
+            raise _invalid_safetensors_error("Tensor '{}' does not match its declared shape and dtype.".format(name), ckpt)
+
         if start == end:
-            sd[name] = torch.empty(info["shape"], dtype =_TYPES[info["dtype"]])
+            sd[name] = torch.empty(info["shape"], dtype=dtype)
         else:
             with warnings.catch_warnings():
                 #We are working with read-only RAM by design
                 warnings.filterwarnings("ignore", message="The given buffer is not writable")
-                tensor = torch.frombuffer(mv[start:end], dtype=_TYPES[info["dtype"]]).view(info["shape"])
+                tensor = torch.frombuffer(mv[start:end], dtype=dtype).view(info["shape"])
                 storage = tensor.untyped_storage()
                 setattr(storage,
                         "_comfy_tensor_file_slice",
@@ -143,9 +179,9 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
             if len(e.args) > 0:
                 message = e.args[0]
                 if "HeaderTooLarge" in message:
-                    raise ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt or invalid. Make sure this is actually a safetensors file and not a ckpt or pt or other filetype.".format(message, ckpt))
+                    raise _invalid_safetensors_error(message, ckpt)
                 if "MetadataIncompleteBuffer" in message:
-                    raise ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt/incomplete. Check the file size and make sure you have copied/downloaded it correctly.".format(message, ckpt))
+                    raise _incomplete_safetensors_error(message, ckpt)
             raise e
     else:
         torch_args = {}
