@@ -1,0 +1,4 @@
+numpy==2.5.2
+torch==2.15.0a0+rocm10.1.0a20260831
+torchvision==0.30.0a0+rocm10.1.0a20260831
+torchaudio==2.11.0.3+rocm10.1.0a20260831

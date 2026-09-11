@@ -1,0 +1,12 @@
+amd-torch-device-gfx1100
+amd-torch-device-gfx110x
+amd-torchvision-device-gfx1100
+rocm
+rocm-bootstrap
+rocm-sdk-core
+rocm-sdk-device-gfx1100
+rocm-sdk-libraries
+torch
+torchaudio
+torchvision
+triton
