@@ -570,7 +570,10 @@ class MiniMaxH3Model(nn.Module):
             carry = (sigma_a / sigma_v).to(audio_src.dtype)
             x = [x[0], audio_src * carry]
 
-        compile_allocations = comfy.model_prefetch.malloc_graph_enabled(x[0].device)
+        compile_allocations = (
+            not transformer_options.get("disable_comfy_compiler", False)
+            and comfy.model_prefetch.malloc_graph_enabled(x[0].device)
+        )
         if compile_allocations:
             out = [torch.empty_like(x[0]), torch.empty_like(x[1])]
             comfy.model_prefetch.malloc_graph_begin(x[0].device)
