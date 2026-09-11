@@ -748,6 +748,95 @@ class PromptServer():
         async def get_prompt(request):
             return web.json_response(self.get_queue_info())
 
+        @routes.get("/status")
+        async def get_status(request):
+            prompt_id = request.rel_url.query.get("prompt_id", None)
+            if not prompt_id:
+                return web.json_response({"error": "prompt_id required"}, status=400)
+
+            # Volatile snapshot of running and queued tasks
+            running, queued = self.prompt_queue.get_current_queue_volatile()
+
+            status = "none"
+            position = None
+            filename = None
+
+            # Check currently running tasks
+            for item in running:
+                # item structure: (number, prompt_id, prompt, extra_data, outputs_to_execute)
+                try:
+                    item_prompt_id = item[1]
+                except Exception:
+                    continue
+                if item_prompt_id == prompt_id:
+                    status = "running"
+                    position = 0
+                    break
+
+            # If not running, check queued tasks (determine position)
+            if status == "none":
+                # queued is a heap; sort to get execution order
+                try:
+                    queued_sorted = sorted(queued)
+                except Exception:
+                    queued_sorted = list(queued)
+                for idx, q in enumerate(queued_sorted):
+                    try:
+                        q_prompt_id = q[1]
+                    except Exception:
+                        continue
+                    if q_prompt_id == prompt_id:
+                        status = "waiting"
+                        # position: 1 if next, etc.
+                        position = idx + 1
+                        break
+
+            # If not running or queued, check history for done/error and extract filename only
+            if status == "none":
+                hist = self.prompt_queue.get_history(prompt_id=prompt_id)
+                if prompt_id in hist:
+                    entry = hist[prompt_id]
+                    status_dict = entry.get("status")
+                    if status_dict is None:
+                        status = "done"
+                    else:
+                        status_str = status_dict.get("status_str")
+                        if status_str == "success":
+                            status = "done"
+                        elif status_str == "error":
+                            status = "error"
+                        else:
+                            status = status_str or "done"
+
+                    # Prefer extracting filename from 'outputs' -> node -> images list
+                    outputs = entry.get("outputs", {}) or {}
+                    for node_out in outputs.values():
+                        if not isinstance(node_out, dict):
+                            continue
+                        images = node_out.get("images")
+                        if isinstance(images, list) and len(images) > 0:
+                            first = images[0]
+                            if isinstance(first, dict) and "filename" in first:
+                                filename = first.get("filename")
+                                break
+
+                    # Fallback: check meta entries for filename
+                    if filename is None:
+                        meta = entry.get("meta", {}) or {}
+                        for node_meta in meta.values():
+                            if not isinstance(node_meta, dict):
+                                continue
+                            fn = node_meta.get("filename") or node_meta.get("output_filename") or node_meta.get("display_filename")
+                            if fn:
+                                filename = fn
+                                break
+
+            return web.json_response({
+                "status": status,
+                "position_in_queue": position,
+                "filename": filename
+            })
+
         def node_info(node_class):
             obj_class = nodes.NODE_CLASS_MAPPINGS[node_class]
             if issubclass(obj_class, _ComfyNodeInternal):
