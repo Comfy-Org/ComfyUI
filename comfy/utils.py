@@ -237,13 +237,13 @@ def state_dict_key_replace(state_dict, keys_to_replace):
 def state_dict_prefix_replace(state_dict, replace_prefix, filter_keys=False):
     if filter_keys:
         out = {}
+        for old_prefix, new_prefix in replace_prefix.items():
+            keys_to_replace = [key for key in state_dict if key.startswith(old_prefix)]
+            for key in keys_to_replace:
+                new_key = new_prefix + key[len(old_prefix):]
+                out[new_key] = state_dict.pop(key)
     else:
         out = state_dict
-    for rp in replace_prefix:
-        replace = list(map(lambda a: (a, "{}{}".format(replace_prefix[rp], a[len(rp):])), filter(lambda a: a.startswith(rp), state_dict.keys())))
-        for x in replace:
-            w = state_dict.pop(x[0])
-            out[x[1]] = w
     return out
 
 
