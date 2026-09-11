@@ -231,6 +231,14 @@ class CreateVideo(io.ComfyNode):
                     optional=True,
                     tooltip="Colorspace of the input images. HDR selects BT.2020/HLG and HDR PQ selects BT.2020/PQ.",
                 ),
+                io.Combo.Input(
+                    "codec",
+                    options=["none", *Types.VideoCodec.as_input()],
+                    default="none",
+                    advanced=True,
+                    optional=True,
+                    tooltip="Optionally encode the video immediately. None keeps the images in tensor form; Auto uses H.264.",
+                ),
             ],
             outputs=[
                 io.Video.Output(),
@@ -239,17 +247,18 @@ class CreateVideo(io.ComfyNode):
 
     @classmethod
     def execute(
-        cls, images: Input.Image, fps: float, audio: Optional[Input.Audio] = None, bit_depth: int | str = "auto", color_space: str = "sRGB",
+        cls, images: Input.Image, fps: float, audio: Optional[Input.Audio] = None, bit_depth: int | str = "auto", color_space: str = "sRGB", codec: str = "none",
     ) -> io.NodeOutput:
         if bit_depth == "auto":
             bit_depth = 10 if color_space in ("HDR", "HDR PQ") else 8
-        return io.NodeOutput(
-            InputImpl.VideoFromComponents(
-                Types.VideoComponents(images=images, audio=audio, frame_rate=Fraction(fps)),
-                bit_depth=bit_depth,
-                color_space=color_space,
-            )
+        video = InputImpl.VideoFromComponents(
+            Types.VideoComponents(images=images, audio=audio, frame_rate=Fraction(fps)),
+            bit_depth=bit_depth,
+            color_space=color_space,
         )
+        if codec != "none":
+            video = InputImpl.VideoFromList([video], codec=Types.VideoCodec(codec))
+        return io.NodeOutput(video)
 
 
 class ConcatenateVideo(io.ComfyNode):

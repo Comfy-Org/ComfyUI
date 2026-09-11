@@ -10,7 +10,7 @@ import torch
 from comfy_api.input_impl.video_types import VideoFromComponents, VideoFromFile, VideoFromList
 from comfy_api.input.basic_types import AudioInput
 from comfy_api.util.video_types import VideoCodec, VideoComponents
-from comfy_extras.nodes_video import ConcatenateVideo
+from comfy_extras.nodes_video import ConcatenateVideo, CreateVideo
 
 
 def test_tensor_video_encodes_to_list_owned_file():
@@ -66,6 +66,25 @@ def test_concatenate_video_schema_and_intermediate_codec(monkeypatch):
     assert schema.description and schema.outputs[0].tooltip
     assert all(input.tooltip for input in schema.inputs)
     assert inputs["inputs"].template.input.tooltip
+
+
+def test_create_video_optional_eager_encoding(monkeypatch):
+    encoded_codecs = []
+
+    def record_save(self, path, **kwargs):
+        encoded_codecs.append(kwargs["codec"])
+        with open(path, "wb"):
+            pass
+
+    monkeypatch.setattr(VideoFromComponents, "save_to", record_save)
+    video = CreateVideo.execute(torch.zeros((1, 16, 16, 3)), 8, codec="av1").result[0]
+
+    codec_input = next(input for input in CreateVideo.define_schema().inputs if input.id == "codec")
+    assert isinstance(video, VideoFromList)
+    assert encoded_codecs == [VideoCodec.AV1]
+    assert codec_input.options == ["none", "auto", "h264", "av1"]
+    assert codec_input.default == "none"
+    assert codec_input.advanced and codec_input.optional
 
 
 def test_nested_complete_audio_uses_most_recent_override():
