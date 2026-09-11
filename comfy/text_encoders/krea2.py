@@ -27,6 +27,9 @@ class Krea2Tokenizer(comfy.text_encoders.qwen3vl.Qwen3VLTokenizer):
 
     def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=True, **kwargs):
         # Krea2 conditions on the no-think template; thinking=True drops the empty <think> block qwen3vl adds.
+        if llama_template is None and len(images) > 0 and not text.startswith('<|im_start|>'):
+            vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
+            llama_template = KREA2_TEMPLATE.replace("{}", vision_block * len(images) + "{}")
         return super().tokenize_with_weights(text, return_word_ids=return_word_ids, llama_template=llama_template, images=images, prevent_empty_text=prevent_empty_text, thinking=thinking, **kwargs)
 
 
