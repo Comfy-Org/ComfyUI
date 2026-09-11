@@ -12,6 +12,7 @@ import json
 import numpy as np
 import math
 import os
+import tempfile
 import torch
 from .._util import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
 import comfy.utils
@@ -1210,3 +1211,42 @@ class VideoFromComponents(VideoInput):
             return None
         #TODO Consider tracking duration and trimming at time of save?
         return VideoFromFile(self.get_stream_source(), start_time=start_time, duration=duration)
+
+
+class VideoFromList(VideoInput):
+    def __init__(
+        self,
+        videos: list[VideoInput],
+        complete_audio: AudioInput | None = None,
+        codec: VideoCodec = VideoCodec.AUTO,
+    ):
+        self.videos = []
+        self.__owners = []
+        inherited_audio = None
+        for video in videos:
+            if isinstance(video, VideoFromList):
+                if video.complete_audio is not None:
+                    inherited_audio = video.complete_audio
+                self.videos.extend(video.videos)
+                self.__owners.extend(video.__owners)
+            elif isinstance(video, VideoFromComponents):
+                owner = tempfile.TemporaryDirectory(prefix="comfy-video-")
+                self.__owners.append(owner)
+                path = os.path.join(owner.name, "video.mkv")
+                video.save_to(path, format=VideoContainer.MKV, codec=codec)
+                self.videos.append(VideoFromFile(path))
+            else:
+                self.videos.append(video)
+        if not self.videos:
+            raise ValueError("Concatenate Video requires at least one input")
+        self.complete_audio = complete_audio if complete_audio is not None else inherited_audio
+
+    def get_components(self) -> VideoComponents:
+        raise NotImplementedError
+
+    def save_to(self, path, format=VideoContainer.AUTO, codec=VideoCodec.AUTO, metadata=None,
+                bit_depth=None, crf=None, color_space=None, preset=None):
+        raise NotImplementedError
+
+    def as_trimmed(self, start_time=None, duration=None, strict_duration=False):
+        raise NotImplementedError

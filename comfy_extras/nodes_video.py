@@ -251,6 +251,51 @@ class CreateVideo(io.ComfyNode):
             )
         )
 
+
+class ConcatenateVideo(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ConcatenateVideo",
+            display_name="Concatenate Video",
+            category="video",
+            essentials_category="Video Tools",
+            description="Concatenates videos in order without decoding compatible encoded inputs.",
+            inputs=[
+                io.Autogrow.Input(
+                    "inputs",
+                    template=io.Autogrow.TemplatePrefix(
+                        io.Video.Input("input", tooltip="A video segment to append."),
+                        prefix="inputs",
+                        min=1,
+                        max=100,
+                    ),
+                    tooltip="Video segments to concatenate in input order.",
+                ),
+                io.Combo.Input(
+                    "codec",
+                    options=Types.VideoCodec.as_input(),
+                    default="auto",
+                    advanced=True,
+                    tooltip="Codec used to eagerly encode tensor-backed inputs. Auto uses H.264; existing encoded inputs remain unchanged.",
+                ),
+                io.Audio.Input(
+                    "complete_audio",
+                    optional=True,
+                    advanced=True,
+                    tooltip="Optional complete soundtrack for the concatenated video. Overrides audio carried by the input segments.",
+                ),
+            ],
+            outputs=[io.Video.Output(tooltip="The concatenated video.")],
+            is_input_list=True,
+        )
+
+    @classmethod
+    def execute(cls, inputs: io.Autogrow.Type, codec=None, complete_audio=None) -> io.NodeOutput:
+        videos = [video for group in inputs.values() for video in group]
+        audio = complete_audio[0] if complete_audio else None
+        return io.NodeOutput(InputImpl.VideoFromList(videos, audio, Types.VideoCodec(codec[0] if codec else "auto")))
+
 class GetVideoComponents(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -509,6 +554,7 @@ class VideoExtension(ComfyExtension):
             SaveWEBM,
             SaveVideo,
             CreateVideo,
+            ConcatenateVideo,
             GetVideoComponents,
             LoadVideo,
             VideoSlice,
