@@ -1033,7 +1033,7 @@ def shift_window_to_start(window: list[int], num_frames: int):
 def shift_window_to_end(window: list[int], num_frames: int):
     # 1) shift window to start
     shift_window_to_start(window, num_frames)
-    end_val = window[-1]
+    end_val = max(window)
     end_delta = num_frames - end_val - 1
     for i in range(len(window)):
         # 2) add end_delta to each val to slide windows to end
