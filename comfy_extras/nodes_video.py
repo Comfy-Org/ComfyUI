@@ -272,10 +272,10 @@ class ConcatenateVideo(io.ComfyNode):
             description="Concatenates videos in order without decoding compatible encoded inputs.",
             inputs=[
                 io.Autogrow.Input(
-                    "inputs",
+                    "videos",
                     template=io.Autogrow.TemplatePrefix(
-                        io.Video.Input("input", tooltip="A video segment to append."),
-                        prefix="inputs",
+                        io.Video.Input("video", tooltip="A video segment to append."),
+                        prefix="video",
                         min=1,
                         max=100,
                     ),
@@ -286,13 +286,13 @@ class ConcatenateVideo(io.ComfyNode):
                     options=Types.VideoCodec.as_input(),
                     default="auto",
                     advanced=True,
-                    tooltip="Codec used to eagerly encode tensor-backed inputs. Auto uses H.264; existing encoded inputs remain unchanged.",
+                    tooltip="Codec used to encode videos tensors. Auto uses H.264; already encoded videos remain unchanged.",
                 ),
                 io.Audio.Input(
                     "complete_audio",
                     optional=True,
                     advanced=True,
-                    tooltip="Optional complete soundtrack for the concatenated video. Overrides audio carried by the input segments.",
+                    tooltip="Optional complete soundtrack for the concatenated video. Overrides audio carried by the input videos.",
                 ),
             ],
             outputs=[io.Video.Output(tooltip="The concatenated video.")],
@@ -300,8 +300,8 @@ class ConcatenateVideo(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, inputs: io.Autogrow.Type, codec=None, complete_audio=None) -> io.NodeOutput:
-        videos = [video for group in inputs.values() for video in group]
+    def execute(cls, videos: io.Autogrow.Type, codec=None, complete_audio=None) -> io.NodeOutput:
+        videos = [video for group in videos.values() for video in group]
         audio = complete_audio[0] if complete_audio else None
         return io.NodeOutput(InputImpl.VideoFromList(videos, audio, Types.VideoCodec(codec[0] if codec else "auto")))
 
