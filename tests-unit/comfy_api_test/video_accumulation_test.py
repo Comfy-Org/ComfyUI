@@ -105,7 +105,7 @@ def test_accumulated_video_packet_concatenates_file_backed_inputs():
             assert sum(1 for _ in container.decode(video=0)) == 4
 
 
-def test_accumulated_video_reencodes_only_incompatible_chunks():
+def test_accumulated_video_reencodes_all_chunks_with_shared_configuration():
     class RewriteTrackingVideo(VideoFromFile):
         rewritten = False
 
@@ -126,10 +126,35 @@ def test_accumulated_video_reencodes_only_incompatible_chunks():
         output = os.path.join(directory, "output.mp4")
         VideoFromList(sources).save_to(output)
 
-        assert not sources[0].rewritten
-        assert sources[1].rewritten
+        assert all(source.rewritten for source in sources)
         with av.open(output) as container:
             assert sum(1 for _ in container.decode(video=0)) == 4
+
+
+def test_accumulated_video_reencodes_audio_to_shared_rate_and_layout():
+    with tempfile.TemporaryDirectory() as directory:
+        sources = []
+        for index, (sample_rate, channels) in enumerate(((8000, 1), (16000, 2))):
+            source = os.path.join(directory, f"source-{index}.mp4")
+            audio = AudioInput({
+                "waveform": torch.zeros((1, channels, sample_rate // 4)),
+                "sample_rate": sample_rate,
+            })
+            VideoFromComponents(
+                VideoComponents(
+                    images=torch.zeros((2, 16, 16, 3)),
+                    frame_rate=Fraction(8),
+                    audio=audio,
+                )
+            ).save_to(source)
+            sources.append(VideoFromFile(source))
+
+        output = os.path.join(directory, "output.mp4")
+        VideoFromList(sources).save_to(output)
+
+        with av.open(output) as container:
+            assert container.streams.audio[0].sample_rate == 8000
+            assert container.streams.audio[0].layout.name == "mono"
 
 
 def test_accumulated_video_stream_source_is_owned_and_reused():
@@ -167,3 +192,75 @@ def test_accumulated_video_continuously_encodes_audio_and_allows_override():
             assert overridden_audio.layout.name == "mono"
             assert float(embedded_audio.duration * embedded_audio.time_base) <= 0.6
             assert float(overridden_audio.duration * overridden_audio.time_base) <= 0.6
+
+
+def test_accumulated_video_metadata_and_explicit_materialization():
+    videos = [
+        VideoFromComponents(
+            VideoComponents(images=torch.full((2, 16, 16, 3), value), frame_rate=Fraction(8))
+        )
+        for value in (0.0, 0.5)
+    ]
+    video = VideoFromList(videos)
+
+    assert video.get_dimensions() == (16, 16)
+    assert video.get_duration() == 0.5
+    assert video.get_frame_count() == 4
+    assert video.get_frame_rate() == 8
+    assert video.get_components().images.shape == (4, 16, 16, 3)
+
+
+def test_accumulated_video_reports_each_incompatible_dimension():
+    videos = [
+        VideoFromComponents(
+            VideoComponents(images=torch.zeros((1, height, width, 3)), frame_rate=Fraction(8))
+        )
+        for width, height in ((16, 16), (24, 16), (16, 24))
+    ]
+    video = VideoFromList(videos)
+
+    try:
+        video.get_dimensions()
+    except ValueError as error:
+        assert str(error) == (
+            "Accumulated videos have incompatible frame dimensions: "
+            "chunk 0 is 16x16; chunk 1 is 24x16; chunk 2 is 16x24"
+        )
+    else:
+        raise AssertionError("Expected incompatible dimensions to fail")
+
+
+def test_accumulated_video_trims_across_file_boundaries_without_materializing():
+    class NoMaterializeVideo(VideoFromFile):
+        def get_components(self):
+            raise AssertionError("trim materialized video frames")
+
+    with tempfile.TemporaryDirectory() as directory:
+        sources = []
+        for index in range(2):
+            source = os.path.join(directory, f"source{index}.mp4")
+            VideoFromComponents(
+                VideoComponents(images=torch.zeros((2, 16, 16, 3)), frame_rate=Fraction(8))
+            ).save_to(source)
+            sources.append(NoMaterializeVideo(source))
+
+        trimmed = VideoFromList(sources).as_trimmed(0.125, 0.25, strict_duration=True)
+
+        assert isinstance(trimmed, VideoFromList)
+        assert len(trimmed.videos) == 2
+        assert trimmed.get_duration() == 0.25
+
+
+def test_accumulated_video_trim_slices_complete_audio():
+    video = VideoFromList(
+        [
+            VideoFromComponents(
+                VideoComponents(images=torch.zeros((4, 16, 16, 3)), frame_rate=Fraction(4))
+            )
+        ],
+        AudioInput({"waveform": torch.arange(8000).reshape(1, 1, -1), "sample_rate": 8000}),
+    )
+
+    trimmed = video.as_trimmed(0.25, 0.5)
+
+    assert torch.equal(trimmed.complete_audio["waveform"], torch.arange(2000, 6000).reshape(1, 1, -1))
