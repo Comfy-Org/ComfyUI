@@ -111,6 +111,11 @@ def _get(handler, path):
     return handler(make_mocked_request("GET", path))
 
 
+def _get_with_header(handler, path, header_name, header_value):
+    headers = {header_name: header_value}
+    return handler(make_mocked_request("GET", path, headers=headers))
+
+
 @pytest.fixture
 def view_handler():
     return _load_view_handler()
@@ -175,9 +180,26 @@ async def test_dangerous_type_keeps_attachment(view_handler, output_dir):
     assert response.headers["Content-Type"] == "application/octet-stream"
 
 
+async def test_svg_with_image_fetch_dest_serves_inline(view_handler, output_dir):
+    """SVG requested as an <img> source (Sec-Fetch-Dest: image) is safe to
+    serve inline: the browser will not execute scripts in that context, so
+    the preview path keeps inline while the no-header branch stays attachment.
+    """
+    (output_dir / "evil.svg").write_text(SVG_WITH_SCRIPT)
+
+    response = await _get_with_header(
+        view_handler, "/view?filename=evil.svg", "Sec-Fetch-Dest", "image"
+    )
+
+    assert response.headers["Content-Disposition"] == 'inline; filename="evil.svg"'
+    assert response.headers["Content-Type"] == "image/svg+xml"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Vary"] == "Sec-Fetch-Dest"
+    assert response.headers["Cache-Control"] == "no-store"
+
+
 async def test_every_disposition_survives_rfc6266_parse(view_handler, output_dir):
     """Case 4: simulate Go's mime.ParseMediaType on every /view disposition.
-
     A strict media-type parser must extract both the disposition-type and the
     filename parameter from every header the endpoint emits — exactly what Go
     downloaders failed on in issue #8914.

@@ -630,14 +630,8 @@ class PromptServer():
                         # and execute in the page origin) to download instead of
                         # displaying inline, preventing stored XSS. SVG loaded
                         # into an <img> is exempt, see renders_safely_as_image.
-                        # The disposition type must be explicit per RFC 2183/6266:
-                        # a bare filename= parameter has no disposition-type and
-                        # breaks strict parsers like Go's mime.ParseMediaType
-                        # (issue #8914). inline preserves browser display of
-                        # legitimate images; attachment on the dangerous branch
-                        # below is the load-bearing XSS guard. Reverting inline
-                        # to attachment here breaks previews (#13093, reverted
-                        # in #13733).
+                        # inline is required for RFC-compliant parsing; the
+                        # dangerous branch below must retain attachment.
                         # Escape backslash/quote per RFC 6266 quoted-string so a
                         # filename containing a double quote (which passes the
                         # ".."/leading-slash filter above) can't break out of the
