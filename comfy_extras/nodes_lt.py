@@ -65,6 +65,7 @@ class EmptyLTXVLatentVideo(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="EmptyLTXVLatentVideo",
+            display_name="Empty LTXV Latent Video",
             category="model/latent/ltxv",
             inputs=[
                 io.Int.Input("width", default=768, min=64, max=nodes.MAX_RESOLUTION, step=32),
