@@ -1458,7 +1458,6 @@ class VideoFromList(VideoInput):
                         output = av.open(path, **open_kwargs)
                         write_output_metadata(container, output, metadata)
                         output_video = output.add_stream_from_template(video_stream, opaque=True)
-                        hevc_filter = isobmff_hevc_filter(output, video_stream, output_video)
                         if self.complete_audio is not None:
                             source_rate = int(self.complete_audio["sample_rate"])
                             channels = self.complete_audio["waveform"].shape[1]
@@ -1477,6 +1476,7 @@ class VideoFromList(VideoInput):
                                 layout=layout,
                             )
                             audio_resampler = av.AudioResampler(format="fltp", layout=layout, rate=target_rate)
+                    hevc_filter = isobmff_hevc_filter(output, video_stream, output_video)
                     video_end = video_offset
                     origin = None
                     for packet in video_packets(container, video_stream):
