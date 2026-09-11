@@ -1109,12 +1109,12 @@ def _compress_rgb_gamut(rgb, weights):
 class ImageColorSpace(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
-        spaces = ["sRGB", "HDR", "HDR PQ"]
+        spaces = ["sRGB", "HDR", "HDR PQ", "linear"]
         return IO.Schema(
             node_id="ImageColorSpace",
             display_name="Convert Image Color Space",
             category="image/color",
-            description="Convert sRGB (Rec.709), HDR (Rec.2020 HLG), and HDR PQ (Rec.2020 PQ). Uses 203-nit SDR white and a 1000-nit HLG reference display. Narrowing tone-maps excess luminance across the batch and compresses out-of-gamut colors. Conversions compute in float32 and return the intermediate device and dtype. Straight alpha is not color-transformed.",
+            description="Convert sRGB, linear Rec.709, HDR (Rec.2020 HLG), and HDR PQ (Rec.2020 PQ). Linear 1.0 uses the same 203-nit reference white as sRGB; HLG uses a 1000-nit reference display. Linear output and linear-to-HDR conversions preserve extended values without tone mapping. SDR output and PQ-to-HLG conversion tone-map excess luminance across the batch and compress out-of-gamut colors. Conversions compute in float32 and return the intermediate device and dtype. Straight alpha is not color-transformed.",
             inputs=[
                 IO.Image.Input("image"),
                 IO.Combo.Input("source", options=spaces, default="sRGB", tooltip="Color space of the input pixels."),
@@ -1134,6 +1134,8 @@ class ImageColorSpace(IO.ComfyNode):
         # Convert to display-linear Rec.2020 in cd/m² (BT.2100 EOTFs).
         if source == "sRGB":
             rgb = _convert_rgb_primaries(srgb_to_linear(rgb), _REC709_TO_REC2020) * _SDR_WHITE_NITS
+        elif source == "linear":
+            rgb = _convert_rgb_primaries(rgb, _REC709_TO_REC2020) * _SDR_WHITE_NITS
         elif source == "HDR":
             rgb = hlg_to_linear(rgb)
             luminance = _rgb_luminance(rgb, _REC2020_LUMA).clamp_min(0.0)
@@ -1145,7 +1147,9 @@ class ImageColorSpace(IO.ComfyNode):
         else:
             raise ValueError(f"Unsupported source color space: {source}")
 
-        if destination == "sRGB":
+        if destination == "linear":
+            rgb = _convert_rgb_primaries(rgb / _SDR_WHITE_NITS, _REC2020_TO_REC709)
+        elif destination == "sRGB":
             rgb = _convert_rgb_primaries(rgb / _SDR_WHITE_NITS, _REC2020_TO_REC709)
             rgb = _tone_map_luminance(rgb, _REC709_LUMA)
             rgb = _compress_rgb_gamut(rgb, _REC709_LUMA)
