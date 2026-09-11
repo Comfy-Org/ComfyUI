@@ -29,6 +29,7 @@ from comfy_api_nodes.apis.openrouter import (
 from comfy_api_nodes.util import (
     ApiEndpoint,
     bytesio_to_image_tensor,
+    download_url_to_image_tensor,
     get_number_of_images,
     pad_images_to_common_channels,
     sync_op,
@@ -279,16 +280,20 @@ def _extract_text(response: OpenRouterChatResponse) -> str:
     return message.content or ""
 
 
-def _image_data_to_tensor(item: OpenRouterImageData) -> torch.Tensor:
-    try:
-        return bytesio_to_image_tensor(BytesIO(base64.b64decode(item.b64_json)))
-    except Exception as e:
-        raise ValueError(f"OpenRouter returned an image that could not be decoded: {e}") from e
+async def _image_data_to_tensor(cls: type[IO.ComfyNode], item: OpenRouterImageData) -> torch.Tensor:
+    if item.b64_json:
+        try:
+            return bytesio_to_image_tensor(BytesIO(base64.b64decode(item.b64_json)))
+        except Exception as e:
+            raise ValueError(f"OpenRouter returned an image that could not be decoded: {e}") from e
+    if item.url:
+        return await download_url_to_image_tensor(item.url, cls=cls)
+    raise ValueError("OpenRouter returned an image with neither inline data nor a URL.")
 
 
-def _extract_images(response: OpenRouterImageResponse) -> torch.Tensor:
+async def _extract_images(cls: type[IO.ComfyNode], response: OpenRouterImageResponse) -> torch.Tensor:
     _raise_on_error(response.error)
-    tensors = [_image_data_to_tensor(item) for item in response.data or [] if item.b64_json]
+    tensors = [await _image_data_to_tensor(cls, item) for item in response.data or [] if item.b64_json or item.url]
     if not tensors:
         raise ValueError("OpenRouter returned no image.")
     return torch.cat(pad_images_to_common_channels(tensors))
@@ -607,6 +612,7 @@ class OpenRouterImageNode(IO.ComfyNode):
             cls,
             ApiEndpoint(path=OPENROUTER_IMAGES_ENDPOINT, method="POST"),
             response_model=OpenRouterImageResponse,
+            asset_urls=True,
             data=OpenRouterImageRequest(
                 model=slug,
                 prompt=prompt,
@@ -614,7 +620,7 @@ class OpenRouterImageNode(IO.ComfyNode):
                 input_references=input_references,
             ),
         )
-        return IO.NodeOutput(_extract_images(response))
+        return IO.NodeOutput(await _extract_images(cls, response))
 
 
 class OpenRouterExtension(ComfyExtension):

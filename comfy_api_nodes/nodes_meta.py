@@ -16,6 +16,8 @@ from comfy_api_nodes.apis.meta import (
 from comfy_api_nodes.util import (
     ApiEndpoint,
     bytesio_to_image_tensor,
+    download_url_to_image_tensor,
+    pad_images_to_common_channels,
     sync_op,
     upload_images_to_comfyapi,
     validate_string,
@@ -57,15 +59,16 @@ def _size(aspect_ratio: str) -> str | None:
     return None if aspect_ratio == "auto" else aspect_ratio.replace(":", "x")
 
 
-def _decode_images(response: MuseImageResponse) -> torch.Tensor:
-    images = [
-        bytesio_to_image_tensor(BytesIO(base64.b64decode(item.b64_json)))
-        for item in response.data
-        if item.b64_json
-    ]
+async def _decode_images(cls: type[IO.ComfyNode], response: MuseImageResponse) -> torch.Tensor:
+    images = []
+    for item in response.data:
+        if item.b64_json:
+            images.append(bytesio_to_image_tensor(BytesIO(base64.b64decode(item.b64_json))))
+        elif item.url:
+            images.append(await download_url_to_image_tensor(item.url, cls=cls))
     if not images:
         raise Exception("The response contains no images.")
-    return torch.cat(images)
+    return torch.cat(pad_images_to_common_channels(images))
 
 
 def _reasoning_strength_input() -> IO.Combo.Input:
@@ -220,6 +223,7 @@ class MetaMuseImageTextToImageApi(IO.ComfyNode):
             cls,
             ApiEndpoint(path=GENERATIONS_PATH, method="POST"),
             response_model=MuseImageResponse,
+            asset_urls=True,
             data=MuseImageRequest(
                 model=model["model"],
                 prompt=model["prompt"],
@@ -228,7 +232,7 @@ class MetaMuseImageTextToImageApi(IO.ComfyNode):
                 tool_enablement=_tool_enablement(model),
             ),
         )
-        return IO.NodeOutput(_decode_images(response))
+        return IO.NodeOutput(await _decode_images(cls, response))
 
 
 class MetaMuseImageEditApi(IO.ComfyNode):
@@ -280,6 +284,7 @@ class MetaMuseImageEditApi(IO.ComfyNode):
             cls,
             ApiEndpoint(path=EDITS_PATH, method="POST"),
             response_model=MuseImageResponse,
+            asset_urls=True,
             data=MuseImageEditRequest(
                 model=model["model"],
                 prompt=prompt,
@@ -289,7 +294,7 @@ class MetaMuseImageEditApi(IO.ComfyNode):
                 images=[MuseImageInput(image_url=url) for url in urls],
             ),
         )
-        return IO.NodeOutput(_decode_images(response))
+        return IO.NodeOutput(await _decode_images(cls, response))
 
 
 class MetaApiExtension(ComfyExtension):
