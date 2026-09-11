@@ -1,8 +1,10 @@
 import gc
 import os
+import tempfile
 import weakref
 from fractions import Fraction
 
+import av
 import torch
 
 from comfy_api.input_impl.video_types import VideoFromComponents, VideoFromFile, VideoFromList
@@ -78,3 +80,90 @@ def test_nested_complete_audio_uses_most_recent_override():
 
     assert VideoFromList(nested).complete_audio is audios[1]
     assert VideoFromList(nested, audios[2]).complete_audio is audios[2]
+
+
+def test_accumulated_video_packet_concatenates_file_backed_inputs():
+    class NoMaterializeVideo(VideoFromFile):
+        def get_components(self):
+            raise AssertionError("file-backed concatenation decoded video frames")
+
+        def save_to(self, *args, **kwargs):
+            raise AssertionError("compatible file-backed video was rewritten")
+
+    with tempfile.TemporaryDirectory() as directory:
+        sources = []
+        for index, extension in enumerate(("mkv", "mp4")):
+            source = os.path.join(directory, f"source{index}.{extension}")
+            VideoFromComponents(
+                VideoComponents(images=torch.full((2, 16, 16, 3), index / 2), frame_rate=Fraction(8))
+            ).save_to(source)
+            sources.append(NoMaterializeVideo(source))
+
+        output = os.path.join(directory, "output.mp4")
+        VideoFromList(sources).save_to(output)
+        with av.open(output) as container:
+            assert sum(1 for _ in container.decode(video=0)) == 4
+
+
+def test_accumulated_video_reencodes_only_incompatible_chunks():
+    class RewriteTrackingVideo(VideoFromFile):
+        rewritten = False
+
+        def _save_transcoded(self, *args, **kwargs):
+            self.rewritten = True
+            return super()._save_transcoded(*args, **kwargs)
+
+    with tempfile.TemporaryDirectory() as directory:
+        sources = []
+        for bit_depth in (8, 10):
+            source = os.path.join(directory, f"source-{bit_depth}-bit.mp4")
+            VideoFromComponents(
+                VideoComponents(images=torch.zeros((2, 16, 16, 3)), frame_rate=Fraction(8)),
+                bit_depth=bit_depth,
+            ).save_to(source)
+            sources.append(RewriteTrackingVideo(source))
+
+        output = os.path.join(directory, "output.mp4")
+        VideoFromList(sources).save_to(output)
+
+        assert not sources[0].rewritten
+        assert sources[1].rewritten
+        with av.open(output) as container:
+            assert sum(1 for _ in container.decode(video=0)) == 4
+
+
+def test_accumulated_video_stream_source_is_owned_and_reused():
+    video = VideoFromList([
+        VideoFromComponents(VideoComponents(images=torch.zeros((1, 16, 16, 3)), frame_rate=Fraction(8)))
+    ])
+
+    first = video.get_stream_source()
+    second = video.get_stream_source()
+
+    assert first == second
+    assert os.path.exists(first)
+
+
+def test_accumulated_video_continuously_encodes_audio_and_allows_override():
+    audio = AudioInput({"waveform": torch.zeros((1, 2, 2000)), "sample_rate": 8000})
+    videos = [
+        VideoFromComponents(
+            VideoComponents(images=torch.zeros((2, 16, 16, 3)), frame_rate=Fraction(8), audio=audio)
+        )
+        for _ in range(2)
+    ]
+    override = AudioInput({"waveform": torch.ones((1, 1, 8000)), "sample_rate": 8000})
+
+    with tempfile.TemporaryDirectory() as directory:
+        embedded_path = os.path.join(directory, "embedded.mp4")
+        override_path = os.path.join(directory, "override.mp4")
+        VideoFromList(videos).save_to(embedded_path)
+        VideoFromList(videos, override).save_to(override_path)
+
+        with av.open(embedded_path) as embedded, av.open(override_path) as overridden:
+            embedded_audio = embedded.streams.audio[0]
+            overridden_audio = overridden.streams.audio[0]
+            assert embedded_audio.layout.name == "stereo"
+            assert overridden_audio.layout.name == "mono"
+            assert float(embedded_audio.duration * embedded_audio.time_base) <= 0.6
+            assert float(overridden_audio.duration * overridden_audio.time_base) <= 0.6
