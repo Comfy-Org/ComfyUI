@@ -118,6 +118,7 @@ class VaeDecodeShapeTrellis(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="VaeDecodeShapeTrellis",
+            display_name="Trellis2 VAE Decode Shape",
             category="model/latent/trellis",
             inputs=[
                 IO.Latent.Input("samples"),
@@ -196,6 +197,7 @@ class VaeDecodeTextureTrellis(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="VaeDecodeTextureTrellis",
+            display_name="Trellis2 VAE Decode Texture",
             category="model/latent/trellis",
             inputs=[
                 IO.Latent.Input("samples"),
@@ -277,6 +279,7 @@ class VaeDecodeStructureTrellis2(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="VaeDecodeStructureTrellis2",
+            display_name="Trellis2 VAE Decode Structure",
             category="model/latent/trellis",
             inputs=[
                 IO.Latent.Input("samples"),
@@ -318,7 +321,7 @@ class Trellis2UpsampleStage(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="Trellis2UpsampleStage",
-            category="model/conditioning/trellis2",
+            category="model/conditioning/trellis",
             display_name="Trellis2 Upsample Stage",
             inputs=[
                 IO.Conditioning.Input("positive"),
@@ -441,7 +444,7 @@ class Trellis2Conditioning(IO.ComfyNode):
         return IO.Schema(
             node_id="Trellis2Conditioning",
             display_name="Trellis2 Conditioning",
-            category="model/conditioning/trellis2",
+            category="model/conditioning/trellis",
             inputs=[
                 IO.ClipVision.Input("clip_vision_model"),
                 IO.Image.Input("image", tooltip="Preprocessed image from ImageCropToMask (pad_factor=1.0 for TRELLIS.2)."),
@@ -503,7 +506,7 @@ class Trellis2ShapeStage(IO.ComfyNode):
         return IO.Schema(
             node_id="Trellis2ShapeStage",
             display_name="Trellis2 Shape Stage",
-            category="model/conditioning/trellis2",
+            category="model/conditioning/trellis",
             inputs=[
                 IO.Conditioning.Input("positive"),
                 IO.Conditioning.Input("negative"),
@@ -570,7 +573,7 @@ class Trellis2TextureStage(IO.ComfyNode):
         return IO.Schema(
             node_id="Trellis2TextureStage",
             display_name="Trellis2 Texture Stage",
-            category="model/conditioning/trellis2",
+            category="model/conditioning/trellis",
             inputs=[
                 IO.Conditioning.Input("positive"),
                 IO.Conditioning.Input("negative"),
@@ -626,6 +629,7 @@ class EmptyTrellis2LatentStructure(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="EmptyTrellis2LatentStructure",
+            display_name="Empty Trellis2 Latent Structure",
             category="model/latent/trellis",
             inputs=[
                 IO.Int.Input("batch_size", default=1, min=1, max=4096, tooltip="The number of latent images in the batch."),
@@ -768,7 +772,7 @@ class Pixal3DConditioning(IO.ComfyNode):
         return IO.Schema(
             node_id="Pixal3DConditioning",
             display_name="Pixal3D Conditioning",
-            category="model/conditioning/trellis2",
+            category="model/conditioning/trellis",
             inputs=[
                 IO.ClipVision.Input("clip_vision_model", tooltip="DINOv3 ViT-L/16 ClipVision."),
                 IO.Image.Input("image", tooltip="Preprocessed image from ImageCropToMask (pad_factor=1.1 for Pixal3D)."),
@@ -828,7 +832,7 @@ class Pixal3DMultiViewConditioning(IO.ComfyNode):
         return IO.Schema(
             node_id="Pixal3DMultiViewConditioning",
             display_name="Pixal3D Multi-View Conditioning",
-            category="model/conditioning/trellis2",
+            category="model/conditioning/trellis",
             inputs=[IO.ClipVision.Input("clip_vision_model", tooltip="DINOv3 ViT-L/16 ClipVision with bundled NAF weights."),
                     IO.Float.Input("fov", default=20.0, min=1.0, max=170.0, step=0.01, round=False,
                                    tooltip="Horizontal FOV in degrees of the views as framed: 20 for rig renders and most "
