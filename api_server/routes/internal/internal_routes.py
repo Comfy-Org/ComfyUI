@@ -4,6 +4,8 @@ from folder_paths import folder_names_and_paths, get_directory_by_type
 from api_server.services.terminal_service import TerminalService
 import app.logger
 import os
+from utils.extra_config import load_server_config
+
 
 class InternalRoutes:
     '''
@@ -17,6 +19,7 @@ class InternalRoutes:
         self._app: Optional[web.Application] = None
         self.prompt_server = prompt_server
         self.terminal_service = TerminalService(prompt_server)
+        self.config = load_server_config('internal')
 
     def setup_routes(self):
         @self.routes.get('/logs')
@@ -43,7 +46,6 @@ class InternalRoutes:
 
             return web.Response(status=200)
 
-
         @self.routes.get('/folder_paths')
         async def get_folder_paths(request):
             response = {}
@@ -69,6 +71,10 @@ class InternalRoutes:
             )
             return web.json_response([f"{entry.name} [{directory_type}]" for entry in sorted_files], status=200)
 
+        @self.routes.get('/models_download/config')
+        async def get_models_download_config(request):
+            response = self.config.get('modelsDownload', {})
+            return web.json_response(response)
 
     def get_app(self):
         if self._app is None:
