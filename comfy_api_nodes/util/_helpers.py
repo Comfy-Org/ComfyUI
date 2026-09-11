@@ -7,7 +7,10 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from io import BytesIO
+from urllib.parse import urlparse
 
+import aiohttp
+from aiohttp.client_exceptions import ClientError
 from yarl import URL
 
 from comfy.cli_args import args
@@ -73,6 +76,48 @@ def get_comfy_api_headers(node_cls: type[IO.ComfyNode]) -> dict[str, str]:
 
 def default_base_url() -> str:
     return normalize_comfy_api_base(getattr(args, "comfy_api_base", "https://api.comfy.org"))
+
+
+async def diagnose_connectivity() -> dict[str, bool]:
+    """Best-effort connectivity diagnostics to distinguish local vs. server issues."""
+    results = {
+        "internet_accessible": False,
+        "api_accessible": False,
+    }
+    timeout = aiohttp.ClientTimeout(total=5.0)
+
+    # Probe Google and Baidu in parallel: Google is blocked by the GFW in mainland China, so a Baidu probe is required
+    # to correctly detect that Chinese users with working internet do have working internet.
+    internet_probe_urls = ("https://www.google.com", "https://www.baidu.com")
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async def _probe(url: str) -> bool:
+            try:
+                async with session.get(url) as resp:
+                    return resp.status < 500
+            except (ClientError, OSError, asyncio.TimeoutError):
+                return False
+
+        probe_tasks = [asyncio.create_task(_probe(u)) for u in internet_probe_urls]
+        try:
+            for fut in asyncio.as_completed(probe_tasks):
+                if await fut:
+                    results["internet_accessible"] = True
+                    break
+        finally:
+            for t in probe_tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*probe_tasks, return_exceptions=True)
+        if not results["internet_accessible"]:
+            return results
+
+        parsed = urlparse(default_base_url())
+        health_url = f"{parsed.scheme}://{parsed.netloc}/health"
+        with contextlib.suppress(ClientError, OSError):
+            async with session.get(health_url) as resp:
+                results["api_accessible"] = resp.status < 500
+    return results
 
 
 async def sleep_with_interrupt(

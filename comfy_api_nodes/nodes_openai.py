@@ -84,12 +84,15 @@ SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
 }
 
 
-async def validate_and_cast_response(response, timeout: int = None) -> torch.Tensor:
+async def validate_and_cast_response(
+    response, timeout: int = None, cls: type[IO.ComfyNode] = None
+) -> torch.Tensor:
     """Validates and casts a response to a torch.Tensor.
 
     Args:
         response: The response to validate and cast.
         timeout: Request timeout in seconds. Defaults to None (no timeout).
+        cls: The calling node class; required for relative `/proxy/` URLs so they can be expanded and authenticated.
 
     Returns:
         A torch.Tensor of shape (N, H, W, C) with all returned images; images whose
@@ -112,7 +115,7 @@ async def validate_and_cast_response(response, timeout: int = None) -> torch.Ten
             img_io = BytesIO(base64.b64decode(img_data.b64_json))
         elif img_data.url:
             img_io = BytesIO()
-            await download_url_to_bytesio(img_data.url, img_io, timeout=timeout)
+            await download_url_to_bytesio(img_data.url, img_io, timeout=timeout, cls=cls)
         else:
             raise ValueError("Invalid image payload – neither URL nor base64 data present.")
 
@@ -367,6 +370,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 cls,
                 ApiEndpoint(path="/proxy/openai/images/edits", method="POST"),
                 response_model=OpenAIImageGenerationResponse,
+                asset_urls=True,
                 data=OpenAIImageEditRequest(
                     model=model,
                     prompt=prompt,
@@ -385,6 +389,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 cls,
                 ApiEndpoint(path="/proxy/openai/images/generations", method="POST"),
                 response_model=OpenAIImageGenerationResponse,
+                asset_urls=True,
                 data=OpenAIImageGenerationRequest(
                     model=model,
                     prompt=prompt,
@@ -396,7 +401,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                     moderation="low",
                 ),
             )
-        return IO.NodeOutput(await validate_and_cast_response(response))
+        return IO.NodeOutput(await validate_and_cast_response(response, cls=cls))
 
 
 GPT_IMAGE_QUALITIES = ("low", "medium", "high")
@@ -732,6 +737,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                 cls,
                 ApiEndpoint(path="/proxy/openai/images/edits", method="POST"),
                 response_model=OpenAIImageGenerationResponse,
+                asset_urls=True,
                 data=OpenAIImageEditRequest(
                     model=model_id,
                     prompt=prompt,
@@ -749,6 +755,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                 cls,
                 ApiEndpoint(path="/proxy/openai/images/generations", method="POST"),
                 response_model=OpenAIImageGenerationResponse,
+                asset_urls=True,
                 data=OpenAIImageGenerationRequest(
                     model=model_id,
                     prompt=prompt,
@@ -759,7 +766,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                     moderation="low",
                 ),
             )
-        return IO.NodeOutput(await validate_and_cast_response(response))
+        return IO.NodeOutput(await validate_and_cast_response(response, cls=cls))
 
 
 class OpenAIChatNode(IO.ComfyNode):
