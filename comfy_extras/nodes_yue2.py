@@ -39,7 +39,7 @@ class YuE2GenerateMusic(io.ComfyNode):
             node_id="YuE2GenerateMusic",
             display_name="YuE2 Generate Music",
             category="model/conditioning/yue2",
-            description="Generates music tokens and acoustic conditioning from style, lyrics, and an ABC score. Use seconds for the empty latent duration. An empty ABC input automatically selects off mode.",
+            description="Generates music tokens and acoustic conditioning from style, lyrics, and an ABC notation. Provide the generated seconds to the Empty YuE2 Latent Audio node. An empty ABC input ignores the selected mode.",
             inputs=[
                 io.Clip.Input("clip"),
                 io.String.Input("style", multiline=True, dynamic_prompts=True),
