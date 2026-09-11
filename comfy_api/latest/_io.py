@@ -1320,10 +1320,17 @@ class DynamicSlot(ComfyTypeI):
 class DynamicGroup(ComfyTypeI):
     """Repeat a widget template and pass its values to execute as a list of row dicts.
 
-    min/max count submitted rows, independently of the template's required fields.
-    Missing indices are preserved as rows whose fields are None, so the resulting
-    list can be longer than max. Its length is limited to 100. Use min=0 to allow
-    an empty group, including when the group input is optional.
+    Template fields must be widget inputs without force_input or nested dynamic inputs.
+    Submit fields as '<group>.<index>.<field>', using indices 0 through 99 without leading zeros.
+    min/max count submitted rows (defaults: 0/50), even when optional=True.
+    Each submitted row follows the template's required/optional field declarations.
+
+    Missing positions are dicts whose fields are None. Missing optional fields are
+    also None; widget defaults are not injected. The list can be longer than max,
+    but never longer than 100.
+
+    Empty groups are [] in execute and check_lazy_status. Nonempty lazy groups
+    contain (value, original_key) tuples at each field.
     """
 
     Type = list[dict[str, Any]]
@@ -1401,7 +1408,7 @@ class DynamicGroup(ComfyTypeI):
                 slot_id = f"{finalized_prefix}.{row}.{field_id}"
                 if row in present_rows:
                     out_dict[category][slot_id] = field_value
-                # Only submitted rows are validated; all positions are preserved on reconstruction.
+                # Preserve gaps without adding validation inputs for them.
                 out_dict["dynamic_paths"][slot_id] = slot_id
 
         out_dict["list_paths"].add(finalized_prefix)
@@ -1991,7 +1998,6 @@ def get_finalized_class_inputs(d: dict[str, Any], live_inputs: dict[str, Any], i
     dynamic_paths = out_dict.pop("dynamic_paths", None)
     if dynamic_paths is not None and len(dynamic_paths) > 0:
         v3_data["dynamic_paths"] = dynamic_paths
-    # this list is used for autogrow, in the case all inputs are optional and no values are passed
     dynamic_paths_default_value = out_dict.pop("dynamic_paths_default_value", None)
     if dynamic_paths_default_value is not None and len(dynamic_paths_default_value) > 0:
         v3_data["dynamic_paths_default_value"] = dynamic_paths_default_value
@@ -2056,7 +2062,7 @@ def build_nested_inputs(values: dict[str, Any], v3_data: V3Data):
             if is_last:
                 value = values.pop(key, None)
                 if value is None:
-                    # see if a default value was provided for this key
+                    # Apply empty-container markers, not widget defaults.
                     default_option = default_value_dict.get(key, None)
                     if default_option == DynamicPathsDefaultValue.EMPTY_DICT:
                         value = {}
