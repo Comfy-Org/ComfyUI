@@ -129,11 +129,13 @@ class ModelSamplingSD3:
 
     CATEGORY = "model/patch/stable diffusion"
 
-    def patch(self, model, shift, multiplier=1000):
+    def patch(self, model, shift, multiplier=1000, sampling="flow"):
         m = model.clone()
 
         sampling_base = comfy.model_sampling.ModelSamplingDiscreteFlow
         sampling_type = comfy.model_sampling.CONST
+        if sampling == "img_to_img_velocity":
+            sampling_type = comfy.model_sampling.IMG_TO_IMG_VELOCITY
 
         class ModelSamplingAdvanced(sampling_base, sampling_type):
             pass
@@ -151,13 +153,15 @@ class ModelSamplingAuraFlow(ModelSamplingSD3):
     def INPUT_TYPES(s):
         return {"required": { "model": ("MODEL",),
                               "shift": ("FLOAT", {"default": 1.73, "min": 0.0, "max": 100.0, "step":0.01}),
+                              },
+                "optional": { "sampling": (["flow", "img_to_img_velocity"], {"default": "flow", "advanced": True}),
                               }}
 
     FUNCTION = "patch_aura"
     CATEGORY = "model/patch"
 
-    def patch_aura(self, model, shift):
-        return self.patch(model, shift, multiplier=1.0)
+    def patch_aura(self, model, shift, sampling="flow"):
+        return self.patch(model, shift, multiplier=1.0, sampling=sampling)
 
 class ModelSamplingFlux:
     @classmethod
