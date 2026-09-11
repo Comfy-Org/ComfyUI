@@ -524,6 +524,22 @@ def test_upload_image_accepts_arbitrary_subfolder_but_only_known_values_become_t
     assert tags.isdisjoint(unexpected_tags)
 
 
+@pytest.mark.parametrize("route", ["/upload/image", "/upload/mask"])
+@pytest.mark.parametrize("upload_type", ["foo", "", "   "])
+def test_upload_rejects_unknown_type(
+    http: requests.Session,
+    api_base: str,
+    route: str,
+    upload_type: str,
+):
+    files = {"image": ("unknown-type.png", b"image-upload" * 64, "image/png")}
+    form = {"type": upload_type}
+
+    response = http.post(api_base + route, data=form, files=files, timeout=120)
+
+    assert response.status_code == 400
+
+
 def test_multipart_upload_accepts_system_looking_extra_labels(
     http: requests.Session, api_base: str
 ):
