@@ -50,6 +50,13 @@ def test_rejects_socket_template():
         io.DynamicGroup.Input("rows", template=[io.Image.Input("image")])
 
 
+@pytest.mark.parametrize("limit", ["min", "max"])
+@pytest.mark.parametrize("value", [1.5, True, False])
+def test_rejects_non_integer_limits(limit, value):
+    with pytest.raises(TypeError, match="min and max must be integers"):
+        io.DynamicGroup.Input("rows", template=[io.Float.Input("x")], **{limit: value})
+
+
 @pytest.mark.parametrize("lazy", [False, True])
 @pytest.mark.parametrize("values", [{}, {"rows": 0}, {"rows": 7}, {"rows": [1, 2, 3]}, {"rows": {"bad": "data"}}])
 def test_empty_group_is_an_empty_list(lazy, values):

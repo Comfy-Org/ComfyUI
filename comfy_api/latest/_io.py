@@ -1323,7 +1323,7 @@ class DynamicGroup(ComfyTypeI):
     Template fields must be widget inputs without force_input or nested dynamic inputs.
     Submit fields as '<group>.<index>.<field>', using indices below max without leading zeros.
     The '<group>.' prefix is reserved for group fields, not separate sibling inputs.
-    min/max count submitted rows (defaults: 0/50), even when optional=True.
+    min/max are integers that count submitted rows (defaults: 0/50), even when optional=True.
     max also bounds the reconstructed list length and cannot exceed 100.
     Each submitted row follows the template's required/optional field declarations.
 
@@ -1358,6 +1358,8 @@ class DynamicGroup(ComfyTypeI):
                 raise ValueError("DynamicGroup template field ids must be unique within a row.")
             if not id or "." in id:
                 raise ValueError(f"DynamicGroup id must be nonempty and must not contain '.'. Got: '{id}'")
+            if isinstance(min, bool) or not isinstance(min, int) or isinstance(max, bool) or not isinstance(max, int):
+                raise TypeError("DynamicGroup min and max must be integers.")
             if not 1 <= max <= DynamicGroup._MaxRows:
                 raise ValueError(f"DynamicGroup max must be between 1 and {DynamicGroup._MaxRows}.")
             if not 0 <= min <= max:
