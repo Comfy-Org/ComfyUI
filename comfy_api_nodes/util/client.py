@@ -30,12 +30,14 @@ from . import request_logger
 from ._helpers import (
     _retry_after_wait,
     default_base_url,
+    diagnose_connectivity,
     get_comfy_api_headers,
     get_node_id,
     is_processing_interrupted,
     sleep_with_interrupt,
 )
 from .common_exceptions import ApiServerError, LocalNetworkError, ProcessingInterrupted
+from .download_helpers import download_url_to_bytesio
 
 M = TypeVar("M", bound=BaseModel)
 
@@ -76,6 +78,7 @@ class _RequestConfig:
     is_rate_limited: Callable[[int, Any], bool] | None = None
     response_header_validator: Callable[[dict[str, str]], None] | None = None
     idempotency_key: str | None = None
+    asset_urls: bool = False
 
 
 @dataclass
@@ -95,6 +98,8 @@ _RETRY_STATUS = {408, 500, 502, 503, 504}  # status 429 is handled separately
 _MAX_RETRY_AFTER_WAIT = 150.0  # Cap a server Retry-After at this many seconds so a large hint can't block execution
 
 IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+ASSET_FORMAT_HEADER = "Comfy-Asset-Format"
+ASSET_FORMAT_URL = "url"
 _IDEMPOTENT_REPLAYED_HEADER = "Idempotent-Replayed"
 _ERROR_TYPE_HEADER = "X-Comfy-Error-Type"
 _IDEMPOTENCY_IN_FLIGHT = "idempotency_in_flight"
@@ -192,6 +197,7 @@ async def sync_op(
     monitor_progress: bool = True,
     max_retries_on_rate_limit: int = 16,
     is_rate_limited: Callable[[int, Any], bool] | None = None,
+    asset_urls: bool = False,
 ) -> M:
     raw = await sync_op_raw(
         cls,
@@ -212,6 +218,7 @@ async def sync_op(
         monitor_progress=monitor_progress,
         max_retries_on_rate_limit=max_retries_on_rate_limit,
         is_rate_limited=is_rate_limited,
+        asset_urls=asset_urls,
     )
     if not isinstance(raw, dict):
         raise Exception("Expected JSON response to validate into a Pydantic model, got non-JSON (binary or text).")
@@ -289,12 +296,15 @@ async def sync_op_raw(
     is_rate_limited: Callable[[int, Any], bool] | None = None,
     response_header_validator: Callable[[dict[str, str]], None] | None = None,
     idempotent: bool = True,
+    asset_urls: bool = False,
 ) -> dict[str, Any] | bytes:
     """
     Make a single network request.
       - If as_binary=False (default): returns JSON dict (or {'_raw': '<text>'} if non-JSON).
       - If as_binary=True: returns bytes.
       - response_header_validator: optional callback receiving response headers dict
+      - asset_urls=True: asks the proxy for Comfy-hosted URLs in place of inline media; a JSON {"url": ...}
+        answer to an as_binary request is downloaded and returned as the bytes.
     """
     if isinstance(data, BaseModel):
         data = data.model_dump(exclude_none=True)
@@ -321,6 +331,7 @@ async def sync_op_raw(
         is_rate_limited=is_rate_limited,
         response_header_validator=response_header_validator,
         idempotency_key=uuid.uuid4().hex if idempotent and endpoint.method != "GET" else None,
+        asset_urls=asset_urls,
     )
     return await _request_base(cfg, expect_binary=as_binary)
 
@@ -623,48 +634,6 @@ def _estimate_progress_pct(elapsed_seconds: float, p50_seconds: int | None, p90_
     return 90 + int(5.0 * (elapsed_seconds - p50_seconds) / (horizon - p50_seconds))
 
 
-async def _diagnose_connectivity() -> dict[str, bool]:
-    """Best-effort connectivity diagnostics to distinguish local vs. server issues."""
-    results = {
-        "internet_accessible": False,
-        "api_accessible": False,
-    }
-    timeout = aiohttp.ClientTimeout(total=5.0)
-
-    # Probe Google and Baidu in parallel: Google is blocked by the GFW in mainland China, so a Baidu probe is required
-    # to correctly detect that Chinese users with working internet do have working internet.
-    internet_probe_urls = ("https://www.google.com", "https://www.baidu.com")
-
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async def _probe(url: str) -> bool:
-            try:
-                async with session.get(url) as resp:
-                    return resp.status < 500
-            except (ClientError, OSError, asyncio.TimeoutError):
-                return False
-
-        probe_tasks = [asyncio.create_task(_probe(u)) for u in internet_probe_urls]
-        try:
-            for fut in asyncio.as_completed(probe_tasks):
-                if await fut:
-                    results["internet_accessible"] = True
-                    break
-        finally:
-            for t in probe_tasks:
-                if not t.done():
-                    t.cancel()
-            await asyncio.gather(*probe_tasks, return_exceptions=True)
-        if not results["internet_accessible"]:
-            return results
-
-        parsed = urlparse(default_base_url())
-        health_url = f"{parsed.scheme}://{parsed.netloc}/health"
-        with contextlib.suppress(ClientError, OSError):
-            async with session.get(health_url) as resp:
-                results["api_accessible"] = resp.status < 500
-    return results
-
-
 def _normalize_files(files: dict[str, Any] | list[tuple[str, Any]]) -> list[tuple[str, str, Any, str]]:
     """Flatten `files` into (field_name, filename, value, content_type) once per request.
 
@@ -858,6 +827,43 @@ def _snapshot_request_body_for_logging(
     return data or {}
 
 
+async def _read_binary_body(resp: aiohttp.ClientResponse, cfg: _RequestConfig, start_time: float) -> bytes:
+    buff = bytearray()
+    last_tick = time.monotonic()
+    async for chunk in resp.content.iter_chunked(64 * 1024):
+        buff.extend(chunk)
+        now = time.monotonic()
+        if now - last_tick >= 1.0:
+            last_tick = now
+            if is_processing_interrupted():
+                raise ProcessingInterrupted("Task cancelled")
+            if cfg.monitor_progress:
+                _display_time_progress(cfg.node_cls, cfg.wait_label, int(now - start_time))
+    return bytes(buff)
+
+
+def _asset_url_from_envelope(resp: aiohttp.ClientResponse, body: bytes) -> str | None:
+    if resp.content_type != "application/json":
+        return None
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    asset_url = payload.get("url") if isinstance(payload, dict) else None
+    return asset_url if isinstance(asset_url, str) and asset_url else None
+
+
+async def _download_asset(asset_url: str, cfg: _RequestConfig) -> bytes:
+    buf = BytesIO()
+    try:
+        await download_url_to_bytesio(asset_url, buf, timeout=cfg.timeout, cls=cfg.node_cls)
+    except (ProcessingInterrupted, LocalNetworkError, ApiServerError):
+        raise
+    except Exception as e:
+        raise Exception(f"The request completed, but its result could not be downloaded: {e}") from e
+    return buf.getvalue()
+
+
 async def _request_base(cfg: _RequestConfig, expect_binary: bool):
     """Core request with retries, per-second interruption monitoring, true cancellation, and friendly errors."""
     url = cfg.endpoint.path
@@ -911,6 +917,8 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
             payload_headers.update(cfg.endpoint.headers)
         if keyed:
             payload_headers[IDEMPOTENCY_KEY_HEADER] = cfg.idempotency_key
+        if cfg.asset_urls and is_comfy_api_request:
+            payload_headers[ASSET_FORMAT_HEADER] = ASSET_FORMAT_URL
 
         payload_kw: dict[str, Any] = {"headers": payload_headers}
         if method == "GET":
@@ -1083,19 +1091,9 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                     raise Exception(msg)
 
                 if expect_binary:
-                    buff = bytearray()
-                    last_tick = time.monotonic()
-                    async for chunk in resp.content.iter_chunked(64 * 1024):
-                        buff.extend(chunk)
-                        now = time.monotonic()
-                        if now - last_tick >= 1.0:
-                            last_tick = now
-                            if is_processing_interrupted():
-                                raise ProcessingInterrupted("Task cancelled")
-                            if cfg.monitor_progress:
-                                _display_time_progress(cfg.node_cls, cfg.wait_label, int(now - start_time))
-                    bytes_payload = bytes(buff)
+                    bytes_payload = await _read_binary_body(resp, cfg, start_time)
                     resp_headers = {k.lower(): v for k, v in resp.headers.items()}
+                    asset_url = _asset_url_from_envelope(resp, bytes_payload) if cfg.asset_urls else None
                     if is_comfy_api_request:
                         _maybe_remember_credits_used(cfg.node_cls, resp.headers.get(PRICE_CREDITS_HEADER))
                         _maybe_remember_server_estimate(cfg.node_cls, resp.headers)
@@ -1104,8 +1102,6 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                             extracted_price = cfg.price_extractor(resp_headers)
                     if cfg.response_header_validator:
                         cfg.response_header_validator(resp_headers)
-                    operation_succeeded = True
-                    final_elapsed_seconds = int(time.monotonic() - start_time)
                     request_logger.log_request_response(
                         operation_id=operation_id,
                         request_method=method,
@@ -1114,6 +1110,10 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                         response_headers=resp_headers,
                         response_content=bytes_payload,
                     )
+                    if asset_url:
+                        bytes_payload = await _download_asset(asset_url, cfg)
+                    operation_succeeded = True
+                    final_elapsed_seconds = int(time.monotonic() - start_time)
                     return bytes_payload
                 else:
                     try:
@@ -1178,7 +1178,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                 )
                 delay *= cfg.retry_backoff
                 continue
-            diag = await _diagnose_connectivity()
+            diag = await diagnose_connectivity()
             if not diag["internet_accessible"]:
                 request_logger.log_request_response(
                     operation_id=operation_id,
