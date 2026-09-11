@@ -131,7 +131,7 @@ class SaveConditioning(io.ComfyNode):
         safetensors.torch.save_file({k: v.detach().to("cpu", copy=True).contiguous() for k, v in sd.items()},
                                     os.path.join(full_output_folder, f"{filename}_{counter:05}_.safetensors"),
                                     metadata={"conditioning_options": json.dumps(values)})
-        return io.NodeOutput()
+        return io.NodeOutput(conditioning)
 
 
 class CondExtension(ComfyExtension):
