@@ -160,7 +160,8 @@ jobs:
         run: |
           cd ..
           cd ComfyUI_windows_portable
-          python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu --enable-manager
+          python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu --enable-manager | tee manager_smoke.log
+          grep -q "\[START\] ComfyUI-Manager" manager_smoke.log
 
           python_embeded/python.exe -s ./update/update.py ComfyUI/
 

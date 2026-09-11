@@ -81,7 +81,8 @@ jobs:
             mv ComfyUI_windows_portable_nightly_pytorch.7z ComfyUI/ComfyUI_windows_portable_nvidia_or_cpu_nightly_pytorch.7z
 
             cd ComfyUI_windows_portable_nightly_pytorch
-            python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu --enable-manager
+            python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu --enable-manager | tee manager_smoke.log
+            grep -q "\[START\] ComfyUI-Manager" manager_smoke.log
 
             ls
 
