@@ -122,6 +122,8 @@ jobs:
           ./python.exe -s -m pip uninstall -y comfyui-workflow-templates-media-image comfyui-workflow-templates-media-video comfyui-workflow-templates-media-other
           rm requirements_comfyui.txt
 
+          ./python.exe -s -m pip install -r ../ComfyUI/manager_requirements.txt
+
           sed -i '1i../ComfyUI' ./python3${{ inputs.python_minor }}._pth
 
           if test -f ./Lib/site-packages/torch/lib/dnnl.lib; then
@@ -158,7 +160,7 @@ jobs:
         run: |
           cd ..
           cd ComfyUI_windows_portable
-          python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu
+          python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu --enable-manager
 
           python_embeded/python.exe -s ./update/update.py ComfyUI/
 
