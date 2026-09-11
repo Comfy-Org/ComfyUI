@@ -27,7 +27,7 @@ class YuE2GenerateABC(io.ComfyNode):
 
     @classmethod
     def execute(cls, clip, style, lyrics, seed, mode, max_abc_tokens):
-        tokens = clip.tokenize(style, lyrics=lyrics, cot=cot, seed=seed, max_tokens=max_abc_tokens)
+        tokens = clip.tokenize(style, lyrics=lyrics, cot=mode, seed=seed, max_tokens=max_abc_tokens)
         ids = clip.generate(tokens, max_length=max_abc_tokens, temperature=0.7, top_p=0.9, top_k=30, repetition_penalty=1.005, seed=seed)
         return io.NodeOutput(clip.decode(ids))
 
@@ -59,7 +59,7 @@ class YuE2GenerateMusic(io.ComfyNode):
     @classmethod
     def execute(cls, clip, style, lyrics, seed, mode, max_duration, temperature, top_p, top_k, repetition_penalty, abc=""):
         if not abc.strip():
-            cot = "off"
+            mode = "off"
         tokens = clip.tokenize(style, lyrics=lyrics, cot=mode, seed=seed, abc=abc,
                                max_tokens=max(1, round(max_duration * FRAMES_PER_SECOND)),
                                temperature=temperature, top_p=top_p, top_k=top_k, repetition_penalty=repetition_penalty)
