@@ -21,7 +21,7 @@ from app.assets.database.queries.records import (
     mark_content_missing,
     unset_content_missing,
 )
-from app.assets.helpers import to_stored_hash
+from app.assets.helpers import sql_path_under_prefix, to_stored_hash
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 from app.assets.services.snapshot_hash import snapshot_hash
 
@@ -193,7 +193,13 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
 
 
 def live_contents_under_prefixes(session: Session, prefixes: list[str]) -> list[AssetContent]:
-    contents = session.scalars(
-        sa.select(AssetContent).where(AssetContent.is_missing.is_(False))
+    if not prefixes:
+        return []
+    return list(
+        session.scalars(
+            sa.select(AssetContent).where(
+                AssetContent.is_missing.is_(False),
+                sa.or_(*(sql_path_under_prefix(AssetContent.path, prefix) for prefix in prefixes)),
+            )
+        )
     )
-    return [content for content in contents if is_path_under_prefixes(content.path, prefixes)]

@@ -9,9 +9,12 @@ from unittest.mock import patch
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from app.assets.database.queries import create_content, create_record
+from app.assets.database.queries import create_content, create_record, mark_content_missing
 from app.assets.scanner import get_unenriched_assets_for_roots
-from app.assets.scanner_changes import is_path_under_prefixes
+from app.assets.scanner_changes import (
+    is_path_under_prefixes,
+    live_contents_under_prefixes,
+)
 
 from .path_prefix_cases import prefix_case_paths
 
@@ -205,3 +208,100 @@ def test_prefix_holding_metacharacters_matches_only_literal_children(
 
     assert is_path_under_prefixes(decoy_path, [root]) is False
     assert returned == {inside_path}
+
+
+# --- live_contents_under_prefixes direct pins ---
+# These pins exercise live_contents_under_prefixes directly, not the enrichment predicate.
+
+
+def test_live_contents_under_prefixes_returns_empty_for_empty_prefixes(
+    session: Session, temp_dir: Path
+) -> None:
+    _ = create_content(session, str(temp_dir / "seed.safetensors"))
+
+    returned = {content.path for content in live_contents_under_prefixes(session, [])}
+
+    assert returned == set()
+
+
+def test_live_contents_under_prefixes_matches_directory_and_exact_path_prefixes(
+    session: Session, temp_dir: Path
+) -> None:
+    content = create_content(session, str(temp_dir / "root" / "model.safetensors"))
+
+    under_directory = {candidate.path for candidate in live_contents_under_prefixes(session, [str(temp_dir / "root")])}
+    exact_path = {candidate.path for candidate in live_contents_under_prefixes(session, [content.path])}
+
+    assert under_directory == {content.path}
+    assert exact_path == {content.path}
+
+
+def test_live_contents_under_prefixes_respects_sibling_boundary(
+    session: Session, temp_dir: Path
+) -> None:
+    sibling_path = str(temp_dir / "a" / "bc" / "model.safetensors")
+    _ = create_content(session, sibling_path)
+
+    returned = {content.path for content in live_contents_under_prefixes(session, [str(temp_dir / "a" / "b")])}
+
+    assert returned == set()
+
+
+def test_live_contents_under_prefixes_is_case_sensitive(
+    session: Session, temp_dir: Path
+) -> None:
+    case_different_path = str(temp_dir / "data" / "TEMP" / "model.safetensors")
+    _ = create_content(session, case_different_path)
+
+    returned = {content.path for content in live_contents_under_prefixes(session, [str(temp_dir / "data" / "temp")])}
+
+    assert returned == set()
+
+
+def test_live_contents_under_prefixes_treats_metacharacters_literally(
+    session: Session, temp_dir: Path
+) -> None:
+    prefix = temp_dir / "a_b%c*d?e[f"
+    literal_child = create_content(session, str(prefix / "child.safetensors"))
+    decoy_path = str(temp_dir / "aXbYc*d?e[f" / "keep.safetensors")
+    _ = create_content(session, decoy_path)
+
+    returned = {content.path for content in live_contents_under_prefixes(session, [str(prefix)])}
+
+    assert returned == {literal_child.path}
+
+
+def test_live_contents_under_prefixes_matches_any_prefix(
+    session: Session, temp_dir: Path
+) -> None:
+    content = create_content(session, str(temp_dir / "second" / "model.safetensors"))
+    prefixes = [str(temp_dir / "first"), str(temp_dir / "second")]
+
+    returned = {candidate.path for candidate in live_contents_under_prefixes(session, prefixes)}
+
+    assert returned == {content.path}
+
+
+def test_live_contents_under_prefixes_excludes_missing_content(
+    session: Session, temp_dir: Path
+) -> None:
+    content = create_content(session, str(temp_dir / "root" / "missing.safetensors"))
+    mark_content_missing(session, content.id)
+
+    returned = {candidate.path for candidate in live_contents_under_prefixes(session, [str(temp_dir / "root")])}
+
+    assert returned == set()
+
+
+def test_live_contents_under_prefixes_equals_python_predicate_for_corpus(
+    session: Session, temp_dir: Path
+) -> None:
+    root = str(temp_dir / "root")
+    corpus = prefix_case_paths(root)
+    stored_paths = {create_content(session, path).path for path in corpus}
+    prefixes = [root]
+
+    returned = {content.path for content in live_contents_under_prefixes(session, prefixes)}
+    expected = {path for path in stored_paths if is_path_under_prefixes(path, prefixes)}
+
+    assert returned == expected

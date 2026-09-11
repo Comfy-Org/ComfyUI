@@ -457,13 +457,22 @@ def setup_database(asset_manager):
         init_db()
         asset_manager.startup()
     except Exception as e:
-        if "database is locked" in str(e) or "Could not acquire lock on database" in str(e):
+        if "database is locked" in str(e):
             logging.error(
                 "Database is locked. Another ComfyUI process is already using this database.\n"
                 "To resolve this, specify a separate database file for this instance:\n"
                 "  --database-url sqlite:///path/to/another.db"
             )
             sys.exit(1)
+        if "Could not acquire lock on database" in str(e):
+            logging.error(
+                "Database is locked. Another ComfyUI process is already using this database.\n"
+                "To resolve this, specify a separate database file for this instance:\n"
+                "  --database-url sqlite:///path/to/another.db"
+            )
+            if args.enable_assets:
+                sys.exit(1)
+            return
         if args.enable_assets:
             logging.error(
                 f"Failed to initialize database: {e}\n"
