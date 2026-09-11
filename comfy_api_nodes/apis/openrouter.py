@@ -57,6 +57,15 @@ class OpenRouterChatRequest(BaseModel):
     stream: bool = Field(False)
 
 
+class OpenRouterImageRequest(BaseModel):
+    model: str = Field(...)
+    prompt: str = Field(...)
+    aspect_ratio: str | None = Field(None)
+    size: str | None = Field(None)
+    input_references: list[OpenRouterImageContent] | None = Field(None)
+    stream: bool = Field(False)
+
+
 class OpenRouterUsage(BaseModel):
     prompt_tokens: int | None = Field(None)
     completion_tokens: int | None = Field(None)
@@ -89,5 +98,17 @@ class OpenRouterChatResponse(BaseModel):
     object: str | None = Field(None)
     provider: str | None = Field(None)
     choices: list[OpenRouterChoice] | None = Field(None)
+    usage: OpenRouterUsage | None = Field(None)
+    error: OpenRouterError | None = Field(None)
+
+
+class OpenRouterImageData(BaseModel):
+    b64_json: str | None = Field(None)
+    media_type: str | None = Field(None)
+
+
+class OpenRouterImageResponse(BaseModel):
+    created: int | None = Field(None)
+    data: list[OpenRouterImageData] | None = Field(None)
     usage: OpenRouterUsage | None = Field(None)
     error: OpenRouterError | None = Field(None)

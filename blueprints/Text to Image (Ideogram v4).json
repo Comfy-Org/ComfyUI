@@ -2462,7 +2462,7 @@
           }
         ],
         "extra": {},
-        "category": "Image generation and editing/Text to image",
+        "category": "Image generation/Text to image",
         "description": "This subgraph generates images using Ideogram v4, accepting plain text or structured JSON prompts for precise layout and style control. It suits detailed illustrations, concept art, or marketing visuals needing predictable composition and color palettes. The model uses flow-matching with asymmetric guidance, so no negative prompt is needed, but JSON prompts yield the best results."
       }
     ]
