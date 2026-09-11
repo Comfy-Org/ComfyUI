@@ -57,7 +57,7 @@ class SheetSage2AudioToABC(io.ComfyNode):
             node_id="SheetSage2AudioToABC",
             display_name="SheetSage2 Audio to ABC",
             category="model/conditioning/yue2",
-            description="Transcribes vocal and instrumental melodies from music. Connect abc to YuE2 Generate Music and use the matching cot mode.",
+            description="Transcribes vocal and instrumental melodies from music into ABC notation. Connect abc output to YuE2 Generate Music node and use the matching mode.",
             inputs=[
                 io.AudioEncoder.Input("audio_encoder"),
                 io.Audio.Input("audio"),
