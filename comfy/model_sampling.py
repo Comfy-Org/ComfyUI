@@ -125,6 +125,9 @@ class IMG_TO_IMG_VELOCITY(CONST):
     def noise_scaling(self, sigma, noise, latent_image, max_denoise=False):
         return latent_image
 
+    def inverse_noise_scaling(self, sigma, latent):
+        return latent
+
 class COSMOS_RFLOW:
     def calculate_input(self, sigma, noise):
         sigma = (sigma / (sigma + 1))
