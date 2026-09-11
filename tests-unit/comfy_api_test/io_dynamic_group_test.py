@@ -31,7 +31,8 @@ def test_serializes_one_template_with_field_requirements():
     ("rows", [io.Float.Input("x"), io.Float.Input("x")], {}),
     ("rows.bad", [io.Float.Input("x")], {}),
     ("rows", [io.Float.Input("x.bad")], {}),
-    ("rows", [io.Image.Input("image")], {}),
+    ("", [io.Float.Input("x")], {}),
+    ("rows", [io.Float.Input("")], {}),
     ("rows", [io.Float.Input("x", force_input=True)], {}),
     ("rows", [io.DynamicGroup.Input("nested", template=[io.Float.Input("x")])], {}),
     ("rows", [io.Float.Input("x")], {"min": -1}),
@@ -40,14 +41,39 @@ def test_serializes_one_template_with_field_requirements():
     ("rows", [io.Float.Input("x")], {"max": 101}),
 ])
 def test_rejects_invalid_template_or_limits(group_id, template, limits):
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         io.DynamicGroup.Input(group_id, template=template, **limits)
 
 
+def test_rejects_socket_template():
+    with pytest.raises(TypeError, match="WidgetInputs"):
+        io.DynamicGroup.Input("rows", template=[io.Image.Input("image")])
+
+
 @pytest.mark.parametrize("lazy", [False, True])
-def test_empty_group_is_an_empty_list(lazy):
+@pytest.mark.parametrize("values", [{}, {"rows": 0}, {"rows": 7}, {"rows": [1, 2, 3]}, {"rows": {"bad": "data"}}])
+def test_empty_group_is_an_empty_list(lazy, values):
     group = io.DynamicGroup.Input("rows", template=[io.Float.Input("x", default=1.0)], min=0)
-    assert _reconstruct(group, {}, lazy=lazy) == {"rows": []}
+    assert _reconstruct(group, values, lazy=lazy) == {"rows": []}
+
+
+@pytest.mark.parametrize("sibling_id", ["rows.summary", "rows.0.x"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_rejects_sibling_input_in_group_namespace(sibling_id, nested):
+    inputs = [
+        io.Float.Input(sibling_id, optional=True),
+        io.DynamicGroup.Input("rows", template=[io.Float.Input("x")]),
+    ]
+    if nested:
+        inputs = [io.DynamicCombo.Input("mode", options=[io.DynamicCombo.Option("on", inputs)])]
+    with pytest.raises(ValueError, match="conflicts with a DynamicGroup field prefix"):
+        create_input_dict_v1(inputs)
+
+
+def test_other_dotted_input_ids_are_unchanged():
+    inputs = [io.DynamicGroup.Input("rows", template=[io.Float.Input("x")]), io.Float.Input("rows_summary.value")]
+    schema = create_input_dict_v1(inputs)
+    assert schema["required"]["rows_summary.value"] == ("FLOAT", {})
 
 
 @pytest.mark.parametrize("minimum", [0, 1, 2])
@@ -77,7 +103,7 @@ def test_min_counts_submitted_rows_without_padding(optional_group, values):
 def test_sparse_rows_preserve_positions_without_defaults():
     group = io.DynamicGroup.Input("rows", template=[
         io.String.Input("name"), io.Float.Input("weight", default=1.0, optional=True),
-    ], min=2, max=2)
+    ], min=2, max=3)
     values = {"rows.2.name": "C", "rows.2.weight": 0.5, "rows.0.name": "A"}
     assert _reconstruct(group, values) == {"rows": [
         {"name": "A", "weight": None},
@@ -92,7 +118,7 @@ def test_max_counts_rows_not_fields():
     assert _reconstruct(group, {"rows.0.name": "A", "rows.0.weight": 0.8}) == {
         "rows": [{"name": "A", "weight": 0.8}],
     }
-    with pytest.raises(ValueError, match="received 2 rows; expected between 0 and 1"):
+    with pytest.raises(ValueError, match="exceeds the index limit of 0"):
         _reconstruct(group, {"rows.0.name": "A", "rows.2.name": "C"})
 
 
@@ -108,16 +134,16 @@ def test_rejects_malformed_row_keys(key):
 
 
 def test_largest_supported_index_preserves_position():
-    group = io.DynamicGroup.Input("rows", template=[io.Float.Input("x")], max=1)
+    group = io.DynamicGroup.Input("rows", template=[io.Float.Input("x")], max=100)
     rows = _reconstruct(group, {"rows.99.x": 0.5})["rows"]
     assert rows == [{"x": None}] * 99 + [{"x": 0.5}]
 
 
-@pytest.mark.parametrize("index", [100, 1_000_000])
-def test_rejects_out_of_range_index_before_registering_padding(index):
-    group = io.DynamicGroup.Input("rows", template=[io.Float.Input("x")], max=1)
+@pytest.mark.parametrize("maximum,index", [(1, 1), (1, 99), (2, 2), (50, 50), (100, 100), (1, 1_000_000)])
+def test_rejects_out_of_range_index_before_registering_padding(maximum, index):
+    group = io.DynamicGroup.Input("rows", template=[io.Float.Input("x")], max=maximum)
     expanded = {"required": {}, "optional": {}, "dynamic_paths": {}, "dynamic_paths_default_value": {}, "list_paths": set()}
-    with pytest.raises(ValueError, match="exceeds the index limit of 99"):
+    with pytest.raises(ValueError, match=f"exceeds the index limit of {maximum - 1}"):
         io.DynamicGroup._expand_schema_for_dynamic(
             expanded, {f"rows.{index}.x": 0.5}, (group.io_type, group.as_dict()), "required", ["rows"],
         )
@@ -125,7 +151,7 @@ def test_rejects_out_of_range_index_before_registering_padding(index):
 
 
 def test_lazy_rows_keep_original_field_keys_and_positions():
-    group = io.DynamicGroup.Input("rows", template=[io.Float.Input("x")], max=2)
+    group = io.DynamicGroup.Input("rows", template=[io.Float.Input("x")], max=3)
     assert _reconstruct(group, {"rows.2.x": 0.5, "rows.0.x": 0.8}, lazy=True) == {"rows": [
         {"x": (0.8, "rows.0.x")},
         {"x": (None, "rows.1.x")},

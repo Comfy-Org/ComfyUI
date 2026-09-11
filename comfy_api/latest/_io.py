@@ -1321,13 +1321,14 @@ class DynamicGroup(ComfyTypeI):
     """Repeat a widget template and pass its values to execute as a list of row dicts.
 
     Template fields must be widget inputs without force_input or nested dynamic inputs.
-    Submit fields as '<group>.<index>.<field>', using indices 0 through 99 without leading zeros.
+    Submit fields as '<group>.<index>.<field>', using indices below max without leading zeros.
+    The '<group>.' prefix is reserved for group fields, not separate sibling inputs.
     min/max count submitted rows (defaults: 0/50), even when optional=True.
+    max also bounds the reconstructed list length and cannot exceed 100.
     Each submitted row follows the template's required/optional field declarations.
 
     Missing positions are dicts whose fields are None. Missing optional fields are
-    also None; widget defaults are not injected. The list can be longer than max,
-    but never longer than 100.
+    also None; widget defaults are not injected.
 
     Empty groups are [] in execute and check_lazy_status. Nonempty lazy groups
     contain (value, original_key) tuples at each field.
@@ -1341,19 +1342,26 @@ class DynamicGroup(ComfyTypeI):
                      display_name: str=None, optional: bool=False, tooltip: str=None,
                      lazy: bool=None, extra_dict=None, group_name: str="Group"):
             super().__init__(id, display_name, optional, tooltip, lazy, extra_dict)
-            assert len(template) > 0, "DynamicGroup template must have at least one field."
+            if not template:
+                raise ValueError("DynamicGroup template must have at least one field.")
             for t in template:
-                assert isinstance(t, WidgetInput), f"DynamicGroup template field '{t.id}' must be a WidgetInput."
-                assert not isinstance(t, DynamicInput), "Nesting dynamic inputs inside DynamicGroup is not supported."
-                assert not t.force_input, f"DynamicGroup template field '{t.id}' must not use force_input."
-                assert "." not in t.id, f"DynamicGroup template field id must not contain '.'. Got: '{t.id}'"
+                if isinstance(t, DynamicInput):
+                    raise ValueError("Nesting dynamic inputs inside DynamicGroup is not supported.")
+                if not isinstance(t, WidgetInput):
+                    raise TypeError("DynamicGroup template fields must be WidgetInputs.")
+                if t.force_input:
+                    raise ValueError(f"DynamicGroup template field '{t.id}' must not use force_input.")
+                if not t.id or "." in t.id:
+                    raise ValueError(f"DynamicGroup template field id must be nonempty and must not contain '.'. Got: '{t.id}'")
             field_ids = [t.id for t in template]
-            assert len(field_ids) == len(set(field_ids)), "DynamicGroup template field ids must be unique within a row."
-            assert "." not in id, f"DynamicGroup id must not contain '.'. Got: '{id}'"
-            assert min >= 0, "DynamicGroup min must be >= 0."
-            assert max >= 1, "DynamicGroup max must be >= 1."
-            assert max <= DynamicGroup._MaxRows, f"DynamicGroup max must be <= {DynamicGroup._MaxRows}."
-            assert min <= max, "DynamicGroup min must be <= max."
+            if len(field_ids) != len(set(field_ids)):
+                raise ValueError("DynamicGroup template field ids must be unique within a row.")
+            if not id or "." in id:
+                raise ValueError(f"DynamicGroup id must be nonempty and must not contain '.'. Got: '{id}'")
+            if not 1 <= max <= DynamicGroup._MaxRows:
+                raise ValueError(f"DynamicGroup max must be between 1 and {DynamicGroup._MaxRows}.")
+            if not 0 <= min <= max:
+                raise ValueError("DynamicGroup min must be between 0 and max.")
             self.template = template
             self.min = min
             self.max = max
@@ -1396,8 +1404,8 @@ class DynamicGroup(ComfyTypeI):
                     or (len(index) > 1 and index.startswith("0")) or field_id not in field_specs):
                 raise ValueError(f"Invalid DynamicGroup input key '{key}'; expected '{finalized_prefix}.<index>.<template field>'.")
             row = int(index)
-            if row >= DynamicGroup._MaxRows:
-                raise ValueError(f"DynamicGroup input '{key}' exceeds the index limit of {DynamicGroup._MaxRows - 1}.")
+            if row >= max_rows:
+                raise ValueError(f"DynamicGroup input '{key}' exceeds the index limit of {max_rows - 1} (max={max_rows}).")
             present_rows.add(row)
 
         if not min_rows <= len(present_rows) <= max_rows:
@@ -2026,7 +2034,10 @@ def create_input_dict_v1(inputs: list[Input]) -> dict:
     input = {
         "required": {}
     }
+    group_prefixes = tuple(f"{i.id}." for i in inputs if isinstance(i, DynamicGroup.Input))
     for i in inputs:
+        if group_prefixes and i.id.startswith(group_prefixes):
+            raise ValueError(f"Input '{i.id}' conflicts with a DynamicGroup field prefix.")
         add_to_dict_v1(i, input)
     return input
 
@@ -2061,14 +2072,13 @@ def build_nested_inputs(values: dict[str, Any], v3_data: V3Data):
 
             if is_last:
                 value = values.pop(key, None)
-                if value is None:
-                    # Apply empty-container markers, not widget defaults.
-                    default_option = default_value_dict.get(key, None)
-                    if default_option == DynamicPathsDefaultValue.EMPTY_DICT:
-                        value = {}
-                    elif default_option == DynamicPathsDefaultValue.EMPTY_LIST:
-                        value = []
-                if create_tuple and default_value_dict.get(key) != DynamicPathsDefaultValue.EMPTY_LIST:
+                default_option = default_value_dict.get(key, None)
+                if default_option == DynamicPathsDefaultValue.EMPTY_LIST:
+                    # No row keys were submitted, regardless of the root input value.
+                    value = []
+                elif value is None and default_option == DynamicPathsDefaultValue.EMPTY_DICT:
+                    value = {}
+                if create_tuple and default_option != DynamicPathsDefaultValue.EMPTY_LIST:
                     value = (value, key)
                 current[p] = value
             else:
