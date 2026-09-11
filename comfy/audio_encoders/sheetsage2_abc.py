@@ -390,6 +390,8 @@ def _fill_intervals(rows, subbeat_times, *, default, dtype):
         end_t = _quantize_time(end, subbeat_times)
         start_t = max(0, min(start_t, len(result) - 1))
         end_t = max(0, min(end_t, len(result) - 1))
+        if start_t == end_t == len(result) - 1:
+            continue
         if end_t <= start_t:
             raise AbcRebuildError(
                 f"Interval {start:.6f}-{end:.6f} ({value}) is shorter than the ABC subbeat grid"
@@ -415,6 +417,8 @@ def _notes_to_arr(notes, subbeat_times, voice_id):
         end_t = int(np.searchsorted(boundaries, note[1]))
         start_t = max(0, min(start_t, len(result) - 1))
         end_t = max(0, min(end_t, len(result) - 1))
+        if start_t == end_t == len(result) - 1:
+            continue
         if end_t <= start_t:
             raise MelodyVoiceError(
                 f"{voice_id}: note pitch={note[2]} at {note[0]:.6f}-{note[1]:.6f} "
