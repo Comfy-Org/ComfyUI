@@ -1,3 +1,5 @@
+import logging
+import time
 from typing import TypedDict, Dict, Optional, Tuple
 from typing_extensions import override, NotRequired
 from PIL import Image
@@ -28,6 +30,7 @@ class NodeProgressState(TypedDict):
     value: float
     max: float
     activity: NotRequired[str]  # what a running node is spending time on, e.g. "loading"
+    seconds: NotRequired[Dict[str, float]]  # set when the node finishes: "total" plus one entry per activity seen
 
 
 class ProgressHandler(ABC):
@@ -180,6 +183,8 @@ class WebUIProgressHandler(ProgressHandler):
             }
             if "activity" in state:
                 active_nodes[node_id]["activity"] = state["activity"]
+            if "seconds" in state:
+                active_nodes[node_id]["seconds"] = state["seconds"]
 
         # Send a combined progress_state message with all node states
         # Include client_id to ensure message is only sent to the initiating client
@@ -246,6 +251,7 @@ class ProgressRegistry:
         self.dynprompt = dynprompt
         self.nodes: Dict[str, NodeProgressState] = {}
         self.handlers: Dict[str, ProgressHandler] = {}
+        self.clocks: Dict[str, dict] = {}
 
     def register_handler(self, handler: ProgressHandler) -> None:
         """Register a progress handler"""
@@ -282,6 +288,8 @@ class ProgressRegistry:
         entry["state"] = NodeState.Running
         entry["value"] = 0.0
         entry["max"] = 1.0
+        now = time.perf_counter()
+        self.clocks[node_id] = {"started": now, "since": now, "activity": None, "seconds": {}}
 
         # Notify all enabled handlers
         for handler in self.handlers.values():
@@ -313,6 +321,7 @@ class ProgressRegistry:
             entry.pop("activity", None)
         else:
             entry["activity"] = activity
+        self._close_stretch(node_id, activity)
 
         # Notify all enabled handlers
         for handler in self.handlers.values():
@@ -321,11 +330,29 @@ class ProgressRegistry:
                     node_id, entry["value"], entry["max"], entry, self.prompt_id
                 )
 
+    def _close_stretch(self, node_id: str, next_activity: str | None) -> None:
+        clock = self.clocks.get(node_id)
+        if clock is None:
+            return
+        now = time.perf_counter()
+        if clock["activity"] is not None:
+            clock["seconds"][clock["activity"]] = clock["seconds"].get(clock["activity"], 0.0) + now - clock["since"]
+        clock["activity"] = next_activity
+        clock["since"] = now
+
     def finish_progress(self, node_id: str) -> None:
         """Finish progress tracking for a node"""
         entry = self.ensure_entry(node_id)
         entry["state"] = NodeState.Finished
         entry["value"] = entry["max"]
+        entry.pop("activity", None)
+        self._close_stretch(node_id, None)
+        clock = self.clocks.pop(node_id, None)
+        if clock is not None:
+            seconds = {k: round(v, 3) for k, v in clock["seconds"].items()}
+            seconds["total"] = round(time.perf_counter() - clock["started"], 3)
+            entry["seconds"] = seconds
+            logging.debug("node %s %s seconds: %s", node_id, self.dynprompt.get_node(node_id)["class_type"], seconds)
 
         # Notify all enabled handlers
         for handler in self.handlers.values():
