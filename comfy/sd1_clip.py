@@ -309,6 +309,12 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
         return self.transformer.load_state_dict(sd, strict=False, assign=getattr(self, "can_assign_sd", False))
 
     def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0):
+        if not hasattr(self.transformer, "generate"):
+            raise RuntimeError(
+                "The loaded model ({}) does not support text generation. "
+                "The TextGenerate node requires a language model (LLM) such as Qwen, LLaMA, or Gemma, "
+                "not a CLIP text encoder. Please load the correct model type.".format(type(self.transformer).__name__)
+            )
         if isinstance(tokens, dict):
             tokens_only = next(iter(tokens.values())) # todo: get this better?
         else:
