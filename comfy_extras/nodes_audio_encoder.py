@@ -61,7 +61,7 @@ class SheetSage2AudioToABC(io.ComfyNode):
             inputs=[
                 io.AudioEncoder.Input("audio_encoder"),
                 io.Audio.Input("audio"),
-                io.Combo.Input("mode", options=["melody", "full"], tooltip="Melody retains both melodies; full also retains the chords."),
+                io.Combo.Input("mode", options=["melody", "full"], tooltip="full: generates melody and chords; melody: generates melody only, recommended for covers."),
             ],
             outputs=[io.String.Output(display_name="abc", is_output_list=True)],
         )
