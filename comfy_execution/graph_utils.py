@@ -153,3 +153,9 @@ class ExecutionBlocker:
     """
     def __init__(self, message):
         self.message = message
+
+
+class ExecutionFailureBlocker(ExecutionBlocker):
+    def __init__(self, node_id):
+        super().__init__(None)
+        self.node_id = node_id
