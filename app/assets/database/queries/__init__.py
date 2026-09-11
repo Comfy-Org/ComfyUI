@@ -11,6 +11,7 @@ from app.assets.database.queries.asset import (
 from app.assets.database.queries.asset_reference import (
     CacheStateRow,
     UnenrichedReferenceRow,
+    any_reference_exists_for_asset_id,
     bulk_insert_references_ignore_conflicts,
     bulk_update_enrichment_level,
     count_active_siblings,
@@ -76,6 +77,7 @@ __all__ = [
     "RemoveTagsResult",
     "SetTagsResult",
     "UnenrichedReferenceRow",
+    "any_reference_exists_for_asset_id",
     "add_missing_tag_for_asset_id",
     "add_tags_to_reference",
     "asset_exists_by_hash",

@@ -1,8 +1,14 @@
 import contextlib
+import errno
+import logging
 import mimetypes
 import os
+import shutil
+import uuid
 from datetime import timezone
 from typing import Sequence
+
+import folder_paths
 
 from app.assets.services.cursor import (
     CursorPayload,
@@ -17,6 +23,7 @@ from app.assets.services.cursor import (
 
 from app.assets.database.models import Asset
 from app.assets.database.queries import (
+    any_reference_exists_for_asset_id,
     asset_exists_by_hash,
     reference_exists_for_asset_id,
     delete_reference_by_id,
@@ -51,6 +58,45 @@ from app.assets.services.schemas import (
     extract_reference_data,
 )
 from app.database.db import create_session
+
+
+class AssetFileDeleteForbiddenError(PermissionError):
+    pass
+
+
+def _copy_file_with_fsync(source_path: str, destination_path: str) -> None:
+    with open(source_path, "rb") as source_file, open(
+        destination_path, "wb"
+    ) as destination_file:
+        shutil.copyfileobj(source_file, destination_file)
+        destination_file.flush()
+        os.fsync(destination_file.fileno())
+    shutil.copystat(source_path, destination_path)
+
+
+def _stage_file_across_devices(source_path: str, staged_path: str) -> None:
+    try:
+        _copy_file_with_fsync(source_path, staged_path)
+        os.remove(source_path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(staged_path)
+        raise
+
+
+def _restore_file_across_devices(staged_path: str, original_path: str) -> None:
+    restore_path = os.path.join(
+        os.path.dirname(original_path), f".comfy-restore-{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        _copy_file_with_fsync(staged_path, restore_path)
+        os.replace(restore_path, original_path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(restore_path)
+        raise
+    with contextlib.suppress(OSError):
+        os.remove(staged_path)
 
 
 def get_asset_detail(
@@ -220,6 +266,131 @@ def delete_asset_reference(
                     os.remove(p)
 
     return True
+
+
+def delete_asset_reference_with_file(
+    reference_id: str,
+    owner_id: str,
+    staging_directory: str,
+    expected_file_path: str,
+    allowed_directories: Sequence[str],
+    allow_ownerless: bool = False,
+) -> bool:
+    """Delete a reference and permanently remove its source file.
+
+    ``expected_file_path`` must still match the stored path, and the caller must
+    restrict ``allowed_directories`` to managed roots. The source is staged in
+    ``staging_directory`` before the database commit and restored if the commit
+    fails. ``allow_ownerless`` permits deleting legacy ownerless references.
+    The asset row is removed only when no references of any state remain.
+    The filesystem move and database commit are failure-compensated but are not
+    a single atomic transaction; abrupt process termination between them is not
+    recoverable by this function.
+
+    Raises ``AssetFileDeleteForbiddenError`` when ownership, path identity, or
+    containment checks fail.
+    """
+    with create_session() as session:
+        ref = get_reference_by_id(session, reference_id=reference_id)
+        if ref is None or ref.deleted_at is not None:
+            return False
+
+        caller_owner_id = (owner_id or "").strip()
+        owns_reference = ref.owner_id == caller_owner_id
+        may_delete_ownerless = allow_ownerless and ref.owner_id == ""
+        if not (owns_reference or may_delete_ownerless):
+            raise AssetFileDeleteForbiddenError(
+                "Only the owning user can delete an asset's source file."
+            )
+
+        asset_id = ref.asset_id
+        file_path = ref.file_path
+        if not file_path or os.path.realpath(file_path) != os.path.realpath(
+            expected_file_path
+        ):
+            raise AssetFileDeleteForbiddenError(
+                "The asset source path changed before it could be deleted."
+            )
+        if not any(
+            folder_paths.is_within_directory(directory, file_path)
+            for directory in allowed_directories
+        ):
+            raise AssetFileDeleteForbiddenError(
+                "The asset source file is outside the directories allowed for deletion."
+            )
+
+        deleted = delete_reference_by_id(
+            session, reference_id=reference_id, owner_id=caller_owner_id
+        )
+        if not deleted:
+            session.rollback()
+            return False
+
+        staged_file_path: str | None = None
+        cross_device_staging = False
+        if file_path and os.path.isfile(file_path):
+            os.makedirs(staging_directory, exist_ok=True)
+            staged_file_path = os.path.join(
+                staging_directory, f".comfy-delete-{uuid.uuid4().hex}.tmp"
+            )
+            if not any(
+                folder_paths.is_within_directory(directory, file_path)
+                for directory in allowed_directories
+            ):
+                raise AssetFileDeleteForbiddenError(
+                    "The asset source file moved outside the directories allowed for deletion."
+                )
+            try:
+                os.replace(file_path, staged_file_path)
+            except OSError as staging_error:
+                if staging_error.errno != errno.EXDEV:
+                    raise
+                if not any(
+                    folder_paths.is_within_directory(directory, file_path)
+                    for directory in allowed_directories
+                ):
+                    raise AssetFileDeleteForbiddenError(
+                        "The asset source file moved outside the directories allowed for deletion."
+                    )
+                _stage_file_across_devices(file_path, staged_file_path)
+                cross_device_staging = True
+
+        try:
+            session.flush()
+            if not any_reference_exists_for_asset_id(session, asset_id=asset_id):
+                asset = session.get(Asset, asset_id)
+                if asset is not None:
+                    session.delete(asset)
+            session.commit()
+        except Exception:
+            session.rollback()
+            if (
+                staged_file_path
+                and file_path
+                and os.path.isfile(staged_file_path)
+                and not os.path.exists(file_path)
+            ):
+                try:
+                    if cross_device_staging:
+                        _restore_file_across_devices(staged_file_path, file_path)
+                    else:
+                        os.replace(staged_file_path, file_path)
+                except OSError:
+                    logging.exception(
+                        "Failed to restore staged asset file after rollback: %s",
+                        file_path,
+                    )
+            raise
+
+        if staged_file_path:
+            try:
+                os.remove(staged_file_path)
+            except OSError:
+                logging.exception(
+                    "Failed to remove staged asset file after commit: %s",
+                    staged_file_path,
+                )
+        return True
 
 
 def set_asset_preview(

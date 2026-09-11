@@ -145,6 +145,19 @@ def reference_exists_for_asset_id(
     return session.execute(q).first() is not None
 
 
+def any_reference_exists_for_asset_id(
+    session: Session,
+    asset_id: str,
+) -> bool:
+    q = (
+        select(sa.literal(True))
+        .select_from(AssetReference)
+        .where(AssetReference.asset_id == asset_id)
+        .limit(1)
+    )
+    return session.execute(q).first() is not None
+
+
 def reference_exists(
     session: Session,
     reference_id: str,
