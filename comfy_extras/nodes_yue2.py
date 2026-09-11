@@ -18,15 +18,15 @@ class YuE2GenerateABC(io.ComfyNode):
                 io.Clip.Input("clip"),
                 io.String.Input("style", multiline=True, dynamic_prompts=True),
                 io.String.Input("lyrics", multiline=True, dynamic_prompts=True),
-                io.Combo.Input("mode", options=["full", "melody"], tooltip="full: generates melody and chords; melody: generates melody only, recommended for covers."),
                 io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff, control_after_generate=True),
+                io.Combo.Input("mode", options=["full", "melody"], tooltip="full: generates melody and chords; melody: generates melody only, recommended for covers."),
                 io.Int.Input("max_abc_tokens", default=8192, min=1, max=20000, advanced=True),
             ],
             outputs=[io.String.Output(display_name="abc")],
         )
 
     @classmethod
-    def execute(cls, clip, style, lyrics, cot, seed, max_abc_tokens):
+    def execute(cls, clip, style, lyrics, seed, mode, max_abc_tokens):
         tokens = clip.tokenize(style, lyrics=lyrics, cot=cot, seed=seed, max_tokens=max_abc_tokens)
         ids = clip.generate(tokens, max_length=max_abc_tokens, temperature=0.7, top_p=0.9, top_k=30, repetition_penalty=1.005, seed=seed)
         return io.NodeOutput(clip.decode(ids))
@@ -45,8 +45,8 @@ class YuE2GenerateMusic(io.ComfyNode):
                 io.String.Input("style", multiline=True, dynamic_prompts=True),
                 io.String.Input("lyrics", multiline=True, dynamic_prompts=True),
                 io.String.Input("abc", default="", multiline=True, tooltip="Connect the ABC generator or supply an edited score. Leave empty to use off mode automatically."),
-                io.Combo.Input("mode", options=["full", "melody"], tooltip="full: generates melody and chords; melody: generates melody only, recommended for covers."),
                 io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff, control_after_generate=True),
+                io.Combo.Input("mode", options=["full", "melody"], tooltip="full: generates melody and chords; melody: generates melody only, recommended for covers."),
                 io.Float.Input("max_duration", default=360.0, min=0.04, max=360.0, step=0.04, tooltip="Maximum duration; generation can stop earlier. The release uses a 360-second budget."),
                 io.Float.Input("temperature", default=1.0, min=0.0, max=5.0, step=0.05, advanced=True),
                 io.Float.Input("top_p", default=0.95, min=0.01, max=1.0, step=0.01, advanced=True),
@@ -57,10 +57,10 @@ class YuE2GenerateMusic(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, style, lyrics, cot, seed, max_duration, temperature, top_p, top_k, repetition_penalty, abc=""):
+    def execute(cls, clip, style, lyrics, seed, mode, max_duration, temperature, top_p, top_k, repetition_penalty, abc=""):
         if not abc.strip():
             cot = "off"
-        tokens = clip.tokenize(style, lyrics=lyrics, cot=cot, seed=seed, abc=abc,
+        tokens = clip.tokenize(style, lyrics=lyrics, cot=mode, seed=seed, abc=abc,
                                max_tokens=max(1, round(max_duration * FRAMES_PER_SECOND)),
                                temperature=temperature, top_p=top_p, top_k=top_k, repetition_penalty=repetition_penalty)
         conditioning = clip.encode_from_tokens_scheduled(tokens)
