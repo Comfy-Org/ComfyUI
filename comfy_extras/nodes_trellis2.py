@@ -440,6 +440,7 @@ class Trellis2Conditioning(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="Trellis2Conditioning",
+            display_name="Trellis2 Conditioning",
             category="model/conditioning/trellis2",
             inputs=[
                 IO.ClipVision.Input("clip_vision_model"),
@@ -501,6 +502,7 @@ class Trellis2ShapeStage(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="Trellis2ShapeStage",
+            display_name="Trellis2 Shape Stage",
             category="model/conditioning/trellis2",
             inputs=[
                 IO.Conditioning.Input("positive"),
@@ -567,6 +569,7 @@ class Trellis2TextureStage(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="Trellis2TextureStage",
+            display_name="Trellis2 Texture Stage",
             category="model/conditioning/trellis2",
             inputs=[
                 IO.Conditioning.Input("positive"),
@@ -764,6 +767,7 @@ class Pixal3DConditioning(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="Pixal3DConditioning",
+            display_name="Pixal3D Conditioning",
             category="model/conditioning/trellis2",
             inputs=[
                 IO.ClipVision.Input("clip_vision_model", tooltip="DINOv3 ViT-L/16 ClipVision."),
