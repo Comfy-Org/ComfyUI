@@ -13,7 +13,303 @@ import uuid
 import urllib.request
 import urllib.parse
 import urllib.error
+import os
+from pathlib import PurePosixPath
 from comfy_execution.graph_utils import GraphBuilder, Node
+from app.assets.scanner_admission import _should_skip_extension
+from app.assets.services.file_utils import list_files_recursively
+
+
+ASSET_HEALTH_TIMEOUT_SECONDS = 120
+ASSET_SEED_RETRY_ATTEMPTS = 10
+ASSET_SEED_RETRY_DELAY_SECONDS = 3
+ASSET_STATUS_POLL_DELAY_SECONDS = 1
+ASSET_CAPTURE_TAIL_LINES = 80
+
+# Static prefixes of app/assets exception-path messages; re-diff against logging.exception sites when the assets logging PR lands.
+ASSET_FATAL_LOG_PREFIXES = (
+    "get_asset failed for reference_id=",
+    "upload_asset failed for tenant_id=",
+    "update_asset failed for reference_id=",
+    "delete_asset_reference failed for reference_id=",
+    "add_tags_to_asset failed for reference_id=",
+    "remove_tags_from_asset failed for reference_id=",
+    "check_hash_exists failed for hash=",
+    "Temp DB row wipe failed; skipping filesystem cleanup",
+    "Asset startup maintenance failed",
+    "Temp DB row wipe failed during shutdown",
+    "Asset shutdown cleanup failed",
+    "fast DB scan failed for ",
+    "temp reference sync failed: ",
+    "marking missing assets failed: ",
+    "Failed to enrich ",
+    "Asset scan failed",
+    "Batch insert failed at offset ",
+    "Failed to discard orphan content ",
+    "Failed to register cached output: ",
+    "Failed to register executed output: ",
+    "Failed to register uploaded image as asset",
+    "WARNING: blake3 package not installed",
+)
+
+
+def _asset_json_request(url, deadline, data=None):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise AssertionError(
+            f"Asset health check failure (i): deadline/transport failure before requesting {url}"
+        )
+
+    request = urllib.request.Request(url, data=data)
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+
+    try:
+        with urllib.request.urlopen(request, timeout=max(0.01, remaining)) as response:
+            status = response.status
+            raw_payload = response.read()
+    except urllib.error.HTTPError as error:
+        status = error.code
+        raw_payload = error.read()
+    except (TimeoutError, ConnectionError, urllib.error.URLError) as error:
+        raise AssertionError(
+            f"Asset health check failure (i): deadline/transport failure requesting {url}: {error!r}"
+        ) from error
+
+    try:
+        payload = json.loads(raw_payload)
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        rendered_payload = raw_payload.decode("utf-8", errors="replace")
+        raise AssertionError(
+            "Asset health check failure (iv): malformed JSON/schema "
+            f"from {url}: status={status}, payload={rendered_payload!r}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise AssertionError(
+            "Asset health check failure (iv): malformed JSON/schema "
+            f"from {url}: status={status}, payload={payload!r}"
+        )
+    return status, payload
+
+
+def _seed_output_assets(base_url, deadline):
+    request_data = json.dumps({"roots": ["output"]}).encode("utf-8")
+    last_conflict_payload = None
+    for attempt in range(1, ASSET_SEED_RETRY_ATTEMPTS + 1):
+        if last_conflict_payload is not None and deadline - time.monotonic() <= 0:
+            raise AssertionError(
+                "Asset health check failure (ii): 409-retries-exhausted before the deadline; "
+                f"last payload={last_conflict_payload!r}"
+            )
+
+        url = f"{base_url}/api/assets/seed?wait=true"
+        status, payload = _asset_json_request(url, deadline, request_data)
+        if status == 409:
+            if payload.get("status") != "already_running":
+                raise AssertionError(
+                    "Asset health check failure (iv): malformed JSON/schema "
+                    f"from {url}: status={status}, payload={payload!r}"
+                )
+            last_conflict_payload = payload
+            if attempt == ASSET_SEED_RETRY_ATTEMPTS:
+                raise AssertionError(
+                    "Asset health check failure (ii): 409-retries-exhausted after "
+                    f"{attempt} attempts; last payload={payload!r}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(
+                    "Asset health check failure (ii): 409-retries-exhausted before the deadline; "
+                    f"last payload={payload!r}"
+                )
+            time.sleep(min(ASSET_SEED_RETRY_DELAY_SECONDS, remaining))
+            continue
+        if status != 200:
+            raise AssertionError(
+                "Asset health check failure (iv): unexpected-HTTP-status "
+                f"from {url}: status={status}, payload={payload!r}"
+            )
+
+        progress = payload.get("progress")
+        errors = payload.get("errors")
+        progress_fields = ("scanned", "total", "created", "skipped")
+        if (
+            payload.get("status") != "completed"
+            or not isinstance(progress, dict)
+            or any(type(progress.get(field)) is not int for field in progress_fields)
+            or not isinstance(errors, list)
+        ):
+            raise AssertionError(
+                "Asset health check failure (iv): malformed JSON/schema "
+                f"from {url}: status={status}, payload={payload!r}"
+            )
+        if errors:
+            raise AssertionError(
+                f"Asset health check failure (iii): scan-completed-with-errors: errors={errors!r}"
+            )
+        return
+
+
+def _wait_for_stable_asset_idle(base_url, deadline):
+    stable_reads = 0
+    last_payload = None
+    url = f"{base_url}/api/assets/seed/status"
+    while True:
+        if deadline - time.monotonic() <= 0:
+            raise AssertionError(
+                "Asset health check failure (v): idle-stability-exhaustion; "
+                f"last payload={last_payload!r}"
+            )
+        status, payload = _asset_json_request(url, deadline)
+        progress = payload.get("progress")
+        errors = payload.get("errors")
+        if (
+            status != 200
+            or not isinstance(payload.get("state"), str)
+            or not isinstance(errors, list)
+            or (progress is not None and not isinstance(progress, dict))
+        ):
+            failure = "unexpected-HTTP-status" if status != 200 else "malformed JSON/schema"
+            raise AssertionError(
+                f"Asset health check failure (iv): {failure} from {url}: "
+                f"status={status}, payload={payload!r}"
+            )
+
+        last_payload = payload
+        if payload["state"].lower() == "idle" and errors == []:
+            stable_reads += 1
+            if stable_reads == 2:
+                return
+        else:
+            stable_reads = 0
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                "Asset health check failure (v): idle-stability-exhaustion; "
+                f"last payload={last_payload!r}"
+            )
+        time.sleep(min(ASSET_STATUS_POLL_DELAY_SECONDS, remaining))
+
+
+def _normalize_asset_path(path):
+    return PurePosixPath(path.replace("\\", "/")).as_posix()
+
+
+def _fetch_output_asset_paths(base_url, deadline):
+    asset_paths = set()
+    after = None
+    previous_cursor = None
+    while True:
+        query = {"tags_all": "output", "limit": "100"}
+        if after is not None:
+            query["after"] = after
+        url = f"{base_url}/api/assets?{urllib.parse.urlencode(query)}"
+        status, payload = _asset_json_request(url, deadline)
+        assets = payload.get("assets")
+        next_cursor = payload.get("next_cursor")
+        if (
+            status != 200
+            or not isinstance(assets, list)
+            or type(payload.get("total")) is not int
+            or not isinstance(payload.get("has_more"), bool)
+            or (next_cursor is not None and not isinstance(next_cursor, str))
+        ):
+            failure = "unexpected-HTTP-status" if status != 200 else "malformed JSON/schema"
+            raise AssertionError(
+                f"Asset health check failure (iv): {failure} from {url}: "
+                f"status={status}, payload={payload!r}"
+            )
+
+        for asset in assets:
+            if not isinstance(asset, dict):
+                raise AssertionError(
+                    "Asset health check failure (iv): malformed JSON/schema "
+                    f"from {url}: asset={asset!r}, payload={payload!r}"
+                )
+            loader_path = asset.get("loader_path")
+            if not isinstance(loader_path, str):
+                raise AssertionError(
+                    "Asset health check reconcile failure: asset has missing/non-string "
+                    f"loader_path: asset={asset!r}"
+                )
+            asset_paths.add(_normalize_asset_path(loader_path))
+
+        if next_cursor is None:
+            if payload["has_more"]:
+                raise AssertionError(
+                    "Asset health check failure (iv): malformed JSON/schema "
+                    f"from {url}: has_more=true without next_cursor, payload={payload!r}"
+                )
+            return asset_paths
+        if next_cursor == previous_cursor:
+            raise AssertionError(
+                "Asset health check reconcile failure: pagination cursor made no progress: "
+                f"cursor={next_cursor!r}, payload={payload!r}"
+            )
+        previous_cursor = next_cursor
+        after = next_cursor
+
+
+def _list_output_files_on_disk(output_dir):
+    output_root = os.path.abspath(output_dir)
+    disk_paths = set()
+    for file_path in list_files_recursively(output_root):
+        if _should_skip_extension(file_path):
+            continue
+        try:
+            stat_result = os.stat(file_path, follow_symlinks=True)
+        except OSError:
+            continue
+        if not stat_result.st_size:
+            continue
+        relative_path = os.path.relpath(file_path, output_root)
+        disk_paths.add(_normalize_asset_path(relative_path))
+    return disk_paths
+
+
+def _assert_no_fatal_asset_logs(capture_path):
+    server_output = capture_path.read_text(encoding="utf-8", errors="replace")
+    matched_prefixes = [
+        prefix for prefix in ASSET_FATAL_LOG_PREFIXES if prefix in server_output
+    ]
+    if matched_prefixes:
+        raise AssertionError(
+            "Asset health check fatal-log failure: "
+            f"matched prefixes={matched_prefixes!r}"
+        )
+
+
+def _assert_assets_healthy(listen, port, output_dir, capture_path):
+    deadline = time.monotonic() + ASSET_HEALTH_TIMEOUT_SECONDS
+    base_url = f"http://{listen}:{port}"
+    _seed_output_assets(base_url, deadline)
+    _wait_for_stable_asset_idle(base_url, deadline)
+
+    api_paths = _fetch_output_asset_paths(base_url, deadline)
+    disk_paths = _list_output_files_on_disk(output_dir)
+    if not api_paths or not disk_paths:
+        raise AssertionError(
+            "Asset health check reconcile failure: expected non-empty sets: "
+            f"api_paths={sorted(api_paths)!r}, disk_paths={sorted(disk_paths)!r}"
+        )
+    disk_only = disk_paths - api_paths
+    api_only = api_paths - disk_paths
+    if disk_only or api_only:
+        raise AssertionError(
+            "Asset health check reconcile failure: "
+            f"disk-has-but-API-lacks={sorted(disk_only)!r}, "
+            f"API-has-but-disk-lacks={sorted(api_only)!r}"
+        )
+    _assert_no_fatal_asset_logs(capture_path)
+
+
+def _capture_tail(capture_path):
+    try:
+        lines = capture_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as error:
+        return f"<unable to read capture file: {error!r}>"
+    return "\n".join(lines[-ASSET_CAPTURE_TAIL_LINES:])
 
 def run_warmup(client, prefix="warmup"):
     """Run a simple workflow to warm up the server."""
@@ -186,9 +482,11 @@ class TestExecution:
         { "extra_args" : ["--cache-classic"], "should_cache_results" : True },
         { "extra_args" : ["--cache-lru", 100], "should_cache_results" : True },
         { "extra_args" : ["--cache-none"], "should_cache_results" : False },
+        {"extra_args": ["--enable-assets"], "should_cache_results": True, "assets": True},
     ])
-    def server(self, args_pytest, request):
+    def server(self, args_pytest, request, tmp_path_factory):
         # Start server
+        assets_enabled = request.param.get("assets")
         pargs = [
             'python','main.py',
             '--output-directory', args_pytest["output_dir"],
@@ -198,7 +496,67 @@ class TestExecution:
             '--cpu',
         ]
         pargs += [ str(param) for param in request.param["extra_args"] ]
+        if assets_enabled:
+            assets_tmp_dir = tmp_path_factory.mktemp("execution-assets")
+            database_path = assets_tmp_dir / "assets.db"
+            capture_path = assets_tmp_dir / "server.log"
+            pargs += ["--database-url", f"sqlite:///{database_path}"]
         print("Running server with args:", pargs)  # noqa: T201
+        if assets_enabled:
+            capture_file = capture_path.open("a", encoding="utf-8")
+            try:
+                p = subprocess.Popen(
+                    pargs, stdout=capture_file, stderr=subprocess.STDOUT
+                )
+            except OSError:
+                capture_file.close()
+                raise
+
+            health_failure = None
+            cleanup_failures = []
+            try:
+                yield request.param
+                exit_code = p.poll()
+                if exit_code is not None:
+                    raise AssertionError(
+                        "Asset health check server-dead failure: "
+                        f"exit code={exit_code}"
+                    )
+                _assert_assets_healthy(
+                    args_pytest["listen"],
+                    args_pytest["port"],
+                    args_pytest["output_dir"],
+                    capture_path,
+                )
+            except AssertionError as error:
+                health_failure = error
+            finally:
+                try:
+                    p.kill()
+                except OSError as error:
+                    cleanup_failures.append(f"kill failed: {error!r}")
+                finally:
+                    try:
+                        p.wait(timeout=10)
+                    except (OSError, subprocess.TimeoutExpired) as error:
+                        cleanup_failures.append(f"bounded reap failed: {error!r}")
+                    finally:
+                        try:
+                            capture_file.close()
+                        except OSError as error:
+                            cleanup_failures.append(f"capture close failed: {error!r}")
+                        finally:
+                            torch.cuda.empty_cache()
+
+            if cleanup_failures:
+                print("Asset server cleanup warnings:", cleanup_failures)  # noqa: T201
+            if health_failure is not None:
+                capture_tail = _capture_tail(capture_path)
+                raise AssertionError(
+                    f"{health_failure}\nServer output tail:\n{capture_tail}"
+                ) from health_failure
+            return
+
         p = subprocess.Popen(pargs)
         yield request.param
         p.kill()
