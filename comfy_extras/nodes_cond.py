@@ -99,7 +99,7 @@ class SaveConditioning(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="SaveConditioning",
-            search_aliases=["export conditioning", "cache text encoder output"],
+            search_aliases=["save conditioning", "export conditioning", "cache text encoder output"],
             display_name="Save Conditioning",
             category="model/conditioning",
             description="Saves a conditioning to the output folder as safetensors; move the file to models/embeddings to load it with Load Conditioning, e.g. to skip the text encoder.",
@@ -108,7 +108,7 @@ class SaveConditioning(io.ComfyNode):
                 io.Conditioning.Input("conditioning"),
                 io.String.Input("filename_prefix", default="conditioning/ComfyUI"),
             ],
-            outputs=[],
+            outputs=[io.Conditioning.Output(display_name="conditioning")],
         )
 
     @classmethod

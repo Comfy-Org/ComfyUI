@@ -16,8 +16,7 @@ class MarigoldV2PostProcess(io.ComfyNode):
             description="Turns a decoded Marigold V2 prediction into an image: normalized depth with near as bright, unit surface normals, or sRGB albedo.",
             inputs=[
                 io.Image.Input("image"),
-                io.Combo.Input("prediction", options=["depth", "disparity", "normals", "albedo"],
-                               tooltip="depth for the Log and Uniform checkpoints, disparity for the Disparity ones."),
+                io.Combo.Input("prediction", options=["depth", "normals", "albedo"]),
             ],
             outputs=[io.Image.Output()],
         )
@@ -31,10 +30,7 @@ class MarigoldV2PostProcess(io.ComfyNode):
         d = image.mean(dim=-1, keepdim=True)
         lo = d.amin(dim=(1, 2, 3), keepdim=True)
         hi = d.amax(dim=(1, 2, 3), keepdim=True)
-        d = (d - lo) / (hi - lo).clamp(min=1e-6)
-        if prediction == "depth":
-            d = 1.0 - d
-        return io.NodeOutput(d.repeat(1, 1, 1, 3))
+        return io.NodeOutput(((hi - d) / (hi - lo).clamp(min=1e-6)).repeat(1, 1, 1, 3))
 
 
 class MarigoldExtension(ComfyExtension):
