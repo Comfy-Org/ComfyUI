@@ -1597,10 +1597,10 @@ class BriaReplaceImageBackground(IO.ComfyNode):
                                         names=[f"ref_image_{i}" for i in range(1, BRIA_MAX_REFERENCE_IMAGES + 1)],
                                         min=1,
                                     ),
-                                    tooltip=f"1-{BRIA_MAX_REFERENCE_IMAGES} images guiding the new background, "
-                                    "each keeping its own size. Every reference changes the result, so a few "
-                                    "consistent ones beat many conflicting ones. A batched input counts once "
-                                    "per image.",
+                                    tooltip=f"1-{BRIA_MAX_REFERENCE_IMAGES} images guiding the new background; "
+                                    "they do not need to share a size. Every reference changes the result, so "
+                                    "a few consistent ones beat many conflicting ones. A batched input counts "
+                                    "once per image.",
                                 ),
                                 IO.Boolean.Input(
                                     "enhance_ref_images",
