@@ -38,7 +38,7 @@ def test_accumulate_flattens_groups_and_eagerly_encodes_tensors():
     videos = [VideoFromComponents(VideoComponents(images=image, frame_rate=Fraction(8))) for image in images]
     nested = VideoFromList(videos[:2])
 
-    result = ConcatenateVideo.execute({"inputs0": [nested], "inputs1": [videos[2]]}).result[0]
+    result = ConcatenateVideo.execute({"video0": [nested], "video1": [videos[2]]}).result[0]
     del images, videos, nested
     gc.collect()
 
@@ -58,7 +58,7 @@ def test_concatenate_video_schema_and_intermediate_codec(monkeypatch):
     source = VideoFromComponents(
         VideoComponents(images=torch.zeros((1, 16, 16, 3)), frame_rate=Fraction(8))
     )
-    ConcatenateVideo.execute({"inputs0": [source]}, codec=["av1"])
+    ConcatenateVideo.execute({"video0": [source]}, codec=["av1"])
 
     schema = ConcatenateVideo.define_schema()
     inputs = {input.id: input for input in schema.inputs}
@@ -66,7 +66,9 @@ def test_concatenate_video_schema_and_intermediate_codec(monkeypatch):
     assert inputs["codec"].advanced and inputs["complete_audio"].advanced
     assert schema.description and schema.outputs[0].tooltip
     assert all(input.tooltip for input in schema.inputs)
-    assert inputs["inputs"].template.input.tooltip
+    assert inputs["videos"].template.input.id == "video"
+    assert inputs["videos"].template.input.tooltip
+    assert inputs["videos"].template.names[:2] == ["video0", "video1"]
 
 
 def test_create_video_optional_eager_encoding(monkeypatch):
