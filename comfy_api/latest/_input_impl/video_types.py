@@ -12,7 +12,6 @@ import json
 import numpy as np
 import math
 import os
-import tempfile
 import torch
 from .._util import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
 import comfy.utils
@@ -1225,26 +1224,22 @@ class VideoFromList(VideoInput):
         codec: VideoCodec = VideoCodec.AUTO,
     ):
         self.videos = []
-        self.__owners = []
         inherited_audio = None
         for video in videos:
             if isinstance(video, VideoFromList):
                 if video.complete_audio is not None:
                     inherited_audio = video.complete_audio
                 self.videos.extend(video.videos)
-                self.__owners.extend(video.__owners)
             elif isinstance(video, VideoFromComponents):
-                owner = tempfile.TemporaryDirectory(prefix="comfy-video-")
-                self.__owners.append(owner)
-                path = os.path.join(owner.name, "video.mkv")
-                video.save_to(path, format=VideoContainer.MKV, codec=codec)
-                self.videos.append(VideoFromFile(path))
+                buffer = io.BytesIO()
+                video.save_to(buffer, format=VideoContainer.MKV, codec=codec)
+                self.videos.append(VideoFromFile(buffer))
             else:
                 self.videos.append(video)
         if not self.videos:
             raise ValueError("Concatenate Video requires at least one input")
         self.complete_audio = complete_audio if complete_audio is not None else inherited_audio
-        self.__temp_dir = None
+        self.__buffer = None
 
     def get_components(self) -> VideoComponents:
         components = [video.get_components() for video in self.videos]
@@ -1394,14 +1389,10 @@ class VideoFromList(VideoInput):
                 audio_stream.layout.name if audio_stream else None,
             )
 
-        sources = []
         source_signatures = []
         shared_encode = crf is not None or color_space is not None
         for video in self.videos:
-            source = video.get_stream_source()
-            if isinstance(source, io.BytesIO):
-                source.seek(0)
-            with av.open(source) as container:
+            with av.open(video.get_stream_source()) as container:
                 current_signature = encoded_signature(container)
                 source_signatures.append(current_signature)
                 video_stream = container.streams.video[0]
@@ -1412,7 +1403,6 @@ class VideoFromList(VideoInput):
                     or video.get_active_trim_window() != (0.0, 0.0)
                     or video.get_dimensions() != (video_stream.width, video_stream.height)
                 )
-            sources.append(source)
         shared_encode |= any(
             current_signature != source_signatures[0]
             for current_signature in source_signatures[1:]
@@ -1425,103 +1415,101 @@ class VideoFromList(VideoInput):
         target_audio_layout = source_signatures[0][7]
 
         try:
-            with tempfile.TemporaryDirectory(prefix="comfy-video-parts-") as directory:
-                for index, (video, source) in enumerate(zip(self.videos, sources)):
-                    if isinstance(source, io.BytesIO):
-                        source.seek(0)
-                    container = av.open(source)
-                    current_signature = encoded_signature(container)
-                    if shared_encode:
-                        scratch = os.path.join(directory, f"part.{VideoContainer.get_extension(output_format)}")
-                        try:
-                            video._save_transcoded(
-                                container,
-                                scratch,
-                                format=output_format,
-                                codec=target_codec,
-                                metadata=None,
-                                bit_depth=target_bit_depth,
-                                crf=crf,
-                                color_space=target_color_space,
-                                preset=preset,
-                                preserve_source_timestamps=False,
-                                frame_rate=target_frame_rate,
-                                audio_sample_rate=target_audio_rate,
-                                audio_layout=target_audio_layout,
-                            )
-                        finally:
-                            container.close()
-                        container = av.open(scratch)
-                        current_signature = encoded_signature(container)
-                        if signature is not None and current_signature != signature:
-                            container.close()
-                            fields = ("codec", "extradata", "width", "height", "bit depth", "color space", "audio rate", "audio layout")
-                            differences = "; ".join(
-                                f"{field}: expected {expected!r}, got {actual!r}"
-                                for field, expected, actual in zip(fields, signature, current_signature)
-                                if expected != actual
-                            )
-                            raise ValueError(f"Video chunk {index} could not be encoded compatibly: {differences}")
-                    with container:
-                        video_stream = container.streams.video[0]
-                        audio_stream = None if self.complete_audio is not None else last_decodable_audio_stream(container)
-                        if index == 0:
-                            signature = current_signature
-                            output = av.open(path, **open_kwargs)
-                            write_output_metadata(container, output, metadata)
-                            output_video = output.add_stream_from_template(video_stream, opaque=True)
-                            hevc_filter = isobmff_hevc_filter(output, video_stream, output_video)
-                            if self.complete_audio is not None:
-                                source_rate = int(self.complete_audio["sample_rate"])
-                                channels = self.complete_audio["waveform"].shape[1]
-                                layout = {1: "mono", 2: "stereo", 6: "5.1"}.get(channels, "stereo")
-                            elif audio_stream is not None:
-                                source_rate = audio_stream.sample_rate
-                                layout = audio_stream.layout.name
-                            else:
-                                source_rate = layout = None
-                            if layout is not None:
-                                target_rate = 48000 if output_format == VideoContainer.WEBM else source_rate
-                                audio_layout = layout
-                                output_audio = output.add_stream(
-                                    "libopus" if output_format == VideoContainer.WEBM else "aac",
-                                    rate=target_rate,
-                                    layout=layout,
-                                )
-                                audio_resampler = av.AudioResampler(format="fltp", layout=layout, rate=target_rate)
-                        video_end = video_offset
-                        origin = None
-                        for packet in video_packets(container, video_stream):
-                            time_base = packet.time_base
-                            if origin is None:
-                                origin = Fraction(packet.pts if packet.pts is not None else packet.dts) * time_base
-                            if packet.pts is not None:
-                                packet.pts = int((Fraction(packet.pts) * time_base - origin + video_offset) / time_base)
-                                video_end = max(video_end, Fraction(packet.pts + (packet.duration or 0)) * time_base)
-                            packet.dts = int((Fraction(packet.dts) * time_base - origin + video_offset) / time_base)
-                            packet.stream = output_video
-                            for packet in filter_hevc_packet(hevc_filter, packet) if hevc_filter else (packet,):
-                                packet.stream = output_video
-                                output.mux(packet)
-                        video_offset = video_end
-                        if audio_stream is not None:
-                            container.seek(0)
-                            write_audio_frames(
-                                itertools.chain.from_iterable(packet.decode() for packet in container.demux(audio_stream)),
-                                round(float(video_offset) * output_audio.rate),
-                            )
-
-                if output_audio is not None:
-                    if self.complete_audio is not None:
-                        source_rate = int(self.complete_audio["sample_rate"])
-                        waveform = self.complete_audio["waveform"][0, :, : round(source_rate * float(video_offset))]
-                        frame = av.AudioFrame.from_ndarray(
-                            waveform.float().cpu().contiguous().numpy(), format="fltp", layout=audio_layout
+            for index, video in enumerate(self.videos):
+                container = av.open(video.get_stream_source())
+                current_signature = encoded_signature(container)
+                if shared_encode:
+                    scratch = io.BytesIO()
+                    try:
+                        video._save_transcoded(
+                            container,
+                            scratch,
+                            format=output_format,
+                            codec=target_codec,
+                            metadata=None,
+                            bit_depth=target_bit_depth,
+                            crf=crf,
+                            color_space=target_color_space,
+                            preset=preset,
+                            preserve_source_timestamps=False,
+                            frame_rate=target_frame_rate,
+                            audio_sample_rate=target_audio_rate,
+                            audio_layout=target_audio_layout,
                         )
-                        frame.sample_rate = source_rate
-                        write_audio_frames((frame,), round(float(video_offset) * output_audio.rate))
-                    mux_audio_frames(audio_resampler.resample(None), round(float(video_offset) * output_audio.rate))
-                    output.mux(output_audio.encode(None))
+                    finally:
+                        container.close()
+                    scratch.seek(0)
+                    container = av.open(scratch)
+                    current_signature = encoded_signature(container)
+                    if signature is not None and current_signature != signature:
+                        container.close()
+                        fields = ("codec", "extradata", "width", "height", "bit depth", "color space", "audio rate", "audio layout")
+                        differences = "; ".join(
+                            f"{field}: expected {expected!r}, got {actual!r}"
+                            for field, expected, actual in zip(fields, signature, current_signature)
+                            if expected != actual
+                        )
+                        raise ValueError(f"Video chunk {index} could not be encoded compatibly: {differences}")
+                with container:
+                    video_stream = container.streams.video[0]
+                    audio_stream = None if self.complete_audio is not None else last_decodable_audio_stream(container)
+                    if index == 0:
+                        signature = current_signature
+                        output = av.open(path, **open_kwargs)
+                        write_output_metadata(container, output, metadata)
+                        output_video = output.add_stream_from_template(video_stream, opaque=True)
+                        hevc_filter = isobmff_hevc_filter(output, video_stream, output_video)
+                        if self.complete_audio is not None:
+                            source_rate = int(self.complete_audio["sample_rate"])
+                            channels = self.complete_audio["waveform"].shape[1]
+                            layout = {1: "mono", 2: "stereo", 6: "5.1"}.get(channels, "stereo")
+                        elif audio_stream is not None:
+                            source_rate = audio_stream.sample_rate
+                            layout = audio_stream.layout.name
+                        else:
+                            source_rate = layout = None
+                        if layout is not None:
+                            target_rate = 48000 if output_format == VideoContainer.WEBM else source_rate
+                            audio_layout = layout
+                            output_audio = output.add_stream(
+                                "libopus" if output_format == VideoContainer.WEBM else "aac",
+                                rate=target_rate,
+                                layout=layout,
+                            )
+                            audio_resampler = av.AudioResampler(format="fltp", layout=layout, rate=target_rate)
+                    video_end = video_offset
+                    origin = None
+                    for packet in video_packets(container, video_stream):
+                        time_base = packet.time_base
+                        if origin is None:
+                            origin = Fraction(packet.pts if packet.pts is not None else packet.dts) * time_base
+                        if packet.pts is not None:
+                            packet.pts = int((Fraction(packet.pts) * time_base - origin + video_offset) / time_base)
+                            video_end = max(video_end, Fraction(packet.pts + (packet.duration or 0)) * time_base)
+                        packet.dts = int((Fraction(packet.dts) * time_base - origin + video_offset) / time_base)
+                        packet.stream = output_video
+                        for packet in filter_hevc_packet(hevc_filter, packet) if hevc_filter else (packet,):
+                            packet.stream = output_video
+                            output.mux(packet)
+                    video_offset = video_end
+                    if audio_stream is not None:
+                        container.seek(0)
+                        write_audio_frames(
+                            itertools.chain.from_iterable(packet.decode() for packet in container.demux(audio_stream)),
+                            round(float(video_offset) * output_audio.rate),
+                        )
+
+            if output_audio is not None:
+                if self.complete_audio is not None:
+                    source_rate = int(self.complete_audio["sample_rate"])
+                    waveform = self.complete_audio["waveform"][0, :, : round(source_rate * float(video_offset))]
+                    frame = av.AudioFrame.from_ndarray(
+                        waveform.float().cpu().contiguous().numpy(), format="fltp", layout=audio_layout
+                    )
+                    frame.sample_rate = source_rate
+                    write_audio_frames((frame,), round(float(video_offset) * output_audio.rate))
+                mux_audio_frames(audio_resampler.resample(None), round(float(video_offset) * output_audio.rate))
+                output.mux(output_audio.encode(None))
         except BaseException:
             if output is not None:
                 output.close()
@@ -1533,10 +1521,11 @@ class VideoFromList(VideoInput):
                 output.close()
 
     def get_stream_source(self):
-        if self.__temp_dir is None:
-            self.__temp_dir = tempfile.TemporaryDirectory(prefix="comfy-video-")
-            self.save_to(os.path.join(self.__temp_dir.name, "video.mp4"))
-        return os.path.join(self.__temp_dir.name, "video.mp4")
+        if self.__buffer is None:
+            self.__buffer = io.BytesIO()
+            self.save_to(self.__buffer, format=VideoContainer.MP4)
+        self.__buffer.seek(0)
+        return self.__buffer
 
     def as_trimmed(self, start_time=None, duration=None, strict_duration=False):
         total_duration = self.get_duration()
@@ -1575,14 +1564,10 @@ class VideoFromList(VideoInput):
                 "waveform": audio["waveform"][..., start_sample:end_sample],
                 "sample_rate": sample_rate,
             })
-        result = VideoFromList(selected, audio)
-        result.__owners = self.__owners
-        return result
+        return VideoFromList(selected, audio)
 
     def as_cropped(self, x=0, y=0, width=0, height=0):
-        result = VideoFromList(
+        return VideoFromList(
             [video.as_cropped(x, y, width, height) for video in self.videos],
             self.complete_audio,
         )
-        result.__owners = self.__owners
-        return result

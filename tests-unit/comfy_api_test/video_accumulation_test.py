@@ -1,3 +1,4 @@
+import io
 import gc
 import os
 import tempfile
@@ -13,21 +14,22 @@ from comfy_api.util.video_types import VideoCodec, VideoComponents
 from comfy_extras.nodes_video import ConcatenateVideo, CreateVideo
 
 
-def test_tensor_video_encodes_to_list_owned_file():
+def test_tensor_video_encodes_to_list_owned_buffer():
     images = torch.zeros((2, 16, 16, 3))
     images_ref = weakref.ref(images)
     source = VideoFromComponents(VideoComponents(images=images, frame_rate=Fraction(8)))
 
     video = VideoFromList([source])
     encoded = video.videos[0]
-    path = encoded.get_stream_source()
+    buffer = encoded.get_stream_source()
     trimmed = video.as_trimmed(0, 0.125)
     del images, source, video, encoded
     gc.collect()
 
     assert isinstance(trimmed, VideoFromList)
     assert images_ref() is None
-    assert os.path.exists(path)
+    assert isinstance(buffer, io.BytesIO)
+    assert buffer.getbuffer().nbytes > 0
 
 
 def test_accumulate_flattens_groups_and_eagerly_encodes_tensors():
@@ -50,8 +52,7 @@ def test_concatenate_video_schema_and_intermediate_codec(monkeypatch):
 
     def record_save(self, path, **kwargs):
         encoded_codecs.append(kwargs["codec"])
-        with open(path, "wb"):
-            pass
+        path.write(b"")
 
     monkeypatch.setattr(VideoFromComponents, "save_to", record_save)
     source = VideoFromComponents(
@@ -73,8 +74,7 @@ def test_create_video_optional_eager_encoding(monkeypatch):
 
     def record_save(self, path, **kwargs):
         encoded_codecs.append(kwargs["codec"])
-        with open(path, "wb"):
-            pass
+        path.write(b"")
 
     monkeypatch.setattr(VideoFromComponents, "save_to", record_save)
     video = CreateVideo.execute(torch.zeros((1, 16, 16, 3)), 8, codec="av1").result[0]
@@ -176,7 +176,7 @@ def test_accumulated_video_reencodes_audio_to_shared_rate_and_layout():
             assert container.streams.audio[0].layout.name == "mono"
 
 
-def test_accumulated_video_stream_source_is_owned_and_reused():
+def test_accumulated_video_stream_source_is_buffered_and_reused():
     video = VideoFromList([
         VideoFromComponents(VideoComponents(images=torch.zeros((1, 16, 16, 3)), frame_rate=Fraction(8)))
     ])
@@ -185,7 +185,8 @@ def test_accumulated_video_stream_source_is_owned_and_reused():
     second = video.get_stream_source()
 
     assert first == second
-    assert os.path.exists(first)
+    assert isinstance(first, io.BytesIO)
+    assert first.getbuffer().nbytes > 0
 
 
 def test_accumulated_video_continuously_encodes_audio_and_allows_override():
