@@ -1230,7 +1230,7 @@ class VideoFromList(VideoInput):
                 if video.complete_audio is not None:
                     inherited_audio = video.complete_audio
                 self.videos.extend(video.videos)
-            elif isinstance(video, VideoFromComponents):
+            elif not isinstance(video, VideoFromFile):
                 buffer = io.BytesIO()
                 video.save_to(buffer, format=VideoContainer.MKV, codec=codec)
                 self.videos.append(VideoFromFile(buffer))
