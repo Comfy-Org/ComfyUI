@@ -102,7 +102,7 @@ def test_setup_database_routes_file_lock_to_lock_guidance(monkeypatch, caplog):
 
     def _raise_file_lock():
         raise RuntimeError(
-            "Could not acquire lock on database '/some/path.db'. "
+            "Could not acquire lock on database 'x.db'. "
             "Another ComfyUI process may already be using it. "
             "Use --database-url to specify a separate database file."
         )
@@ -110,9 +110,46 @@ def test_setup_database_routes_file_lock_to_lock_guidance(monkeypatch, caplog):
     monkeypatch.setattr(main, "init_db", _raise_file_lock)
     monkeypatch.setattr(main.args, "enable_assets", False)
 
+    with caplog.at_level(logging.ERROR):
+        result = main.setup_database(None)
+
+    assert result is None
+    assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
+    assert "Failed to initialize database." not in caplog.text
+
+
+def test_setup_database_exits_for_file_lock_when_assets_are_enabled(monkeypatch, caplog):
+    monkeypatch.setattr(main, "dependencies_available", lambda: True)
+
+    def _raise_file_lock():
+        raise RuntimeError(
+            "Could not acquire lock on database 'x.db'. "
+            "Another ComfyUI process may already be using it. "
+            "Use --database-url to specify a separate database file."
+        )
+
+    monkeypatch.setattr(main, "init_db", _raise_file_lock)
+    monkeypatch.setattr(main.args, "enable_assets", True)
+
     with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as error:
         main.setup_database(None)
 
     assert error.value.code == 1
     assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
-    assert "Failed to initialize database." not in caplog.text
+    assert "The --enable-assets flag requires a working database connection." not in caplog.text
+
+
+def test_setup_database_exits_for_driver_lock_when_assets_are_disabled(monkeypatch, caplog):
+    monkeypatch.setattr(main, "dependencies_available", lambda: True)
+
+    def _raise_driver_lock():
+        raise Exception("sqlite3.OperationalError: database is locked")
+
+    monkeypatch.setattr(main, "init_db", _raise_driver_lock)
+    monkeypatch.setattr(main.args, "enable_assets", False)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as error:
+        main.setup_database(None)
+
+    assert error.value.code == 1
+    assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
