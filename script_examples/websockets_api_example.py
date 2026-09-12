@@ -1,5 +1,5 @@
 #This is an example that uses the websockets api to know when a prompt execution is done
-#Once the prompt execution is done it downloads the images using the /history endpoint
+#Once the prompt execution is done it downloads the images using the /api/jobs endpoint
 
 import websocket #NOTE: websocket-client (https://github.com/websocket-client/websocket-client)
 import uuid
@@ -13,17 +13,17 @@ client_id = str(uuid.uuid4())
 def queue_prompt(prompt, prompt_id):
     p = {"prompt": prompt, "client_id": client_id, "prompt_id": prompt_id}
     data = json.dumps(p).encode('utf-8')
-    req = urllib.request.Request("http://{}/prompt".format(server_address), data=data)
+    req = urllib.request.Request("http://{}/api/prompt".format(server_address), data=data)
     urllib.request.urlopen(req).read()
 
 def get_image(filename, subfolder, folder_type):
     data = {"filename": filename, "subfolder": subfolder, "type": folder_type}
     url_values = urllib.parse.urlencode(data)
-    with urllib.request.urlopen("http://{}/view?{}".format(server_address, url_values)) as response:
+    with urllib.request.urlopen("http://{}/api/view?{}".format(server_address, url_values)) as response:
         return response.read()
 
-def get_history(prompt_id):
-    with urllib.request.urlopen("http://{}/history/{}".format(server_address, prompt_id)) as response:
+def get_job(prompt_id):
+    with urllib.request.urlopen("http://{}/api/jobs/{}".format(server_address, prompt_id)) as response:
         return json.loads(response.read())
 
 def get_images(ws, prompt):
@@ -44,9 +44,9 @@ def get_images(ws, prompt):
             # preview_image = Image.open(bytesIO) # This is your preview in PIL image format, store it in a global
             continue #previews are binary data
 
-    history = get_history(prompt_id)[prompt_id]
-    for node_id in history['outputs']:
-        node_output = history['outputs'][node_id]
+    job = get_job(prompt_id)
+    for node_id in job['outputs']:
+        node_output = job['outputs'][node_id]
         images_output = []
         if 'images' in node_output:
             for image in node_output['images']:
