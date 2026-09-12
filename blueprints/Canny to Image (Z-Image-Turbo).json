@@ -1553,7 +1553,7 @@
           "VHS_MetadataImage": true,
           "VHS_KeepIntermediate": true
         },
-        "category": "Image generation and editing/Conditioned",
+        "category": "Image generation/Conditioned",
         "description": "Generates an image from a Canny edge map using Z-Image-Turbo, with text conditioning."
       }
     ]

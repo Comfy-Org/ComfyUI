@@ -8,6 +8,9 @@ import node_helpers
 from comfy_api.latest import ComfyExtension, io
 
 
+REFERENCE_IMAGE_INPUT_SLOTS = 100
+
+
 class EmptyHiDreamO1LatentImage(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -40,8 +43,6 @@ class EmptyHiDreamO1LatentImage(io.ComfyNode):
 
 
 class HiDreamO1ReferenceImages(io.ComfyNode):
-    """Attach reference images to both positive and negative conditioning."""
-
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
@@ -49,9 +50,9 @@ class HiDreamO1ReferenceImages(io.ComfyNode):
             display_name="HiDream-O1 Reference Images",
             category="model/conditioning/hidream",
             description=(
-                "Attach 1-10 reference images to conditioning, one for edit instruction"
-                "or multiple for subject-driven personalization."
+                "Attach ordered reference images to positive and negative conditioning."
             ),
+            search_aliases=["sensenova reference images"],
             inputs=[
                 io.Conditioning.Input(id="positive"),
                 io.Conditioning.Input(id="negative"),
@@ -59,11 +60,14 @@ class HiDreamO1ReferenceImages(io.ComfyNode):
                     "images",
                     template=io.Autogrow.TemplateNames(
                         io.Image.Input("image"),
-                        names=[f"image_{i}" for i in range(1, 11)],
-                        min=1,
+                        names=[
+                            f"image_{index}"
+                            for index in range(1, REFERENCE_IMAGE_INPUT_SLOTS + 1)
+                        ],
+                        min=0,
                     ),
-                    tooltip=("Reference images. 1 image = instruction edit; 2-10 images = multi reference."
-                    ),
+                    optional=True,
+                    tooltip="Reference images are used in numeric socket order.",
                 ),
             ],
             outputs=[
@@ -73,10 +77,31 @@ class HiDreamO1ReferenceImages(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, *, positive, negative, images: io.Autogrow.Type) -> io.NodeOutput:
-        refs = [images[f"image_{i}"] for i in range(1, 11) if f"image_{i}" in images]
-        positive = node_helpers.conditioning_set_values(positive, {"reference_latents": refs}, append=True)
-        negative = node_helpers.conditioning_set_values(negative, {"reference_latents": refs}, append=True)
+    def execute(
+        cls, *, positive, negative, images: io.Autogrow.Type = None
+    ) -> io.NodeOutput:
+        images = images or {}
+        ordered_names = [
+            f"image_{index}"
+            for index in range(1, REFERENCE_IMAGE_INPUT_SLOTS + 1)
+            if f"image_{index}" in images
+        ]
+        known_names = set(ordered_names)
+        refs = [images[name] for name in ordered_names]
+        refs.extend(
+            image for name, image in images.items() if name not in known_names
+        )
+        if not refs:
+            return io.NodeOutput(positive, negative)
+        positive = node_helpers.conditioning_set_values(
+            positive, {"reference_latents": refs}, append=True
+        )
+        negative = node_helpers.conditioning_set_values(
+            negative, {"prompt_type": "negative"}
+        )
+        negative = node_helpers.conditioning_set_values(
+            negative, {"reference_latents": refs}, append=True
+        )
         return io.NodeOutput(positive, negative)
 
 

@@ -1,6 +1,6 @@
 {
   "revision": 0,
-  "last_node_id": 176,
+  "last_node_id": 177,
   "last_link_id": 0,
   "nodes": [
     {
@@ -164,8 +164,8 @@
         "version": 1,
         "state": {
           "lastGroupId": 8,
-          "lastNodeId": 176,
-          "lastLinkId": 380,
+          "lastNodeId": 177,
+          "lastLinkId": 381,
           "lastRerouteId": 0
         },
         "revision": 0,
@@ -716,6 +716,88 @@
             ]
           },
           {
+            "id": 177,
+            "type": "LatentCut",
+            "pos": [
+              830,
+              -70
+            ],
+            "size": [
+              270,
+              170
+            ],
+            "flags": {},
+            "order": 14,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "samples",
+                "name": "samples",
+                "type": "LATENT",
+                "link": 142
+              },
+              {
+                "localized_name": "dim",
+                "name": "dim",
+                "type": "COMBO",
+                "widget": {
+                  "name": "dim"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "index",
+                "name": "index",
+                "type": "INT",
+                "widget": {
+                  "name": "index"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "amount",
+                "name": "amount",
+                "type": "INT",
+                "widget": {
+                  "name": "amount"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "links": [
+                  381
+                ]
+              }
+            ],
+            "properties": {
+              "cnr_id": "comfy-core",
+              "ver": "0.5.1",
+              "ue_properties": {
+                "widget_ue_connectable": {},
+                "input_ue_unconnectable": {},
+                "version": "7.7"
+              },
+              "Node name for S&R": "LatentCut",
+              "enableTabs": false,
+              "tabWidth": 65,
+              "tabXOffset": 10,
+              "hasSecondTab": false,
+              "secondTabText": "Send Back",
+              "secondTabOffset": 80,
+              "secondTabWidth": 65
+            },
+            "widgets_values": [
+              "t",
+              1,
+              16384
+            ]
+          },
+          {
             "id": 76,
             "type": "LatentCutToBatch",
             "pos": [
@@ -734,7 +816,7 @@
                 "localized_name": "samples",
                 "name": "samples",
                 "type": "LATENT",
-                "link": 142
+                "link": 381
               },
               {
                 "localized_name": "dim",
@@ -1434,7 +1516,7 @@
             "id": 142,
             "origin_id": 3,
             "origin_slot": 0,
-            "target_id": 76,
+            "target_id": 177,
             "target_slot": 0,
             "type": "LATENT"
           },
@@ -1581,12 +1663,20 @@
             "target_id": 39,
             "target_slot": 0,
             "type": "COMBO"
+          },
+          {
+            "id": 381,
+            "origin_id": 177,
+            "origin_slot": 0,
+            "target_id": 76,
+            "target_slot": 0,
+            "type": "LATENT"
           }
         ],
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Image to layers",
+        "category": "Image editing/Image to layers",
         "description": "Decomposes an image into variable-resolution RGBA layers for independent editing using Qwen-Image-Layered."
       }
     ]

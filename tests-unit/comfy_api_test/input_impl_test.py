@@ -2,8 +2,9 @@ import io
 from comfy_api.input_impl.video_types import (
     container_to_output_format,
     get_open_write_kwargs,
+    video_encoder_options,
 )
-from comfy_api.util import VideoContainer
+from comfy_api.util import VideoCodec, VideoContainer
 
 
 def test_container_to_output_format_empty_string():
@@ -36,7 +37,7 @@ def test_get_open_write_kwargs_filepath_no_format():
     kwargs_specific = get_open_write_kwargs("output.avi", "mp4", "avi")
     fail_msg = "Format should not be set for file paths (Specific)"
     assert "format" not in kwargs_specific, fail_msg
-    assert kwargs_specific["options"]["movflags"] == "use_metadata_tags"
+    assert "options" not in kwargs_specific
 
 
 def test_get_open_write_kwargs_base_options_mode():
@@ -90,3 +91,16 @@ def test_get_open_write_kwargs_bytesio_specific_format_list():
 
     fail_msg = "Format should be a valid format from the specified format list when output format is not AUTO"
     assert kwargs["format"] in to_fmt, fail_msg
+
+
+def test_get_open_write_kwargs_does_not_pass_movflags_to_matroska_or_webm():
+    for format, suffix in ((VideoContainer.MKV, "mkv"), (VideoContainer.WEBM, "webm")):
+        assert "options" not in get_open_write_kwargs(f"output.{suffix}", "mp4", format)
+        assert "options" not in get_open_write_kwargs(io.BytesIO(), "mp4", format)
+
+
+def test_av1_zero_crf_uses_lossless_mode():
+    assert video_encoder_options(VideoCodec.AV1, 0) == {"svtav1-params": "lossless=1"}
+    assert video_encoder_options(VideoCodec.AV1, 30.0) == {"crf": "30.0"}
+    assert video_encoder_options(VideoCodec.H264, 0) == {"crf": "0"}
+    assert video_encoder_options(VideoCodec.AV1, None) == {}

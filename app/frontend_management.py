@@ -277,15 +277,17 @@ comfyui-workflow-templates is not installed.
             return None
 
         asset_map: Dict[str, str] = {}
-        try:
-            for entry in template_entries:
-                for asset in entry.assets:
+        for entry in template_entries:
+            for asset in entry.assets:
+                try:
                     asset_map[asset.filename] = get_asset_path(
                         entry.template_id, asset.filename
                     )
-        except Exception as exc:
-            logging.error(f"Failed to resolve template asset paths: {exc}")
-            return None
+                except FileNotFoundError:
+                    continue
+                except Exception as exc:
+                    logging.error(f"Failed to resolve template asset paths: {exc}")
+                    return None
 
         if not asset_map:
             logging.error("No workflow template assets found. Did the packages install correctly?")

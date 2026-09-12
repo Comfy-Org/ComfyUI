@@ -603,6 +603,8 @@ def _comfy_kitchen_int8_inputs(q, k, v, heads, mask, skip_reshape, enable_gqa):
 
 @wrap_attn
 def attention_comfy_kitchen_int8(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    if kwargs.get("low_precision_attention", True) is False and q.dtype == torch.float32:
+        return attention_pytorch(q, k, v, heads, mask=mask, attn_precision=attn_precision, skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs)
     q, k, v, mask, b, dim_head = _comfy_kitchen_int8_inputs(
         q, k, v, heads, mask, skip_reshape, kwargs.get("enable_gqa", False)
     )
@@ -622,6 +624,8 @@ def _attention_comfy_kitchen_int8_containers(q, k, v, heads, mask=None, attn_pre
     q = q.take()
     k = k.take()
     v = v.take()
+    if kwargs.get("low_precision_attention", True) is False and q.dtype == torch.float32:
+        return attention_pytorch(q, k, v, heads, mask=mask, attn_precision=attn_precision, skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs)
     q, k, v, mask, b, dim_head = _comfy_kitchen_int8_inputs(
         q, k, v, heads, mask, skip_reshape, kwargs.get("enable_gqa", False)
     )

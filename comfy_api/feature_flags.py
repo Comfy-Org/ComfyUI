@@ -30,6 +30,11 @@ CLI_FEATURE_FLAG_REGISTRY: dict[str, FeatureFlagInfo] = {
         "default": False,
         "description": "Signal the frontend that telemetry collection is enabled",
     },
+    "partner_run_gate_enabled": {
+        "type": "bool",
+        "default": True,
+        "description": "Gate the local Run button behind sign-in when the graph contains partner nodes",
+    },
 }
 
 

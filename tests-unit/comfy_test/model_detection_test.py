@@ -289,6 +289,18 @@ class TestModelDetection:
         del sd["double_blocks.0.attn.img_attn_q_norm.weight"]
         assert detect_unet_config(sd, "") is None
 
+    def test_pixal3d_projection_detection_ignores_packed_weight_width(self):
+        sd = {
+            "img2shape.t_embedder.mlp.0.weight": torch.empty(8, 8, device="meta"),
+            "img2shape.blocks.0.cross_attn.proj_linear.weight": torch.empty(8, 1024, device="meta"),
+            "structure_model.blocks.0.cross_attn.proj_linear.weight": torch.empty(8, 512, device="meta"),
+        }
+
+        unet_config = detect_unet_config(sd, "")
+
+        assert unet_config["proj_in_channels_shape"] == 2048
+        assert unet_config["proj_in_channels_structure"] == 1024
+
     def test_unet_config_and_required_keys_combination_is_unique(self):
         """Each model in the registry must have a unique combination of
         ``unet_config`` and ``required_keys``. If two models share the same
