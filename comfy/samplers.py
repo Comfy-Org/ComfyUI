@@ -1138,7 +1138,7 @@ def get_total_hook_groups_in_conds(conds: dict[str, list[dict[str]]]):
 
 def cast_to_load_options(model_options: dict[str], device=None, dtype=None):
     '''
-    If any patches from hooks, wrappers, or callbacks have .to to be called, call it.
+    If any patches from hooks, wrappers, or callbacks have .to() to be called, call it.
     '''
     if model_options is None:
         return
