@@ -50,8 +50,12 @@ class ParsedUpload:
 
 
 class ListAssetsQuery(BaseModel):
-    include_tags: list[str] = Field(default_factory=list)
-    exclude_tags: list[str] = Field(default_factory=list)
+    # Deprecated spellings: include_tags ≡ tags_all, exclude_tags ≡ tags_none.
+    include_tags: list[str] = Field(default_factory=list, deprecated=True)
+    exclude_tags: list[str] = Field(default_factory=list, deprecated=True)
+    tags_all: list[str] = Field(default_factory=list)
+    tags_any: list[str] = Field(default_factory=list)
+    tags_none: list[str] = Field(default_factory=list)
     name_contains: str | None = None
 
     # Accept either a JSON string (query param) or a dict
@@ -70,7 +74,10 @@ class ListAssetsQuery(BaseModel):
     )
     order: Literal["asc", "desc"] = "desc"
 
-    @field_validator("include_tags", "exclude_tags", mode="before")
+    @field_validator(
+        "include_tags", "exclude_tags", "tags_all", "tags_any", "tags_none",
+        mode="before",
+    )
     @classmethod
     def _split_csv_tags(cls, v):
         # Accept "a,b,c" or ["a","b"] (we are liberal in what we accept)
@@ -154,13 +161,20 @@ class CreateFromHashBody(BaseModel):
 
 
 class TagsRefineQuery(BaseModel):
-    include_tags: list[str] = Field(default_factory=list)
-    exclude_tags: list[str] = Field(default_factory=list)
+    # Deprecated spellings: include_tags ≡ tags_all, exclude_tags ≡ tags_none.
+    include_tags: list[str] = Field(default_factory=list, deprecated=True)
+    exclude_tags: list[str] = Field(default_factory=list, deprecated=True)
+    tags_all: list[str] = Field(default_factory=list)
+    tags_any: list[str] = Field(default_factory=list)
+    tags_none: list[str] = Field(default_factory=list)
     name_contains: str | None = None
     metadata_filter: dict[str, Any] | None = None
     limit: conint(ge=1, le=1000) = 100
 
-    @field_validator("include_tags", "exclude_tags", mode="before")
+    @field_validator(
+        "include_tags", "exclude_tags", "tags_all", "tags_any", "tags_none",
+        mode="before",
+    )
     @classmethod
     def _split_csv_tags(cls, v):
         if v is None:

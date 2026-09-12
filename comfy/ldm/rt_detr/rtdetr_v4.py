@@ -31,7 +31,7 @@ class ConvBNAct(nn.Module):
         super().__init__()
 
         self.conv = operations.Conv2d(ic, oc, k, s, (k - 1) // 2, groups=groups, bias=False, device=device, dtype=dtype)
-        self.bn   = nn.BatchNorm2d(oc, device=device, dtype=dtype)
+        self.bn   = operations.BatchNorm2d(oc, device=device, dtype=dtype)
         self.act  = nn.ReLU() if use_act else nn.Identity()
 
     def forward(self, x):

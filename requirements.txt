@@ -1,6 +1,6 @@
-comfyui-frontend-package==1.48.7
-comfyui-workflow-templates==0.11.37
-comfyui-embedded-docs==0.5.9
+comfyui-frontend-package==1.52.7
+comfyui-workflow-templates==0.11.59
+comfyui-embedded-docs==0.5.11
 torch
 torchsde
 torchvision
@@ -21,9 +21,9 @@ psutil
 alembic
 SQLAlchemy>=2.0.0
 filelock
-av>=16.0.0
-comfy-kitchen==0.2.28
-comfy-aimdo==0.4.13
+av>=17.0.0
+comfy-kitchen==0.2.33
+comfy-aimdo==0.5.3
 requests
 simpleeval>=1.0.0
 blake3

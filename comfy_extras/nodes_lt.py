@@ -2,11 +2,14 @@ import nodes
 import node_helpers
 import torch
 import torchaudio
+import comfy.ldm.lightricks.duration_head
 import comfy.model_management
 import comfy.model_sampling
 import comfy.samplers
 import comfy.utils
+import logging
 import math
+import re
 import numpy as np
 import av
 from io import BytesIO
@@ -426,6 +429,43 @@ class LTXVAddGuide(io.ComfyNode):
         return latent_image, noise_mask
 
     @classmethod
+    def attach_guide_latent(cls, positive, negative, latent_image, noise_mask, guide_latent, frame_idx, strength,
+                            scale_factors, latent_downscale_factor=1, causal_fix=None, attention_mask=None):
+        """Dilate a guide latent onto the canvas, pin it, and record its attention entry.
+
+        Keeps the three values that have to agree in one place: the pre-dilation
+        shape recorded on the attention entry, the post-dilation token count, and
+        the downscale factor handed to append_keyframe. context_windows re-derives
+        the factor from the first two, so they must not drift apart.
+        """
+        guide_latent_shape = list(guide_latent.shape[2:])  # pre-dilation [F, H, W] for spatial-mask downsampling
+        guide_mask = None
+        if latent_downscale_factor > 1:
+            guide_latent, guide_mask = cls.dilate_latent(guide_latent, latent_downscale_factor)
+
+        positive, negative, latent_image, noise_mask = cls.append_keyframe(
+            positive,
+            negative,
+            frame_idx,
+            latent_image,
+            noise_mask,
+            guide_latent,
+            strength,
+            scale_factors,
+            guide_mask=guide_mask,
+            latent_downscale_factor=latent_downscale_factor,
+            causal_fix=causal_fix,
+        )
+
+        # Track this guide for per-reference attention control.
+        pre_filter_count = guide_latent.shape[2] * guide_latent.shape[3] * guide_latent.shape[4]
+        positive, negative = _append_guide_attention_entry(
+            positive, negative, pre_filter_count, guide_latent_shape, strength=strength,
+            attention_mask=attention_mask,
+        )
+        return positive, negative, latent_image, noise_mask
+
+    @classmethod
     def execute(cls, positive, negative, vae, latent, image, frame_idx, strength, attention_mask=None, iclora_parameters=None) -> io.NodeOutput:
         scale_factors = vae.downscale_index_formula
         latent_image = latent["samples"]
@@ -459,38 +499,150 @@ class LTXVAddGuide(io.ComfyNode):
             t = t[:, :, 1:, :, :]
             image = image[1:]
 
-        guide_latent_shape = list(t.shape[2:])  # pre-dilation [F, H, W] for spatial-mask downsampling
-        guide_mask = None
-        if latent_downscale_factor > 1:
-            t, guide_mask = cls.dilate_latent(t, latent_downscale_factor)
-
         frame_idx, latent_idx = cls.get_latent_index(positive, latent_length, len(image), frame_idx, scale_factors, latent_shape=latent_image.shape)
         assert latent_idx + t.shape[2] <= latent_length, "Conditioning frames exceed the length of the latent sequence."
 
-        positive, negative, latent_image, noise_mask = cls.append_keyframe(
+        positive, negative, latent_image, noise_mask = cls.attach_guide_latent(
             positive,
             negative,
-            frame_idx,
             latent_image,
             noise_mask,
             t,
+            frame_idx,
             strength,
             scale_factors,
-            guide_mask=guide_mask,
             latent_downscale_factor=latent_downscale_factor,
             causal_fix=causal_fix,
-        )
-
-        # Track this guide for per-reference attention control.
-        pre_filter_count = t.shape[2] * t.shape[3] * t.shape[4]
-        positive, negative = _append_guide_attention_entry(
-            positive, negative, pre_filter_count, guide_latent_shape, strength=strength,
             attention_mask=attention_mask,
         )
 
         return io.NodeOutput(positive, negative, {"samples": latent_image, "noise_mask": noise_mask})
 
     generate = execute  # TODO: remove
+
+
+class LTXVAddLatentGuide(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXVAddLatentGuide",
+            display_name="LTXV Add Latent Guide",
+            category="model/conditioning/ltxv",
+            description="Pins an already-encoded latent as a guide, for when the guide comes out of an "
+                        "earlier stage rather than an image. Same effect as LTXV Add Guide without the "
+                        "VAE decode/encode round trip. A guide that is spatially smaller than the target "
+                        "(an IC-LoRA or detailing reference) is dilated onto a sparse grid, and its RoPE "
+                        "end positions are expanded by the same ratio so it covers the target canvas "
+                        "instead of addressing only the top-left corner of it.",
+            search_aliases=["latent guide", "add latent guide", "guide latent"],
+            inputs=[
+                io.Conditioning.Input("positive"),
+                io.Conditioning.Input("negative"),
+                io.Vae.Input("vae"),
+                io.Latent.Input("latent", tooltip="Target video latent the guide is pinned onto."),
+                io.Latent.Input(
+                    "guiding_latent",
+                    tooltip="Guide latent. Its spatial size must divide the target's by the same whole "
+                            "number on both axes; equal size pins it as-is, half size is treated as an "
+                            "x2 IC-LoRA reference.",
+                ),
+                io.Int.Input(
+                    "latent_idx",
+                    default=0,
+                    min=-9999,
+                    max=9999,
+                    tooltip="Latent frame index to start the guide at, counted in latent frames rather "
+                            "than pixel frames. Negative values place the guide on frames before the "
+                            "start of the latent, not counted back from its end.",
+                ),
+                io.Float.Input(
+                    "strength",
+                    default=1.0,
+                    min=0.0,
+                    max=1.0,
+                    step=0.01,
+                    tooltip="Capped at 1.0. A dilated guide marks its padding positions with a "
+                            "negative denoise mask so the model drops them; above 1.0 the kept "
+                            "positions would go negative too and the whole guide would be dropped. "
+                            "Amplify beyond 1.0 with attention_mask instead.",
+                ),
+                io.Mask.Input(
+                    "attention_mask",
+                    optional=True,
+                    tooltip="Optional pixel-space spatial mask. Controls per-region "
+                            "conditioning influence via self-attention, multiplied by strength.",
+                ),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="positive"),
+                io.Conditioning.Output(display_name="negative"),
+                io.Latent.Output(display_name="latent"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, positive, negative, vae, latent, guiding_latent, latent_idx, strength, attention_mask=None) -> io.NodeOutput:
+        scale_factors = vae.downscale_index_formula
+        latent_image = latent["samples"]
+        noise_mask = get_noise_mask(latent)
+        guide_latent = guiding_latent["samples"]
+
+        for name, samples in (("latent", latent_image), ("guiding_latent", guide_latent)):
+            if samples.ndim != 5:
+                raise ValueError(
+                    f"{name} must be a 5D video latent (batch, channels, frames, height, width), "
+                    f"got shape {list(samples.shape)}."
+                )
+
+        guide_frames = guide_latent.shape[2]
+        latent_frames = latent_image.shape[2]
+        if latent_idx + guide_frames > latent_frames:
+            raise ValueError(
+                f"Guide of {guide_frames} latent frame(s) at latent_idx {latent_idx} runs past the "
+                f"end of the {latent_frames}-frame latent. Negative values are allowed and place the "
+                f"guide before the start of the latent."
+            )
+
+        if latent_image.shape[3] % guide_latent.shape[3] != 0 or latent_image.shape[4] % guide_latent.shape[4] != 0:
+            raise ValueError(
+                f"Guiding latent spatial size {guide_latent.shape[3]}x{guide_latent.shape[4]} must divide "
+                f"the target size {latent_image.shape[3]}x{latent_image.shape[4]} by a whole number."
+            )
+
+        height_scale = latent_image.shape[3] // guide_latent.shape[3]
+        width_scale = latent_image.shape[4] // guide_latent.shape[4]
+        # dilate_latent and append_keyframe take a single IC-LoRA downscale factor for both
+        # axes, so a non-square ratio would mis-place RoPE on one of them.
+        if height_scale != width_scale:
+            raise ValueError(
+                f"Guiding latent spatial ratio must be square, got height x{height_scale} and "
+                f"width x{width_scale} ({guide_latent.shape[3]}x{guide_latent.shape[4]} -> "
+                f"{latent_image.shape[3]}x{latent_image.shape[4]})."
+            )
+
+        time_scale_factor = scale_factors[0]
+        if latent_idx <= 0:
+            frame_idx = latent_idx * time_scale_factor
+        else:
+            frame_idx = 1 + (latent_idx - 1) * time_scale_factor
+
+        positive, negative, latent_image, noise_mask = LTXVAddGuide.attach_guide_latent(
+            positive,
+            negative,
+            latent_image,
+            noise_mask,
+            guide_latent,
+            frame_idx,
+            strength,
+            scale_factors,
+            latent_downscale_factor=width_scale,
+            attention_mask=attention_mask,
+        )
+
+        out = latent.copy()
+        out["samples"] = latent_image
+        out["noise_mask"] = noise_mask
+        return io.NodeOutput(positive, negative, out)
 
 
 class LTXVCropGuides(io.ComfyNode):
@@ -934,6 +1086,243 @@ class LTXVReferenceAudio(io.ComfyNode):
         return io.NodeOutput(m, positive, negative)
 
 
+class LTXVSpatioTemporalGuidance(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXVSpatioTemporalGuidance",
+            display_name="LTXV Spatio-Temporal Guidance (STG)",
+            category="advanced/guidance",
+            description="Runs one extra pass per step with the self-attention of the selected blocks degraded to a value-passthrough, "
+                        "then guides away from it - improving spatial detail and motion coherence.",
+            inputs=[
+                io.Model.Input("model"),
+                io.Float.Input("scale", default=1.0, min=0.0, max=100.0, step=0.01, round=0.01),
+                io.String.Input("blocks", default="29", tooltip="Comma-separated transformer block indices to perturb."),
+                io.Float.Input("start_percent", default=0.0, min=0.0, max=1.0, step=0.001, advanced=True),
+                io.Float.Input("end_percent", default=1.0, min=0.0, max=1.0, step=0.001, advanced=True),
+            ],
+            outputs=[io.Model.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, scale, blocks, start_percent, end_percent) -> io.NodeOutput:
+        block_set = frozenset(int(b) for b in re.findall(r"\d+", blocks))
+
+        m = model.clone()
+        model_sampling = m.get_model_object("model_sampling")
+        sigma_start = model_sampling.percent_to_sigma(start_percent)
+        sigma_end = model_sampling.percent_to_sigma(end_percent)
+
+        def post_cfg_function(args):
+            if scale == 0 or not block_set:
+                return args["denoised"]
+
+            sigma_ = args["sigma"][0].item()
+            if sigma_ > sigma_start or sigma_ < sigma_end:
+                return args["denoised"]
+
+            cond_pred = args["cond_denoised"]
+            cond = args["cond"]
+            cfg_result = args["denoised"]
+            x = args["input"]
+
+            model_options = args["model_options"].copy()
+            transformer_options = model_options.get("transformer_options", {}).copy()
+            transformer_options["stg_self_attn_blocks"] = block_set
+            model_options["transformer_options"] = transformer_options
+
+            (perturbed,) = comfy.samplers.calc_cond_batch(args["model"], [cond], x, args["sigma"], model_options)
+
+            return cfg_result + (cond_pred - perturbed) * scale
+
+        m.set_model_sampler_post_cfg_function(post_cfg_function)
+        return io.NodeOutput(m)
+
+
+class LTXVModalityGuidance(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXVModalityGuidance",
+            display_name="LTXV Modality Guidance (A/V coupling)",
+            category="advanced/guidance",
+            description="Cross-modal (audio-video) guidance for LTXV-AV. Runs one extra forward "
+                        "pass per step with the a2v/v2a cross-attention severed, then pushes the "
+                        "result toward the coupled prediction - strengthening audio-visual sync "
+                        "(e.g. lip-sync). Reference default modality_scale is 3.0. Stacks with the "
+                        "dual-CFG guider and STG. Set to 1.0 to disable (no extra pass).",
+            inputs=[
+                io.Model.Input("model"),
+                io.Float.Input("modality_scale", default=3.0, min=1.0, max=100.0, step=0.1, round=0.01),
+                io.Float.Input("start_percent", default=0.0, min=0.0, max=1.0, step=0.001, advanced=True),
+                io.Float.Input("end_percent", default=1.0, min=0.0, max=1.0, step=0.001, advanced=True),
+            ],
+            outputs=[io.Model.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, modality_scale, start_percent, end_percent) -> io.NodeOutput:
+        m = model.clone()
+        model_sampling = m.get_model_object("model_sampling")
+        sigma_start = model_sampling.percent_to_sigma(start_percent)
+        sigma_end = model_sampling.percent_to_sigma(end_percent)
+
+        def post_cfg_function(args):
+            if math.isclose(modality_scale, 1.0):
+                return args["denoised"]
+
+            sigma_ = args["sigma"][0].item()
+            if sigma_ > sigma_start or sigma_ < sigma_end:
+                return args["denoised"]
+
+            cond_pred = args["cond_denoised"]
+            cond = args["cond"]
+            cfg_result = args["denoised"]
+            x = args["input"]
+
+            # Extra pass with audio-video cross-attention severed (both directions)
+            model_options = args["model_options"].copy()
+            transformer_options = model_options.get("transformer_options", {}).copy()
+            transformer_options["a2v_cross_attn"] = False
+            transformer_options["v2a_cross_attn"] = False
+            model_options["transformer_options"] = transformer_options
+
+            (mod_pred,) = comfy.samplers.calc_cond_batch(
+                args["model"], [cond], x, args["sigma"], model_options
+            )
+
+            # (modality_scale - 1) * (cond - uncond_modality), per the reference guider.
+            return cfg_result + (cond_pred - mod_pred) * (modality_scale - 1.0)
+
+        m.set_model_sampler_post_cfg_function(post_cfg_function)
+        return io.NodeOutput(m)
+
+
+class Guider_LTXAVDualCFG(comfy.samplers.CFGGuider):
+    """CFG guider that applies separate guidance scales to the video and audio
+    modalities of a packed LTXV-AV latent.
+    """
+
+    def set_conds(self, positive, negative):
+        self.inner_set_conds({"positive": positive, "negative": negative})
+
+    def set_cfg(self, video_cfg, audio_cfg):
+        self.video_cfg = video_cfg
+        self.audio_cfg = audio_cfg
+        self.cfg = max(video_cfg, audio_cfg)
+
+    def sample(self, noise, latent_image, *args, **kwargs):
+        # Capture the video/audio split from the nested latent before it is packed.
+        self._v_numel = None
+        if getattr(latent_image, "is_nested", False):
+            parts = latent_image.unbind()
+            if len(parts) >= 2:
+                self._v_numel = math.prod(parts[0].shape[1:])
+        return super().sample(noise, latent_image, *args, **kwargs)
+
+    def predict_noise(self, x, timestep, model_options={}, seed=None):
+        v = getattr(self, "_v_numel", None)
+        if v is None or math.isclose(self.video_cfg, self.audio_cfg):
+            # Not an AV latent, or equal scales: fall back to standard single-CFG.
+            self.cfg = self.video_cfg
+            return super().predict_noise(x, timestep, model_options, seed)
+
+        video_cfg, audio_cfg = self.video_cfg, self.audio_cfg
+
+        def dual_cfg(args):
+            # Noise-space: cond = x - cond_pred, uncond = x - uncond_pred; the
+            # returned tensor is subtracted from x by cfg_function.
+            cond, uncond = args["cond"], args["uncond"]
+            out = uncond + (cond - uncond) * video_cfg
+            out[..., v:] = uncond[..., v:] + (cond[..., v:] - uncond[..., v:]) * audio_cfg
+            return out
+
+        # disable_cfg1_optimization so the uncond pass always runs even if one of the two scales is 1.0.
+        model_options = {**model_options, "sampler_cfg_function": dual_cfg, "disable_cfg1_optimization": True}
+        return super().predict_noise(x, timestep, model_options, seed)
+
+
+class LTXVDualCFGGuider(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXVDualCFGGuider",
+            display_name="LTXV Dual CFG Guider",
+            category="model/sampling/guiders",
+            description="Separate CFG scales for the video and audio modalities of a packed LTXV-AV latent.",
+            inputs=[
+                io.Model.Input("model"),
+                io.Conditioning.Input("positive"),
+                io.Conditioning.Input("negative"),
+                io.Float.Input("video_cfg", default=3.0, min=0.0, max=100.0, step=0.1, round=0.01),
+                io.Float.Input("audio_cfg", default=7.0, min=0.0, max=100.0, step=0.1, round=0.01),
+            ],
+            outputs=[io.Guider.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, positive, negative, video_cfg, audio_cfg) -> io.NodeOutput:
+        guider = Guider_LTXAVDualCFG(model)
+        guider.set_conds(positive, negative)
+        guider.set_cfg(video_cfg, audio_cfg)
+        return io.NodeOutput(guider)
+
+
+class LTXVDurationPredictor(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="LTXVDurationPredictor",
+            display_name="LTXV Duration Predictor",
+            category="model/conditioning/ltxv",
+            description="Predicts the natural shot duration for a prompt using the LTX 2.4 duration "
+                        "head (loaded with ModelPatchLoader), and snaps it to the VAE's 8k+1 frame grid.",
+            search_aliases=["auto duration", "duration head", "num_frames"],
+            inputs=[
+                io.Model.Input("model"),
+                io.Conditioning.Input("positive"),
+                io.Custom("MODEL_PATCH").Input("duration_head",
+                                               tooltip="LTX 2.4 duration head loaded with ModelPatchLoader."),
+                io.Float.Input("frame_rate", default=24.0, min=1.0, max=120.0, step=0.01),
+                io.Float.Input("min_seconds", default=1.0, min=0.5, max=120.0, step=0.1),
+                io.Float.Input("max_seconds", default=20.0, min=0.5, max=120.0, step=0.1),
+            ],
+            outputs=[
+                io.Int.Output(display_name="num_frames"),
+                io.Float.Output(display_name="seconds", tooltip="Raw (unclamped) predicted duration."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, model, positive, duration_head, frame_rate, min_seconds, max_seconds) -> io.NodeOutput:
+        dm = model.model.diffusion_model
+        head = duration_head.model
+        if not isinstance(head, comfy.ldm.lightricks.duration_head.DurationHead):
+            raise ValueError("The connected model_patch is not an LTX duration head.")
+
+        context = positive[0][0]
+        meta = positive[0][1]
+        if context.shape[0] != 1:
+            context = context[:1]
+
+        # Run the caption connectors exactly the way sampling does.
+        comfy.model_management.load_models_gpu([model, duration_head])
+        device = model.load_device
+        head = head.to(device)
+        with torch.no_grad():
+            context = context.to(device=device, dtype=model.model.get_dtype_inference())
+            processed = dm.preprocess_text_embeds(context, unprocessed=meta.get("unprocessed_ltxav_embeds", False))
+            video_tokens = processed[..., :dm.cross_attention_dim].float()
+            audio_tokens = processed[..., dm.cross_attention_dim:].float()
+            seconds = float(head(video_tokens, audio_tokens)[0])
+
+        num_frames = comfy.ldm.lightricks.duration_head.seconds_to_num_frames(
+            seconds, frame_rate, min_seconds, max_seconds)
+        logging.info("LTXV duration head predicted %.2fs -> %d frames @ %.2f fps", seconds, num_frames, frame_rate)
+        return io.NodeOutput(num_frames, seconds)
+
+
 class LtxvExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -946,11 +1335,16 @@ class LtxvExtension(ComfyExtension):
             LTXVScheduler,
             GetICLoRAParameters,
             LTXVAddGuide,
+            LTXVAddLatentGuide,
             LTXVPreprocess,
             LTXVCropGuides,
             LTXVConcatAVLatent,
             LTXVSeparateAVLatent,
             LTXVReferenceAudio,
+            LTXVDualCFGGuider,
+            LTXVModalityGuidance,
+            LTXVSpatioTemporalGuidance,
+            LTXVDurationPredictor,
         ]
 
 

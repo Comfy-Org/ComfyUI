@@ -268,6 +268,8 @@ def list_references_page(
     order: str | None = None,
     after_cursor_value: object | None = None,
     after_cursor_id: str | None = None,
+    # Appended last so pre-existing positional callers keep binding correctly.
+    any_tags: Sequence[str] | None = None,
 ) -> tuple[list[AssetReference], dict[str, list[str]], int]:
     """List references with pagination, filtering, and sorting.
 
@@ -293,7 +295,7 @@ def list_references_page(
         escaped, esc = escape_sql_like_string(name_contains)
         base = base.where(AssetReference.name.ilike(f"%{escaped}%", escape=esc))
 
-    base = apply_tag_filters(base, include_tags, exclude_tags)
+    base = apply_tag_filters(base, include_tags, exclude_tags, any_tags)
     base = apply_metadata_filter(base, metadata_filter)
 
     sort = (sort or "created_at").lower()
@@ -345,7 +347,7 @@ def list_references_page(
         count_stmt = count_stmt.where(
             AssetReference.name.ilike(f"%{escaped}%", escape=esc)
         )
-    count_stmt = apply_tag_filters(count_stmt, include_tags, exclude_tags)
+    count_stmt = apply_tag_filters(count_stmt, include_tags, exclude_tags, any_tags)
     count_stmt = apply_metadata_filter(count_stmt, metadata_filter)
 
     total = int(session.execute(count_stmt).scalar_one() or 0)
@@ -1060,6 +1062,27 @@ def get_references_by_paths_and_asset_ids(
         winners.update(result.scalars().all())
 
     return winners
+
+
+def get_reference_paths_by_ids(
+    session: Session,
+    reference_ids: list[str],
+) -> dict[str, str]:
+    """Map reference id -> file_path for live, file-backed references."""
+    if not reference_ids:
+        return {}
+
+    paths: dict[str, str] = {}
+    for chunk in iter_chunks(reference_ids, MAX_BIND_PARAMS):
+        rows = session.execute(
+            select(AssetReference.id, AssetReference.file_path).where(
+                AssetReference.id.in_(chunk),
+                AssetReference.file_path.is_not(None),
+                AssetReference.deleted_at.is_(None),
+            )
+        )
+        paths.update({rid: fp for rid, fp in rows})
+    return paths
 
 
 def get_reference_ids_by_ids(

@@ -184,6 +184,32 @@ class Wan27Text2VideoTaskCreationRequest(BaseModel):
     parameters: Wan27Text2VideoParametersField = Field(...)
 
 
+class Wan3MediaItem(BaseModel):
+    type: str = Field(...)
+    url: str = Field(...)
+
+
+class Wan3InputField(BaseModel):
+    prompt: str | None = Field(None)
+    media: list[Wan3MediaItem] | None = Field(None)
+
+
+class Wan3ParametersField(BaseModel):
+    resolution: str = Field(...)
+    ratio: str = Field(...)
+    duration: int = Field(..., ge=-1, le=30)
+    seed: int = Field(..., ge=0, le=2147483647)
+    audio: bool = Field(True)
+    prompt_extend: bool = Field(True)
+    watermark: bool = Field(False)
+
+
+class Wan3TaskCreationRequest(BaseModel):
+    model: str = Field(...)
+    input: Wan3InputField = Field(...)
+    parameters: Wan3ParametersField = Field(...)
+
+
 class TaskCreationOutputField(BaseModel):
     task_id: str = Field(...)
     task_status: str = Field(...)

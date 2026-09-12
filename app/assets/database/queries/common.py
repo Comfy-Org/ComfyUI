@@ -60,10 +60,13 @@ def apply_tag_filters(
     stmt: sa.sql.Select,
     include_tags: Sequence[str] | None = None,
     exclude_tags: Sequence[str] | None = None,
+    any_tags: Sequence[str] | None = None,
 ) -> sa.sql.Select:
-    """include_tags: every tag must be present; exclude_tags: none may be present."""
+    """include_tags: every tag must be present; any_tags: at least one must be
+    present; exclude_tags: none may be present."""
     include_tags = normalize_tags(include_tags)
     exclude_tags = normalize_tags(exclude_tags)
+    any_tags = normalize_tags(any_tags)
 
     if include_tags:
         for tag_name in include_tags:
@@ -73,6 +76,14 @@ def apply_tag_filters(
                     & (AssetReferenceTag.tag_name == tag_name)
                 )
             )
+
+    if any_tags:
+        stmt = stmt.where(
+            exists().where(
+                (AssetReferenceTag.asset_reference_id == AssetReference.id)
+                & (AssetReferenceTag.tag_name.in_(any_tags))
+            )
+        )
 
     if exclude_tags:
         stmt = stmt.where(

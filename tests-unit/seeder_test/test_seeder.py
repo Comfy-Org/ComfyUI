@@ -399,7 +399,7 @@ class TestSeederMarkMissing:
         with (
             patch("app.assets.seeder.dependencies_available", return_value=True),
             patch(
-                "app.assets.seeder.get_all_known_prefixes",
+                "app.assets.seeder.get_owned_prefixes",
                 return_value=["/models", "/input", "/output"],
             ),
             patch(
@@ -454,8 +454,9 @@ class TestSeederMarkMissing:
 
         with (
             patch("app.assets.seeder.dependencies_available", return_value=True),
-            patch("app.assets.seeder.get_all_known_prefixes", return_value=["/models"]),
+            patch("app.assets.seeder.get_owned_prefixes", return_value=["/models"]),
             patch("app.assets.seeder.mark_missing_outside_prefixes_safely", side_effect=track_mark),
+            patch("app.assets.seeder.sync_temp_references_safely"),
             patch("app.assets.seeder.sync_root_safely", side_effect=track_sync),
             patch("app.assets.seeder.collect_paths_for_roots", return_value=[]),
             patch("app.assets.seeder.build_asset_specs", return_value=([], set(), 0)),
@@ -468,6 +469,29 @@ class TestSeederMarkMissing:
 
             assert call_order[0] == "mark_missing"
             assert "sync_models" in call_order
+
+    def test_prune_first_flag_reconciles_temp_references(
+        self, fresh_seeder: _AssetSeeder
+    ):
+        with (
+            patch("app.assets.seeder.dependencies_available", return_value=True),
+            patch("app.assets.seeder.get_owned_prefixes", return_value=["/models"]),
+            patch("app.assets.seeder.mark_missing_outside_prefixes_safely", return_value=0),
+            patch("app.assets.seeder.sync_temp_references_safely") as sync_temp,
+            patch("app.assets.seeder.sync_root_safely", return_value=set()),
+            patch("app.assets.seeder.collect_paths_for_roots", return_value=[]),
+            patch("app.assets.seeder.build_asset_specs", return_value=([], set(), 0)),
+            patch("app.assets.seeder.insert_asset_specs", return_value=0),
+            patch("app.assets.seeder.get_unenriched_assets_for_roots", return_value=[]),
+            patch("app.assets.seeder.enrich_assets_batch", return_value=(0, 0)),
+        ):
+            fresh_seeder.start(roots=("models",), prune_first=True)
+            fresh_seeder.wait(timeout=5.0)
+
+            assert sync_temp.called, (
+                "temp is not a scan root, so the scan must reconcile it explicitly "
+                "or files wiped at startup stay listed"
+            )
 
 
 class TestSeederPhases:

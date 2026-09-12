@@ -187,7 +187,7 @@ class TestMathExpressionExecute:
             self._exec("a / b", a=1, b=0)
 
     def test_sqrt_negative_raises(self):
-        with pytest.raises(ValueError, match="math domain error"):
+        with pytest.raises(ValueError, match="math domain error|expected a nonnegative input"):
             self._exec("sqrt(a)", a=-1)
 
     def test_overflow_inf_raises(self):

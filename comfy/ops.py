@@ -123,10 +123,12 @@ def materialize_meta_param(s, param_keys):
 
 
 # FIXME: add n=1 cache hit fast path
-def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blocking):
+def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blocking, return_faulted=False):
     offload_stream = None
     cast_buffer = None
     cast_buffer_offset = 0
+    if return_faulted:
+        fully_faulted = all(not getattr(s, param_key + "_function", []) for s in comfy_modules for param_key in ("weight", "bias"))
 
     def ensure_offload_stream(module, required_size, check_largest):
         nonlocal offload_stream
@@ -163,6 +165,8 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
     for s in comfy_modules:
         signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
         resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
+        if return_faulted and (signature is None or not resident):
+            fully_faulted = False
         prefetch = {
             "signature": signature,
             "resident": resident,
@@ -255,10 +259,12 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         prefetch["needs_cast"] = needs_cast
         s._prefetch = prefetch
 
+    if return_faulted:
+        return offload_stream, fully_faulted
     return offload_stream
 
 
-def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant):
+def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant, return_weights=True):
 
     prefetch = getattr(s, "_prefetch", None)
 
@@ -298,7 +304,7 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
                 tensor = tensor.dequantize()
             return tensor
 
-        if orig.dtype != dtype or len(fns) > 0:
+        if (return_weights and orig.dtype != dtype) or len(fns) > 0:
             x = to_dequant(x, dtype)
         if not resident and lowvram_fn is not None:
             x = to_dequant(x, dtype if compute_dtype is None else compute_dtype)
@@ -325,7 +331,7 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
     if prefetch["signature"] is not None:
         prefetch["resident"] = True
 
-    return weight, bias
+    return (weight, bias) if return_weights else None
 
 
 def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, offloadable=False, compute_dtype=None, want_requant=False):
@@ -1281,6 +1287,16 @@ def _quantized_weight_state_dict(module, sd, prefix, extra_quant_conf=None, extr
     return sd
 
 
+class MixedPrecisionOp(CastWeightBiasOp):
+    quant_format = None
+
+    def can_use_quantized_matmul(self, disabled_formats):
+        return (self.quant_format in QUANT_ALGOS
+                and not self._full_precision_mm_config
+                and self.quant_format not in self._disabled_formats
+                and self.quant_format not in disabled_formats)
+
+
 def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_precision_mm=False, disabled=[]):
     class MixedPrecisionOps(manual_cast):
         _quant_config = quant_config
@@ -1288,7 +1304,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
         _full_precision_mm = full_precision_mm
         _disabled = disabled
 
-        class Linear(torch.nn.Module, CastWeightBiasOp):
+        class Linear(torch.nn.Module, MixedPrecisionOp):
             _disabled_formats = disabled
 
             def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None):
@@ -1336,6 +1352,8 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         compute_dtype=compute_dtype,
                         want_requant=want_requant,
                     ) as (weight, bias):
+                        if self._full_precision_mm and isinstance(weight, QuantizedTensor):
+                            weight = weight.dequantize()
                         return self._forward(input, weight, bias)
 
                 with CastBiasWeightContext(
@@ -1438,7 +1456,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def _apply(self, fn, recurse=True):  # This is to get torch.compile + moving weights to another device working
                 return _quantized_apply(self, fn, recurse)
 
-        class MoEExperts(torch.nn.Module, CastWeightBiasOp):
+        class MoEExperts(torch.nn.Module, MixedPrecisionOp):
             """Container for E quantized expert weights, indexed via expert_weight(i).
 
             The bank lives on self.weight as a single 3D tensor — either a
@@ -1633,7 +1651,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                             self.norm_type, self.scale_grad_by_freq, self.sparse)
                     target_dtype = out_dtype if out_dtype is not None else weight._params.orig_dtype
                     x = x.to(dtype=target_dtype)
-                    if scale is not None and scale != 1.0:
+                    if scale is not None:
                         x = x * scale.to(dtype=target_dtype)
                     return x
 
@@ -1642,24 +1660,45 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 
     return MixedPrecisionOps
 
-def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_fp8=False, fp8_optimizations=False, model_config=None):
-    fp8_compute = comfy.model_management.supports_fp8_compute(load_device) # TODO: if we support more ops this needs to be more granular
-    nvfp4_compute = comfy.model_management.supports_nvfp4_compute(load_device)
-    mxfp8_compute = comfy.model_management.supports_mxfp8_compute(load_device)
+def get_disabled_quant_formats(device=None):
+    disabled = set()
+    if not comfy.model_management.supports_nvfp4_compute(device):
+        disabled.add("nvfp4")
+    if not comfy.model_management.supports_mxfp8_compute(device):
+        disabled.add("mxfp8")
+    if not comfy.model_management.supports_fp8_compute(device):
+        disabled.add("float8_e4m3fn")
+        disabled.add("float8_e5m2")
+    if not comfy.model_management.supports_int8_compute(device):
+        disabled.add("int8_tensorwise")
+        disabled.add("convrot_w4a4")
+        disabled.add("asym_w4a8_int8")
+    return disabled
 
+
+@contextlib.contextmanager
+def use_quantized_matmul(model, device):
+    disabled = get_disabled_quant_formats(device)
+    previous = []
+    try:
+        for module in model.modules():
+            if isinstance(module, MixedPrecisionOp) and module.can_use_quantized_matmul(disabled):
+                previous.append((module, module._full_precision_mm))
+                module._full_precision_mm = False
+        yield
+    finally:
+        for module, full_precision_mm in previous:
+            module._full_precision_mm = full_precision_mm
+
+
+def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_fp8=False, fp8_optimizations=False, model_config=None):
     if model_config and hasattr(model_config, 'quant_config') and model_config.quant_config:
         logging.info("Using mixed precision operations")
-        disabled = set()
-        if not nvfp4_compute:
-            disabled.add("nvfp4")
-        if not mxfp8_compute:
-            disabled.add("mxfp8")
-        if not fp8_compute:
-            disabled.add("float8_e4m3fn")
-            disabled.add("float8_e5m2")
+        disabled = get_disabled_quant_formats(load_device)
         logging.info("Native ops: {} {}".format(", ".join(QUANT_ALGOS.keys() - disabled), ", emulated ops: {}".format(", ".join(disabled)) if len(disabled) > 0 else ""))
         return mixed_precision_ops(model_config.quant_config, compute_dtype, disabled=disabled)
 
+    fp8_compute = comfy.model_management.supports_fp8_compute(load_device)
     if (
         fp8_compute and
         (fp8_optimizations or PerformanceFeature.Fp8MatrixMultiplication in args.fast) and

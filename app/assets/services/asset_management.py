@@ -21,6 +21,7 @@ from app.assets.database.queries import (
     reference_exists_for_asset_id,
     delete_reference_by_id,
     fetch_reference_and_asset,
+    get_reference_paths_by_ids,
     soft_delete_reference_by_id,
     fetch_reference_asset_and_tags,
     get_asset_by_hash as queries_get_asset_by_hash,
@@ -279,6 +280,8 @@ def list_assets_page(
     sort: str = "created_at",
     order: str = "desc",
     after: str | None = None,
+    # Appended last so pre-existing positional callers keep binding correctly.
+    any_tags: Sequence[str] | None = None,
 ) -> ListAssetsResult:
     """List assets with optional cursor pagination.
 
@@ -317,6 +320,7 @@ def list_assets_page(
             owner_id=owner_id,
             include_tags=include_tags,
             exclude_tags=exclude_tags,
+            any_tags=any_tags,
             name_contains=name_contains,
             metadata_filter=metadata_filter,
             limit=fetch_limit,
@@ -419,6 +423,14 @@ def resolve_hash_to_path(
         content_type=ctype,
         download_name=display_name,
     )
+
+
+def get_preview_file_paths(preview_ids: list[str]) -> dict[str, str]:
+    """Map preview reference id -> file_path, in one query for the whole page."""
+    if not preview_ids:
+        return {}
+    with create_session() as session:
+        return get_reference_paths_by_ids(session, reference_ids=preview_ids)
 
 
 def resolve_asset_for_download(

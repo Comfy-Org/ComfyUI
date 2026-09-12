@@ -2179,7 +2179,7 @@
           }
         ],
         "extra": {},
-        "category": "Image generation and editing/Text to image",
+        "category": "Image generation/Text to image",
         "description": "Generates images from text prompts using Baidu’s open ERNIE Image (~8B DiT): bilingual in-image typography and layouts (posters, infographics, multi-panel compositions) alongside general scenes, with bundled encoders and VAE."
       }
     ]

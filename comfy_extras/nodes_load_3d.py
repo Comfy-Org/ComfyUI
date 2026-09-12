@@ -89,12 +89,12 @@ class Preview3D(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="Preview3D",
-            search_aliases=["view mesh", "3d viewer"],
-            display_name="Preview 3D & Animation",
+            display_name="Preview 3D & Animation (DEPRECATED)",
             category="3d",
             description="Preview a 3D model file without saving it to the ComfyUI output directory.",
             is_experimental=True,
             is_output_node=True,
+            is_deprecated=True, # This node is superseded by the Preview 3D (Advanced) node
             inputs=[
                 IO.MultiType.Input(
                     IO.String.Input("model_file", default="", multiline=False),
@@ -135,7 +135,7 @@ class Preview3DAdvanced(IO.ComfyNode):
         return IO.Schema(
             node_id="Preview3DAdvanced",
             display_name="Preview 3D (Advanced)",
-            search_aliases=["preview 3d", "3d viewer", "view mesh", "frame 3d", "3d camera output"],
+            search_aliases=["preview", "preview 3d", "3d viewer", "view mesh", "frame 3d", "3d camera output"],
             category="3d",
             description="Preview a 3D model file without saving it to the ComfyUI output directory.",
             is_experimental=True,
@@ -156,16 +156,16 @@ class Preview3DAdvanced(IO.ComfyNode):
                 ),
                 IO.Load3DModelInfo.Input("model_3d_info", optional=True, advanced=True),
                 IO.Load3D.Input("viewport_state"),
-                IO.Load3DCamera.Input("camera_info", optional=True, advanced=True),
-                IO.Int.Input("width", default=1024, min=1, max=4096, step=1),
-                IO.Int.Input("height", default=1024, min=1, max=4096, step=1),
+                IO.Load3DCamera.Input("camera_info", optional=True, advanced=True, tooltip="Viewport camera information: position, look-at target, zoom, and type."),
+                IO.Int.Input("width", default=1024, min=1, max=4096, step=1, tooltip="Render width of the viewport in pixels."),
+                IO.Int.Input("height", default=1024, min=1, max=4096, step=1, tooltip="Render height of the viewport in pixels."),
             ],
             outputs=[
-                IO.File3DAny.Output(display_name="model_3d"),
-                IO.Load3DModelInfo.Output(display_name="model_3d_info"),
-                IO.Load3DCamera.Output(display_name="camera_info"),
-                IO.Int.Output(display_name="width"),
-                IO.Int.Output(display_name="height"),
+                IO.File3DAny.Output(display_name="model_3d", tooltip="3D model file (glb/obj/stl/etc.) from an upstream 3D node."),
+                IO.Load3DModelInfo.Output(display_name="model_3d_info", tooltip="Placement of each model in the scene: position, rotation, and scale (Y-up world space)."),
+                IO.Load3DCamera.Output(display_name="camera_info", tooltip="Viewport camera information: position, look-at target, zoom, and type."),
+                IO.Int.Output(display_name="width", tooltip="Render width of the viewport in pixels."),
+                IO.Int.Output(display_name="height", tooltip="Render height of the viewport in pixels."),
             ],
         )
 
@@ -185,7 +185,7 @@ class Preview3DAdvanced(IO.ComfyNode):
             camera_info,
             width,
             height,
-            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info),
+            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info, folder_type=IO.FolderType.temp),
         )
 
 
@@ -200,17 +200,18 @@ class PreviewGaussianSplat(IO.ComfyNode):
             is_experimental=True,
             is_output_node=True,
             search_aliases=[
-                "view splat",
-                "view gaussian",
-                "view gaussian splat",
+                "preview",
+                "preview splat",
                 "preview gaussian",
                 "preview gaussian splat",
-                "view 3dgs",
                 "preview 3dgs",
                 "preview ply",
                 "preview spz",
-                "preview splat",
                 "preview ksplat",
+                "view splat",
+                "view gaussian",
+                "view gaussian splat",
+                "view 3dgs",
             ],
             inputs=[
                 IO.MultiType.Input(
@@ -255,7 +256,7 @@ class PreviewGaussianSplat(IO.ComfyNode):
             camera_info,
             width,
             height,
-            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info),
+            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info, folder_type=IO.FolderType.temp),
         )
 
 
@@ -270,11 +271,12 @@ class PreviewPointCloud(IO.ComfyNode):
             is_experimental=True,
             is_output_node=True,
             search_aliases=[
-                "view point cloud",
-                "view pointcloud",
+                "preview",
                 "preview point cloud",
                 "preview pointcloud",
                 "preview ply",
+                "view point cloud",
+                "view pointcloud",
             ],
             inputs=[
                 IO.MultiType.Input(
@@ -316,7 +318,7 @@ class PreviewPointCloud(IO.ComfyNode):
             camera_info,
             width,
             height,
-            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info),
+            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info, folder_type=IO.FolderType.temp),
         )
 
 
@@ -353,15 +355,15 @@ class Load3DAdvanced(IO.ComfyNode):
             inputs=[
                 IO.Combo.Input("model_file", options=["none"] + sorted(files), upload=IO.UploadType.model),
                 IO.Load3D.Input("viewport_state"),
-                IO.Int.Input("width", default=1024, min=1, max=4096, step=1),
-                IO.Int.Input("height", default=1024, min=1, max=4096, step=1),
+                IO.Int.Input("width", default=1024, min=1, max=4096, step=1, tooltip="Render width of the viewport in pixels."),
+                IO.Int.Input("height", default=1024, min=1, max=4096, step=1, tooltip="Render height of the viewport in pixels."),
             ],
             outputs=[
-                IO.File3DAny.Output(display_name="model_3d"),
-                IO.Load3DModelInfo.Output(display_name="model_3d_info"),
-                IO.Load3DCamera.Output(display_name="camera_info"),
-                IO.Int.Output(display_name="width"),
-                IO.Int.Output(display_name="height"),
+                IO.File3DAny.Output(display_name="model_3d", tooltip="Loaded 3D model file (glb/obj/stl/etc.)."),
+                IO.Load3DModelInfo.Output(display_name="model_3d_info", tooltip="Placement of each model in the scene: position, rotation, and scale (Y-up world space)."),
+                IO.Load3DCamera.Output(display_name="camera_info", tooltip="Viewport camera information: position, look-at target, zoom, and type."),
+                IO.Int.Output(display_name="width", tooltip="Render width of the viewport in pixels."),
+                IO.Int.Output(display_name="height", tooltip="Render height of the viewport in pixels."),
             ],
         )
 

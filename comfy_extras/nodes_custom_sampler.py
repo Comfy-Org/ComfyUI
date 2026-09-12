@@ -718,15 +718,7 @@ class Noise_EmptyNoise:
         self.seed = 0
 
     def generate_noise(self, input_latent):
-        latent_image = input_latent["samples"]
-        if latent_image.is_nested:
-            tensors = latent_image.unbind()
-            zeros = []
-            for t in tensors:
-                zeros.append(torch.zeros(t.shape, dtype=t.dtype, layout=t.layout, device="cpu"))
-            return comfy.nested_tensor.NestedTensor(zeros)
-        else:
-            return torch.zeros(latent_image.shape, dtype=latent_image.dtype, layout=latent_image.layout, device="cpu")
+        return comfy.sample.prepare_empty_noise(input_latent["samples"])
 
 
 class Noise_RandomNoise:

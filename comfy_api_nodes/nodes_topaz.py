@@ -217,7 +217,6 @@ class TopazImageEnhance(IO.ComfyNode):
             response_model=ImageStatusResponse,
             status_extractor=lambda x: x.status,
             progress_extractor=lambda x: getattr(x, "progress", 0),
-            price_extractor=lambda x: x.credits * 0.08,
             poll_interval=8.0,
             estimated_duration=60,
         )
@@ -567,7 +566,6 @@ class TopazImageEnhanceV2(IO.ComfyNode):
             response_model=ImageStatusResponse,
             status_extractor=lambda x: x.status,
             progress_extractor=lambda x: getattr(x, "progress", 0),
-            price_extractor=lambda x: x.credits * (0.08 if model_choice == "Reimagine" else 0.1144),
             poll_interval=8.0,
             estimated_duration=60,
         )
@@ -814,7 +812,6 @@ class TopazVideoEnhance(IO.ComfyNode):
             response_model=VideoStatusResponse,
             status_extractor=lambda x: x.status,
             progress_extractor=lambda x: getattr(x, "progress", 0),
-            price_extractor=lambda x: (x.estimates.cost[0] * 0.08 if x.estimates and x.estimates.cost[0] else None),
             poll_interval=10.0,
         )
         return IO.NodeOutput(await download_url_to_video_output(final_response.download.url))
@@ -1158,7 +1155,6 @@ class TopazVideoEnhanceV2(IO.ComfyNode):
             response_model=VideoStatusResponse,
             status_extractor=lambda x: x.status,
             progress_extractor=lambda x: getattr(x, "progress", 0),
-            price_extractor=lambda x: (x.estimates.cost[0] * 0.08 if x.estimates and x.estimates.cost[0] else None),
             poll_interval=10.0,
         )
         return IO.NodeOutput(await download_url_to_video_output(final_response.download.url))

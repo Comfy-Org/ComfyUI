@@ -43,7 +43,7 @@ def test_uses_persisted_loader_path_without_recomputing():
         loader_path="SENTINEL/stored.safetensors",
     )
 
-    resp = _build_asset_response(result)
+    resp = _build_asset_response(result, {})
 
     assert resp.loader_path == "SENTINEL/stored.safetensors"
 
@@ -67,7 +67,7 @@ def test_null_stored_loader_path_is_served_as_null(tmp_path: Path):
         mock_fp.models_dir = str(models)
 
         result = _make_result(file_path=str(f), loader_path=None)
-        resp = _build_asset_response(result)
+        resp = _build_asset_response(result, {})
 
         assert resp.loader_path is None
         assert resp.display_name == "checkpoints/bar.safetensors"
@@ -77,7 +77,7 @@ def test_all_path_fields_null_without_file_path():
     """API-created / hash-only references (no file_path) expose no paths."""
     result = _make_result(file_path=None, loader_path=None)
 
-    resp = _build_asset_response(result)
+    resp = _build_asset_response(result, {})
 
     assert resp.loader_path is None
     assert resp.display_name is None

@@ -136,7 +136,7 @@ class DINOv2Encoder(nn.Module):
     def forward(self, image: torch.Tensor, token_rows: int, token_cols: int,
                 return_class_token: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         image_14 = F.interpolate(image, (token_rows * 14, token_cols * 14), mode="bilinear", align_corners=False, antialias=True)
-        image_14 = (image_14 - self.image_mean) / self.image_std
+        image_14 = (image_14 - comfy.ops.cast_to_input(self.image_mean, image_14, copy=False)) / comfy.ops.cast_to_input(self.image_std, image_14, copy=False)
         feats = self.backbone.get_intermediate_layers(image_14, self.intermediate_layers, apply_norm=True)
         x = torch.stack([
             proj(feat.permute(0, 2, 1).unflatten(2, (token_rows, token_cols)).contiguous())

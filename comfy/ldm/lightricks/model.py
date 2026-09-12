@@ -303,22 +303,22 @@ class NormSingleLinearTextProjection(nn.Module):
 
 
 class GELU_approx(nn.Module):
-    def __init__(self, dim_in, dim_out, dtype=None, device=None, operations=None):
+    def __init__(self, dim_in, dim_out, bias=True, dtype=None, device=None, operations=None):
         super().__init__()
-        self.proj = operations.Linear(dim_in, dim_out, dtype=dtype, device=device)
+        self.proj = operations.Linear(dim_in, dim_out, bias=bias, dtype=dtype, device=device)
 
     def forward(self, x):
         return torch.nn.functional.gelu(self.proj(x), approximate="tanh")
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, dim_out, mult=4, glu=False, dropout=0.0, dtype=None, device=None, operations=None):
+    def __init__(self, dim, dim_out, mult=4, glu=False, dropout=0.0, ff_bias=True, dtype=None, device=None, operations=None):
         super().__init__()
         inner_dim = int(dim * mult)
-        project_in = GELU_approx(dim, inner_dim, dtype=dtype, device=device, operations=operations)
+        project_in = GELU_approx(dim, inner_dim, bias=ff_bias, dtype=dtype, device=device, operations=operations)
 
         self.net = nn.Sequential(
-            project_in, nn.Dropout(dropout), operations.Linear(inner_dim, dim_out, dtype=dtype, device=device)
+            project_in, nn.Dropout(dropout), operations.Linear(inner_dim, dim_out, bias=ff_bias, dtype=dtype, device=device)
         )
 
     def forward(self, x):
@@ -462,28 +462,34 @@ class CrossAttention(nn.Module):
         )
 
     def forward(self, x, context=None, mask=None, pe=None, k_pe=None, transformer_options={}):
+        self_attn = context is None
         q = self.to_q(x)
         context = x if context is None else context
         k = self.to_k(context)
         v = self.to_v(context)
 
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-
-        # These norms span all heads, so the per-head RMS+RoPE kernel is not equivalent.
-        if pe is not None:
-            if k_pe is None and q.shape == k.shape:
-                q, k = apply_rotary_emb_qk(q, k, pe)
-            else:
-                q = apply_rotary_emb(q, pe)
-                k = apply_rotary_emb(k, pe if k_pe is None else k_pe)
-
-        if mask is None:
-            out = comfy.ldm.modules.attention.optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision, transformer_options=transformer_options)
-        elif isinstance(mask, GuideAttentionMask):
-            out = _attention_with_guide_mask(q, k, v, self.heads, mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
+        # Spatio-Temporal Guidance (STG) perturbation: for the flagged self-attention
+        # layers, the attention degrades to a passthrough of the value projection (out = V).
+        if self_attn and transformer_options.get("stg_skip_self_attn", False):
+            out = v
         else:
-            out = comfy.ldm.modules.attention.optimized_attention(q, k, v, self.heads, mask=mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+            # These norms span all heads, so the per-head RMS+RoPE kernel is not equivalent.
+            if pe is not None:
+                if k_pe is None and q.shape == k.shape:
+                    q, k = apply_rotary_emb_qk(q, k, pe)
+                else:
+                    q = apply_rotary_emb(q, pe)
+                    k = apply_rotary_emb(k, pe if k_pe is None else k_pe)
+
+            if mask is None:
+                out = comfy.ldm.modules.attention.optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            elif isinstance(mask, GuideAttentionMask):
+                out = _attention_with_guide_mask(q, k, v, self.heads, mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            else:
+                out = comfy.ldm.modules.attention.optimized_attention(q, k, v, self.heads, mask=mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
 
         # Apply per-head gating if enabled
         if self.to_gate_logits is not None:
@@ -502,7 +508,7 @@ ADALN_CROSS_ATTN_PARAMS_COUNT = 9
 
 class BasicTransformerBlock(nn.Module):
     def __init__(
-        self, dim, n_heads, d_head, context_dim=None, attn_precision=None, cross_attention_adaln=False, dtype=None, device=None, operations=None
+        self, dim, n_heads, d_head, context_dim=None, attn_precision=None, cross_attention_adaln=False, ff_bias=True, dtype=None, device=None, operations=None
     ):
         super().__init__()
 
@@ -518,7 +524,7 @@ class BasicTransformerBlock(nn.Module):
             device=device,
             operations=operations,
         )
-        self.ff = FeedForward(dim, dim_out=dim, glu=True, dtype=dtype, device=device, operations=operations)
+        self.ff = FeedForward(dim, dim_out=dim, glu=True, ff_bias=ff_bias, dtype=dtype, device=device, operations=operations)
 
         self.attn2 = CrossAttention(
             query_dim=dim,
@@ -717,6 +723,9 @@ class LTXBaseModel(torch.nn.Module, ABC):
         caption_proj_before_connector=False,
         cross_attention_adaln=False,
         caption_projection_first_linear=True,
+        ff_bias=True,
+        use_prompt_adaln_single=True,
+        use_keyframes_abs_pos_embedding=False,
         dtype=None,
         device=None,
         operations=None,
@@ -746,6 +755,9 @@ class LTXBaseModel(torch.nn.Module, ABC):
         self.caption_proj_before_connector = caption_proj_before_connector
         self.cross_attention_adaln = cross_attention_adaln
         self.caption_projection_first_linear = caption_projection_first_linear
+        self.ff_bias = ff_bias
+        self.use_prompt_adaln_single = use_prompt_adaln_single
+        self.use_keyframes_abs_pos_embedding = use_keyframes_abs_pos_embedding
 
         # Common dimensions
         self.inner_dim = num_attention_heads * attention_head_dim
@@ -773,12 +785,17 @@ class LTXBaseModel(torch.nn.Module, ABC):
             self.in_channels, self.inner_dim, bias=True, dtype=dtype, device=device
         )
 
+        if self.use_keyframes_abs_pos_embedding:
+            self.keyframes_abs_pos_embedding = nn.Parameter(torch.zeros(1, self.inner_dim, dtype=dtype, device=device))
+        else:
+            self.keyframes_abs_pos_embedding = None
+
         embedding_coefficient = ADALN_CROSS_ATTN_PARAMS_COUNT if self.cross_attention_adaln else ADALN_BASE_PARAMS_COUNT
         self.adaln_single = AdaLayerNormSingle(
             self.inner_dim, embedding_coefficient=embedding_coefficient, use_additional_conditions=False, dtype=dtype, device=device, operations=self.operations
         )
 
-        if self.cross_attention_adaln:
+        if self.cross_attention_adaln and self.use_prompt_adaln_single:
             self.prompt_adaln_single = AdaLayerNormSingle(
                 self.inner_dim, embedding_coefficient=2, use_additional_conditions=False, dtype=dtype, device=device, operations=self.operations
             )
@@ -1070,6 +1087,7 @@ class LTXVModel(LTXBaseModel):
                     self.attention_head_dim,
                     context_dim=self.cross_attention_dim,
                     cross_attention_adaln=self.cross_attention_adaln,
+                    ff_bias=self.ff_bias,
                     dtype=dtype,
                     device=device,
                     operations=self.operations,
@@ -1099,6 +1117,15 @@ class LTXVModel(LTXBaseModel):
 
         grid_mask = None
         if keyframe_idxs is not None and keyframe_idxs.shape[2] > 0:
+            tokens_per_frame = self.tokens_per_latent_frame(additional_args["orig_shape"])
+            if keyframe_idxs.shape[2] % tokens_per_frame != 0:
+                raise ValueError(
+                    f"keyframe_idxs holds {keyframe_idxs.shape[2]} tokens, which is not a whole number of "
+                    f"{tokens_per_frame}-token latent frames. The appended frames were recorded against a "
+                    "different spatial resolution than the latent being sampled, so their positions would land "
+                    "on the wrong tokens. Crop the guides and separate the generated keyframes before "
+                    "upscaling the latent."
+                )
             additional_args.update({ "orig_patchified_shape": list(x.shape)})
             denoise_mask = self.patchifier.patchify(denoise_mask)[0]
             grid_mask = ~torch.any(denoise_mask < 0, dim=-1)[0]
@@ -1141,7 +1168,63 @@ class LTXVModel(LTXBaseModel):
             additional_args["num_guide_tokens"] = keyframe_idxs.shape[2]
 
         x = self.patchify_proj(x)
+        x = self.apply_keyframes_abs_pos_embedding(
+            x,
+            pixel_coords,
+            orig_shape=additional_args["orig_shape"],
+            grid_mask=grid_mask,
+            num_guide_tokens=additional_args.get("num_guide_tokens", 0),
+            generated_keyframes=kwargs.get("generated_keyframes", None),
+        )
         return x, pixel_coords, additional_args
+
+    def tokens_per_latent_frame(self, orig_shape):
+        """Token count of a single latent frame at the given latent shape."""
+        patch_size = self.patchifier.patch_size
+        return (orig_shape[3] // patch_size[1]) * (orig_shape[4] // patch_size[2])
+
+    def keyframes_abs_pos_mask(self, pixel_coords, orig_shape, grid_mask, num_guide_tokens, generated_keyframes):
+        """Per-token mask selecting the latents that encode a single standalone pixel frame.
+
+        Returns a (batch, tokens) boolean mask over the already grid-filtered token sequence.
+        """
+        temporal_start = pixel_coords[:, 0]
+        if temporal_start.ndim == 3:  # (batch, tokens, [start, end])
+            temporal_start = temporal_start[..., 0]
+        mask = temporal_start == 0
+        if num_guide_tokens > 0:
+            mask[:, -num_guide_tokens:] = False
+
+        if generated_keyframes is not None:
+            # The temporal patch size is always 1, so one latent frame is one row of tokens.
+            tokens_per_frame = self.tokens_per_latent_frame(orig_shape)
+            if generated_keyframes["tokens_per_frame"] != tokens_per_frame:
+                raise ValueError(
+                    f"The generated keyframes were recorded at {generated_keyframes['tokens_per_frame']} tokens "
+                    f"per latent frame but this latent has {tokens_per_frame}. Separate the generated keyframes "
+                    "before upscaling the latent."
+                )
+            first_token = generated_keyframes["first_latent_frame"] * tokens_per_frame
+            num_slot_tokens = generated_keyframes["num_keyframes"] * tokens_per_frame
+            slots = torch.zeros(orig_shape[2] * tokens_per_frame, dtype=torch.bool, device=mask.device)
+            slots[first_token:first_token + num_slot_tokens] = True
+            if grid_mask is not None:
+                slots = slots[grid_mask]
+            mask = mask | slots
+
+        return mask
+
+    def apply_keyframes_abs_pos_embedding(self, x, pixel_coords, orig_shape, grid_mask, num_guide_tokens, generated_keyframes):
+        """Add the learned keyframe marker to the single-pixel-frame tokens.
+
+        A no-op for every checkpoint built without the parameter.
+        """
+        if self.keyframes_abs_pos_embedding is None:
+            return x
+
+        mask = self.keyframes_abs_pos_mask(pixel_coords, orig_shape, grid_mask, num_guide_tokens, generated_keyframes)
+        embedding = self.keyframes_abs_pos_embedding.to(device=x.device, dtype=x.dtype)
+        return x + mask.unsqueeze(-1).to(x.dtype) * embedding
 
     def _build_guide_self_attention_mask(self, x, transformer_options, merged_args):
         """Build self-attention mask for per-guide attention attenuation.

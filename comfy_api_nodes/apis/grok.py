@@ -9,6 +9,7 @@ class ImageGenerationRequest(BaseModel):
     seed: int = Field(...)
     response_format: str = Field("url")
     resolution: str = Field(...)
+    quality: str | None = Field(None)
 
 
 class InputUrlObject(BaseModel):
@@ -28,6 +29,7 @@ class ImageEditRequest(BaseModel):
     seed: int = Field(...)
     response_format: str = Field("url")
     aspect_ratio: str | None = Field(...)
+    quality: str | None = Field(None)
 
 
 class VideoGenerationRequest(BaseModel):

@@ -2,7 +2,7 @@ from comfy import sd1_clip
 import comfy.model_management
 import comfy.text_encoders.llama
 from .hunyuan_image import HunyuanImageTokenizer
-from transformers import LlamaTokenizerFast
+from .bpe_tokenizer import LlamaTokenizerFast
 import torch
 import os
 import numbers

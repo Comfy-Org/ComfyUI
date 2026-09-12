@@ -156,10 +156,11 @@ class DINOv3ViTRopePositionEmbedding(nn.Module):
 
 
 class DINOv3ViTEmbeddings(nn.Module):
-    def __init__(self, hidden_size, num_register_tokens, num_channels, patch_size, dtype, device, operations):
+    def __init__(self, hidden_size, num_register_tokens, num_channels, patch_size, dtype, device, operations, use_mask_token=True):
         super().__init__()
         self.cls_token = nn.Parameter(torch.empty(1, 1, hidden_size, device=device, dtype=dtype))
-        self.mask_token = nn.Parameter(torch.empty(1, 1, hidden_size, device=device, dtype=dtype))
+        self.mask_token = nn.Parameter(torch.empty(1, 1, hidden_size, device=device, dtype=dtype)) if use_mask_token else None
+
         self.register_tokens = nn.Parameter(torch.empty(1, num_register_tokens, hidden_size, device=device, dtype=dtype))
         self.patch_embeddings = operations.Conv2d(
             num_channels, hidden_size, kernel_size=patch_size, stride=patch_size, device=device, dtype=dtype
@@ -212,7 +213,7 @@ class DINOv3ViTLayer(nn.Module):
 
 
 class DINOv3ViTModel(nn.Module):
-    def __init__(self, config, dtype, device, operations):
+    def __init__(self, config, dtype, device, operations, use_mask_token=True):
         super().__init__()
         num_hidden_layers = config["num_hidden_layers"]
         hidden_size = config["hidden_size"]
@@ -228,7 +229,7 @@ class DINOv3ViTModel(nn.Module):
 
         self.embeddings = DINOv3ViTEmbeddings(
             hidden_size, num_register_tokens, num_channels=num_channels, patch_size=patch_size,
-            dtype=dtype, device=device, operations=operations
+            dtype=dtype, device=device, operations=operations, use_mask_token=use_mask_token
         )
         self.rope_embeddings = DINOv3ViTRopePositionEmbedding(
             rope_theta, hidden_size, num_attention_heads, patch_size=patch_size, dtype=dtype, device=device
@@ -239,6 +240,10 @@ class DINOv3ViTModel(nn.Module):
                            dtype=dtype, device=device, operations=operations, gated_mlp_act=gated_mlp_act)
             for _ in range(num_hidden_layers)])
         self.norm = operations.LayerNorm(hidden_size, eps=layer_norm_eps, dtype=dtype, device=device)
+
+        self.patch_size = patch_size
+        self.embed_dim = self.embed_dims = hidden_size
+        self.num_prefix_tokens = 1 + num_register_tokens  # cls + register
 
     def get_input_embeddings(self):
         return self.embeddings.patch_embeddings
@@ -257,3 +262,11 @@ class DINOv3ViTModel(nn.Module):
             sequence_output = norm(hidden_states)
         pooled_output = sequence_output[:, 0, :]
         return sequence_output, None, pooled_output, None
+
+    def forward_features(self, pixel_values, **kwargs):
+        sequence_output = self.forward(pixel_values, **kwargs)[0]
+        b = pixel_values.shape[0]
+        h = pixel_values.shape[-2] // self.patch_size
+        w = pixel_values.shape[-1] // self.patch_size
+        patches = sequence_output[:, self.num_prefix_tokens:, :]
+        return patches.reshape(b, h, w, self.embed_dim).permute(0, 3, 1, 2).contiguous()

@@ -54,7 +54,6 @@ async def execute_task(
         response_model=TaskStatusResponse,
         status_extractor=lambda r: r.state,
         progress_extractor=lambda r: r.progress,
-        price_extractor=lambda r: r.credits * 0.005 if r.credits is not None else None,
         max_poll_attempts=max_poll_attempts,
     )
     if not response.creations:
