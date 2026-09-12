@@ -1,0 +1,32 @@
+{
+  "char_woman": "a strikingly beautiful Chinese woman in her mid-30s, fair skin, large expressive eyes, elegant, long straight black hair, refined quiet luxury clothing",
+  "char_man": "a handsome Chinese man in his early 30s, short neat black hair, clean-shaven, dark tailored suit",
+  "scenes": [
+    {"id": "01_empty_hotel", "label": "空掉的凡尔赛宫 · 蒙太奇拉古纳海滩",
+     "prompt": "Cinematic slow dolly-in. A pristine, completely empty luxury hotel suite on a clifftop floor overlooking the Pacific Ocean, cool morning light. A single housekeeper in a white uniform slowly tucks the corner of a made bed, wipes a marble counter, then closes the door. No guests. Vast empty space, melancholic blue ocean light, a palace waiting for a queen. Film grain, photorealistic, 8k."},
+    {"id": "02_2007_dorm", "label": "2007 北大的老电脑",
+     "prompt": "Cinematic close-up, warm 2007 nostalgia. A dim student dorm at night, an old bulky desktop PC glowing on a cluttered desk, a QQ ad popup on the screen showing a young beautiful Chinese woman's face, a college-age young man typing a single chat message, then pausing, uncertain. Green CRT glow, dust in the air, 2007 aesthetic, warm nostalgic tones, film grain, photorealistic."},
+    {"id": "03_first_meeting", "label": "初见 · 瑰丽酒店",
+     "prompt": "Cinematic medium shot in soft afternoon light. A luxury hotel lounge. A strikingly beautiful Chinese woman in her mid-30s with long black hair sits casually on a cream sofa, thinner than a photo. A handsome young Chinese man in a dark suit stands watching her, calm rather than nervous. Warm neutral tones, shallow depth of field, quiet, photorealistic, 8k."},
+    {"id": "04_banana", "label": "六百万美元的香蕉",
+     "prompt": "Cinematic wide shot inside a minimalist art gallery. A colossal bright-yellow sculpted banana as an art installation. A beautiful Chinese woman and a young man in a dark suit stand small before it, dwarfed by the artwork. She tilts her head and asks a question, then turns away. Soft museum lighting, ironic and tender, photorealistic, 8k."},
+    {"id": "05_private_screening", "label": "私人放映",
+     "prompt": "Cinematic low-angle wide shot. A vast, completely empty modern movie theater, every seat dark and unoccupied. Only two figures, a beautiful Chinese woman and a young man in a suit, seated alone in the center facing a huge bright screen. Cool blue screen light on their faces, absurd scale for two people, the excess of a private screening, photorealistic, 8k."},
+    {"id": "06_polishing_nails", "label": "磨指甲 · 最私密",
+     "prompt": "Cinematic extreme close-up, intimate and still. A woman's hands gently holding a man's hand on her lap, carefully filing and polishing one nail at a time with a small professional tool, lifting it to check against the light. Soft warm bedroom light, tender and unhurried, shallow depth of field, cinematic warmth, photorealistic."},
+    {"id": "07_tenerife_tape", "label": "特纳里费 · 贴胶带的房间",
+     "prompt": "Cinematic slow pan. A luxury oceanfront room, every window, vent and indicator light sealed in strips of black tape shutting out all light, the room dark like a sealed cell while blinding daylight rages outside. A beautiful Chinese woman sits in the sealed dark, the young man beside her. High contrast of darkness and blinding sun, secrecy and privacy, photorealistic, 8k."},
+    {"id": "08_stars_wish", "label": "山顶看星星 · 许个愿",
+     "prompt": "Cinematic wide night shot. A couple wrapped in thick coats on a cold mountain overlook beneath a dense field of stars, a glowing champagne glass between them. She looks up, makes a wish, then turns and speaks. Deep blue night, starlight, their small warmth against a vast cold sky, wistful, photorealistic, 8k."},
+    {"id": "09_maldives_deck", "label": "索尼娃贾尼 · 收到",
+     "prompt": "Cinematic slow aerial over the Indian Ocean. Overwater bungalows on stilts. A beautiful Chinese woman on a barefoot private deck, her phone glowing with a short message. A young man stands at the waterline watching. Endless turquoise water, white sand, the extreme privacy of a no-news no-shoes island, serene and slightly cold, photorealistic, 8k."},
+    {"id": "10_proposal_ring", "label": "求婚 · 钻戒太小了",
+     "prompt": "Cinematic close-up then slow pull-back. A single diamond ring resting on a white envelope on a Maldives deck. A beautiful Chinese woman and a young man face each other. She notes the ring is too small and asks a question; he is silent. Golden pre-dawn light over a black, unlit sea, the weight of the question hanging, photorealistic, 8k."},
+    {"id": "11_hk_fireworks", "label": "春节 · 一百万人，没有她",
+     "prompt": "Cinematic wide shot. The Victoria Harbour skyline exploding in fireworks over a dense sea of a million spectators. Then 3am, an empty Hong Kong street at a red light with a single stopped car, no other traffic. The contrast of a million people and total emptiness, celebration and absence, cool night tones with warm firework bursts, photorealistic, 8k."},
+    {"id": "12_eighth_day_call", "label": "第八天电话 · 我知道了",
+     "prompt": "Cinematic two-shot, split-tone. A handsome young Chinese man holding a phone on one end with the faint sound of the ocean behind him; on the other, a woman by the sea, calm, saying a short sentence. Long silence between them, no one moving. Split cool tones of a city harbor and an empty ocean, both silent, the call hanging in the air, photorealistic, 8k."},
+    {"id": "13_epilogue_drawers", "label": "尾声 · 什么都没有发生",
+     "prompt": "Cinematic slow push-in, elegiac. A drawer pulled open: a single unopened medical vial, a small nail-filing tool, and a phone showing a low-resolution 2007 photo of a young woman's blurred face. A man's hand rests on his own chest counting a steady heartbeat. Then the Victoria Harbour fireworks over a million people, then the city going dark, nothing happening. Muted cool tones, quiet, final, photorealistic, 8k."}
+  ]
+}
