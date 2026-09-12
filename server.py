@@ -573,8 +573,12 @@ class PromptServer():
                             img.save(buffer, format=image_format, quality=quality)
                             buffer.seek(0)
 
+                            # Explicit inline disposition per RFC 2183/6266: the
+                            # filename hints below previously had no
+                            # disposition-type, which strict parsers such as Go's
+                            # mime.ParseMediaType reject (issue #8914).
                             return web.Response(body=buffer.read(), content_type=f'image/{image_format}',
-                                                headers={"Content-Disposition": f"filename=\"{filename}\""})
+                                                headers={"Content-Disposition": f"inline; filename=\"{filename}\""})
 
                     if 'channel' not in request.rel_url.query:
                         channel = 'rgba'
@@ -594,7 +598,7 @@ class PromptServer():
                             buffer.seek(0)
 
                             return web.Response(body=buffer.read(), content_type='image/png',
-                                                headers={"Content-Disposition": f"filename=\"{filename}\""})
+                                                headers={"Content-Disposition": f"inline; filename=\"{filename}\""})
 
                     elif channel == 'a':
                         with Image.open(file) as img:
@@ -611,7 +615,7 @@ class PromptServer():
                             alpha_buffer.seek(0)
 
                             return web.Response(body=alpha_buffer.read(), content_type='image/png',
-                                                headers={"Content-Disposition": f"filename=\"{filename}\""})
+                                                headers={"Content-Disposition": f"inline; filename=\"{filename}\""})
                     else:
                         # Use the content type from asset resolution if available,
                         # otherwise guess from the filename.
@@ -626,16 +630,14 @@ class PromptServer():
                         # and execute in the page origin) to download instead of
                         # displaying inline, preventing stored XSS. SVG loaded
                         # into an <img> is exempt, see renders_safely_as_image.
-                        # The attachment disposition is the load-bearing guard: a
-                        # bare filename= hint does not force a download per
-                        # RFC 6266, so we only attach it on the dangerous branch
-                        # to avoid breaking inline display of legitimate images.
+                        # inline is required for RFC-compliant parsing; the
+                        # dangerous branch below must retain attachment.
                         # Escape backslash/quote per RFC 6266 quoted-string so a
                         # filename containing a double quote (which passes the
                         # ".."/leading-slash filter above) can't break out of the
                         # header's quoted-string and malform the disposition.
                         safe_filename = filename.replace("\\", "\\\\").replace('"', '\\"')
-                        disposition = f"filename=\"{safe_filename}\""
+                        disposition = f"inline; filename=\"{safe_filename}\""
                         headers = {"X-Content-Type-Options": "nosniff"}
                         sec_fetch_dest = request.headers.get('Sec-Fetch-Dest')
                         if folder_paths.is_dangerous_content_type(content_type):
