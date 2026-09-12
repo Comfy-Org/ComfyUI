@@ -148,6 +148,10 @@ class TopologicalSort:
             self.blockCount[unique_id] = 0
             self.blocking[unique_id] = {}
 
+            if self.is_cached(unique_id):
+                # A cached node never reads its inputs, so don't pull uncached ancestors in for nothing.
+                continue
+
             inputs = self.dynprompt.get_node(unique_id)["inputs"]
             for input_name in inputs:
                 value = inputs[input_name]
