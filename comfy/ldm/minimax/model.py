@@ -371,15 +371,25 @@ class PackedLayout:
 
         if keyframes:
             # fl2va: keyframe cond rows right after text, sharing the target spatial grid;
-            # anchors count from the target timeline origin, FRAME_RESCALE per pixel frame, 1.0 per audio latent frame
+            # anchors count from the target timeline origin, FRAME_RESCALE per pixel frame, 1.0 per audio latent frame.
+            # A keyframe latent smaller than the target frame is placed at its optional
+            # latent_y/latent_x offset (latent units, 2-aligned like the 2x2 patch grid)
+            # so its tokens take the positions of the target patches they cover.
             for kf in keyframes:
                 cond_t = cursor + FRAME_RESCALE * kf["resolved_frame_index"]
                 video_latent = kf.get("latent")
                 if video_latent is not None:
-                    vt = video_latent.shape[2]
-                    n = vt * frame_rows
+                    vt, vh, vw = video_latent.shape[2:]
+                    latent_y = kf.get("latent_y", 0)
+                    latent_x = kf.get("latent_x", 0)
+                    target_frame = frame.reshape(latent_h // 2, latent_w // 2, 2)
+                    cond_frame = target_frame[
+                        latent_y // 2 : (latent_y + vh) // 2,
+                        latent_x // 2 : (latent_x + vw) // 2,
+                    ].reshape(-1, 2)
+                    n = vt * cond_frame.shape[0]
                     segments.append(("cond", n))
-                    pos.append(_video_grid(vt, frame, cond_t))
+                    pos.append(_video_grid(vt, cond_frame, cond_t))
                     img_pos.append(torch.arange(row, row + n))
                     img_update.append(torch.zeros(n, dtype=torch.bool))
                     row += n
