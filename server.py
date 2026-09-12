@@ -99,16 +99,24 @@ async def deprecation_warning(request: web.Request, handler):
     return response
 
 
+COMPRESSABLE_MIME_TYPES = ["text/html", "text/css", "text/plain", "text/xml", "text/javascript", "application/javascript", "application/json", "application/xml", "image/svg+xml"]
+COMPRESSABLE_EXTENSIONS = [".html", ".js", ".css", ".svg", ".txt", ".json", ".xml", ".md"]
+CACHEABLE_EXTENSIONS = [".js", ".css", ".svg"]
+
 @web.middleware
 async def compress_body(request: web.Request, handler):
     accept_encoding = request.headers.get("Accept-Encoding", "")
     response: web.Response = await handler(request)
-    if not isinstance(response, web.Response):
-        return response
-    if response.content_type not in ["application/json", "text/plain"]:
-        return response
-    if response.body and "gzip" in accept_encoding:
-        response.enable_compression()
+    if "gzip" in accept_encoding:
+        if isinstance(response, web.Response) and response.content_type in COMPRESSABLE_MIME_TYPES and response.body:
+            response.enable_compression()
+        elif isinstance(response, web.FileResponse) and (response.content_type in COMPRESSABLE_MIME_TYPES or any(str(response._path).endswith(ext) for ext in COMPRESSABLE_EXTENSIONS)):
+            if any(str(response._path).endswith(ext) for ext in CACHEABLE_EXTENSIONS):
+                if "Cache-Control" not in response.headers:
+                    response.headers["Cache-Control"] = "public, max-age=86400"
+                else:
+                    response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            response.enable_compression()
     return response
 
 
