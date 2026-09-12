@@ -21,14 +21,20 @@ class YuE2GenerateABC(io.ComfyNode):
                 io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff, control_after_generate=True),
                 io.Combo.Input("mode", options=["full", "melody"], tooltip="full: generates melody and chords; melody: generates melody only, recommended for covers."),
                 io.Int.Input("max_abc_tokens", default=8192, min=1, max=20000, advanced=True),
+                io.Float.Input("temperature", default=0.7, min=0.0, max=5.0, step=0.05, advanced=True),
+                io.Float.Input("top_p", default=0.9, min=0.01, max=1.0, step=0.01, advanced=True),
+                io.Int.Input("top_k", default=30, min=1, max=32768, advanced=True),
+                io.Float.Input("repetition_penalty", default=1.005, min=0.01, max=10.0, step=0.005, advanced=True),
+                io.Int.Input("penalty_window", default=100, min=1, max=20000, advanced=True, tooltip="Number of recent ABC tokens used to penalize repetition."),
             ],
             outputs=[io.String.Output(display_name="abc")],
         )
 
     @classmethod
-    def execute(cls, clip, style, lyrics, seed, mode, max_abc_tokens):
-        tokens = clip.tokenize(style, lyrics=lyrics, cot=mode, seed=seed, max_tokens=max_abc_tokens)
-        ids = clip.generate(tokens, max_length=max_abc_tokens, temperature=0.7, top_p=0.9, top_k=30, repetition_penalty=1.005, seed=seed)
+    def execute(cls, clip, style, lyrics, seed, mode, max_abc_tokens, temperature=0.7, top_p=0.9, top_k=30, repetition_penalty=1.005, penalty_window=100):
+        tokens = clip.tokenize(style, lyrics=lyrics, cot=mode, seed=seed, max_tokens=max_abc_tokens, penalty_window=penalty_window)
+        ids = clip.generate(tokens, max_length=max_abc_tokens, temperature=temperature, top_p=top_p, top_k=top_k,
+                            repetition_penalty=repetition_penalty, seed=seed)
         return io.NodeOutput(clip.decode(ids))
 
 
