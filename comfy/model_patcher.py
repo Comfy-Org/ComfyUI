@@ -237,6 +237,15 @@ def get_key_weight(model, key):
 
     return weight, set_func, convert_func
 
+
+def is_quantized_lora_target(model, key):
+    try:
+        weight, set_func, convert_func = get_key_weight(model, key)
+    except Exception:
+        return False
+
+    return isinstance(weight, QuantizedTensor)
+
 def key_param_name_to_key(key, param):
     if len(key) == 0:
         return param
@@ -1003,8 +1012,15 @@ class ModelPatcher:
                 weight_key = "{}.weight".format(n)
                 bias_key = "{}.bias".format(n)
 
-                if not full_load and hasattr(m, "comfy_cast_weights"):
-                    if not lowvram_fits:
+                force_lazy_lora_patch = False
+                if not force_patch_weights:
+                    if weight_key in self.patches and is_quantized_lora_target(self.model, weight_key):
+                        force_lazy_lora_patch = True
+                    if bias_key in self.patches and is_quantized_lora_target(self.model, bias_key):
+                        force_lazy_lora_patch = True
+
+                if hasattr(m, "comfy_cast_weights"):
+                    if force_lazy_lora_patch or (not full_load and not lowvram_fits):
                         offload_buffer = potential_offload
                         lowvram_weight = True
                         lowvram_counter += 1
