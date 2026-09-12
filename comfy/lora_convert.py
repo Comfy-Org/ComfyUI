@@ -32,7 +32,15 @@ def convert_uso_lora(sd):
         sd_out[k_to] = tensor
     return sd_out
 
-
+def twinflow_z_image_lora_to_diffusers(state_dict):
+    """Convert TwinFlow LoRA state dict for diffusers compatibility."""
+    for key in list(state_dict.keys()):
+        if "t_embedder_2" not in key and key.startswith("t_embedder."):
+            new_key = key.replace("t_embedder.", "t_embedder_2.", 1)
+            if new_key not in state_dict:
+                state_dict[new_key] = state_dict.pop(key)
+    return state_dict
+    
 def convert_lora(sd):
     if "img_in.lora_A.weight" in sd and "single_blocks.0.norm.key_norm.scale" in sd:
         return convert_lora_bfl_control(sd)
@@ -40,4 +48,6 @@ def convert_lora(sd):
         return convert_lora_wan_fun(sd)
     if "single_blocks.37.processor.qkv_lora.up.weight" in sd and "double_blocks.18.processor.qkv_lora2.up.weight" in sd:
         return convert_uso_lora(sd)
+    if any(k.startswith("t_embedder.") for k in sd.keys()):
+        return twinflow_z_image_lora_to_diffusers(sd)
     return sd
