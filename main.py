@@ -586,11 +586,6 @@ if __name__ == "__main__":
     # Running directly, just start ComfyUI.
     logging.info("Python version: {}".format(sys.version))
     logging.info("ComfyUI version: {}".format(comfyui_version.__version__))
-    for package in ("comfy-aimdo", "comfy-kitchen"):
-        try:
-            logging.info("{} version: {}".format(package, importlib.metadata.version(package)))
-        except:
-            pass
 
     if sys.version_info.major == 3 and sys.version_info.minor < 10:
         logging.warning("WARNING: You are using a python version older than 3.10, please upgrade to a newer one. 3.12 and above is recommended.")
