@@ -1,6 +1,7 @@
 """Tests for app.assets.seeder – enqueue_enrich and pending-queue behaviour."""
 
 import threading
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,33 @@ from app.assets.seeder import Progress, _AssetSeeder, State
 def seeder():
     """Fresh seeder instance for each test."""
     return _AssetSeeder()
+
+
+class TestEventSink:
+    def test_delivers_event_and_payload_to_sink(self, seeder):
+        received: list[tuple[str, dict[str, Any]]] = []
+
+        def record_event(event_type: str, data: dict[str, Any]) -> None:
+            received.append((event_type, data))
+
+        event_type = "assets.seed.started"
+        payload = {"roots": ["models"], "total": 1, "phase": "fast"}
+        seeder.set_event_sink(record_event)
+
+        seeder._emit_event(event_type, payload)
+
+        assert received == [(event_type, payload)]
+
+    def test_noop_when_no_sink_is_set(self, seeder):
+        assert seeder._emit_event("assets.seed.resumed", {}) is None
+
+    def test_swallows_raising_sink_exception(self, seeder):
+        def raise_from_sink(event_type: str, data: dict[str, Any]) -> None:
+            raise RuntimeError("boom")
+
+        seeder.set_event_sink(raise_from_sink)
+
+        assert seeder._emit_event("assets.seed.error", {"message": "failure"}) is None
 
 
 # ---------------------------------------------------------------------------

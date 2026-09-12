@@ -1,10 +1,10 @@
 import asyncio
 import os
-import sys
 import tempfile
-import types
 
 import pytest
+
+from test_inmemory_assets import InMemoryAssets
 
 _BASE = os.path.join(tempfile.gettempdir(), "execute-reentry-test-base")
 
@@ -100,28 +100,15 @@ def execution_env(monkeypatch):
     except Exception as exc:  # pragma: no cover - environment dependent
         pytest.skip(f"execution module could not be imported in CPU mode: {exc!r}")
 
-    monkeypatch.setattr(args, "enable_assets", True, raising=False)
-
-    counter = {"n": 0}
-
-    def _register(abs_path, job_id=None):
-        counter["n"] += 1
-        return types.SimpleNamespace(id=f"asset-{counter['n']}", job_id=job_id)
-
-    monkeypatch.setitem(
-        sys.modules,
-        "app.assets.services.ingest",
-        types.SimpleNamespace(register_executed_output=_register, register_cached_output=_register),
-    )
     os.makedirs(_BASE, exist_ok=True)
     monkeypatch.setattr(folder_paths, "get_directory_by_type", lambda t: _BASE)
     monkeypatch.setattr(execution, "get_progress_state", lambda: _NoProgress())
     monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "AsyncUINode", _AsyncUINode)
 
-    return execution
+    return execution, InMemoryAssets()
 
 
-async def _drive_async_reentry(execution):
+async def _drive_async_reentry(execution, asset_manager):
     from comfy_execution.graph import DynamicPrompt
 
     unique_id = "1"
@@ -139,7 +126,9 @@ async def _drive_async_reentry(execution):
 
     common = (server, dynprompt, caches, unique_id, {}, executed, "job-1", exec_list)
 
-    r1, _, _ = await execution.execute(*common, pending_subgraph_results, pending_async_nodes, ui_outputs)
+    r1, _, _ = await execution.execute(
+        *common, pending_subgraph_results, pending_async_nodes, ui_outputs, asset_manager
+    )
     ui_outputs_had_uid_after_entry1 = unique_id in ui_outputs
 
     tasks = [t for t in pending_async_nodes.get(unique_id, []) if isinstance(t, asyncio.Task)]
@@ -148,7 +137,9 @@ async def _drive_async_reentry(execution):
     for _ in range(3):
         await asyncio.sleep(0)
 
-    r2, _, _ = await execution.execute(*common, pending_subgraph_results, pending_async_nodes, ui_outputs)
+    r2, _, _ = await execution.execute(
+        *common, pending_subgraph_results, pending_async_nodes, ui_outputs, asset_manager
+    )
 
     cached = caches.outputs.store.get(unique_id)
     return {
@@ -162,10 +153,10 @@ async def _drive_async_reentry(execution):
 
 
 def test_async_reentry_keeps_cache_id_free(execution_env):
-    execution = execution_env
+    execution, asset_manager = execution_env
     from execution import ExecutionResult
 
-    obs = asyncio.run(_drive_async_reentry(execution))
+    obs = asyncio.run(_drive_async_reentry(execution, asset_manager))
 
     assert obs["r1"] == ExecutionResult.PENDING
     assert obs["r2"] == ExecutionResult.SUCCESS
@@ -177,3 +168,4 @@ def test_async_reentry_keeps_cache_id_free(execution_env):
 
     assert obs["cache_entry"] is not None
     assert obs["cache_ids"] == []
+    assert [call.method for call in asset_manager.calls] == ["register_executed_output"]

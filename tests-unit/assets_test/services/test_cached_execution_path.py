@@ -1,27 +1,19 @@
 import os
-import sys
-import types
-from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
 
 from sqlalchemy import event, select
 
 import folder_paths
 from app.assets.database.models import Asset, AssetContent
+from app.assets.manager import AssetsEnabled
 from comfy_execution.asset_enrichment import (
     register_cached_outputs,
     register_executed_outputs,
 )
 
-
-@contextmanager
-def _assets_enabled(enabled: bool = True):
-    with patch.dict(
-        sys.modules,
-        {"comfy.cli_args": types.SimpleNamespace(args=types.SimpleNamespace(enable_assets=enabled))},
-    ):
-        yield
+class _ArgsStub:
+    enable_assets = True
+    enable_asset_hashing = False
 
 
 def _write_output_file(name: str) -> Path:
@@ -42,15 +34,14 @@ def _wrapper(name: str, node_id: str = "1") -> dict:
 def test_cached_replay_binds_new_record_to_existing_content(mock_create_session):
     path = _write_output_file("cached-execution-bind.png")
     try:
-        with _assets_enabled():
-            executed = register_executed_outputs(_output_ui(path.name), "original-job")
+        manager = AssetsEnabled(_ArgsStub())
+        executed = register_executed_outputs(_output_ui(path.name), "original-job", manager)
         original_id = executed["images"][0]["id"]
         with mock_create_session() as session:
             original_content_id = session.get(Asset, original_id).content_id
 
         wrapper = _wrapper(path.name)
-        with _assets_enabled():
-            enriched = register_cached_outputs(wrapper, "cached-job")
+        enriched = register_cached_outputs(wrapper, "cached-job", manager)
         cached_id = enriched["output"]["images"][0]["id"]
 
         with mock_create_session() as session:
@@ -83,8 +74,8 @@ def test_cached_replay_does_not_update_existing_content(mock_create_session, db_
             update_statements.append(statement)
 
     try:
-        with _assets_enabled():
-            executed = register_executed_outputs(_output_ui(path.name), "original-job")
+        manager = AssetsEnabled(_ArgsStub())
+        executed = register_executed_outputs(_output_ui(path.name), "original-job", manager)
         original_id = executed["images"][0]["id"]
         with mock_create_session() as session:
             original_content = session.get(
@@ -102,8 +93,7 @@ def test_cached_replay_does_not_update_existing_content(mock_create_session, db_
 
         event.listen(db_engine, "before_cursor_execute", capture_updates)
         wrapper = _wrapper(path.name)
-        with _assets_enabled():
-            register_cached_outputs(wrapper, "cached-job")
+        register_cached_outputs(wrapper, "cached-job", manager)
 
         with mock_create_session() as session:
             content = session.get(AssetContent, original_state[0])

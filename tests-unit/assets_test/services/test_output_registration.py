@@ -1,7 +1,4 @@
 import os
-import sys
-import types
-from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,19 +6,16 @@ import folder_paths
 from sqlalchemy import select
 
 from app.assets.database.models import Asset, AssetContent
+from app.assets.manager import AssetsEnabled, NoAssets
 from comfy_execution.asset_enrichment import (
     register_cached_outputs,
     register_executed_outputs,
 )
 
-
-@contextmanager
-def _assets_enabled(enabled: bool = True):
-    with patch.dict(
-        sys.modules,
-        {"comfy.cli_args": types.SimpleNamespace(args=types.SimpleNamespace(enable_assets=enabled))},
-    ):
-        yield
+class _ArgsStub:
+    def __init__(self, enable_assets: bool = True) -> None:
+        self.enable_assets = enable_assets
+        self.enable_asset_hashing = False
 
 
 def _write_output_file(name: str, data: bytes) -> Path:
@@ -44,8 +38,9 @@ def test_executed_adapter_registers_new_output(mock_create_session):
     try:
         output_ui = _output_ui(path.name)
 
-        with _assets_enabled():
-            enriched = register_executed_outputs(output_ui, "exec-job")
+        enriched = register_executed_outputs(
+            output_ui, "exec-job", AssetsEnabled(_ArgsStub())
+        )
 
         new_id = enriched["images"][0]["id"]
         assert "id" not in output_ui["images"][0]
@@ -62,13 +57,12 @@ def test_executed_adapter_registers_new_output(mock_create_session):
 def test_executed_adapter_over_existing_path_marks_old_missing(mock_create_session):
     path = _write_output_file("adapter-executed-replace.png", b"original")
     try:
-        with _assets_enabled():
-            first = register_executed_outputs(_output_ui(path.name), "job-1")
+        manager = AssetsEnabled(_ArgsStub())
+        first = register_executed_outputs(_output_ui(path.name), "job-1", manager)
         old_id = first["images"][0]["id"]
 
         path.write_bytes(b"replacement")
-        with _assets_enabled():
-            second = register_executed_outputs(_output_ui(path.name), "job-2")
+        second = register_executed_outputs(_output_ui(path.name), "job-2", manager)
         new_id = second["images"][0]["id"]
 
         assert new_id != old_id
@@ -92,8 +86,7 @@ def test_executed_adapter_disabled_registers_nothing(mock_create_session):
     try:
         output_ui = _output_ui(path.name)
 
-        with _assets_enabled(False):
-            enriched = register_executed_outputs(output_ui, "job")
+        enriched = register_executed_outputs(output_ui, "job", NoAssets(_ArgsStub(False)))
 
         assert "id" not in enriched["images"][0]
         with mock_create_session() as session:
@@ -112,11 +105,13 @@ def test_executed_adapter_registration_failure_never_raises(mock_create_session)
     try:
         output_ui = _output_ui(path.name)
 
-        with _assets_enabled(), patch(
-            "app.assets.services.ingest.register_executed_output",
+        with patch(
+            "app.assets.manager.ingest_register_executed_output",
             side_effect=RuntimeError("boom"),
         ):
-            enriched = register_executed_outputs(output_ui, "job")
+            enriched = register_executed_outputs(
+                output_ui, "job", AssetsEnabled(_ArgsStub())
+            )
 
         assert "id" not in enriched["images"][0]
     finally:
@@ -128,8 +123,9 @@ def test_cached_adapter_without_live_content_is_nonevent(mock_create_session):
     try:
         wrapper = _wrapper(path.name)
 
-        with _assets_enabled():
-            enriched = register_cached_outputs(wrapper, "cached-job")
+        enriched = register_cached_outputs(
+            wrapper, "cached-job", AssetsEnabled(_ArgsStub())
+        )
 
         assert "id" not in enriched["output"]["images"][0]
         with mock_create_session() as session:
