@@ -14,6 +14,7 @@ from comfy.cli_args import args
 from comfy.comfy_api_env import normalize_comfy_api_base
 from comfy.deploy_environment import get_deploy_environment
 from comfy.model_management import processing_interrupted
+from comfy_api.credential_registry import api_node_credentials
 from comfy_api.latest import IO
 from comfy_execution.utils import get_executing_context
 from comfyui_version import __version__ as comfyui_version
@@ -33,12 +34,24 @@ def get_node_id(node_cls: type[IO.ComfyNode]) -> str:
     return node_cls.hidden.unique_id
 
 
-def get_auth_header(node_cls: type[IO.ComfyNode]) -> dict[str, str]:
+def get_auth_header_with_generation(node_cls: type[IO.ComfyNode]) -> tuple[dict[str, str], int | None]:
+    ctx = get_executing_context()
+    if ctx is not None and not node_cls.hidden.api_key_comfy_org:
+        credential = api_node_credentials.get_for_prompt(ctx.prompt_id)
+        if credential is not None:
+            if credential.token:
+                return {"Authorization": f"Bearer {credential.token}"}, credential.generation
+            return {}, credential.generation
+
     if node_cls.hidden.auth_token_comfy_org:
-        return {"Authorization": f"Bearer {node_cls.hidden.auth_token_comfy_org}"}
+        return {"Authorization": f"Bearer {node_cls.hidden.auth_token_comfy_org}"}, None
     if node_cls.hidden.api_key_comfy_org:
-        return {"X-API-KEY": node_cls.hidden.api_key_comfy_org}
-    return {}
+        return {"X-API-KEY": node_cls.hidden.api_key_comfy_org}, None
+    return {}, None
+
+
+def get_auth_header(node_cls: type[IO.ComfyNode]) -> dict[str, str]:
+    return get_auth_header_with_generation(node_cls)[0]
 
 
 def get_usage_source(node_cls: type[IO.ComfyNode]) -> str:
@@ -58,8 +71,13 @@ def get_comfy_api_headers(node_cls: type[IO.ComfyNode]) -> dict[str, str]:
     relative/cloud URLs resolved against ``default_base_url()``; because the result
     includes auth, callers must not attach it to arbitrary absolute/presigned URLs.
     """
+    return get_comfy_api_headers_with_generation(node_cls)[0]
+
+
+def get_comfy_api_headers_with_generation(node_cls: type[IO.ComfyNode]) -> tuple[dict[str, str], int | None]:
+    auth_headers, generation = get_auth_header_with_generation(node_cls)
     headers = {
-        **get_auth_header(node_cls),
+        **auth_headers,
         "Comfy-Env": get_deploy_environment(),
         "Comfy-Usage-Source": get_usage_source(node_cls),
         "Comfy-Core-Version": comfyui_version,
@@ -67,7 +85,7 @@ def get_comfy_api_headers(node_cls: type[IO.ComfyNode]) -> dict[str, str]:
     ctx = get_executing_context()
     if ctx is not None:
         headers["Comfy-Job-Id"] = ctx.prompt_id
-    return headers
+    return headers, generation
 
 
 def default_base_url() -> str:

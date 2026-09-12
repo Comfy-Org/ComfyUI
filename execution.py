@@ -421,6 +421,47 @@ def format_value(x):
     else:
         return str(x)
 
+
+def format_input_data(input_data_all):
+    formatted = {}
+    for name, inputs in input_data_all.items():
+        if name in SENSITIVE_EXTRA_DATA_KEYS:
+            formatted[name] = ["***"]
+        else:
+            formatted[name] = [format_value(x) for x in inputs]
+    return formatted
+
+
+def redact_sensitive_text(text, extra_data, additional_sensitive_values=()):
+    sensitive_values = [
+        value
+        for key in SENSITIVE_EXTRA_DATA_KEYS
+        if isinstance((value := extra_data.get(key)), str) and value
+    ]
+    sensitive_values.extend(
+        value for value in additional_sensitive_values if isinstance(value, str) and value
+    )
+    for value in sorted(sensitive_values, key=len, reverse=True):
+        text = text.replace(value, "***")
+    return text
+
+
+def log_execution_exception(ex, tb, extra_data):
+    request_sensitive_values = getattr(ex, "sensitive_values", ())
+    exception_message = redact_sensitive_text(str(ex), extra_data, request_sensitive_values)
+    traceback_lines = [
+        redact_sensitive_text(line, extra_data, request_sensitive_values)
+        for line in traceback.format_tb(tb)
+    ]
+    formatted_exception = "".join(
+        redact_sensitive_text(line, extra_data, request_sensitive_values)
+        for line in traceback.format_exception(type(ex), ex, tb)
+    )
+    logging.error("!!! Exception during processing !!! %s", exception_message)
+    logging.error(formatted_exception)
+    return exception_message, traceback_lines
+
+
 def _is_intermediate_output(dynprompt, node_id):
     class_type = dynprompt.get_node(node_id)["class_type"]
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
@@ -630,12 +671,9 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
         exception_type = full_type_name(typ)
         input_data_formatted = {}
         if input_data_all is not None:
-            input_data_formatted = {}
-            for name, inputs in input_data_all.items():
-                input_data_formatted[name] = [format_value(x) for x in inputs]
+            input_data_formatted = format_input_data(input_data_all)
 
-        logging.error(f"!!! Exception during processing !!! {ex}")
-        logging.error(traceback.format_exc())
+        exception_message, traceback_lines = log_execution_exception(ex, tb, extra_data)
         tips = ""
 
         if comfy.model_management.is_oom(ex):
@@ -648,9 +686,9 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
 
         error_details = {
             "node_id": real_node_id,
-            "exception_message": "{}\n{}".format(ex, tips),
+            "exception_message": "{}\n{}".format(exception_message, tips),
             "exception_type": exception_type,
-            "traceback": traceback.format_tb(tb),
+            "traceback": traceback_lines,
             "current_inputs": input_data_formatted
         }
 
@@ -1261,9 +1299,17 @@ class PromptQueue:
 
     def put(self, item):
         with self.mutex:
+            prompt_id = item[1]
+            if (
+                prompt_id in self.history
+                or any(queued[1] == prompt_id for queued in self.queue)
+                or any(running[1] == prompt_id for running in self.currently_running.values())
+            ):
+                return False
             heapq.heappush(self.queue, item)
             self.server.queue_updated()
             self.not_empty.notify()
+            return True
 
     def get(self, timeout=None):
         with self.not_empty:
@@ -1345,8 +1391,10 @@ class PromptQueue:
 
     def wipe_queue(self):
         with self.mutex:
+            removed = self.queue
             self.queue = []
             self.server.queue_updated()
+            return removed
 
     def delete_queue_item(self, function):
         with self.mutex:

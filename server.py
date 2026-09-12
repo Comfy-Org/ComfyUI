@@ -25,6 +25,8 @@ import struct
 import ssl
 import socket
 import ipaddress
+import hmac
+import secrets
 from PIL import Image, ImageOps
 from PIL.PngImagePlugin import PngInfo
 from io import BytesIO
@@ -39,6 +41,7 @@ from comfy.deploy_environment import get_deploy_environment
 import comfy.utils
 import comfy.model_management
 from comfy_api import feature_flags
+from comfy_api.credential_registry import api_node_credentials
 from comfy.comfy_api_env import get_environment_overrides
 import node_helpers
 from comfyui_version import __version__
@@ -123,7 +126,7 @@ def create_cors_middleware(allowed_origin: str):
 
         response.headers['Access-Control-Allow-Origin'] = allowed_origin
         response.headers['Access-Control-Allow-Methods'] = 'POST, GET, DELETE, PUT, OPTIONS, PATCH'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Comfy-Client-Id, X-Comfy-Credential-Key'
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         return response
 
@@ -154,6 +157,51 @@ def is_loopback(host):
             pass
 
     return loopback
+
+
+_CLIENT_ID_HEADER = "X-Comfy-Client-Id"
+_CREDENTIAL_KEY_HEADER = "X-Comfy-Credential-Key"
+
+
+def _credential_transport_enabled(request: web.Request) -> bool:
+    """Allow credentials only over direct TLS or from a direct loopback peer."""
+    transport = request.transport
+    if transport is None:
+        return False
+    if transport.get_extra_info("sslcontext") is not None or transport.get_extra_info("ssl_object") is not None:
+        return True
+
+    peername = transport.get_extra_info("peername")
+    if not isinstance(peername, (tuple, list)) or not peername:
+        return False
+    try:
+        return ipaddress.ip_address(peername[0].split("%", 1)[0]).is_loopback
+    except (AttributeError, ValueError):
+        return False
+
+
+def _credential_keys_match(presented: object, expected: object) -> bool:
+    return (
+        isinstance(presented, str)
+        and isinstance(expected, str)
+        and presented.isascii()
+        and expected.isascii()
+        and hmac.compare_digest(presented, expected)
+    )
+
+
+def _authenticated_client_id(request: web.Request, sockets_metadata: dict) -> str | None:
+    client_id = request.headers.get(_CLIENT_ID_HEADER)
+    credential_key = request.headers.get(_CREDENTIAL_KEY_HEADER)
+    if not client_id or not credential_key:
+        return None
+    metadata = sockets_metadata.get(client_id)
+    expected_key = metadata.get("credential_key") if metadata else None
+    if not _credential_keys_match(credential_key, expected_key):
+        return None
+    if not api_node_credentials.is_protected(client_id):
+        return None
+    return client_id
 
 
 def create_origin_only_middleware():
@@ -268,9 +316,42 @@ class PromptServer():
 
         @routes.get('/ws')
         async def websocket_handler(request):
+            credential_transport_enabled = _credential_transport_enabled(request)
+            sid = request.rel_url.query.get('clientId', '')
+            existing_metadata = self.sockets_metadata.get(sid) if sid else None
+            if existing_metadata is not None and sid not in self.sockets and not api_node_credentials.is_protected(sid):
+                self.sockets_metadata.pop(sid, None)
+                existing_metadata = None
+            existing_credential_key = existing_metadata.get("credential_key") if existing_metadata else None
+            if not credential_transport_enabled and existing_credential_key is not None:
+                # Do not let a legacy plaintext connection replace protected
+                # credential state for the requested client id.
+                sid = ""
+                existing_metadata = None
+                existing_credential_key = None
+            requires_credential_auth = credential_transport_enabled and existing_credential_key is not None
+
             ws = web.WebSocketResponse()
             await ws.prepare(request)
-            sid = request.rel_url.query.get('clientId', '')
+            if requires_credential_auth:
+                try:
+                    auth_message = await ws.receive(timeout=5)
+                    auth_data = json.loads(auth_message.data) if auth_message.type == aiohttp.WSMsgType.TEXT else {}
+                except (asyncio.TimeoutError, json.JSONDecodeError):
+                    auth_data = {}
+                if not isinstance(auth_data, dict):
+                    auth_data = {}
+                auth_payload = auth_data.get("data")
+                presented_key = (
+                    auth_payload.get("credential_key")
+                    if auth_data.get("type") == "credential_auth" and isinstance(auth_payload, dict)
+                    else None
+                )
+                expected_key = existing_metadata.get("credential_key")
+                if not _credential_keys_match(presented_key, expected_key):
+                    await ws.close(code=aiohttp.WSCloseCode.POLICY_VIOLATION, message=b"Invalid client credentials")
+                    return ws
+
             if sid:
                 # Reusing existing session, remove old
                 self.sockets.pop(sid, None)
@@ -280,17 +361,38 @@ class PromptServer():
             # Store WebSocket for backward compatibility
             self.sockets[sid] = ws
             # Store metadata separately
-            self.sockets_metadata[sid] = {"feature_flags": {}}
+            credential_key = existing_credential_key or (
+                secrets.token_urlsafe(32) if credential_transport_enabled else None
+            )
+            connection_id = secrets.token_hex(16)
+            self.sockets_metadata[sid] = {
+                "feature_flags": {},
+                "connection_id": connection_id,
+            }
+            if credential_key is not None:
+                self.sockets_metadata[sid]["credential_key"] = credential_key
+                api_node_credentials.connect(sid)
 
             try:
                 # Send initial state to the new client
-                await self.send("status", {"status": self.get_queue_info(), "sid": sid}, sid)
+                status_data = {
+                    "status": self.get_queue_info(),
+                    "sid": sid,
+                }
+                if credential_key is not None:
+                    status_data["credential_key"] = credential_key
+                await self.send(
+                    "status",
+                    status_data,
+                    sid,
+                )
                 # On reconnect if we are the currently executing client send the current node
                 if self.client_id == sid and self.last_node_id is not None:
                     await self.send("executing", { "node": self.last_node_id }, sid)
 
                 # Flag to track if we've received the first message
                 first_message = True
+                allow_credential_auth_prelude = not requires_credential_auth
 
                 async for msg in ws:
                     if msg.type == aiohttp.WSMsgType.ERROR:
@@ -298,6 +400,16 @@ class PromptServer():
                     elif msg.type == aiohttp.WSMsgType.TEXT:
                         try:
                             data = json.loads(msg.data)
+                            if not isinstance(data, dict):
+                                first_message = False
+                                continue
+                            if (
+                                first_message
+                                and allow_credential_auth_prelude
+                                and data.get("type") == "credential_auth"
+                            ):
+                                allow_credential_auth_prelude = False
+                                continue
                             # Check if first message is feature flags
                             if first_message and data.get("type") == "feature_flags":
                                 # Store client feature flags
@@ -307,7 +419,9 @@ class PromptServer():
                                 # Send server feature flags in response
                                 await self.send(
                                     "feature_flags",
-                                    feature_flags.get_server_features(),
+                                    feature_flags.get_server_features(
+                                        include_credentials=credential_transport_enabled
+                                    ),
                                     sid,
                                 )
 
@@ -322,8 +436,11 @@ class PromptServer():
                         except Exception as e:
                             logging.error(f"Error processing WebSocket message: {e}")
             finally:
-                self.sockets.pop(sid, None)
-                self.sockets_metadata.pop(sid, None)
+                metadata = self.sockets_metadata.get(sid)
+                if metadata is not None and metadata.get("connection_id") == connection_id:
+                    self.sockets.pop(sid, None)
+                    if not credential_transport_enabled or not api_node_credentials.disconnect(sid):
+                        self.sockets_metadata.pop(sid, None)
             return ws
 
         @routes.get("/")
@@ -738,11 +855,36 @@ class PromptServer():
 
         @routes.get("/features")
         async def get_features(request):
-            features = feature_flags.get_server_features()
+            features = feature_flags.get_server_features(
+                include_credentials=_credential_transport_enabled(request)
+            )
             overrides = get_environment_overrides()
             if overrides:
                 features.update(overrides)
             return web.json_response(features)
+
+        @routes.post("/credentials")
+        async def update_api_credentials(request):
+            if not _credential_transport_enabled(request):
+                return web.json_response({"error": "Credential transport requires HTTPS or loopback"}, status=403)
+            client_id = _authenticated_client_id(request, self.sockets_metadata)
+            if client_id is None:
+                return web.json_response({"error": "Invalid client credentials"}, status=403)
+
+            try:
+                json_data = await request.json()
+            except (json.JSONDecodeError, TypeError):
+                return web.json_response({"error": "Request body must be valid JSON"}, status=400)
+            if not isinstance(json_data, dict) or "auth_token_comfy_org" not in json_data:
+                return web.json_response({"error": "auth_token_comfy_org is required"}, status=400)
+            token = json_data["auth_token_comfy_org"]
+            if token is not None and (not isinstance(token, str) or not token or len(token) > 16384):
+                return web.json_response({"error": "auth_token_comfy_org must be a non-empty string or null"}, status=400)
+
+            if _authenticated_client_id(request, self.sockets_metadata) != client_id:
+                return web.json_response({"error": "Invalid client credentials"}, status=403)
+            generation = api_node_credentials.update(client_id, token)
+            return web.json_response({"generation": generation})
 
         @routes.get("/prompt")
         async def get_prompt(request):
@@ -963,7 +1105,10 @@ class PromptServer():
 
             def dequeue(prompt_id):
                 logging.info(f"Cancelling pending prompt {prompt_id}")
-                return self.prompt_queue.delete_queue_item(lambda a: a[1] == prompt_id)
+                deleted = self.prompt_queue.delete_queue_item(lambda a: a[1] == prompt_id)
+                if deleted:
+                    self.release_api_node_prompt(prompt_id)
+                return deleted
 
             classification = cancel_job(job_id, running, queued, history, interrupt, dequeue)
             return classification in (CANCEL_RUNNING, CANCEL_PENDING)
@@ -1072,8 +1217,16 @@ class PromptServer():
         @routes.post("/prompt")
         async def post_prompt(request):
             logging.info("got prompt")
+            has_credential_headers = _CLIENT_ID_HEADER in request.headers or _CREDENTIAL_KEY_HEADER in request.headers
+            if has_credential_headers and not _credential_transport_enabled(request):
+                return web.json_response({"error": "Credential transport requires HTTPS or loopback"}, status=403)
             json_data =  await request.json()
             json_data = self.trigger_on_prompt(json_data)
+            authenticated_client = _authenticated_client_id(request, self.sockets_metadata)
+            if has_credential_headers and authenticated_client is None:
+                return web.json_response({"error": "Invalid client credentials"}, status=403)
+            if authenticated_client is not None and json_data.get("client_id") != authenticated_client:
+                return web.json_response({"error": "client_id does not match authenticated client"}, status=403)
 
             if "number" in json_data:
                 number = float(json_data['number'])
@@ -1123,12 +1276,23 @@ class PromptServer():
                         extra_data["comfy_usage_source"] = usage_source
                 if valid[0]:
                     outputs_to_execute = valid[2]
+                    if (
+                        authenticated_client is not None
+                        and _authenticated_client_id(request, self.sockets_metadata) != authenticated_client
+                    ):
+                        return web.json_response({"error": "Invalid client credentials"}, status=403)
                     sensitive = {}
                     for sensitive_val in execution.SENSITIVE_EXTRA_DATA_KEYS:
                         if sensitive_val in extra_data:
                             sensitive[sensitive_val] = extra_data.pop(sensitive_val)
                     extra_data["create_time"] = int(time.time() * 1000)  # timestamp in milliseconds
-                    self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
+                    if authenticated_client is not None and not api_node_credentials.bind_prompt(prompt_id, authenticated_client):
+                        return web.json_response({"error": "prompt_id already exists"}, status=409)
+                    queued = self.prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
+                    if not queued:
+                        if authenticated_client is not None:
+                            self.release_api_node_prompt(prompt_id)
+                        return web.json_response({"error": "prompt_id already exists"}, status=409)
                     response = {"prompt_id": prompt_id, "number": number, "node_errors": valid[3]}
                     return web.json_response(response)
                 else:
@@ -1148,12 +1312,15 @@ class PromptServer():
             json_data =  await request.json()
             if "clear" in json_data:
                 if json_data["clear"]:
-                    self.prompt_queue.wipe_queue()
+                    removed = self.prompt_queue.wipe_queue()
+                    for item in removed:
+                        self.release_api_node_prompt(item[1])
             if "delete" in json_data:
                 to_delete = json_data['delete']
                 for id_to_delete in to_delete:
                     delete_func = lambda a: a[1] == id_to_delete
-                    self.prompt_queue.delete_queue_item(delete_func)
+                    if self.prompt_queue.delete_queue_item(delete_func):
+                        self.release_api_node_prompt(id_to_delete)
 
             return web.Response(status=200)
 
@@ -1286,6 +1453,11 @@ class PromptServer():
         exec_info['queue_remaining'] = self.prompt_queue.get_tasks_remaining()
         prompt_info['exec_info'] = exec_info
         return prompt_info
+
+    def release_api_node_prompt(self, prompt_id):
+        client_id = api_node_credentials.release_prompt(prompt_id)
+        if client_id is not None and client_id not in self.sockets:
+            self.sockets_metadata.pop(client_id, None)
 
     async def send(self, event, data, sid=None):
         if event == BinaryEventTypes.UNENCODED_PREVIEW_IMAGE:
