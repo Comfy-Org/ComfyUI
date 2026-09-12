@@ -194,7 +194,7 @@ class YuE2TEModel(torch.nn.Module):
         finally:
             # Each phase has different KV buffers and may change the CFG batch size.
             comfy.model_prefetch.cleanup_prefetch_queues()
-        logging.warning("YuE2 %s reached its token budget; increase the limit for a complete result.", phase)
+        logging.warning("YuE2 %s reached its token budget before the end token.", phase)
         return history, True
 
     def _acoustic_conditioning(self, prefix, tokens, dtype):
@@ -242,12 +242,19 @@ class YuE2TEModel(torch.nn.Module):
             abc_ids = []
         prefix = prefix + abc_ids + [ABC_END, MUSIC_START]
         negative = tokens["negative"] + ([MUSIC_START] if cot == "off" else [ABC_START] + abc_ids + [ABC_END, MUSIC_START])
+        context = self.config.max_position_embeddings
+        max_tokens = min(tokens["max_tokens"], context - max(len(prefix), len(negative)))
+        # One acoustic frame needs two positions plus three boundary tokens.
+        if max_tokens < 1 or len(prefix) + 5 > context:
+            raise ValueError("YuE2 prompt leaves no room for music; shorten the style, lyrics, or ABC.")
+        if max_tokens < tokens["max_tokens"]:
+            logging.info("YuE2 music budget reduced to %d tokens (%.2f seconds) to fit the prompt.", max_tokens, max_tokens / FRAMES_PER_SECOND)
         semantic, semantic_truncated = self._generate(
-            prefix, tokens["seed"], tokens["max_tokens"], "semantic", dtype,
+            prefix, tokens["seed"], max_tokens, "semantic", dtype,
             negative=negative, cfg_scale=tokens["cfg_scale"], legacy_off=cot == "off",
             temperature=tokens["temperature"], top_p=tokens["top_p"], top_k=tokens["top_k"],
             repetition_penalty=tokens["repetition_penalty"], penalty_window=50,
-            min_tokens=min(200, tokens["max_tokens"]),
+            min_tokens=min(200, max_tokens),
         )
         conditioning, chunks = self._acoustic_conditioning(prefix, semantic, dtype)
         return conditioning, None, {
