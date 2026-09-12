@@ -1011,6 +1011,17 @@ class Hunyuan3Dv2mini(LatentFormat):
     latent_dimensions = 1
     scale_factor = 1.0188137142395404
 
+class Hunyuan3Dv2_1Paint(SD15):
+    """SD-2.1 image latents with the paint model's albedo/MR views packed on a
+    non-batch axis: (B, 4, n_pbr * views, H, W)."""
+    latent_dimensions = 3
+
+    def __init__(self):
+        super().__init__()
+        # The SD15 TAESD decoder assumes (B, C, H, W); previews of the packed
+        # layout go through latent2rgb, which handles the 5D case (first view).
+        self.taesd_decoder_name = None
+
 class ACEAudio(LatentFormat):
     latent_channels = 8
     latent_dimensions = 2
