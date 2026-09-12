@@ -49,6 +49,7 @@ from app.assets.api.routes import register_assets_routes
 from app.assets.services.ingest import register_file_in_place
 from app.assets.services.path_utils import get_known_subfolder_tags
 from app.assets.services.asset_management import resolve_hash_to_path
+from app.assets.services.preview import get_or_create_preview_file
 
 from app.user_manager import UserManager
 from app.model_manager import ModelFileManager
@@ -473,45 +474,104 @@ class PromptServer():
 
             def image_save_function(image, post, filepath):
                 original_ref = json.loads(post.get("original_ref"))
-                filename, output_dir = folder_paths.annotated_filepath(original_ref['filename'])
+                ref_filename = original_ref['filename']
 
-                if not filename:
-                    return web.Response(status=400)
+                if ref_filename.startswith("blake3:"):
+                    owner_id = self.user_manager.get_request_user_id(request)
+                    result = resolve_hash_to_path(ref_filename, owner_id=owner_id)
+                    if result is None:
+                        raise web.HTTPBadRequest()
+                    file = result.abs_path
+                else:
+                    filename, output_dir = folder_paths.annotated_filepath(ref_filename)
 
-                # validation for security: prevent accessing arbitrary path
-                if filename[0] == '/' or '..' in filename:
-                    return web.Response(status=400)
+                    if not filename:
+                        raise web.HTTPBadRequest()
 
-                if output_dir is None:
-                    type = original_ref.get("type", "output")
-                    output_dir = folder_paths.get_directory_by_type(type)
+                    # validation for security: prevent accessing arbitrary path
+                    if filename[0] == '/' or '..' in filename:
+                        raise web.HTTPBadRequest()
 
-                if output_dir is None:
-                    return web.Response(status=400)
+                    if output_dir is None:
+                        type = original_ref.get("type", "output")
+                        output_dir = folder_paths.get_directory_by_type(type)
 
-                if original_ref.get("subfolder", "") != "":
-                    full_output_dir = os.path.join(output_dir, original_ref["subfolder"])
-                    if os.path.commonpath((os.path.abspath(full_output_dir), output_dir)) != output_dir:
-                        return web.Response(status=403)
-                    output_dir = full_output_dir
+                    if output_dir is None:
+                        raise web.HTTPBadRequest()
 
-                file = os.path.join(output_dir, filename)
+                    if original_ref.get("subfolder", "") != "":
+                        full_output_dir = os.path.join(output_dir, original_ref["subfolder"])
+                        if os.path.commonpath((os.path.abspath(full_output_dir), output_dir)) != output_dir:
+                            raise web.HTTPForbidden()
+                        output_dir = full_output_dir
 
-                if os.path.isfile(file):
-                    with Image.open(file) as original_pil:
-                        metadata = PngInfo()
-                        if hasattr(original_pil,'text'):
-                            for key in original_pil.text:
-                                metadata.add_text(key, original_pil.text[key])
-                        original_pil = original_pil.convert('RGBA')
-                        mask_pil = Image.open(image.file).convert('RGBA')
+                    file = os.path.join(output_dir, filename)
 
-                        # alpha copy
-                        new_alpha = mask_pil.getchannel('A')
-                        original_pil.putalpha(new_alpha)
-                        original_pil.save(filepath, compress_level=4, pnginfo=metadata)
+                if not os.path.isfile(file):
+                    raise web.HTTPBadRequest()
 
-            return image_upload(post, image_save_function)
+                with Image.open(file) as original_pil:
+                    metadata = PngInfo()
+                    if hasattr(original_pil,'text'):
+                        for key in original_pil.text:
+                            metadata.add_text(key, original_pil.text[key])
+
+                    original_pil = ImageOps.exif_transpose(original_pil.convert('RGBA'))
+                    original_pil.putalpha(Image.new('L', original_pil.size, 255))
+                    mask_pil = Image.open(image.file).convert('RGBA')
+
+                    # alpha copy; the mask may come from a downscaled
+                    # preview edit, so upscale it to the original size
+                    new_alpha = mask_pil.getchannel('A')
+                    if new_alpha.size != original_pil.size:
+                        new_alpha = new_alpha.resize(original_pil.size, Image.Resampling.LANCZOS)
+
+                    masked_pil = original_pil.copy()
+                    masked_pil.putalpha(new_alpha)
+                    outputs = [(filepath, masked_pil, {"pnginfo": metadata})]
+
+                    paint = post.get("paint")
+                    if paint is not None and paint.file:
+                        save_dir = os.path.dirname(filepath)
+
+                        paint_pil = Image.open(paint.file).convert('RGBA')
+                        if paint_pil.size != original_pil.size:
+                            paint_pil = paint_pil.resize(original_pil.size, Image.Resampling.LANCZOS)
+                        painted_pil = Image.alpha_composite(original_pil, paint_pil)
+                        painted_masked_pil = painted_pil.copy()
+                        painted_masked_pil.putalpha(new_alpha)
+
+                        sibling_outputs = [
+                            ("paint_filename", paint_pil, {}),
+                            ("painted_filename", painted_pil, {"pnginfo": metadata}),
+                            ("painted_masked_filename", painted_masked_pil, {"pnginfo": metadata}),
+                        ]
+                        for field, pil_image, save_kwargs in sibling_outputs:
+                            name = post.get(field)
+                            if not name:
+                                continue
+                            outputs.append((os.path.join(save_dir, os.path.basename(name)), pil_image, save_kwargs))
+
+                    staged = []
+                    try:
+                        for dest, pil_image, save_kwargs in outputs:
+                            tmp = f"{dest}.{uuid.uuid4().hex}.tmp"
+                            pil_image.save(tmp, format="PNG", compress_level=4, **save_kwargs)
+                            staged.append((tmp, dest))
+                        for tmp, dest in staged:
+                            os.replace(tmp, dest)
+                    except Exception:
+                        for tmp, _ in staged:
+                            if os.path.exists(tmp):
+                                try:
+                                    os.remove(tmp)
+                                except OSError:
+                                    pass
+                        raise
+
+            # Compositing large originals can take seconds; keep it off the event loop
+            return await asyncio.get_running_loop().run_in_executor(
+                None, image_upload, post, image_save_function)
 
         @routes.get("/view")
         async def view_image(request):
@@ -557,24 +617,68 @@ class PromptServer():
 
                 if os.path.isfile(file):
                     if 'preview' in request.rel_url.query:
-                        with Image.open(file) as img:
-                            preview_info = request.rel_url.query['preview'].split(';')
-                            image_format = preview_info[0]
-                            if image_format not in ['webp', 'jpeg'] or 'a' in request.rel_url.query.get('channel', ''):
-                                image_format = 'webp'
+                        preview_info = request.rel_url.query['preview'].split(';')
+                        channel = request.rel_url.query.get('channel', '')
+                        image_format = preview_info[0]
+                        if image_format not in ['webp', 'jpeg'] or 'a' in channel:
+                            image_format = 'webp'
 
-                            quality = 90
-                            if preview_info[-1].isdigit():
-                                quality = int(preview_info[-1])
+                        quality = 90
+                        if preview_info[-1].isdigit():
+                            parsed_quality = int(preview_info[-1])
+                            if 1 <= parsed_quality <= 100:
+                                quality = parsed_quality
 
-                            buffer = BytesIO()
-                            if image_format in ['jpeg'] or request.rel_url.query.get('channel', '') == 'rgb':
-                                img = img.convert("RGB")
-                            img.save(buffer, format=image_format, quality=quality)
-                            buffer.seek(0)
+                        # A max_size (any integer) requests downscaling and is
+                        # clamped into the permitted range; absent or non-integer
+                        # means no downscale.
+                        max_size = None
+                        max_size_param = request.rel_url.query.get('max_size', '')
+                        if max_size_param:
+                            try:
+                                max_size = min(8192, max(512, int(max_size_param)))
+                            except ValueError:
+                                max_size = None
 
-                            return web.Response(body=buffer.read(), content_type=f'image/{image_format}',
-                                                headers={"Content-Disposition": f"filename=\"{filename}\""})
+                        safe_filename = filename.replace("\\", "\\\\").replace('"', '\\"')
+                        preview_headers = {"Content-Disposition": f'filename="{safe_filename}"'}
+                        loop = asyncio.get_running_loop()
+
+                        preview_file = None
+                        preview_failed = False
+                        if max_size is not None and args.enable_assets:
+                            try:
+                                preview_file = await loop.run_in_executor(
+                                    None, get_or_create_preview_file, file, max_size, quality)
+                            except Exception:
+                                logging.warning("Failed to generate preview asset, downscaling in memory without caching", exc_info=True)
+                                preview_failed = True
+
+                        needs_convert = image_format == 'jpeg' or channel == 'rgb'
+                        if preview_file is not None and not needs_convert:
+                            return web.FileResponse(preview_file, headers={
+                                **preview_headers,
+                                "Content-Type": "image/webp",
+                            })
+
+                        render_source = preview_file or file
+
+                        def render_preview():
+                            with Image.open(render_source) as img:
+                                preview_img = img
+
+                                if preview_failed and max_size is not None and max(img.size) > max_size:
+                                    preview_img = ImageOps.contain(
+                                        img, (max_size, max_size), Image.Resampling.LANCZOS)
+                                if needs_convert:
+                                    preview_img = preview_img.convert("RGB")
+                                buffer = BytesIO()
+                                preview_img.save(buffer, format=image_format, quality=quality)
+                                return buffer.getvalue()
+
+                        body = await loop.run_in_executor(None, render_preview)
+                        return web.Response(body=body, content_type=f'image/{image_format}',
+                                            headers=preview_headers)
 
                     if 'channel' not in request.rel_url.query:
                         channel = 'rgba'
