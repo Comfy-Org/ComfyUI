@@ -335,6 +335,11 @@ class Qwen25_7BVLI_Config:
     rms_norm_add = False
     mlp_activation = "silu"
     qkv_bias = True
+    # Qwen2.5-VL stop tokens: <|im_end|> / <|endoftext|>. Without this,
+    # transformer.generate() (in this file) crashes with AttributeError when it
+    # falls back to self.model.config.stop_tokens, because this config omitted
+    # it while every other Qwen config defines it.
+    stop_tokens = [151643, 151645]
     rope_dims = [16, 24, 24]
     q_norm = None
     k_norm = None
