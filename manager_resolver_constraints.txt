@@ -1,0 +1,21 @@
+# Runtime constraints consumed by ComfyUI-Manager's UnifiedDepResolver.
+# Keep the validated CUDA stack on exact PyTorch cu128 wheels without making
+# the PyTorch index globally eligible for unrelated packages.
+comfyui_manager==4.2.1
+torch @ https://download-r2.pytorch.org/whl/cu128/torch-2.11.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=d252cf975fb18c94a85336323ad425f473df56dab35a44b00399bd70c7a3b997
+torchvision @ https://download-r2.pytorch.org/whl/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=ccf26b4b659cfce6f2208cb8326071d51c70219a34856dfdf468d1e19af52c0d
+torchaudio @ https://download-r2.pytorch.org/whl/cu128/torchaudio-2.11.0%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=78b86a17f164bdaabdcee93fdfde2587fc43b9ebf15cd61dcf730b4f8615176b
+triton==3.6.0
+numpy==2.4.4
+transformers==4.50.3
+tokenizers==0.21.4
+huggingface-hub==0.36.2
+safetensors==0.8.0
+diffusers==0.38.0
+peft==0.20.0
+accelerate==1.14.0
+bitsandbytes==0.50.0
+requests==2.34.2
+urllib3==2.7.0
+chardet==7.5.1
+charset-normalizer==3.4.7
