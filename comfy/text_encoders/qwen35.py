@@ -760,8 +760,10 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
                     vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
                     template = template.replace(vision_block, vision_block * len(images), 1)
             llama_text = template.format(text)
-            if not thinking:
-                llama_text += "<think>\n</think>\n"
+            if thinking:
+                llama_text += "<think>\n"
+            else:
+                llama_text += "<think>\n\n</think>\n\n"
 
         tokens = super().tokenize_with_weights(llama_text, return_word_ids=return_word_ids, disable_weights=True, **kwargs)
         key_name = next(iter(tokens))
