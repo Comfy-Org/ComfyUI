@@ -340,6 +340,101 @@ class TestMixedPrecisionOps(unittest.TestCase):
         finally:
             mm.supports_int8_compute = orig_supports_int8
 
+    def _int8_layer_on_a_device_without_int_mm(self, seed=4242):
+        """A loaded int8_tensorwise Linear marked for the dequantized path, as
+        pick_operations marks it on a device whose int8 matmul is unusable."""
+        import comfy.model_management as mm
+
+        orig_supports_int8 = mm.supports_int8_compute
+        mm.supports_int8_compute = lambda device=None: False
+        try:
+            model_config = SimpleNamespace(quant_config={"layer": {"format": "int8_tensorwise"}})
+            operations = ops.pick_operations(torch.bfloat16, torch.bfloat16, model_config=model_config)
+
+            torch.manual_seed(seed)
+            weight = torch.randn(16, 256, dtype=torch.bfloat16)
+            bias = torch.randn(16, dtype=torch.bfloat16)
+            q_weight = QuantizedTensor.from_float(weight, "TensorWiseINT8Layout", per_channel=True)
+            state_dict, _ = comfy.utils.convert_old_quants(
+                {
+                    "layer.weight": q_weight._qdata,
+                    "layer.bias": bias,
+                    "layer.weight_scale": q_weight._params.scale,
+                },
+                metadata={"_quantization_metadata": json.dumps(
+                    {"layers": {"layer": {"format": "int8_tensorwise"}}})},
+            )
+            model = torch.nn.Module()
+            model.layer = operations.Linear(256, 16, device="cpu", dtype=torch.bfloat16)
+            model.load_state_dict(state_dict, strict=False)
+        finally:
+            mm.supports_int8_compute = orig_supports_int8
+
+        self.assertIsInstance(model.layer.weight, QuantizedTensor)
+        self.assertTrue(model.layer._full_precision_mm)
+        return model.layer
+
+    def test_linear_input_act_honors_the_disabled_int8_format(self):
+        """The fused activation+INT8 kernel must honor the same disabled-format
+        routing the layer's forward honors (Comfy-Org/ComfyUI#16284).
+
+        MiniMax H3's MLP down-projection goes through linear_input_act, not the
+        layer's forward, so on MPS it reached torch._int_mm and raised
+        NotImplementedError even after #16130 marked int8 as disabled there. The
+        INT8 kernel is stubbed to raise the way MPS does, so this test fails on
+        the unfixed path for the reported reason rather than by inspection."""
+        layer = self._int8_layer_on_a_device_without_int_mm()
+
+        def _unimplemented_like_mps(*a, **kw):
+            raise NotImplementedError(
+                "The operator 'aten::_int_mm' is not currently implemented for the MPS device.")
+
+        seen_weight_types = []
+        orig_forward = layer._forward
+
+        def _capturing_forward(input, weight, bias, _orig=orig_forward):
+            seen_weight_types.append(type(weight))
+            return _orig(input, weight, bias)
+
+        layer._forward = _capturing_forward
+        orig_int8_linear = ops.quant_ops.ck.int8_linear
+        ops.quant_ops.ck.int8_linear = _unimplemented_like_mps
+        try:
+            x = torch.randn(4, 512, dtype=torch.bfloat16)
+            out = ops.linear_input_act(layer, x, "swiglu")
+        finally:
+            ops.quant_ops.ck.int8_linear = orig_int8_linear
+            layer._forward = orig_forward
+
+        self.assertEqual(out.shape, (4, 16))
+        # Dequantized, for the same reason as the layer's own forward: handing a
+        # QuantizedTensor to plain linear() would dispatch back into the disabled path.
+        self.assertEqual(seen_weight_types, [torch.Tensor])
+        # And the answer is the eager activation followed by the layer.
+        torch.testing.assert_close(out, layer(ops.INPUT_ACT_EAGER["swiglu"](x)))
+
+    def test_linear_input_act_still_fuses_where_int8_is_usable(self):
+        """The fix must not disable the fused kernel on devices that can run it."""
+        layer = self._int8_layer_on_a_device_without_int_mm(seed=99)
+        # Same layer, but this device can run the INT8 matmul.
+        layer._full_precision_mm = False
+
+        calls = []
+
+        def _recording_int8_linear(x, qdata, scale, bias, dtype, **kwargs):
+            calls.append(kwargs.get("input_act"))
+            return torch.zeros(x.shape[:-1] + (qdata.shape[0],), dtype=dtype)
+
+        orig_int8_linear = ops.quant_ops.ck.int8_linear
+        ops.quant_ops.ck.int8_linear = _recording_int8_linear
+        try:
+            out = ops.linear_input_act(layer, torch.randn(4, 512, dtype=torch.bfloat16), "swiglu")
+        finally:
+            ops.quant_ops.ck.int8_linear = orig_int8_linear
+
+        self.assertEqual(calls, ["swiglu"])
+        self.assertEqual(out.shape, (4, 16))
+
     def test_supports_int8_compute_treats_mps_mode_as_unsupported_when_device_is_none(self):
         """Call sites (like pick_operations' default) may omit load_device. On an
         MPS machine that must still report int8 as unsupported instead of
