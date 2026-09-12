@@ -932,6 +932,20 @@ class TestExecution:
 
         assert len(result) <= 1, "Should return at most 1 item when offset is near end"
 
+    def test_history_api_rejects_non_integer_max_items(self, client: ComfyClient):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            client.get_all_history(max_items="not-an-integer")
+
+        assert exc_info.value.code == 400
+        assert json.loads(exc_info.value.read()) == {"error": "max_items must be an integer"}
+
+    def test_history_api_rejects_non_integer_offset(self, client: ComfyClient):
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            client.get_all_history(offset="not-an-integer")
+
+        assert exc_info.value.code == 400
+        assert json.loads(exc_info.value.read()) == {"error": "offset must be an integer"}
+
     # Jobs API tests
     def test_jobs_api_job_structure(
         self, client: ComfyClient, builder: GraphBuilder
