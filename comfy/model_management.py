@@ -876,7 +876,7 @@ def extra_reserved_memory():
 def minimum_inference_memory():
     return (1024 * 1024 * 1024) * 0.8 + extra_reserved_memory()
 
-def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins_required=0, ram_required=0):
+def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins_required=0, ram_required=0, retain_ram_cache=False):
     cleanup_models_gc()
     if not for_dynamic:
         detail("Non dynamic memory free called! memory_required=%s pins_required=%s ram_required=%s", memory_required, pins_required, ram_required)
@@ -902,9 +902,17 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
                 #as that works on-demand.
                 memory_required -= current_loaded_models[i].model.loaded_size()
                 memory_to_free = 0
-        if memory_to_free > 0 and current_loaded_models[i].model_unload(memory_to_free):
-            logging.debug(f"Unloading {current_loaded_models[i].model.model.__class__.__name__}")
-            unloaded_model.append(i)
+        if memory_to_free > 0:
+            model = current_loaded_models[i].model
+            if retain_ram_cache and model.is_dynamic():
+                loaded_size = model.loaded_size()
+                freed = model.partially_unload(model.offload_device, memory_to_free)
+                if freed < min(memory_to_free, loaded_size) and current_loaded_models[i].model_unload(memory_to_free):
+                    logging.debug(f"Unloading {model.model.__class__.__name__}")
+                    unloaded_model.append(i)
+            elif current_loaded_models[i].model_unload(memory_to_free):
+                logging.debug(f"Unloading {model.model.__class__.__name__}")
+                unloaded_model.append(i)
 
     for i in sorted(unloaded_model, reverse=True):
         unloaded_models.append(current_loaded_models.pop(i))
@@ -987,13 +995,14 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
             free_memory(total_memory_required[device] * 1.1 + extra_mem,
                         device,
                         for_dynamic=free_for_dynamic,
-                        pins_required=total_pins_required.get(device, 0))
+                        pins_required=total_pins_required.get(device, 0),
+                        retain_ram_cache=True)
 
     for device in total_memory_required:
         if device != torch.device("cpu"):
             free_mem = get_free_memory(device)
             if free_mem < minimum_memory_required:
-                models_l = free_memory(minimum_memory_required, device, for_dynamic=free_for_dynamic)
+                models_l = free_memory(minimum_memory_required, device, for_dynamic=free_for_dynamic, retain_ram_cache=True)
                 logging.info("{} models unloaded.".format(len(models_l)))
 
     for loaded_model in models_to_load:
