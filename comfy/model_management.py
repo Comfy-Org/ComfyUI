@@ -1643,7 +1643,8 @@ def pin_memory(tensor):
 
     size = tensor.nbytes
     comfy.memory_management.extra_ram_release(comfy.memory_management.RAM_CACHE_HEADROOM)
-    ensure_pin_registerable(size)
+    if not ensure_pin_budget(size) or not ensure_pin_registerable(size):
+        return False
 
     ptr = tensor.data_ptr()
     if ptr == 0:
