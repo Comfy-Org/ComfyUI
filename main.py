@@ -35,6 +35,7 @@ from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
 from app.database.db import init_db, dependencies_available
+import comfy.metrics
 
 if __name__ == "__main__":
     #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
@@ -381,6 +382,9 @@ def prompt_worker(q, server_instance):
         queue_item = q.get(timeout=timeout)
         if queue_item is not None:
             item, item_id = queue_item
+            create_time_ms = item[3].get("create_time")
+            if create_time_ms is not None:
+                comfy.metrics.record_queue_wait(time.time() - create_time_ms / 1000.0)
             execution_start_time = time.perf_counter()
             prompt_id = item[1]
             server_instance.last_prompt_id = prompt_id
@@ -392,6 +396,10 @@ def prompt_worker(q, server_instance):
 
             asset_seeder.pause()
             e.execute(item[2], prompt_id, extra_data, item[4])
+            status = "completed" if e.success else "interrupted" if e.interrupted else "failed"
+            comfy.metrics.increment_jobs_total(status)
+            if e.success:
+                comfy.metrics.record_job_duration(time.perf_counter() - execution_start_time)
 
             need_gc = True
 
@@ -525,6 +533,8 @@ def start_comfyui(asyncio_loop=None):
     Starts the ComfyUI server using the provided asyncio event loop or creates a new one.
     Returns the event loop, server instance, and a function to start the server asynchronously.
     """
+    comfy.metrics.init_metrics()
+
     if args.temp_directory:
         temp_dir = os.path.join(os.path.abspath(args.temp_directory), "temp")
         logging.info(f"Setting temp directory to: {temp_dir}")

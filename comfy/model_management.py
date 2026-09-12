@@ -36,6 +36,7 @@ import comfy.quant_ops
 import comfy_aimdo.host_buffer
 import comfy_aimdo.vram_buffer
 from comfy.internal_logging import detail
+import comfy.metrics
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -796,6 +797,7 @@ class LoadedModel:
             return self.model_memory()
 
     def model_load(self, lowvram_model_memory=0, force_patch_weights=False):
+        comfy.metrics.increment_model_swaps()
         self.model.model_patches_to(self.device)
         self.model.model_patches_to(self.model.model_dtype())
 
@@ -811,6 +813,7 @@ class LoadedModel:
         self.real_model = weakref.ref(real_model)
         self.model_finalizer = weakref.finalize(real_model, cleanup_models)
         self.model_finalizer.atexit = False
+        comfy.metrics.update_vram_metrics(self.device)
         return real_model
 
     def should_reload_model(self, force_patch_weights=False):
@@ -819,15 +822,18 @@ class LoadedModel:
         return False
 
     def model_unload(self, memory_to_free=None, unpatch_weights=True):
+        comfy.metrics.increment_model_swaps()
         if memory_to_free is not None:
             if memory_to_free < self.model.loaded_size():
                 freed = self.model.partially_unload(self.model.offload_device, memory_to_free)
+                comfy.metrics.update_vram_metrics(self.device)
                 if freed >= memory_to_free:
                     return False
         self.model.detach(unpatch_weights)
         self.model_finalizer.detach()
         self.model_finalizer = None
         self.real_model = None
+        comfy.metrics.update_vram_metrics(self.device)
         return True
 
     def model_use_more_vram(self, extra_memory, force_patch_weights=False):
@@ -908,6 +914,7 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
 
     for i in sorted(unloaded_model, reverse=True):
         unloaded_models.append(current_loaded_models.pop(i))
+    comfy.metrics.update_loaded_models_count(len(current_loaded_models))
 
     if not for_dynamic and pins_required > 0:
         ensure_pin_budget(pins_required)
@@ -971,8 +978,10 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
                 to_unload = [i] + to_unload
         for i in to_unload:
             model_to_unload = current_loaded_models.pop(i)
+            comfy.metrics.increment_model_swaps()
             model_to_unload.model.detach(unpatch_all=False)
             model_to_unload.model_finalizer.detach()
+            comfy.metrics.update_vram_metrics(model_to_unload.device)
 
     total_memory_required = {}
     total_pins_required = {}
@@ -1022,6 +1031,7 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
         ram_used = model.loaded_ram_size() if model.is_dynamic() else loaded_model.model_memory() - vram_used
         detail("Model loaded: patcher=%s model=%s ram_mb=%.1f vram_mb=%.1f", model.__class__.__name__, model.model.__class__.__name__, ram_used / (1024 ** 2), vram_used / (1024 ** 2))
         current_loaded_models.insert(0, loaded_model)
+        comfy.metrics.update_loaded_models_count(len(current_loaded_models))
     return
 
 def load_model_gpu(model):

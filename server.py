@@ -32,6 +32,7 @@ from io import BytesIO
 import aiohttp
 from aiohttp import web
 import logging
+import comfy.metrics
 
 import mimetypes
 from comfy.cli_args import args
@@ -333,6 +334,14 @@ class PromptServer():
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
             return response
+
+        if comfy.metrics.is_enabled() and args.prometheus_port is None:
+            @routes.get("/metrics")
+            async def get_metrics(request):
+                return web.Response(
+                    body=comfy.metrics.generate_latest(),
+                    headers={"Content-Type": "text/plain; version=0.0.4; charset=utf-8"},
+                )
 
         @routes.get("/embeddings")
         def get_embeddings(request):
@@ -1395,6 +1404,7 @@ class PromptServer():
 
     def queue_updated(self):
         self.send_sync("status", { "status": self.get_queue_info() })
+        comfy.metrics.update_queue_length(len(self.prompt_queue.queue))
 
     async def publish_loop(self):
         while True:
