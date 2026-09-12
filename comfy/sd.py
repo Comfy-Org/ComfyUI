@@ -79,6 +79,7 @@ import comfy.text_encoders.qwen35
 import comfy.text_encoders.qwen3vl
 import comfy.text_encoders.minimax
 import comfy.text_encoders.minimax_music
+import comfy.text_encoders.yue2
 import comfy.ldm.minimax.vae
 import comfy.ldm.minimax.audio_vae
 import comfy.text_encoders.boogu
@@ -695,6 +696,7 @@ class VAE:
                                                                     decoder_config={'target': "comfy.ldm.modules.diffusionmodules.model.Decoder", 'params': decoder_ddconfig if decoder_ddconfig is not None else ddconfig})
             elif "decoder.layers.1.layers.0.beta" in sd:
                 config = {}
+                yue2_vae = "decoder.layers.6.layers.1.weight_v" in sd or "decoder.layers.6.layers.1.parametrizations.weight.original1" in sd
                 param_key = None
                 self.upscale_ratio = 2048
                 self.downscale_ratio = 2048
@@ -709,6 +711,9 @@ class VAE:
                         self.upscale_ratio = 1920
                         self.downscale_ratio = 1920
 
+                if yue2_vae:
+                    config.update(channels=64, c_mults=[1, 2, 4, 8, 16, 32], strides=[2, 2, 4, 4, 5, 6],
+                                  sample_latent=False)
                 self.first_stage_model = AudioOobleckVAE(**config)
                 self.memory_used_encode = lambda shape, dtype: (1000 * shape[2]) * model_management.dtype_size(dtype)
                 self.memory_used_decode = lambda shape, dtype: (1000 * shape[2] * 2048) * model_management.dtype_size(dtype)
@@ -720,6 +725,10 @@ class VAE:
                 self.process_input = lambda audio: audio
                 self.working_dtypes = [torch.float16, torch.bfloat16, torch.float32]
                 self.disable_offload = True
+                if yue2_vae:
+                    self.audio_sample_rate = 48000
+                    self.upscale_ratio = self.downscale_ratio = 1920
+                    self.memory_used_decode = lambda shape, dtype: (1500 * shape[-1] * 1920) * model_management.dtype_size(dtype)
             elif "blocks.2.blocks.3.stack.5.weight" in sd or "decoder.blocks.2.blocks.3.stack.5.weight" in sd or "layers.4.layers.1.attn_block.attn.qkv.weight" in sd or "encoder.layers.4.layers.1.attn_block.attn.qkv.weight" in sd: #genmo mochi vae
                 if "blocks.2.blocks.3.stack.5.weight" in sd:
                     sd = comfy.utils.state_dict_prefix_replace(sd, {"": "decoder."})
@@ -1552,6 +1561,7 @@ class CLIPType(Enum):
     JOYIMAGE = 33
     MAGE = 34
     MINIMAX = 35
+    YUE2 = 36
 
 
 
@@ -1741,7 +1751,12 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
     clip_target.params = {}
     if len(clip_data) == 1:
         te_model = detect_te_model(clip_data[0])
-        if clip_type == CLIPType.MINIMAX and "model.audio_decoder.projection.weight" in clip_data[0]:
+        if clip_type == CLIPType.YUE2 and "yue2_tokenizer_json" in clip_data[0]:
+            tokenizer_data["yue2_tokenizer_json"] = clip_data[0].pop("yue2_tokenizer_json")
+            detect = comfy.text_encoders.hunyuan_video.llama_detect(clip_data[0])
+            clip_target.clip = comfy.text_encoders.yue2.te(**detect)
+            clip_target.tokenizer = comfy.text_encoders.yue2.YuE2Tokenizer
+        elif clip_type == CLIPType.MINIMAX and "model.audio_decoder.projection.weight" in clip_data[0]:
             tokenizer_data["tokenizer_json"] = clip_data[0].pop("tokenizer_json", None)
             quant = comfy.utils.detect_layer_quantization(clip_data[0], "")
             if quant is not None:
