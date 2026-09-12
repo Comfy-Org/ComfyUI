@@ -71,6 +71,54 @@ def _remove_sensitive_from_queue(queue: list) -> list:
     return [item[:5] for item in queue]
 
 
+def dedupe_conflicting_routes(routes):
+    """Drop route definitions that aiohttp would reject at registration.
+
+    Adding two routes that conflict on the same path raises RuntimeError in
+    aiohttp's router; with custom-node routes that aborts server startup.
+    This keeps the first registration (aiohttp's resolution order) and skips
+    any later one that would conflict, logging both handlers' modules.
+
+    Conflict rule mirrors aiohttp's Resource.add_route: a route registers an
+    effective set of methods (GET also claims HEAD unless allow_head=False,
+    '*' is the wildcard), and a new route conflicts iff the path already has a
+    wildcard claim, or one of its methods is already claimed. A new wildcard
+    after existing concrete methods does NOT conflict (aiohttp keeps both:
+    the concrete method resolves first, the wildcard handles the rest), so it
+    is preserved. Non-RouteDef entries (e.g. static routes) pass through.
+    """
+    claimed = {}  # path -> {effective method: first route}
+    result = []
+    for route in routes:
+        if not isinstance(route, web.RouteDef):
+            result.append(route)
+            continue
+        if route.method == "*":
+            methods = {"*"}
+        elif route.method == "GET" and route.kwargs.get("allow_head", True):
+            methods = {"GET", "HEAD"}
+        else:
+            methods = {route.method}
+        path_claims = claimed.setdefault(route.path, {})
+        conflict = path_claims.get("*")
+        if conflict is None:
+            for method in methods:
+                if method in path_claims:
+                    conflict = path_claims[method]
+                    break
+        if conflict is not None:
+            logging.warning(
+                "Skipping duplicate route %s %s registered by %s (already registered by %s)",
+                route.method, route.path,
+                getattr(route.handler, "__module__", "unknown"),
+                getattr(conflict.handler, "__module__", "unknown"))
+            continue
+        for method in methods:
+            path_claims[method] = route
+        result.append(route)
+    return result
+
+
 async def send_socket_catch_exception(function, message):
     try:
         await function(message)
@@ -1225,19 +1273,27 @@ class PromptServer():
         self.node_replace_manager.add_routes(self.routes)
         self.app.add_subapp('/internal', self.internal_routes.get_app())
 
+        # Drop routes that would collide inside aiohttp's router. Two
+        # registrations that conflict on the same path -- typically two custom
+        # nodes claiming the same endpoint -- would otherwise raise here and
+        # prevent the server from starting at all. Every other custom-node
+        # failure is downgraded to a warning; this keeps route conflicts
+        # consistent with that.
+        deduped_routes = dedupe_conflicting_routes(self.routes)
+
         # Prefix every route with /api for easier matching for delegation.
         # This is very useful for frontend dev server, which need to forward
         # everything except serving of static files.
         # Currently both the old endpoints without prefix and new endpoints with
         # prefix are supported.
         api_routes = web.RouteTableDef()
-        for route in self.routes:
+        for route in deduped_routes:
             # Custom nodes might add extra static routes. Only process non-static
             # routes to add /api prefix.
             if isinstance(route, web.RouteDef):
                 api_routes.route(route.method, "/api" + route.path)(route.handler, **route.kwargs)
         self.app.add_routes(api_routes)
-        self.app.add_routes(self.routes)
+        self.app.add_routes(deduped_routes)
 
         # Add routes from web extensions.
         for name, dir in nodes.EXTENSION_WEB_DIRS.items():
