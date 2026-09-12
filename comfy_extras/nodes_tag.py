@@ -2,7 +2,7 @@
 # https://hyeon-cho.github.io/TAG/
 # https://arxiv.org/abs/2510.04533
 # https://github.com/hyeon-cho/Tangential-Amplifying-Guidance
-from typing import override
+from typing_extensions import override
 from comfy_api.latest import io, ComfyExtension
 
 
