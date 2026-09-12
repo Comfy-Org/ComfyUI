@@ -40,7 +40,7 @@ from comfy_execution.graph import (
     get_input_info,
 )
 from comfy_execution.graph_utils import GraphBuilder, is_link
-from comfy_execution.validation import validate_node_input
+from comfy_execution.validation import LoopValidationError, validate_loops, validate_node_input
 from comfy_execution.progress import get_progress_state, reset_progress_state, add_progress_handler, WebUIProgressHandler
 from comfy_execution.utils import CurrentNodeContext
 from comfy_execution.asset_enrichment import enrich_output_with_assets
@@ -205,6 +205,8 @@ def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=
                 hidden_inputs_v3[io.Hidden.api_key_comfy_org] = extra_data.get("api_key_comfy_org", None)
             if io.Hidden.comfy_usage_source.name in hidden:
                 hidden_inputs_v3[io.Hidden.comfy_usage_source] = extra_data.get("comfy_usage_source", None)
+            if io.Hidden.execution_list.name in hidden:
+                hidden_inputs_v3[io.Hidden.execution_list] = execution_list
     else:
         if "hidden" in valid_inputs:
             h = valid_inputs["hidden"]
@@ -213,6 +215,8 @@ def get_input_data(inputs, class_def, unique_id, execution_list=None, dynprompt=
                     input_data_all[x] = [dynprompt.get_original_prompt() if dynprompt is not None else {}]
                 if h[x] == "DYNPROMPT":
                     input_data_all[x] = [dynprompt]
+                if h[x] == "EXECUTION_LIST":
+                    input_data_all[x] = [execution_list]
                 if h[x] == "EXTRA_PNGINFO":
                     input_data_all[x] = [extra_data.get('extra_pnginfo', None)]
                 if h[x] == "UNIQUE_ID":
@@ -517,6 +521,8 @@ async def execute(server, dynprompt, caches, current_item, extra_data, executed,
                 if len(required_inputs) > 0:
                     for i in required_inputs:
                         execution_list.make_input_strong_link(unique_id, i)
+                    return (ExecutionResult.PENDING, None, None)
+                if execution_list.is_staged_node_blocked():
                     return (ExecutionResult.PENDING, None, None)
 
             def execution_block_cb(block):
@@ -1173,6 +1179,15 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
         }
         return (False, error, [], {})
 
+    start_nodes = set()
+    end_nodes = set()
+    for node_id, node in prompt.items():
+        boundary = getattr(nodes.NODE_CLASS_MAPPINGS[node["class_type"]], "LOOP_BOUNDARY", None)
+        if boundary == "start":
+            start_nodes.add(node_id)
+        elif boundary == "end":
+            end_nodes.add(node_id)
+
     good_outputs = set()
     errors = []
     node_errors = {}
@@ -1227,6 +1242,31 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
                             logging.error(f"  - {reason['message']}: {reason['details']}")
                     node_errors[node_id]["dependent_outputs"].append(o)
             logging.error("Output will be ignored")
+
+    has_dependency_cycle = any(
+        reason["type"] == "dependency_cycle"
+        for valid, reasons, _ in validated.values()
+        for reason in reasons
+    )
+    if not has_dependency_cycle:
+        try:
+            validate_loops(prompt, outputs, validated, start_nodes, end_nodes)
+        except LoopValidationError as ex:
+            dependent_outputs = ex.error["extra_info"]["output_ids"]
+            for node_id in ex.error["extra_info"]["node_ids"]:
+                if node_id not in node_errors:
+                    node_errors[node_id] = {
+                        "errors": [],
+                        "dependent_outputs": [],
+                        "class_type": prompt[node_id]["class_type"],
+                    }
+                node_errors[node_id]["errors"].append(ex.error)
+                node_errors[node_id]["dependent_outputs"] = sorted(
+                    set(node_errors[node_id]["dependent_outputs"]).union(dependent_outputs)
+                )
+            for output_id in dependent_outputs:
+                good_outputs.discard(output_id)
+            errors.append((dependent_outputs[0], [ex.error]))
 
     if len(good_outputs) == 0:
         errors_list = []
