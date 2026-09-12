@@ -534,6 +534,35 @@ class SamplerEulerAncestralCFGPP(io.ComfyNode):
 
     get_sampler = execute
 
+class SamplerCFGPP_ud10_ab(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="SamplerCFGPP_ud10_ab",
+            display_name="SamplerCFG++_UD10_AB",
+            category="model/sampling/samplers",
+            inputs=[
+                io.Float.Input("history_weight", default=0.25, min=0.0, max=1.0, step=0.01, round=False, advanced=True),
+                io.Float.Input("uncond_history_weight", default=0.1, min=0.0, max=100.0, step=0.01, round=False, advanced=True),
+                io.Boolean.Input("cfg_distilled_model", default=False, tooltip="When set to true, speeds up sampling at CFG==1.0 by discarding negative cond.\nUseful for turbo/distilled models that can work without CFG.", advanced=True),
+            ],
+            outputs=[io.Sampler.Output()]
+        )
+
+    @classmethod
+    def execute(cls, history_weight, uncond_history_weight, cfg_distilled_model) -> io.NodeOutput:
+        sampler = comfy.samplers.ksampler(
+            "cfgpp_ud10_ab",
+            {
+                "history_weight": history_weight,
+                "uncond_history_weight": uncond_history_weight,
+                "disable_cfg1_optimization": not cfg_distilled_model,
+            },
+        )
+        return io.NodeOutput(sampler)
+
+    get_sampler = execute
+
 class SamplerLMS(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -1201,6 +1230,7 @@ class CustomSamplersExtension(ComfyExtension):
             KSamplerSelect,
             SamplerEulerAncestral,
             SamplerEulerAncestralCFGPP,
+            SamplerCFGPP_ud10_ab,
             SamplerLMS,
             SamplerDPMPP_3M_SDE,
             SamplerDPMPP_2M_SDE,
