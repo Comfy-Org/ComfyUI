@@ -966,6 +966,11 @@ def linear_input_act(linear, x, input_act):
     """
     weight = linear.weight
     if (comfy.model_management.in_training
+            # A layer whose format is disabled on this device (no torch._int_mm on MPS,
+            # say) is marked for the dequantized path, and the fused kernel is the one
+            # place that has to honor it too: it calls the INT8 matmul directly, so
+            # skipping this check reaches the very operator the format was disabled for.
+            or getattr(linear, "_full_precision_mm", False)
             or not isinstance(weight, QuantizedTensor)
             or weight._layout_cls != "TensorWiseINT8Layout"
             or getattr(weight._params, "transposed", False)):
