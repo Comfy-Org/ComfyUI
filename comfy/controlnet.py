@@ -155,7 +155,7 @@ class ControlBase:
 
         When autoregister is set to True, the deep clone is also added to multigpu_clones dict.
         '''
-        raise NotImplementedError("Classes inheriting from ControlBase should define their own deepclone_multigpu funtion.")
+        raise NotImplementedError("Classes inheriting from ControlBase should define their own deepclone_multigpu function.")
 
     def get_extra_hooks(self):
         out = []
