@@ -1,3 +1,9 @@
+"""Re-exports the record and tag query functions so callers import them from one
+place instead of reaching into individual query modules. A module-level
+``__getattr__`` resolves names that live in the tag module, keeping this import
+surface flat as queries are split across more files.
+"""
+
 from importlib import import_module
 
 from app.assets.database.queries.records import (

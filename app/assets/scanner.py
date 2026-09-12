@@ -1,3 +1,12 @@
+"""Walks the asset roots and turns what it finds into catalog rows: collecting
+paths, building specs, seeding new content and records, then enriching them
+with metadata and hashes. Each spec is seeded inside its own savepoint, so one
+file whose row conflicts cannot discard the work done for the files around it.
+Enrichment counts as progress only when it produced what was asked of it — a
+requested hash that could not be computed is no progress, which is what bounds
+a pass over a file the server cannot read.
+"""
+
 import logging
 import os
 from dataclasses import dataclass
@@ -6,6 +15,7 @@ from typing import Callable, Literal, TypedDict
 
 import folder_paths
 import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.assets import mode
 from app.assets.database.queries import (
@@ -315,45 +325,50 @@ def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
         for spec in specs:
             path = os.path.abspath(spec["abs_path"])
             try:
-                stat_result = os.stat(path, follow_symlinks=True)
-            except OSError:
-                logging.warning("Skipping vanished asset during scan: %s", path)
+                with session.begin_nested():
+                    try:
+                        stat_result = os.stat(path, follow_symlinks=True)
+                    except OSError:
+                        logging.warning("Skipping vanished asset during scan: %s", path)
+                        continue
+                    try:
+                        recovery = recover_missing_content(
+                            session,
+                            path,
+                            stat_result,
+                            hashing_is_enabled=mode.hashing_enabled(),
+                        )
+                    except OSError:
+                        logging.warning("Skipping vanished asset during scan: %s", path)
+                        continue
+                    if recovery != "no_match":
+                        continue
+                    content = create_content(
+                        session,
+                        path=path,
+                        hash=None,
+                        size_bytes=spec["size_bytes"],
+                        mtime_ns=spec["mtime_ns"],
+                    )
+                    created_content_ids.append(content.id)
+                    existing_record = session.scalar(
+                        sa.select(Asset.id).where(Asset.content_id == content.id).limit(1)
+                    )
+                    if existing_record is not None:
+                        continue
+                    create_record(
+                        session,
+                        content_id=content.id,
+                        name=spec["info_name"],
+                        mime_type=spec["mime_type"],
+                        job_id=spec["job_id"],
+                        loader_path=spec["fname"],
+                        tags=spec["tags"],
+                    )
+                    created += 1
+            except IntegrityError:
+                logging.warning("Skipping asset whose row conflicts during scan: %s", path)
                 continue
-            try:
-                recovery = recover_missing_content(
-                    session,
-                    path,
-                    stat_result,
-                    hashing_is_enabled=mode.hashing_enabled(),
-                )
-            except OSError:
-                logging.warning("Skipping vanished asset during scan: %s", path)
-                continue
-            if recovery != "no_match":
-                continue
-            content = create_content(
-                session,
-                path=path,
-                hash=None,
-                size_bytes=spec["size_bytes"],
-                mtime_ns=spec["mtime_ns"],
-            )
-            created_content_ids.append(content.id)
-            existing_record = session.scalar(
-                sa.select(Asset.id).where(Asset.content_id == content.id).limit(1)
-            )
-            if existing_record is not None:
-                continue
-            create_record(
-                session,
-                content_id=content.id,
-                name=spec["info_name"],
-                mime_type=spec["mime_type"],
-                job_id=spec["job_id"],
-                loader_path=spec["fname"],
-                tags=spec["tags"],
-            )
-            created += 1
     except Exception:
         session.rollback()
         for content_id in created_content_ids:
@@ -456,7 +471,8 @@ def enrich_asset(
     digest: str | None = None
     stored_hash: str | None = None
     verified_stat: os.stat_result | None = None
-    if compute_hash and content is not None and content.hash is None:
+    hash_requested = compute_hash and content is not None and content.hash is None
+    if hash_requested:
         try:
             snapshot = snapshot_hash(file_path)
             if snapshot is None:
@@ -508,6 +524,8 @@ def enrich_asset(
 
     session.commit()
 
+    if hash_requested and stored_hash is None:
+        return False
     return stored_hash is not None or metadata is not None or mime_type is not None
 
 

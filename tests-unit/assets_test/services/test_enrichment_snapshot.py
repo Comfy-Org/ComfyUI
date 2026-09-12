@@ -155,6 +155,32 @@ def test_enrichment_lands_metadata_and_hash_from_one_stable_observation(
     }
 
 
+def test_enrichment_reports_no_progress_when_a_requested_hash_fails(
+    session, temp_dir: Path
+):
+    path = temp_dir / "unreadable-for-hashing.bin"
+    path.write_bytes(b"metadata reads fine, hashing does not")
+    content, record = _create_unhashed_record(session, path)
+
+    with patch("app.assets.scanner.snapshot_hash", side_effect=PermissionError("denied")):
+        enriched = enrich_asset(
+            session,
+            file_path=str(path),
+            content_id=content.id,
+            record_id=record.id,
+            extract_metadata=True,
+            compute_hash=True,
+        )
+
+    assert enriched is False, (
+        "a record whose requested hash could not be computed has made no progress; "
+        "counting the metadata as progress keeps the record out of failed_ids, so the "
+        "enrich pass re-selects it forever"
+    )
+    session.expire_all()
+    assert session.get(AssetContent, content.id).hash is None
+
+
 def test_off_mode_enrichment_still_lands_metadata_without_a_hash(
     session, temp_dir: Path
 ):

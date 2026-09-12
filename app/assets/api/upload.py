@@ -1,3 +1,11 @@
+"""Reads a multipart upload off the wire and lands its bytes in a temporary file
+the ingest service can hash and move. The body is consumed in chunks so a large
+model never has to fit in memory, and the temporary file is removed on every
+failure path so an abandoned upload leaves nothing behind. Field values are
+validated as they arrive, letting a bad request fail before its bytes are
+written.
+"""
+
 import logging
 import os
 import uuid

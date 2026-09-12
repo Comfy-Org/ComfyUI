@@ -87,7 +87,7 @@ def test_upload_content_lookup_not_gated_on_hashing_flag(session, tmp_path):
 
     mode_module.init(FakeArgs())
     f = _make_file(tmp_path, "f4.png")
-    content = create_content(session, path=f, hash="abc123")
+    content = create_content(session, path=f, hash="abc123", size_bytes=os.path.getsize(f))
     session.commit()
     result = lookup_for_view(session, "abc123")
     assert result is not None
@@ -99,7 +99,7 @@ def test_stale_older_newer_live_returns_newer(session, tmp_path):
     old_time = datetime(2020, 1, 1)
     new_time = datetime(2024, 1, 1)
     c_old = create_content(session, path="/nonexistent/old.png", hash="xyz")
-    c_new = create_content(session, path=f_newer, hash="xyz")
+    c_new = create_content(session, path=f_newer, hash="xyz", size_bytes=os.path.getsize(f_newer))
     session.execute(update(AssetContent).where(AssetContent.id == c_old.id).values(created_at=old_time))
     session.execute(update(AssetContent).where(AssetContent.id == c_new.id).values(created_at=new_time))
     session.commit()
@@ -157,3 +157,15 @@ def test_refresh_qualified_content_none_when_file_vanishes(session, tmp_path):
     os.unlink(f)
 
     assert refresh_qualified_content(session, content.id) is None
+
+
+def test_size_mismatch_disqualifies_a_row_that_never_recorded_an_mtime(session, tmp_path):
+    f = _make_file(tmp_path, "size_mismatch.png", content=b"the real bytes on disk")
+    content = create_content(session, path=f, hash="dup", size_bytes=999_999)
+    session.commit()
+
+    assert content.mtime_ns is None, "fixture must exercise the unrecorded-mtime case"
+    assert lookup_for_view(session, "dup") is None, (
+        "a row whose recorded size disagrees with the file must not be served; an "
+        "unrecorded mtime is no reason to skip the size check too"
+    )

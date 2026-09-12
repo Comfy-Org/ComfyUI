@@ -1,3 +1,9 @@
+"""Defines the response bodies the asset API returns, fixing the field names,
+types and serialization its HTTP contract promises. Routes dump these models
+with null fields omitted, so whether a field is absent and whether it is empty
+stay distinguishable to a client.
+"""
+
 from datetime import datetime
 from typing import Any
 

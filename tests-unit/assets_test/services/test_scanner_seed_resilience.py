@@ -4,11 +4,9 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.assets.database.models import Asset
-from app.assets.database.queries import create_record as create_record_query
 from app.assets.scanner import SeedAssetSpec, seed_asset_specs
 from app.assets.services.snapshot_hash import snapshot_hash
 
@@ -114,36 +112,21 @@ def test_seed_logs_once_for_each_vanished_path(
     assert messages == [f"Skipping vanished asset during scan: {vanished_path}"]
 
 
-def test_seed_propagates_integrity_error_and_aborts_batch(
-    session: Session, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
+def test_seed_isolates_a_poisoned_spec_and_persists_the_specs_around_it(
+    session: Session, temp_dir: Path
 ) -> None:
-    specs, vanished_path = _specs_with_vanished_path(temp_dir)
+    specs, poisoned_path = _specs_with_vanished_path(temp_dir)
+    specs[1]["size_bytes"] = -1
 
-    def _create_record_or_raise(
-        session: Session,
-        content_id: str,
-        name: str,
-        mime_type: str | None = None,
-        job_id: str | None = None,
-        loader_path: str | None = None,
-        tags: tuple[str, ...] | None = None,
-    ) -> Asset:
-        if name == vanished_path.name:
-            raise IntegrityError("insert asset content", {}, Exception("forced failure"))
-        return create_record_query(
-            session,
-            content_id,
-            name,
-            mime_type,
-            job_id,
-            loader_path,
-            tags,
-        )
+    created = seed_asset_specs(session, specs)
+    session.commit()
 
-    monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
-
-    with pytest.raises(IntegrityError):
-        _ = seed_asset_specs(session, specs)
-    session.rollback()
-
-    assert _record_count(session) == 0
+    assert created == 2
+    assert _record_count(session) == 2
+    assert {record.name for record in session.scalars(select(Asset))} == {
+        "first.bin",
+        "last.bin",
+    }, (
+        "the batch shares one transaction, so a bare rollback would erase the spec BEFORE "
+        f"the poisoned one; both neighbours of {poisoned_path.name} must survive"
+    )

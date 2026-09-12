@@ -1,3 +1,11 @@
+"""Decides whether a file observed during a filesystem walk is settled enough to
+catalog, and parks the ones that are not. Admission requires two stats taken a
+moment apart to agree; a file still changing, or carrying a partial-download
+extension, goes onto a bounded watch list that later scans re-check until it
+settles, vanishes, or exhausts its retries. This is what keeps a model that is
+still downloading out of the catalog.
+"""
+
 from __future__ import annotations
 
 import mimetypes

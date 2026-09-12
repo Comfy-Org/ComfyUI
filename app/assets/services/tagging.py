@@ -1,3 +1,10 @@
+"""Applies and removes tags on a record and answers tag listing and histogram
+queries. Adding reports what it actually inserted, read back after the write,
+so a caller that lost a race is told the tag was already present rather than
+that it added one. Removal leaves automatically applied tags in place and
+reports them as protected instead of silently skipping them.
+"""
+
 from typing import Sequence
 
 from sqlalchemy import delete, select
@@ -7,9 +14,13 @@ from app.assets.database.queries import (
     RemoveTagsResult,
     list_tags_with_usage,
 )
-from app.assets.database.queries.records import bump_record_updated_at
+from app.assets.database.queries.records import (
+    bump_record_updated_at,
+    ensure_tag,
+    ensure_tag_link,
+)
 from app.assets.database.queries.tags import list_tag_counts_for_filtered_assets
-from app.assets.database.models import Asset, AssetTag, Tag
+from app.assets.database.models import Asset, AssetTag
 from app.assets.helpers import normalize_tags
 from app.assets.services.schemas import TagUsage
 from app.database.db import create_session
@@ -25,26 +36,19 @@ def apply_tags(
             raise ValueError(f"Asset {reference_id} not found")
 
         normalized_tags = normalize_tags(tags)
-        current_tags = set(
-            session.scalars(
-                select(AssetTag.tag_name).where(AssetTag.asset_id == reference_id)
-            )
-        )
         requested_tags = set(normalized_tags)
+        added: list[str] = []
         for tag_name in normalized_tags:
-            if session.get(Tag, tag_name) is None:
-                session.add(Tag(name=tag_name))
-                session.flush()
-            if tag_name not in current_tags:
-                session.add(
-                    AssetTag(
-                        asset_id=reference_id,
-                        tag_name=tag_name,
-                        origin=origin,
-                    )
-                )
+            ensure_tag(session, tag_name)
+            if ensure_tag_link(
+                session,
+                asset_id=reference_id,
+                tag_name=tag_name,
+                origin=origin,
+            ):
+                added.append(tag_name)
         session.flush()
-        if requested_tags - current_tags:
+        if added:
             bump_record_updated_at(session, reference_id)
         total_tags = list(
             session.scalars(
@@ -56,8 +60,8 @@ def apply_tags(
         session.commit()
 
     return AddTagsResult(
-        added=sorted(requested_tags - current_tags),
-        already_present=sorted(requested_tags & current_tags),
+        added=sorted(added),
+        already_present=sorted((requested_tags & set(total_tags)) - set(added)),
         total_tags=total_tags,
     )
 

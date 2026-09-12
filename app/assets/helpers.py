@@ -1,3 +1,9 @@
+"""Small conversions the asset system needs in more than one layer: canonical
+stored-hash strings, UTC timestamps, tag normalization, and a SQL predicate for
+path containment. That predicate is deliberately case-sensitive and
+component-bounded, because callers use it to choose rows for hard deletion.
+"""
+
 import os
 from datetime import datetime, timezone
 

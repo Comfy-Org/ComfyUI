@@ -1,3 +1,11 @@
+"""Registers the files a prompt produced as assets, at the moment the execution
+result is emitted. Each output is matched to a path inside its declared base
+directory and skipped when it escapes that directory or is not on disk, and a
+run served from cache replays the same registration so cached results still
+yield assets. Registering at emission rather than by inspecting the cache
+afterwards keeps this independent of any cache eviction policy.
+"""
+
 import copy
 import logging
 import os

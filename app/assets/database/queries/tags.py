@@ -1,3 +1,10 @@
+"""Answers questions about tag usage: which tags exist with how many assets, and
+how those counts narrow once a filter is applied. Both queries reuse the record
+listing's own joins and filter clauses, so the counts a client sees always
+describe the same assets the listing endpoint would return for that filter,
+records with missing content included.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

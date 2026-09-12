@@ -1132,3 +1132,229 @@ def test_off_mode_upload_calls_content_lookup(mock_create_session, hashing_off):
     finally:
         if os.path.exists(temp):
             os.unlink(temp)
+
+
+def _tag_names(session, record_id: str) -> list[str]:
+    return sorted(
+        session.scalars(select(AssetTag.tag_name).where(AssetTag.asset_id == record_id)).all()
+    )
+
+
+def test_upload_round_trips_its_own_served_tags(mock_create_session, hashing_on):
+    temp = _write_temp(b"round-trip-served-tags")
+    try:
+        result = upload_from_temp_path(
+            temp_path=temp,
+            name="served.bin",
+            tags=["output", "uploaded"],
+            client_filename="served.bin",
+        )
+
+        with mock_create_session() as session:
+            assert _tag_names(session, result.ref.id) == ["output", "uploaded"], (
+                "re-uploading a file with the tags the API served for it must succeed; "
+                "'uploaded' is appended unconditionally, so a request already carrying it "
+                "double-adds the same composite PK"
+            )
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def test_upload_accepts_a_repeated_custom_tag(mock_create_session, hashing_on):
+    temp = _write_temp(b"repeated-custom-tag")
+    try:
+        result = upload_from_temp_path(
+            temp_path=temp,
+            name="repeat.bin",
+            tags=["output", "x", "x"],
+            client_filename="repeat.bin",
+        )
+
+        with mock_create_session() as session:
+            assert _tag_names(session, result.ref.id) == ["output", "uploaded", "x"]
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def test_upload_normalizes_tags_before_they_reach_the_query_layer(
+    mock_create_session, hashing_on, monkeypatch
+):
+    captured: list[list[str]] = []
+    real_create_upload_record = ingest_module._create_upload_record
+
+    def capturing_create_upload_record(*args, **kwargs):
+        captured.append(list(args[4]))
+        return real_create_upload_record(*args, **kwargs)
+
+    monkeypatch.setattr(
+        ingest_module, "_create_upload_record", capturing_create_upload_record
+    )
+
+    payload = b"seam-assertion-bytes"
+    new_content_temp = _write_temp(payload)
+    reused_content_temp = _write_temp(payload)
+    try:
+        upload_from_temp_path(
+            temp_path=new_content_temp,
+            name="seam.bin",
+            tags=["output", "uploaded"],
+            client_filename="seam.bin",
+        )
+        upload_from_temp_path(
+            temp_path=reused_content_temp,
+            name="seam.bin",
+            tags=["output", "uploaded"],
+            client_filename="seam.bin",
+        )
+
+        assert len(captured) == 2, (
+            "expected one new-content upload and one reused-content upload"
+        )
+        for tags in captured:
+            assert len(tags) == len(set(tags)), (
+                f"{tags!r} reached the query layer with duplicates; normalization belongs "
+                "at the build site, not as a side effect of create_record's dedup"
+            )
+            assert tags.count("uploaded") == 1
+    finally:
+        for path in (new_content_temp, reused_content_temp):
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+def _stat_pair(path: str) -> tuple[int, int]:
+    stat_result = os.stat(path)
+    return stat_result.st_size, stat_result.st_mtime_ns
+
+
+def _mutating_snapshot_hash(path_to_mutate: str, new_bytes: bytes):
+    real_snapshot_hash = ingest_module.snapshot_hash
+
+    def _mutate_then_hash(candidate_path: str):
+        if candidate_path == path_to_mutate:
+            with open(path_to_mutate, "wb") as file:
+                file.write(new_bytes)
+            os.utime(path_to_mutate, ns=(_LATER_NS, _LATER_NS))
+        return real_snapshot_hash(candidate_path)
+
+    return _mutate_then_hash
+
+
+_LATER_NS = 2_000_000_000_000_000_000
+
+
+def test_incumbent_reconciliation_persists_the_stat_hashing_verified(
+    mock_create_session, hashing_on, monkeypatch
+):
+    output_dir = folder_paths.get_output_directory()
+    os.makedirs(output_dir, exist_ok=True)
+    dest_abs = os.path.join(output_dir, "incumbent_stat.bin")
+    original = b"the original incumbent bytes"
+    rewritten = b"REWRITTEN incumbent bytes!!!"
+    assert len(rewritten) == len(original), (
+        "same length keeps reconciliation on its adopt-the-hash branch, so this test "
+        "isolates stat pairing instead of the size-contradiction retirement"
+    )
+    with open(dest_abs, "wb") as file:
+        file.write(original)
+    try:
+        with mock_create_session() as session:
+            stale_size, stale_mtime = _stat_pair(dest_abs)
+            create_content(session, dest_abs, None, stale_size, stale_mtime)
+            session.commit()
+
+        monkeypatch.setattr(
+            ingest_module,
+            "snapshot_hash",
+            _mutating_snapshot_hash(dest_abs, rewritten),
+        )
+
+        with mock_create_session() as session:
+            ingest_module._settle_destination_before_write(session, dest_abs)
+            session.commit()
+
+        verified_size, verified_mtime = _stat_pair(dest_abs)
+        with mock_create_session() as session:
+            live = session.scalar(
+                select(AssetContent).where(
+                    AssetContent.path == dest_abs, AssetContent.is_missing.is_(False)
+                )
+            )
+            assert live is not None
+            assert (live.size_bytes, live.mtime_ns) == (verified_size, verified_mtime), (
+                "the row's hash describes the bytes hashing actually read, so its size and "
+                "mtime must describe those same bytes; a pre-hash stat makes the row "
+                "stat-inconsistent and therefore unservable by hash"
+            )
+            assert lookup_for_view(session, live.hash) is not None
+    finally:
+        if os.path.exists(dest_abs):
+            os.unlink(dest_abs)
+
+
+def test_in_place_registration_persists_the_stat_hashing_verified(
+    mock_create_session, hashing_on, monkeypatch
+):
+    output_dir = folder_paths.get_output_directory()
+    os.makedirs(output_dir, exist_ok=True)
+    locator = os.path.join(output_dir, "in_place_stat.bin")
+    with open(locator, "wb") as file:
+        file.write(b"in-place original bytes")
+    try:
+        monkeypatch.setattr(
+            ingest_module,
+            "snapshot_hash",
+            _mutating_snapshot_hash(locator, b"in-place bytes rewritten mid-hash"),
+        )
+
+        result = register_file_in_place(
+            abs_path=locator, name="in_place_stat.bin", tags=["output"]
+        )
+
+        verified_size, verified_mtime = _stat_pair(locator)
+        with mock_create_session() as session:
+            record = session.get(Asset, result.ref.id)
+            content = session.get(AssetContent, record.content_id)
+            assert (content.size_bytes, content.mtime_ns) == (verified_size, verified_mtime)
+            assert lookup_for_view(session, content.hash) is not None
+    finally:
+        if os.path.exists(locator):
+            os.unlink(locator)
+
+
+def test_multipart_upload_persists_the_stat_hashing_verified(
+    mock_create_session, hashing_on, monkeypatch
+):
+    payload = b"multipart bytes whose destination stat goes stale"
+    temp = _write_temp(payload)
+    real_digest = snapshot_hash(temp)[0]
+
+    def _stale_stat(_path: str, follow_symlinks: bool = True) -> tuple[int, int]:
+        return 1, 1
+
+    monkeypatch.setattr(ingest_module, "get_size_and_mtime_ns", _stale_stat)
+
+    result = upload_from_temp_path(
+        temp_path=temp,
+        name="multipart_stat.bin",
+        tags=["output"],
+        client_filename="multipart_stat.bin",
+    )
+
+    with mock_create_session() as session:
+        record = session.get(Asset, result.ref.id)
+        content = session.get(AssetContent, record.content_id)
+        assert (content.size_bytes, content.mtime_ns) != (1, 1), (
+            "a stat read separately from hashing can be stale; the verified stat that "
+            "hashing proved describes these bytes is the one to persist"
+        )
+        assert (content.size_bytes, content.mtime_ns) == _stat_pair(content.path)
+        assert content.hash == to_stored_hash(real_digest), (
+            "the digest, not the (digest, stat) pair, feeds to_stored_hash"
+        )
+        assert real_digest[:8] in os.path.basename(content.path), (
+            "the digest, not the pair, feeds hash-mode destination naming"
+        )
+        assert lookup_for_view(session, content.hash) is not None

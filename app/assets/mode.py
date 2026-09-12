@@ -1,3 +1,9 @@
+"""Holds whether asset hashing is enabled for this process, taken from the
+command-line flag once at startup. Callers ask here rather than reading
+arguments themselves, and asking before initialization raises instead of
+defaulting, so a route can never quietly answer as though hashing were off.
+"""
+
 from __future__ import annotations
 
 from typing import Protocol

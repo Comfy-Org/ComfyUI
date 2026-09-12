@@ -1,3 +1,10 @@
+"""Reconciles catalogued content against what is actually on disk: retiring rows
+whose file is gone, splitting a row whose bytes changed, and recovering one
+whose file came back. Recovery fires only when the returning file's hash
+identifies exactly one missing row and no live row already occupies that path,
+so a restored file can never leave two live rows describing one location.
+"""
+
 from __future__ import annotations
 
 import os
@@ -40,6 +47,13 @@ def recover_missing_content(
     session: Session, path: str, stat_result: os.stat_result, hashing_is_enabled: bool
 ) -> Literal["recovered", "no_match", "unstable"]:
     if not hashing_is_enabled:
+        return "no_match"
+    occupied = session.scalar(
+        sa.select(AssetContent.id)
+        .where(AssetContent.path == path, AssetContent.is_missing.is_(False))
+        .limit(1)
+    )
+    if occupied is not None:
         return "no_match"
     snapshot = snapshot_hash(path)
     if snapshot is None:

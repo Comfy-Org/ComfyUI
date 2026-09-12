@@ -196,6 +196,16 @@ def _init_file_db(db_url):
         raise
 
 
+_DESTRUCTIVE_REVISION = "0007_record_content_split"
+
+
+def _upgrade_discards_the_catalog(script, target_rev, current_rev):
+    return any(
+        revision.revision == _DESTRUCTIVE_REVISION
+        for revision in script.iterate_revisions(upper=target_rev, lower=current_rev)
+    )
+
+
 def _migrate_and_bind(db_url, db_path, db_exists):
     config = get_alembic_config()
 
@@ -237,6 +247,14 @@ def _migrate_and_bind(db_url, db_path, db_exists):
                 os.remove(backup_path)
             logging.exception("Error upgrading database: ")
             raise e
+
+        if backup_path and _upgrade_discards_the_catalog(script, target_rev, current_rev):
+            log_startup_warning(
+                f"The asset catalog was rebuilt from scratch by migration "
+                f"{_DESTRUCTIVE_REVISION}: manual tags, user metadata, previews, renames, "
+                f"API-created records and job_id links from the previous database were "
+                f"discarded. The database from before the upgrade was kept at {backup_path}."
+            )
 
     conn.close()
 

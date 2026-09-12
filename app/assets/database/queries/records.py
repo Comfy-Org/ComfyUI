@@ -1,3 +1,11 @@
+"""Owns every write to content rows, records and their tag links, plus the paged
+reads that list them. Inserts that can lose a race — a content row at a path, a
+tag, a tag link — run inside a savepoint and re-read the conflicting row, so a
+concurrent writer settles the call instead of raising, while a genuine
+constraint failure still surfaces. This is the sole writer of a content row's
+path, which is what lets other modules trust raw-column path predicates.
+"""
+
 from __future__ import annotations
 
 import os
@@ -64,15 +72,40 @@ def create_content(session: Session, path: str, hash: str | None = None, size_by
         return winner
 
 
+def ensure_tag(session: Session, name: str) -> None:
+    if session.get(Tag, name) is not None:
+        return
+    try:
+        with session.begin_nested():
+            session.add(Tag(name=name))
+            session.flush()
+    except IntegrityError:
+        # Only a row that is now present proves a lost race; anything else is a real failure.
+        if session.get(Tag, name) is None:
+            raise
+
+
+def ensure_tag_link(session: Session, *, asset_id: str, tag_name: str, origin: str) -> bool:
+    if session.get(AssetTag, (asset_id, tag_name)) is not None:
+        return False
+    try:
+        with session.begin_nested():
+            session.add(AssetTag(asset_id=asset_id, tag_name=tag_name, origin=origin))
+            session.flush()
+    except IntegrityError:
+        if session.get(AssetTag, (asset_id, tag_name)) is None:
+            raise
+        return False
+    return True
+
+
 def create_record(session: Session, content_id: str, name: str, mime_type: str | None = None, job_id: str | None = None, loader_path: str | None = None, tags: Sequence[str] | None = None, *, system_metadata: dict[str, Any] | None = None) -> Asset:
     record = Asset(content_id=content_id, name=name, mime_type=mime_type, job_id=job_id, loader_path=loader_path, system_metadata=system_metadata)
     session.add(record)
     session.flush()
-    for tag_name in tags or ():
-        if session.get(Tag, tag_name) is None:
-            session.add(Tag(name=tag_name))
-            session.flush()
-        session.add(AssetTag(asset_id=record.id, tag_name=tag_name))
+    for tag_name in dict.fromkeys(tags or ()):
+        ensure_tag(session, tag_name)
+        ensure_tag_link(session, asset_id=record.id, tag_name=tag_name, origin="manual")
     session.flush()
     return record
 
@@ -280,12 +313,9 @@ def mark_content_missing(session: Session, content_id: str) -> None:
     if content is None:
         raise LookupError(content_id)
     content.is_missing = True
-    if session.get(Tag, "missing") is None:
-        session.add(Tag(name="missing"))
-        session.flush()
+    ensure_tag(session, "missing")
     for record_id in session.scalars(sa.select(Asset.id).where(Asset.content_id == content_id)):
-        if session.get(AssetTag, {"asset_id": record_id, "tag_name": "missing"}) is None:
-            session.add(AssetTag(asset_id=record_id, tag_name="missing", origin="automatic"))
+        ensure_tag_link(session, asset_id=record_id, tag_name="missing", origin="automatic")
     session.flush()
 
 

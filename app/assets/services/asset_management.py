@@ -1,10 +1,17 @@
+"""Serves the per-asset operations behind the API: reading an asset's detail,
+updating its name, tags, metadata and preview, deleting a record, and resolving
+a hash to a servable path. An update moves ``updated_at`` only when it actually
+changed something, so a call that requests what is already true is not recorded
+as a user edit.
+"""
+
 import mimetypes
 import os
 from typing import Sequence
 
 from sqlalchemy import delete, select, update
 
-from app.assets.database.models import Asset, AssetContent, AssetTag, Tag
+from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries import (
     delete_record,
     fetch_record_tags,
@@ -13,6 +20,8 @@ from app.assets.database.queries import (
 )
 from app.assets.database.queries.records import (
     bump_record_updated_at,
+    ensure_tag,
+    ensure_tag_link,
     get_preview_file_paths_by_ids,
     rename_record,
 )
@@ -124,17 +133,13 @@ def update_asset_metadata(
             )
         if tags is not None:
             for tag_name in normalize_tags(list(tags)):
-                if session.get(Tag, tag_name) is None:
-                    session.add(Tag(name=tag_name))
-                    session.flush()
-                if session.get(AssetTag, (reference_id, tag_name)) is None:
-                    session.add(
-                        AssetTag(
-                            asset_id=reference_id,
-                            tag_name=tag_name,
-                            origin=tag_origin,
-                        )
-                    )
+                ensure_tag(session, tag_name)
+                ensure_tag_link(
+                    session,
+                    asset_id=reference_id,
+                    tag_name=tag_name,
+                    origin=tag_origin,
+                )
             session.flush()
             if _fetch_manual_tags(session, reference_id) != manual_tags_before:
                 bump_record_updated_at(session, reference_id)

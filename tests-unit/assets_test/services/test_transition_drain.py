@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import folder_paths
@@ -311,3 +312,110 @@ def test_transition_drain_skips_out_of_root_path(session, temp_dir, monkeypatch,
     assert session.get(AssetContent, old_content_id).is_missing is False
     assert hash_mode_state.pending_transition_count() == 0
     assert any("orphan.bin" in record.getMessage() for record in caplog.records)
+
+
+def _seed_hashed_row(session, path: Path, payload: bytes) -> tuple[str, str]:
+    path.write_bytes(payload)
+    stat = path.stat()
+    stored = to_stored_hash(blake3(payload).hexdigest())
+    content = create_content(session, str(path), stored, stat.st_size, stat.st_mtime_ns)
+    create_record(session, content.id, path.name)
+    return content.id, stored
+
+
+def test_transition_drain_clears_an_unverifiable_hash_only_on_the_third_attempt(
+    session, temp_dir, monkeypatch, caplog
+):
+    path = temp_dir / "permanently-unreadable.bin"
+    content_id, original_hash = _seed_hashed_row(session, path, b"bytes nobody can read")
+    write_stored_mode(session, "off")
+    monkeypatch.setattr(hash_mode_state._mode, "hashing_enabled", lambda: True)
+
+    def always_denied(_candidate_path: str):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(hash_mode_state, "snapshot_hash", always_denied)
+
+    transition = record_transition_intent(session)
+    enqueue_transition_work(session, transition)
+
+    def warnings_naming_the_path() -> list[str]:
+        return [r.getMessage() for r in caplog.records if str(path) in r.getMessage()]
+
+    with caplog.at_level(logging.WARNING):
+        for attempt in (1, 2):
+            drain_transition_queue(session)
+            session.commit()
+            session.expire_all()
+            assert hash_mode_state.pending_transition_count() == 1, (
+                f"attempt {attempt} of 3 must requeue the entry, not retire it"
+            )
+            assert read_stored_mode(session) == "off", (
+                f"the mode must not flip while attempt {attempt} is still pending"
+            )
+            assert session.get(AssetContent, content_id).hash == original_hash, (
+                f"a transient failure on attempt {attempt} must not clear a good hash"
+            )
+            assert warnings_naming_the_path() == [], (
+                f"attempt {attempt} is a retry, not a terminal outcome; it must stay quiet"
+            )
+
+        drain_transition_queue(session)
+        session.commit()
+
+    session.expire_all()
+    assert hash_mode_state.pending_transition_count() == 0, (
+        "the third failure retires the entry so the queue can empty"
+    )
+    assert read_stored_mode(session) == "on", (
+        "an unreadable file must not wedge the mode flip for the process lifetime"
+    )
+    retired = session.get(AssetContent, content_id)
+    assert retired.is_missing is False, (
+        "the file is unreadable, not gone; retiring its hash must not mark the row missing"
+    )
+    assert retired.hash is None, (
+        "an unverifiable digest must not survive into persisted 'on'"
+    )
+    assert len(warnings_naming_the_path()) == 1, (
+        "the terminal outcome is announced exactly once, naming the path"
+    )
+
+
+def test_transition_drain_retires_only_the_unreadable_path_and_hashes_the_healthy_one(
+    session, temp_dir, monkeypatch
+):
+    unreadable_path = temp_dir / "unreadable.bin"
+    healthy_path = temp_dir / "healthy.bin"
+    healthy_payload = b"a file that reads fine"
+    unreadable_id, _ = _seed_hashed_row(session, unreadable_path, b"a file that does not")
+    healthy_path.write_bytes(healthy_payload)
+    healthy_stat = healthy_path.stat()
+    healthy_content = create_content(
+        session, str(healthy_path), size_bytes=healthy_stat.st_size, mtime_ns=healthy_stat.st_mtime_ns
+    )
+    healthy_id = healthy_content.id
+    create_record(session, healthy_id, healthy_path.name)
+    write_stored_mode(session, "off")
+    monkeypatch.setattr(hash_mode_state._mode, "hashing_enabled", lambda: True)
+
+    def denied_for_the_unreadable_path(candidate_path: str):
+        if candidate_path == str(unreadable_path):
+            raise PermissionError("denied")
+        return snapshot_hash(candidate_path)
+
+    monkeypatch.setattr(hash_mode_state, "snapshot_hash", denied_for_the_unreadable_path)
+
+    transition = record_transition_intent(session)
+    enqueue_transition_work(session, transition)
+    for _ in range(3):
+        drain_transition_queue(session)
+        session.commit()
+
+    session.expire_all()
+    assert session.get(AssetContent, healthy_id).hash == _stored_hash(healthy_path), (
+        "one unreadable path must not cost the healthy paths behind it their hashes"
+    )
+    assert session.get(AssetContent, unreadable_id).hash is None
+    assert hash_mode_state.pending_transition_count() == 0
+    assert read_stored_mode(session) == "on"
