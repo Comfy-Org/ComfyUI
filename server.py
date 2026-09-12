@@ -71,11 +71,15 @@ def _remove_sensitive_from_queue(queue: list) -> list:
     return [item[:5] for item in queue]
 
 
+SEND_SOCKET_TIMEOUT = 10.0
+
 async def send_socket_catch_exception(function, message):
     try:
-        await function(message)
+        await asyncio.wait_for(function(message), timeout=SEND_SOCKET_TIMEOUT)
     except (aiohttp.ClientError, aiohttp.ClientPayloadError, ConnectionResetError, BrokenPipeError, ConnectionError) as err:
         logging.warning("send error: {}".format(err))
+    except asyncio.TimeoutError:
+        logging.warning("send error: timed out sending to a websocket client")
 
 # Track deprecated paths that have been warned about to only warn once per file
 _deprecated_paths_warned = set()
