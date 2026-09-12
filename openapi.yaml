@@ -1229,6 +1229,9 @@ components:
                             items:
                                 type: string
                             type: array
+                        base_path:
+                            description: Effective ComfyUI base directory
+                            type: string
                         cloud_version:
                             description: Cloud ingest service version (commit hash)
                             type: string
@@ -1238,14 +1241,23 @@ components:
                         comfyui_version:
                             description: ComfyUI version
                             type: string
+                        cwd:
+                            description: Current working directory of the ComfyUI process
+                            type: string
                         deploy_environment:
                             description: How this ComfyUI instance is deployed (e.g. cloud, local-git, local-portable, local-desktop)
                             type: string
                         embedded_python:
                             description: Whether using embedded Python
                             type: boolean
+                        input_directory:
+                            description: Effective input directory
+                            type: string
                         os:
                             description: Operating system
+                            type: string
+                        output_directory:
+                            description: Effective output root directory
                             type: string
                         python_version:
                             description: Python version
@@ -1259,6 +1271,12 @@ components:
                         ram_total:
                             description: Total RAM in bytes
                             type: number
+                        temp_directory:
+                            description: Effective temporary directory
+                            type: string
+                        user_directory:
+                            description: Effective user directory
+                            type: string
                         workflow_templates_version:
                             description: Workflow templates version
                             type: string

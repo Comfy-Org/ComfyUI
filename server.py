@@ -212,6 +212,63 @@ def create_block_external_middleware():
     return block_external_middleware
 
 
+def get_system_stats() -> dict:
+    primary_device = comfy.model_management.get_torch_device()
+    cpu_device = comfy.model_management.torch.device("cpu")
+    ram_total = comfy.model_management.get_total_memory(cpu_device)
+    ram_free = comfy.model_management.get_free_memory(cpu_device)
+    required_frontend_version = FrontendManager.get_required_frontend_version()
+    installed_templates_version = FrontendManager.get_installed_templates_version()
+    required_templates_version = FrontendManager.get_required_templates_version()
+    comfy_package_versions = FrontendManager.get_comfy_package_versions()
+
+    # Keep the primary device first for existing clients that read devices[0].
+    torch_devices = comfy.model_management.get_all_torch_devices()
+    if primary_device in torch_devices:
+        torch_devices = [primary_device] + [d for d in torch_devices if d != primary_device]
+    else:
+        torch_devices = [primary_device] + list(torch_devices)
+
+    device_entries = []
+    for d in torch_devices:
+        vram_total, torch_vram_total = comfy.model_management.get_total_memory(d, torch_total_too=True)
+        vram_free, torch_vram_free = comfy.model_management.get_free_memory(d, torch_free_too=True)
+        device_entries.append({
+            "name": comfy.model_management.get_torch_device_name(d),
+            "type": d.type,
+            "index": d.index,
+            "vram_total": vram_total,
+            "vram_free": vram_free,
+            "torch_vram_total": torch_vram_total,
+            "torch_vram_free": torch_vram_free,
+        })
+
+    return {
+        "system": {
+            "os": sys.platform,
+            "ram_total": ram_total,
+            "ram_free": ram_free,
+            "comfyui_version": __version__,
+            "required_frontend_version": required_frontend_version,
+            "installed_templates_version": installed_templates_version,
+            "required_templates_version": required_templates_version,
+            "comfy_package_versions": comfy_package_versions,
+            "python_version": sys.version,
+            "pytorch_version": comfy.model_management.torch_version,
+            "embedded_python": os.path.split(os.path.split(sys.executable)[0])[1] == "python_embeded",
+            "deploy_environment": get_deploy_environment(),
+            "argv": sys.argv,
+            "cwd": os.getcwd(),
+            "base_path": folder_paths.base_path,
+            "input_directory": folder_paths.get_input_directory(),
+            "output_directory": folder_paths.get_output_directory(),
+            "temp_directory": folder_paths.get_temp_directory(),
+            "user_directory": folder_paths.get_user_directory(),
+        },
+        "devices": device_entries,
+    }
+
+
 class PromptServer():
     def __init__(self, loop):
         PromptServer.instance = self
@@ -685,56 +742,7 @@ class PromptServer():
 
         @routes.get("/system_stats")
         async def system_stats(request):
-            primary_device = comfy.model_management.get_torch_device()
-            cpu_device = comfy.model_management.torch.device("cpu")
-            ram_total = comfy.model_management.get_total_memory(cpu_device)
-            ram_free = comfy.model_management.get_free_memory(cpu_device)
-            required_frontend_version = FrontendManager.get_required_frontend_version()
-            installed_templates_version = FrontendManager.get_installed_templates_version()
-            required_templates_version = FrontendManager.get_required_templates_version()
-            comfy_package_versions = FrontendManager.get_comfy_package_versions()
-
-            # Report every torch device visible to multigpu, with the primary
-            # device first so existing clients that read devices[0] keep working.
-            torch_devices = comfy.model_management.get_all_torch_devices()
-            if primary_device in torch_devices:
-                torch_devices = [primary_device] + [d for d in torch_devices if d != primary_device]
-            else:
-                torch_devices = [primary_device] + list(torch_devices)
-
-            device_entries = []
-            for d in torch_devices:
-                vram_total, torch_vram_total = comfy.model_management.get_total_memory(d, torch_total_too=True)
-                vram_free, torch_vram_free = comfy.model_management.get_free_memory(d, torch_free_too=True)
-                device_entries.append({
-                    "name": comfy.model_management.get_torch_device_name(d),
-                    "type": d.type,
-                    "index": d.index,
-                    "vram_total": vram_total,
-                    "vram_free": vram_free,
-                    "torch_vram_total": torch_vram_total,
-                    "torch_vram_free": torch_vram_free,
-                })
-
-            system_stats = {
-                "system": {
-                    "os": sys.platform,
-                    "ram_total": ram_total,
-                    "ram_free": ram_free,
-                    "comfyui_version": __version__,
-                    "required_frontend_version": required_frontend_version,
-                    "installed_templates_version": installed_templates_version,
-                    "required_templates_version": required_templates_version,
-                    "comfy_package_versions": comfy_package_versions,
-                    "python_version": sys.version,
-                    "pytorch_version": comfy.model_management.torch_version,
-                    "embedded_python": os.path.split(os.path.split(sys.executable)[0])[1] == "python_embeded",
-                    "deploy_environment": get_deploy_environment(),
-                    "argv": sys.argv
-                },
-                "devices": device_entries
-            }
-            return web.json_response(system_stats)
+            return web.json_response(get_system_stats())
 
         @routes.get("/features")
         async def get_features(request):

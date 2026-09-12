@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "output_directory": "F:\\ComfyUI\\_Output",
+  "defaults": {
+    "output": "all-supported-fields-output",
+    "temp": "all-supported-fields-temp"
+  },
+  "profiles": {
+    "all-supported-fields-output": {
+      "folder_template": "{date:%Y-%m-%d}/{prefix_dir}",
+      "filename_template": "{prefix_stem}_{width}x{height}"
+    },
+    "all-supported-fields-temp": {
+      "folder_template": "temp/{date:%Y-%m-%d}/{prefix_dir}",
+      "filename_template": "{prefix_stem}_{width}x{height}"
+    }
+  }
+}

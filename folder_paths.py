@@ -1,10 +1,12 @@
 import os
+import ntpath
 import time
 import mimetypes
 import logging
 from typing import Literal, List
 from collections.abc import Collection
 
+import output_routing
 from comfy.cli_args import args
 
 supported_pt_extensions: set[str] = {'.ckpt', '.pt', '.pt2', '.bin', '.pth', '.safetensors', '.pkl', '.sft'}
@@ -70,6 +72,8 @@ output_directory = os.path.join(base_path, "output")
 temp_directory = os.path.join(base_path, "temp")
 input_directory = os.path.join(base_path, "input")
 user_directory = os.path.join(base_path, "user")
+
+output_routing_policy = output_routing.legacy_policy()
 
 filename_list_cache: dict[str, tuple[list[str], dict[str, float], float]] = {}
 
@@ -149,6 +153,53 @@ def get_user_directory() -> str:
 def set_user_directory(user_dir: str) -> None:
     global user_directory
     user_directory = user_dir
+
+
+def configure_output_routing(policy_path: str | None = None) -> None:
+    global output_routing_policy
+
+    if policy_path is None:
+        policy_path = os.path.join(get_user_directory(), "output-policy.json")
+        if not os.path.isfile(policy_path):
+            output_routing_policy = output_routing.legacy_policy()
+            return
+    output_routing_policy = output_routing.load_policy(policy_path)
+    if output_routing_policy.output_directory is not None and args.output_directory is None:
+        set_output_directory(_resolve_policy_output_directory(output_routing_policy.output_directory))
+
+
+def _resolve_policy_output_directory(policy_output_directory: str) -> str:
+    if os.path.isabs(policy_output_directory) or ntpath.isabs(policy_output_directory):
+        return os.path.abspath(policy_output_directory)
+
+    configured_output_directory = get_output_directory()
+    resolved_output_directory = os.path.abspath(os.path.join(configured_output_directory, policy_output_directory))
+    if not is_within_directory(configured_output_directory, resolved_output_directory):
+        raise output_routing.OutputRoutingError("Output routing policy relative output_directory must stay within the configured output directory")
+    return resolved_output_directory
+
+
+def _get_output_routing_type(output_dir: str) -> str | None:
+    normalized_output_dir = os.path.normcase(os.path.abspath(output_dir))
+    if normalized_output_dir == os.path.normcase(os.path.abspath(get_output_directory())):
+        return "output"
+    if normalized_output_dir == os.path.normcase(os.path.abspath(get_temp_directory())):
+        return "temp"
+    return None
+
+
+def _get_routed_output_path(output_dir: str, subfolder: str, filename: str, image_width: int, image_height: int) -> tuple[str, str]:
+    output_type = _get_output_routing_type(output_dir)
+    if output_type is None:
+        return subfolder, filename
+
+    route_context = output_routing.OutputRouteContext(
+        width=image_width,
+        height=image_height,
+        prefix_dir=subfolder,
+        prefix_stem=filename,
+    )
+    return output_routing.resolve_route(output_routing_policy, output_type, route_context)
 
 
 # System User Protection - Protects system directories from HTTP endpoint access
@@ -519,7 +570,7 @@ def get_filename_list(folder_name: str) -> list[str]:
 
 def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, image_height=0) -> tuple[str, str, int, str, str]:
     def map_filename(filename: str) -> tuple[int, str]:
-        prefix_len = len(os.path.basename(filename_prefix))
+        prefix_len = len(filename_stem)
         prefix = filename[:prefix_len + 1]
         try:
             remainder = filename[prefix_len + 1:]
@@ -547,6 +598,8 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
     subfolder = os.path.dirname(os.path.normpath(filename_prefix))
     filename = os.path.basename(os.path.normpath(filename_prefix))
 
+    subfolder, filename_stem = _get_routed_output_path(output_dir, subfolder, filename, image_width, image_height)
+
     full_output_folder = os.path.join(output_dir, subfolder)
 
     if not is_within_directory(output_dir, full_output_folder):
@@ -557,13 +610,13 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
         raise Exception(err)
 
     try:
-        counter = max(filter(lambda a: os.path.normcase(a[1][:-1]) == os.path.normcase(filename) and a[1][-1] == "_", map(map_filename, os.listdir(full_output_folder))))[0] + 1
+        counter = max(filter(lambda a: os.path.normcase(a[1][:-1]) == os.path.normcase(filename_stem) and a[1][-1] == "_", map(map_filename, os.listdir(full_output_folder))))[0] + 1
     except ValueError:
         counter = 1
     except FileNotFoundError:
         os.makedirs(full_output_folder, exist_ok=True)
         counter = 1
-    return full_output_folder, filename, counter, subfolder, filename_prefix
+    return full_output_folder, filename_stem, counter, subfolder, filename_prefix
 
 def get_input_subfolders() -> list[str]:
     """Returns a list of all subfolder paths in the input directory, recursively.
