@@ -1,3 +1,4 @@
+import concurrent.futures
 import torch
 
 
@@ -1694,29 +1695,38 @@ class SaveImage:
         filename_prefix += self.prefix_append
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0])
         results = list()
-        for (batch_number, image) in enumerate(images):
-            i = 255. * image.cpu().numpy()
-            img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
-            metadata = None
-            if not args.disable_metadata:
-                metadata = PngInfo()
-                if prompt is not None:
-                    metadata.add_text("prompt", json.dumps(prompt))
-                if extra_pnginfo is not None:
-                    for x in extra_pnginfo:
-                        metadata.add_text(x, json.dumps(extra_pnginfo[x]))
 
-            filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
-            file = f"{filename_with_batch_num}_{counter:05}_.png"
-            img.save(os.path.join(full_output_folder, file), pnginfo=metadata, compress_level=self.compress_level)
-            results.append({
-                "filename": file,
-                "subfolder": subfolder,
-                "type": self.type
-            })
-            counter += 1
+        # Note: when saving multiple images it can be much faster with multithreading
+        with concurrent.futures.ThreadPoolExecutor() as exe:
+            futures = []
+            for (batch_number, image) in enumerate(images):
+                filename_with_batch_num = filename.replace("%batch_num%", str(batch_number))
+                file = f"{filename_with_batch_num}_{counter:05}_.png"
+
+                futures.append(exe.submit(save_png, image, full_output_folder, file, prompt, extra_pnginfo, self.compress_level))
+                results.append({
+                    "filename": file,
+                    "subfolder": subfolder,
+                    "type": self.type
+                })
+                counter += 1
+            for f in futures:
+                f.result() # propagate exception
 
         return { "ui": { "images": results }, "result" : (images,) }
+
+def save_png(image, full_output_folder, filename, prompt, extra_pnginfo, compress_level):
+    i = 255. * image.cpu().numpy()
+    img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
+    metadata = None
+    if not args.disable_metadata:
+        metadata = PngInfo()
+        if prompt is not None:
+            metadata.add_text("prompt", json.dumps(prompt))
+        if extra_pnginfo is not None:
+            for x in extra_pnginfo:
+                metadata.add_text(x, json.dumps(extra_pnginfo[x]))
+    img.save(os.path.join(full_output_folder, filename), pnginfo=metadata, compress_level=compress_level)
 
 class PreviewImage(SaveImage):
     def __init__(self):
