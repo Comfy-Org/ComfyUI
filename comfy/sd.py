@@ -2223,7 +2223,8 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
         ModelPatcher = comfy.model_patcher.ModelPatcher if disable_dynamic else comfy.model_patcher.CoreModelPatcher
         offload_device = model_options.get("offload_device", model_management.unet_offload_device())
         model_patcher = ModelPatcher(model, load_device=load_device, offload_device=offload_device)
-        model.load_model_weights(sd, diffusion_model_prefix, assign=model_patcher.is_dynamic())
+        with comfy.utils.progress_activity("loading"):
+            model.load_model_weights(sd, diffusion_model_prefix, assign=model_patcher.is_dynamic())
 
     if output_vae:
         vae_sd = comfy.utils.state_dict_prefix_replace(sd, {k: "" for k in model_config.vae_key_prefix}, filter_keys=True)
@@ -2365,7 +2366,8 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
     model_patcher = ModelPatcher(model, load_device=load_device, offload_device=offload_device)
     if not model_management.is_device_cpu(offload_device):
         model.to(offload_device)
-    model.load_model_weights(new_sd, "", assign=model_patcher.is_dynamic())
+    with comfy.utils.progress_activity("loading"):
+        model.load_model_weights(new_sd, "", assign=model_patcher.is_dynamic())
     left_over = sd.keys()
     if len(left_over) > 0:
         logging.info("left over keys in diffusion model: {}".format(left_over))

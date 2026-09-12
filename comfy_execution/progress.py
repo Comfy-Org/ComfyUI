@@ -1,5 +1,5 @@
 from typing import TypedDict, Dict, Optional, Tuple
-from typing_extensions import override
+from typing_extensions import override, NotRequired
 from PIL import Image
 from enum import Enum
 from abc import ABC
@@ -27,6 +27,7 @@ class NodeProgressState(TypedDict):
     state: NodeState
     value: float
     max: float
+    activity: NotRequired[str]  # what a running node is spending time on, e.g. "loading"
 
 
 class ProgressHandler(ABC):
@@ -177,6 +178,10 @@ class WebUIProgressHandler(ProgressHandler):
             for node_id, state in nodes.items()
             if state["state"] != NodeState.Pending
         }
+        for node_id, node in active_nodes.items():
+            activity = nodes[node_id].get("activity")
+            if activity is not None:
+                node["activity"] = activity
 
         # Send a combined progress_state message with all node states
         # Include client_id to ensure message is only sent to the initiating client
@@ -299,6 +304,23 @@ class ProgressRegistry:
             if handler.enabled:
                 handler.update_handler(
                     node_id, value, max_value, entry, self.prompt_id, image
+                )
+
+    def set_activity(self, node_id: str, activity: str | None) -> None:
+        """Set what a running node is spending time on, or None to clear it"""
+        entry = self.ensure_entry(node_id)
+        if entry.get("activity") == activity:
+            return
+        if activity is None:
+            entry.pop("activity", None)
+        else:
+            entry["activity"] = activity
+
+        # Notify all enabled handlers
+        for handler in self.handlers.values():
+            if handler.enabled:
+                handler.update_handler(
+                    node_id, entry["value"], entry["max"], entry, self.prompt_id
                 )
 
     def finish_progress(self, node_id: str) -> None:

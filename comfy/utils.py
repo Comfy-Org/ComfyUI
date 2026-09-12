@@ -22,6 +22,7 @@ import math
 import struct
 import ctypes
 import os
+import contextlib
 import comfy.memory_management
 import safetensors.torch
 import numpy as np
@@ -1296,6 +1297,26 @@ PROGRESS_BAR_HOOK = None
 def set_progress_bar_global_hook(function):
     global PROGRESS_BAR_HOOK
     PROGRESS_BAR_HOOK = function
+
+PROGRESS_ACTIVITY_HOOK = None
+def set_progress_activity_global_hook(function):
+    global PROGRESS_ACTIVITY_HOOK
+    PROGRESS_ACTIVITY_HOOK = function
+
+@contextlib.contextmanager
+def progress_activity(activity):
+    """Report what the running node is spending time on, so the UI can tell a
+    slow load apart from slow compute."""
+    hook = PROGRESS_ACTIVITY_HOOK
+    if hook is None:
+        yield
+        return
+
+    hook(activity)
+    try:
+        yield
+    finally:
+        hook(None)
 
 # Throttle settings for progress bar updates to reduce WebSocket flooding
 PROGRESS_THROTTLE_MIN_INTERVAL = 0.1  # 100ms minimum between updates
