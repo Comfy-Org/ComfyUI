@@ -407,5 +407,30 @@ class TestMixedPrecisionOps(unittest.TestCase):
         self.assertEqual(saved_conf["linear_dtype"], "int8")
         self.assertNotIn("quant_group_size", saved_conf)
 
+    def test_quantized_weight_survives_to_call_inside_inference_mode(self):
+        """A QuantizedTensor weight built outside inference_mode must survive a
+        later .to() call made inside inference_mode (model offload/unload does
+        this) instead of raising "Cannot set version_counter for inference
+        tensor"."""
+        weight = torch.randn(16, 16, dtype=torch.bfloat16)
+        q_weight = QuantizedTensor.from_float(weight, "TensorCoreFP8E4M3Layout")
+        self.assertFalse(q_weight.is_inference())
+
+        model = torch.nn.Module()
+        model.layer = ops.mixed_precision_ops({}).Linear(16, 16, device="cpu", dtype=torch.bfloat16)
+        model.layer.weight = torch.nn.Parameter(q_weight, requires_grad=False)
+        model.layer.bias = torch.nn.Parameter(torch.randn(16, dtype=torch.bfloat16))
+        model.layer.weight_function = []
+        model.layer.bias_function = []
+
+        with torch.inference_mode():
+            model.to("cpu")
+
+        self.assertIsInstance(model.layer.weight, QuantizedTensor)
+        self.assertTrue(torch.equal(
+            model.layer.weight._qdata.view(torch.uint8),
+            q_weight._qdata.view(torch.uint8),
+        ))
+
 if __name__ == "__main__":
     unittest.main()

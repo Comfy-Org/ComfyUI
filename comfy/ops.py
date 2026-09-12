@@ -1099,9 +1099,7 @@ def _quantized_apply(module, fn, recurse=True):
         if param is None:
             continue
         p = fn(param)
-        if (not torch.is_inference_mode_enabled()) and p.is_inference():
-            p = p.clone()
-        module.register_parameter(key, torch.nn.Parameter(p, requires_grad=False))
+        module.register_parameter(key, comfy.utils.make_param(p))
     for key, buf in module._buffers.items():
         if buf is not None:
             module._buffers[key] = fn(buf)
