@@ -47,7 +47,7 @@ class YuE2GenerateMusic(io.ComfyNode):
                 io.String.Input("abc", default="", multiline=True, tooltip="Connect the ABC generator or supply an edited score. Leave empty to use off mode automatically."),
                 io.Int.Input("seed", default=0, min=0, max=0xffffffffffffffff, control_after_generate=True),
                 io.Combo.Input("mode", options=["full", "melody"], tooltip="full: generates melody and chords; melody: generates melody only, recommended for covers."),
-                io.Float.Input("max_duration", default=360.0, min=0.04, max=360.0, step=0.04, tooltip="Maximum duration; generation can stop earlier. The release uses a 360-second budget."),
+                io.Float.Input("max_duration", default=360.0, min=0.04, max=900.0, step=0.04, tooltip="Maximum duration in seconds. Automatically reduced for long prompts; generation can stop earlier."),
                 io.Float.Input("temperature", default=1.0, min=0.0, max=5.0, step=0.05, advanced=True),
                 io.Float.Input("top_p", default=0.95, min=0.01, max=1.0, step=0.01, advanced=True),
                 io.Int.Input("top_k", default=100, min=1, max=32768, advanced=True),
