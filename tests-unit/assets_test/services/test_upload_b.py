@@ -18,6 +18,7 @@ from app.assets.database.queries.records import (
     mark_content_missing,
 )
 from app.assets.helpers import to_stored_hash
+from app.assets.services.asset_management import delete_asset_reference
 from app.assets.services.file_utils import get_size_and_mtime_ns
 from app.assets.services.ingest import (
     UploadUnstableError,
@@ -380,6 +381,47 @@ def _seed_live_content(session, path: str, stored_hash: str | None) -> tuple[str
     )
     session.commit()
     return content.id, record.id
+
+
+def test_register_file_in_place_record_failure_preserves_retained_live_content(
+    mock_create_session, hashing_off, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_dir = folder_paths.get_output_directory()
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, f"retained_{uuid.uuid4().hex}.bin")
+    with open(path, "wb") as file:
+        file.write(b"retained-live-content")
+
+    try:
+        original = register_file_in_place(
+            abs_path=path,
+            name="retained.bin",
+            tags=["output"],
+        )
+        retained_content_id = original.content_id
+        assert delete_asset_reference(original.ref.id) is True
+
+        def _raise_record_creation(*_args, **_kwargs):
+            raise RuntimeError("forced record creation failure")
+
+        monkeypatch.setattr(
+            ingest_module,
+            "_create_upload_record",
+            _raise_record_creation,
+        )
+
+        with pytest.raises(RuntimeError, match="forced record creation failure"):
+            register_file_in_place(
+                abs_path=path,
+                name="retained.bin",
+                tags=["output"],
+            )
+
+        with mock_create_session() as session:
+            assert session.get(AssetContent, retained_content_id) is not None
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
 
 
 def _is_missing_tagged(session, record_id: str) -> bool:

@@ -8,6 +8,7 @@ from importlib import import_module
 
 from app.assets.database.queries.records import (
     create_content,
+    create_content_reporting_insert,
     create_record,
     delete_record,
     fetch_record_tags,
@@ -21,6 +22,7 @@ from app.assets.database.queries.records import (
 
 __all__ = [
     "create_content",
+    "create_content_reporting_insert",
     "create_record",
     "delete_record",
     "fetch_record_tags",

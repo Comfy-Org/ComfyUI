@@ -405,7 +405,7 @@ def prompt_worker(q, server_instance, asset_manager):
                 need_gc = False
                 hook_breaker_ac10a0.restore_functions()
 
-                asset_manager.queue_output_enrichment()
+                asset_manager.queue_output_scan()
                 asset_manager.resume_background_scan()
 
 
@@ -464,6 +464,15 @@ def setup_database(asset_manager):
                 "  --database-url sqlite:///path/to/another.db"
             )
             sys.exit(1)
+        if "Could not acquire lock on database" in str(e):
+            logging.error(
+                "Database is locked. Another ComfyUI process is already using this database.\n"
+                "To resolve this, specify a separate database file for this instance:\n"
+                "  --database-url sqlite:///path/to/another.db"
+            )
+            if args.enable_assets:
+                sys.exit(1)
+            return
         if args.enable_assets:
             logging.error(
                 f"Failed to initialize database: {e}\n"

@@ -95,6 +95,95 @@ def test_executed_new_path_gets_fresh_id(output_path_environment) -> None:
     ]
 
 
+def test_executed_multiple_entries_register_each_output(output_path_environment) -> None:
+    manager = InMemoryAssets()
+    filenames = ["first.png", "second.png", "third.png"]
+    output_ui = {
+        "images": [
+            {"filename": filename, "subfolder": "batch", "type": "output"}
+            for filename in filenames
+        ]
+    }
+
+    register_executed_outputs(output_ui, "job-list", manager)
+
+    expected_paths = [os.path.join(_BASE, "batch", filename) for filename in filenames]
+    assert manager.calls == [
+        AssetCall("register_executed_output", (path, "job-list"))
+        for path in expected_paths
+    ]
+    assert [
+        (delivery.abs_path, delivery.asset.job_id, delivery.superseded)
+        for path in expected_paths
+        for delivery in manager.deliveries_by_path[path]
+    ] == [(path, "job-list", False) for path in expected_paths]
+
+
+def test_executed_mixed_types_use_their_own_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = InMemoryAssets()
+    output_root = f"{_BASE}-output"
+    temp_root = f"{_BASE}-temp"
+    roots = {"output": output_root, "temp": temp_root}
+    monkeypatch.setattr(
+        folder_paths,
+        "get_directory_by_type",
+        lambda output_type: roots[output_type],
+    )
+    monkeypatch.setattr(os.path, "isfile", lambda _path: True)
+    output_ui = {
+        "images": [
+            {"filename": "kept.png", "subfolder": "saved", "type": "output"},
+            {"filename": "preview.png", "subfolder": "staged", "type": "temp"},
+        ]
+    }
+
+    register_executed_outputs(output_ui, "job-mixed", manager)
+
+    assert manager.calls == [
+        AssetCall(
+            "register_executed_output",
+            (os.path.join(output_root, "saved", "kept.png"), "job-mixed"),
+        ),
+        AssetCall(
+            "register_executed_output",
+            (os.path.join(temp_root, "staged", "preview.png"), "job-mixed"),
+        ),
+    ]
+
+
+def test_executed_repeated_calls_keep_distinct_path_deliveries(
+    output_path_environment,
+) -> None:
+    manager = InMemoryAssets()
+    filenames = ["iteration-1.png", "iteration-2.png", "iteration-3.png"]
+
+    for filename in filenames:
+        register_executed_outputs(_output(filename), "loop-job", manager)
+
+    expected_paths = [os.path.join(_BASE, filename) for filename in filenames]
+    assert manager.calls == [
+        AssetCall("register_executed_output", (path, "loop-job"))
+        for path in expected_paths
+    ]
+    assert [
+        (delivery.abs_path, delivery.asset.job_id, delivery.superseded)
+        for path in expected_paths
+        for delivery in manager.deliveries_by_path[path]
+    ] == [(path, "loop-job", False) for path in expected_paths]
+
+
+def test_executed_empty_entry_list_is_noop(output_path_environment) -> None:
+    manager = InMemoryAssets()
+
+    enriched = register_executed_outputs({"images": []}, "job", manager)
+
+    assert enriched == {"images": []}
+    assert manager.calls == []
+    assert manager.deliveries_by_path == {}
+
+
 def test_executed_over_existing_path_gets_new_id_and_marks_old_missing(output_path_environment) -> None:
     manager = InMemoryAssets()
 
