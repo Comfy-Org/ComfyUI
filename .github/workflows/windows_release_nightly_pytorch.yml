@@ -52,6 +52,7 @@ jobs:
             python -m pip wheel torch torchvision torchaudio --pre --extra-index-url https://download.pytorch.org/whl/nightly/cu${{ inputs.cu }} -r ../ComfyUI/requirements.txt pygit2 -w ../temp_wheel_dir
             ls ../temp_wheel_dir
             ./python.exe -s -m pip install --pre ../temp_wheel_dir/*
+            ./python.exe -s -m pip install -r ../ComfyUI/manager_requirements.txt
             sed -i '1i../ComfyUI' ./python3${{ inputs.python_minor }}._pth
 
             rm ./Lib/site-packages/torch/lib/dnnl.lib #I don't think this is actually used and I need the space
@@ -72,7 +73,7 @@ jobs:
             cp -r ComfyUI/.ci/windows_nightly_base_files/* ./
 
             echo "call update_comfyui.bat nopause
-            ..\python_embeded\python.exe -s -m pip install --upgrade --pre torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/nightly/cu${{ inputs.cu }} -r ../ComfyUI/requirements.txt pygit2
+            ..\python_embeded\python.exe -s -m pip install --upgrade --pre torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/nightly/cu${{ inputs.cu }} -r ../ComfyUI/requirements.txt -r ../ComfyUI/manager_requirements.txt pygit2
             pause" > ./update/update_comfyui_and_python_dependencies.bat
             cd ..
 
@@ -80,7 +81,8 @@ jobs:
             mv ComfyUI_windows_portable_nightly_pytorch.7z ComfyUI/ComfyUI_windows_portable_nvidia_or_cpu_nightly_pytorch.7z
 
             cd ComfyUI_windows_portable_nightly_pytorch
-            python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu
+            python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu --enable-manager | tee manager_smoke.log
+            grep -q "\[START\] ComfyUI-Manager" manager_smoke.log
 
             ls
 

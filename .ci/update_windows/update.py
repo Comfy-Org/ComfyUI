@@ -123,8 +123,10 @@ repo_update_py_path = os.path.join(repo_path, ".ci/update_windows/update.py")
 cur_path = os.path.dirname(update_py_path)
 
 
-req_path = os.path.join(cur_path, "current_requirements.txt")
-repo_req_path = os.path.join(repo_path, "requirements.txt")
+requirement_files = [
+    (os.path.join(repo_path, "requirements.txt"), os.path.join(cur_path, "current_requirements.txt")),
+    (os.path.join(repo_path, "manager_requirements.txt"), os.path.join(cur_path, "current_manager_requirements.txt")),
+]
 
 
 def files_equal(file1, file2):
@@ -144,8 +146,13 @@ if self_update and not files_equal(update_py_path, repo_update_py_path) and file
     shutil.copy(repo_update_py_path, os.path.join(cur_path, "update_new.py"))
     exit()
 
-if not os.path.exists(req_path) or not files_equal(repo_req_path, req_path):
-    import subprocess
+import subprocess
+
+for repo_req_path, req_path in requirement_files:
+    if not os.path.exists(repo_req_path):
+        continue
+    if os.path.exists(req_path) and files_equal(repo_req_path, req_path):
+        continue
     try:
         subprocess.check_call([sys.executable, '-s', '-m', 'pip', 'install', '-r', repo_req_path])
         shutil.copy(repo_req_path, req_path)
