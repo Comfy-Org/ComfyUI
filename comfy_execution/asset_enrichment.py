@@ -1,6 +1,7 @@
 """Enrich executed-node output entries with asset id."""
 import logging
-import os
+
+from comfy_execution.media_enrichment import resolve_output_entry_path
 
 
 def enrich_output_with_assets(output_ui: dict) -> dict:
@@ -15,7 +16,6 @@ def enrich_output_with_assets(output_ui: dict) -> dict:
     if not args.enable_assets:
         return output_ui
 
-    import folder_paths
     from app.assets.services.ingest import register_file_in_place, DependencyMissingError
 
     enriched = {}
@@ -29,20 +29,8 @@ def enrich_output_with_assets(output_ui: dict) -> dict:
                 new_entries.append(entry)
                 continue
             try:
-                base = folder_paths.get_directory_by_type(entry["type"])
-                if base is None:
-                    new_entries.append(entry)
-                    continue
-                base_abs = os.path.abspath(base)
-                abs_path = os.path.abspath(os.path.join(base_abs, entry.get("subfolder") or "", entry["filename"]))
-                try:
-                    if os.path.commonpath([base_abs, abs_path]) != base_abs:
-                        raise ValueError("escapes base")
-                except ValueError:
-                    logging.warning("Asset enrichment skipped (path escapes base): %s", entry.get("filename"))
-                    new_entries.append(entry)
-                    continue
-                if not os.path.isfile(abs_path):
+                abs_path = resolve_output_entry_path(entry)
+                if abs_path is None:
                     new_entries.append(entry)
                     continue
 
