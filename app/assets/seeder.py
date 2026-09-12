@@ -6,7 +6,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable
+from typing import Any, Callable
 
 from app.assets.scanner import (
     RootType,
@@ -95,8 +95,12 @@ class _AssetSeeder:
         self._compute_hashes: bool = False
         self._prune_first: bool = False
         self._progress_callback: ProgressCallback | None = None
+        self._event_sink: Callable[[str, dict[str, Any]], None] | None = None
         self._disabled: bool = False
         self._pending_enrich: dict | None = None
+
+    def set_event_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
+        self._event_sink = sink
 
     def disable(self) -> None:
         """Disable the asset seeder, preventing any scans from starting."""
@@ -469,13 +473,11 @@ class _AssetSeeder:
         self._run_gate.wait()  # Blocks if paused
         return self._is_cancelled()
 
-    def _emit_event(self, event_type: str, data: dict) -> None:
+    def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Emit a WebSocket event if server is available."""
         try:
-            from server import PromptServer
-
-            if hasattr(PromptServer, "instance") and PromptServer.instance:
-                PromptServer.instance.send_sync(event_type, data)
+            if self._event_sink is not None:
+                self._event_sink(event_type, data)
         except Exception:
             pass
 

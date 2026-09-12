@@ -22,9 +22,8 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.assets import mode
-from app.assets.lifecycle import cleanup_temp_filesystem, init_db_and_state, run_shutdown, run_startup
-from app.assets.seeder import asset_seeder
+from app.assets.lifecycle import cleanup_temp_filesystem
+from app.assets.manager import AssetManager, default_asset_manager
 import itertools
 import utils.extra_config
 from utils.mime_types import init_mime_types
@@ -35,7 +34,7 @@ import sys
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
-from app.database.db import dependencies_available
+from app.database.db import dependencies_available, init_db
 
 if __name__ == "__main__":
     #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
@@ -317,7 +316,7 @@ def cuda_malloc_warning():
             logging.warning("\nWARNING: this card most likely does not support cuda-malloc, if you get \"CUDA error\" please run ComfyUI with: --disable-cuda-malloc\n")
 
 
-def prompt_worker(q, server_instance):
+def prompt_worker(q, server_instance, asset_manager):
     current_time: float = 0.0
     cache_ram = 0
     cache_ram_inactive = 0
@@ -337,7 +336,7 @@ def prompt_worker(q, server_instance):
     elif args.cache_none:
         cache_type = execution.CacheType.NONE
 
-    e = execution.PromptExecutor(server_instance, cache_type=cache_type, cache_args={ "lru" : args.cache_lru, "ram" : cache_ram, "ram_inactive" : cache_ram_inactive } )
+    e = execution.PromptExecutor(server_instance, cache_type=cache_type, cache_args={ "lru" : args.cache_lru, "ram" : cache_ram, "ram_inactive" : cache_ram_inactive }, asset_manager=asset_manager )
     last_gc_collect = 0
     need_gc = False
     gc_collect_interval = 10.0
@@ -359,7 +358,7 @@ def prompt_worker(q, server_instance):
             for k in sensitive:
                 extra_data[k] = sensitive[k]
 
-            asset_seeder.pause()
+            asset_manager.pause_background_scan()
             e.execute(item[2], prompt_id, extra_data, item[4])
 
             need_gc = True
@@ -406,9 +405,8 @@ def prompt_worker(q, server_instance):
                 need_gc = False
                 hook_breaker_ac10a0.restore_functions()
 
-                if not asset_seeder.is_disabled():
-                    asset_seeder.enqueue_enrich(roots=("output",), compute_hashes=args.enable_asset_hashing)
-                asset_seeder.resume()
+                asset_manager.queue_output_enrichment()
+                asset_manager.resume_background_scan()
 
 
 async def run(server_instance, address='', port=8188, verbose=True, call_on_start=None):
@@ -451,13 +449,13 @@ def hijack_progress(server_instance):
     comfy.utils.set_progress_bar_global_hook(hook)
 
 
-def setup_database():
+def setup_database(asset_manager):
     if not dependencies_available():
         return
 
     try:
-        mode.init(args)
-        init_db_and_state()
+        init_db()
+        asset_manager.startup()
     except Exception as e:
         if "database is locked" in str(e):
             logging.error(
@@ -477,8 +475,6 @@ def setup_database():
             )
             sys.exit(1)
         logging.error(f"Failed to initialize database. Please ensure you have installed the latest requirements. If the error persists, please report this as in future the database will be required: {e}")
-    else:
-        run_startup(enable_assets=args.enable_assets)
 
 
 def start_comfyui(asyncio_loop=None):
@@ -491,13 +487,14 @@ def start_comfyui(asyncio_loop=None):
         logging.info(f"Setting temp directory to: {temp_dir}")
         folder_paths.set_temp_directory(temp_dir)
 
-    if not (args.enable_assets and dependencies_available()):
+    asset_manager: AssetManager = default_asset_manager()
+    if not (asset_manager.enabled and dependencies_available()):
         cleanup_temp_filesystem()
 
     if not asyncio_loop:
         asyncio_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(asyncio_loop)
-    prompt_server = server.PromptServer(asyncio_loop)
+    prompt_server = server.PromptServer(asyncio_loop, asset_manager)
 
     if args.enable_manager and not args.disable_manager_ui:
         comfyui_manager.start()
@@ -515,12 +512,12 @@ def start_comfyui(asyncio_loop=None):
     hook_breaker_ac10a0.restore_functions()
 
     cuda_malloc_warning()
-    setup_database()
+    setup_database(asset_manager)
 
     prompt_server.add_routes()
     hijack_progress(prompt_server)
 
-    threading.Thread(target=prompt_worker, daemon=True, args=(prompt_server.prompt_queue, prompt_server,)).start()
+    threading.Thread(target=prompt_worker, daemon=True, args=(prompt_server.prompt_queue, prompt_server, asset_manager)).start()
 
     if args.quick_test_for_ci:
         exit(0)
@@ -568,7 +565,7 @@ if __name__ == "__main__":
             "dynamic vram enabled and using native ComfyUI model formats instead. "
             "ComfyUI native formats like fp8, int8 and w4a8 will be faster even if they are larger than your memory."
         )
-    event_loop, _, start_all_func = start_comfyui()
+    event_loop, prompt_server, start_all_func = start_comfyui()
     try:
         x = start_all_func()
         app.logger.print_startup_warnings()
@@ -576,5 +573,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logging.info("\nStopped server")
     finally:
-        asset_seeder.shutdown()
-        run_shutdown()
+        prompt_server.asset_manager.shutdown()

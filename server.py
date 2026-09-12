@@ -44,10 +44,6 @@ import node_helpers
 from comfyui_version import __version__
 from app.frontend_management import FrontendManager, parse_version
 from comfy_api.internal import _ComfyNodeInternal
-from app.assets.seeder import asset_seeder
-from app.assets.api.routes import register_assets_routes
-from app.assets.services.ingest import register_file_in_place
-from app.assets.services.path_utils import get_known_subfolder_tags
 from app.assets.services.asset_management import resolve_hash_to_path
 
 from app.user_manager import UserManager
@@ -55,9 +51,12 @@ from app.model_manager import ModelFileManager
 from app.custom_node_manager import CustomNodeManager
 from app.subgraph_manager import SubgraphManager
 from app.node_replace_manager import NodeReplaceManager
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 from api_server.routes.internal.internal_routes import InternalRoutes
 from protocol import BinaryEventTypes
+
+if TYPE_CHECKING:
+    from app.assets.manager import AssetManager
 
 # Import cache control middleware
 from middleware.cache_middleware import cache_control
@@ -213,9 +212,10 @@ def create_block_external_middleware():
 
 
 class PromptServer():
-    def __init__(self, loop):
+    def __init__(self, loop, asset_manager: "AssetManager"):
         PromptServer.instance = self
 
+        self.asset_manager = asset_manager
         self.user_manager = UserManager()
         self.model_file_manager = ModelFileManager()
         self.custom_node_manager = CustomNodeManager()
@@ -254,11 +254,8 @@ class PromptServer():
             else args.front_end_root
         )
         logging.info(f"[Prompt Server] web root: {self.web_root}")
-        if args.enable_assets:
-            register_assets_routes(self.app, self.user_manager)
-        else:
-            register_assets_routes(self.app)
-            asset_seeder.disable()
+        self.asset_manager.register_routes(self.app, self.user_manager)
+        self.asset_manager.set_event_sink(self.send_sync)
         routes = web.RouteTableDef()
         self.routes = routes
         self.last_node_id = None
@@ -440,27 +437,22 @@ class PromptServer():
 
                 resp = {"name" : filename, "subfolder": subfolder, "type": image_upload_type}
 
-                if args.enable_assets:
-                    try:
-                        tag = image_upload_type if image_upload_type in ("input", "output") else "input"
-                        tags = [tag]
-                        tags.extend(get_known_subfolder_tags(subfolder))
-                        result = register_file_in_place(
-                            abs_path=filepath,
-                            name=filename,
-                            tags=tags,
-                            content_written=not image_is_duplicate,
-                        )
-                        resp["asset"] = {
-                            "id": result.ref.id,
-                            "name": result.ref.name,
-                            "asset_hash": result.asset.hash,
-                            "size": result.asset.size_bytes,
-                            "mime_type": result.asset.mime_type,
-                            "tags": result.tags,
-                        }
-                    except Exception:
-                        logging.warning("Failed to register uploaded image as asset", exc_info=True)
+                view = self.asset_manager.register_upload(
+                    abs_path=filepath,
+                    name=filename,
+                    upload_type=image_upload_type,
+                    subfolder=subfolder,
+                    content_written=not image_is_duplicate,
+                )
+                if view is not None:
+                    resp["asset"] = {
+                        "id": view.asset.id,
+                        "name": view.asset.name,
+                        "asset_hash": view.asset_hash,
+                        "size": view.size,
+                        "mime_type": view.mime_type,
+                        "tags": view.tags,
+                    }
 
                 return web.json_response(resp)
             else:
@@ -807,7 +799,7 @@ class PromptServer():
 
         @routes.get("/object_info")
         async def get_object_info(request):
-            asset_seeder.start(roots=("models", "input", "output"))
+            self.asset_manager.ensure_scan_started()
             with folder_paths.cache_helper:
                 out = {}
                 for x in nodes.NODE_CLASS_MAPPINGS:
