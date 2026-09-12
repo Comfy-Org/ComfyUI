@@ -148,6 +148,13 @@ class HiDreamO1Transformer(nn.Module):
             raise ValueError("HiDreamO1Transformer requires input_ids and position_ids in conditioning")
 
         B, _, H, W = x.shape
+        
+        if H % self.patch_size != 0 or W % self.patch_size != 0:
+            raise ValueError(
+        f"Input dimensions ({H}, {W}) must be divisible "
+        f"by patch size {self.patch_size}"
+    )
+
         h_p, w_p = H // self.patch_size, W // self.patch_size
         tgt_image_len = h_p * w_p
 
