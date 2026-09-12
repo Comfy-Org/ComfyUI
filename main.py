@@ -36,12 +36,28 @@ from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
 from app.database.db import init_db, dependencies_available
 
+
+def set_rocm_nofile_limit():
+    import resource
+
+    soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft_limit >= 2048:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (2048, hard_limit))
+    except (OSError, ValueError) as e:
+        logging.warning("Could not raise the open file limit to 2048: %s", e)
+
+
 if __name__ == "__main__":
     #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
     os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
     os.environ['DO_NOT_TRACK'] = '1'
 
     import cuda_malloc
+
+    if os.name == "posix" and "rocm" in cuda_malloc.get_torch_version_noimport():
+        set_rocm_nofile_limit()
 
     if (
         os.name == "nt"
