@@ -79,9 +79,8 @@ async def sleep_with_interrupt(
     node_cls: type[IO.ComfyNode] | None,
     label: str | None = None,
     start_ts: float | None = None,
-    estimated_total: int | None = None,
     *,
-    display_callback: Callable[[type[IO.ComfyNode], str, int, int | None], None] | None = None,
+    display_callback: Callable[[type[IO.ComfyNode], str, int], None] | None = None,
 ):
     """
     Sleep in 1s slices while:
@@ -95,7 +94,7 @@ async def sleep_with_interrupt(
         now = time.monotonic()
         if start_ts is not None and label and display_callback:
             with contextlib.suppress(Exception):
-                display_callback(node_cls, label, int(now - start_ts), estimated_total)
+                display_callback(node_cls, label, int(now - start_ts))
         if now >= end:
             break
         await asyncio.sleep(min(1.0, end - now))

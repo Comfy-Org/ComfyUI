@@ -330,7 +330,6 @@ async def upload_file(
                             cls,
                             wait_label,
                             start_ts,
-                            None,
                             display_callback=_display_time_progress if wait_label else None,
                         )
                         delay *= retry_backoff
@@ -362,7 +361,6 @@ async def upload_file(
                     cls,
                     wait_label,
                     start_ts,
-                    None,
                     display_callback=_display_time_progress if wait_label else None,
                 )
                 delay *= retry_backoff
