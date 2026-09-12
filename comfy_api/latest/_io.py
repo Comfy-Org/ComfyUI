@@ -1316,6 +1316,117 @@ class DynamicSlot(ComfyTypeI):
             out_dict[input_type][finalized_id] = value
             out_dict["dynamic_paths"][finalized_id] = finalize_prefix(curr_prefix, curr_prefix[-1])
 
+@comfytype(io_type="COMFY_DYNAMICGROUP_V3")
+class DynamicGroup(ComfyTypeI):
+    """Repeat a widget template and pass its values to execute as a list of row dicts.
+
+    Template fields must be widget inputs without force_input or nested dynamic inputs.
+    Submit fields as '<group>.<index>.<field>', using indices below max without leading zeros.
+    The '<group>.' prefix is reserved for group fields, not separate sibling inputs.
+    min/max are integers that count submitted rows (defaults: 0/50), even when optional=True.
+    max also bounds the reconstructed list length and cannot exceed 100.
+    Each submitted row follows the template's required/optional field declarations.
+
+    Missing positions are dicts whose fields are None. Missing optional fields are
+    also None; widget defaults are not injected.
+
+    Empty groups are [] in execute and check_lazy_status. Nonempty lazy groups
+    contain (value, original_key) tuples at each field.
+    """
+
+    Type = list[dict[str, Any]]
+    _MaxRows = 100
+
+    class Input(DynamicInput):
+        def __init__(self, id: str, template: list[WidgetInput], min: int=0, max: int=50,
+                     display_name: str=None, optional: bool=False, tooltip: str=None,
+                     lazy: bool=None, extra_dict=None, group_name: str="Group"):
+            super().__init__(id, display_name, optional, tooltip, lazy, extra_dict)
+            if not template:
+                raise ValueError("DynamicGroup template must have at least one field.")
+            for t in template:
+                if isinstance(t, DynamicInput):
+                    raise ValueError("Nesting dynamic inputs inside DynamicGroup is not supported.")
+                if not isinstance(t, WidgetInput):
+                    raise TypeError("DynamicGroup template fields must be WidgetInputs.")
+                if t.force_input:
+                    raise ValueError(f"DynamicGroup template field '{t.id}' must not use force_input.")
+                if not t.id or "." in t.id:
+                    raise ValueError(f"DynamicGroup template field id must be nonempty and must not contain '.'. Got: '{t.id}'")
+            field_ids = [t.id for t in template]
+            if len(field_ids) != len(set(field_ids)):
+                raise ValueError("DynamicGroup template field ids must be unique within a row.")
+            if not id or "." in id:
+                raise ValueError(f"DynamicGroup id must be nonempty and must not contain '.'. Got: '{id}'")
+            if isinstance(min, bool) or not isinstance(min, int) or isinstance(max, bool) or not isinstance(max, int):
+                raise TypeError("DynamicGroup min and max must be integers.")
+            if not 1 <= max <= DynamicGroup._MaxRows:
+                raise ValueError(f"DynamicGroup max must be between 1 and {DynamicGroup._MaxRows}.")
+            if not 0 <= min <= max:
+                raise ValueError("DynamicGroup min must be between 0 and max.")
+            self.template = template
+            self.min = min
+            self.max = max
+            self.group_name = group_name
+
+        def get_all(self) -> list[Input]:
+            return [self] + list(self.template)
+
+        def as_dict(self):
+            return super().as_dict() | prune_dict({
+                "template": create_input_dict_v1(self.template),
+                "min": self.min,
+                "max": self.max,
+                "group_name": self.group_name,
+            })
+
+        def validate(self):
+            for t in self.template:
+                t.validate()
+
+    @staticmethod
+    def _expand_schema_for_dynamic(out_dict: dict[str, Any], live_inputs: dict[str, Any], value: tuple[str, dict[str, Any]], input_type: str, curr_prefix: list[str] | None):
+        info = value[1]
+        min_rows = info.get("min", 0)
+        max_rows = info.get("max", DynamicGroup._MaxRows)
+        template = info.get("template", {})
+        field_specs = {
+            field_id: (field_value, category)
+            for category in ("required", "optional")
+            for field_id, field_value in template.get(category, {}).items()
+        }
+        finalized_prefix = finalize_prefix(curr_prefix)
+        prefix = finalized_prefix + "."
+        present_rows = set()
+        for key in live_inputs:
+            if not key.startswith(prefix):
+                continue
+            index, separator, field_id = key[len(prefix):].partition(".")
+            if (not separator or not index.isascii() or not index.isdecimal()
+                    or (len(index) > 1 and index.startswith("0")) or field_id not in field_specs):
+                raise ValueError(f"Invalid DynamicGroup input key '{key}'; expected '{finalized_prefix}.<index>.<template field>'.")
+            row = int(index)
+            if row >= max_rows:
+                raise ValueError(f"DynamicGroup input '{key}' exceeds the index limit of {max_rows - 1} (max={max_rows}).")
+            present_rows.add(row)
+
+        if not min_rows <= len(present_rows) <= max_rows:
+            raise ValueError(f"DynamicGroup input '{finalized_prefix}' received {len(present_rows)} rows; expected between {min_rows} and {max_rows}.")
+
+        for row in range(max(present_rows, default=-1) + 1):
+            for field_id, (field_value, category) in field_specs.items():
+                slot_id = f"{finalized_prefix}.{row}.{field_id}"
+                if row in present_rows:
+                    out_dict[category][slot_id] = field_value
+                # Preserve gaps without adding validation inputs for them.
+                out_dict["dynamic_paths"][slot_id] = slot_id
+
+        out_dict["list_paths"].add(finalized_prefix)
+        if not present_rows:
+            out_dict["dynamic_paths"][finalized_prefix] = finalized_prefix
+            out_dict["dynamic_paths_default_value"][finalized_prefix] = DynamicPathsDefaultValue.EMPTY_LIST
+
+
 @comfytype(io_type="IMAGECOMPARE")
 class ImageCompare(ComfyTypeI):
   Type = dict
@@ -1529,6 +1640,8 @@ def setup_dynamic_input_funcs():
     register_dynamic_input_func(DynamicCombo.io_type, DynamicCombo._expand_schema_for_dynamic)
     # DynamicSlot.Input
     register_dynamic_input_func(DynamicSlot.io_type, DynamicSlot._expand_schema_for_dynamic)
+    # DynamicGroup.Input
+    register_dynamic_input_func(DynamicGroup.io_type, DynamicGroup._expand_schema_for_dynamic)
 
 if len(DYNAMIC_INPUT_LOOKUP) == 0:
     setup_dynamic_input_funcs()
@@ -1540,6 +1653,8 @@ class V3Data(TypedDict):
     'Dictionary where the keys are the input ids and the values dictate how to turn the inputs into a nested dictionary.'
     dynamic_paths_default_value: dict[str, Any]
     'Dictionary where the keys are the input ids and the values are a string from DynamicPathsDefaultValue for the inputs if value is None.'
+    list_paths: set[str]
+    'Paths whose index-keyed row dictionaries are reconstructed as lists.'
     create_dynamic_tuple: bool
     'When True, the value of the dynamic input will be in the format (value, path_key).'
 
@@ -1881,6 +1996,7 @@ def get_finalized_class_inputs(d: dict[str, Any], live_inputs: dict[str, Any], i
         "optional": {},
         "dynamic_paths": {},
         "dynamic_paths_default_value": {},
+        "list_paths": set(),
     }
     d = d.copy()
     # ignore hidden for parsing
@@ -1892,10 +2008,12 @@ def get_finalized_class_inputs(d: dict[str, Any], live_inputs: dict[str, Any], i
     dynamic_paths = out_dict.pop("dynamic_paths", None)
     if dynamic_paths is not None and len(dynamic_paths) > 0:
         v3_data["dynamic_paths"] = dynamic_paths
-    # this list is used for autogrow, in the case all inputs are optional and no values are passed
     dynamic_paths_default_value = out_dict.pop("dynamic_paths_default_value", None)
     if dynamic_paths_default_value is not None and len(dynamic_paths_default_value) > 0:
         v3_data["dynamic_paths_default_value"] = dynamic_paths_default_value
+    list_paths = out_dict.pop("list_paths")
+    if list_paths:
+        v3_data["list_paths"] = list_paths
     return out_dict, hidden, v3_data
 
 def parse_class_inputs(out_dict: dict[str, Any], live_inputs: dict[str, Any], curr_dict: dict[str, Any], curr_prefix: list[str] | None=None) -> None:
@@ -1918,7 +2036,10 @@ def create_input_dict_v1(inputs: list[Input]) -> dict:
     input = {
         "required": {}
     }
+    group_prefixes = tuple(f"{i.id}." for i in inputs if isinstance(i, DynamicGroup.Input))
     for i in inputs:
+        if group_prefixes and i.id.startswith(group_prefixes):
+            raise ValueError(f"Input '{i.id}' conflicts with a DynamicGroup field prefix.")
         add_to_dict_v1(i, input)
     return input
 
@@ -1931,6 +2052,7 @@ def add_to_dict_v1(i: Input, d: dict):
 
 class DynamicPathsDefaultValue:
     EMPTY_DICT = "empty_dict"
+    EMPTY_LIST = "empty_list"
 
 def build_nested_inputs(values: dict[str, Any], v3_data: V3Data):
     paths = v3_data.get("dynamic_paths", None)
@@ -1952,18 +2074,27 @@ def build_nested_inputs(values: dict[str, Any], v3_data: V3Data):
 
             if is_last:
                 value = values.pop(key, None)
-                if value is None:
-                    # see if a default value was provided for this key
-                    default_option = default_value_dict.get(key, None)
-                    if default_option == DynamicPathsDefaultValue.EMPTY_DICT:
-                        value = {}
-                if create_tuple:
+                default_option = default_value_dict.get(key, None)
+                if default_option == DynamicPathsDefaultValue.EMPTY_LIST:
+                    # No row keys were submitted, regardless of the root input value.
+                    value = []
+                elif value is None and default_option == DynamicPathsDefaultValue.EMPTY_DICT:
+                    value = {}
+                if create_tuple and default_option != DynamicPathsDefaultValue.EMPTY_LIST:
                     value = (value, key)
                 current[p] = value
             else:
                 current = current.setdefault(p, {})
 
     values.update(result)
+    for list_path in v3_data.get("list_paths", set()):
+        parts = list_path.split(".")
+        container = values
+        for part in parts[:-1]:
+            container = container[part]
+        rows = container[parts[-1]]
+        if isinstance(rows, dict):
+            container[parts[-1]] = [rows[key] for key in sorted(rows, key=int)]
     return values
 
 
@@ -2531,6 +2662,7 @@ __all__ = [
     "MatchType",
     "DynamicCombo",
     "Autogrow",
+    "DynamicGroup",
     # Other classes
     "HiddenHolder",
     "Hidden",
