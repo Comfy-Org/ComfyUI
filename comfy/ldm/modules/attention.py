@@ -53,6 +53,17 @@ except ImportError:
 
 COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE = comfy_kitchen.int8_attention_is_available()
 
+FLEX_ATTENTION_IS_AVAILABLE = False
+try:
+    from torch.nn.attention.flex_attention import flex_attention
+    FLEX_ATTENTION_IS_AVAILABLE = True
+except ImportError as error:
+    if model_management.flex_attention_enabled():
+        logging.error("PyTorch flex attention is unavailable: %s", error)
+        exit(-1)
+
+FLEX_ATTENTION_COMPILED = torch.compile(flex_attention) if FLEX_ATTENTION_IS_AVAILABLE else None
+
 REGISTERED_ATTENTION_FUNCTIONS = {}
 def register_attention_function(name: str, func: Callable):
     # avoid replacing existing functions
@@ -542,6 +553,50 @@ else:
     SDP_BATCH_LIMIT = 2**31
 
 @wrap_attn
+def attention_flex(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    if skip_reshape:
+        b, _, _, dim_head = q.shape
+    else:
+        b, _, dim_head = q.shape
+        dim_head //= heads
+        q, k, v = _reshape_qkv_to_heads(q, k, v, b, heads, dim_head, kwargs.get("enable_gqa", False), expand_kv=False)
+        q, k, v = map(lambda t: t.transpose(1, 2), (q, k, v))
+
+    score_mod = None
+    if mask is not None:
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0)
+        if mask.ndim == 3:
+            mask = mask.unsqueeze(1)
+        mask = mask.expand(b, heads, q.shape[-2], k.shape[-2])
+
+        def score_mod(score, batch, head, q_idx, k_idx):
+            mask_value = mask[batch, head, q_idx, k_idx]
+            if mask.dtype == torch.bool:
+                return torch.where(mask_value, score, -torch.inf)
+            return score + mask_value.to(score.dtype)
+
+    try:
+        attention_function = flex_attention if torch.compiler.is_compiling() else FLEX_ATTENTION_COMPILED
+        out = attention_function(
+            q,
+            k,
+            v,
+            score_mod=score_mod,
+            scale=kwargs.get("scale", None),
+            enable_gqa=kwargs.get("enable_gqa", False),
+        )
+    except torch.OutOfMemoryError:
+        raise
+    except (NotImplementedError, RuntimeError) as error:
+        logging.warning("Flex attention failed, using PyTorch attention: %s", error)
+        return attention_pytorch(q, k, v, heads, mask=mask, skip_reshape=True, skip_output_reshape=skip_output_reshape, **kwargs)
+    if not skip_output_reshape:
+        out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+    return out
+
+
+@wrap_attn
 def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
     if skip_reshape:
         b, _, _, dim_head = q.shape
@@ -862,6 +917,9 @@ if model_management.sage_attention_enabled():
 elif model_management.flash_attention_enabled():
     logging.info("Using Flash Attention")
     optimized_attention = attention_flash
+elif model_management.flex_attention_enabled():
+    logging.info("Using flex attention")
+    optimized_attention = attention_flex
 elif model_management.xformers_enabled():
     logging.info("Using xformers attention")
     optimized_attention = attention_xformers
@@ -896,6 +954,8 @@ if SAGE_ATTENTION3_IS_AVAILABLE:
     register_attention_function("sage3", attention3_sage)
 if FLASH_ATTENTION_IS_AVAILABLE:
     register_attention_function("flash", attention_flash)
+if FLEX_ATTENTION_IS_AVAILABLE:
+    register_attention_function("flex", attention_flex)
 if model_management.xformers_enabled():
     register_attention_function("xformers", attention_xformers)
 register_attention_function("pytorch", attention_pytorch)
@@ -905,6 +965,8 @@ register_attention_function("split", attention_split)
 
 def optimized_attention_for_device(device, mask=False, small_input=False):
     if small_input:
+        if model_management.flex_attention_enabled():
+            return attention_flex
         if model_management.pytorch_attention_enabled():
             return attention_pytorch #TODO: need to confirm but this is probably slightly faster for small inputs in all cases
         else:
