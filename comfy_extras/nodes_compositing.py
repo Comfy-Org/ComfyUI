@@ -46,7 +46,7 @@ def porter_duff_composite(src_image: torch.Tensor, src_alpha: torch.Tensor, dst_
         out_image = torch.zeros_like(dst_image)
     elif mode == PorterDuffMode.DARKEN:
         out_alpha = src_alpha + dst_alpha - src_alpha * dst_alpha
-        out_image = (1 - dst_alpha) * src_image + (1 - src_alpha) * dst_image + torch.min(src_image, dst_image)
+        out_image = (1 - dst_alpha) * src_image + (1 - src_alpha) * dst_image + torch.min(src_image * dst_alpha, dst_image * src_alpha)
     elif mode == PorterDuffMode.DST:
         out_alpha = dst_alpha
         out_image = dst_image
@@ -64,14 +64,15 @@ def porter_duff_composite(src_image: torch.Tensor, src_alpha: torch.Tensor, dst_
         out_image = dst_image + (1 - dst_alpha) * src_image
     elif mode == PorterDuffMode.LIGHTEN:
         out_alpha = src_alpha + dst_alpha - src_alpha * dst_alpha
-        out_image = (1 - dst_alpha) * src_image + (1 - src_alpha) * dst_image + torch.max(src_image, dst_image)
+        out_image = (1 - dst_alpha) * src_image + (1 - src_alpha) * dst_image + torch.max(src_image * dst_alpha, dst_image * src_alpha)
     elif mode == PorterDuffMode.MULTIPLY:
-        out_alpha = src_alpha * dst_alpha
-        out_image = src_image * dst_image
+        out_alpha = src_alpha + dst_alpha - src_alpha * dst_alpha
+        out_image = (1 - dst_alpha) * src_image + (1 - src_alpha) * dst_image + src_image * dst_image
     elif mode == PorterDuffMode.OVERLAY:
         out_alpha = src_alpha + dst_alpha - src_alpha * dst_alpha
-        out_image = torch.where(2 * dst_image < dst_alpha, 2 * src_image * dst_image,
-            src_alpha * dst_alpha - 2 * (dst_alpha - src_image) * (src_alpha - dst_image))
+        overlap = torch.where(2 * dst_image < dst_alpha, 2 * src_image * dst_image,
+            src_alpha * dst_alpha - 2 * (src_alpha - src_image) * (dst_alpha - dst_image))
+        out_image = (1 - dst_alpha) * src_image + (1 - src_alpha) * dst_image + overlap
     elif mode == PorterDuffMode.SCREEN:
         out_alpha = src_alpha + dst_alpha - src_alpha * dst_alpha
         out_image = src_image + dst_image - src_image * dst_image
