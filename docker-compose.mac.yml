@@ -1,0 +1,36 @@
+name: comfyui-sos-mac
+
+services:
+  comfyui:
+    build:
+      context: .
+      dockerfile: Dockerfile.mac
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.11-slim-bookworm}
+        APT_MIRROR: ${APT_MIRROR:-}
+        APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-}
+    image: comfyui-sos:mac-cpu
+    container_name: comfyui-sos-mac
+    platform: linux/arm64
+    ports:
+      - "8188:8188"
+    volumes:
+      - ./models:/app/models
+      - ./output:/app/output
+      - ./input:/app/input
+      - ./user:/app/user
+      - ./temp:/app/temp
+      - ./custom_nodes:/app/custom_nodes
+    environment:
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      DO_NOT_TRACK: "1"
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8188/', timeout=5).read(1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped

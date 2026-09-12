@@ -1,0 +1,53 @@
+.git
+.github
+.gitignore
+*.md
+plan-*.md
+
+# Python virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Large data directories that should be mounted as volumes
+models/
+output/
+input/
+user/
+temp/
+custom_nodes/
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Node modules if any frontend tooling exists
+node_modules/
