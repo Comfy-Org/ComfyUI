@@ -2756,6 +2756,56 @@ paths:
             summary: List custom node JS extensions
             tags:
                 - node
+    /api/billing/capabilities:
+        get:
+            description: Relays the authenticated request to the configured Comfy Cloud API billing capabilities endpoint
+            operationId: getBillingCapabilities
+            responses:
+                "200":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Server-resolved billing capabilities
+                "401":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Missing or invalid credentials
+                "403":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Workspace access denied
+                "404":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Workspace not found
+                "429":
+                    description: Upstream rate limit reached
+                "502":
+                    content:
+                        application/json:
+                            schema:
+                                additionalProperties: true
+                                type: object
+                    description: Upstream capability resolution failed
+                "503":
+                    description: Upstream capability service unavailable
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+            summary: Get server-resolved billing capabilities
+            tags:
+                - billing
     /api/features:
         get:
             description: Returns the server's feature capabilities

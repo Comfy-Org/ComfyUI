@@ -39,6 +39,7 @@ from comfy.deploy_environment import get_deploy_environment
 import comfy.utils
 import comfy.model_management
 from comfy_api import feature_flags
+from comfy_api.billing_capabilities import relay_billing_capabilities
 from comfy.comfy_api_env import get_environment_overrides
 import node_helpers
 from comfyui_version import __version__
@@ -123,7 +124,7 @@ def create_cors_middleware(allowed_origin: str):
 
         response.headers['Access-Control-Allow-Origin'] = allowed_origin
         response.headers['Access-Control-Allow-Methods'] = 'POST, GET, DELETE, PUT, OPTIONS, PATCH'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-API-Key'
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         return response
 
@@ -744,6 +745,11 @@ class PromptServer():
                 features.update(overrides)
             return web.json_response(features)
 
+        if not args.disable_api_nodes:
+            @routes.get("/billing/capabilities")
+            async def get_billing_capabilities(request):
+                return await relay_billing_capabilities(request, self.client_session)
+
         @routes.get("/prompt")
         async def get_prompt(request):
             return web.json_response(self.get_queue_info())
@@ -1215,7 +1221,12 @@ class PromptServer():
 
     async def setup(self):
         timeout = aiohttp.ClientTimeout(total=None) # no timeout
-        self.client_session = aiohttp.ClientSession(timeout=timeout)
+        self.client_session = aiohttp.ClientSession(
+            timeout=timeout,
+            # The billing capabilities relay shares this process-wide session
+            # across users, so upstream cookies must never persist between calls.
+            cookie_jar=aiohttp.DummyCookieJar(),
+        )
 
     def add_routes(self):
         self.user_manager.add_routes(self.routes)
