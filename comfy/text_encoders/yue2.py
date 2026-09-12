@@ -88,6 +88,7 @@ class YuE2Tokenizer:
             "top_p": kwargs.get("top_p", 0.95),
             "top_k": kwargs.get("top_k", 100),
             "repetition_penalty": kwargs.get("repetition_penalty", 1.2),
+            "penalty_window": kwargs.get("penalty_window", 100),
             "cfg_scale": kwargs.get("cfg_scale", 1.01 if cot == "off" else 1.0),
         }
 
@@ -160,6 +161,11 @@ class YuE2TEModel(torch.nn.Module):
         fixed_kv = isinstance(cache[0], FixedKV)
         decode_tokens = torch.empty((len(prefixes), 1), device=device, dtype=torch.long)
         positions = torch.tensor([[len(p)] for p in prefixes], device=device, dtype=torch.long)
+        # Decoder inputs and rotary tensors must keep their addresses across graph replays.
+        decode_buffers = None
+        if fixed_kv:
+            decode_buffers = (torch.empty((len(prefixes), 1, self.config.hidden_size), device=device, dtype=dtype),
+                              self.model.compute_freqs_cis(positions, device))
         history = []
         end = ABC_END if phase == "abc" else MUSIC_END
         progress = comfy.utils.ProgressBar(max_tokens)
@@ -184,7 +190,8 @@ class YuE2TEModel(torch.nn.Module):
                     if fixed_kv:
                         comfy.model_prefetch.malloc_graph_begin(device)
                     output = self.model(decode_tokens, past_key_values=cache, dtype=dtype, position_ids=positions,
-                                        attention_mask=mask[:, :prefix_length + step + 1] if mask is not None and not fixed_kv else None)
+                                        attention_mask=mask[:, :prefix_length + step + 1] if mask is not None and not fixed_kv else None,
+                                        decode_buffers=decode_buffers)
                     logits.copy_(self.model.lm_head(output[0][:, -1]))
                     cache = output[2]
                     del output
@@ -228,7 +235,7 @@ class YuE2TEModel(torch.nn.Module):
         ids, _ = self._generate(
             tokens["prefix"], tokens["seed"] if seed is None else seed, max_length, "abc", dtype,
             temperature=temperature if do_sample else 0, top_p=top_p, top_k=top_k,
-            repetition_penalty=repetition_penalty, penalty_window=100, min_tokens=min(32, max_length),
+            repetition_penalty=repetition_penalty, penalty_window=tokens.get("penalty_window", 100), min_tokens=min(32, max_length),
         )
         return ids
 
