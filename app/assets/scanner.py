@@ -11,13 +11,14 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, TypedDict
+from typing import Callable, Literal, Protocol, TypedDict
 
 import folder_paths
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.assets import mode
+from app.assets.event_log import emit, error_type
 from app.assets.database.queries import (
     create_content_reporting_insert,
     mark_content_missing,
@@ -64,6 +65,14 @@ __all__ = [
 
 # Temp is deliberately absent: it is wiped before every scan, so walking it finds nothing.
 RootType = Literal["models", "input", "output"]
+
+
+class _ScanProgress(Protocol):
+    hash_failed: int
+    enrich_failed: int
+    permission_denied: int
+
+    def mark_emitted(self, key: str) -> bool: ...
 
 
 class SeedAssetSpec(TypedDict):
@@ -140,11 +149,13 @@ def sync_references_with_filesystem(
     session,
     root: RootType,
     collect_existing_paths: bool = False,
+    progress: _ScanProgress | None = None,
 ) -> set[str] | None:
     return sync_prefixes_with_filesystem(
         session,
         get_scan_prefixes_for_root(root),
         collect_existing_paths=collect_existing_paths,
+        progress=progress,
     )
 
 
@@ -152,6 +163,7 @@ def sync_prefixes_with_filesystem(
     session: Session,
     prefixes: list[str],
     collect_existing_paths: bool = False,
+    progress: _ScanProgress | None = None,
 ) -> set[str] | None:
     if not prefixes:
         return set() if collect_existing_paths else None
@@ -163,6 +175,8 @@ def sync_prefixes_with_filesystem(
         except FileNotFoundError:
             mark_content_missing(session, content.id)
         except PermissionError:
+            if progress is not None:
+                progress.permission_denied += 1
             logging.debug("Permission denied accessing %s", content.path)
         except OSError as e:
             logging.debug("OSError checking %s: %s", content.path, e)
@@ -183,7 +197,9 @@ def _is_under_prefixes(path: str, prefixes: list[str]) -> bool:
     return is_path_under_prefixes(path, prefixes)
 
 
-def sync_root_safely(root: RootType) -> set[str]:
+def sync_root_safely(
+    root: RootType, progress: _ScanProgress | None = None
+) -> set[str]:
     """Sync a single root's references with the filesystem.
 
     Returns survivors (existing paths) or empty set on failure.
@@ -194,22 +210,39 @@ def sync_root_safely(root: RootType) -> set[str]:
                 sess,
                 root,
                 collect_existing_paths=True,
+                progress=progress,
             )
             sess.commit()
             return survivors or set()
-    except Exception as e:
-        logging.exception("fast DB scan failed for %s: %s", root, e)
+    except Exception as exc:
+        logging.exception("fast DB scan failed for %s: %s", root, exc)
+        emit(
+            "scanner.fast_scan_failed",
+            root=root,
+            error_type=error_type(exc),
+        )
         return set()
 
 
-def sync_temp_references_safely() -> None:
+def sync_temp_references_safely(
+    progress: _ScanProgress | None = None,
+) -> None:
     """Retire temp references whose file is gone; temp is never scanned, so nothing else stats them."""
     try:
         with create_session() as sess:
-            sync_prefixes_with_filesystem(sess, get_temp_prefixes())
+            sync_prefixes_with_filesystem(
+                sess,
+                get_temp_prefixes(),
+                progress=progress,
+            )
             sess.commit()
-    except Exception as e:
-        logging.exception("temp reference sync failed: %s", e)
+    except Exception as exc:
+        logging.exception("temp reference sync failed: %s", exc)
+        emit(
+            "scanner.temp_sync_failed",
+            root="temp",
+            error_type=error_type(exc),
+        )
 
 
 def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int:
@@ -222,8 +255,12 @@ def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int:
             count = mark_contents_missing_outside_prefixes(sess, prefixes)
             sess.commit()
             return count
-    except Exception as e:
-        logging.exception("marking missing assets failed: %s", e)
+    except Exception as exc:
+        logging.exception("marking missing assets failed: %s", exc)
+        emit(
+            "scanner.mark_missing_failed",
+            error_type=error_type(exc),
+        )
         return 0
 
 
@@ -255,6 +292,7 @@ def build_asset_specs(
     paths: list[str],
     existing_paths: set[str],
     enable_metadata_extraction: bool = True,
+    progress: _ScanProgress | None = None,
 ) -> tuple[list[SeedAssetSpec], set[str], int]:
     """Build asset specs from paths, returning (specs, tag_pool, skipped_count).
 
@@ -262,6 +300,7 @@ def build_asset_specs(
         paths: List of file paths to process
         existing_paths: Set of paths that already exist in the database
         enable_metadata_extraction: If True, extract tier 1 & 2 metadata
+        progress: Optional per-scan state for emit-once bookkeeping
     """
     specs: list[SeedAssetSpec] = []
     tag_pool: set[str] = set()
@@ -278,7 +317,11 @@ def build_asset_specs(
             continue
         try:
             stat_p = os.stat(abs_p, follow_symlinks=True)
-        except OSError:
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            if progress is not None and progress.mark_emitted("stat_failed:discovery"):
+                emit("scanner.stat_failed", site="discovery", error_type=error_type(e))
             continue
         if not stat_p.st_size:
             continue
@@ -435,6 +478,7 @@ def enrich_asset(
     record_id: str,
     extract_metadata: bool = True,
     compute_hash: bool = False,
+    progress: _ScanProgress | None = None,
 ) -> bool:
     """Enrich a single asset with metadata and/or hash.
 
@@ -451,7 +495,11 @@ def enrich_asset(
     """
     try:
         stat_p = os.stat(file_path, follow_symlinks=True)
-    except OSError:
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        if progress is not None and progress.mark_emitted("stat_failed:enrich"):
+            emit("scanner.stat_failed", site="enrich", error_type=error_type(e))
         return False
 
     initial_mtime_ns = get_mtime_ns(stat_p)
@@ -478,6 +526,7 @@ def enrich_asset(
         try:
             snapshot = snapshot_hash(file_path)
             if snapshot is None:
+                emit("scanner.hash_discarded_modified")
                 logging.warning(
                     "File modified during hashing (snapshot unstable), discarding hash: %s",
                     file_path,
@@ -485,8 +534,14 @@ def enrich_asset(
                 return False
             digest, verified_stat = snapshot
             stored_hash = to_stored_hash(digest)
-        except Exception as e:
-            logging.warning("Failed to hash %s: %s", file_path, e)
+        except Exception as exc:
+            emit_failure = progress is None
+            if progress is not None:
+                progress.hash_failed += 1
+                emit_failure = progress.mark_emitted("hash_failed")
+            if emit_failure:
+                emit("scanner.hash_failed", error_type=error_type(exc))
+            logging.warning("Failed to hash %s: %s", file_path, exc)
 
     record = session.get(Asset, record_id)
     if content is None or record is None or content.mtime_ns != initial_mtime_ns:
@@ -536,6 +591,7 @@ def enrich_assets_batch(
     extract_metadata: bool = True,
     compute_hash: bool = False,
     interrupt_check: Callable[[], bool] | None = None,
+    progress: _ScanProgress | None = None,
 ) -> tuple[int, list[str]]:
     """Enrich a batch of assets.
 
@@ -569,13 +625,18 @@ def enrich_assets_batch(
                     record_id=row.record_id,
                     extract_metadata=extract_metadata,
                     compute_hash=compute_hash,
+                    progress=progress,
                 )
                 if updated:
                     enriched += 1
                 else:
                     failed_ids.append(row.record_id)
-            except Exception as e:
-                logging.warning("Failed to enrich %s: %s", row.file_path, e)
+            except Exception as exc:
+                if progress is not None:
+                    progress.enrich_failed += 1
+                if progress is None or progress.mark_emitted("enrich_failed"):
+                    emit("scanner.enrich_failed", error_type=error_type(exc))
+                logging.warning("Failed to enrich %s: %s", row.file_path, exc)
                 sess.rollback()
                 failed_ids.append(row.record_id)
 

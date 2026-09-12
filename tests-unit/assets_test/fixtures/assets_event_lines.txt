@@ -1,0 +1,3 @@
+[assets-event] seeder.scan_completed created=12 elapsed_ms=8123 enrich_failed=0 enriched=4 hash_failed=2 permission_denied=0 phase=fast root=models skipped=3
+[assets-event] seeder.scan_started phase=enrich
+[assets-event] scanner.stat_failed error_type=PermissionError site=discovery
