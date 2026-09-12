@@ -60,7 +60,10 @@ def get_pin(module, subset="weights"):
 
     if torch.cuda.cudart().cudaHostRegister(pin.data_ptr(), size, 1) != 0:
         comfy.model_management.discard_cuda_async_error()
-        return pin
+        comfy.model_management.free_registrations(size)
+        if torch.cuda.cudart().cudaHostRegister(pin.data_ptr(), size, 1) != 0:
+            comfy.model_management.discard_cuda_async_error()
+            return pin
 
     module_pin["registered"] = True
     stack_split[0] = max(stack_split[0], module_pin["stack_index"])

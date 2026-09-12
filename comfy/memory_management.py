@@ -15,12 +15,13 @@ class TensorFileSlice(NamedTuple):
     size: int
 
 
-def read_tensor_file_slice_into(tensor, destination, stream=None, destination2=None):
+def read_tensor_file_slice_into(tensor, destination, stream=None, destination2=None, recover_memory=None):
 
     if isinstance(tensor, QuantizedTensor):
         if not read_tensor_file_slice_into(tensor._qdata,
                                            destination._qdata if destination is not None else None, stream=stream,
-                                           destination2=(destination2._qdata if destination2 is not None else None)):
+                                           destination2=(destination2._qdata if destination2 is not None else None),
+                                           recover_memory=recover_memory):
             return False
 
         if destination is not None:
@@ -56,22 +57,37 @@ def read_tensor_file_slice_into(tensor, destination, stream=None, destination2=N
 
     if destination is None:
         stream_ptr = getattr(stream, "cuda_stream", 0) if stream is not None else 0
-        comfy_aimdo.host_buffer.read_file_to_device(file_obj, info.offset, info.size,
-                                                    stream_ptr, destination2.data_ptr(),
-                                                    destination2.device.index,
-                                                    mark_cold=False)
+        for attempt in range(0, 2):
+            try:
+                comfy_aimdo.host_buffer.read_file_to_device(file_obj, info.offset, info.size,
+                                                            stream_ptr, destination2.data_ptr(),
+                                                            destination2.device.index,
+                                                            mark_cold=False)
+                break
+            except RuntimeError:
+                if attempt == 1 or recover_memory is None:
+                    raise
+                recover_memory(destination2.device)
         return True
 
     hostbuf = getattr(destination.untyped_storage(), "_comfy_hostbuf", None)
     if hostbuf is not None:
         stream_ptr = getattr(stream, "cuda_stream", 0) if stream is not None else 0
         device_ptr = destination2.data_ptr() if destination2 is not None else 0
-        with info.lock:
-            hostbuf.read_file_slice(file_obj, info.offset, info.size,
-                                    offset=destination.data_ptr() - hostbuf.get_raw_address(),
-                                    stream=stream_ptr,
-                                    device_ptr=device_ptr,
-                                    device=None if destination2 is None else destination2.device.index)
+        device = destination.device if destination2 is None else destination2.device
+        for attempt in range(0, 2):
+            try:
+                with info.lock:
+                    hostbuf.read_file_slice(file_obj, info.offset, info.size,
+                                            offset=destination.data_ptr() - hostbuf.get_raw_address(),
+                                            stream=stream_ptr,
+                                            device_ptr=device_ptr,
+                                            device=None if destination2 is None else destination2.device.index)
+                break
+            except RuntimeError:
+                if attempt == 1 or recover_memory is None:
+                    raise
+                recover_memory(device)
         return True
 
     if not hasattr(file_obj, "seek") or not hasattr(file_obj, "readinto"):
