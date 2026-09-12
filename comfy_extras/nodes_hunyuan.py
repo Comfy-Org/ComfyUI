@@ -1,3 +1,5 @@
+import dis
+
 import nodes
 import node_helpers
 import torch
@@ -43,7 +45,7 @@ class EmptyHunyuanLatentVideo(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="EmptyHunyuanLatentVideo",
-            display_name="Empty HunyuanVideo 1.0 Latent",
+            display_name="Empty Hunyuan Video 1.0 Latent",
             category="model/latent/hunyuan video",
             inputs=[
                 io.Int.Input("width", default=848, min=16, max=nodes.MAX_RESOLUTION, step=16),
@@ -69,7 +71,7 @@ class EmptyHunyuanVideo15Latent(EmptyHunyuanLatentVideo):
     def define_schema(cls):
         schema = super().define_schema()
         schema.node_id = "EmptyHunyuanVideo15Latent"
-        schema.display_name = "Empty HunyuanVideo 1.5 Latent"
+        schema.display_name = "Empty Hunyuan Video 1.5 Latent"
         schema.category = "model/latent/hunyuan video"
         return schema
 
@@ -233,8 +235,8 @@ class HunyuanVideo15LatentUpscaleWithModel(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="HunyuanVideo15LatentUpscaleWithModel",
-            display_name="Hunyuan Video 15 Latent Upscale With Model",
-            category="model/latent/hunyhuan video",
+            display_name="Hunyuan Video 1.5 Latent Upscale With Model",
+            category="model/latent/hunyuan video",
             inputs=[
                 io.LatentUpscaleModel.Input("model"),
                 io.Latent.Input("samples"),
@@ -366,6 +368,7 @@ class EmptyHunyuanImageLatent(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="EmptyHunyuanImageLatent",
+            display_name="Empty Hunyuan Image Latent",
             category="model/latent/hunyuan image",
             inputs=[
                 io.Int.Input("width", default=2048, min=64, max=nodes.MAX_RESOLUTION, step=32),
