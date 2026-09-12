@@ -1017,7 +1017,12 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
         if vram_set_state == VRAMState.NO_VRAM:
             lowvram_model_memory = 0.1
 
-        loaded_model.model_load(lowvram_model_memory, force_patch_weights=force_patch_weights)
+        # Multi-GPU fix: custom CUDA kernels (e.g. comfy_kitchen quantize/
+        # dequantize) require torch.cuda.current_device() to match the model
+        # being loaded. Without this, loading a multi-GPU deepclone with LoRA
+        # patches can launch kernels on the wrong device.
+        with cuda_device_context(torch_dev):
+            loaded_model.model_load(lowvram_model_memory, force_patch_weights=force_patch_weights)
         vram_used = 0 if is_device_cpu(torch_dev) else loaded_model.model_loaded_memory()
         ram_used = model.loaded_ram_size() if model.is_dynamic() else loaded_model.model_memory() - vram_used
         detail("Model loaded: patcher=%s model=%s ram_mb=%.1f vram_mb=%.1f", model.__class__.__name__, model.model.__class__.__name__, ram_used / (1024 ** 2), vram_used / (1024 ** 2))
