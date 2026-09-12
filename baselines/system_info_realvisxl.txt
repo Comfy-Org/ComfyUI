@@ -1,0 +1,55 @@
+=== ComfyUI RealVisXL no-mmap Stable Baseline ===
+Date: 2026-06-20
+
+--- Previous baseline ---
+Tag: rocm-sd15-working-baseline (preserved, not modified)
+
+--- This baseline adds ---
+Fix:   comfy/utils.py: _load_safetensors_no_mmap() for files >4 GB
+Model: RealVisXL_V4.0.safetensors (6.46 GB) - path only, not in git
+Test:  768x1024, 25 steps, cfg=6, dpmpp_2m, karras -> OK
+
+--- Root cause of crash (diagnosed & fixed) ---
+Strix Halo UMA: ROCm init reserves ~14 GB GPU virtual address space.
+safetensors mmap of files >~4 GB then fails (Windows VA space exhausted).
+SD1.5 (3.97 GB) < threshold -> mmap OK.
+SDXL fp16 (~6.5 GB) > threshold -> access violation in safe_open().
+Fix: sequential file-read (open+seek+read) bypasses mmap entirely.
+
+--- Patch location ---
+File:      comfy/utils.py
+Functions: _load_safetensors_no_mmap(), _LARGE_FILE_MMAP_THRESHOLD = 4_000_000_000
+Branch:    load_torch_file() elif os.path.getsize > threshold and cuda available
+
+--- Startup command ---
+cd %USERPROFILE%\ComfyUI
+.\venv\Scripts\activate
+python main.py --disable-dynamic-vram --disable-mmap
+
+--- GPU / ROCm ---
+torch:    2.7.0a0+git3f903c3
+Device:   AMD Radeon(TM) 8050S Graphics
+VRAM GB:  14.37
+ROCm:     6.5 / gfx1151 (Strix Halo)
+
+--- Models in checkpoints (not in git) ---
+v1-5-pruned-emaonly.safetensors   3.97 GB  SD1.5 baseline
+RealVisXL_V4.0.safetensors        6.46 GB  SDXL realistic portrait
+
+--- Working parameters (RealVisXL) ---
+Resolution:   768x1024
+Steps:        25
+CFG:          6
+Sampler:      dpmpp_2m
+Scheduler:    karras
+Batch size:   1
+
+--- Recovery commands ---
+# 1. Return to this code state:
+git checkout rocm-realvisxl-nommap-working
+
+# 2. Re-download RealVisXL if needed (not in git):
+# python -c "from huggingface_hub import hf_hub_download; hf_hub_download(repo_id='SG161222/RealVisXL_V4.0', filename='RealVisXL_V4.0.safetensors', local_dir='models/checkpoints')"
+
+# 3. Start ComfyUI:
+# python main.py --disable-dynamic-vram --disable-mmap
