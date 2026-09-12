@@ -43,7 +43,7 @@ class TangentialAmplifyingGuidance(io.ComfyNode):
         sigma_lo = ms.percent_to_sigma(end_percent)
 
         def post_cfg_function(args):
-            if not (sigma_lo <= args["sigma"] <= sigma_hi):
+            if not (sigma_lo <= args["sigma"].flatten()[0] <= sigma_hi):
                 return args["denoised"]
             return tangential_amplify(args["denoised"], args["input"], t_scale, r_scale)
 
