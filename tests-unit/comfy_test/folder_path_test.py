@@ -112,6 +112,79 @@ def test_get_save_image_path(temp_dir):
         assert filename_prefix == "test"
 
 
+def _save_three(prefix, out_dir):
+    """Run the node's save loop three times and return the filenames written."""
+    written = []
+    for _ in range(3):
+        full_output_folder, filename, counter, _subfolder, _prefix = folder_paths.get_save_image_path(
+            prefix, out_dir
+        )
+        name = f"{filename}_{counter:05}_.png"
+        open(os.path.join(full_output_folder, name), "w").close()
+        written.append(name)
+    return written
+
+
+@pytest.mark.parametrize("prefix", ["out/", "sub/out/", "sub/"])
+def test_get_save_image_path_counter_advances_with_a_trailing_separator(prefix, temp_dir):
+    """A filename_prefix ending in a separator must still increment the counter.
+
+    `map_filename` sized the prefix with `os.path.basename(filename_prefix)`, which
+    is EMPTY when the prefix ends in a separator, while the caller compares against
+    `os.path.basename(os.path.normpath(filename_prefix))`. Nothing matched, the
+    counter stayed at 1, and every save silently overwrote the previous file.
+    """
+    with patch("folder_paths.output_directory", temp_dir):
+        written = _save_three(prefix, temp_dir)
+
+    assert len(set(written)) == 3, f"each save must get its own filename, got {written}"
+    assert written == sorted(written)
+
+
+@pytest.mark.parametrize("prefix", ["out", "sub/out"])
+def test_get_save_image_path_counter_still_advances_without_a_trailing_separator(
+    prefix, temp_dir
+):
+    with patch("folder_paths.output_directory", temp_dir):
+        written = _save_three(prefix, temp_dir)
+
+    assert written == ["out_00001_.png", "out_00002_.png", "out_00003_.png"]
+
+
+def test_get_save_image_path_trailing_separator_resolves_like_the_plain_prefix(temp_dir):
+    """"out/" and "out" name the same file, so they must share one counter."""
+    with patch("folder_paths.output_directory", temp_dir):
+        plain = folder_paths.get_save_image_path("out", temp_dir)
+        trailing = folder_paths.get_save_image_path("out/", temp_dir)
+
+    # full_output_folder, filename, counter, subfolder
+    assert plain[0] == trailing[0]
+    assert plain[1] == trailing[1] == "out"
+    assert plain[2] == trailing[2]
+    assert plain[3] == trailing[3]
+
+
+def test_get_save_image_path_trailing_separator_continues_the_plain_prefix_counter(temp_dir):
+    """The load-bearing case: "out/" must continue the run "out" already started.
+
+    Comparing the two on an EMPTY directory is not enough — both return 1 there,
+    so that assertion holds even with the bug present. What the bug actually does
+    is reset the counter, so the switch has to happen with files on disk.
+    """
+    with patch("folder_paths.output_directory", temp_dir):
+        assert _save_three("out", temp_dir) == [
+            "out_00001_.png",
+            "out_00002_.png",
+            "out_00003_.png",
+        ]
+        # Same folder, same filename, written through the trailing-separator form.
+        assert _save_three("out/", temp_dir) == [
+            "out_00004_.png",
+            "out_00005_.png",
+            "out_00006_.png",
+        ]
+
+
 def test_base_path_changes(set_base_dir):
     test_dir = os.path.abspath("/test/dir")
     set_base_dir(test_dir)
