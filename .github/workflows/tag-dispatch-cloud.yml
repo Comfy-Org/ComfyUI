@@ -8,6 +8,7 @@ on:
 jobs:
   dispatch-cloud:
     runs-on: ubuntu-latest
+    if: github.repository == 'Comfy-Org/ComfyUI'
     steps:
       - name: Send repository dispatch to cloud
         env:
