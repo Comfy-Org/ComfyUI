@@ -236,6 +236,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         for param_key in ("weight", "bias"):
             lowvram_source = getattr(s, param_key + "_lowvram_function", None)
             if lowvram_source is not None:
+                comfy.pinned_memory.copy_prefetch_order(s, lowvram_source)
                 ensure_offload_stream(s, cast_buffer_offset, False)
                 lowvram_size = lowvram_source.memory_required()
                 lowvram_dest = get_cast_buffer(lowvram_size)
