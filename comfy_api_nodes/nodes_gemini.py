@@ -8,6 +8,7 @@ import os
 from fnmatch import fnmatch
 from io import BytesIO
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import torch
 from typing_extensions import override
@@ -277,8 +278,12 @@ async def get_video_from_interaction(
     )
 
 
+GEMINI_FILES_HOST = "generativelanguage.googleapis.com"
+
+
 async def download_interaction_video(uri: str, cls: type[IO.ComfyNode] | None = None) -> InputImpl.VideoFromFile:
-    if "/files/" not in uri:
+    parsed = urlparse(uri)
+    if parsed.netloc != GEMINI_FILES_HOST or "/files/" not in parsed.path:
         return await download_url_to_video_output(uri, cls=cls)
     name = uri.split("?", 1)[0].rsplit("/files/", 1)[-1].split(":", 1)[0]
     await poll_op(
@@ -1743,6 +1748,7 @@ class GeminiVideoOmni(IO.ComfyNode):
                 ),
             ),
             response_model=GeminiInteraction,
+            asset_urls=True,
         )
         if interaction.status != "completed":
             model_message = get_text_from_interaction(interaction).strip()
@@ -2003,6 +2009,7 @@ class GeminiVideoOmniV2(IO.ComfyNode):
                 response_format=response_format,
             ),
             response_model=GeminiInteraction,
+            asset_urls=True,
         )
         if interaction.status != "completed":
             model_message = get_text_from_interaction(interaction).strip()

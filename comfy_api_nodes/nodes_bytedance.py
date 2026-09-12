@@ -3362,6 +3362,7 @@ class ByteDanceSeedAudioNode(IO.ComfyNode):
             cls,
             ApiEndpoint(path="/proxy/byteplus/api/v3/tts/create", method="POST"),
             response_model=SeedAudioResponse,
+            asset_urls=True,
             data=SeedAudioRequest(
                 model=model,
                 text_prompt=text_prompt,
@@ -3374,11 +3375,15 @@ class ByteDanceSeedAudioNode(IO.ComfyNode):
                 ),
             ),
         )
-        if not response.audio:
+        if response.audio:
+            audio_bytes = base64.b64decode(response.audio)
+        elif response.url:
+            audio_bytes = (await download_url_as_bytesio(response.url, cls=cls)).getvalue()
+        else:
             raise Exception(
                 f"Seed Audio returned no audio (code={response.code}): {response.message}"
             )
-        return IO.NodeOutput(audio_bytes_to_audio_input(base64.b64decode(response.audio)))
+        return IO.NodeOutput(audio_bytes_to_audio_input(audio_bytes))
 
 
 _VCUBE_ENHANCE_VIDEO_ENDPOINT = ApiEndpoint(path="/proxy/byteplusmediakit/api/v1/tools/enhance-video", method="POST")

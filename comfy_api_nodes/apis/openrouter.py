@@ -104,6 +104,7 @@ class OpenRouterChatResponse(BaseModel):
 
 class OpenRouterImageData(BaseModel):
     b64_json: str | None = Field(None)
+    url: str | None = Field(None)
     media_type: str | None = Field(None)
 
 
