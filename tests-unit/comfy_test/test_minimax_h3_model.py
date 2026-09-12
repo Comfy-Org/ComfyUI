@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 
+import comfy.model_prefetch
 from comfy.ldm.minimax.model import MiniMaxH3Model, time_shift_sigma
 from comfy.model_sampling import CONST
 
@@ -12,6 +13,29 @@ def make_model(video_output, audio_output):
     model.sigma_shift_audio = 3.0
     model._forward = lambda *args, **kwargs: [video_output.clone(), audio_output.clone()]
     return model
+
+
+def test_forward_can_disable_the_allocation_compiler_for_one_model(monkeypatch):
+    video_output = torch.ones((1, 1, 1, 1, 1))
+    audio_output = torch.ones((1, 1, 2, 2))
+    model = make_model(video_output, audio_output)
+
+    def unexpected_compiler_call(*args, **kwargs):
+        raise AssertionError("allocation compiler should be disabled for this model")
+
+    monkeypatch.setattr(comfy.model_prefetch, "malloc_graph_enabled", unexpected_compiler_call)
+    monkeypatch.setattr(comfy.model_prefetch, "malloc_graph_begin", unexpected_compiler_call)
+
+    out = model(
+        [torch.zeros_like(video_output), torch.zeros_like(audio_output)],
+        torch.tensor([500.0]),
+        torch.empty(1, 1, 1),
+        transformer_options={"disable_comfy_compiler": True},
+        minimax_payload={"audio_scale": 1.0},
+    )
+
+    torch.testing.assert_close(out[0], video_output)
+    torch.testing.assert_close(out[1], audio_output)
 
 
 def test_forward_scales_velocity_to_mask_timestep():
