@@ -14,6 +14,7 @@ from app.assets.services.ingest import (
 )
 from app.assets.services.path_utils import get_known_subfolder_tags
 from app.assets.services.schemas import RegisteredAsset, UploadAssetView
+from app.database.db import dependencies_available
 from app.user_manager import UserManager
 from comfy.cli_args import args
 
@@ -214,4 +215,10 @@ class AssetsEnabled:
 
 
 def default_asset_manager() -> AssetManager:
+    if args.enable_assets and not dependencies_available():
+        logging.warning(
+            "Assets requested but database dependencies unavailable; asset endpoints "
+            "will answer 503. Please install the updated requirements.txt file."
+        )
+        return NoAssets(args)
     return AssetsEnabled(args) if args.enable_assets else NoAssets(args)

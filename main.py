@@ -22,6 +22,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
+from app.database.db import dependencies_available, init_db
 from app.assets.lifecycle import cleanup_temp_filesystem
 from app.assets.manager import AssetManager, default_asset_manager
 import itertools
@@ -34,7 +35,6 @@ import sys
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
-from app.database.db import dependencies_available, init_db
 
 if __name__ == "__main__":
     #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
@@ -488,7 +488,7 @@ def start_comfyui(asyncio_loop=None):
         folder_paths.set_temp_directory(temp_dir)
 
     asset_manager: AssetManager = default_asset_manager()
-    if not (asset_manager.enabled and dependencies_available()):
+    if not asset_manager.enabled:
         cleanup_temp_filesystem()
 
     if not asyncio_loop:

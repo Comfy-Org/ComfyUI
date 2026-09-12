@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+import logging
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -13,7 +14,8 @@ from app.assets import lifecycle
 from app.assets.api import routes
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_content, create_record
-from app.assets.manager import NoAssets
+from app.assets import manager
+from app.assets.manager import AssetsEnabled, NoAssets
 from app.assets.mode import hashing_enabled
 from app.assets.seeder import asset_seeder
 from app.assets.services.hash_mode_state import read_stored_mode
@@ -175,3 +177,26 @@ def test_noassets_registration_methods_return_none() -> None:
 
 def test_noassets_is_disabled() -> None:
     assert _no_assets().enabled is False
+
+
+def test_default_asset_manager_disables_assets_when_dependencies_are_unavailable(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(manager.args, "enable_assets", True)
+    monkeypatch.setattr(manager, "dependencies_available", lambda: False)
+
+    with caplog.at_level(logging.WARNING):
+        asset_manager = manager.default_asset_manager()
+
+    assert isinstance(asset_manager, NoAssets)
+    assert "asset endpoints will answer 503" in caplog.text
+    assert "requirements.txt" in caplog.text
+
+
+def test_default_asset_manager_enables_assets_when_dependencies_are_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager.args, "enable_assets", True)
+    monkeypatch.setattr(manager, "dependencies_available", lambda: True)
+
+    assert isinstance(manager.default_asset_manager(), AssetsEnabled)
