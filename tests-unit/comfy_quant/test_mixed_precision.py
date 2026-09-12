@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 import torch
 import sys
 import os
@@ -15,8 +16,10 @@ from comfy.cli_args import args
 if not has_gpu():
     args.cpu = True
 
-from comfy import ops
-from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor
+import comfy.model_management as model_management
+from comfy import hooks, ops
+from comfy.model_patcher import ModelPatcher, ModelPatcherDynamic
+from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor, TensorCoreFP8E4M3Layout
 import comfy.utils
 
 
@@ -406,6 +409,253 @@ class TestMixedPrecisionOps(unittest.TestCase):
         self.assertEqual(saved_conf["convrot_groupsize"], 256)
         self.assertEqual(saved_conf["linear_dtype"], "int8")
         self.assertNotIn("quant_group_size", saved_conf)
+
+    def test_hook_patches_skip_only_quantized_weight_pieces(self):
+        operations = ops.mixed_precision_ops(compute_dtype=torch.float32)
+        model = torch.nn.Module()
+        model.linear = operations.Linear(4, 4, bias=False, device="cpu")
+        qdata, params = TensorCoreFP8E4M3Layout.quantize(
+            torch.ones(4, 4), scale="recalculate"
+        )
+        model.linear.quant_format = "float8_e4m3fn"
+        model.linear.layout_type = "TensorCoreFP8E4M3Layout"
+        model.linear.weight = torch.nn.Parameter(
+            QuantizedTensor(qdata, model.linear.layout_type, params),
+            requires_grad=False,
+        )
+        model.linear.input_scale = torch.nn.Parameter(
+            torch.tensor(0.125), requires_grad=False
+        )
+        model.linear_alias = model.linear
+        model.patch_target = torch.nn.Linear(4, 4, bias=False)
+        torch.nn.init.zeros_(model.patch_target.weight)
+
+        patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+        weight = model.linear.weight
+        input_scale = model.linear.input_scale
+        hook = hooks.WeightHook()
+        hook.need_weight_init = False
+        hook.weights = {
+            "patch_target.weight": (torch.ones_like(model.patch_target.weight),)
+        }
+        hook_group = hooks.HookGroup()
+        hook_group.add(hook)
+        patcher.register_all_hook_patches(
+            hook_group, hooks.create_target_dict(hooks.EnumWeightTarget.Model)
+        )
+        patcher.patch_hooks(hook_group)
+
+        self.assertIs(model.linear.weight, weight)
+        self.assertIs(model.linear.input_scale, input_scale)
+        self.assertTrue(
+            torch.equal(
+                model.patch_target.weight,
+                torch.ones_like(model.patch_target.weight),
+            )
+        )
+
+        self.assertEqual(
+            set(patcher.get_key_patches()),
+            {
+                "linear.weight",
+                "linear.input_scale",
+                "linear_alias.weight",
+                "linear_alias.input_scale",
+                "patch_target.weight",
+            },
+        )
+
+    def test_hook_targets_disable_async_offload(self):
+        model = torch.nn.Module()
+        model.linear = ops.disable_weight_init.Linear(
+            4, 4, bias=False, device="cpu", dtype=torch.bfloat16
+        )
+        model.other = ops.disable_weight_init.Linear(
+            4, 4, bias=False, device="cpu", dtype=torch.bfloat16
+        )
+        model.linear.weight = torch.nn.Parameter(
+            model.linear.weight.float(), requires_grad=False
+        )
+        model.other.weight = torch.nn.Parameter(
+            model.other.weight.float(), requires_grad=False
+        )
+        model.linear.weight_comfy_model_dtype = torch.bfloat16
+        model.other.weight_comfy_model_dtype = torch.bfloat16
+        model.control = torch.nn.Parameter(torch.zeros(1))
+        torch.nn.init.zeros_(model.linear.weight)
+        patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+
+        hook = hooks.WeightHook()
+        hook.need_weight_init = False
+        hook.weights = {
+            "linear.weight": (
+                torch.zeros_like(model.linear.weight),
+            )
+        }
+        group = hooks.HookGroup()
+        group.add(hook)
+        patcher.register_all_hook_patches(
+            group, hooks.create_target_dict(hooks.EnumWeightTarget.Model)
+        )
+
+        patcher.patch_hooks(group)
+        self.assertTrue(model.linear.comfy_disable_async_offload)
+        self.assertTrue(model.other.comfy_disable_async_offload)
+        self.assertTrue(model.linear.comfy_cast_weights)
+        self.assertTrue(model.other.comfy_cast_weights)
+        output = model.linear(torch.zeros(1, 4, dtype=torch.bfloat16))
+        self.assertEqual(output.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(output).all())
+        patcher.patch_hooks(None)
+
+        model.linear.comfy_disable_async_offload = False
+        model.other.comfy_disable_async_offload = False
+        patcher._hook_async_offload_disabled = False
+        patcher.patch_hooks(group)
+        self.assertTrue(model.linear.comfy_disable_async_offload)
+        self.assertTrue(model.other.comfy_disable_async_offload)
+        patcher.patch_hooks(None)
+
+    def test_cast_weight_honors_async_offload_disable(self):
+        linear = ops.disable_weight_init.Linear(
+            4, 4, bias=False, device="cpu", dtype=torch.float32
+        )
+        target = torch.device("cpu", 1)
+
+        linear.comfy_disable_async_offload = True
+        with mock.patch(
+            "comfy.model_management.get_offload_stream", return_value=None
+        ) as get_offload_stream:
+            ops.cast_bias_weight(
+                linear,
+                dtype=torch.float32,
+                device=target,
+                offloadable=True,
+            )
+        get_offload_stream.assert_not_called()
+
+        linear.comfy_disable_async_offload = False
+        with mock.patch(
+            "comfy.model_management.get_offload_stream", return_value=None
+        ) as get_offload_stream:
+            ops.cast_bias_weight(
+                linear,
+                dtype=torch.float32,
+                device=target,
+                offloadable=True,
+            )
+        get_offload_stream.assert_called_once_with(target)
+
+    def test_dynamic_delegate_is_released_only_after_model_unload(self):
+        patcher = object.__new__(ModelPatcherDynamic)
+        patcher.model = torch.nn.Module()
+        delegate = object()
+        patcher.non_dynamic_delegate_model = delegate
+        patcher.partially_unload_ram = mock.Mock()
+        patcher.partially_unload = mock.Mock()
+
+        with mock.patch.object(ModelPatcher, "unpatch_model") as base_unpatch:
+            patcher.unpatch_model(unpatch_weights=False)
+            base_unpatch.assert_called_once_with(
+                device_to=None, unpatch_weights=False
+            )
+        self.assertIs(patcher.non_dynamic_delegate_model, delegate)
+        patcher.partially_unload_ram.assert_not_called()
+        patcher.partially_unload.assert_not_called()
+
+        patcher.partially_unload_ram.reset_mock()
+        patcher.partially_unload.reset_mock()
+        with mock.patch.object(ModelPatcher, "unpatch_model") as base_unpatch:
+            patcher.unpatch_model(
+                device_to=torch.device("cpu"), unpatch_weights=True
+            )
+            base_unpatch.assert_called_once_with(
+                device_to=None, unpatch_weights=False
+            )
+        self.assertIs(patcher.non_dynamic_delegate_model, delegate)
+        patcher.partially_unload_ram.assert_called_once_with(1e32)
+        patcher.partially_unload.assert_called_once_with(None, 1e32)
+
+        patcher.finalize_model_unload()
+        self.assertIsNone(patcher.non_dynamic_delegate_model)
+
+    def test_dynamic_delegate_is_recreated_after_model_unload(self):
+        patcher = object.__new__(ModelPatcherDynamic)
+        initial_override = object()
+        first_override = object()
+        second_override = object()
+        first_delegate = mock.Mock()
+        second_delegate = mock.Mock()
+        first_delegate.get_clone_model_override.return_value = first_override
+        second_delegate.get_clone_model_override.return_value = second_override
+        patcher.non_dynamic_delegate_model = initial_override
+        patcher.clone = mock.Mock(
+            side_effect=[first_delegate, second_delegate]
+        )
+
+        self.assertIs(patcher.get_non_dynamic_delegate(), first_delegate)
+        patcher.clone.assert_called_with(
+            disable_dynamic=True, model_override=initial_override
+        )
+        self.assertIs(patcher.non_dynamic_delegate_model, first_override)
+
+        patcher.finalize_model_unload()
+        self.assertIsNone(patcher.non_dynamic_delegate_model)
+
+        self.assertIs(patcher.get_non_dynamic_delegate(), second_delegate)
+        patcher.clone.assert_called_with(
+            disable_dynamic=True, model_override=None
+        )
+        self.assertIs(patcher.non_dynamic_delegate_model, second_override)
+
+    def test_free_memory_finalizes_only_removed_models(self):
+        device = torch.device("cpu")
+        kept_patcher = mock.Mock()
+        kept_patcher.model = torch.nn.Module()
+        kept = mock.Mock()
+        kept.device = device
+        kept.model = kept_patcher
+        kept.is_dead.return_value = False
+
+        unloaded_patcher = mock.Mock()
+        unloaded_patcher.model = torch.nn.Module()
+        unload = mock.Mock()
+        unload.device = device
+        unload.model = unloaded_patcher
+        unload.is_dead.return_value = False
+        unload.model_offloaded_memory.return_value = 0
+        unload.model_memory.return_value = 1
+        unload.model_unload.return_value = True
+
+        def assert_only_kept_before_finalize():
+            self.assertEqual(
+                model_management.current_loaded_models, [kept]
+            )
+
+        unloaded_patcher.finalize_model_unload.side_effect = (
+            assert_only_kept_before_finalize
+        )
+        with (
+            mock.patch.object(
+                model_management, "current_loaded_models", [kept, unload]
+            ),
+            mock.patch.object(model_management, "cleanup_models_gc"),
+            mock.patch.object(
+                model_management, "get_free_memory", return_value=0
+            ),
+            mock.patch.object(model_management, "soft_empty_cache"),
+        ):
+            unloaded = model_management.free_memory(
+                1, device, keep_loaded=[kept]
+            )
+            self.assertEqual(unloaded, [unload])
+            self.assertEqual(
+                model_management.current_loaded_models, [kept]
+            )
+
+        kept.model_unload.assert_not_called()
+        kept_patcher.finalize_model_unload.assert_not_called()
+        unloaded_patcher.finalize_model_unload.assert_called_once_with()
 
 if __name__ == "__main__":
     unittest.main()

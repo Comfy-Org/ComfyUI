@@ -909,6 +909,11 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
     for i in sorted(unloaded_model, reverse=True):
         unloaded_models.append(current_loaded_models.pop(i))
 
+    for unloaded in unloaded_models:
+        model = unloaded.model
+        if model is not None:
+            model.finalize_model_unload()
+
     if not for_dynamic and pins_required > 0:
         ensure_pin_budget(pins_required)
         ensure_pin_registerable(pins_required)
