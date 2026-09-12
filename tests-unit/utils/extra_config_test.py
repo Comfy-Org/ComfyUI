@@ -301,3 +301,22 @@ def test_load_extra_path_config_no_base_path(
     actual_diffusion = folder_paths.folder_names_and_paths["diffusion_models"][0]
     assert len(actual_diffusion) == 1, "Should have one path for 'diffusion_models'."
     assert actual_diffusion[0] == os.path.abspath(expected_unet)
+
+
+@pytest.mark.parametrize("yaml_content", [
+    "",
+    "\n  \n\n",
+    "# every line is a comment\n# so there are no nodes to parse\n",
+])
+def test_load_extra_path_config_empty_yaml(yaml_content, clear_folder_paths, tmp_path):
+    """
+    Test that a config with no YAML nodes is a no-op. An empty file, a whitespace-only file,
+    and a file of only comments all parse to None rather than to an empty dict, so the loader
+    has to guard against that before iterating.
+    """
+    yaml_path = tmp_path / "empty.yaml"
+    yaml_path.write_text(yaml_content, encoding="utf-8")
+
+    load_extra_path_config(str(yaml_path))
+
+    assert folder_paths.folder_names_and_paths == {}
