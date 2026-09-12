@@ -619,7 +619,7 @@ class QwenImageDiffsynthControlnet:
         if mask is not None:
             if mask.ndim == 3:
                 mask = mask.unsqueeze(1)
-            if mask.ndim == 4:
+            elif mask.ndim == 4:
                 mask = mask.unsqueeze(2)
             mask = 1.0 - mask
 
