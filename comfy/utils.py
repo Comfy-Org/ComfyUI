@@ -155,7 +155,7 @@ def load_safetensors(ckpt):
     return sd, header.get("__metadata__", {}),
 
 
-def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
+def load_torch_file(ckpt, safe_load=True, device=None, return_metadata=False):
     if device is None:
         device = torch.device("cpu")
     metadata = None
@@ -188,7 +188,7 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
         if MMAP_TORCH_FILES:
             torch_args["mmap"] = True
 
-        pl_sd = torch.load(ckpt, map_location=device, weights_only=True, **torch_args)
+        pl_sd = torch.load(ckpt, map_location=device, weights_only=safe_load, **torch_args)
 
         if "state_dict" in pl_sd:
             sd = pl_sd["state_dict"]
