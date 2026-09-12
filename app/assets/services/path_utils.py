@@ -325,6 +325,16 @@ def get_path_derived_tags_from_path(path: str) -> list[str]:
     return tags
 
 
+def get_path_derived_tag_vocabulary() -> set[str]:
+    """Bounds which stored tags a re-derivation may take away; one outside this set came from elsewhere."""
+    vocabulary = {"input", "output", "temp", "models"}
+    vocabulary.update(_KNOWN_SUBFOLDER_TAGS)
+    for folder_name, _bases, _extensions in get_comfy_models_folders():
+        # Strip the name, not the finished tag: whitespace after "model_type:" survives an end-strip.
+        vocabulary.add(f"model_type:{folder_name.strip()}")
+    return vocabulary
+
+
 def get_name_and_tags_from_asset_path(file_path: str) -> tuple[str, list[str]]:
     """Return (name, tags) derived from a filesystem path.
 
