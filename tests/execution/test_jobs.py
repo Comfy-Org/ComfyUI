@@ -655,6 +655,76 @@ class TestNormalizeHistoryItem:
             'extra_data': {'create_time': 1234567890, 'client_id': 'abc'},
         }
 
+    def test_missing_status(self):
+        history_item = {
+            'prompt': (
+                5,
+                'prompt-without-status',
+                {'nodes': {}},
+                {'create_time': 100},
+                [],
+            ),
+            'status': None,
+            'outputs': {},
+        }
+
+        job = normalize_history_item('prompt-without-status', history_item)
+
+        assert job['status'] == 'completed'
+        assert 'completion_status' not in job
+
+    def test_partial_success_metadata_and_errors(self):
+        node_error = {
+            'prompt_id': 'prompt-partial',
+            'node_id': '2',
+            'node_type': 'TestSyncError',
+            'exception_message': 'failed',
+            'exception_type': 'RuntimeError',
+            'traceback': [],
+            'current_inputs': {},
+            'current_outputs': [],
+            'timestamp': 200,
+        }
+        history_item = {
+            'prompt': (
+                5,
+                'prompt-partial',
+                {'nodes': {}},
+                {'create_time': 100},
+                ['3', '4'],
+            ),
+            'status': {
+                'status_str': 'success',
+                'completed': True,
+                'execution_summary': {
+                    'completion_status': 'partial_success',
+                    'has_errors': True,
+                    'execution_error_count': 1,
+                },
+                'messages': [
+                    ('execution_start', {'prompt_id': 'prompt-partial', 'timestamp': 150}),
+                    ('execution_node_error', node_error),
+                    ('execution_success', {
+                        'prompt_id': 'prompt-partial',
+                        'completion_status': 'partial_success',
+                        'has_errors': True,
+                        'execution_error_count': 1,
+                        'timestamp': 300,
+                    }),
+                ],
+            },
+            'outputs': {'4': {'images': [{'filename': 'survived.png'}]}},
+        }
+
+        job = normalize_history_item('prompt-partial', history_item, include_outputs=True)
+
+        assert job['status'] == 'completed'
+        assert job['completion_status'] == 'partial_success'
+        assert job['has_errors'] is True
+        assert job['execution_error_count'] == 1
+        assert job['execution_errors'] == [node_error]
+        assert job['outputs']['4']['images'] == [{'filename': 'survived.png'}]
+
     def test_include_outputs_normalizes_3d_strings(self):
         """Detail view should transform string 3D filenames into file output dicts."""
         history_item = {

@@ -17,6 +17,7 @@ class NodeState(Enum):
     Running = "running"
     Finished = "finished"
     Error = "error"
+    Blocked = "blocked"
 
 
 class NodeProgressState(TypedDict):
@@ -301,16 +302,24 @@ class ProgressRegistry:
                     node_id, value, max_value, entry, self.prompt_id, image
                 )
 
-    def finish_progress(self, node_id: str) -> None:
-        """Finish progress tracking for a node"""
+    def _finish_progress(self, node_id: str, state: NodeState) -> None:
         entry = self.ensure_entry(node_id)
-        entry["state"] = NodeState.Finished
+        entry["state"] = state
         entry["value"] = entry["max"]
 
-        # Notify all enabled handlers
         for handler in self.handlers.values():
             if handler.enabled:
                 handler.finish_handler(node_id, entry, self.prompt_id)
+
+    def finish_progress(self, node_id: str) -> None:
+        """Finish progress tracking for a node"""
+        self._finish_progress(node_id, NodeState.Finished)
+
+    def error_progress(self, node_id: str) -> None:
+        self._finish_progress(node_id, NodeState.Error)
+
+    def block_progress(self, node_id: str) -> None:
+        self._finish_progress(node_id, NodeState.Blocked)
 
     def reset_handlers(self) -> None:
         """Reset all handlers"""
