@@ -482,7 +482,34 @@ class TestOutputNodeWithSocketOutput:
         result = image * value
         return (result,)
 
+class TestOmittedOptionalInput:
+    """Stands in for a node that gained an optional input after a prompt was saved.
+
+    `scale` has a default in the schema but none in the entry function, and
+    `mask` has no default in the schema so it stays a nullable value.
+    """
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            },
+            "optional": {
+                "scale": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 10.0}),
+                "mask": ("MASK",),
+            },
+        }
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "process"
+    CATEGORY = "Testing/Compatibility"
+
+    def process(self, image, scale, mask=None):
+        if mask is not None:
+            image = image * mask.unsqueeze(-1)
+        return (image * scale,)
+
 TEST_NODE_CLASS_MAPPINGS = {
+    "TestOmittedOptionalInput": TestOmittedOptionalInput,
     "TestLazyMixImages": TestLazyMixImages,
     "TestVariadicAverage": TestVariadicAverage,
     "TestCustomIsChanged": TestCustomIsChanged,
@@ -501,6 +528,7 @@ TEST_NODE_CLASS_MAPPINGS = {
 }
 
 TEST_NODE_DISPLAY_NAME_MAPPINGS = {
+    "TestOmittedOptionalInput": "Omitted Optional Input",
     "TestLazyMixImages": "Lazy Mix Images",
     "TestVariadicAverage": "Variadic Average",
     "TestCustomIsChanged": "Custom IsChanged",
