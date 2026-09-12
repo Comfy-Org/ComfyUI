@@ -410,7 +410,12 @@ def prompt_worker(q, server_instance):
 
             # Log Time in a more readable way after 10 minutes
             if execution_time > 600:
-                execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
+                # Format manually instead of with time.gmtime: %H is hour-of-day
+                # and wraps at 24, so a prompt running longer than a day silently
+                # loses whole days (29h17m07s was logged as "05:17:07").
+                total_seconds = int(execution_time)
+                execution_time = "{}:{:02d}:{:02d}".format(
+                    total_seconds // 3600, total_seconds % 3600 // 60, total_seconds % 60)
                 logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
             else:
                 logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
