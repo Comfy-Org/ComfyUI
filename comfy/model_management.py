@@ -1014,7 +1014,7 @@ def load_models_gpu(models, memory_required=0, force_patch_weights=False, minimu
             if lowvram_model_memory == 0:
                 lowvram_model_memory = 0.1
 
-        if vram_set_state == VRAMState.NO_VRAM:
+        if vram_set_state == VRAMState.NO_VRAM or (set_vram_to == VRAMState.LOW_VRAM and is_device_mps(torch_dev) and not force_full_load):
             lowvram_model_memory = 0.1
 
         loaded_model.model_load(lowvram_model_memory, force_patch_weights=force_patch_weights)
