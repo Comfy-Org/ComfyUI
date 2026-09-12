@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import comfy.ldm.common_dit
 import comfy.model_management
+import comfy.model_prefetch
 import comfy.ops
 import comfy.quant_ops
 
@@ -17,6 +18,120 @@ from comfy.ldm.flux.math import apply_rope
 import comfy.patcher_extension
 import comfy.utils
 from comfy.ldm.chroma_radiance.layers import NerfEmbedder
+from comfy.quant_ops import QuantizedTensor, TensorWiseINT8Layout
+
+_FUSED_RMS_MODULATED = getattr(TensorWiseINT8Layout, "fused_rms_modulated", None)
+_FUSED_SWIGLU_FFN = getattr(TensorWiseINT8Layout, "fused_swiglu_ffn", None)
+
+
+def _int8_convrot_weight(weight) -> bool:
+    """Return whether a weight uses the supported INT8 ConvRot layout."""
+    return (
+        isinstance(weight, QuantizedTensor)
+        and weight._layout_cls == "TensorWiseINT8Layout"
+        and getattr(weight._params, "convrot", False)
+    )
+
+
+def _fused_rms_modulated_linear(x, linear, norm, modulation_scale):
+    """Run fused RMS modulation and INT8 projection when supported."""
+    weight = getattr(linear, "weight", None)
+    if (
+        comfy.model_management.in_training
+        or not callable(_FUSED_RMS_MODULATED)
+        or not _int8_convrot_weight(weight)
+    ):
+        return None
+    with (
+        comfy.ops.CastBiasWeightContext(norm, x, offloadable=True) as (norm_weight, _),
+        comfy.ops.CastBiasWeightContext(linear, x, offloadable=True) as (weight, bias),
+    ):
+        scale = modulation_scale.to(device=x.device, dtype=x.dtype)
+        fused = _FUSED_RMS_MODULATED(
+            x, weight, bias, norm_weight, norm.eps, scale,
+        )
+        return None if fused is NotImplemented else fused
+
+
+def _fused_swiglu_ffn_postnorm(x, feed_forward, norm):
+    """Run the post-normalized fused INT8 SwiGLU FFN when supported."""
+    if (
+        comfy.model_management.in_training
+        or not callable(_FUSED_SWIGLU_FFN)
+    ):
+        return None
+    w1 = getattr(feed_forward.w1, "weight", None)
+    w2 = getattr(feed_forward.w2, "weight", None)
+    w3 = getattr(feed_forward.w3, "weight", None)
+    if (
+        feed_forward.w1.bias is not None
+        or feed_forward.w2.bias is not None
+        or feed_forward.w3.bias is not None
+        or not all(_int8_convrot_weight(w) for w in (w1, w2, w3))
+    ):
+        return None
+    normed = norm(x)
+    with (
+        comfy.ops.CastBiasWeightContext(feed_forward.w1, normed, offloadable=True) as (w1, b1),
+        comfy.ops.CastBiasWeightContext(feed_forward.w3, normed, offloadable=True) as (w3, b3),
+        comfy.ops.CastBiasWeightContext(feed_forward.w2, normed, offloadable=True) as (w2, b2),
+    ):
+        fused = _FUSED_SWIGLU_FFN(
+            normed, w1, w3, w2, b1, b3, b2,
+        )
+    return None if fused is NotImplemented else fused
+
+
+def _fused_swiglu_ffn(x, feed_forward, norm, modulation_scale):
+    """Run fused RMS modulation and an INT8 SwiGLU FFN when supported."""
+    w1 = getattr(feed_forward.w1, "weight", None)
+    w2 = getattr(feed_forward.w2, "weight", None)
+    w3 = getattr(feed_forward.w3, "weight", None)
+    if (
+        comfy.model_management.in_training
+        or not callable(_FUSED_SWIGLU_FFN)
+        or feed_forward.w1.bias is not None
+        or feed_forward.w2.bias is not None
+        or feed_forward.w3.bias is not None
+        or not all(_int8_convrot_weight(w) for w in (w1, w2, w3))
+    ):
+        return None
+    with (
+        comfy.ops.CastBiasWeightContext(feed_forward.w1, x, offloadable=True) as (w1, b1),
+        comfy.ops.CastBiasWeightContext(feed_forward.w3, x, offloadable=True) as (w3, b3),
+        comfy.ops.CastBiasWeightContext(feed_forward.w2, x, offloadable=True) as (w2, b2),
+        comfy.ops.CastBiasWeightContext(norm, x, offloadable=True) as (norm_weight, _),
+    ):
+        scale = modulation_scale.to(device=x.device, dtype=x.dtype)
+        fused = _FUSED_SWIGLU_FFN(
+            x, w1, w3, w2, b1, b3, b2,
+            norm_weight=norm_weight, norm_eps=norm.eps, modulation_scale=scale,
+        )
+        return None if fused is NotImplemented else fused
+
+
+def _fused_rms_gated_residual(activation, norm, residual, gate):
+    """Run fused RMS normalization, gating, and residual addition."""
+    ck = getattr(comfy.quant_ops, "ck", None)
+    if ck is None or not callable(getattr(ck, "rms_gated_residual", None)):
+        return None
+    if (
+        comfy.model_management.in_training
+        or activation.dtype != torch.bfloat16
+        or residual.shape != activation.shape
+        or gate.ndim != 2
+        or gate.shape[0] != 1
+        or gate.shape[1] != activation.shape[-1]
+    ):
+        return None
+    norm_weight, _, offload_stream = comfy.ops.cast_bias_weight(norm, activation, offloadable=True)
+    try:
+        gate_vec = gate[0].to(device=activation.device, dtype=activation.dtype)
+        return ck.rms_gated_residual(
+            activation, norm_weight, residual, gate_vec, norm.eps,
+        )
+    finally:
+        comfy.ops.uncast_bias_weight(norm, norm_weight, None, offload_stream)
 
 
 def invert_slices(slices, length):
@@ -129,6 +244,7 @@ class JointAttention(nn.Module):
         x_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
         transformer_options={},
+        qkv: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
 
@@ -142,8 +258,11 @@ class JointAttention(nn.Module):
         """
         bsz, seqlen, _ = x.shape
 
+        if qkv is None:
+            qkv = self.qkv(x)
+
         xq, xk, xv = torch.split(
-            self.qkv(x),
+            qkv,
             [
                 self.n_local_heads * self.head_dim,
                 self.n_local_kv_heads * self.head_dim,
@@ -334,20 +453,66 @@ class JointTransformerBlock(nn.Module):
         if self.modulation:
             assert adaln_input is not None
             scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(adaln_input).chunk(4, dim=1)
+            gate_msa = gate_msa.tanh()
+            gate_mlp = gate_mlp.tanh()
+            gate_msa_t = gate_msa.unsqueeze(1)
+            gate_mlp_t = gate_mlp.unsqueeze(1)
 
-            x = x + apply_gate(gate_msa.unsqueeze(1).tanh(), self.attention_norm2(
-                clamp_fp16(self.attention(
-                    modulate(self.attention_norm1(x), scale_msa, timestep_zero_index=timestep_zero_index),
-                    x_mask,
-                    freqs_cis,
-                    transformer_options=transformer_options,
-                ))), timestep_zero_index=timestep_zero_index
-            )
-            x = x + apply_gate(gate_mlp.unsqueeze(1).tanh(), self.ffn_norm2(
-                clamp_fp16(self.feed_forward(
-                    modulate(self.ffn_norm1(x), scale_mlp, timestep_zero_index=timestep_zero_index),
-                ))), timestep_zero_index=timestep_zero_index
-            )
+            if timestep_zero_index is None and not comfy.model_management.in_training:
+                qkv = _fused_rms_modulated_linear(
+                    x, self.attention.qkv, self.attention_norm1, scale_msa,
+                )
+                if qkv is not None:
+                    attn_out = clamp_fp16(self.attention(
+                        x, x_mask, freqs_cis, transformer_options=transformer_options, qkv=qkv,
+                    ))
+                    fused_x = _fused_rms_gated_residual(
+                        attn_out, self.attention_norm2, x, gate_msa,
+                    )
+                    if fused_x is not None:
+                        x = fused_x
+                    else:
+                        x = x + apply_gate(gate_msa_t, self.attention_norm2(attn_out))
+                else:
+                    x = x + apply_gate(gate_msa_t, self.attention_norm2(
+                        clamp_fp16(self.attention(
+                            modulate(self.attention_norm1(x), scale_msa, timestep_zero_index=timestep_zero_index),
+                            x_mask,
+                            freqs_cis,
+                            transformer_options=transformer_options,
+                        ))
+                    ))
+
+                ffn_out = _fused_swiglu_ffn(x, self.feed_forward, self.ffn_norm1, scale_mlp)
+                if ffn_out is not None:
+                    ffn_out = clamp_fp16(ffn_out)
+                    fused_x = _fused_rms_gated_residual(
+                        ffn_out, self.ffn_norm2, x, gate_mlp,
+                    )
+                    if fused_x is not None:
+                        x = fused_x
+                    else:
+                        x = x + apply_gate(gate_mlp_t, self.ffn_norm2(ffn_out))
+                else:
+                    x = x + apply_gate(gate_mlp_t, self.ffn_norm2(
+                        clamp_fp16(self.feed_forward(
+                            modulate(self.ffn_norm1(x), scale_mlp, timestep_zero_index=timestep_zero_index),
+                        ))
+                    ))
+            else:
+                x = x + apply_gate(gate_msa_t, self.attention_norm2(
+                    clamp_fp16(self.attention(
+                        modulate(self.attention_norm1(x), scale_msa, timestep_zero_index=timestep_zero_index),
+                        x_mask,
+                        freqs_cis,
+                        transformer_options=transformer_options,
+                    ))
+                ), timestep_zero_index=timestep_zero_index)
+                x = x + apply_gate(gate_mlp_t, self.ffn_norm2(
+                    clamp_fp16(self.feed_forward(
+                        modulate(self.ffn_norm1(x), scale_mlp, timestep_zero_index=timestep_zero_index),
+                    ))
+                ), timestep_zero_index=timestep_zero_index)
         else:
             assert adaln_input is None
             x = x + self.attention_norm2(
@@ -358,11 +523,15 @@ class JointTransformerBlock(nn.Module):
                     transformer_options=transformer_options,
                 ))
             )
-            x = x + self.ffn_norm2(
-                self.feed_forward(
-                    self.ffn_norm1(x),
+            ffn_out = _fused_swiglu_ffn_postnorm(x, self.feed_forward, self.ffn_norm1)
+            if ffn_out is not None:
+                x = x + self.ffn_norm2(clamp_fp16(ffn_out))
+            else:
+                x = x + self.ffn_norm2(
+                    self.feed_forward(
+                        self.ffn_norm1(x),
+                    )
                 )
-            )
         return x
 
 
@@ -626,6 +795,18 @@ class NextDiT(nn.Module):
         self.dim = dim
         self.n_heads = n_heads
 
+    def get_dynamic_vram__units(self):
+        """Return model units in Dynamic VRAM execution order."""
+        units = list(self.context_refiner)
+        if self.siglip_refiner is not None:
+            units.extend(self.siglip_refiner)
+        units.extend(self.noise_refiner)
+        units.extend(self.layers)
+        final_unit = getattr(self, "final_layer", None)
+        if final_unit is None:
+            final_unit = getattr(self, "dec_net", None)
+        return units, [] if final_unit is None else [final_unit]
+
     def unpatchify(
         self, x: torch.Tensor, img_size: List[Tuple[int, int]], cap_size: List[int], return_tensor=False
     ) -> List[torch.Tensor]:
@@ -717,6 +898,7 @@ class NextDiT(nn.Module):
     def patchify_and_embed(
         self, x: torch.Tensor, cap_feats: torch.Tensor, cap_mask: torch.Tensor, t: torch.Tensor, num_tokens, ref_latents=[], ref_contexts=[], siglip_feats=[], transformer_options={}
     ) -> Tuple[torch.Tensor, torch.Tensor, List[Tuple[int, int]], List[int], torch.Tensor]:
+        """Embed and refine caption, reference, and image tokens."""
         bsz = x.shape[0]
         cap_mask = None  # TODO?
         main_siglip = None
@@ -771,8 +953,11 @@ class NextDiT(nn.Module):
         # refine context
         cap_feats = torch.cat(embeds[0], dim=1)
         cap_freqs_cis = torch.cat(freqs_cis[0], dim=1)
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.context_refiner), cap_feats.device, transformer_options)
         for layer in self.context_refiner:
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, cap_feats.device, layer)
             cap_feats = layer(cap_feats, cap_mask, cap_freqs_cis, transformer_options=transformer_options)
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, cap_feats.device, None)
 
         feats = (cap_feats,)
         fc = (cap_freqs_cis,)
@@ -782,8 +967,11 @@ class NextDiT(nn.Module):
             siglip_feats_combined = torch.cat(embeds[1], dim=1)
             siglip_feats_freqs_cis = torch.cat(freqs_cis[1], dim=1)
             if self.siglip_refiner is not None:
+                prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.siglip_refiner), siglip_feats_combined.device, transformer_options)
                 for layer in self.siglip_refiner:
+                    comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, siglip_feats_combined.device, layer)
                     siglip_feats_combined = layer(siglip_feats_combined, siglip_mask, siglip_feats_freqs_cis, transformer_options=transformer_options)
+                comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, siglip_feats_combined.device, None)
             feats += (siglip_feats_combined,)
             fc += (siglip_feats_freqs_cis,)
 
@@ -796,13 +984,16 @@ class NextDiT(nn.Module):
             timestep_zero_index = None
 
         x_input = x
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.noise_refiner), x.device, transformer_options)
         for i, layer in enumerate(self.noise_refiner):
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, layer)
             x = layer(x, padded_img_mask, fc_x, t, timestep_zero_index=timestep_zero_index, transformer_options=transformer_options)
             if "noise_refiner" in patches:
                 for p in patches["noise_refiner"]:
                     out = p({"img": x, "img_input": x_input, "txt": cap_feats, "pe": fc_x, "vec": t, "x": orig_x, "block_index": i, "transformer_options": transformer_options, "block_type": "noise_refiner"})
                     if "img" in out:
                         x = out["img"]
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None)
 
         padded_full_embed = torch.cat(feats + (x,), dim=1)
         if timestep_zero_index is not None:
@@ -815,6 +1006,7 @@ class NextDiT(nn.Module):
         return padded_full_embed, mask, img_sizes, l_effective_cap_len, torch.cat(fc + (fc_x,), dim=1), timestep_zero_index
 
     def forward(self, x, timesteps, context, num_tokens, attention_mask=None, **kwargs):
+        """Execute the denoiser through registered model wrappers."""
         return comfy.patcher_extension.WrapperExecutor.new_class_executor(
             self._forward,
             self,
@@ -823,6 +1015,7 @@ class NextDiT(nn.Module):
 
     # def forward(self, x, t, cap_feats, cap_mask):
     def _forward(self, x, timesteps, context, num_tokens, attention_mask=None, ref_latents=[], ref_contexts=[], siglip_feats=[], transformer_options={}, **kwargs):
+        """Run the NextDiT denoising forward pass."""
         omni = len(ref_latents) > 0
         if omni:
             timesteps = torch.cat([timesteps * 0, timesteps], dim=0)
@@ -832,11 +1025,6 @@ class NextDiT(nn.Module):
         cap_mask = attention_mask
         bs, c, h, w = x.shape
         x = comfy.ldm.common_dit.pad_to_patch_size(x, (self.patch_size, self.patch_size))
-        """
-        Forward pass of NextDiT.
-        t: (N,) tensor of diffusion timesteps
-        y: (N,) tensor of text tokens/features
-        """
 
         t = self.t_embedder(t * self.time_scale, dtype=x.dtype)  # (N, D)
         adaln_input = t
@@ -858,7 +1046,9 @@ class NextDiT(nn.Module):
         transformer_options["total_blocks"] = len(self.layers)
         transformer_options["block_type"] = "double"
         img_input = img
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.layers), img.device, transformer_options)
         for i, layer in enumerate(self.layers):
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, img.device, layer)
             transformer_options["block_index"] = i
             img = layer(img, mask, freqs_cis, adaln_input, timestep_zero_index=timestep_zero_index, transformer_options=transformer_options)
             if "double_block" in patches:
@@ -868,6 +1058,7 @@ class NextDiT(nn.Module):
                         img[:, cap_size[0]:] = out["img"]
                     if "txt" in out:
                         img[:, :cap_size[0]] = out["txt"]
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, img.device, None)
 
         img = self.final_layer(img, adaln_input, timestep_zero_index=timestep_zero_index)
         img = self.unpatchify(img, img_size, cap_size, return_tensor=x_is_tensor)[:, :, :h, :w]
@@ -1043,6 +1234,7 @@ class NextDiTPixelSpace(NextDiT):
     # with the pixel-space dec_net decoder.
     # ------------------------------------------------------------------
     def _forward(self, x, timesteps, context, num_tokens, attention_mask=None, ref_latents=[], ref_contexts=[], siglip_feats=[], transformer_options={}, **kwargs):
+        """Run the pixel-space NextDiT denoising forward pass."""
         omni = len(ref_latents) > 0
         if omni:
             timesteps = torch.cat([timesteps * 0, timesteps], dim=0)
@@ -1089,7 +1281,9 @@ class NextDiTPixelSpace(NextDiT):
         transformer_options["total_blocks"] = len(self.layers)
         transformer_options["block_type"] = "double"
         img_input = img
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.layers), img.device, transformer_options)
         for i, layer in enumerate(self.layers):
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, img.device, layer)
             transformer_options["block_index"] = i
             img = layer(img, mask, freqs_cis, adaln_input, timestep_zero_index=timestep_zero_index, transformer_options=transformer_options)
             if "double_block" in patches:
@@ -1099,6 +1293,7 @@ class NextDiTPixelSpace(NextDiT):
                         img[:, cap_size[0]:] = out["img"]
                     if "txt" in out:
                         img[:, :cap_size[0]] = out["txt"]
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, img.device, None)
 
         # ---- pixel-space decoder (replaces final_layer + unpatchify) ----
         # img may have padding tokens beyond N; only the first N are real image patches
@@ -1120,6 +1315,7 @@ class NextDiTPixelSpace(NextDiT):
         return -img_out
 
     def forward(self, x, timesteps, context, num_tokens, attention_mask=None, **kwargs):
+        """Execute the pixel-space denoiser through model wrappers."""
         # _forward returns neg_x0 = -x0 (negated decoder output).
         #
         # Reference inference (working_inference_reference.py):
