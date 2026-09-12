@@ -20,6 +20,9 @@ NUM_KV_HEADS = 8
 HEAD_DIM = 128
 MERGED_PATCH_SIZE = 32
 VOCAB_SIZE = 151936
+EOS_TOKEN_ID = 151645
+THINK_END_TOKEN_ID = 151668
+THINK_SUFFIX_TOKEN_IDS = (271, 151670)
 
 
 def _pad_to_merged_patch_size(value):
@@ -318,6 +321,32 @@ class Attention(nn.Module):
         )
         return self.o_proj_mot_gen(output)
 
+    def forward_decode(
+        self,
+        hidden_states,
+        rope,
+        prefix_key,
+        prefix_value,
+        transformer_options,
+        attention_mask=None,
+    ):
+        """Decode tokens against an existing attention KV prefix."""
+
+        query, key, value = self._project(hidden_states, rope, False)
+        key = torch.cat((prefix_key, key), dim=2)
+        value = torch.cat((prefix_value, value), dim=2)
+        output = optimized_attention(
+            query,
+            key,
+            value,
+            NUM_HEADS,
+            mask=attention_mask,
+            skip_reshape=True,
+            transformer_options=transformer_options,
+            enable_gqa=True,
+        )
+        return self.o_proj(output), key, value
+
 
 class DecoderLayer(nn.Module):
     def __init__(self, device=None, dtype=None, operations=None):
@@ -363,6 +392,31 @@ class DecoderLayer(nn.Module):
         image = image + self.mlp_mot_gen(self.post_attention_layernorm_mot_gen(image))
         return image
 
+    def forward_decode(
+        self,
+        hidden_states,
+        rope,
+        prefix_key,
+        prefix_value,
+        transformer_options,
+        attention_mask=None,
+    ):
+        """Decode tokens through one transformer layer and extend its KV state."""
+
+        attention, key, value = self.self_attn.forward_decode(
+            self.input_layernorm(hidden_states),
+            rope,
+            prefix_key,
+            prefix_value,
+            transformer_options,
+            attention_mask,
+        )
+        hidden_states = hidden_states + attention
+        hidden_states = hidden_states + self.mlp(
+            self.post_attention_layernorm(hidden_states)
+        )
+        return hidden_states, key, value
+
 
 class LanguageBackbone(nn.Module):
     def __init__(self, device=None, dtype=None, operations=None):
@@ -383,9 +437,17 @@ class LanguageBackbone(nn.Module):
 
 
 class LanguageModel(nn.Module):
-    def __init__(self, device=None, dtype=None, operations=None):
+    def __init__(self, has_lm_head=False, device=None, dtype=None, operations=None):
         super().__init__()
         self.model = LanguageBackbone(device=device, dtype=dtype, operations=operations)
+        if has_lm_head:
+            self.lm_head = operations.Linear(
+                HIDDEN_SIZE,
+                VOCAB_SIZE,
+                bias=False,
+                device=device,
+                dtype=dtype,
+            )
 
 
 class ConvDecoder(nn.Module):
@@ -409,15 +471,25 @@ class ConvDecoder(nn.Module):
 
 class SenseNovaU15(nn.Module):
     def __init__(
-        self, image_model=None, dtype=None, device=None, operations=None, **kwargs
+        self,
+        image_model=None,
+        has_lm_head=False,
+        dtype=None,
+        device=None,
+        operations=None,
+        **kwargs,
     ):
         super().__init__()
         self.dtype = dtype
+        self.has_lm_head = has_lm_head
         self.vision_model = VisionModel(
             device=device, dtype=dtype, operations=operations
         )
         self.language_model = LanguageModel(
-            device=device, dtype=dtype, operations=operations
+            has_lm_head=has_lm_head,
+            device=device,
+            dtype=dtype,
+            operations=operations,
         )
         self.fm_modules = nn.ModuleDict(
             {
@@ -485,12 +557,13 @@ class SenseNovaU15(nn.Module):
 
         return prefix, prefix_indexes, prefix_mask, prefix_time
 
-    def preprocess_prefix(
+    def _preprocess_prefix_state(
         self,
         text_input_ids,
         reference_images=None,
         prefix_indexes=None,
         prefix_mask=None,
+        transformer_options=None,
     ):
         prefix, prefix_indexes, prefix_mask, prefix_time = self._prepare_prefix(
             text_input_ids, reference_images, prefix_indexes, prefix_mask
@@ -498,7 +571,8 @@ class SenseNovaU15(nn.Module):
         prefix_keys = []
         prefix_values = []
         prefix_rope = _prepare_mrope(prefix_indexes, prefix.device, prefix.dtype)
-        transformer_options = {}
+        if transformer_options is None:
+            transformer_options = {}
         for layer_index, layer in enumerate(self.language_model.model.layers):
             transformer_options["block_index"] = layer_index
             prefix, prefix_key, prefix_value = layer.forward_prefix(
@@ -509,7 +583,247 @@ class SenseNovaU15(nn.Module):
             )
             prefix_keys.append(prefix_key)
             prefix_values.append(prefix_value)
+        return prefix, prefix_keys, prefix_values, prefix_time
+
+    def preprocess_prefix(
+        self,
+        text_input_ids,
+        reference_images=None,
+        prefix_indexes=None,
+        prefix_mask=None,
+        transformer_options=None,
+    ):
+        """Precompute the text and reference-image prefix KV state."""
+
+        _, prefix_keys, prefix_values, prefix_time = (
+            SenseNovaU15._preprocess_prefix_state(
+                self,
+                text_input_ids,
+                reference_images,
+                prefix_indexes,
+                prefix_mask,
+                transformer_options,
+            )
+        )
         return prefix_keys, prefix_values, prefix_time
+
+    def _next_text_token(self, hidden_states):
+        hidden_states = self.language_model.model.norm(hidden_states[:, -1:])
+        return self.language_model.lm_head(hidden_states)[:, -1].argmax(dim=-1)
+
+    def _decode_text_token(
+        self,
+        token,
+        prefix_keys,
+        prefix_values,
+        prefix_time,
+        transformer_options=None,
+    ):
+        hidden_states = self.language_model.model.embed_tokens(token[:, None])
+        positions = prefix_time[:, None]
+        zeros = torch.zeros_like(positions)
+        rope = _prepare_mrope(
+            torch.stack((positions, zeros, zeros)),
+            hidden_states.device,
+            hidden_states.dtype,
+        )
+        next_keys = []
+        next_values = []
+        if transformer_options is None:
+            transformer_options = {}
+        for layer_index, layer in enumerate(self.language_model.model.layers):
+            transformer_options["block_index"] = layer_index
+            hidden_states, key, value = layer.forward_decode(
+                hidden_states,
+                rope,
+                prefix_keys[layer_index],
+                prefix_values[layer_index],
+                transformer_options,
+            )
+            next_keys.append(key)
+            next_values.append(value)
+        return hidden_states, next_keys, next_values, prefix_time + 1
+
+    def append_interleave_image(
+        self,
+        image,
+        prefix_keys,
+        prefix_values,
+        prefix_time,
+        transformer_options=None,
+    ):
+        """Encode one generated image and append it to an interleave KV prefix."""
+
+        image = image * 0.5 + 0.5
+        mean = image.new_tensor((0.485, 0.456, 0.406)).view(1, 3, 1, 1)
+        std = image.new_tensor((0.229, 0.224, 0.225)).view(1, 3, 1, 1)
+        image = _pad_to_merged_patch_size((image - mean) / std)
+        image_embeds = self.vision_model(image)
+        batch, image_length, _ = image_embeds.shape
+        image_end = torch.full(
+            (batch, 1), 151671, dtype=torch.long, device=image.device
+        )
+        hidden_states = torch.cat(
+            (image_embeds, self.language_model.model.embed_tokens(image_end)), dim=1
+        )
+
+        token_width = image.shape[-1] // MERGED_PATCH_SIZE
+        positions = torch.arange(image_length, device=image.device)
+        image_time = prefix_time[:, None].expand(batch, image_length)
+        end_time = prefix_time[:, None] + 1
+        zeros = torch.zeros((batch, 1), dtype=torch.long, device=image.device)
+        indexes = torch.stack(
+            (
+                torch.cat((image_time, end_time), dim=1),
+                torch.cat(
+                    (
+                        (positions // token_width)[None].expand(batch, image_length),
+                        zeros,
+                    ),
+                    dim=1,
+                ),
+                torch.cat(
+                    (
+                        (positions % token_width)[None].expand(batch, image_length),
+                        zeros,
+                    ),
+                    dim=1,
+                ),
+            )
+        )
+        rope = _prepare_mrope(indexes, hidden_states.device, hidden_states.dtype)
+        target_length = image_length + 1
+        past_length = prefix_keys[0].shape[2]
+        attention_mask = torch.zeros(
+            (batch, 1, target_length, past_length + target_length),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        attention_mask[:, :, :image_length, past_length + image_length] = float(
+            "-inf"
+        )
+
+        if transformer_options is None:
+            transformer_options = {}
+        next_keys = []
+        next_values = []
+        for layer_index, layer in enumerate(self.language_model.model.layers):
+            transformer_options["block_index"] = layer_index
+            hidden_states, key, value = layer.forward_decode(
+                hidden_states,
+                rope,
+                prefix_keys[layer_index],
+                prefix_values[layer_index],
+                transformer_options,
+                attention_mask,
+            )
+            next_keys.append(key)
+            next_values.append(value)
+        return hidden_states, next_keys, next_values, prefix_time + 2
+
+    def preprocess_thinking_prefix(
+        self,
+        text_input_ids,
+        reference_images=None,
+        prefix_indexes=None,
+        prefix_mask=None,
+        max_think_tokens=1024,
+        transformer_options=None,
+        progress=None,
+        interrupt=None,
+    ):
+        """Autoregressively extend a prefix with the model's thinking tokens."""
+
+        prefix_keys, prefix_values, prefix_time, _ = (
+            self.preprocess_thinking_prefix_with_tokens(
+                text_input_ids,
+                reference_images,
+                prefix_indexes,
+                prefix_mask,
+                max_think_tokens=max_think_tokens,
+                transformer_options=transformer_options,
+                progress=progress,
+                interrupt=interrupt,
+            )
+        )
+        return prefix_keys, prefix_values, prefix_time
+
+    def preprocess_thinking_prefix_with_tokens(
+        self,
+        text_input_ids,
+        reference_images=None,
+        prefix_indexes=None,
+        prefix_mask=None,
+        max_think_tokens=1024,
+        transformer_options=None,
+        progress=None,
+        interrupt=None,
+    ):
+        """Extend a thinking prefix and return its generated token IDs."""
+
+        if not self.has_lm_head:
+            raise RuntimeError(
+                "This SenseNova checkpoint does not contain language_model.lm_head.weight, "
+                "which is required for thinking."
+            )
+        if text_input_ids.shape[0] != 1:
+            raise ValueError("SenseNova thinking currently requires a single prompt batch.")
+
+        hidden_states, prefix_keys, prefix_values, prefix_time = (
+            self._preprocess_prefix_state(
+                text_input_ids,
+                reference_images,
+                prefix_indexes,
+                prefix_mask,
+                transformer_options,
+            )
+        )
+        next_token = self._next_text_token(hidden_states)
+        thinking_token_ids = []
+        closed_thinking = False
+        for step in range(max_think_tokens):
+            if interrupt is not None:
+                interrupt()
+            token_id = int(next_token.item())
+            if token_id == EOS_TOKEN_ID:
+                break
+            thinking_token_ids.append(token_id)
+            hidden_states, prefix_keys, prefix_values, prefix_time = (
+                self._decode_text_token(
+                    next_token,
+                    prefix_keys,
+                    prefix_values,
+                    prefix_time,
+                    transformer_options,
+                )
+            )
+            if progress is not None:
+                progress(step + 1)
+            if token_id == THINK_END_TOKEN_ID:
+                closed_thinking = True
+                break
+            next_token = self._next_text_token(hidden_states)
+
+        if not closed_thinking:
+            closing_token = torch.full_like(next_token, THINK_END_TOKEN_ID)
+            thinking_token_ids.append(THINK_END_TOKEN_ID)
+            _, prefix_keys, prefix_values, prefix_time = self._decode_text_token(
+                closing_token,
+                prefix_keys,
+                prefix_values,
+                prefix_time,
+                transformer_options,
+            )
+        for token_id in THINK_SUFFIX_TOKEN_IDS:
+            suffix = torch.full_like(next_token, token_id)
+            _, prefix_keys, prefix_values, prefix_time = self._decode_text_token(
+                suffix,
+                prefix_keys,
+                prefix_values,
+                prefix_time,
+                transformer_options,
+            )
+        return prefix_keys, prefix_values, prefix_time, thinking_token_ids
 
     def _forward(
         self,
@@ -524,6 +838,10 @@ class SenseNovaU15(nn.Module):
         prefix_keys=None,
         prefix_values=None,
         prefix_time=None,
+        sensenova_thinking=False,
+        sensenova_max_think_tokens=1024,
+        sensenova_thinking_result=None,
+        sensenova_thinking_interrupt=None,
         **kwargs,
     ):
         if text_input_ids is None and prefix_keys is None:
@@ -572,10 +890,39 @@ class SenseNovaU15(nn.Module):
         image = image + time_embedding[:, None, :]
 
         if prefix_keys is None:
-            prefix, prefix_indexes, prefix_mask, prefix_time = self._prepare_prefix(
-                text_input_ids, reference_images, prefix_indexes, prefix_mask
-            )
-            prefix_rope = _prepare_mrope(prefix_indexes, prefix.device, prefix.dtype)
+            if sensenova_thinking:
+                if isinstance(sensenova_thinking_result, dict):
+                    prefix_keys, prefix_values, prefix_time, token_ids = (
+                        self.preprocess_thinking_prefix_with_tokens(
+                            text_input_ids,
+                            reference_images,
+                            prefix_indexes,
+                            prefix_mask,
+                            max_think_tokens=sensenova_max_think_tokens,
+                            transformer_options=transformer_options,
+                            interrupt=sensenova_thinking_interrupt,
+                        )
+                    )
+                    sensenova_thinking_result["token_ids"] = token_ids
+                else:
+                    prefix_keys, prefix_values, prefix_time = (
+                        self.preprocess_thinking_prefix(
+                            text_input_ids,
+                            reference_images,
+                            prefix_indexes,
+                            prefix_mask,
+                            max_think_tokens=sensenova_max_think_tokens,
+                            transformer_options=transformer_options,
+                            interrupt=sensenova_thinking_interrupt,
+                        )
+                    )
+            else:
+                prefix, prefix_indexes, prefix_mask, prefix_time = self._prepare_prefix(
+                    text_input_ids, reference_images, prefix_indexes, prefix_mask
+                )
+                prefix_rope = _prepare_mrope(
+                    prefix_indexes, prefix.device, prefix.dtype
+                )
         image_time = prefix_time.repeat_interleave(generation_batch)
 
         image_positions = torch.arange(image_length, dtype=torch.long, device=x.device)
