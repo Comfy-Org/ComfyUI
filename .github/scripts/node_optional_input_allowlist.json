@@ -1,0 +1,14 @@
+[
+ "ViduImageToVideoNode.movement_amplitude",
+ "ViduImageToVideoNode.resolution",
+ "ViduReferenceVideoNode.aspect_ratio",
+ "ViduReferenceVideoNode.movement_amplitude",
+ "ViduReferenceVideoNode.resolution",
+ "ViduStartEndToVideoNode.movement_amplitude",
+ "ViduStartEndToVideoNode.prompt",
+ "ViduStartEndToVideoNode.resolution",
+ "ViduTextToVideoNode.aspect_ratio",
+ "ViduTextToVideoNode.movement_amplitude",
+ "ViduTextToVideoNode.resolution",
+ "WanPhantomSubjectToVideo.images"
+]
