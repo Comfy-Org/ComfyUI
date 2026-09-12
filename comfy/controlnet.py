@@ -81,6 +81,8 @@ class ControlBase:
     def __init__(self):
         self.cond_hint_original = None
         self.cond_hint = None
+        self.cond_hints = {}
+        self.control_inputs = {}
         self.strength = 1.0
         self.timestep_percent_range = (0.0, 1.0)
         self.latent_format = None
@@ -111,6 +113,8 @@ class ControlBase:
         self.extra_concat_orig = extra_concat.copy()
         if self.concat_mask and len(self.extra_concat_orig) == 0:
             self.extra_concat_orig.append(torch.tensor([[[[1.0]]]]))
+        self.cond_hints.clear()
+        self.control_inputs.clear()
         return self
 
     def pre_run(self, model, percent_to_timestep_function):
@@ -129,6 +133,8 @@ class ControlBase:
             with ControlIsolation(device_cnet):
                 device_cnet.cleanup()
         self.cond_hint = None
+        self.cond_hints.clear()
+        self.control_inputs.clear()
         self.extra_concat = None
         self.timestep_range = None
 
@@ -266,38 +272,42 @@ class ControlNet(ControlBase):
         if self.manual_cast_dtype is not None:
             dtype = self.manual_cast_dtype
 
-        if self.cond_hint is None or x_noisy.shape[2] * self.compression_ratio != self.cond_hint.shape[2] or x_noisy.shape[3] * self.compression_ratio != self.cond_hint.shape[3]:
-            if self.cond_hint is not None:
-                del self.cond_hint
-            self.cond_hint = None
+        # Keep a couple of prepared hints around: with area composition the same controlnet is
+        # called with alternating crop sizes every step, and rebuilding (upscale + VAE encode)
+        # each time dominated the step time.
+        cond_hint = self.cond_hints.get((x_noisy.shape[2], x_noisy.shape[3]))
+        if cond_hint is None:
             compression_ratio = self.compression_ratio
             if self.vae is not None:
                 compression_ratio *= self.vae.spacial_compression_encode()
             else:
                 if self.latent_format is not None:
                     raise ValueError("This Controlnet needs a VAE but none was provided, please use a ControlNetApply node with a VAE input and connect it.")
-            self.cond_hint = comfy.utils.common_upscale(self.cond_hint_original, x_noisy.shape[-1] * compression_ratio, x_noisy.shape[-2] * compression_ratio, self.upscale_algorithm, "center")
-            self.cond_hint = self.preprocess_image(self.cond_hint)
+            cond_hint = comfy.utils.common_upscale(self.cond_hint_original, x_noisy.shape[-1] * compression_ratio, x_noisy.shape[-2] * compression_ratio, self.upscale_algorithm, "center")
+            cond_hint = self.preprocess_image(cond_hint)
             if self.vae is not None:
                 loaded_models = comfy.model_management.loaded_models(only_currently_used=True)
-                self.cond_hint = self.vae.encode(self.cond_hint.movedim(1, -1))
+                cond_hint = self.vae.encode(cond_hint.movedim(1, -1))
                 comfy.model_management.load_models_gpu(loaded_models)
             if self.latent_format is not None:
-                self.cond_hint = self.latent_format.process_in(self.cond_hint)
+                cond_hint = self.latent_format.process_in(cond_hint)
             if len(self.extra_concat_orig) > 0:
                 to_concat = []
                 for c in self.extra_concat_orig:
-                    c = c.to(self.cond_hint.device)
-                    c = comfy.utils.common_upscale(c, self.cond_hint.shape[-1], self.cond_hint.shape[-2], self.upscale_algorithm, "center")
-                    if c.ndim < self.cond_hint.ndim:
+                    c = c.to(cond_hint.device)
+                    c = comfy.utils.common_upscale(c, cond_hint.shape[-1], cond_hint.shape[-2], self.upscale_algorithm, "center")
+                    if c.ndim < cond_hint.ndim:
                         c = c.unsqueeze(2)
-                        c = comfy.utils.repeat_to_batch_size(c, self.cond_hint.shape[2], dim=2)
-                    to_concat.append(comfy.utils.repeat_to_batch_size(c, self.cond_hint.shape[0]))
-                self.cond_hint = torch.cat([self.cond_hint] + to_concat, dim=1)
+                        c = comfy.utils.repeat_to_batch_size(c, cond_hint.shape[2], dim=2)
+                    to_concat.append(comfy.utils.repeat_to_batch_size(c, cond_hint.shape[0]))
+                cond_hint = torch.cat([cond_hint] + to_concat, dim=1)
 
-            self.cond_hint = self.cond_hint.to(device=x_noisy.device, dtype=dtype)
-        if x_noisy.shape[0] != self.cond_hint.shape[0]:
-            self.cond_hint = broadcast_image_to(self.cond_hint, x_noisy.shape[0], batched_number)
+            cond_hint = cond_hint.to(device=x_noisy.device, dtype=dtype)
+            while len(self.cond_hints) >= 2:
+                self.cond_hints.pop(next(iter(self.cond_hints)))
+            self.cond_hints[(x_noisy.shape[2], x_noisy.shape[3])] = cond_hint
+        if x_noisy.shape[0] != cond_hint.shape[0]:
+            cond_hint = broadcast_image_to(cond_hint, x_noisy.shape[0], batched_number)
 
         context = cond.get('crossattn_controlnet', cond['c_crossattn'])
         extra = self.extra_args.copy()
@@ -309,7 +319,7 @@ class ControlNet(ControlBase):
         timestep = self.model_sampling_current.timestep(t)
         x_noisy = self.model_sampling_current.calculate_input(t, x_noisy)
 
-        control = self.control_model(x=x_noisy.to(dtype), hint=self.cond_hint, timesteps=timestep.to(dtype), context=comfy.model_management.cast_to_device(context, x_noisy.device, dtype), **extra)
+        control = self.control_model(x=x_noisy.to(dtype), hint=cond_hint, timesteps=timestep.to(dtype), context=comfy.model_management.cast_to_device(context, x_noisy.device, dtype), **extra)
         return self.control_merge(control, control_prev, output_dtype=None)
 
     def copy(self):
@@ -897,7 +907,6 @@ class T2IAdapter(ControlBase):
         super().__init__()
         self.t2i_model = t2i_model
         self.channels_in = channels_in
-        self.control_input = None
         self.compression_ratio = compression_ratio
         self.upscale_algorithm = upscale_algorithm
         if device is None:
@@ -922,28 +931,33 @@ class T2IAdapter(ControlBase):
                 else:
                     return None
 
-        if self.cond_hint is None or x_noisy.shape[2] * self.compression_ratio != self.cond_hint.shape[2] or x_noisy.shape[3] * self.compression_ratio != self.cond_hint.shape[3]:
-            if self.cond_hint is not None:
-                del self.cond_hint
-            self.control_input = None
-            self.cond_hint = None
+        cond_hint = self.cond_hints.get((x_noisy.shape[2], x_noisy.shape[3]))
+        if cond_hint is None:
             width, height = self.scale_image_to(x_noisy.shape[3] * self.compression_ratio, x_noisy.shape[2] * self.compression_ratio)
-            self.cond_hint = comfy.utils.common_upscale(self.cond_hint_original, width, height, self.upscale_algorithm, "center").float().to(self.device)
-            if self.channels_in == 1 and self.cond_hint.shape[1] > 1:
-                self.cond_hint = torch.mean(self.cond_hint, 1, keepdim=True)
-        if x_noisy.shape[0] != self.cond_hint.shape[0]:
-            self.cond_hint = broadcast_image_to(self.cond_hint, x_noisy.shape[0], batched_number)
-        if self.control_input is None:
+            cond_hint = comfy.utils.common_upscale(self.cond_hint_original, width, height, self.upscale_algorithm, "center").float().to(self.device)
+            if self.channels_in == 1 and cond_hint.shape[1] > 1:
+                cond_hint = torch.mean(cond_hint, 1, keepdim=True)
+            while len(self.cond_hints) >= 2:
+                self.cond_hints.pop(next(iter(self.cond_hints)))
+            self.cond_hints[(x_noisy.shape[2], x_noisy.shape[3])] = cond_hint
+        if x_noisy.shape[0] != cond_hint.shape[0]:
+            cond_hint = broadcast_image_to(cond_hint, x_noisy.shape[0], batched_number)
+
+        control_input = self.control_inputs.get((x_noisy.shape[2], x_noisy.shape[3], x_noisy.shape[0], batched_number, x_noisy.dtype))
+        if control_input is None:
             self.t2i_model.to(x_noisy.dtype)
             self.t2i_model.to(self.device)
-            self.control_input = self.t2i_model(self.cond_hint.to(x_noisy.dtype))
+            control_input = self.t2i_model(cond_hint.to(x_noisy.dtype))
             self.t2i_model.cpu()
+            while len(self.control_inputs) >= 2:
+                self.control_inputs.pop(next(iter(self.control_inputs)))
+            self.control_inputs[(x_noisy.shape[2], x_noisy.shape[3], x_noisy.shape[0], batched_number, x_noisy.dtype)] = control_input
 
-        control_input = {}
-        for k in self.control_input:
-            control_input[k] = list(map(lambda a: None if a is None else a.clone(), self.control_input[k]))
+        out = {}
+        for k in control_input:
+            out[k] = list(map(lambda a: None if a is None else a.clone(), control_input[k]))
 
-        return self.control_merge(control_input, control_prev, x_noisy.dtype)
+        return self.control_merge(out, control_prev, x_noisy.dtype)
 
     def copy(self):
         c = T2IAdapter(self.t2i_model, self.channels_in, self.compression_ratio, self.upscale_algorithm)
