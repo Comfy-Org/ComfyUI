@@ -1143,6 +1143,19 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
     if layer_conf is not None:
         layer_conf = json.loads(layer_conf.numpy().tobytes())
 
+    if layer_conf is not None and layer_conf.get("format") in ("float8_e4m3fn", "float8_e5m2") \
+            and not comfy.model_management.supports_fp8_cast(device):
+        # The emulated fp8 path dequantizes inside the op, which needs an fp8 ->
+        # compute_dtype cast on the compute device. Devices without fp8 kernels
+        # (e.g. MPS) can't do that cast at all, so dequantize here on CPU and hand
+        # back a plain compute_dtype weight instead of a QuantizedTensor. Costs the
+        # memory saving but is the difference between running and not.
+        scale = pop_scale("weight_scale")
+        weight = weight.cpu().to(dtype=compute_dtype)
+        if scale is not None:
+            weight = weight * scale.cpu().to(dtype=compute_dtype)
+        layer_conf = None
+
     if layer_conf is None:
         module.weight = torch.nn.Parameter(weight.to(device=device, dtype=compute_dtype), requires_grad=False)
     else:
