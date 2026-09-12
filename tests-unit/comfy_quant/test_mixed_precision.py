@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 import torch
 import sys
 import os
@@ -16,7 +17,7 @@ if not has_gpu():
     args.cpu = True
 
 from comfy import ops
-from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor
+from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor, TensorCoreNVFP4Layout
 import comfy.utils
 
 
@@ -37,6 +38,27 @@ class SimpleModel(torch.nn.Module):
 
 
 class TestMixedPrecisionOps(unittest.TestCase):
+
+    @staticmethod
+    def _nvfp4_tensor(rows, columns, fill, scale=1.0):
+        params = TensorCoreNVFP4Layout.Params(
+            scale=None if scale is None else torch.tensor(scale),
+            orig_dtype=torch.float32,
+            orig_shape=(rows, columns),
+            block_scale=torch.ones(1),
+        )
+        return QuantizedTensor(
+            torch.full((rows, columns // 2), fill, dtype=torch.uint8),
+            "TensorCoreNVFP4Layout",
+            params,
+        )
+
+    @staticmethod
+    def _nvfp4_linear(in_features=16, out_features=8):
+        layer = ops.mixed_precision_ops({}).Linear(in_features, out_features, device="cpu", dtype=torch.float32)
+        layer.layout_type = "TensorCoreNVFP4Layout"
+        layer.quant_format = "nvfp4"
+        return layer
 
     def test_all_layers_standard(self):
         """Test that model with no quantization works normally"""
@@ -406,6 +428,138 @@ class TestMixedPrecisionOps(unittest.TestCase):
         self.assertEqual(saved_conf["convrot_groupsize"], 256)
         self.assertEqual(saved_conf["linear_dtype"], "int8")
         self.assertNotIn("quant_group_size", saved_conf)
+
+    def test_nvfp4_quantized_mm_dispatch_with_bias_and_rank_restore(self):
+        input_tensor = torch.randn(2, 3, 16)
+        quantized_input = self._nvfp4_tensor(6, 16, 1)
+        quantized_weight = self._nvfp4_tensor(8, 16, 2)
+        bias = torch.arange(8, dtype=torch.float32)
+        kernel_output = torch.arange(48, dtype=torch.float32).reshape(6, 8)
+        layer = self._nvfp4_linear()
+        layer.weight = quantized_weight
+
+        with (
+            mock.patch.object(QuantizedTensor, "from_float", return_value=quantized_input) as quantize,
+            mock.patch("comfy_kitchen.scaled_mm_nvfp4", return_value=kernel_output) as scaled_mm,
+            mock.patch.object(QuantizedTensor, "dequantize", autospec=True) as dequantize,
+            mock.patch.object(ops, "cast_bias_weight", return_value=(quantized_weight, bias, None)),
+            mock.patch.object(ops, "uncast_bias_weight"),
+        ):
+            output = layer(input_tensor)
+
+        self.assertTrue(torch.equal(output, (kernel_output + bias).reshape(2, 3, 8)))
+        self.assertEqual(quantize.call_args.args[0].shape, (6, 16))
+        self.assertEqual(scaled_mm.call_count, 1)
+        self.assertEqual(dequantize.call_count, 0)
+
+    def test_nvfp4_quantized_mm_dispatch_without_bias(self):
+        quantized_input = self._nvfp4_tensor(5, 16, 1)
+        quantized_weight = self._nvfp4_tensor(8, 16, 2)
+        kernel_output = torch.randn(5, 8)
+        layer = self._nvfp4_linear()
+
+        with (
+            mock.patch("comfy_kitchen.scaled_mm_nvfp4", return_value=kernel_output) as scaled_mm,
+            mock.patch.object(QuantizedTensor, "dequantize", autospec=True) as dequantize,
+        ):
+            output = layer._forward(quantized_input, quantized_weight, None)
+
+        self.assertIs(output, kernel_output)
+        self.assertEqual(scaled_mm.call_count, 1)
+        self.assertEqual(dequantize.call_count, 0)
+
+    def test_nvfp4_mm_backend_fallbacks_dequantize(self):
+        input_tensor = torch.randn(5, 16)
+        weight = torch.randn(8, 16)
+        bias = torch.randn(8)
+        expected = torch.nn.functional.linear(input_tensor, weight, bias)
+        quantized_input = self._nvfp4_tensor(5, 16, 1)
+        quantized_weight = self._nvfp4_tensor(8, 16, 2)
+        dequantized = {
+            (5, 16): input_tensor,
+            (8, 16): weight,
+        }
+        layer = self._nvfp4_linear()
+
+        def dequantize(tensor):
+            value = dequantized[tensor._params.orig_shape if not tensor._params.transposed else tuple(reversed(tensor._params.orig_shape))]
+            return value.t() if tensor._params.transposed else value
+
+        for error in (RuntimeError("no supported backend"), TypeError("unsupported kernel signature")):
+            with self.subTest(error=type(error).__name__):
+                with (
+                    mock.patch("comfy_kitchen.scaled_mm_nvfp4", side_effect=error) as scaled_mm,
+                    mock.patch.object(QuantizedTensor, "dequantize", autospec=True, side_effect=dequantize) as dequantize_call,
+                ):
+                    output = layer._forward(quantized_input, quantized_weight, bias)
+
+                self.assertTrue(torch.equal(output, expected))
+                self.assertEqual(scaled_mm.call_count, 1)
+                self.assertEqual(dequantize_call.call_count, 2)
+
+    def test_nvfp4_mm_unexpected_failures_remain_loud(self):
+        class Cancellation(BaseException):
+            pass
+
+        quantized_input = self._nvfp4_tensor(5, 16, 1)
+        quantized_weight = self._nvfp4_tensor(8, 16, 2)
+        layer = self._nvfp4_linear()
+
+        for error in (ValueError("invalid metadata"), Cancellation("cancelled")):
+            with self.subTest(error=type(error).__name__):
+                with (
+                    mock.patch("comfy_kitchen.scaled_mm_nvfp4", side_effect=error),
+                    mock.patch.object(QuantizedTensor, "dequantize", autospec=True) as dequantize,
+                ):
+                    with self.assertRaises(type(error)):
+                        layer._forward(quantized_input, quantized_weight, None)
+                    self.assertEqual(dequantize.call_count, 0)
+
+    def test_nvfp4_mm_invalid_quantization_metadata_remains_loud(self):
+        quantized_input = self._nvfp4_tensor(5, 16, 1)
+        layer = self._nvfp4_linear()
+
+        missing_params = self._nvfp4_tensor(8, 16, 2)
+        del missing_params._params
+        with self.assertRaises(AttributeError):
+            layer._forward(quantized_input, missing_params, None)
+
+        unknown_layout = self._nvfp4_tensor(8, 16, 2)
+        unknown_layout._layout_cls = "UnknownLayout"
+        with self.assertRaises(KeyError):
+            layer._forward(quantized_input, unknown_layout, None)
+
+        missing_scale = self._nvfp4_tensor(8, 16, 2, scale=None)
+        with mock.patch("comfy_kitchen.scaled_mm_nvfp4", side_effect=ValueError("missing scale")):
+            with self.assertRaisesRegex(ValueError, "missing scale"):
+                layer._forward(quantized_input, missing_scale, None)
+
+    def test_nvfp4_mm_guard_preserves_other_linear_paths(self):
+        quantized_input = self._nvfp4_tensor(5, 16, 1)
+        quantized_weight = self._nvfp4_tensor(8, 16, 2)
+        regular_input = torch.randn(5, 16)
+        regular_weight = torch.randn(8, 16)
+        bias = torch.randn(8)
+        sentinel = torch.randn(5, 8)
+        layer = self._nvfp4_linear()
+
+        cases = (
+            ("TensorCoreFP8E4M3Layout", quantized_input, quantized_weight),
+            ("TensorCoreNVFP4Layout", regular_input, quantized_weight),
+            ("TensorCoreNVFP4Layout", quantized_input, regular_weight),
+        )
+        for layout_type, input_value, weight_value in cases:
+            with self.subTest(layout_type=layout_type, input_type=type(input_value).__name__, weight_type=type(weight_value).__name__):
+                with (
+                    mock.patch.object(torch.nn.functional, "linear", return_value=sentinel) as functional_linear,
+                    mock.patch.object(torch, "mm") as mm,
+                ):
+                    layer.layout_type = layout_type
+                    output = layer._forward(input_value, weight_value, bias)
+
+                self.assertIs(output, sentinel)
+                functional_linear.assert_called_once_with(input_value, weight_value, bias)
+                mm.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()
