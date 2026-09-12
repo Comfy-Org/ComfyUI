@@ -401,6 +401,7 @@ async def build_gemini_media_parts(
     *,
     url_budget: int = GEMINI_URL_INPUT_BUDGET,
     max_inline_bytes: int = GEMINI_MAX_INLINE_BYTES,
+    video_processing: str | None = None,
 ) -> list[GeminiPart]:
     """Build Gemini parts for multimodal inputs (images, audio, video).
 
@@ -421,17 +422,19 @@ async def build_gemini_media_parts(
     inline_bytes = 0
     for kind, payload in units:
         if url_used < url_budget:
-            parts.append(await _media_url_part(cls, kind, payload))
+            part = await _media_url_part(cls, kind, payload)
             url_used += 1
-            continue
-        part, nbytes = _media_inline_part(kind, payload)
-        inline_bytes += nbytes
-        if inline_bytes > max_inline_bytes:
-            detail = f" after the first {url_budget} inputs are uploaded as URLs" if url_budget else ""
-            raise ValueError(
-                f"Too much media to send inline (over {max_inline_bytes // (1024 * 1024)}MB{detail}). "
-                "Reduce the number or size of attached media."
-            )
+        else:
+            part, nbytes = _media_inline_part(kind, payload)
+            inline_bytes += nbytes
+            if inline_bytes > max_inline_bytes:
+                detail = f" after the first {url_budget} inputs are uploaded as URLs" if url_budget else ""
+                raise ValueError(
+                    f"Too much media to send inline (over {max_inline_bytes // (1024 * 1024)}MB{detail}). "
+                    "Reduce the number or size of attached media."
+                )
+        if kind == "video" and video_processing == "agentic":
+            part.mediaProcessing = "AGENTIC"
         parts.append(part)
     return parts
 
@@ -620,7 +623,37 @@ class GeminiNode(IO.ComfyNode):
         return IO.NodeOutput(output_text or "Empty response from Gemini model...")
 
 
-GEMINI_V2_MODELS: dict[str, str] = {
+GEMINI_TEXT_PRICE_BADGE = IO.PriceBadge(
+    depends_on=IO.PriceBadgeDepends(widgets=["model"]),
+    expr="""
+    (
+      $m := widgets.model;
+      $contains($m, "lite") ? {
+        "type": "list_usd",
+        "usd": [0.00025, 0.0015],
+        "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+      }
+      : ($contains($m, "3.7 flash") or $contains($m, "3.8 flash")) ? {
+        "type": "list_usd",
+        "usd": [0.002145, 0.010725],
+        "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+      }
+      : $contains($m, "3.5 flash") ? {
+        "type": "list_usd",
+        "usd": [0.0015, 0.009],
+        "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+      }
+      : {
+        "type": "list_usd",
+        "usd": [0.002, 0.012],
+        "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+      }
+    )
+    """,
+)
+
+
+GEMINI_TEXT_MODELS: dict[str, str] = {
     "Gemini 3.8 Flash": "gemini-3.8-flash",
     "Gemini 3.7 Flash": "gemini-3.7-flash",
     "Gemini 3.1 Pro": "gemini-3.1-pro-preview",
@@ -629,37 +662,7 @@ GEMINI_V2_MODELS: dict[str, str] = {
 }
 
 
-def _gemini_text_model_inputs(
-    thinking_default: str,
-    thinking_options: list[str] | None = None,
-    *,
-    sampling: bool = True,
-) -> list[Input]:
-    sampling_inputs: list[Input] = (
-        [
-            IO.Float.Input(
-                "temperature",
-                default=1.0,
-                min=0.0,
-                max=2.0,
-                step=0.01,
-                tooltip="Controls randomness. Lower is more focused/deterministic, higher is more creative.",
-                advanced=True,
-            ),
-            IO.Float.Input(
-                "top_p",
-                default=0.95,
-                min=0.0,
-                max=1.0,
-                step=0.01,
-                tooltip="Nucleus sampling: sample from the smallest token set whose cumulative "
-                "probability reaches top_p.",
-                advanced=True,
-            ),
-        ]
-        if sampling
-        else []
-    )
+def _gemini_media_inputs() -> list[Input]:
     return [
         IO.Autogrow.Input(
             "images",
@@ -688,32 +691,189 @@ def _gemini_text_model_inputs(
             ),
             tooltip="Optional video clip to use as context for the model.",
         ),
-        IO.Custom("GEMINI_INPUT_FILES").Input(
-            "files",
-            optional=True,
-            tooltip="Optional file(s) to use as context for the model. "
-            "Accepts inputs from the Gemini Input Files node.",
+    ]
+
+
+def _gemini_files_input() -> Input:
+    return IO.Custom("GEMINI_INPUT_FILES").Input(
+        "files",
+        optional=True,
+        tooltip="Optional file(s) to use as context for the model. "
+        "Accepts inputs from the Gemini Input Files node.",
+    )
+
+
+def _gemini_thinking_input(thinking_default: str, thinking_options: list[str] | None) -> Input:
+    return IO.Combo.Input(
+        "thinking_level",
+        options=thinking_options or ["LOW", "HIGH"],
+        default=thinking_default,
+        tooltip="How hard the model reasons internally before answering. "
+        "HIGH improves quality on difficult tasks but costs more (thinking) tokens and is slower.",
+    )
+
+
+def _gemini_sampling_inputs(sampling: bool) -> list[Input]:
+    if not sampling:
+        return []
+    return [
+        IO.Float.Input(
+            "temperature",
+            default=1.0,
+            min=0.0,
+            max=2.0,
+            step=0.01,
+            tooltip="Controls randomness. Lower is more focused/deterministic, higher is more creative.",
+            advanced=True,
         ),
-        IO.Combo.Input(
-            "thinking_level",
-            options=thinking_options or ["LOW", "HIGH"],
-            default=thinking_default,
-            tooltip="How hard the model reasons internally before answering. "
-            "HIGH improves quality on difficult tasks but costs more (thinking) tokens and is slower.",
-        ),
-        *sampling_inputs,
-        IO.Int.Input(
-            "max_output_tokens",
-            default=32768,
-            min=16,
-            max=65536,
-            tooltip="Maximum tokens to generate, including the model's internal thinking. "
-            "With thinking_level HIGH, a low value can leave no room for the answer; raise this if "
-            "responses come back empty or truncated. The model stops early when finished, so a higher "
-            "cap costs nothing extra for short replies.",
+        IO.Float.Input(
+            "top_p",
+            default=0.95,
+            min=0.0,
+            max=1.0,
+            step=0.01,
+            tooltip="Nucleus sampling: sample from the smallest token set whose cumulative "
+            "probability reaches top_p.",
             advanced=True,
         ),
     ]
+
+
+def _gemini_max_output_tokens_input() -> Input:
+    return IO.Int.Input(
+        "max_output_tokens",
+        default=32768,
+        min=16,
+        max=65536,
+        tooltip="Maximum tokens to generate, including the model's internal thinking. "
+        "With thinking_level HIGH, a low value can leave no room for the answer; raise this if "
+        "responses come back empty or truncated. The model stops early when finished, so a higher "
+        "cap costs nothing extra for short replies.",
+        advanced=True,
+    )
+
+
+def _gemini_text_model_inputs(
+    thinking_default: str,
+    thinking_options: list[str] | None = None,
+    *,
+    sampling: bool = True,
+) -> list[Input]:
+    return [
+        *_gemini_media_inputs(),
+        _gemini_files_input(),
+        _gemini_thinking_input(thinking_default, thinking_options),
+        *_gemini_sampling_inputs(sampling),
+        _gemini_max_output_tokens_input(),
+    ]
+
+
+def _gemini_v3_model_inputs(
+    thinking_default: str,
+    thinking_options: list[str] | None = None,
+    *,
+    sampling: bool = True,
+    agentic_video: bool = False,
+) -> list[Input]:
+    video_processing_inputs: list[Input] = (
+        [
+            IO.Combo.Input(
+                "video_processing",
+                options=["static", "agentic"],
+                default="static",
+                tooltip="How the model reads the attached video. "
+                "`static` samples frames at a fixed rate and sends all of them as context; "
+                "`agentic` lets the model navigate the timeline itself and load only the frames, "
+                "audio or transcript it needs, which costs far fewer input tokens on long videos.",
+            )
+        ]
+        if agentic_video
+        else []
+    )
+    return [
+        IO.String.Input(
+            "prompt",
+            multiline=True,
+            default="",
+            tooltip="Text input to the model. Include detailed instructions, questions, or context.",
+        ),
+        *_gemini_media_inputs(),
+        *video_processing_inputs,
+        _gemini_files_input(),
+        _gemini_thinking_input(thinking_default, thinking_options),
+        *_gemini_sampling_inputs(sampling),
+        _gemini_max_output_tokens_input(),
+        IO.Int.Input(
+            "seed",
+            default=42,
+            min=0,
+            max=2147483647,
+            control_after_generate=True,
+            tooltip="Seed for sampling. Set to 0 for a random seed. Deterministic output isn't guaranteed.",
+        ),
+        IO.String.Input(
+            "system_prompt",
+            multiline=True,
+            default="",
+            advanced=True,
+            tooltip="Foundational instructions that dictate the model's behavior.",
+        ),
+    ]
+
+
+async def _run_gemini_text(
+    cls: type[IO.ComfyNode],
+    *,
+    prompt: str,
+    model_id: str,
+    images: list[Input.Image],
+    audios: list[Input.Audio],
+    videos: list[Input.Video],
+    files: list[GeminiPart] | None,
+    thinking_level: str,
+    temperature: float | None,
+    top_p: float | None,
+    max_output_tokens: int,
+    seed: int,
+    system_prompt: str,
+    video_processing: str | None = None,
+) -> str:
+    validate_string(prompt, strip_whitespace=True, min_length=1)
+
+    parts: list[GeminiPart] = [GeminiPart(text=prompt)]
+    if images or audios or videos:
+        parts.extend(
+            await build_gemini_media_parts(cls, images, audios, videos, video_processing=video_processing)
+        )
+    if files is not None:
+        parts.extend(files)
+
+    gemini_system_prompt = None
+    if system_prompt:
+        gemini_system_prompt = GeminiSystemInstructionContent(parts=[GeminiTextPart(text=system_prompt)], role=None)
+
+    response = await sync_op(
+        cls,
+        endpoint=ApiEndpoint(path=f"{GEMINI_BASE_ENDPOINT}/{model_id}", method="POST"),
+        data=GeminiGenerateContentRequest(
+            contents=[
+                GeminiContent(
+                    role=GeminiRole.user,
+                    parts=parts,
+                )
+            ],
+            generationConfig=GeminiGenerationConfig(
+                temperature=temperature,
+                topP=top_p,
+                maxOutputTokens=max_output_tokens,
+                seed=seed if seed > 0 else None,
+                thinkingConfig=GeminiThinkingConfig(thinkingLevel=thinking_level),
+            ),
+            systemInstruction=gemini_system_prompt,
+        ),
+        response_model=GeminiGenerateContentResponse,
+    )
+    return get_text_from_response(response) or "Empty response from Gemini model..."
 
 
 class GeminiNodeV2(IO.ComfyNode):
@@ -724,7 +884,6 @@ class GeminiNodeV2(IO.ComfyNode):
             node_id="GeminiNodeV2",
             display_name="Google Gemini",
             category="partner/text/Gemini",
-            essentials_category="Text Generation",
             description="Generate text responses with Google's Gemini models. Provide a text prompt and, "
             "optionally, one or more images, audio clips, videos, or files as multimodal context.",
             inputs=[
@@ -780,34 +939,8 @@ class GeminiNodeV2(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
-            price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["model"]),
-                expr="""
-                (
-                  $m := widgets.model;
-                  $contains($m, "lite") ? {
-                    "type": "list_usd",
-                    "usd": [0.00025, 0.0015],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
-                  : ($contains($m, "3.7 flash") or $contains($m, "3.8 flash")) ? {
-                    "type": "list_usd",
-                    "usd": [0.002145, 0.010725],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
-                  : $contains($m, "3.5 flash") ? {
-                    "type": "list_usd",
-                    "usd": [0.0015, 0.009],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
-                  : {
-                    "type": "list_usd",
-                    "usd": [0.002, 0.012],
-                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
-                  }
-                )
-                """,
-            ),
+            price_badge=GEMINI_TEXT_PRICE_BADGE,
+            is_deprecated=True,
         )
 
     @classmethod
@@ -818,47 +951,92 @@ class GeminiNodeV2(IO.ComfyNode):
         seed: int,
         system_prompt: str = "",
     ) -> IO.NodeOutput:
-        validate_string(prompt, strip_whitespace=True, min_length=1)
-        model_id = GEMINI_V2_MODELS[model["model"]]
-
-        parts: list[GeminiPart] = [GeminiPart(text=prompt)]
-        images = [t for t in (model.get("images") or {}).values() if t is not None]
-        audios = [a for a in (model.get("audio") or {}).values() if a is not None]
-        videos = [v for v in (model.get("video") or {}).values() if v is not None]
-        if images or audios or videos:
-            parts.extend(await build_gemini_media_parts(cls, images, audios, videos))
-        files = model.get("files")
-        if files is not None:
-            parts.extend(files)
-
-        gemini_system_prompt = None
-        if system_prompt:
-            gemini_system_prompt = GeminiSystemInstructionContent(parts=[GeminiTextPart(text=system_prompt)], role=None)
-
-        response = await sync_op(
-            cls,
-            endpoint=ApiEndpoint(path=f"{GEMINI_BASE_ENDPOINT}/{model_id}", method="POST"),
-            data=GeminiGenerateContentRequest(
-                contents=[
-                    GeminiContent(
-                        role=GeminiRole.user,
-                        parts=parts,
-                    )
-                ],
-                generationConfig=GeminiGenerationConfig(
-                    temperature=model.get("temperature"),
-                    topP=model.get("top_p"),
-                    maxOutputTokens=model["max_output_tokens"],
-                    seed=seed if seed > 0 else None,
-                    thinkingConfig=GeminiThinkingConfig(thinkingLevel=model["thinking_level"]),
-                ),
-                systemInstruction=gemini_system_prompt,
-            ),
-            response_model=GeminiGenerateContentResponse,
+        return IO.NodeOutput(
+            await _run_gemini_text(
+                cls,
+                prompt=prompt,
+                model_id=GEMINI_TEXT_MODELS[model["model"]],
+                images=[t for t in (model.get("images") or {}).values() if t is not None],
+                audios=[a for a in (model.get("audio") or {}).values() if a is not None],
+                videos=[v for v in (model.get("video") or {}).values() if v is not None],
+                files=model.get("files"),
+                thinking_level=model["thinking_level"],
+                temperature=model.get("temperature"),
+                top_p=model.get("top_p"),
+                max_output_tokens=model["max_output_tokens"],
+                seed=seed,
+                system_prompt=system_prompt,
+            )
         )
 
-        output_text = get_text_from_response(response)
-        return IO.NodeOutput(output_text or "Empty response from Gemini model...")
+
+class GeminiNodeV3(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="GeminiNodeV3",
+            display_name="Google Gemini",
+            category="partner/text/Gemini",
+            essentials_category="Text Generation",
+            description="Generate text responses with Google's Gemini models. Provide a text prompt and, "
+            "optionally, one or more images, audio clips, videos, or files as multimodal context.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "Gemini 3.8 Flash",
+                            _gemini_v3_model_inputs(
+                                "MEDIUM", ["LOW", "MEDIUM", "HIGH"], sampling=False, agentic_video=True
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Gemini 3.7 Flash",
+                            _gemini_v3_model_inputs("MEDIUM", ["LOW", "MEDIUM", "HIGH"]),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Gemini 3.5 Flash",
+                            _gemini_v3_model_inputs("MEDIUM", ["MINIMAL", "LOW", "MEDIUM", "HIGH"]),
+                        ),
+                        IO.DynamicCombo.Option("Gemini 3.1 Pro", _gemini_v3_model_inputs("HIGH")),
+                        IO.DynamicCombo.Option("Gemini 3.1 Flash-Lite", _gemini_v3_model_inputs("LOW")),
+                    ],
+                    tooltip="The Gemini model used to generate the response.",
+                ),
+            ],
+            outputs=[
+                IO.String.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=GEMINI_TEXT_PRICE_BADGE,
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        return IO.NodeOutput(
+            await _run_gemini_text(
+                cls,
+                prompt=model["prompt"],
+                model_id=GEMINI_TEXT_MODELS[model["model"]],
+                images=[t for t in (model.get("images") or {}).values() if t is not None],
+                audios=[a for a in (model.get("audio") or {}).values() if a is not None],
+                videos=[v for v in (model.get("video") or {}).values() if v is not None],
+                files=model.get("files"),
+                thinking_level=model["thinking_level"],
+                temperature=model.get("temperature"),
+                top_p=model.get("top_p"),
+                max_output_tokens=model["max_output_tokens"],
+                seed=model["seed"],
+                system_prompt=model.get("system_prompt") or "",
+                video_processing=model.get("video_processing"),
+            )
+        )
 
 
 class GeminiInputFiles(IO.ComfyNode):
@@ -2022,6 +2200,7 @@ class GeminiExtension(ComfyExtension):
         return [
             GeminiNode,
             GeminiNodeV2,
+            GeminiNodeV3,
             GeminiImage,
             GeminiImage2,
             GeminiNanoBanana2,
