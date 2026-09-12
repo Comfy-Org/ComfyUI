@@ -895,6 +895,10 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
 
     valid_inputs = set(class_inputs.get('required',{})).union(set(class_inputs.get('optional',{})))
 
+    unknown_inputs = set(inputs) - valid_inputs
+    if unknown_inputs:
+        logging.warning(f"Node {unique_id} ({class_type}): ignoring unknown input(s) {', '.join(sorted(unknown_inputs))}")
+
     for x in valid_inputs:
         input_type, input_category, extra_info = get_input_info(obj_class, x, class_inputs)
         assert extra_info is not None
