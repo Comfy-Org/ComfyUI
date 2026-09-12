@@ -915,10 +915,10 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
         val = inputs[x]
         info = (input_type, extra_info)
         if isinstance(val, list):
-            if len(val) != 2:
+            if not is_link(val):
                 error = {
                     "type": "bad_linked_input",
-                    "message": "Bad linked input, must be a length-2 list of [node_id, slot_index]",
+                    "message": "Bad linked input, must be a plain length-2 list of [node_id, integer_slot_index]",
                     "details": f"{x}",
                     "extra_info": {
                         "input_name": x,
