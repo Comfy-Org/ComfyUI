@@ -1396,10 +1396,31 @@ def sampler_object(name):
         sampler = ksampler(name)
     return sampler
 
+DISCARD_PENULTIMATE_SIGMA_SAMPLERS = ("dpm_2", "dpm_2_ancestral", "uni_pc", "uni_pc_bh2")
+
+
+def calculate_sigmas_for_sampler(model_sampling: object, scheduler_name: str, steps: int, sampler_name: str) -> torch.Tensor:
+    """Sigmas for a named sampler, matching what KSampler.calculate_sigmas builds.
+
+    The samplers in DISCARD_PENULTIMATE_SIGMA_SAMPLERS expect the schedule built with one extra
+    step and the penultimate sigma dropped; custom sampling paths that consume sigmas directly
+    need the same adjustment to produce identical results to KSampler.
+    """
+    discard_penultimate_sigma = False
+    if sampler_name in DISCARD_PENULTIMATE_SIGMA_SAMPLERS:
+        steps += 1
+        discard_penultimate_sigma = True
+
+    sigmas = calculate_sigmas(model_sampling, scheduler_name, steps)
+
+    if discard_penultimate_sigma:
+        sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
+    return sigmas
+
 class KSampler:
     SCHEDULERS = SCHEDULER_NAMES
     SAMPLERS = SAMPLER_NAMES
-    DISCARD_PENULTIMATE_SIGMA_SAMPLERS = set(('dpm_2', 'dpm_2_ancestral', 'uni_pc', 'uni_pc_bh2'))
+    DISCARD_PENULTIMATE_SIGMA_SAMPLERS = DISCARD_PENULTIMATE_SIGMA_SAMPLERS
 
     def __init__(self, model, steps, device, sampler=None, scheduler=None, denoise=None, model_options={}):
         self.model = model
@@ -1415,18 +1436,7 @@ class KSampler:
         self.model_options = model_options
 
     def calculate_sigmas(self, steps):
-        sigmas = None
-
-        discard_penultimate_sigma = False
-        if self.sampler in self.DISCARD_PENULTIMATE_SIGMA_SAMPLERS:
-            steps += 1
-            discard_penultimate_sigma = True
-
-        sigmas = calculate_sigmas(self.model.get_model_object("model_sampling"), self.scheduler, steps)
-
-        if discard_penultimate_sigma:
-            sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
-        return sigmas
+        return calculate_sigmas_for_sampler(self.model.get_model_object("model_sampling"), self.scheduler, steps, self.sampler)
 
     def set_steps(self, steps, denoise=None):
         self.steps = steps
