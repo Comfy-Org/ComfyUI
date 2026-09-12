@@ -232,6 +232,17 @@ def test_accumulated_video_metadata_and_explicit_materialization():
     assert video.get_components().images.shape == (4, 16, 16, 3)
 
 
+def test_accumulated_video_frame_count_counts_frames_in_owned_buffers():
+    videos = [
+        VideoFromComponents(
+            VideoComponents(images=torch.zeros((frame_count, 16, 16, 3)), frame_rate=Fraction(25))
+        )
+        for frame_count in (10, 15)
+    ]
+
+    assert VideoFromList(videos).get_frame_count() == 25
+
+
 def test_accumulated_video_reports_each_incompatible_dimension():
     videos = [
         VideoFromComponents(
@@ -271,6 +282,26 @@ def test_accumulated_video_trims_across_file_boundaries_without_materializing():
         assert isinstance(trimmed, VideoFromList)
         assert len(trimmed.videos) == 2
         assert trimmed.get_duration() == 0.25
+
+
+def test_accumulated_video_trim_preserves_frame_count_and_duration(tmp_path):
+    videos = [
+        VideoFromComponents(
+            VideoComponents(images=torch.zeros((frame_count, 16, 16, 3)), frame_rate=Fraction(25))
+        )
+        for frame_count in (10, 15)
+    ]
+
+    trimmed = VideoFromList(videos).as_trimmed(0.2, 0.4, False)
+
+    assert trimmed is not None
+    assert trimmed.get_frame_count() == 10
+    components = trimmed.get_components()
+    assert len(components.images) / components.frame_rate == Fraction(2, 5)
+
+    output = str(tmp_path / "trimmed.mp4")
+    trimmed.save_to(output)
+    assert VideoFromFile(output).get_duration() == 0.4
 
 
 def test_accumulated_video_trim_slices_complete_audio():

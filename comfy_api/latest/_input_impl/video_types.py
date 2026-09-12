@@ -407,11 +407,7 @@ class VideoFromFile(VideoInput):
             start_pts = int(start_time / video_stream.time_base)
             end_pts = int((start_time + duration) / video_stream.time_base) if duration else None
             container.seek(start_pts, stream=video_stream)
-            frame_iterator = (
-                container.decode(video_stream)
-                if video_stream.codec.capabilities & 0x100
-                else container.demux(video_stream)
-            )
+            frame_iterator = container.decode(video_stream)
             for frame in frame_iterator:
                 if frame.pts >= start_pts:
                     break
