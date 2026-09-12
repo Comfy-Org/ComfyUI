@@ -36,7 +36,11 @@ import comfy.model_management
 import comfy.ops
 import comfy.patcher_extension
 import comfy.utils
-import comfy_aimdo.host_buffer
+from comfy_aimdo.host_buffer import HostBuffer
+
+# Add a custom exception for host buffer failures
+class HostBufferError(RuntimeError):
+    pass
 from comfy.comfy_types import UnetWrapperFunction
 from comfy.internal_logging import detail
 from comfy.quant_ops import QuantizedTensor
