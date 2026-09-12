@@ -83,7 +83,6 @@ from comfy.ldm.sensenova.sampling import SenseNovaModelSampling, time_snr_shift
 import comfy.ldm.depth_anything_3.model
 
 import comfy.model_management
-import comfy.utils
 import comfy.patcher_extension
 import comfy.conds
 import comfy.ops
@@ -368,8 +367,7 @@ class BaseModel(torch.nn.Module):
                 to_load[k[len(unet_prefix):]] = sd.pop(k)
 
         to_load = self.model_config.process_unet_state_dict(to_load)
-        with comfy.utils.progress_activity("loading"):
-            m, u = self.diffusion_model.load_state_dict(to_load, strict=False, assign=assign)
+        m, u = self.diffusion_model.load_state_dict(to_load, strict=False, assign=assign)
         if len(m) > 0:
             logging.warning("unet missing: {}".format(m))
 
