@@ -213,6 +213,7 @@ parser.add_argument("--windows-standalone-build", action="store_true", help="Win
 parser.add_argument("--disable-metadata", action="store_true", help="Disable saving prompt metadata in files.")
 parser.add_argument("--disable-all-custom-nodes", action="store_true", help="Disable loading all custom nodes.")
 parser.add_argument("--whitelist-custom-nodes", type=str, nargs='+', default=[], help="Specify custom node folders to load even when --disable-all-custom-nodes is enabled.")
+parser.add_argument("--disabled-nodes-config", type=str, default=None, metavar="PATH", help="Path to a YAML file listing node IDs to disable.")
 parser.add_argument("--disable-api-nodes", action="store_true", help="Disable loading all api nodes. Also prevents the frontend from communicating with the internet.")
 
 parser.add_argument("--multi-user", action="store_true", help="Enables per-user storage.")

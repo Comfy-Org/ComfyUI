@@ -22,7 +22,7 @@ def copy_node_struct(node_struct: NodeStruct, empty_inputs: bool = False) -> Nod
         new_node_struct["inputs"] = {}
     else:
         new_node_struct["inputs"] = node_struct["inputs"].copy()
-    new_node_struct["_meta"] = node_struct["_meta"].copy()
+    new_node_struct["_meta"] = node_struct.get("_meta", {}).copy()
     return new_node_struct
 
 

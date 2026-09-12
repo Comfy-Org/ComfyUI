@@ -17,6 +17,7 @@ import importlib.metadata
 import folder_paths
 import time
 from comfy.cli_args import enables_dynamic_vram
+from app import governance
 from app.logger import setup_logger
 console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
@@ -127,16 +128,6 @@ def handle_comfyui_manager_unavailable():
     args.enable_manager = False
 
 
-if args.enable_manager:
-    if importlib.util.find_spec("comfyui_manager"):
-        import comfyui_manager
-
-        if not comfyui_manager.__file__ or not comfyui_manager.__file__.endswith('__init__.py'):
-            handle_comfyui_manager_unavailable()
-    else:
-        handle_comfyui_manager_unavailable()
-
-
 def apply_custom_paths():
     # extra model paths
     extra_model_paths_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "extra_model_paths.yaml")
@@ -210,6 +201,10 @@ def execute_prestartup_script():
             if os.path.isfile(module_path) or module_path.endswith(".disabled") or module_path == "__pycache__":
                 continue
 
+            if not governance.pack_allowed(module_path):
+                logging.warning("Custom node pack '%s' is not permitted by your organization's policy.", possible_module)
+                continue
+
             script_path = os.path.join(module_path, "prestartup_script.py")
             if os.path.exists(script_path):
                 if args.disable_all_custom_nodes and possible_module not in args.whitelist_custom_nodes:
@@ -228,8 +223,18 @@ def execute_prestartup_script():
             logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
         logging.info("")
 
+governance.initialize()
 apply_custom_paths()
 init_mime_types()
+
+if args.enable_manager:
+    if importlib.util.find_spec("comfyui_manager"):
+        import comfyui_manager
+
+        if not comfyui_manager.__file__ or not comfyui_manager.__file__.endswith('__init__.py'):
+            handle_comfyui_manager_unavailable()
+    else:
+        handle_comfyui_manager_unavailable()
 
 if args.enable_manager:
     comfyui_manager.prestartup()
@@ -544,6 +549,8 @@ def start_comfyui(asyncio_loop=None):
         init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
         init_api_nodes=not args.disable_api_nodes
     ))
+    disabled_nodes = governance.load_disabled_nodes(args.disabled_nodes_config) if args.disabled_nodes_config else set()
+    governance.apply_disabled_nodes(disabled_nodes)
 
     # Re-apply Comfy's cuDNN benchmark policy after custom-node imports. Benchmark
     # mode can request near-card-sized autotune workspaces, and some custom nodes set it at import time.
