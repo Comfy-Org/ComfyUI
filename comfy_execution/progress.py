@@ -164,11 +164,8 @@ class WebUIProgressHandler(ProgressHandler):
             return
 
         # Only send info for non-pending nodes
-        active_nodes = {}
-        for node_id, state in nodes.items():
-            if state["state"] == NodeState.Pending:
-                continue
-            active_nodes[node_id] = {
+        active_nodes = {
+            node_id: {
                 "value": state["value"],
                 "max": state["max"],
                 "state": state["state"].value,
@@ -178,8 +175,13 @@ class WebUIProgressHandler(ProgressHandler):
                 "parent_node_id": self.registry.dynprompt.get_parent_node_id(node_id),
                 "real_node_id": self.registry.dynprompt.get_real_node_id(node_id),
             }
-            if "activity" in state:
-                active_nodes[node_id]["activity"] = state["activity"]
+            for node_id, state in nodes.items()
+            if state["state"] != NodeState.Pending
+        }
+        for node_id, node in active_nodes.items():
+            activity = nodes[node_id].get("activity")
+            if activity is not None:
+                node["activity"] = activity
 
         # Send a combined progress_state message with all node states
         # Include client_id to ensure message is only sent to the initiating client
