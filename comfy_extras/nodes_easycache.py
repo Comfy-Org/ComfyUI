@@ -227,7 +227,7 @@ class EasyCacheHolder:
         self.output_channels = output_channels
 
     def is_past_end_timestep(self, timestep: float) -> bool:
-        return not (timestep[0] > self.end_t).item()
+        return not (timestep[0] >= self.end_t).item()
 
     def should_do_easycache(self, timestep: float) -> bool:
         return (timestep[0] <= self.start_t).item()
@@ -418,7 +418,7 @@ class LazyCacheHolder:
         return self.cache_diff is not None
 
     def is_past_end_timestep(self, timestep: float) -> bool:
-        return not (timestep[0] > self.end_t).item()
+        return not (timestep[0] >= self.end_t).item()
 
     def should_do_easycache(self, timestep: float) -> bool:
         return (timestep[0] <= self.start_t).item()
