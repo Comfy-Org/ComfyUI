@@ -32,6 +32,7 @@ import tqdm
 import comfy.float
 import comfy.hooks
 import comfy.lora
+import comfy.memory_management
 import comfy.model_management
 import comfy.ops
 import comfy.patcher_extension
@@ -213,6 +214,19 @@ def low_vram_patch_estimate_vram(model, key):
 
     return weight.numel() * model_dtype.itemsize * LOWVRAM_PATCH_ESTIMATE_MATH_FACTOR
 
+def _collect_quantized_weight_state_dict_keys(model):
+    """Return state-dict keys owned by each module's QuantizedTensor weight."""
+    keys = set()
+    for module_name, module in model.named_modules(remove_duplicate=False):
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, QuantizedTensor):
+            continue
+        prefix = f"{module_name}." if module_name else ""
+        weight_key = f"{prefix}weight"
+        keys.update(k for k in weight.state_dict(weight_key) if k != weight_key)
+        keys.add(f"{prefix}comfy_quant")
+    return keys
+
 def get_key_weight(model, key):
     set_func = None
     convert_func = None
@@ -273,7 +287,7 @@ class MemoryCounter:
         # TODO: add a safe limit besides 0
 
     def use(self, weight: torch.Tensor):
-        weight_size = weight.nelement() * weight.element_size()
+        weight_size = comfy.memory_management.vram_aligned_size(weight)
         if self.is_useable(weight_size):
             self.decrement(weight_size)
             return True
@@ -373,8 +387,8 @@ class ModelPatcher:
 
         self.hook_patches: dict[comfy.hooks._HookRef] = {}
         self.hook_patches_backup: dict[comfy.hooks._HookRef] = None
-        self.hook_backup: dict[str, tuple[torch.Tensor, torch.device]] = {}
-        self.cached_hook_patches: dict[comfy.hooks.HookGroup, dict[str, torch.Tensor]] = {}
+        self.hook_backup: dict[str, tuple[torch.Tensor, torch.device, bool]] = {}
+        self.cached_hook_patches: dict[comfy.hooks.HookGroup, dict[str, tuple[torch.Tensor, torch.device]]] = {}
         self.current_hooks: Optional[comfy.hooks.HookGroup] = None
         self.forced_hooks: Optional[comfy.hooks.HookGroup] = None  # NOTE: only used for CLIP at this time
         self.is_clip = False
@@ -865,11 +879,14 @@ class ModelPatcher:
 
     def get_key_patches(self, filter_prefix=None):
         model_sd = self.model_state_dict()
+        quantized_weight_state_dict_keys = _collect_quantized_weight_state_dict_keys(self.model)
         p = {}
         for k in model_sd:
             if filter_prefix is not None:
                 if not k.startswith(filter_prefix):
                     continue
+            if k in quantized_weight_state_dict_keys:
+                continue
             bk = self.backup.get(k, None)
             hbk = self.hook_backup.get(k, None)
             weight, set_func, convert_func = get_key_weight(self.model, k)
@@ -1615,44 +1632,74 @@ class ModelPatcher:
                     original_weights = None
                     if len(relevant_patches) > 0:
                         original_weights = self.get_key_patches()
+                    patch_keys = []
                     for key in relevant_patches:
                         if key not in model_sd_keys:
-                            logging.warning(f"Cached hook would not patch. Key does not exist in model: {key}")
+                            logging.warning(f"Hook could not patch. Key does not exist in model: {key}")
                             continue
+                        patch_keys.append(key)
+                    cache_entries = None
+                    cache_on_device = False
+                    if memory_counter is not None and patch_keys:
+                        cache_required = 0
+                        for key in patch_keys:
+                            weight, _, _ = get_key_weight(self.model, key)
+                            cache_required += comfy.memory_management.vram_aligned_size(weight) * 2
+                        cache_on_device = memory_counter.is_useable(cache_required)
+                        if cache_on_device:
+                            cache_entries = {}
+                        else:
+                            offload_memory_counter = MemoryCounter(
+                                initial=comfy.model_management.get_free_memory(self.offload_device),
+                                minimum=comfy.model_management.minimum_inference_memory()*2,
+                            )
+                            if offload_memory_counter.is_useable(cache_required):
+                                cache_entries = {}
+                    for key in patch_keys:
                         self.patch_hook_weight_to_device(hooks=hooks, combined_patches=relevant_patches, key=key, original_weights=original_weights,
-                                                            memory_counter=memory_counter)
+                                                            memory_counter=memory_counter, cache_entries=cache_entries,
+                                                            cache_on_device=cache_on_device)
+                    if cache_entries is not None and len(cache_entries) == len(patch_keys):
+                        self.cached_hook_patches[hooks] = cache_entries
             else:
                 self.unpatch_hooks()
             self.current_hooks = hooks
 
     def patch_cached_hook_weights(self, cached_weights: dict, key: str, memory_counter: MemoryCounter):
+        weight, set_func, _ = get_key_weight(self.model, key)
+        inplace_update = set_func is None
         if key not in self.hook_backup:
-            weight: torch.Tensor = comfy.utils.get_attr(self.model, key)
             target_device = self.offload_device
             if self.hook_mode == comfy.hooks.EnumHookMode.MaxSpeed:
                 used = memory_counter.use(weight)
                 if used:
                     target_device = weight.device
-            self.hook_backup[key] = (weight.to(device=target_device, copy=True), weight.device)
-        comfy.utils.copy_to_param(self.model, key, cached_weights[key][0].to(device=cached_weights[key][1]))
+            self.hook_backup[key] = (weight.to(device=target_device, copy=True), weight.device, inplace_update)
+        cached_weight = cached_weights[key][0].to(device=weight.device)
+        if inplace_update:
+            comfy.utils.copy_to_param(self.model, key, cached_weight)
+        else:
+            comfy.utils.set_attr_param(self.model, key, cached_weight)
 
     def clear_cached_hook_weights(self):
         self.cached_hook_patches.clear()
         self.patch_hooks(None)
 
-    def patch_hook_weight_to_device(self, hooks: comfy.hooks.HookGroup, combined_patches: dict, key: str, original_weights: dict, memory_counter: MemoryCounter):
+    def patch_hook_weight_to_device(self, hooks: comfy.hooks.HookGroup, combined_patches: dict, key: str, original_weights: dict,
+                                    memory_counter: MemoryCounter, cache_entries: dict=None, cache_on_device: bool=False):
         if key not in combined_patches:
             return
 
         weight, set_func, convert_func = get_key_weight(self.model, key)
         weight: torch.Tensor
+        inplace_update = set_func is None
         if key not in self.hook_backup:
             target_device = self.offload_device
-            if self.hook_mode == comfy.hooks.EnumHookMode.MaxSpeed:
+            if cache_entries is not None and cache_on_device:
                 used = memory_counter.use(weight)
                 if used:
                     target_device = weight.device
-            self.hook_backup[key] = (weight.to(device=target_device, copy=True), weight.device)
+            self.hook_backup[key] = (weight.to(device=target_device, copy=True), weight.device, inplace_update)
         # TODO: properly handle LowVramPatch, if it ends up an issue
         temp_weight = comfy.model_management.cast_to_device(weight, weight.device, torch.float32, copy=True)
         if convert_func is not None:
@@ -1666,15 +1713,15 @@ class ModelPatcher:
             out_weight = comfy.float.stochastic_rounding(out_weight, weight.dtype, seed=comfy.utils.string_to_seed(key))
             comfy.utils.copy_to_param(self.model, key, out_weight)
         else:
-            set_func(out_weight, inplace_update=True, seed=comfy.utils.string_to_seed(key))
-        if self.hook_mode == comfy.hooks.EnumHookMode.MaxSpeed:
-            # TODO: disable caching if not enough system RAM to do so
+            out_weight = set_func(out_weight, inplace_update=False, seed=comfy.utils.string_to_seed(key), return_weight=True)
+            comfy.utils.set_attr_param(self.model, key, out_weight)
+        if cache_entries is not None:
             target_device = self.offload_device
-            used = memory_counter.use(weight)
-            if used:
+            if cache_on_device:
+                if not memory_counter.use(weight):
+                    return
                 target_device = weight.device
-            self.cached_hook_patches.setdefault(hooks, {})
-            self.cached_hook_patches[hooks][key] = (out_weight.to(device=target_device, copy=False), weight.device)
+            cache_entries[key] = (out_weight.to(device=target_device, copy=False), weight.device)
         del temp_weight
         del out_weight
         del weight
@@ -1688,11 +1735,21 @@ class ModelPatcher:
             if whitelist_keys_set:
                 for k in keys:
                     if k in whitelist_keys_set:
-                        comfy.utils.copy_to_param(self.model, k, self.hook_backup[k][0].to(device=self.hook_backup[k][1]))
+                        weight, device, inplace_update = self.hook_backup[k]
+                        weight = weight.to(device=device)
+                        if inplace_update:
+                            comfy.utils.copy_to_param(self.model, k, weight)
+                        else:
+                            comfy.utils.set_attr_param(self.model, k, weight)
                         self.hook_backup.pop(k)
             else:
                 for k in keys:
-                    comfy.utils.copy_to_param(self.model, k, self.hook_backup[k][0].to(device=self.hook_backup[k][1]))
+                    weight, device, inplace_update = self.hook_backup[k]
+                    weight = weight.to(device=device)
+                    if inplace_update:
+                        comfy.utils.copy_to_param(self.model, k, weight)
+                    else:
+                        comfy.utils.set_attr_param(self.model, k, weight)
 
                 self.hook_backup.clear()
                 self.current_hooks = None
@@ -2160,7 +2217,8 @@ class ModelPatcherDynamic(ModelPatcher):
     def patch_cached_hook_weights(self, cached_weights: dict, key: str, memory_counter: MemoryCounter):
         assert False #Should be unreachable - we dont ever cache in the new implementation
 
-    def patch_hook_weight_to_device(self, hooks: comfy.hooks.HookGroup, combined_patches: dict, key: str, original_weights: dict, memory_counter: MemoryCounter):
+    def patch_hook_weight_to_device(self, hooks: comfy.hooks.HookGroup, combined_patches: dict, key: str, original_weights: dict,
+                                    memory_counter: MemoryCounter, cache_entries: dict=None, cache_on_device: bool=False):
         if key not in combined_patches:
             return
 
