@@ -129,6 +129,9 @@ class UserManager():
                 return web.json_response({"storage": "server", "users": self.users})
             else:
                 user_dir = self.get_request_user_filepath(request, None, create_dir=False)
+                if not user_dir:
+                    return web.Response(status=403, text="Invalid user directory")
+
                 return web.json_response({
                     "storage": "server",
                     "migrated": os.path.exists(user_dir)
