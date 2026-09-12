@@ -1140,6 +1140,47 @@ class LTXVSpatioTemporalGuidance(io.ComfyNode):
         return io.NodeOutput(m)
 
 
+class LTXVGuidanceRescale(io.ComfyNode):
+    """ComfyUI node that applies Diffusers-style guidance rescale to LTXV."""
+
+    @classmethod
+    def define_schema(cls):
+        """Define the guidance-rescale node inputs and outputs."""
+        return io.Schema(
+            node_id="LTXVGuidanceRescale",
+            display_name="LTXV Guidance Rescale",
+            category="advanced/guidance",
+            description="Rescales guided predictions to the conditional prediction standard deviation, matching Diffusers guidance_rescale.",
+            inputs=[
+                io.Model.Input("model"),
+                io.Float.Input("guidance_rescale", default=0.7, min=0.0, max=1.0, step=0.01, round=0.01),
+            ],
+            outputs=[io.Model.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, guidance_rescale) -> io.NodeOutput:
+        """Attach a post-CFG rescale callback to a cloned model."""
+        m = model.clone()
+
+        def post_cfg_function(args):
+            """Rescale the CFG result to match the conditional prediction variance."""
+            if guidance_rescale <= 0:
+                return args["denoised"]
+
+            cond_pred = args["cond_denoised"]
+            cfg_result = args["denoised"]
+            dims = list(range(1, cfg_result.ndim))
+            std_text = cond_pred.std(dim=dims, keepdim=True)
+            std_cfg = cfg_result.std(dim=dims, keepdim=True)
+            std_cfg = std_cfg.clamp_min(torch.finfo(std_cfg.dtype).tiny)
+            rescaled = cfg_result * (std_text / std_cfg)
+            return guidance_rescale * rescaled + (1.0 - guidance_rescale) * cfg_result
+
+        m.set_model_sampler_post_cfg_function(post_cfg_function)
+        return io.NodeOutput(m)
+
+
 class LTXVModalityGuidance(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -1344,6 +1385,7 @@ class LtxvExtension(ComfyExtension):
             LTXVDualCFGGuider,
             LTXVModalityGuidance,
             LTXVSpatioTemporalGuidance,
+            LTXVGuidanceRescale,
             LTXVDurationPredictor,
         ]
 
