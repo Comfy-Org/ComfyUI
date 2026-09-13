@@ -155,6 +155,59 @@ def load_safetensors(ckpt):
     return sd, header.get("__metadata__", {}),
 
 
+# Matches the header size limit enforced by the safetensors library itself.
+MAX_SAFETENSORS_HEADER_SIZE = 100_000_000
+
+
+def load_safetensors_no_mmap(ckpt, device):
+    # safetensors.safe_open()/get_tensor() reads tensor data through an mmap of
+    # the file. On Windows that mmap-backed read can crash with an access
+    # violation for large files in a long-running process. Read the tensors
+    # with plain file I/O instead so no mmap of the file is ever created.
+    sd = {}
+    with open(ckpt, "rb") as f:
+        header_size = struct.unpack("<Q", f.read(8))[0]
+        if header_size > MAX_SAFETENSORS_HEADER_SIZE:
+            raise ValueError("Invalid safetensors header: header size exceeds the maximum allowed size")
+        header = json.loads(f.read(header_size).decode("utf-8"))
+        data_start = 8 + header_size
+        data_size = os.fstat(f.fileno()).st_size - data_start
+
+        tensors = []
+        for name, info in header.items():
+            if name == "__metadata__":
+                continue
+            start, end = info["data_offsets"]
+            dtype = _TYPES[info["dtype"]]
+            shape = info["shape"]
+            expected_size = math.prod(shape) * dtype.itemsize
+            if start < 0 or end < start or end - start != expected_size:
+                raise ValueError("Invalid safetensors header: tensor '{}' data range does not match its declared shape/dtype".format(name))
+            tensors.append((start, end, name, dtype, shape))
+
+        # The data region must be fully and contiguously indexed by the header,
+        # with no gaps, overlaps, or trailing bytes, matching the validation
+        # the safetensors library itself performs on the mmap path.
+        next_start = 0
+        for start, end, name, _dtype, _shape in sorted(tensors, key=lambda t: t[0]):
+            if start != next_start:
+                raise ValueError("Invalid safetensors header: tensor data ranges are not contiguous")
+            next_start = end
+        if next_start != data_size:
+            raise ValueError("Invalid safetensors header: tensor data does not cover the full file")
+
+        for start, end, name, dtype, shape in tensors:
+            if start == end:
+                sd[name] = torch.empty(shape, dtype=dtype, device=device)
+                continue
+            f.seek(data_start + start)
+            raw = bytearray(end - start)
+            if f.readinto(raw) != len(raw):
+                raise ValueError("Invalid safetensors file: tensor '{}' data is truncated".format(name))
+            sd[name] = torch.frombuffer(raw, dtype=dtype).view(shape).to(device=device)
+    return sd, header.get("__metadata__", {})
+
+
 def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
     if device is None:
         device = torch.device("cpu")
@@ -165,14 +218,15 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
                 sd, metadata = load_safetensors(ckpt)
                 if not return_metadata:
                     metadata = None
+            elif DISABLE_MMAP:
+                sd, metadata = load_safetensors_no_mmap(ckpt, device)
+                if not return_metadata:
+                    metadata = None
             else:
                 with safetensors.safe_open(ckpt, framework="pt", device=device.type) as f:
                     sd = {}
                     for k in f.keys():
-                        tensor = f.get_tensor(k)
-                        if DISABLE_MMAP:  # TODO: Not sure if this is the best way to bypass the mmap issues
-                            tensor = tensor.to(device=device, copy=True)
-                        sd[k] = tensor
+                        sd[k] = f.get_tensor(k)
                     if return_metadata:
                         metadata = f.metadata()
         except Exception as e:
