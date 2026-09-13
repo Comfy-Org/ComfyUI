@@ -9,6 +9,11 @@ ComfyUI is designed to run locally. By default, the server binds to `127.0.0.1`,
 - Anyone with access to the ComfyUI URL is trusted (a direct consequence of the localhost-only default).
 - PyTorch and other dependencies are at the versions we ship or recommend in the README.
 
+The asset `open-location` action trusts the direct transport peer's loopback
+address and opens the host file manager. Do not forward that endpoint through a
+same-host reverse proxy unless an additional access control restricts it to the
+host operator.
+
 A report is in scope only if it affects a user operating within this threat model.
 
 ## What We Consider a Vulnerability
