@@ -53,6 +53,17 @@ from app.assets.database.queries.asset_reference import (
     update_reference_updated_at,
     upsert_reference,
 )
+from app.assets.database.queries.semantics import (
+    AUTOMATIC_TAG_ORIGIN,
+    DerivedStateRow,
+    bulk_add_automatic_tags,
+    bulk_remove_automatic_tags,
+    bulk_set_loader_paths,
+    get_file_backed_references_page,
+    get_semantics_version,
+    get_tag_origins_by_reference,
+    set_semantics_version,
+)
 from app.assets.database.queries.tags import (
     AddTagsResult,
     RemoveTagsResult,
@@ -72,7 +83,9 @@ from app.assets.database.queries.tags import (
 
 __all__ = [
     "AddTagsResult",
+    "AUTOMATIC_TAG_ORIGIN",
     "CacheStateRow",
+    "DerivedStateRow",
     "RemoveTagsResult",
     "SetTagsResult",
     "UnenrichedReferenceRow",
@@ -82,6 +95,9 @@ __all__ = [
     "bulk_insert_assets",
     "bulk_insert_references_ignore_conflicts",
     "bulk_insert_tags_and_meta",
+    "bulk_add_automatic_tags",
+    "bulk_remove_automatic_tags",
+    "bulk_set_loader_paths",
     "bulk_update_enrichment_level",
     "count_active_siblings",
     "create_stub_asset",
@@ -97,6 +113,7 @@ __all__ = [
     "fetch_reference_asset_and_tags",
     "get_asset_by_hash",
     "get_existing_asset_ids",
+    "get_file_backed_references_page",
     "get_or_create_reference",
     "get_reference_by_file_path",
     "get_reference_by_id",
@@ -106,6 +123,8 @@ __all__ = [
     "get_reference_tags",
     "get_references_by_paths_and_asset_ids",
     "get_references_for_prefixes",
+    "get_semantics_version",
+    "get_tag_origins_by_reference",
     "get_unenriched_references",
     "get_unreferenced_unhashed_asset_ids",
     "insert_reference",
@@ -125,6 +144,7 @@ __all__ = [
     "set_reference_metadata",
     "set_reference_preview",
     "set_reference_system_metadata",
+    "set_semantics_version",
     "soft_delete_reference_by_id",
     "set_reference_tags",
     "update_asset_hash_and_mime",

@@ -23,6 +23,21 @@ from app.assets.helpers import get_utc_now
 from app.database.models import Base
 
 
+class AssetSemanticsVersion(Base):
+    """Which generation of the derivation logic wrote these rows -- deliberately not the Alembic version, which tracks shape rather than meaning."""
+
+    __tablename__ = "asset_semantics_version"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), nullable=False, default=get_utc_now
+    )
+
+    def __repr__(self) -> str:
+        return f"<AssetSemanticsVersion version={self.version}>"
+
+
 class Asset(Base):
     __tablename__ = "assets"
 
