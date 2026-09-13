@@ -812,11 +812,8 @@ class _AssetSeeder:
                 roots,
                 compute_hashes=self._compute_hashes,
                 limit=batch_size,
+                skip_ids=skip_ids,
             )
-
-            # Filter out previously failed references
-            if skip_ids:
-                unenriched = [row for row in unenriched if row.record_id not in skip_ids]
 
             if not unenriched:
                 break

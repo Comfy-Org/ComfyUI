@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy.orm import Session as SASession
 
 from app.assets import scanner, seeder as seeder_module
-from app.assets.database.models import AssetContent
+from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_content, create_record
 from app.assets.helpers import to_stored_hash
 from app.assets.services import hash_mode_state
@@ -106,3 +106,55 @@ def test_enrich_phase_settles_an_unreadable_transition_without_looping(
     assert attempts == [record_id], (
         "the record is attempted once, then excluded from the rest of the pass"
     )
+
+
+def test_enrich_phase_reaches_healthy_candidates_after_a_full_failed_batch(
+    session, db_engine, temp_dir: Path, monkeypatch
+):
+    for index in range(101):
+        path = temp_dir / f"candidate-{index}.safetensors"
+        content = create_content(session, str(path))
+        create_record(session, content.id, path.name)
+    session.commit()
+
+    @contextmanager
+    def _create_session():
+        with SASession(db_engine) as sess:
+            yield sess
+
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
+    with patch("app.assets.scanner.create_session", _create_session):
+        ordered = scanner.get_unenriched_assets_for_roots(
+            ("input",), compute_hashes=False, limit=101
+        )
+
+    failed_ids = {row.record_id for row in ordered[:100]}
+    healthy = ordered[100]
+    attempted: list[str] = []
+
+    def enrich_batch(rows, **_kwargs):
+        attempted.extend(row.record_id for row in rows)
+        failed = [row.record_id for row in rows if row.record_id in failed_ids]
+        if healthy.record_id in attempted:
+            with SASession(db_engine) as update_session:
+                record = update_session.get(Asset, healthy.record_id)
+                assert record is not None
+                record.system_metadata = {"enriched": True}
+                update_session.commit()
+            return 1, failed
+        return 0, failed
+
+    asset_seeder = seeder_module._AssetSeeder()
+    asset_seeder._run_gate.set()
+    asset_seeder._cancel_event.clear()
+
+    with (
+        patch("app.assets.seeder.create_session", _create_session),
+        patch("app.assets.scanner.create_session", _create_session),
+        patch("app.assets.seeder.enrich_assets_batch", enrich_batch),
+    ):
+        cancelled, enriched = asset_seeder._run_enrich_phase(("input",))
+
+    assert cancelled is False
+    assert enriched == 1
+    assert healthy.record_id in attempted

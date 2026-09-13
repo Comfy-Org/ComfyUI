@@ -9,6 +9,7 @@ a pass over a file the server cannot read.
 
 import logging
 import os
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, TypedDict
@@ -404,6 +405,7 @@ def get_unenriched_assets_for_roots(
     roots: tuple[RootType, ...],
     compute_hashes: bool,
     limit: int = 1000,
+    skip_ids: Collection[str] = (),
 ) -> list[UnenrichedContent]:
     prefixes: list[str] = []
     for root in roots:
@@ -427,6 +429,8 @@ def get_unenriched_assets_for_roots(
             )
         else:
             query = query.where(Asset.system_metadata.is_(None))
+        if skip_ids:
+            query = query.where(Asset.id.not_in(skip_ids))
         query = query.where(
             sa.or_(
                 *(sql_path_under_prefix(AssetContent.path, p) for p in prefixes)
