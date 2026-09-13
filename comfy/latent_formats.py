@@ -9,6 +9,7 @@ class LatentFormat:
     latent_rgb_factors_bias = None
     latent_rgb_factors_reshape = None
     taesd_decoder_name = None
+    compile_preview = False
     spacial_downscale_ratio = 8
     temporal_downscale_ratio = 1
 
@@ -625,6 +626,7 @@ class MiniMaxH3Video(LatentFormat):
     temporal_downscale_ratio = 4
     scale_factor = 1.0
     taesd_decoder_name = "taeh3"
+    compile_preview = True
 
     latent_rgb_factors = [
         [-0.018555,  0.024344, -0.017536],
@@ -1021,6 +1023,12 @@ class ACEAudio15(LatentFormat):
     latent_channels = 64
     latent_dimensions = 1
     temporal_downscale_ratio = 1764
+
+class YuE2(LatentFormat):
+    latent_channels = 64
+    latent_dimensions = 1
+    temporal_downscale_ratio = 1920
+
 
 class MiniMaxMusic3(LatentFormat):
     latent_channels = 128

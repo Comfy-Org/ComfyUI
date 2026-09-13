@@ -876,18 +876,19 @@ class GetMeshInfo(IO.ComfyNode):
         return IO.NodeOutput(mesh, info, ui=UI.PreviewText(info))
 
 
-def _save_file3d_to_output(model_3d: Types.File3D, filename_prefix: str) -> str:
+def _save_file3d_to_output(model_3d: Types.File3D, filename_prefix: str) -> UI.SavedResult:
     full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
         filename_prefix, folder_paths.get_output_directory()
     )
     ext = model_3d.format or "glb"
     saved_filename = f"{filename}_{counter:05}.{ext}"
     model_3d.save_to(os.path.join(full_output_folder, saved_filename))
-    return f"{subfolder}/{saved_filename}" if subfolder else saved_filename
+    return UI.SavedResult(saved_filename, subfolder, IO.FolderType.output)
 
 
 def execute_save_3d_advanced(model_3d, viewport_state, width, height, filename_prefix, kwargs) -> IO.NodeOutput:
-    model_file = _save_file3d_to_output(model_3d, filename_prefix)
+    saved = _save_file3d_to_output(model_3d, filename_prefix)
+    model_file = f"{saved.subfolder}/{saved.filename}" if saved.subfolder else saved.filename
     viewport_state = viewport_state if isinstance(viewport_state, dict) else {}
     camera_info_input = kwargs.get("camera_info", None)
     camera_info = camera_info_input if camera_info_input is not None else viewport_state.get('camera_info')
@@ -899,7 +900,7 @@ def execute_save_3d_advanced(model_3d, viewport_state, width, height, filename_p
         camera_info,
         width,
         height,
-        ui=UI.PreviewUI3DAdvanced(model_file, camera_info, model_3d_info),
+        ui=UI.PreviewUI3DAdvanced(model_file, camera_info, model_3d_info, saved_result=saved),
     )
 
 
@@ -929,17 +930,17 @@ class Save3DAdvanced(IO.ComfyNode):
                 ),
                 IO.String.Input("filename_prefix", default="3d/ComfyUI"),
                 IO.Load3D.Input("viewport_state"),
-                IO.Load3DModelInfo.Input("model_3d_info", optional=True, advanced=True),
-                IO.Load3DCamera.Input("camera_info", optional=True, advanced=True),
-                IO.Int.Input("width", default=1024, min=1, max=4096, step=1),
-                IO.Int.Input("height", default=1024, min=1, max=4096, step=1),
+                IO.Load3DModelInfo.Input("model_3d_info", optional=True, advanced=True, tooltip="Placement of each model in the scene: position, rotation, and scale (Y-up world space)."),
+                IO.Load3DCamera.Input("camera_info", optional=True, advanced=True, tooltip="Viewport camera information: position, look-at target, zoom, and type."),
+                IO.Int.Input("width", default=1024, min=1, max=4096, step=1, tooltip="Render width of the viewport in pixels."),
+                IO.Int.Input("height", default=1024, min=1, max=4096, step=1, tooltip="Render height of the viewport in pixels."),
             ],
             outputs=[
-                IO.File3DAny.Output(display_name="model_3d"),
-                IO.Load3DModelInfo.Output(display_name="model_3d_info"),
-                IO.Load3DCamera.Output(display_name="camera_info"),
-                IO.Int.Output(display_name="width"),
-                IO.Int.Output(display_name="height"),
+                IO.File3DAny.Output(display_name="model_3d", tooltip="3D model file (glb/obj/stl/etc.) from an upstream 3D node."),
+                IO.Load3DModelInfo.Output(display_name="model_3d_info", tooltip="Placement of each model in the scene: position, rotation, and scale (Y-up world space)."),
+                IO.Load3DCamera.Output(display_name="camera_info", tooltip="Viewport camera information: position, look-at target, zoom, and type."),
+                IO.Int.Output(display_name="width", tooltip="Render width of the viewport in pixels."),
+                IO.Int.Output(display_name="height", tooltip="Render height of the viewport in pixels."),
             ],
         )
 

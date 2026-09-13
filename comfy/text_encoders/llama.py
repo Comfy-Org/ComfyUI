@@ -822,7 +822,7 @@ class Llama2_(nn.Module):
                                     device=device)
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True,
-                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None):
+                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None, decode_buffers=None):
         if embeds is not None:
             x = embeds
         else:
@@ -858,7 +858,15 @@ class Llama2_(nn.Module):
 
         enable_graph = self.graph_dynamic_vbar_blocks and fixed_kv_decode
         if enable_graph:
-            x = x.clone()
+            if decode_buffers is None:
+                x = x.clone()
+            else:
+                hidden_buffer, rotary_buffers = decode_buffers
+                hidden_buffer.copy_(x)
+                x = hidden_buffer
+                for buffer, value in zip(rotary_buffers, freqs_cis):
+                    buffer.copy_(value)
+                freqs_cis = rotary_buffers
 
         intermediate = None
         all_intermediate = None
@@ -1036,7 +1044,7 @@ class BaseGenerate:
         for step in tqdm(range(max_length), desc="Generating tokens"):
             if step > 0:
                 if compile_allocations:
-                    comfy.model_prefetch.malloc_graph_begin(self, device)
+                    comfy.model_prefetch.malloc_graph_begin(device)
                 embeds = self.model.embed_tokens(decode_tokens).to(execution_dtype)
                 current_input_ids = decode_tokens if initial_input_ids is not None else None
                 position_ids = torch.tensor([[next_pos]], device=device) if next_pos is not None else None

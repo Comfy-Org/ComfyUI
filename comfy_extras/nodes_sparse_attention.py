@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import re
+import weakref
 
 import comfy_kitchen as ck
 import torch
@@ -142,11 +143,11 @@ class SparseAttnPatch:
 
     def vsa_rope_freqs(self, rope_freqs, plan):
         hit = self.vsa_rope
-        if hit is not None and hit[0] is rope_freqs and hit[1] is plan:
+        if hit is not None and hit[0]() is rope_freqs and hit[1] is plan:
             return hit[2]
         padded = rope_freqs.new_zeros((1, plan["n"]) + tuple(rope_freqs.shape[2:]))
         padded[0, plan["inv"]] = rope_freqs[0]
-        self.vsa_rope = (rope_freqs, plan, padded)
+        self.vsa_rope = (weakref.ref(rope_freqs), plan, padded)
         return padded
 
 
@@ -257,6 +258,7 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
         if patch.vsa:
             plan = patch.vsa_plan(transformer_options["minimax_h3_layout"], x.device)
             n = plan["n"]
+            freqs = patch.vsa_rope_freqs(rope_freqs, plan)
 
         key = (block_index, n, tuple(transformer_options.get("uuids", ())))   # statistics per conditioning branch
         pooled = patch.pooled.get(key)
@@ -268,7 +270,6 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
             )
 
     if patch.vsa:
-        freqs = patch.vsa_rope_freqs(rope_freqs, plan)
         sink = sink_q = (0, plan["n_prefix"])
         extra = {"tail": False, "block_len": plan["block_len"]}
         gate = attn.to_gate_compress

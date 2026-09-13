@@ -1385,7 +1385,6 @@ LARGEST_CASTED_WEIGHT = (None, 0)
 STREAM_AIMDO_CAST_BUFFERS = {}
 LARGEST_AIMDO_CASTED_WEIGHT = (None, 0)
 CROSS_STEP_STATE = weakref.WeakSet()
-MALLOC_GRAPH_MODULES = weakref.WeakSet()
 
 DEFAULT_AIMDO_CAST_BUFFER_RESERVATION_SIZE = 16 * 1024 ** 3
 
@@ -1471,9 +1470,6 @@ def reset_cast_buffers():
 
     STREAM_CAST_BUFFERS.clear()
     STREAM_AIMDO_CAST_BUFFERS.clear()
-    for module in MALLOC_GRAPH_MODULES:
-        del module._comfy_malloc_graph
-    MALLOC_GRAPH_MODULES.clear()
     soft_empty_cache()
 
 def get_offload_stream(device):

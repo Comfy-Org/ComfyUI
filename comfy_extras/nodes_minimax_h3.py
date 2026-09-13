@@ -17,6 +17,7 @@ import torchaudio
 
 import nodes
 import comfy.model_management
+import comfy.model_prefetch
 import comfy.model_sampling
 import comfy.nested_tensor
 import comfy.patcher_extension
@@ -478,7 +479,8 @@ class MiniMaxH3FunControlPatch:
         self.active = self.sigma_end <= sigma <= self.sigma_start
         self.control_stream = None
         if self.active:
-            self.prepare_control_latent(x[0].shape)
+            with comfy.model_prefetch.pause_malloc_graph():
+                self.prepare_control_latent(x[0].shape)
         try:
             return executor(x, timestep, context, transformer_options, **kwargs)
         finally:
@@ -540,12 +542,15 @@ class MiniMaxH3FunControlBlockPatch:
         self.previous = previous
 
     def __call__(self, args, extra_args):
-        self.control_patch.before_block(self.block_index, args)
+        # Control state must stay outside the base block's allocation scope.
+        with comfy.model_prefetch.pause_malloc_graph():
+            self.control_patch.before_block(self.block_index, args)
         if self.previous is None:
             out = extra_args["original_block"](args)
         else:
             out = self.previous(args, extra_args)
-        return self.control_patch.after_block(self.block_index, args, out)
+        with comfy.model_prefetch.pause_malloc_graph():
+            return self.control_patch.after_block(self.block_index, args, out)
 
     def to(self, device_or_dtype):
         self.control_patch.to(device_or_dtype)
