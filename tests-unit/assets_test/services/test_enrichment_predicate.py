@@ -16,7 +16,7 @@ from app.assets.scanner_changes import (
     live_contents_under_prefixes,
 )
 
-from .path_prefix_cases import prefix_case_paths
+from .path_prefix_cases import expected_prefix_case_paths, prefix_case_paths
 
 
 @contextmanager
@@ -186,12 +186,13 @@ def test_prefix_filter_result_set_equals_python_predicate(
     session: Session, temp_dir: Path
 ) -> None:
     root = str(temp_dir / "root")
-    by_record = _seed_paths(session, prefix_case_paths(root))
+    corpus = prefix_case_paths(root)
+    by_record = _seed_paths(session, [path for path, _ in corpus])
     stored = set(by_record.values())
 
     returned = _candidate_paths(session, root)
 
-    expected = {p for p in stored if is_path_under_prefixes(p, [root])}
+    expected = expected_prefix_case_paths(root)
     assert returned == expected
     assert expected and expected != stored
 
@@ -298,10 +299,10 @@ def test_live_contents_under_prefixes_equals_python_predicate_for_corpus(
 ) -> None:
     root = str(temp_dir / "root")
     corpus = prefix_case_paths(root)
-    stored_paths = {create_content(session, path).path for path in corpus}
+    for path, _ in corpus:
+        _ = create_content(session, path)
     prefixes = [root]
 
     returned = {content.path for content in live_contents_under_prefixes(session, prefixes)}
-    expected = {path for path in stored_paths if is_path_under_prefixes(path, prefixes)}
 
-    assert returned == expected
+    assert returned == expected_prefix_case_paths(root)

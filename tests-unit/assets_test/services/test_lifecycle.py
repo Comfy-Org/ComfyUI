@@ -27,7 +27,7 @@ from app.assets.seeder import asset_seeder
 from app.assets.services import hash_mode_state
 from app.assets.services.hash_mode_state import clear_transition_queue, write_stored_mode
 
-from .path_prefix_cases import prefix_case_paths
+from .path_prefix_cases import expected_prefix_case_paths, prefix_case_paths
 
 
 @pytest.fixture(autouse=True)
@@ -302,12 +302,12 @@ def _surviving_paths(session: Session) -> set[str]:
 
 def test_wipe_deletes_exactly_what_is_path_under_prefixes_accepts(session, comfy_dirs):
     temp_root = str(comfy_dirs)
-    stored = _seed_paths(session, prefix_case_paths(temp_root))
+    stored = _seed_paths(session, [path for path, _ in prefix_case_paths(temp_root)])
 
     records_deleted, contents_deleted = wipe_temp_db_rows(session)
     session.commit()
 
-    wiped = {p for p in stored if is_path_under_prefixes(p, [temp_root])}
+    wiped = expected_prefix_case_paths(temp_root)
     assert _surviving_paths(session) == set(stored) - wiped
     assert (records_deleted, contents_deleted) == (len(wiped), len(wiped))
     assert wiped and wiped != set(stored)
