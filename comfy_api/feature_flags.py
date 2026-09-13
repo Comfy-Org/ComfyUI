@@ -109,8 +109,6 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "max_upload_size": args.max_upload_size * 1024 * 1024, # Convert MB to bytes
     "extension": {"manager": {"supports_v4": True}},
     "node_replacements": True,
-    # Mirrors the constructed AssetManager; no degradation path exists, so this always agrees with it.
-    "assets": args.enable_assets,
 }
 
 # CLI-provided flags cannot overwrite core flags
@@ -162,11 +160,11 @@ def supports_feature(
     return get_connection_feature(sockets_metadata, sid, feature_name, False) is True
 
 
-def get_server_features() -> dict[str, Any]:
+def get_server_features(assets_enabled: bool) -> dict[str, Any]:
     """
     Get the server's feature flags.
 
     Returns:
         Dictionary of server feature flags
     """
-    return SERVER_FEATURE_FLAGS.copy()
+    return {**SERVER_FEATURE_FLAGS, "assets": assets_enabled}

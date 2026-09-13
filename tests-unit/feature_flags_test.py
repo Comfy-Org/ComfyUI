@@ -23,7 +23,7 @@ class TestFeatureFlags:
 
     def test_get_server_features_returns_copy(self):
         """Test that get_server_features returns a copy of the server flags."""
-        features = get_server_features()
+        features = get_server_features(assets_enabled=True)
         # Verify it's a copy by modifying it
         features["test_flag"] = True
         # Original should be unchanged
@@ -31,7 +31,7 @@ class TestFeatureFlags:
 
     def test_get_server_features_contains_expected_flags(self):
         """Test that server features contain expected flags."""
-        features = get_server_features()
+        features = get_server_features(assets_enabled=True)
         assert "supports_preview_metadata" in features
         assert features["supports_preview_metadata"] is True
         assert "supports_model_type_tags" in features
@@ -246,7 +246,7 @@ class TestComfyApiEnv:
             "comfy.comfy_api_env.args",
             type("Args", (), {"comfy_api_base": "https://pr-7.testenvs.comfy.org"})(),
         )
-        features = get_server_features()
+        features = get_server_features(assets_enabled=True)
         assert "comfy_api_base_url" not in features
         assert "comfy_platform_base_url" not in features
         assert "firebase_env" not in features

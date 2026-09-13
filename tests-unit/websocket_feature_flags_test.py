@@ -7,7 +7,7 @@ class TestWebSocketFeatureFlags:
 
     def test_server_feature_flags_response(self):
         """Test server feature flags are properly formatted."""
-        features = feature_flags.get_server_features()
+        features = feature_flags.get_server_features(assets_enabled=True)
 
         # Check expected server features
         assert "supports_preview_metadata" in features
@@ -67,7 +67,7 @@ class TestWebSocketFeatureFlags:
         assert "supports_preview_metadata" in client_message["data"]
 
         # Server response format (what would be sent)
-        server_features = feature_flags.get_server_features()
+        server_features = feature_flags.get_server_features(assets_enabled=True)
         server_message = {
             "type": "feature_flags",
             "data": server_features
