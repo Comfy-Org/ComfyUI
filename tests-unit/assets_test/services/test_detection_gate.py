@@ -123,8 +123,11 @@ def test_hash_mode_real_edit_splits(session, temp_dir: Path):
     input_root.mkdir()
     path = input_root / "edited.bin"
     path.write_bytes(b"old bytes")
+    previous_target_ns = path.stat().st_mtime_ns
     old_content, _ = _seed_content(session, path, _stored_hash(path))
     path.write_bytes(b"new bytes with a different length")
+    target_ns = max(path.stat().st_mtime_ns, previous_target_ns) + 1_000_000
+    os.utime(path, ns=(target_ns, target_ns))
 
     with (
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
