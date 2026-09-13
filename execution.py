@@ -119,8 +119,7 @@ class CacheSet:
             self.init_null_cache()
             logging.info("Disabling intermediate node cache.")
         elif cache_type == CacheType.RAM_PRESSURE:
-            cache_ram = cache_args.get("ram", 16.0)
-            self.init_ram_cache(cache_ram)
+            self.init_ram_cache()
             logging.info("Using RAM pressure cache.")
         elif cache_type == CacheType.LRU:
             cache_size = cache_args.get("lru", 0)
@@ -140,7 +139,7 @@ class CacheSet:
         self.outputs = LRUCache(CacheKeySetInputSignature, max_size=cache_size, enable_providers=True)
         self.objects = HierarchicalCache(CacheKeySetID)
 
-    def init_ram_cache(self, min_headroom):
+    def init_ram_cache(self):
         self.outputs = RAMPressureCache(CacheKeySetInputSignature, enable_providers=True)
         self.objects = HierarchicalCache(CacheKeySetID)
 
