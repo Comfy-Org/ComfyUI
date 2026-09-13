@@ -88,6 +88,7 @@ class YuE2Tokenizer:
             "top_p": kwargs.get("top_p", 0.95),
             "top_k": kwargs.get("top_k", 100),
             "repetition_penalty": kwargs.get("repetition_penalty", 1.2),
+            "penalty_window": kwargs.get("penalty_window", 100),
             "cfg_scale": kwargs.get("cfg_scale", 1.01 if cot == "off" else 1.0),
         }
 
@@ -160,6 +161,11 @@ class YuE2TEModel(torch.nn.Module):
         fixed_kv = isinstance(cache[0], FixedKV)
         decode_tokens = torch.empty((len(prefixes), 1), device=device, dtype=torch.long)
         positions = torch.tensor([[len(p)] for p in prefixes], device=device, dtype=torch.long)
+        # Decoder inputs and rotary tensors must keep their addresses across graph replays.
+        decode_buffers = None
+        if fixed_kv:
+            decode_buffers = (torch.empty((len(prefixes), 1, self.config.hidden_size), device=device, dtype=dtype),
+                              self.model.compute_freqs_cis(positions, device))
         history = []
         end = ABC_END if phase == "abc" else MUSIC_END
         progress = comfy.utils.ProgressBar(max_tokens)
@@ -184,7 +190,8 @@ class YuE2TEModel(torch.nn.Module):
                     if fixed_kv:
                         comfy.model_prefetch.malloc_graph_begin(device)
                     output = self.model(decode_tokens, past_key_values=cache, dtype=dtype, position_ids=positions,
-                                        attention_mask=mask[:, :prefix_length + step + 1] if mask is not None and not fixed_kv else None)
+                                        attention_mask=mask[:, :prefix_length + step + 1] if mask is not None and not fixed_kv else None,
+                                        decode_buffers=decode_buffers)
                     logits.copy_(self.model.lm_head(output[0][:, -1]))
                     cache = output[2]
                     del output
@@ -194,7 +201,7 @@ class YuE2TEModel(torch.nn.Module):
         finally:
             # Each phase has different KV buffers and may change the CFG batch size.
             comfy.model_prefetch.cleanup_prefetch_queues()
-        logging.warning("YuE2 %s reached its token budget; increase the limit for a complete result.", phase)
+        logging.warning("YuE2 %s reached its token budget before the end token.", phase)
         return history, True
 
     def _acoustic_conditioning(self, prefix, tokens, dtype):
@@ -228,7 +235,7 @@ class YuE2TEModel(torch.nn.Module):
         ids, _ = self._generate(
             tokens["prefix"], tokens["seed"] if seed is None else seed, max_length, "abc", dtype,
             temperature=temperature if do_sample else 0, top_p=top_p, top_k=top_k,
-            repetition_penalty=repetition_penalty, penalty_window=100, min_tokens=min(32, max_length),
+            repetition_penalty=repetition_penalty, penalty_window=tokens.get("penalty_window", 100), min_tokens=min(32, max_length),
         )
         return ids
 
@@ -242,12 +249,19 @@ class YuE2TEModel(torch.nn.Module):
             abc_ids = []
         prefix = prefix + abc_ids + [ABC_END, MUSIC_START]
         negative = tokens["negative"] + ([MUSIC_START] if cot == "off" else [ABC_START] + abc_ids + [ABC_END, MUSIC_START])
+        context = self.config.max_position_embeddings
+        max_tokens = min(tokens["max_tokens"], context - max(len(prefix), len(negative)))
+        # One acoustic frame needs two positions plus three boundary tokens.
+        if max_tokens < 1 or len(prefix) + 5 > context:
+            raise ValueError("YuE2 prompt leaves no room for music; shorten the style, lyrics, or ABC.")
+        if max_tokens < tokens["max_tokens"]:
+            logging.info("YuE2 music budget reduced to %d tokens (%.2f seconds) to fit the prompt.", max_tokens, max_tokens / FRAMES_PER_SECOND)
         semantic, semantic_truncated = self._generate(
-            prefix, tokens["seed"], tokens["max_tokens"], "semantic", dtype,
+            prefix, tokens["seed"], max_tokens, "semantic", dtype,
             negative=negative, cfg_scale=tokens["cfg_scale"], legacy_off=cot == "off",
             temperature=tokens["temperature"], top_p=tokens["top_p"], top_k=tokens["top_k"],
             repetition_penalty=tokens["repetition_penalty"], penalty_window=50,
-            min_tokens=min(200, tokens["max_tokens"]),
+            min_tokens=min(200, max_tokens),
         )
         conditioning, chunks = self._acoustic_conditioning(prefix, semantic, dtype)
         return conditioning, None, {
