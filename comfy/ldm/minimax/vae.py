@@ -39,9 +39,11 @@ LATENTS_STD = [
 # 3D causal CNN encoder
 
 def _kitchen_ndhwc(x):
-    # NDHWC when the kitchen pad kernel can feed it
+    # NDHWC when the kitchen pad kernel can feed it and the conv consumes it natively:
+    # cuDNN does, MIOpen converts back and loses more than the fused pad saves
     ck = getattr(comfy.quant_ops, "ck", None)
-    return ck is not None and hasattr(ck, "group_norm_silu_pad3d") and x.is_cuda and x.dtype in (torch.float16, torch.bfloat16)
+    return (ck is not None and hasattr(ck, "group_norm_silu_pad3d") and torch.version.hip is None
+            and x.is_cuda and x.dtype in (torch.float16, torch.bfloat16))
 
 
 def _fused_norm_pad(x, norm, spatial_pad, front):
