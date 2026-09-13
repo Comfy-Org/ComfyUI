@@ -150,7 +150,6 @@ def downgrade() -> None:
 
     op.drop_index("ix_asset_cache_state_asset_id", table_name="asset_cache_state")
     op.drop_index("ix_asset_cache_state_file_path", table_name="asset_cache_state")
-    op.drop_constraint("uq_asset_cache_state_file_path", table_name="asset_cache_state")
     op.drop_table("asset_cache_state")
 
     op.drop_index("ix_asset_info_tags_asset_info_id", table_name="asset_info_tags")
@@ -160,7 +159,6 @@ def downgrade() -> None:
     op.drop_index("ix_tags_tag_type", table_name="tags")
     op.drop_table("tags")
 
-    op.drop_constraint("uq_assets_info_asset_owner_name", table_name="assets_info")
     op.drop_index("ix_assets_info_owner_name", table_name="assets_info")
     op.drop_index("ix_assets_info_last_access_time", table_name="assets_info")
     op.drop_index("ix_assets_info_created_at", table_name="assets_info")

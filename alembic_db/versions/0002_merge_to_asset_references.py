@@ -177,7 +177,10 @@ def downgrade() -> None:
 
     NOTE: Data is not recoverable. The upgrade discards all rows from the old
     tables and truncates assets. After downgrade the old schema will be empty.
-    A filesystem rescan will repopulate data once the older code is running.
+    A filesystem rescan can repopulate only data derived from paths. It will
+    not restore user_metadata, manually-applied tags, preview_id nominations,
+    name renames, or job_id, because build_asset_specs derives names and tags
+    from the path alone.
     """
     # Drop new tables (order matters due to FK constraints)
     op.drop_index("ix_asset_reference_meta_key_val_bool", table_name="asset_reference_meta")
