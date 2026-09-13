@@ -87,6 +87,13 @@ class UnenrichedContent:
     file_path: str
 
 
+def _log_scan_error(phase: str, error: OSError) -> None:
+    error_type = (
+        "permission_denied" if isinstance(error, PermissionError) else "os_error"
+    )
+    logging.warning("Asset scan error: phase=%s error_type=%s", phase, error_type)
+
+
 def get_scan_prefixes_for_root(root: RootType) -> list[str]:
     if root == "models":
         bases: list[str] = []
@@ -162,9 +169,11 @@ def sync_prefixes_with_filesystem(
             stat_result = os.stat(content.path, follow_symlinks=True)
         except FileNotFoundError:
             mark_content_missing(session, content.id)
-        except PermissionError:
+        except PermissionError as e:
+            _log_scan_error("reference_stat", e)
             logging.debug("Permission denied accessing %s", content.path)
         except OSError as e:
+            _log_scan_error("reference_stat", e)
             logging.debug("OSError checking %s: %s", content.path, e)
             mark_content_missing(session, content.id)
         else:
@@ -278,7 +287,10 @@ def build_asset_specs(
             continue
         try:
             stat_p = os.stat(abs_p, follow_symlinks=True)
-        except OSError:
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            _log_scan_error("discovery_stat", e)
             continue
         if not stat_p.st_size:
             continue
@@ -451,7 +463,10 @@ def enrich_asset(
     """
     try:
         stat_p = os.stat(file_path, follow_symlinks=True)
-    except OSError:
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        _log_scan_error("enrichment_stat", e)
         return False
 
     initial_mtime_ns = get_mtime_ns(stat_p)
@@ -486,7 +501,10 @@ def enrich_asset(
             digest, verified_stat = snapshot
             stored_hash = to_stored_hash(digest)
         except Exception as e:
-            logging.warning("Failed to hash %s: %s", file_path, e)
+            if isinstance(e, OSError):
+                _log_scan_error("hashing", e)
+            else:
+                logging.warning("Failed to hash %s: %s", file_path, e)
 
     record = session.get(Asset, record_id)
     if content is None or record is None or content.mtime_ns != initial_mtime_ns:
