@@ -8,8 +8,9 @@ from comfy_api.latest import ComfyExtension, IO
 # a unit subject cube stands on the ground plane, so the camera orbits its centre.
 SUBJECT_CENTER = (0.0, 0.5, 0.0)
 CAMERA_FOV = 35.0
-MIN_DISTANCE = 3.2
-MAX_DISTANCE = 6.0
+SUBJECT_DISTANCE = 6.0
+MIN_ZOOM_FACTOR = 1.0
+MAX_ZOOM_FACTOR = 1.875
 
 HORIZONTAL_MIN, HORIZONTAL_MAX = 0, 360
 VERTICAL_MIN, VERTICAL_MAX = -30, 60
@@ -53,22 +54,21 @@ def describe_camera_angle(horizontal_angle: float, vertical_angle: float, zoom: 
     return f"{horizontal_term(horizontal_angle)} {vertical_term(vertical_angle)} {distance_term(zoom)}"
 
 
-def zoom_to_distance(zoom: float) -> float:
-    return MAX_DISTANCE - (MAX_DISTANCE - MIN_DISTANCE) * (zoom / ZOOM_MAX)
+def zoom_to_factor(zoom: float) -> float:
+    return MIN_ZOOM_FACTOR + (MAX_ZOOM_FACTOR - MIN_ZOOM_FACTOR) * (zoom / ZOOM_MAX)
 
 
 def build_camera_info(horizontal_angle: float, vertical_angle: float, zoom: float) -> dict:
     yaw, pitch = math.radians(horizontal_angle), math.radians(vertical_angle)
-    distance = zoom_to_distance(zoom)
     cx, cy, cz = SUBJECT_CENTER
     return {
         "position": {
-            "x": cx + distance * math.cos(pitch) * math.sin(yaw),
-            "y": cy + distance * math.sin(pitch),
-            "z": cz + distance * math.cos(pitch) * math.cos(yaw),
+            "x": cx + SUBJECT_DISTANCE * math.cos(pitch) * math.sin(yaw),
+            "y": cy + SUBJECT_DISTANCE * math.sin(pitch),
+            "z": cz + SUBJECT_DISTANCE * math.cos(pitch) * math.cos(yaw),
         },
         "target": {"x": cx, "y": cy, "z": cz},
-        "zoom": 1.0,
+        "zoom": zoom_to_factor(zoom),
         "cameraType": "perspective",
         "fov": CAMERA_FOV,
     }
@@ -90,7 +90,7 @@ class CameraAngle(IO.ComfyNode):
                 IO.Int.Input("vertical_angle", default=0, min=VERTICAL_MIN, max=VERTICAL_MAX, step=1,
                              tooltip="Elevation in degrees. Negative looks up from below, positive looks down from above."),
                 IO.Float.Input("zoom", default=5.0, min=ZOOM_MIN, max=ZOOM_MAX, step=0.1,
-                               tooltip="How close the camera is: 0 is a wide shot, 10 a close-up."),
+                               tooltip="Lens zoom on the subject: 0 is a wide shot, 10 a close-up. Carried into camera_info.zoom."),
                 IO.Image.Input("image", optional=True,
                                tooltip="Optional reference image shown on the front of the subject cube in the 3D preview."),
                 IO.String.Input("view", default="", optional=True, socketless=True,
