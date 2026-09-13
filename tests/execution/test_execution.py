@@ -14,6 +14,8 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import os
+import re
+import sys
 from pathlib import PurePosixPath
 from comfy_execution.graph_utils import GraphBuilder, Node
 from app.assets.scanner_admission import _should_skip_extension
@@ -50,6 +52,10 @@ ASSET_FATAL_LOG_PREFIXES = (
     "Failed to register executed output: ",
     "Failed to register uploaded image as asset",
     "WARNING: blake3 package not installed",
+)
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+LOG_LINE_PREFIX_RE = re.compile(
+    r"^(?:\[[^\]]+\]\s+)?\[(?:DEBUG|DETAIL|INFO|WARNING|ERROR|CRITICAL)\]\s+"
 )
 
 
@@ -274,10 +280,31 @@ def _assert_no_fatal_asset_logs(capture_path):
         prefix for prefix in ASSET_FATAL_LOG_PREFIXES if prefix in server_output
     ]
     if matched_prefixes:
-        raise AssertionError(
-            "Asset health check fatal-log failure: "
-            f"matched prefixes={matched_prefixes!r}"
+        lines = server_output.splitlines()
+        matched_regions = []
+        for index, line in enumerate(lines):
+            line_prefixes = [prefix for prefix in matched_prefixes if prefix in line]
+            if not line_prefixes:
+                continue
+            end = index + 1
+            while end < len(lines):
+                plain_line = ANSI_ESCAPE_RE.sub("", lines[end])
+                if LOG_LINE_PREFIX_RE.match(plain_line):
+                    break
+                end += 1
+            matched_regions.append(
+                f"--- BEGIN MATCH line={index + 1} prefixes={line_prefixes!r} ---\n"
+                + "\n".join(lines[index:end])
+                + f"\n--- END MATCH line={index + 1} ---"
+            )
+        message = (
+            "WIN12_DIAG Asset health check fatal-log failure: "
+            f"matched prefixes={matched_prefixes!r}\n"
+            + "\n".join(matched_regions)
         )
+        print("\n" + message + "\n", file=sys.stdout, flush=True)  # noqa: T201
+        print("\n" + message + "\n", file=sys.stderr, flush=True)  # noqa: T201
+        raise AssertionError(message)
 
 
 def _assert_assets_healthy(listen, port, output_dir, capture_path):
