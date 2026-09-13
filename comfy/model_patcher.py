@@ -630,7 +630,10 @@ class ModelPatcher:
                 return True
 
     def memory_required(self, input_shape):
-        return self.model.memory_required(input_shape=input_shape)
+        memory_efficient_attention = self.model_options.get("optimized_attention_memory_efficient")
+        if memory_efficient_attention is None:
+            return self.model.memory_required(input_shape=input_shape)
+        return self.model.memory_required(input_shape=input_shape, memory_efficient_attention=memory_efficient_attention)
 
     def disable_model_cfg1_optimization(self):
         self.model_options["disable_cfg1_optimization"] = True
@@ -685,13 +688,14 @@ class ModelPatcher:
     def set_model_attn2_output_patch(self, patch):
         self.set_model_patch(patch, "attn2_output_patch")
 
-    def set_model_optimized_attention(self, optimized_attention):
+    def set_model_optimized_attention(self, optimized_attention, memory_efficient=False):
         def optimized_attention_override(_, *args, **kwargs):
             return optimized_attention(*args, **kwargs)
 
         if hasattr(optimized_attention, "container_function") and optimized_attention.container_function is not None:
             optimized_attention_override.container_function = optimized_attention.container_function
         self.model_options["transformer_options"]["optimized_attention_override"] = optimized_attention_override
+        self.model_options["optimized_attention_memory_efficient"] = memory_efficient
 
     def set_model_input_block_patch(self, patch):
         self.set_model_patch(patch, "input_block_patch")

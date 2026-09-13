@@ -854,42 +854,57 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     return out
 
 
-optimized_attention = attention_basic
-# Read by BaseModel.memory_required() to pick between its two estimate formulas.
-optimized_attention_memory_efficient = False
+def attention_backend_memory_efficient(name):
+    if name == "xformers":
+        return True
+    if name in ("pytorch", "sage", "sage3", "flash", "comfy_kitchen_int8"):
+        return model_management.pytorch_attention_flash_attention()
+    return False
 
-if model_management.sage_attention_enabled():
-    logging.info("Using sage attention")
-    optimized_attention = attention_sage
-    optimized_attention_memory_efficient = True
-elif model_management.flash_attention_enabled():
-    logging.info("Using Flash Attention")
-    optimized_attention = attention_flash
-    optimized_attention_memory_efficient = True
-elif model_management.xformers_enabled():
-    logging.info("Using xformers attention")
-    optimized_attention = attention_xformers
-    optimized_attention_memory_efficient = True
-elif model_management.pytorch_attention_enabled():
-    logging.info("Using pytorch attention")
-    optimized_attention = attention_pytorch
-    optimized_attention_memory_efficient = model_management.pytorch_attention_flash_attention()
-else:
-    if args.use_split_cross_attention:
-        logging.info("Using split optimization for attention")
-        optimized_attention = attention_split
-    else:
-        logging.info("Using sub quadratic optimization for attention, if you have memory or speed issues try using: --use-split-cross-attention")
-        optimized_attention = attention_sub_quad
 
-if model_management.comfy_kitchen_attention_enabled():
-    if COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE:
-        logging.info("Using Comfy Kitchen attention")
-        optimized_attention = attention_comfy_kitchen_int8
-        optimized_attention_memory_efficient = True
+def _select_optimized_attention():
+    optimized_attention = attention_basic
+    name = "basic"
+
+    if model_management.sage_attention_enabled():
+        logging.info("Using sage attention")
+        optimized_attention = attention_sage
+        name = "sage"
+    elif model_management.flash_attention_enabled():
+        logging.info("Using Flash Attention")
+        optimized_attention = attention_flash
+        name = "flash"
+    elif model_management.xformers_enabled():
+        logging.info("Using xformers attention")
+        optimized_attention = attention_xformers
+        name = "xformers"
+    elif model_management.pytorch_attention_enabled():
+        logging.info("Using pytorch attention")
+        optimized_attention = attention_pytorch
+        name = "pytorch"
     else:
-        logging.error("Comfy Kitchen attention is unavailable. Install a Comfy Kitchen build with attention support to use --use-ck-attention.")
-        exit(-1)
+        if args.use_split_cross_attention:
+            logging.info("Using split optimization for attention")
+            optimized_attention = attention_split
+            name = "split"
+        else:
+            logging.info("Using sub quadratic optimization for attention, if you have memory or speed issues try using: --use-split-cross-attention")
+            optimized_attention = attention_sub_quad
+            name = "sub_quad"
+
+    if model_management.comfy_kitchen_attention_enabled():
+        if COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE:
+            logging.info("Using Comfy Kitchen attention")
+            optimized_attention = attention_comfy_kitchen_int8
+            name = "comfy_kitchen_int8"
+        else:
+            logging.error("Comfy Kitchen attention is unavailable. Install a Comfy Kitchen build with attention support to use --use-ck-attention.")
+            exit(-1)
+
+    return optimized_attention, attention_backend_memory_efficient(name)
+
+
+optimized_attention, optimized_attention_memory_efficient = _select_optimized_attention()
 
 optimized_attention_masked = optimized_attention
 
