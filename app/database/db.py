@@ -21,6 +21,7 @@ try:
 
     from app.database.models import Base
     import app.assets.database.models  # noqa: F401 — register models with Base.metadata
+    import blake3  # noqa: F401 — verify the hard dependency is importable at startup
 
     _DB_AVAILABLE = True
 except ImportError as e:
@@ -184,6 +185,29 @@ def _init_file_db(db_url):
     prepare_file_db_path(db_path)
     db_exists = os.path.exists(db_path)
 
+    # Lock BEFORE any migration work — deliberately diverging from upstream master, whose
+    # "it would block Alembic" rationale is false (the lock guards a separate `<db>.lock`
+    # file). Only this order makes revision inspection, backup, upgrade and the failure-path
+    # restore mutually exclusive between processes.
+    _acquire_file_lock(db_path)
+    try:
+        _migrate_and_bind(db_url, db_path, db_exists)
+    except Exception:
+        _db_lock.release()
+        raise
+
+
+_DESTRUCTIVE_REVISION = "0007_record_content_split"
+
+
+def _upgrade_discards_the_catalog(script, target_rev, current_rev):
+    return any(
+        revision.revision == _DESTRUCTIVE_REVISION
+        for revision in script.iterate_revisions(upper=target_rev, lower=current_rev)
+    )
+
+
+def _migrate_and_bind(db_url, db_path, db_exists):
     config = get_alembic_config()
 
     # Check if we need to upgrade
@@ -225,11 +249,15 @@ def _init_file_db(db_url):
             logging.exception("Error upgrading database: ")
             raise e
 
-    # Acquire an OS-level file lock after migrations are complete.
-    # Alembic uses its own connection, so we must wait until it's done
-    # before locking — otherwise our own lock blocks the migration.
+        if backup_path and _upgrade_discards_the_catalog(script, target_rev, current_rev):
+            log_startup_warning(
+                f"The asset catalog was rebuilt from scratch by migration "
+                f"{_DESTRUCTIVE_REVISION}: manual tags, user metadata, previews, renames, "
+                f"API-created records and job_id links from the previous database were "
+                f"discarded. The database from before the upgrade was kept at {backup_path}."
+            )
+
     conn.close()
-    _acquire_file_lock(db_path)
 
     global Session
     Session = sessionmaker(bind=engine)
