@@ -419,7 +419,7 @@ class Qwen2VLVisionTransformer(nn.Module):
         hidden_states = self.patch_embed(pixel_values)
 
         window_index, cu_window_seqlens = self.get_window_index(image_grid_thw)
-        cu_window_seqlens = torch.tensor(cu_window_seqlens, device=hidden_states.device)
+        cu_window_seqlens = torch.tensor(cu_window_seqlens)  # only read via .tolist(), keep off the device
         cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
 
         position_embeddings = self.get_position_embeddings(image_grid_thw, hidden_states.device)
