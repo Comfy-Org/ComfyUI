@@ -11,7 +11,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from blake3 import blake3
+try:
+    from blake3 import blake3
+except ImportError:
+    blake3 = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,13 +37,15 @@ def _snapshot(stat_result: os.stat_result) -> _Snapshot:
 def snapshot_hash(
     path: str, chunk_size: int = 8 * 1024 * 1024
 ) -> tuple[str, os.stat_result] | None:
+    if blake3 is None:
+        raise ModuleNotFoundError("No module named 'blake3'")
     try:
         pre_stat = _snapshot(os.stat(path))
         hasher = blake3()
         with open(path, "rb") as file:
             open_stat = _snapshot(os.fstat(file.fileno()))
             while chunk := file.read(chunk_size):
-                hasher.update(chunk)
+                _update_result = hasher.update(chunk)
             post_hash_stat = _snapshot(os.fstat(file.fileno()))
         post_stat_result = os.stat(path)
     except FileNotFoundError:
