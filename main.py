@@ -31,6 +31,7 @@ import faulthandler
 import logging
 import signal
 import sys
+import comfy.browser
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
@@ -566,12 +567,19 @@ def start_comfyui(asyncio_loop=None):
     call_on_start = None
     if args.auto_launch:
         def startup_server(scheme, address, port):
-            import webbrowser
             if os.name == 'nt' and address == '0.0.0.0':
                 address = '127.0.0.1'
             if ':' in address:
                 address = "[{}]".format(address)
-            webbrowser.open(f"{scheme}://{address}:{port}")
+
+            url = f"{scheme}://{address}:{port}"
+            
+            comfy.browser.open_browser(
+                url,
+                browser_path=args.browser_path,
+                browser_profile=args.browser_profile,
+            )
+
         call_on_start = startup_server
 
     async def start_all():
