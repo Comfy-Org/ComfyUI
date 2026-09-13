@@ -1873,7 +1873,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Text to image",
+        "category": "Image generation/Text to image",
         "description": "Generates images from text prompts using Qwen-Image, Alibaba's 20B MMDiT model with excellent multilingual text rendering."
       }
     ]

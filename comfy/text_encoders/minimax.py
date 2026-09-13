@@ -28,6 +28,10 @@ from .qwen3vl import Qwen3VL, Qwen3VLSDTokenizer
 
 VISION_START = 151652
 VISION_END = 151653
+# FL2VA/Ref2VA tokenizer_config extends Qwen with these, ids fixed by the released tokenizer
+MINIMAX_EXTRA_TOKENS = {"<d>": 151669, "</d>": 151670, "<|cutoff|>": 151671,
+                        "<|lyrics_start|>": 151672, "<|lyrics_end|>": 151673,
+                        "<|caption_start|>": 151674, "<|caption_end|>": 151675}
 QWEN_IMAGE_MEAN = [0.5, 0.5, 0.5]
 QWEN_IMAGE_STD = [0.5, 0.5, 0.5]
 
@@ -122,14 +126,17 @@ class MiniMaxH3TEModel(comfy.sd1_clip.SD1ClipModel):
                          clip_model=MiniMaxH3ClipModel, model_options=model_options)
 
 
+class MiniMaxQwenSDTokenizer(Qwen3VLSDTokenizer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.tokenizer.add_special_tokens({"additional_special_tokens": list(MINIMAX_EXTRA_TOKENS)})
+        self.inv_vocab = {v: k for k, v in self.tokenizer.get_vocab().items()}
+
+
 class MiniMaxH3Tokenizer(comfy.sd1_clip.SD1Tokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
-        tokenizer = lambda *a, **kw: Qwen3VLSDTokenizer(*a, **kw, embedding_size=5120, embedding_key="qwen3vl_32b")
+        tokenizer = lambda *a, **kw: MiniMaxQwenSDTokenizer(*a, **kw, embedding_size=5120, embedding_key="qwen3vl_32b")
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name="qwen3vl_32b", tokenizer=tokenizer)
-
-    def _text_ids(self, text):
-        tok = self.qwen3vl_32b.tokenizer
-        return tok(text, add_special_tokens=False)["input_ids"]
 
     @staticmethod
     def _vision_entry(data, video_block=False):
@@ -143,7 +150,16 @@ class MiniMaxH3Tokenizer(comfy.sd1_clip.SD1Tokenizer):
         entries = []
 
         def add_text(s):
-            entries.extend((tid, 1.0) for tid in self._text_ids(s))
+            if not s:
+                return
+            token_batches = self.qwen3vl_32b.tokenize_with_weights(
+                s,
+                return_word_ids=False,
+                disable_weights=True,
+            )
+            if len(token_batches) != 1:
+                raise ValueError("MiniMax H3 text segment exceeds the supported prompt length.")
+            entries.extend(token_batches[0])
 
         def add_vision(data, video_block=False):
             entries.append((VISION_START, 1.0))

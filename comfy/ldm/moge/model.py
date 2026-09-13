@@ -69,7 +69,7 @@ class MoGeModelV1(nn.Module):
         resize = ((num_tokens * 14 ** 2) / (H * W)) ** 0.5
         rh, rw = int(H * resize), int(W * resize)
         x = F.interpolate(image, (rh, rw), mode="bicubic", align_corners=False, antialias=True)
-        x = (x - self.image_mean) / self.image_std
+        x = (x - comfy.ops.cast_to_input(self.image_mean, x, copy=False)) / comfy.ops.cast_to_input(self.image_std, x, copy=False)
         x14 = F.interpolate(x, (rh // 14 * 14, rw // 14 * 14), mode="bilinear", align_corners=False, antialias=True)
 
         n_layers = len(self.backbone.encoder.layer)
@@ -268,7 +268,6 @@ class MoGeModel:
     """Loaded MoGe model + ComfyUI memory management."""
 
     def __init__(self, state_dict: dict):
-        # text encoder dtype closest match
         self.load_device = comfy.model_management.text_encoder_device()
         offload_device = comfy.model_management.text_encoder_offload_device()
         self.dtype = comfy.model_management.text_encoder_dtype(self.load_device)
@@ -287,7 +286,7 @@ class MoGeModel:
               ) -> Dict[str, torch.Tensor]:
         """Run a single MoGe forward + post-process pass. image is (B, 3, H, W) in [0, 1]."""
         comfy.model_management.load_model_gpu(self.patcher)
-        image = image.to(device=self.load_device, dtype=self.dtype)
+        image = image.to(device=self.load_device, dtype=torch.float32)
         H, W = image.shape[-2:]
         aspect_ratio = W / H
 

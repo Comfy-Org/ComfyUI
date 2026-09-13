@@ -1064,6 +1064,27 @@ def get_references_by_paths_and_asset_ids(
     return winners
 
 
+def get_reference_paths_by_ids(
+    session: Session,
+    reference_ids: list[str],
+) -> dict[str, str]:
+    """Map reference id -> file_path for live, file-backed references."""
+    if not reference_ids:
+        return {}
+
+    paths: dict[str, str] = {}
+    for chunk in iter_chunks(reference_ids, MAX_BIND_PARAMS):
+        rows = session.execute(
+            select(AssetReference.id, AssetReference.file_path).where(
+                AssetReference.id.in_(chunk),
+                AssetReference.file_path.is_not(None),
+                AssetReference.deleted_at.is_(None),
+            )
+        )
+        paths.update({rid: fp for rid, fp in rows})
+    return paths
+
+
 def get_reference_ids_by_ids(
     session: Session,
     reference_ids: list[str],

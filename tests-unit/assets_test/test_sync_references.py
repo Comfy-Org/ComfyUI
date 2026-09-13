@@ -150,7 +150,7 @@ def test_needs_verify_toggling(session, temp_dir, case):
     )
     session.commit()
 
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         sync_references_with_filesystem(session, "models")
         session.commit()
 
@@ -185,7 +185,7 @@ def test_is_missing_flag(session, temp_dir, case):
     _make_asset(session, "a1", fp, "r1", asset_hash="blake3:abc", mtime_ns=mtime)
     session.commit()
 
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         sync_references_with_filesystem(session, "models")
         session.commit()
 
@@ -200,7 +200,7 @@ def test_seed_asset_all_missing_deletes_asset(session, temp_dir):
     _make_asset(session, "seed1", fp, "r1", asset_hash=None, mtime_ns=999)
     session.commit()
 
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         sync_references_with_filesystem(session, "models")
         session.commit()
 
@@ -215,7 +215,7 @@ def test_seed_asset_some_exist_returns_survivors(session, temp_dir):
     _make_asset(session, "seed1", fp, "r1", asset_hash=None, mtime_ns=mtime)
     session.commit()
 
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         survivors = sync_references_with_filesystem(
             session, "models", collect_existing_paths=True,
         )
@@ -240,7 +240,7 @@ def test_hashed_asset_prunes_missing_refs_when_one_is_ok(session, temp_dir):
     session.add(ref_gone)
     session.commit()
 
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         sync_references_with_filesystem(session, "models")
         session.commit()
 
@@ -255,7 +255,7 @@ def test_hashed_asset_all_missing_keeps_refs(session, temp_dir):
     _make_asset(session, "h1", fp, "r1", asset_hash="blake3:aaa", mtime_ns=999)
     session.commit()
 
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         sync_references_with_filesystem(session, "models")
         session.commit()
 
@@ -272,7 +272,7 @@ def test_missing_tag_added_when_all_refs_gone(session, temp_dir):
     _make_asset(session, "h1", fp, "r1", asset_hash="blake3:aaa", mtime_ns=999)
     session.commit()
 
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         sync_references_with_filesystem(
             session, "models", update_missing_tags=True,
         )
@@ -295,7 +295,7 @@ def test_missing_tag_removed_when_ref_ok(session, temp_dir):
     ))
     session.commit()
 
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         sync_references_with_filesystem(
             session, "models", update_missing_tags=True,
         )
@@ -313,7 +313,7 @@ def test_missing_tags_not_touched_when_flag_false(session, temp_dir):
     _make_asset(session, "h1", fp, "r1", asset_hash="blake3:aaa", mtime_ns=999)
     session.commit()
 
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         sync_references_with_filesystem(
             session, "models", update_missing_tags=False,
         )
@@ -329,7 +329,7 @@ def test_returns_none_when_collect_false(session, temp_dir):
     _make_asset(session, "a1", fp, "r1", asset_hash="blake3:abc", mtime_ns=mtime)
     session.commit()
 
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         result = sync_references_with_filesystem(
             session, "models", collect_existing_paths=False,
         )
@@ -338,7 +338,7 @@ def test_returns_none_when_collect_false(session, temp_dir):
 
 
 def test_returns_empty_set_for_no_prefixes(session):
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[]):
         result = sync_references_with_filesystem(
             session, "models", collect_existing_paths=True,
         )
@@ -348,7 +348,7 @@ def test_returns_empty_set_for_no_prefixes(session):
 
 def test_no_references_is_noop(session, temp_dir):
     """No crash and no side effects when there are no references."""
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         survivors = sync_references_with_filesystem(
             session, "models", collect_existing_paths=True,
         )
@@ -388,7 +388,7 @@ def test_sync_does_not_resurrect_soft_deleted_ref(session, temp_dir):
     _soft_delete_ref(session, "r1")
     session.commit()
 
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         sync_references_with_filesystem(session, "models")
         session.commit()
 
@@ -472,7 +472,7 @@ def test_sync_ignores_soft_deleted_seed_asset(session, temp_dir):
     _soft_delete_ref(session, "r1")
     session.commit()
 
-    with patch("app.assets.scanner.get_prefixes_for_root", return_value=[str(temp_dir)]):
+    with patch("app.assets.scanner.get_scan_prefixes_for_root", return_value=[str(temp_dir)]):
         sync_references_with_filesystem(session, "models")
         session.commit()
 

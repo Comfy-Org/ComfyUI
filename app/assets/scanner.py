@@ -57,10 +57,18 @@ class _AssetAccumulator(TypedDict):
     refs: list[_RefInfo]
 
 
+# Temp is deliberately absent: it is wiped before every scan, so walking it finds nothing.
 RootType = Literal["models", "input", "output"]
 
 
-def get_prefixes_for_root(root: RootType) -> list[str]:
+def _log_scan_error(phase: str, error: OSError) -> None:
+    error_type = (
+        "permission_denied" if isinstance(error, PermissionError) else "os_error"
+    )
+    logging.warning("Asset scan error: phase=%s error_type=%s", phase, error_type)
+
+
+def get_scan_prefixes_for_root(root: RootType) -> list[str]:
     if root == "models":
         bases: list[str] = []
         for _bucket, paths, _exts in get_comfy_models_folders():
@@ -73,10 +81,15 @@ def get_prefixes_for_root(root: RootType) -> list[str]:
     return []
 
 
-def get_all_known_prefixes() -> list[str]:
-    """Get all known asset prefixes across all root types."""
-    all_roots: tuple[RootType, ...] = ("models", "input", "output")
-    return [p for root in all_roots for p in get_prefixes_for_root(root)]
+def get_owned_prefixes() -> list[str]:
+    """Every directory an asset may live in; references outside these are marked missing."""
+    scan_roots: tuple[RootType, ...] = ("models", "input", "output")
+    prefixes = [p for root in scan_roots for p in get_scan_prefixes_for_root(root)]
+    return prefixes + get_temp_prefixes()
+
+
+def get_temp_prefixes() -> list[str]:
+    return [os.path.abspath(folder_paths.get_temp_directory())]
 
 
 def collect_models_files() -> list[str]:
@@ -107,7 +120,21 @@ def sync_references_with_filesystem(
     collect_existing_paths: bool = False,
     update_missing_tags: bool = False,
 ) -> set[str] | None:
-    """Reconcile asset references with filesystem for a root.
+    return sync_prefixes_with_filesystem(
+        session,
+        get_scan_prefixes_for_root(root),
+        collect_existing_paths=collect_existing_paths,
+        update_missing_tags=update_missing_tags,
+    )
+
+
+def sync_prefixes_with_filesystem(
+    session,
+    prefixes: list[str],
+    collect_existing_paths: bool = False,
+    update_missing_tags: bool = False,
+) -> set[str] | None:
+    """Reconcile asset references with filesystem under the given prefixes.
 
     - Toggle needs_verify per reference using mtime/size stat check
     - For hashed assets with at least one stat-unchanged ref: delete stale missing refs
@@ -117,14 +144,13 @@ def sync_references_with_filesystem(
 
     Args:
         session: Database session
-        root: Root type to scan
+        prefixes: Absolute directory prefixes whose references to reconcile
         collect_existing_paths: If True, return set of surviving file paths
         update_missing_tags: If True, update 'missing' tags based on file status
 
     Returns:
         Set of surviving absolute paths if collect_existing_paths=True, else None
     """
-    prefixes = get_prefixes_for_root(root)
     if not prefixes:
         return set() if collect_existing_paths else None
 
@@ -149,11 +175,13 @@ def sync_references_with_filesystem(
             )
         except FileNotFoundError:
             exists = False
-        except PermissionError:
+        except PermissionError as e:
             exists = True
+            _log_scan_error("reference_stat", e)
             logging.debug("Permission denied accessing %s", row.file_path)
         except OSError as e:
             exists = False
+            _log_scan_error("reference_stat", e)
             logging.debug("OSError checking %s: %s", row.file_path, e)
 
         acc["refs"].append(
@@ -251,6 +279,16 @@ def sync_root_safely(root: RootType) -> set[str]:
         return set()
 
 
+def sync_temp_references_safely() -> None:
+    """Retire temp references whose file is gone; temp is never scanned, so nothing else stats them."""
+    try:
+        with create_session() as sess:
+            sync_prefixes_with_filesystem(sess, get_temp_prefixes())
+            sess.commit()
+    except Exception as e:
+        logging.exception("temp reference sync failed: %s", e)
+
+
 def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int:
     """Mark references as missing when outside the given prefixes.
 
@@ -303,7 +341,10 @@ def build_asset_specs(
             continue
         try:
             stat_p = os.stat(abs_p, follow_symlinks=True)
-        except OSError:
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            _log_scan_error("discovery_stat", e)
             continue
         if not stat_p.st_size:
             continue
@@ -384,7 +425,7 @@ def get_unenriched_assets_for_roots(
     """
     prefixes: list[str] = []
     for root in roots:
-        prefixes.extend(get_prefixes_for_root(root))
+        prefixes.extend(get_scan_prefixes_for_root(root))
 
     if not prefixes:
         return []
@@ -426,7 +467,10 @@ def enrich_asset(
 
     try:
         stat_p = os.stat(file_path, follow_symlinks=True)
-    except OSError:
+    except FileNotFoundError:
+        return new_level
+    except OSError as e:
+        _log_scan_error("enrichment_stat", e)
         return new_level
 
     initial_mtime_ns = get_mtime_ns(stat_p)
@@ -491,7 +535,10 @@ def enrich_asset(
                 if metadata_ok:
                     new_level = ENRICHMENT_HASHED
         except Exception as e:
-            logging.warning("Failed to hash %s: %s", file_path, e)
+            if isinstance(e, OSError):
+                _log_scan_error("hashing", e)
+            else:
+                logging.warning("Failed to hash %s: %s", file_path, e)
 
     # Optimistic guard: if the reference's mtime_ns changed since we
     # started (e.g. ingest_existing_file updated it), our results are

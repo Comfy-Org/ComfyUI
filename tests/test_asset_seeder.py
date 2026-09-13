@@ -162,7 +162,7 @@ class TestPendingEnrichDrain:
     """Verify that _run_scan drains _pending_enrich via start_enrich."""
 
     @patch("app.assets.seeder.dependencies_available", return_value=True)
-    @patch("app.assets.seeder.get_all_known_prefixes", return_value=[])
+    @patch("app.assets.seeder.get_owned_prefixes", return_value=[])
     @patch("app.assets.seeder.sync_root_safely", return_value=set())
     @patch("app.assets.seeder.collect_paths_for_roots", return_value=[])
     @patch("app.assets.seeder.build_asset_specs", return_value=([], {}, 0))
@@ -187,7 +187,7 @@ class TestPendingEnrichDrain:
         assert seeder._pending_enrich is None
 
     @patch("app.assets.seeder.dependencies_available", return_value=True)
-    @patch("app.assets.seeder.get_all_known_prefixes", return_value=[])
+    @patch("app.assets.seeder.get_owned_prefixes", return_value=[])
     @patch("app.assets.seeder.sync_root_safely", return_value=set())
     @patch("app.assets.seeder.collect_paths_for_roots", return_value=[])
     @patch("app.assets.seeder.build_asset_specs", return_value=([], {}, 0))
@@ -206,7 +206,7 @@ class TestPendingEnrichDrain:
         assert seeder._pending_enrich is None
 
     @patch("app.assets.seeder.dependencies_available", return_value=True)
-    @patch("app.assets.seeder.get_all_known_prefixes", return_value=[])
+    @patch("app.assets.seeder.get_owned_prefixes", return_value=[])
     @patch("app.assets.seeder.sync_root_safely", return_value=set())
     @patch("app.assets.seeder.collect_paths_for_roots", return_value=[])
     @patch("app.assets.seeder.build_asset_specs", return_value=([], {}, 0))

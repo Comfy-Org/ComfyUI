@@ -531,7 +531,7 @@ class IdeogramPImage(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="IdeogramPImage",
-            display_name="Ideogram P-Image",
+            display_name="Ideogram & Pruna P-Image",
             category="partner/image/Ideogram",
             description="Generates images using P-Image, Ideogram's fast text-to-image model. "
                         "Strong typography and photorealism; "

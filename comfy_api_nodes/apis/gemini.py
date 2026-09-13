@@ -256,15 +256,32 @@ class GeminiInteractionMediaPart(BaseModel):
     mime_type: str | None = Field(None)
 
 
+class GeminiInteractionVideoConfig(BaseModel):
+    task: str | None = Field(
+        None, description="One of: text_to_video, image_to_video, reference_to_video, edit, extend."
+    )
+
+
 class GeminiInteractionGenerationConfig(BaseModel):
     temperature: float | None = Field(None, ge=0.0, le=2.0)
     top_p: float | None = Field(None, ge=0.0, le=1.0)
+    video_config: GeminiInteractionVideoConfig | None = Field(None)
+
+
+class GeminiInteractionResponseFormat(BaseModel):
+    type: Literal["video"] = "video"
+    resolution: str | None = Field(None, description="One of: 360p, 720p, 1080p, 4k.")
+    aspect_ratio: str | None = Field(None, description="One of: 16:9, 9:16.")
+    delivery: str | None = Field(
+        None, description="Set to 'uri' to receive a Files API URI instead of inline base64 data."
+    )
 
 
 class GeminiInteractionRequest(BaseModel):
     model: str = Field(...)
     input: list[GeminiInteractionTextPart | GeminiInteractionMediaPart] = Field(...)
     generation_config: GeminiInteractionGenerationConfig | None = Field(None)
+    response_format: GeminiInteractionResponseFormat | None = Field(None)
 
 
 class GeminiInteractionModalityTokens(BaseModel):
@@ -299,3 +316,9 @@ class GeminiInteraction(BaseModel):
     )
     steps: list[GeminiInteractionStep] | None = Field(None)
     usage: GeminiInteractionUsage | None = Field(None)
+
+
+class GeminiFile(BaseModel):
+    name: str | None = Field(None, description="Resource name of the file, in the form 'files/<id>'.")
+    uri: str | None = Field(None)
+    state: str | None = Field(None, description="One of: PROCESSING, ACTIVE, FAILED.")

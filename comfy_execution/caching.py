@@ -1,11 +1,11 @@
 import asyncio
 import bisect
 import itertools
-import psutil
 import time
 import torch
 from typing import Sequence, Mapping, Dict
 from comfy.model_patcher import is_model_patcher_output
+from comfy.system_memory import virtual_memory_available
 from comfy_execution.graph import DynamicPrompt
 from abc import ABC, abstractmethod
 
@@ -548,7 +548,7 @@ class RAMPressureCache(LRUCache):
         super().set_local(node_id, value)
 
     def ram_release(self, target, free_active=False, min_entry_size=0):
-        if psutil.virtual_memory().available >= target:
+        if virtual_memory_available() >= target:
             return 0
 
         clean_list = []
@@ -564,19 +564,30 @@ class RAMPressureCache(LRUCache):
 
             ram_usage = RAM_CACHE_DEFAULT_RAM_USAGE
             oom_ram_usage = ram_usage
+            seen_storages = set()
             def scan_list_for_ram_usage(outputs):
                 nonlocal ram_usage, oom_ram_usage
                 if outputs is None:
                     return
+                if isinstance(outputs, Mapping):
+                    outputs = outputs.values()
+                elif not isinstance(outputs, (list, tuple)):
+                    outputs = (outputs,)
                 for output in outputs:
-                    if isinstance(output, (list, tuple)):
+                    if isinstance(output, (list, tuple, Mapping)):
                         scan_list_for_ram_usage(output)
                     elif isinstance(output, torch.Tensor) and output.device.type == 'cpu':
-                        ram_usage += output.numel() * output.element_size()
-                        oom_ram_usage += output.numel() * output.element_size()
+                        storage = output.untyped_storage()
+                        storage_key = (storage.data_ptr(), storage.nbytes())
+                        if storage_key not in seen_storages:
+                            seen_storages.add(storage_key)
+                            ram_usage += storage.nbytes()
+                            oom_ram_usage += storage.nbytes()
                     elif is_model_patcher_output(output) and self.used_generation[key] != self.generation:
                         #old ModelPatchers are the first to go
                         oom_ram_usage = 1e30
+                    elif hasattr(output, "_comfy_cache_tensors"):
+                        scan_list_for_ram_usage(output._comfy_cache_tensors())
             scan_list_for_ram_usage(cache_entry.outputs)
 
             if ram_usage < min_entry_size:
@@ -588,7 +599,7 @@ class RAMPressureCache(LRUCache):
             bisect.insort(clean_list, (oom_score, self.timestamps[key], key, ram_usage))
 
         freed = 0
-        while psutil.virtual_memory().available < target and clean_list:
+        while virtual_memory_available() < target and clean_list:
             _, _, key, ram_usage = clean_list.pop()
             del self.cache[key]
             self.used_generation.pop(key, None)

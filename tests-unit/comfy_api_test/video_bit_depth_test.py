@@ -3,8 +3,10 @@ import torch
 import av
 import numpy as np
 from fractions import Fraction
+from types import SimpleNamespace
 from comfy_api.latest._input_impl.video_types import VideoFromFile, VideoFromComponents
 from comfy_api.latest._util.video_types import VideoComponents
+from comfy_extras.nodes_video import CreateVideo, SaveVideo
 
 
 @pytest.fixture(scope="module")
@@ -56,6 +58,66 @@ def test_create_video_bit_depth(src8, src10):
     assert probe(src8) == ("h264", "yuv420p", 8)
     assert probe(src10) == ("h264", "yuv420p10le", 10)
     assert decoded_levels(src10) > 2 * decoded_levels(src8)
+
+
+@pytest.mark.parametrize(
+    "bit_depth,color_space,expected_bit_depth",
+    [
+        ("auto", "sRGB", 8),
+        ("auto", "HDR", 10),
+        ("auto", "HDR PQ", 10),
+        (8, "HDR", 8),
+        (10, "sRGB", 10),
+    ],
+)
+def test_create_video_node_bit_depth(gradient_components, bit_depth, color_space, expected_bit_depth):
+    video = CreateVideo.execute(
+        gradient_components.images,
+        float(gradient_components.frame_rate),
+        bit_depth=bit_depth,
+        color_space=color_space,
+    ).args[0]
+    assert video.get_bit_depth() == expected_bit_depth
+    assert video.get_color_space() == color_space
+
+
+def test_create_video_node_bit_depth_options():
+    bit_depth_input = next(input for input in CreateVideo.define_schema().inputs if input.id == "bit_depth")
+    assert bit_depth_input.options == ["auto", 8, 10]
+    assert bit_depth_input.default == "auto"
+
+
+@pytest.mark.parametrize(
+    "codec,expected_suffix,expected_codec",
+    [
+        ("auto", "mp4", "h264"),
+        ("h264", "mp4", "h264"),
+        ("av1", "webm", "av1"),
+    ],
+)
+def test_save_video_auto_format(gradient_components, tmp_path, monkeypatch, codec, expected_suffix, expected_codec):
+    monkeypatch.setattr(SaveVideo, "hidden", SimpleNamespace(prompt=None, extra_pnginfo=None))
+    monkeypatch.setattr("comfy_extras.nodes_video.folder_paths.get_output_directory", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        "comfy_extras.nodes_video.folder_paths.get_save_image_path",
+        lambda *args: (str(tmp_path), "auto", 1, "", "auto"),
+    )
+    video = VideoFromComponents(gradient_components)
+
+    SaveVideo.execute(
+        video,
+        "auto",
+        {"format": "auto", "codec": {"codec": codec}},
+    )
+
+    path = tmp_path / f"auto_00001_.{expected_suffix}"
+    with av.open(path) as container:
+        assert container.streams.video[0].codec.canonical_name == expected_codec
+
+
+def test_save_video_has_no_color_space_input():
+    schema = SaveVideo.define_schema()
+    assert all("color_space" not in str(input.as_dict()) for input in schema.inputs)
 
 
 def test_save_auto_keeps_source_depth(src8, src10, tmp_path):

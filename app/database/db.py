@@ -4,7 +4,7 @@ import shutil
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
 from filelock import FileLock, Timeout
-from comfy.cli_args import args
+from comfy.cli_args import args, database_default_path
 
 _DB_AVAILABLE = False
 Session = None
@@ -57,17 +57,64 @@ def get_alembic_config():
 
     config = Config(config_path)
     config.set_main_option("script_location", scripts_path)
-    config.set_main_option("sqlalchemy.url", args.database_url)
+    config.set_main_option("sqlalchemy.url", get_database_url())
 
     return config
 
 
+def get_database_url():
+    if args.database_url is not None:
+        return args.database_url
+
+    import folder_paths
+
+    db_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
+    return f"sqlite:///{db_path}"
+
+
+def get_legacy_default_db_path():
+    return database_default_path
+
+
 def get_db_path():
-    url = args.database_url
+    url = get_database_url()
     if url.startswith("sqlite:///"):
-        return url.split("///")[1]
+        return url.split("///", 1)[1]
     else:
         raise ValueError(f"Unsupported database URL '{url}'.")
+
+
+def copy_legacy_default_db(db_path):
+    if args.database_url is not None:
+        return
+
+    legacy_db_path = get_legacy_default_db_path()
+    if legacy_db_path is None:
+        return
+
+    if os.path.abspath(legacy_db_path) == os.path.abspath(db_path):
+        return
+
+    if os.path.exists(db_path) or not os.path.exists(legacy_db_path):
+        return
+
+    backup_path = legacy_db_path + ".bak"
+    if os.path.exists(backup_path):
+        return
+
+    os.replace(legacy_db_path, backup_path)
+    shutil.copy(backup_path, db_path)
+    logging.info(
+        f"Renamed legacy database '{legacy_db_path}' to '{backup_path}' and copied it to '{db_path}'"
+    )
+
+
+def prepare_file_db_path(db_path):
+    db_dir = os.path.dirname(db_path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
+    copy_legacy_default_db(db_path)
 
 
 _db_lock = None
@@ -97,7 +144,7 @@ def _is_memory_db(db_url):
 
 
 def init_db():
-    db_url = args.database_url
+    db_url = get_database_url()
     logging.debug(f"Database URL: {db_url}")
 
     if _is_memory_db(db_url):
@@ -134,6 +181,7 @@ def _init_memory_db(db_url):
 def _init_file_db(db_url):
     """Initialize a file-backed SQLite database using Alembic migrations."""
     db_path = get_db_path()
+    prepare_file_db_path(db_path)
     db_exists = os.path.exists(db_path)
 
     config = get_alembic_config()

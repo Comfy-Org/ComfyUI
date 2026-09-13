@@ -256,12 +256,10 @@ class TextGenerateLTX2Prompt(TextGenerate):
 
         out = super().execute(clip, formatted_prompt, max_length, sampling_mode, image=image, thinking=thinking, use_default_template=use_default_template, video=video, audio=audio)
 
-        text = out.args[0]
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
-        if "</think>" in text:  # unclosed/truncated reasoning: keep what follows the last close
-            text = text.rsplit("</think>", 1)[-1]
-        text = re.sub(r"</?think>|<\|channel>\w*\n?|<channel\|>|<\|turn>\w*\n?", "", text).strip()
-        return io.NodeOutput(text)
+        # Drop reasoning, including a block left unclosed by max_length. Both system prompts ask
+        # for the original prompt back when there is nothing to give; empty conditions on nothing.
+        text = re.sub(r"<think>.*?(?:</think>|$)", "", out.args[0], flags=re.DOTALL).strip()
+        return io.NodeOutput(text or prompt)
 
 
 class TextgenExtension(ComfyExtension):
