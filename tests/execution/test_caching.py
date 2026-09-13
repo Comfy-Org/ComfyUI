@@ -6,7 +6,8 @@ import torch
 
 from comfy.cli_args import args
 
-args.cpu = True
+if not torch.cuda.is_available():
+    args.cpu = True
 
 from comfy_execution.caching import CacheKeySetID, RAM_CACHE_DEFAULT_RAM_USAGE, RAMPressureCache
 
