@@ -1110,6 +1110,18 @@ class WanHuMoImageToVideo(io.ComfyNode):
         out_latent["samples"] = latent
         return io.NodeOutput(positive, negative, out_latent)
 
+def _apply_wan_animate_mask(mask_refmotion, character_mask, ref_motion_latent_length):
+    character_mask = torch.cat((
+        torch.repeat_interleave(character_mask[:, :, :1], repeats=4, dim=2),
+        character_mask[:, :, 1:],
+    ), dim=2)
+    mask_start = ref_motion_latent_length * 4
+    mask_end = min(character_mask.shape[2], mask_refmotion.shape[2])
+    if mask_end > mask_start:
+        mask_refmotion[:, :, mask_start:mask_end] = character_mask[:, :, mask_start:mask_end]
+    return mask_refmotion
+
+
 class WanAnimateToVideo(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -1234,8 +1246,7 @@ class WanAnimateToVideo(io.ComfyNode):
                 if character_mask.ndim == 4:
                     character_mask = character_mask.unsqueeze(1)
                 character_mask = comfy.utils.common_upscale(character_mask[:, :, :length], concat_latent_image.shape[-1], concat_latent_image.shape[-2], "nearest-exact", "center")
-                if character_mask.shape[2] > ref_images_num:
-                    mask_refmotion[:, :, ref_images_num:character_mask.shape[2]] = character_mask[:, :, ref_images_num:]
+                mask_refmotion = _apply_wan_animate_mask(mask_refmotion, character_mask, ref_motion_latent_length)
 
         concat_latent_image = torch.cat((concat_latent_image, vae.encode(image[:, :, :, :3])), dim=2)
 
