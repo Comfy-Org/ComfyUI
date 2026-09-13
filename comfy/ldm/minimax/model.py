@@ -365,8 +365,15 @@ class PackedLayout:
 
         target_audio_w = (float(w_grid[0]), float(w_grid[-1]))
         # refs pack between text and the targets, so the target timeline starts after their spans
+        ref_positions = []
         cursor = float(text_len)
+        next_picture_index = 0
         for blk in refs or ():
+            if blk["kind"] == "image":
+                picture_index = blk.get("picture_index", next_picture_index)
+                cursor += picture_index - next_picture_index
+                next_picture_index = picture_index + 1
+            ref_positions.append((blk, cursor))
             cursor += _ref_t_span(blk)
 
         if keyframes:
@@ -392,31 +399,28 @@ class PackedLayout:
                     audio_update.append(torch.zeros(rt * 2, dtype=torch.bool))
                     row += rt * 2
 
-        if refs:
-            cursor = float(text_len)
-            for blk in refs:
+        if ref_positions:
+            for blk, ref_cursor in ref_positions:
                 kind = blk["kind"]
                 if kind == "image":
                     r_frame, _ = _frame_grid(blk["latent_h"], blk["latent_w"])
                     n = r_frame.shape[0]
                     g = torch.empty(n, 3, dtype=torch.float64)
-                    g[:, 0] = cursor
+                    g[:, 0] = ref_cursor
                     g[:, 1:] = r_frame
                     segments.append(("ref_img", n))
                     pos.append(g)
                     img_pos.append(torch.arange(row, row + n))
                     img_update.append(torch.zeros(n, dtype=torch.bool))
                     row += n
-                    cursor += 1.0
                 elif kind == "audio":
                     rt = blk["ref_audio_t"]
                     if rt > 0:
                         segments.append(("ref_audio", rt * 2))
-                        pos.append(_audio_grid(cursor, rt, *target_audio_w))
+                        pos.append(_audio_grid(ref_cursor, rt, *target_audio_w))
                         audio_pos.append(torch.arange(row, row + rt * 2))
                         audio_update.append(torch.zeros(rt * 2, dtype=torch.bool))
                         row += rt * 2
-                    cursor += float(rt)
                 elif kind in ("video", "video_audio"):
                     # the block's audio rows pack immediately before its video
                     # rows, both sharing the cursor origin
@@ -425,17 +429,16 @@ class PackedLayout:
                     r_frame, r_w_grid = _frame_grid(blk["latent_h"], blk["latent_w"])
                     if rt > 0:
                         segments.append(("ref_audio", rt * 2))
-                        pos.append(_audio_grid(cursor, rt, float(r_w_grid[0]), float(r_w_grid[-1])))
+                        pos.append(_audio_grid(ref_cursor, rt, float(r_w_grid[0]), float(r_w_grid[-1])))
                         audio_pos.append(torch.arange(row, row + rt * 2))
                         audio_update.append(torch.zeros(rt * 2, dtype=torch.bool))
                         row += rt * 2
                     n = vt * r_frame.shape[0]
                     segments.append(("ref_img", n))
-                    pos.append(_video_grid(vt, r_frame, cursor))
+                    pos.append(_video_grid(vt, r_frame, ref_cursor))
                     img_pos.append(torch.arange(row, row + n))
                     img_update.append(torch.zeros(n, dtype=torch.bool))
                     row += n
-                    cursor += max(float(rt), sum(_video_t_spans(vt)))
 
         # target audio then target video, always the last two segments
         segments.append(("audio", audio_t * 2))
