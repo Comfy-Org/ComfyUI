@@ -350,15 +350,7 @@ class VideoFromFile(VideoInput):
 
             # Last resort: decode frames to count them
             if video_stream and video_stream.average_rate:
-                frame_count = 0
-                container.seek(0)
-                frame_iterator = (
-                    container.decode(video_stream)
-                    if video_stream.codec.capabilities & 0x100
-                    else container.demux(video_stream)
-                )
-                for packet in frame_iterator:
-                    frame_count += 1
+                frame_count = sum(1 for _ in container.decode(video_stream))
                 if frame_count > 0:
                     return float(frame_count / video_stream.average_rate)
 

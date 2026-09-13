@@ -10,7 +10,7 @@ import torch
 
 from comfy_api.input_impl.video_types import VideoFromComponents, VideoFromFile, VideoFromList
 from comfy_api.input.basic_types import AudioInput
-from comfy_api.util.video_types import VideoCodec, VideoComponents
+from comfy_api.util.video_types import VideoCodec, VideoComponents, VideoContainer
 from comfy_extras.nodes_video import ConcatenateVideo, CreateVideo
 
 
@@ -241,6 +241,58 @@ def test_accumulated_video_frame_count_counts_frames_in_owned_buffers():
     ]
 
     assert VideoFromList(videos).get_frame_count() == 25
+
+
+def _create_h264_without_frame_count_metadata(path):
+    VideoFromComponents(
+        VideoComponents(images=torch.zeros((10, 16, 16, 3)), frame_rate=Fraction(25))
+    ).save_to(path, format=VideoContainer.MKV, codec=VideoCodec.H264)
+
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        assert stream.frames == 0
+        assert stream.duration is None
+
+
+def test_file_frame_count_decodes_when_metadata_is_missing(tmp_path):
+    path = tmp_path / "missing-frame-count.mkv"
+    _create_h264_without_frame_count_metadata(path)
+
+    assert VideoFromFile(path).get_frame_count() == 10
+
+
+def test_accumulated_frame_count_decodes_children_with_missing_metadata(tmp_path):
+    path = tmp_path / "missing-frame-count.mkv"
+    _create_h264_without_frame_count_metadata(path)
+
+    video = VideoFromList([VideoFromFile(path), VideoFromFile(path)])
+
+    assert video.get_frame_count() == 20
+
+
+def test_file_duration_decodes_raw_h264_without_timing_metadata(tmp_path):
+    path = tmp_path / "missing-duration.h264"
+    with av.open(path, mode="w", format="h264") as output:
+        stream = output.add_stream("h264", rate=25)
+        stream.width = stream.height = 16
+        stream.pix_fmt = "yuv420p"
+        for index in range(10):
+            frame = av.VideoFrame.from_ndarray(
+                torch.full((16, 16, 3), index * 20, dtype=torch.uint8).numpy(), format="rgb24"
+            )
+            frame.pts = index
+            frame.time_base = Fraction(1, 25)
+            output.mux(stream.encode(frame))
+        output.mux(stream.encode(None))
+
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        assert container.duration is None
+        assert stream.frames == 0
+        assert stream.duration is None
+        assert stream.average_rate == 25
+
+    assert VideoFromFile(path).get_duration() == 0.4
 
 
 def test_accumulated_video_reports_each_incompatible_dimension():
