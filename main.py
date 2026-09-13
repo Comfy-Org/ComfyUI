@@ -359,7 +359,11 @@ def prompt_worker(q, server_instance, asset_manager):
                 extra_data[k] = sensitive[k]
 
             asset_manager.pause_background_scan()
-            e.execute(item[2], prompt_id, extra_data, item[4])
+            try:
+                e.execute(item[2], prompt_id, extra_data, item[4])
+            except BaseException:
+                asset_manager.resume_background_scan()
+                raise
 
             need_gc = True
 
