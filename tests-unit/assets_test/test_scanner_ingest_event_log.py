@@ -182,11 +182,13 @@ def test_hash_failure_first_occurrence_resets_with_new_scan(
     ]
 
 
-def test_hash_failure_tagged_line_does_not_leak_exception_path(
+def test_hash_failure_no_log_line_leaks_exception_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # Both the tagged [assets-event] line and the privacy-safe
+    # "Asset scan error" line must omit the file path.
     path = tmp_path / "private-model.safetensors"
     path.write_bytes(b"model")
 
@@ -201,7 +203,8 @@ def test_hash_failure_tagged_line_does_not_leak_exception_path(
     assert events_named(caplog, "scanner.hash_failed") == [
         {"error_type": "FileNotFoundError"}
     ]
-    assert any(str(path) in record.getMessage() for record in caplog.records)
+    assert any("Asset scan error" in record.getMessage() for record in caplog.records)
+    assert all(str(path) not in record.getMessage() for record in caplog.records)
     assert all(str(path) not in line for line in tagged_lines(caplog))
 
 
