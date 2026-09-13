@@ -41,8 +41,13 @@ try:
         ck.registry.disable("triton")
     for k, v in ck.list_backends().items():
         logging.info(f"Found comfy_kitchen backend {k}: {v}")
-except ImportError as e:
-    logging.error(f"Failed to import comfy_kitchen, Error: {e}, fp8 and fp4 support will not be available.")
+except Exception as e:
+    # Not just ImportError: comfy_kitchen registers custom ops in its module body, and
+    # torch.library.custom_op raises ValueError on a PEP-585 annotation (`list[int]`)
+    # before torch 2.7. On an older torch -- the usual case on legacy GPUs -- that
+    # ValueError escaped this guard and killed startup instead of turning fp8/fp4 off,
+    # which is what the fallback below exists for.
+    logging.error(f"Failed to load comfy_kitchen, Error: {e}, fp8 and fp4 support will not be available.")
     _CK_AVAILABLE = False
 
     class QuantizedTensor:
