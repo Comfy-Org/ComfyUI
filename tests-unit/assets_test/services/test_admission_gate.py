@@ -80,9 +80,14 @@ def test_refreshing_watched_path_preserves_ticks_and_replaces_stat(temp_dir: Pat
 def test_never_stabilizes_dropped_after_cap(session, temp_dir: Path):
     path = temp_dir / "moving.bin"
     path.write_bytes(b"0")
-    _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat())]
+    initial_stat = path.stat()
+    previous_target_ns = initial_stat.st_mtime_ns
+    _WATCH_LIST[:] = [_WatchEntry(str(path), initial_stat)]
     for index in range(scanner_admission._WATCH_SCAN_RETRIES):
         path.write_bytes(str(index + 1).encode())
+        target_ns = max(path.stat().st_mtime_ns, previous_target_ns) + 1_000_000
+        os.utime(path, ns=(target_ns, target_ns))
+        previous_target_ns = target_ns
         tick_watch_list(session)
 
     assert _WATCH_LIST == []

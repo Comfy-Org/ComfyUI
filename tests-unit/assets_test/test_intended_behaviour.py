@@ -601,6 +601,8 @@ def test_scenario_25_registry_birth_fact(session, tmp_path):
     assert original.loader_path is None
 
     path.write_bytes(b"second-bytes-of-a-different-length")
+    target_ns = max(path.stat().st_mtime_ns, seed_stat.st_mtime_ns) + 1_000_000
+    os.utime(path, ns=(target_ns, target_ns))
     with _sandbox_asset_roots(tmp_path, category):
         detect_content_change(session, content, path.stat(), hashing_is_enabled=False)
 
