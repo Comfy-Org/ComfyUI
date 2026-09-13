@@ -520,6 +520,14 @@ def setup_database():
         logging.error(f"Failed to initialize database. Please ensure you have installed the latest requirements. If the error persists, please report this as in future the database will be required: {e}")
 
 
+def prompt_worker_failfast(*args, **kwargs):
+    try:
+        return prompt_worker(*args, **kwargs)
+    except Exception:
+        logging.critical("Unhandled exception in prompt_worker; exiting process.", exc_info=True)
+        os._exit(1)
+
+
 def start_comfyui(asyncio_loop=None):
     """
     Starts the ComfyUI server using the provided asyncio event loop or creates a new one.
@@ -557,7 +565,7 @@ def start_comfyui(asyncio_loop=None):
     prompt_server.add_routes()
     hijack_progress(prompt_server)
 
-    threading.Thread(target=prompt_worker, daemon=True, args=(prompt_server.prompt_queue, prompt_server,)).start()
+    threading.Thread(target=prompt_worker_failfast, daemon=True, args=(prompt_server.prompt_queue, prompt_server,)).start()
 
     if args.quick_test_for_ci:
         exit(0)
