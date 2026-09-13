@@ -185,6 +185,7 @@ class TestExecution:
     @fixture(scope="class", autouse=True, params=[
         { "extra_args" : ["--cache-classic"], "should_cache_results" : True },
         { "extra_args" : ["--cache-lru", 100], "should_cache_results" : True },
+        { "extra_args" : ["--cache-score"], "should_cache_results" : True },
         { "extra_args" : ["--cache-none"], "should_cache_results" : False },
     ])
     def server(self, args_pytest, request):

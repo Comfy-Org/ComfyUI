@@ -1,5 +1,6 @@
 import asyncio
 import bisect
+import heapq
 import itertools
 import time
 import torch
@@ -505,6 +506,8 @@ RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER = 1.3
 
 RAM_CACHE_LARGE_INTERMEDIATE = 512 * 1024 ** 2
 
+SCORE_CACHE_MIN_EXECUTION_TIME = 0.001
+
 
 def all_outputs_dynamic(outputs):
     if outputs is None:
@@ -547,20 +550,13 @@ class RAMPressureCache(LRUCache):
         self.timestamps[self.cache_key_set.get_data_key(node_id)] = time.time()
         super().set_local(node_id, value)
 
-    def ram_release(self, target, free_active=False, min_entry_size=0):
-        if virtual_memory_available() >= target:
-            return 0
-
-        clean_list = []
-
+    def _ram_eviction_candidates(self, free_active, min_entry_size):
         for key, cache_entry in self.cache.items():
             if not free_active and self.used_generation[key] == self.generation:
                 continue
 
             if all_outputs_dynamic(cache_entry.outputs) and self.used_generation[key] == self.generation:
                 continue
-
-            oom_score = RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER ** (self.generation - self.used_generation[key])
 
             ram_usage = RAM_CACHE_DEFAULT_RAM_USAGE
             oom_ram_usage = ram_usage
@@ -593,6 +589,23 @@ class RAMPressureCache(LRUCache):
             if ram_usage < min_entry_size:
                 continue
 
+            yield key, cache_entry, ram_usage, oom_ram_usage
+
+    def _remove_entry(self, key):
+        del self.cache[key]
+        self.used_generation.pop(key, None)
+        self.timestamps.pop(key, None)
+        self.children.pop(key, None)
+
+    def ram_release(self, target, free_active=False, min_entry_size=0):
+        if virtual_memory_available() >= target:
+            return 0
+
+        clean_list = []
+
+        for key, _, ram_usage, oom_ram_usage in self._ram_eviction_candidates(free_active, min_entry_size):
+            oom_score = RAM_CACHE_OLD_WORKFLOW_OOM_MULTIPLIER ** (self.generation - self.used_generation[key])
+
             oom_score *= oom_ram_usage
             #In the case where we have no information on the node ram usage at all,
             #break OOM score ties on the last touch timestamp (pure LRU)
@@ -601,10 +614,44 @@ class RAMPressureCache(LRUCache):
         freed = 0
         while virtual_memory_available() < target and clean_list:
             _, _, key, ram_usage = clean_list.pop()
-            del self.cache[key]
-            self.used_generation.pop(key, None)
-            self.timestamps.pop(key, None)
-            self.children.pop(key, None)
+            self._remove_entry(key)
+            freed += ram_usage
+        if freed and free_active:
+            self.active_evictions = True
+            if min_entry_size == 0:
+                self.full_evictions = True
+        return freed
+
+
+class ScoreCache(RAMPressureCache):
+    def __init__(self, key_class, enable_providers=False):
+        super().__init__(key_class, enable_providers=enable_providers)
+        self.execution_times = {}
+
+    def set_execution_time(self, node_id, execution_time):
+        self.execution_times[self.cache_key_set.get_data_key(node_id)] = execution_time
+
+    def _remove_entry(self, key):
+        super()._remove_entry(key)
+        self.execution_times.pop(key, None)
+
+    def ram_release(self, target, free_active=False, min_entry_size=0):
+        available = virtual_memory_available()
+        if available >= target:
+            return 0
+
+        eviction_heap = []
+        tie_breaker = itertools.count()
+        for key, _, ram_usage, oom_ram_usage in self._ram_eviction_candidates(free_active, min_entry_size):
+            relative_size = oom_ram_usage / max(available, 1)
+            execution_time = max(self.execution_times.get(key, 0.0), SCORE_CACHE_MIN_EXECUTION_TIME)
+            score = relative_size / execution_time
+            heapq.heappush(eviction_heap, (-score, self.timestamps[key], next(tie_breaker), key, ram_usage))
+
+        freed = 0
+        while virtual_memory_available() < target and eviction_heap:
+            _, _, _, key, ram_usage = heapq.heappop(eviction_heap)
+            self._remove_entry(key)
             freed += ram_usage
         if freed and free_active:
             self.active_evictions = True

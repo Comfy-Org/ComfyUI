@@ -13,8 +13,9 @@ from tests.execution.test_execution import ComfyClient, run_warmup
 @pytest.mark.execution
 class TestAsyncNodes:
     @fixture(scope="class", autouse=True, params=[
-        (False, 0),
-        (True, 100),
+        ['--cache-classic'],
+        ['--cache-lru', '100'],
+        ['--cache-score'],
     ])
     def _server(self, args_pytest, request):
         pargs = [
@@ -25,11 +26,7 @@ class TestAsyncNodes:
             '--extra-model-paths-config', 'tests/execution/extra_model_paths.yaml',
             '--cpu',
         ]
-        use_lru, lru_size = request.param
-        if use_lru:
-            pargs += ['--cache-lru', str(lru_size)]
-        else:
-            pargs += ['--cache-classic']
+        pargs += request.param
         # Running server with args: pargs
         p = subprocess.Popen(pargs)
         yield
