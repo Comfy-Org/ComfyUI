@@ -31,6 +31,7 @@ class WanImageToVideo(io.ComfyNode):
                 io.Int.Input("batch_size", default=1, min=1, max=4096),
                 io.ClipVisionOutput.Input("clip_vision_output", optional=True),
                 io.Image.Input("start_image", optional=True),
+                io.Image.Input("ref_pad_image", optional=True, tooltip="Fills the padding frames of the image conditioning with this image instead of gray, anchoring identity without pinning frames (SVI-style anti-drift padding, used by models such as ID-V2V)."),
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
@@ -40,11 +41,14 @@ class WanImageToVideo(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, positive, negative, vae, width, height, length, batch_size, start_image=None, clip_vision_output=None) -> io.NodeOutput:
+    def execute(cls, positive, negative, vae, width, height, length, batch_size, start_image=None, clip_vision_output=None, ref_pad_image=None) -> io.NodeOutput:
         latent = torch.zeros([batch_size, 16, ((length - 1) // 4) + 1, height // 8, width // 8], device=comfy.model_management.intermediate_device())
         if start_image is not None:
             start_image = comfy.utils.common_upscale(start_image[:length].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
             image = torch.ones((length, height, width, start_image.shape[-1]), device=start_image.device, dtype=start_image.dtype) * 0.5
+            if ref_pad_image is not None:
+                ref_pad_image = comfy.utils.common_upscale(ref_pad_image[:1].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+                image[:, :, :, :3] = ref_pad_image[:, :, :, :3].to(device=image.device, dtype=image.dtype)
             image[:start_image.shape[0]] = start_image
 
             concat_latent_image = vae.encode(image[:, :, :, :3])
