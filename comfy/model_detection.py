@@ -1152,6 +1152,12 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             "text_dim": 4096,
         }
 
+    if all(key_prefix + key in state_dict for key in (
+        "vae2llm.weight", "llm2vae.weight", "latent_pos_embed.pe",
+        "model.layers.0.self_attn.qkv_proj.weight", "time_embedder.mlp.0.weight",
+    )):
+        return {"audio_model": "yue2"}
+
     if '{}input_blocks.0.0.weight'.format(key_prefix) not in state_dict_keys:
         return None
 
