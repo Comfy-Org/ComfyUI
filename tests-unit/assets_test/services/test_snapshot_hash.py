@@ -10,9 +10,10 @@ from app.assets.services.snapshot_hash import snapshot_hash
 
 
 class _MutatingReader:
-    def __init__(self, file, mutate: Callable[[], None]) -> None:
+    def __init__(self, file, mutate: Callable[[], None], mutate_after_close: bool) -> None:
         self._file = file
         self._mutate = mutate
+        self._mutate_after_close = mutate_after_close
         self._did_mutate = False
 
     def __enter__(self):
@@ -20,14 +21,18 @@ class _MutatingReader:
         return self
 
     def __exit__(self, *args):
-        return self._file.__exit__(*args)
+        result = self._file.__exit__(*args)
+        if self._mutate_after_close and not self._did_mutate:
+            self._did_mutate = True
+            self._mutate()
+        return result
 
     def fileno(self) -> int:
         return self._file.fileno()
 
     def read(self, size: int = -1) -> bytes:
         result = self._file.read(size)
-        if not self._did_mutate:
+        if not self._mutate_after_close and not self._did_mutate:
             self._did_mutate = True
             self._mutate()
         return result
@@ -74,7 +79,11 @@ def test_snapshot_hash_returns_none_when_file_drifts(
                 raise AssertionError(f"unexpected mutation {unreachable}")
 
     def open_with_mutation(*args, **kwargs):
-        return _MutatingReader(original_open(*args, **kwargs), mutate)
+        return _MutatingReader(
+            original_open(*args, **kwargs),
+            mutate,
+            mutation in {"replace", "unlink"},
+        )
 
     monkeypatch.setattr(builtins, "open", open_with_mutation)
 

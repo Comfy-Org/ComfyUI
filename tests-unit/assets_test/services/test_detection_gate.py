@@ -76,8 +76,11 @@ def test_off_mode_size_change_splits(session, temp_dir: Path):
     input_root.mkdir()
     path = input_root / "grown.bin"
     path.write_bytes(b"small")
+    previous_target_ns = path.stat().st_mtime_ns
     old_content, _ = _seed_content(session, path, hash_value="historical")
     path.write_bytes(b"a decidedly larger set of bytes")
+    target_ns = max(path.stat().st_mtime_ns, previous_target_ns) + 1_000_000
+    os.utime(path, ns=(target_ns, target_ns))
 
     with (
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
@@ -142,8 +145,11 @@ def test_old_record_id_resolves_to_missing_content_after_split(session, temp_dir
     input_root.mkdir()
     path = input_root / "edited.bin"
     path.write_bytes(b"old bytes")
+    previous_target_ns = path.stat().st_mtime_ns
     old_content, old_record = _seed_content(session, path, _stored_hash(path))
     path.write_bytes(b"replacement bytes")
+    target_ns = max(path.stat().st_mtime_ns, previous_target_ns) + 1_000_000
+    os.utime(path, ns=(target_ns, target_ns))
 
     with (
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
