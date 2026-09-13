@@ -275,6 +275,8 @@ parser.add_argument("--enable-assets", action="store_true", help="Enable the ass
 parser.add_argument("--enable-asset-hashing", action="store_true", help="Compute blake3 content hashes when scanning assets. Hashing enables future asset-portability features (deduplication, cross-machine model resolution) but adds startup cost and per-output cost on large models directories. Off by default; enable to opt in.")
 parser.add_argument("--feature-flag", type=str, action='append', default=[], metavar="KEY[=VALUE]", help="Set a server feature flag. Use KEY=VALUE to set an explicit value, or bare KEY to set it to true. Can be specified multiple times. Boolean values (true/false) and numbers are auto-converted. Examples: --feature-flag show_signin_button=true  or  --feature-flag show_signin_button")
 parser.add_argument("--list-feature-flags", action="store_true", help="Print the registry of known CLI-settable feature flags as JSON and exit.")
+parser.add_argument("--enable-prometheus", action="store_true", help="Enable the local Prometheus metrics endpoint.")
+parser.add_argument("--prometheus-port", type=int, default=None, help="Run Prometheus metrics on this separate local port.")
 
 if comfy.options.args_parsing:
     args = parser.parse_args()
