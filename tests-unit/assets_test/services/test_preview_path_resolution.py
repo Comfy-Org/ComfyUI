@@ -18,7 +18,7 @@ def test_preview_paths_resolve_preview_record_content(session, mock_create_sessi
 
     paths = get_preview_file_paths([preview.id])
 
-    assert paths == {preview.id: "/output/preview.png"}
+    assert paths == {preview.id: preview_content.path}
 
 
 def test_preview_paths_exclude_missing_preview_content(session, mock_create_session) -> None:
@@ -46,7 +46,7 @@ def test_preview_paths_resolve_a_page_in_one_query(session, mock_create_session,
         record = create_record(session, record_content.id, f"record-{index}.png")
         record.preview_id = preview.id
         preview_ids.append(preview.id)
-        expected_paths[preview.id] = preview_path
+        expected_paths[preview.id] = preview_content.path
     session.commit()
 
     statements: list[str] = []

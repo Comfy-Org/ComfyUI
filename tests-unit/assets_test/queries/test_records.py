@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from sqlalchemy import create_engine, select, update
 from sqlalchemy.exc import IntegrityError
@@ -84,18 +86,19 @@ def test_concurrent_create_content_same_path(tmp_path):
     db_path = str(tmp_path / "concurrent.db")
     engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
+    shared_path = os.path.abspath("/tmp/shared")
 
     with Session(engine) as s1, Session(engine) as s2:
-        create_content(s1, path="/tmp/shared")
+        create_content(s1, path=shared_path)
         s1.commit()
-        create_content(s2, path="/tmp/shared")
+        create_content(s2, path=shared_path)
         s2.commit()
 
     with Session(engine) as s:
         live_rows = list(
             s.execute(
                 select(AssetContent).where(
-                    AssetContent.path == "/tmp/shared",
+                    AssetContent.path == shared_path,
                     AssetContent.is_missing.is_(False),
                 )
             ).scalars()
