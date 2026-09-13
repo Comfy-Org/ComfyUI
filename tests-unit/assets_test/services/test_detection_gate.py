@@ -5,6 +5,8 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import select
 
+from app.assets import scanner as asset_scanner
+from app.assets import scanner_changes as asset_scanner_changes
 from app.assets.database.models import Asset, AssetContent
 from app.assets.helpers import to_stored_hash
 from app.assets.scanner import (
@@ -12,7 +14,10 @@ from app.assets.scanner import (
     drain_pending_verifications,
     sync_prefixes_with_filesystem,
 )
-from app.assets.scanner_changes import queue_pending_verification
+from app.assets.scanner_changes import (
+    is_path_under_prefixes,
+    queue_pending_verification,
+)
 from app.assets.services.snapshot_hash import snapshot_hash
 
 
@@ -118,21 +123,90 @@ def test_hash_mode_touch_refreshes_mtime(session, temp_dir: Path):
     assert len(session.scalars(select(AssetContent)).all()) == 1
 
 
-def test_hash_mode_real_edit_splits(session, temp_dir: Path):
+def test_hash_mode_real_edit_splits(session, temp_dir: Path, monkeypatch):
     input_root = temp_dir / "input"
     input_root.mkdir()
     path = input_root / "edited.bin"
     path.write_bytes(b"old bytes")
     old_content, _ = _seed_content(session, path, _stored_hash(path))
     path.write_bytes(b"new bytes with a different length")
+    prefixes = [str(input_root)]
+    trace_lines = [
+        f"PATHS stored={old_content.path!r} disk={str(path)!r} prefixes={prefixes!r} "
+        f"python_match={is_path_under_prefixes(old_content.path, prefixes)!r}"
+    ]
+    real_live = asset_scanner.live_contents_under_prefixes
+    real_detect = asset_scanner.detect_content_change
+
+    def traced_live(candidate_session, candidate_prefixes):
+        rows = real_live(candidate_session, candidate_prefixes)
+        trace_lines.append(
+            "LIVE rows="
+            + repr(
+                [
+                    (
+                        row.id,
+                        row.path,
+                        row.mtime_ns,
+                        row.size_bytes,
+                        row.is_missing,
+                    )
+                    for row in rows
+                ]
+            )
+        )
+        return rows
+
+    def traced_detect(
+        candidate_session,
+        content,
+        stat_result,
+        hashing_is_enabled,
+    ):
+        trace_lines.append(
+            f"DETECT mtimes=({content.mtime_ns!r}, {stat_result.st_mtime_ns!r}) "
+            f"equal={content.mtime_ns == stat_result.st_mtime_ns!r} "
+            f"sizes=({content.size_bytes!r}, {stat_result.st_size!r}) "
+            f"hashing={hashing_is_enabled!r}"
+        )
+        return real_detect(
+            candidate_session,
+            content,
+            stat_result,
+            hashing_is_enabled,
+        )
+
+    monkeypatch.setattr(asset_scanner, "live_contents_under_prefixes", traced_live)
+    monkeypatch.setattr(asset_scanner, "detect_content_change", traced_detect)
 
     with (
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
         patch("app.assets.scanner.mode.hashing_enabled", return_value=True),
     ):
-        sync_prefixes_with_filesystem(session, [str(input_root)])
-        drain_pending_verifications(session)
+        sync_prefixes_with_filesystem(session, prefixes)
+        queued_before_drain = list(asset_scanner_changes._pending_verification_ids)
+        processed = drain_pending_verifications(session)
+        queued_after_drain = list(asset_scanner_changes._pending_verification_ids)
     session.commit()
+
+    drain_rows = [
+        (
+            content.id,
+            content.path,
+            content.hash,
+            content.mtime_ns,
+            content.size_bytes,
+            content.is_missing,
+        )
+        for content in session.scalars(
+            select(AssetContent).order_by(AssetContent.created_at)
+        )
+    ]
+    trace_lines.append(
+        f"DRAIN queued_before={queued_before_drain!r} processed={processed!r} "
+        f"queued_after={queued_after_drain!r} rows={drain_rows!r}"
+    )
+    pytest.fail("WIN12_DIAG " + "\n".join(trace_lines))
 
     contents = list(session.scalars(select(AssetContent).order_by(AssetContent.created_at)))
     assert len(contents) == 2
