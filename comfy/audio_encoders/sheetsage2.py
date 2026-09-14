@@ -87,7 +87,7 @@ class Decoder(nn.Module):
             DecoderLayer(dim, intermediate, heads, device=device, dtype=dtype, operations=operations) for _ in range(layers)
         ])
 
-    def forward(self, x, positions, cache):
+    def forward(self, x, positions, cache, decode_buffer=None):
         length = x.shape[1]
         fixed = isinstance(cache[0][0], FixedKV)
         index = cache[0][0].index if fixed else cache[0][0][2]
@@ -95,9 +95,10 @@ class Decoder(nn.Module):
         if length > 1:
             mask = torch.full((length, index + length), -torch.inf, device=x.device, dtype=x.dtype).triu_(index + 1)
         x = self.layernorm_embedding(x + self.embed_positions(positions, out_dtype=x.dtype))
-        graph = fixed and length == 1 and index > 0
+        graph = fixed and length == 1 and index > 0 and decode_buffer is not None
         if graph:
-            x = x.clone()
+            decode_buffer.copy_(x)
+            x = decode_buffer
         attention = optimized_attention_for_device(x.device, mask=mask is not None or graph, small_input=True)
         queue = comfy.model_prefetch.make_prefetch_queue(list(self.layers), x.device, {"prefetch_dynamic_vbars": True})
         for i, layer in enumerate(self.layers):
@@ -167,9 +168,9 @@ class SheetSage2(nn.Module):
             cache.append((self_cache, (cross.project(memory, cross.k_proj), cross.project(memory, cross.v_proj))))
         return cache
 
-    def decode(self, ids, positions, cache):
+    def decode(self, ids, positions, cache, decode_buffer=None):
         x = self.token_embedding(ids, out_dtype=self.dtype)
-        return self.output_projection(self.decoder(x, positions, cache)[:, -1:])
+        return self.output_projection(self.decoder(x, positions, cache, decode_buffer=decode_buffer)[:, -1:])
 
     def generate_tokens(self, memory, stop_seconds, prefix=None):
         tokenizer = self.tokenizer
@@ -185,6 +186,8 @@ class SheetSage2(nn.Module):
         ids = torch.empty((1, 1), device=device, dtype=torch.long)
         positions = torch.full((1, 1), len(tokens) + 2, device=device, dtype=torch.long)
         fixed = isinstance(cache[0][0], FixedKV)
+        # Captured decoder layers must share the same input address on every replay.
+        decode_buffer = memory.new_empty((memory.shape[0], 1, memory.shape[-1])) if fixed else None
         progress = comfy.utils.ProgressBar(self.max_tokens - len(tokens))
         try:
             for step in comfy.utils.model_trange(self.max_tokens - len(tokens), desc="SheetSage2 transcription", unit="token"):
@@ -206,7 +209,7 @@ class SheetSage2(nn.Module):
                 ids.copy_(next_id)
                 if fixed:
                     comfy.model_prefetch.malloc_graph_begin(device)
-                logits.copy_(self.decode(ids, positions, cache))
+                logits.copy_(self.decode(ids, positions, cache, decode_buffer=decode_buffer))
                 if fixed:
                     comfy.model_prefetch.malloc_graph_end()
                 positions.add_(1)
