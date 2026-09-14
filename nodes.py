@@ -2451,6 +2451,7 @@ async def init_builtin_extra_nodes():
         "nodes_eps.py",
         "nodes_flux.py",
         "nodes_lora_extract.py",
+        "nodes_lora_stack.py",
         "nodes_torch_compile.py",
         "nodes_mochi.py",
         "nodes_slg.py",
