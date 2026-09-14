@@ -5,8 +5,8 @@ from typing_extensions import override
 from comfy_api.latest import ComfyExtension, IO
 
 # Scene layout shared with the frontend preview (src/extensions/core/cameraAngle/types.ts):
-# a unit subject cube stands on the ground plane, so the camera orbits its centre.
-SUBJECT_CENTER = (0.0, 0.5, 0.0)
+# a unit subject cube sits at the world origin, where downstream 3D nodes centre their models.
+SUBJECT_CENTER = (0.0, 0.0, 0.0)
 CAMERA_FOV = 35.0
 SUBJECT_DISTANCE = 6.0
 MIN_ZOOM_FACTOR = 1.0

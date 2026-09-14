@@ -56,8 +56,8 @@ def test_zoom_maps_linearly_onto_the_lens_zoom_factor():
 
 def test_front_view_places_camera_on_positive_z_looking_at_subject_centre():
     info = build_camera_info(0, 0, 0)
-    assert info["position"] == pytest.approx({"x": 0.0, "y": SUBJECT_CENTER[1], "z": SUBJECT_DISTANCE})
-    assert info["target"] == {"x": 0.0, "y": SUBJECT_CENTER[1], "z": 0.0}
+    assert info["position"] == pytest.approx({"x": 0.0, "y": 0.0, "z": SUBJECT_DISTANCE})
+    assert info["target"] == {"x": 0.0, "y": 0.0, "z": 0.0}
     assert info["cameraType"] == "perspective"
     assert info["zoom"] == 1.0
 
