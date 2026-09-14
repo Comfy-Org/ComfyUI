@@ -490,22 +490,11 @@ def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_di
     return out
 
 def apply_rope(xq, xk, freqs_cis):
-    org_dtype = xq.dtype
-    cos = freqs_cis[0]
-    sin = freqs_cis[1]
-    nsin = freqs_cis[2]
-
-    q_embed = (xq * cos)
-    q_split = q_embed.shape[-1] // 2
-    q_embed[..., : q_split].addcmul_(xq[..., q_split :], nsin)
-    q_embed[..., q_split :].addcmul_(xq[..., : q_split], sin)
-
-    k_embed = (xk * cos)
-    k_split = k_embed.shape[-1] // 2
-    k_embed[..., : k_split].addcmul_(xk[..., k_split :], nsin)
-    k_embed[..., k_split :].addcmul_(xk[..., : k_split], sin)
-
-    return q_embed.to(org_dtype), k_embed.to(org_dtype)
+    cos, sin, neg_sin = freqs_cis
+    half = sin.shape[-1]
+    matrix = torch.stack((cos[..., :half], neg_sin, sin, cos[..., half:]), dim=-1)
+    matrix = matrix.reshape(*matrix.shape[:-1], 2, 2)
+    return comfy_kitchen.apply_rope_split_half(xq, xk, matrix)
 
 
 class Attention(nn.Module):
