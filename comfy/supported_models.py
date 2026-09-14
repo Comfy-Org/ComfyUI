@@ -2297,6 +2297,16 @@ class MiniMaxMusic3(supported_models_base.BASE):
     supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
     sampling_settings = {"multiplier": 1.0}
 
+    def set_inference_dtype(self, dtype, manual_cast_dtype, device=None):
+        # fp16 compute overflows to NaN on some hardware (e.g. gfx1151); prefer bf16.
+        if (
+            dtype == torch.float16
+            and manual_cast_dtype is None
+            and comfy.model_management.should_use_bf16(device)
+        ):
+            manual_cast_dtype = torch.bfloat16
+        super().set_inference_dtype(dtype, manual_cast_dtype, device=device)
+
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.MiniMaxMusic3(self, device=device)
 
