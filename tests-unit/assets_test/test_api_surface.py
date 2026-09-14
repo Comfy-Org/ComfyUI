@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict, assert_never
+from typing import Literal, NoReturn, TypedDict
 
 import pytest
 import requests
@@ -84,6 +84,10 @@ ROUTE_SPECS: tuple[RouteSpec, ...] = (
 )
 
 EXPECTED_ROUTE_KEYS = {f"{spec.method} {spec.path}" for spec in ROUTE_SPECS}
+
+
+def _assert_never(value: NoReturn) -> NoReturn:
+    raise AssertionError(f"unhandled route kind: {value!r}")
 
 
 def _normalize_route_path(raw_path: str) -> str:
@@ -233,7 +237,7 @@ def _request_for_spec(spec: RouteSpec, ctx: SmokeContext) -> requests.Response:
         case "prune_missing_assets":
             return ctx.http.post(f"{ctx.api_base}/api/assets/prune", timeout=120)
         case _:
-            assert_never(spec.kind)
+            _assert_never(spec.kind)
 
 
 def test_route_coverage_guard_rejects_extra_route() -> None:
