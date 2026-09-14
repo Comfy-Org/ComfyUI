@@ -3,6 +3,7 @@ import sys
 import os
 
 def test_prompt_worker_survives_exception():
+    """Verify prompt_worker recovers after an unhandled exception and processes subsequent prompts."""
     script = """
 import sys
 sys.argv = ['main.py', '--disable-all-custom-nodes', '--cpu']
@@ -18,16 +19,22 @@ class DummyServer:
     def queue_updated(self, *args, **kwargs):
         pass
 
+_executor_instance = None
+
 class DummyPromptExecutor:
     def __init__(self, server_instance, cache_type, cache_args, asset_manager=None):
+        global _executor_instance
         self.history_result = {}
         self.success = True
         self.status_messages = []
         self.execute_called = 0
+        _executor_instance = self
 
     def execute(self, *args, **kwargs):
+        'Raise only on the first call to simulate a one-time crash; succeed afterwards.'
         self.execute_called += 1
-        raise Exception("Simulated unhandled exception!")
+        if self.execute_called == 1:
+            raise Exception("Simulated unhandled exception!")
 
     def reset(self):
         pass
@@ -38,13 +45,13 @@ main.gc.collect = lambda: None
 main.comfy.model_management.soft_empty_cache = lambda: None
 
 q = PromptQueue(DummyServer())
-prompt_tuple = (1, "prompt_id_123", {}, {}, [], {})
-q.put(prompt_tuple)
+q.put((1, "prompt_id_crash", {}, {}, [], {}))
+q.put((2, "prompt_id_ok",    {}, {}, [], {}))
 
 class StopWorkerException(Exception): pass
 original_get = q.get
 def fake_get(timeout=None):
-    if len(q.queue) == 0:
+    if len(q.queue) == 0 and len(q.currently_running) == 0:
         raise StopWorkerException("Stop")
     return original_get(timeout=timeout)
 q.get = fake_get
@@ -62,7 +69,13 @@ try:
 except StopWorkerException:
     pass
 
-assert len(q.currently_running) == 0, "Queue item not completed"
+assert len(q.currently_running) == 0, (
+    f"Queue items not completed; currently_running={q.currently_running}"
+)
+assert _executor_instance is not None, "PromptExecutor was never instantiated"
+assert _executor_instance.execute_called == 2, (
+    f"Expected execute to be called twice (crash + recovery), got {_executor_instance.execute_called}"
+)
 print("SUCCESS")
 """
     env = os.environ.copy()
@@ -71,4 +84,3 @@ print("SUCCESS")
     result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
     assert result.returncode == 0, f"Subprocess failed:\n{result.stderr}\n{result.stdout}"
     assert "SUCCESS" in result.stdout
-

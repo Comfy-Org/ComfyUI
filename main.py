@@ -317,6 +317,7 @@ def cuda_malloc_warning():
 
 
 def prompt_worker(q, server_instance, asset_manager):
+    """Drain the prompt queue, executing each item and keeping the loop alive on exception."""
     current_time: float = 0.0
     cache_ram = 0
     cache_ram_inactive = 0

@@ -549,6 +549,7 @@ class RAMPressureCache(LRUCache):
         super().set_local(node_id, value)
 
     def ram_release(self, target, free_active=False, min_entry_size=0):
+        """Evict cache entries until virtual memory available meets target bytes."""
         if virtual_memory_available() >= target:
             return 0
 
@@ -567,6 +568,7 @@ class RAMPressureCache(LRUCache):
             oom_ram_usage = ram_usage
             seen_storages = set()
             def scan_list_for_ram_usage(outputs):
+                """Accumulate CPU tensor bytes and flag old model patchers for eviction."""
                 nonlocal ram_usage, oom_ram_usage
                 if outputs is None:
                     return
