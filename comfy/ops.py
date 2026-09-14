@@ -968,7 +968,8 @@ def linear_input_act(linear, x, input_act):
     if (comfy.model_management.in_training
             or not isinstance(weight, QuantizedTensor)
             or weight._layout_cls != "TensorWiseINT8Layout"
-            or getattr(weight._params, "transposed", False)):
+            or getattr(weight._params, "transposed", False)
+            or getattr(linear, "_full_precision_mm", False)):
         return linear(INPUT_ACT_EAGER[input_act](x))
 
     # want_requant keeps a vbar-streamed layer on the INT8 path when a LoRA is

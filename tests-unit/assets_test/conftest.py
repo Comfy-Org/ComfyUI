@@ -13,6 +13,8 @@ from typing import Callable, Iterator, Optional
 import pytest
 import requests
 
+from .helpers import assert_hash_fields_consistent
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     """
@@ -27,6 +29,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store",
         default=os.environ.get("ASSETS_TEST_DB_URL"),
         help="SQLAlchemy DB URL (e.g. sqlite:///path/to/db.sqlite3)",
+    )
+    parser.addoption(
+        "--enable-asset-hashing",
+        action="store_true",
+        help="Start the assets subprocess with hash-mode behavior enabled.",
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "hashing_on: exercises the subprocess harness with --enable-asset-hashing",
     )
 
 
@@ -103,8 +117,7 @@ def comfy_url_and_proc(comfy_tmp_base_dir: Path, request: pytest.FixtureRequest)
     if not (comfy_root / "main.py").is_file():
         raise FileNotFoundError(f"main.py not found under {comfy_root}")
 
-    proc = subprocess.Popen(
-        args=[
+    command = [
             sys.executable,
             "main.py",
             f"--base-directory={str(comfy_tmp_base_dir)}",
@@ -115,7 +128,19 @@ def comfy_url_and_proc(comfy_tmp_base_dir: Path, request: pytest.FixtureRequest)
             "--port",
             str(port),
             "--cpu",
-        ],
+        ]
+    if (
+        request.config.getoption("--enable-asset-hashing")
+        or "hashing_on" in request.config.getoption("markexpr")
+        or any(
+            item.get_closest_marker("hashing_on")
+            for item in request.session.items
+        )
+    ):
+        command.append("--enable-asset-hashing")
+
+    proc = subprocess.Popen(
+        args=command,
         stdout=out_log,
         stderr=err_log,
         cwd=str(comfy_root),
@@ -190,8 +215,9 @@ def _post_multipart_asset(
 @pytest.fixture
 def make_asset_bytes() -> Callable[[str, int], bytes]:
     # Salt content per test so it never collides with assets left over from
-    # earlier tests. Delete is now always a soft delete (content is preserved),
-    # so the suite can no longer rely on hard-deleting content for isolation.
+    # earlier tests. Delete hard-deletes the record but preserves content
+    # (content rows and files are untouched), so the suite cannot rely on delete
+    # removing content for isolation.
     # Deterministic within a test: the same (name, size) yields the same bytes.
     salt = uuid.uuid4().bytes
 
@@ -236,9 +262,6 @@ def seeded_asset(request: pytest.FixtureRequest, http: requests.Session, api_bas
     if tags is None:
         tags = ["models", "model_type:checkpoints", "unit-tests", "alpha"]
     meta = {"purpose": "test", "epoch": 1, "flags": ["x", "y"], "nullable": None}
-    # Unique content per test so the seed always creates a fresh asset (201).
-    # Delete is now always a soft delete, so content from a prior test survives
-    # and would otherwise dedup this upload into an existing asset (200).
     content = uuid.uuid4().bytes + b"A" * (4096 - 16)
     files = {"file": (name, content, "application/octet-stream")}
     form_data = {
@@ -249,7 +272,6 @@ def seeded_asset(request: pytest.FixtureRequest, http: requests.Session, api_bas
     r = http.post(api_base + "/api/assets", files=files, data=form_data, timeout=120)
     body = r.json()
     assert r.status_code == 201, body
-    from helpers import assert_hash_fields_consistent
     assert_hash_fields_consistent(body)
     return body
 
