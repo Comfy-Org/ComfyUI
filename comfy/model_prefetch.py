@@ -53,8 +53,9 @@ class _MallocGraphScope:
     def __enter__(self):
         malloc_graph_begin(self.device)
 
-    def __exit__(self, *args):
-        malloc_graph_end()
+    def __exit__(self, exc_type, *args):
+        if exc_type is None:
+            malloc_graph_end()
 
 def malloc_graph_scope(device):
     return _MallocGraphScope(device)

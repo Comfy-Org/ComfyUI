@@ -33,17 +33,14 @@ class FixedKV:
         self.index += num_tokens
 
     def rollback(self, discard=1):
-        # discard the rejected tail of a verify step; the stale K/V slots are
-        # overwritten by the next write, the bias by the next prepare
+        # drop the rejected verify tail; stale slots and bias are overwritten by the next write/prepare
         self.index -= discard
         if self.seqlen is not None:
             self.seqlen.sub_(discard)
 
 @dataclass
 class FixedKVBias(FixedKV):
-    # full-capacity decode bias [1, 1, rows, capacity]; the decode slice uses the LAST
-    # `seq` rows, so row r serves query j = r - (rows - seq) and may see slots <= index + j.
-    # position/bias/tracker are shared across layers
+    # full-capacity decode bias [1, 1, rows, capacity], last `seq` rows serve the queries; shared across layers
     bias: torch.Tensor = None
     tracker: dict = None
 
@@ -68,17 +65,44 @@ class FixedKVBias(FixedKV):
         else:
             self.bias[..., :, i:i + num_tokens] = 0
 
+    @staticmethod
+    def shared(capacity, device, dtype):
+        # all layers advance in lockstep, so the bias caches share one position/bias/tracker
+        position = torch.empty((6,), device=device, dtype=torch.int64)
+        bias = torch.full((1, 1, 6, capacity), torch.finfo(dtype).min, device=device, dtype=dtype)
+        return position, bias, {"step": -1}
 
-def fixed_kv_bias_decode(xq, cache, num_heads, num_kv_heads, head_dim):
-    # fixed-length masked attention over the full capacity, explicit math
-    batch_size, _, seq, _ = xq.shape
-    groups = num_heads // num_kv_heads
-    q = xq.reshape(batch_size, num_kv_heads, groups, seq, head_dim) * head_dim ** -0.5
-    bias = cache.bias[..., cache.bias.shape[-2] - seq:, :].unsqueeze(1)
-    scores = (q @ cache.key.transpose(-1, -2).unsqueeze(2)).add_(bias)
-    probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(xq.dtype)
-    out = probs @ cache.value.unsqueeze(2)
-    return out.permute(0, 3, 1, 2, 4).reshape(batch_size, seq, num_heads * head_dim)
+    @classmethod
+    def zeros(cls, batch, kv_heads, capacity, head_dim, device, dtype, shared):
+        # zero-init: decode attends full capacity with masked tails, 0*0 stays finite
+        key = torch.zeros((batch, kv_heads, capacity, head_dim), device=device, dtype=dtype)
+        return cls(key, torch.zeros_like(key), 0, shared[0], None, shared[1], shared[2])
+
+    def append(self, xk, xv):
+        seq = xk.shape[2]
+        self.key[:, :, self.index:self.index + seq] = xk
+        self.value[:, :, self.index:self.index + seq] = xv
+        return self.key[:, :, :self.index + seq], self.value[:, :, :self.index + seq]
+
+    def decode(self, xq, xk, xv, num_heads, num_kv_heads, head_dim):
+        # CUDA-graphable: device-side write position, masked attention over the full capacity
+        batch_size, _, seq, _ = xq.shape
+        self.key.index_copy_(2, self.position[:seq], xk)
+        self.value.index_copy_(2, self.position[:seq], xv)
+        groups = num_heads // num_kv_heads
+        q = xq.reshape(batch_size, num_kv_heads, groups, seq, head_dim) * head_dim ** -0.5
+        bias = self.bias[..., self.bias.shape[-2] - seq:, :].unsqueeze(1)
+        scores = (q @ self.key.transpose(-1, -2).unsqueeze(2)).add_(bias)
+        probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(xq.dtype)
+        out = probs @ self.value.unsqueeze(2)
+        return out.permute(0, 3, 1, 2, 4).reshape(batch_size, seq, num_heads * head_dim)
+
+def graph_decode_enabled(module, device):
+    # same conditions as prefetch_queue_pop's capture, so eager fallbacks keep the sliced path
+    return (getattr(module, "_v_block", None) is not None
+            and comfy.model_management.NUM_STREAMS > 0
+            and not comfy.model_management.args.disable_cuda_graphs
+            and comfy.model_management.is_device_cuda(device))
 
 @dataclass
 class Llama2Config:
@@ -621,15 +645,9 @@ class Attention(nn.Module):
         fixed_cache = past_key_value if isinstance(past_key_value, FixedKV) else None
         if isinstance(fixed_cache, FixedKVBias):
             if seq_length <= 6 and attention_mask is None and graph_decode:
-                # CUDA-graphable decode: device-side write position, full-capacity biased attention
-                fixed_cache.key.index_copy_(2, fixed_cache.position[:seq_length], xk)
-                fixed_cache.value.index_copy_(2, fixed_cache.position[:seq_length], xv)
-                output = fixed_kv_bias_decode(xq, fixed_cache, self.num_heads, self.num_kv_heads, self.head_dim)
+                output = fixed_cache.decode(xq, xk, xv, self.num_heads, self.num_kv_heads, self.head_dim)
                 return self.o_proj(output), fixed_cache
-            fixed_cache.key[:, :, fixed_cache.index:fixed_cache.index + seq_length] = xk
-            fixed_cache.value[:, :, fixed_cache.index:fixed_cache.index + seq_length] = xv
-            xk = fixed_cache.key[:, :, :fixed_cache.index + seq_length]
-            xv = fixed_cache.value[:, :, :fixed_cache.index + seq_length]
+            xk, xv = fixed_cache.append(xk, xv)
         elif fixed_cache is not None:
             xq = xq.transpose(1, 2)
             xk = xk.transpose(1, 2)
@@ -730,12 +748,7 @@ class TransformerBlock(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
         output = x
-        # mirror the conditions under which prefetch_queue_pop can actually capture, so
-        # eager fallbacks keep the sliced decode path instead of the full-capacity one
-        graph_decode = (getattr(self, "_v_block", None) is not None
-                        and comfy.model_management.NUM_STREAMS > 0
-                        and not comfy.model_management.args.disable_cuda_graphs
-                        and comfy.model_management.is_device_cuda(x.device))
+        graph_decode = graph_decode_enabled(self, x.device)
         # Self Attention
         residual = x
         x = self.input_layernorm(x)
@@ -873,10 +886,7 @@ class Llama2_(nn.Module):
         flash = getattr(comfy_kitchen, "flash_attention_decode_is_available", None)
         flash_kv = self.fixed_kv and flash is not None and flash(device)
         bias_kv = self.fixed_kv and not flash_kv
-        # all layers advance in lockstep, so the bias caches share one position/bias/tracker
-        position = torch.empty((6,), device=device, dtype=torch.int64) if bias_kv else None
-        bias = torch.full((1, 1, 6, capacity), torch.finfo(dtype).min, device=device, dtype=dtype) if bias_kv else None
-        tracker = {"step": -1}
+        shared = FixedKVBias.shared(capacity, device, dtype) if bias_kv else None
         for _ in range(self.config.num_hidden_layers):
             if flash_kv:
                 key = torch.empty((batch, capacity, self.config.num_key_value_heads, self.config.head_dim), device=device, dtype=dtype)
@@ -885,9 +895,7 @@ class Llama2_(nn.Module):
                 seqlen = torch.zeros((batch,), device=device, dtype=torch.int32)
                 caches.append(FixedKV(key, value, 0, pos, seqlen))
             elif bias_kv:
-                # zero-init: decode attends full capacity with masked tails, 0*0 stays finite
-                key = torch.zeros((batch, self.config.num_key_value_heads, capacity, self.config.head_dim), device=device, dtype=dtype)
-                caches.append(FixedKVBias(key, torch.zeros_like(key), 0, position, None, bias, tracker))
+                caches.append(FixedKVBias.zeros(batch, self.config.num_key_value_heads, capacity, self.config.head_dim, device, dtype, shared))
             else:
                 key = torch.empty((batch, self.config.num_key_value_heads, capacity, self.config.head_dim), device=device, dtype=dtype)
                 caches.append((key, torch.empty_like(key), 0))
@@ -1180,8 +1188,7 @@ class BaseGenerate:
         return generated_token_ids
 
     def processed_probs(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, presence_penalty=0.0, penalty_mask=None):
-        # returns (probs, indices); indices None = probs cover the full vocab.
-        # penalty_mask [vocab] bool is a fixed-size stand-in for token_history
+        # returns (probs, indices); penalty_mask [vocab] bool stands in for token_history
         if penalty_active(repetition_penalty, presence_penalty):
             if penalty_mask is not None:
                 logits = torch.where(penalty_mask.unsqueeze(0), apply_penalty(logits, repetition_penalty, presence_penalty), logits)

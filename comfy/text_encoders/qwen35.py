@@ -11,11 +11,12 @@ import comfy.model_management
 import comfy.model_prefetch
 import comfy.ops
 import comfy_kitchen
+from comfy.quant_ops import QuantizedTensor
 from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
 
-from .llama import BaseLlama, BaseGenerate, FixedKV, FixedKVBias, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, fixed_kv_bias_decode, penalty_active, precompute_freqs_cis
+from .llama import BaseLlama, BaseGenerate, FixedKV, FixedKVBias, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, graph_decode_enabled, penalty_active, precompute_freqs_cis
 
 
 @dataclass
@@ -213,9 +214,34 @@ class GatedDeltaNet(nn.Module):
             and seq_len <= 6
         )
 
+        fused_available = getattr(comfy_kitchen, "gated_delta_decode_is_available", None)
+        use_fused = (use_recurrent and self.key_head_dim == 128 and fused_available is not None and fused_available(x.device)
+                     and (seq_len == 1 or getattr(past_key_value, "snap_backing", None) is not None))
+
         # Projections (shared)
-        mixed_qkv = self.in_proj_qkv(x).transpose(1, 2)  # [B, conv_dim, seq_len]
+        proj = self.in_proj_qkv(x)  # [B, seq_len, conv_dim]
         z = self.in_proj_z(x)
+
+        if use_fused:
+            # decode: kitchen conv step, then gates + delta rule + gated norm in one kernel
+            if seq_len > 1:
+                past_key_value.last_seq = seq_len
+            with comfy.ops.CastBiasWeightContext(self.conv1d, proj, offloadable=True) as (conv_weight, conv_bias):
+                conv_out = comfy_kitchen.deltanet_conv_step(proj, past_key_value.conv_state, conv_weight, conv_bias,
+                                                            past_key_value.conv_snap_backing[:seq_len - 1] if seq_len > 1 else None)
+            with comfy.ops.CastBiasWeightContext(self.in_proj_a, x, offloadable=True) as (w_a, _), \
+                 comfy.ops.CastBiasWeightContext(self.in_proj_b, x, offloadable=True) as (w_b, _):
+                if isinstance(w_a, QuantizedTensor):
+                    w_a = w_a.dequantize()
+                if isinstance(w_b, QuantizedTensor):
+                    w_b = w_b.dequantize()
+                core_attn_out = comfy_kitchen.gated_delta_decode_fused(
+                    conv_out, x, w_a, w_b, past_key_value.dt_bias, past_key_value.g_decay, past_key_value.recurrent_state,
+                    self.key_dim, self.num_key_heads, self.key_head_dim ** -0.5, z, past_key_value.norm_weight, self.norm.eps,
+                    past_key_value.snap_backing[:seq_len - 1] if seq_len > 1 else None)
+            return self.out_proj(core_attn_out.reshape(batch_size, seq_len, -1)), past_key_value
+
+        mixed_qkv = proj.transpose(1, 2)  # [B, conv_dim, seq_len]
         b = self.in_proj_b(x)
         a = self.in_proj_a(x)
 
@@ -248,20 +274,20 @@ class GatedDeltaNet(nn.Module):
             if past_key_value is not None:
                 past_key_value.g_decay = g_decay
                 past_key_value.dt_bias = dt_bias
+                past_key_value.norm_weight = comfy.model_management.cast_to(self.norm.weight, dtype=x.dtype, device=x.device)
+
+        beta = b.sigmoid()
+        g = g_decay * F.softplus(a.float() + dt_bias)
+        query = query.reshape(batch_size, seq_len, self.num_key_heads, self.key_head_dim)
+        key = key.reshape(batch_size, seq_len, self.num_key_heads, self.key_head_dim)
+        value = value.reshape(batch_size, seq_len, self.num_value_heads, self.value_head_dim)
+        if self.num_value_heads != self.num_key_heads:
+            rep = self.num_value_heads // self.num_key_heads
+            query = query.repeat_interleave(rep, dim=2)
+            key = key.repeat_interleave(rep, dim=2)
 
         # Delta rule
         if use_recurrent:
-            query = query.reshape(batch_size, seq_len, self.num_key_heads, self.key_head_dim)
-            key = key.reshape(batch_size, seq_len, self.num_key_heads, self.key_head_dim)
-            value = value.reshape(batch_size, seq_len, self.num_value_heads, self.value_head_dim)
-
-            beta = b.sigmoid()
-            g = g_decay * F.softplus(a.float() + dt_bias)
-            if self.num_value_heads != self.num_key_heads:
-                rep = self.num_value_heads // self.num_key_heads
-                query = query.repeat_interleave(rep, dim=2)
-                key = key.repeat_interleave(rep, dim=2)
-
             scale = self.key_head_dim ** -0.5
             q = F.normalize(query.float(), dim=-1) * scale
             k = F.normalize(key.float(), dim=-1)
@@ -271,38 +297,20 @@ class GatedDeltaNet(nn.Module):
 
             # In-place state update: [B, heads, k_dim, v_dim]
             recurrent_state = past_key_value.recurrent_state
-            snaps = getattr(past_key_value, "snap_backing", None)
-            fused = getattr(comfy_kitchen, "gated_delta_decode", None)
-            if fused is not None and x.is_cuda and self.key_head_dim == 128 and (seq_len == 1 or snaps is not None):
-                core_attn_out = fused(q.contiguous(), k.contiguous(), v.contiguous(),
-                                      beta_t.float().contiguous(), g_t.float().contiguous(), recurrent_state,
-                                      snaps[:seq_len - 1] if seq_len > 1 else None).to(x.dtype)
-            else:
-                outs = []
-                for s in range(seq_len):
-                    recurrent_state.mul_(g_t[:, s, :, None, None])
-                    kv_mem = torch.einsum('bhk,bhkv->bhv', k[:, s], recurrent_state)
-                    delta = (v[:, s] - kv_mem) * beta_t[:, s, :, None]
-                    # rank-1 update via baddbmm_: no materialized [B, H, D, D] outer-product temp
-                    recurrent_state.view(-1, self.key_head_dim, self.value_head_dim).baddbmm_(
-                        k[:, s].reshape(-1, self.key_head_dim, 1), delta.reshape(-1, 1, self.value_head_dim))
-                    outs.append(torch.einsum('bhk,bhkv->bhv', q[:, s], recurrent_state))
-                    if seq_len > 1 and s < seq_len - 1:
-                        past_key_value.snapshots[s][0].copy_(recurrent_state)
-                core_attn_out = torch.stack(outs, dim=1).to(x.dtype)
+            outs = []
+            for s in range(seq_len):
+                recurrent_state.mul_(g_t[:, s, :, None, None])
+                kv_mem = torch.einsum('bhk,bhkv->bhv', k[:, s], recurrent_state)
+                delta = (v[:, s] - kv_mem) * beta_t[:, s, :, None]
+                # rank-1 update via baddbmm_: no materialized [B, H, D, D] outer-product temp
+                recurrent_state.view(-1, self.key_head_dim, self.value_head_dim).baddbmm_(
+                    k[:, s].reshape(-1, self.key_head_dim, 1), delta.reshape(-1, 1, self.value_head_dim))
+                outs.append(torch.einsum('bhk,bhkv->bhv', q[:, s], recurrent_state))
+                if seq_len > 1 and s < seq_len - 1:
+                    past_key_value.snapshots[s][0].copy_(recurrent_state)
+            core_attn_out = torch.stack(outs, dim=1).to(x.dtype)
             present_key_value = past_key_value
         else:
-            beta = b.sigmoid()
-            g = g_decay * F.softplus(a.float() + dt_bias)
-            query = query.reshape(batch_size, seq_len, -1, self.key_head_dim)
-            key = key.reshape(batch_size, seq_len, -1, self.key_head_dim)
-            value = value.reshape(batch_size, seq_len, -1, self.value_head_dim)
-
-            if self.num_value_heads != self.num_key_heads:
-                rep = self.num_value_heads // self.num_key_heads
-                query = query.repeat_interleave(rep, dim=2)
-                key = key.repeat_interleave(rep, dim=2)
-
             core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
                 query, key, value, g=g, beta=beta,
                 initial_state=None,
@@ -380,18 +388,10 @@ class GatedAttention(nn.Module):
         # KV cache
         present_key_value = past_key_value
         if past_key_value is not None and seq_length <= 6 and attention_mask is None and graph_decode:
-            # CUDA-graphable decode: device-side write position, full-capacity biased attention
-            cache = past_key_value
-            cache.key.index_copy_(2, cache.position[:seq_length], xk)
-            cache.value.index_copy_(2, cache.position[:seq_length], xv)
-            output = fixed_kv_bias_decode(xq, cache, self.num_heads, self.num_kv_heads, self.head_dim)
+            output = past_key_value.decode(xq, xk, xv, self.num_heads, self.num_kv_heads, self.head_dim)
         else:
             if past_key_value is not None:
-                cache = past_key_value
-                cache.key[:, :, cache.index:cache.index + seq_length] = xk
-                cache.value[:, :, cache.index:cache.index + seq_length] = xv
-                xk = cache.key[:, :, :cache.index + seq_length]
-                xv = cache.value[:, :, :cache.index + seq_length]
+                xk, xv = past_key_value.append(xk, xv)
             gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
             output = optimized_attention(xq, xk, xv, self.num_heads, mask=attention_mask, skip_reshape=True, **gqa_kwargs)
 
@@ -418,13 +418,7 @@ class Qwen35TransformerBlock(nn.Module):
             h, present_key_value = self.linear_attn(self.input_layernorm(x), attention_mask=attention_mask, past_key_value=past_key_value)
         else:
             if graph_decode is None:
-                # mirror the conditions under which prefetch_queue_pop can actually capture, so
-                # eager fallbacks keep the sliced decode path instead of the full-capacity one
-                graph_decode = (getattr(self, "_force_graph_decode", False)
-                                or (getattr(self, "_v_block", None) is not None
-                                    and comfy.model_management.NUM_STREAMS > 0
-                                    and not comfy.model_management.args.disable_cuda_graphs
-                                    and comfy.model_management.is_device_cuda(x.device)))
+                graph_decode = graph_decode_enabled(self, x.device)
             h, present_key_value = self.self_attn(self.input_layernorm(x), attention_mask=attention_mask, freqs_cis=freqs_cis, optimized_attention=optimized_attention, past_key_value=past_key_value, graph_decode=graph_decode)
 
         # in-place into the input buffer so CUDA-graph replays land in the static x
@@ -699,8 +693,7 @@ class Qwen35VisionModel(nn.Module):
         return merged
 
 class MTPHead(nn.Module):
-    # multi-token-prediction draft head: fc(cat[norm(embed), norm(hidden)]) -> one
-    # full-attention block (own KV) -> norm; logits via the shared lm_head
+    # MTP draft head: fc(cat[norm(embed), norm(hidden)]) -> attention block (own KV) -> norm
     def __init__(self, config, device=None, dtype=None, ops=None):
         super().__init__()
         self.fc = ops.Linear(config.hidden_size * 2, config.hidden_size, bias=False, device=device, dtype=dtype)
@@ -775,15 +768,13 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         embeds = embeds.to(dt)
         if embeds.ndim == 2:
             embeds = embeds.unsqueeze(0)
-        # greedy drafts 3 deep (5 after the probe); sampled stays at 2 (deeper measured net-negative)
+        # greedy drafts 3 deep (5 after the probe); sampled stays at 2
         depth = fixed_depth if fixed_depth is not None else (3 if sampling is None else 2)
         cap = embeds.shape[1] + max_length + 7
         pkv = self.init_kv_cache(embeds.shape[0], cap, device, dt)
-        mkey = torch.zeros([embeds.shape[0], cfg.num_key_value_heads, cap, cfg.head_dim], device=device, dtype=dt)
-        # rows >= depth + 1: the repair window must cover drafting ahead plus a near-full rollback
-        mtp_kv = FixedKVBias(mkey, torch.zeros_like(mkey), 0,
-                             torch.empty((6,), device=device, dtype=torch.int64), None,
-                             torch.full((1, 1, 6, cap), torch.finfo(dt).min, device=device, dtype=dt), {"step": -1})
+        # repair window: drafting ahead plus a near-full rollback
+        mtp_kv = FixedKVBias.zeros(embeds.shape[0], cfg.num_key_value_heads, cap, cfg.head_dim, device, dt,
+                                   FixedKVBias.shared(cap, device, dt))
         head = self.model.lm_head if hasattr(self.model, "lm_head") else self.model.embed_tokens
 
         def verify_logits(x):
@@ -842,7 +833,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                 if isinstance(kv, LinearKV):
                     # snapshot views share one backing slab so the fused kernel can write them
                     kv.snap_backing = torch.empty((d,) + tuple(kv.recurrent_state.shape), device=device, dtype=torch.float32)
-                    kv.snapshots = [(kv.snap_backing[s], torch.empty_like(kv.conv_state)) for s in range(d)]
+                    kv.conv_snap_backing = torch.empty((d,) + tuple(kv.conv_state.shape), device=device, dtype=kv.conv_state.dtype)
+                    kv.snapshots = [(kv.snap_backing[s], kv.conv_snap_backing[s]) for s in range(d)]
             # static rope buffers: graphed layers bake their input addresses
             vf = tuple(t.clone() for t in freqs_at(pos, d + 1))
 
@@ -961,7 +953,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                 next_toks = tuple(toks[:, i:i + 1] for i in range(depth + 1))
                 commit = tuple(dr[:accepts]) + (t[accepts],)
             else:
-                # rejection sampling with a one-hot draft: accept draft i w.p. p_i(draft), else the residual
+                # accept draft i w.p. p_i(draft), else sample the residual
                 lgf = lg.float()
                 if penalized:
                     lgf = torch.where(pen_mask, apply_penalty(lgf, sampling["repetition_penalty"], sampling["presence_penalty"]), lgf)
@@ -1005,7 +997,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                     probe[0] += 1
                     probe[1] += accepts
                     if probe[0] == 32:
-                        # deepen once when acceptance sustains it and the recapture round can amortize
+                        # deepen once acceptance sustains it and a recapture round can amortize
                         if sampling is None and max_length - len(ids) > 512 and 1 + probe[1] / probe[0] >= 2.2:
                             comfy.model_prefetch.cleanup_prefetch_queues()
                             comfy.model_management.reset_cast_buffers()
@@ -1027,10 +1019,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         model_config = self.model.config
         past_key_values = []
-        # all full-attention layers advance in lockstep, so they share one position/bias/tracker
-        position = torch.empty((6,), device=device, dtype=torch.int64)
-        bias = torch.full((1, 1, 6, max_cache_len), torch.finfo(execution_dtype).min, device=device, dtype=execution_dtype)
-        tracker = {"step": -1}
+        shared = FixedKVBias.shared(max_cache_len, device, execution_dtype)
         for i in range(model_config.num_hidden_layers):
             if model_config.layer_types[i] == "linear_attention":
                 recurrent_state = torch.zeros(
@@ -1044,9 +1033,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                 )
                 past_key_values.append(LinearKV(conv_state, recurrent_state, 0, None, None))
             else:
-                # zero-init: decode attends full capacity with masked tails, 0*0 stays finite
-                key = torch.zeros([batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype)
-                past_key_values.append(FixedKVBias(key, torch.zeros_like(key), 0, position, None, bias, tracker))
+                past_key_values.append(FixedKVBias.zeros(batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim, device, execution_dtype, shared))
         return past_key_values
 
 # Tokenizer and Text Encoder Wrappers
