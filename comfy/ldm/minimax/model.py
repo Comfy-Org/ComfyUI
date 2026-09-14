@@ -588,6 +588,12 @@ class MiniMaxH3Model(nn.Module):
         else:
             out = graph_out
 
+        # Masked rows predict at mask * sigma; scale their velocity to match the outer x0 conversion.
+        if denoise_mask is not None:
+            out[0] = out[0] * denoise_mask
+        if audio_denoise_mask is not None:
+            out[1] = out[1] * audio_denoise_mask
+
         if scale != 1.0:
             # d/d(sigma_v) of the carried variable
             out[1] = ((1.0 - scale) * (audio_src * carry)

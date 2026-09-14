@@ -23,6 +23,7 @@ import logging
 import comfy.ldm.lightricks.av_model
 import comfy.ldm.minimax.model
 import comfy.ldm.minimax_music.dit
+import comfy.ldm.yue2.model
 import comfy.nested_tensor
 import comfy.ldm.lightricks.symmetric_patchifier
 import comfy.context_windows
@@ -2550,6 +2551,25 @@ class ACEStep15(BaseModel):
 
         out['refer_audio'] = comfy.conds.CONDRegular(refer_audio)
         return out
+
+class YuE2(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.yue2.model.YuE2)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        context = kwargs["cross_attn"].to(device=kwargs["device"], dtype=self.get_dtype_inference())
+        out["c_crossattn"] = comfy.conds.CONDRegular(context)
+        out["yue2_chunks"] = comfy.conds.CONDConstant(kwargs["yue2_chunks"])
+        return out
+
+    def extra_conds_shapes(self, **kwargs):
+        return {"c_crossattn": kwargs["cross_attn"].shape}
+
+    def memory_required(self, input_shape, cond_shapes={}):
+        context_size = sum(math.prod(shape) for shape in cond_shapes.get("c_crossattn", []))
+        return super().memory_required(input_shape, cond_shapes) + context_size * comfy.model_management.dtype_size(self.get_dtype_inference())
+
 
 class MiniMaxMusic3(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):

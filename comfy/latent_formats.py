@@ -1024,6 +1024,12 @@ class ACEAudio15(LatentFormat):
     latent_dimensions = 1
     temporal_downscale_ratio = 1764
 
+class YuE2(LatentFormat):
+    latent_channels = 64
+    latent_dimensions = 1
+    temporal_downscale_ratio = 1920
+
+
 class MiniMaxMusic3(LatentFormat):
     latent_channels = 128
     latent_dimensions = 1

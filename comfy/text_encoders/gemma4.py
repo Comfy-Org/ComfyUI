@@ -528,17 +528,18 @@ class Gemma4Transformer(nn.Module):
                         and comfy.model_management.is_device_cuda(x.device))
         decode_bias = None
         decode_masks = None
-        if decode:
+        if fixed_kv:
+            # prefill must advance the device-side write position of the global caches too
             prepared = set()
             for kv in past_key_values:
                 if isinstance(kv, FixedKV) and id(kv.position) not in prepared:
                     kv.prepare(seq_len)
                     prepared.add(id(kv.position))
-            if mask is not None:
-                decode_masks = {}
-                for kv in past_key_values:
-                    if isinstance(kv, FixedKV) and id(kv.position) not in decode_masks:
-                        decode_masks[id(kv.position)] = _fixed_kv_decode_mask(mask, kv, min_val)
+        if decode and mask is not None:
+            decode_masks = {}
+            for kv in past_key_values:
+                if isinstance(kv, FixedKV) and id(kv.position) not in decode_masks:
+                    decode_masks[id(kv.position)] = _fixed_kv_decode_mask(mask, kv, min_val)
         if compiled_decode:
             capacities = tuple(sorted({kv.key.shape[2] for kv in past_key_values if isinstance(kv, FixedKV)}))
             valid = past_len + 1

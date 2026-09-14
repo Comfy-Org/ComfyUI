@@ -1197,7 +1197,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Conditioning & Preprocessors/Pose",
+        "category": "Preprocessors/Pose",
         "description": "Detects multiple people in an image and outputs per-person pose keypoints, skeleton renders, and bounding boxes using SDPose."
       }
     ]

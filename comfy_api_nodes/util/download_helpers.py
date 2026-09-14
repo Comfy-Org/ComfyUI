@@ -143,7 +143,7 @@ async def download_url_to_bytesio(
                         )
 
                     if resp.status in _RETRY_STATUS and attempt <= max_retries:
-                        await sleep_with_interrupt(delay, cls, None, None, None)
+                        await sleep_with_interrupt(delay, cls, None, None)
                         delay *= retry_backoff
                         continue
                     raise Exception(f"Failed to download (HTTP {resp.status}).")
@@ -200,7 +200,7 @@ async def download_url_to_bytesio(
                     request_url=url,
                     error_message=f"{type(e).__name__}: {str(e)} (will retry)",
                 )
-                await sleep_with_interrupt(delay, cls, None, None, None)
+                await sleep_with_interrupt(delay, cls, None, None)
                 delay *= retry_backoff
                 continue
 

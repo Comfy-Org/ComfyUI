@@ -156,16 +156,16 @@ class Preview3DAdvanced(IO.ComfyNode):
                 ),
                 IO.Load3DModelInfo.Input("model_3d_info", optional=True, advanced=True),
                 IO.Load3D.Input("viewport_state"),
-                IO.Load3DCamera.Input("camera_info", optional=True, advanced=True),
-                IO.Int.Input("width", default=1024, min=1, max=4096, step=1),
-                IO.Int.Input("height", default=1024, min=1, max=4096, step=1),
+                IO.Load3DCamera.Input("camera_info", optional=True, advanced=True, tooltip="Viewport camera information: position, look-at target, zoom, and type."),
+                IO.Int.Input("width", default=1024, min=1, max=4096, step=1, tooltip="Render width of the viewport in pixels."),
+                IO.Int.Input("height", default=1024, min=1, max=4096, step=1, tooltip="Render height of the viewport in pixels."),
             ],
             outputs=[
-                IO.File3DAny.Output(display_name="model_3d"),
-                IO.Load3DModelInfo.Output(display_name="model_3d_info"),
-                IO.Load3DCamera.Output(display_name="camera_info"),
-                IO.Int.Output(display_name="width"),
-                IO.Int.Output(display_name="height"),
+                IO.File3DAny.Output(display_name="model_3d", tooltip="3D model file (glb/obj/stl/etc.) from an upstream 3D node."),
+                IO.Load3DModelInfo.Output(display_name="model_3d_info", tooltip="Placement of each model in the scene: position, rotation, and scale (Y-up world space)."),
+                IO.Load3DCamera.Output(display_name="camera_info", tooltip="Viewport camera information: position, look-at target, zoom, and type."),
+                IO.Int.Output(display_name="width", tooltip="Render width of the viewport in pixels."),
+                IO.Int.Output(display_name="height", tooltip="Render height of the viewport in pixels."),
             ],
         )
 
@@ -355,15 +355,15 @@ class Load3DAdvanced(IO.ComfyNode):
             inputs=[
                 IO.Combo.Input("model_file", options=["none"] + sorted(files), upload=IO.UploadType.model),
                 IO.Load3D.Input("viewport_state"),
-                IO.Int.Input("width", default=1024, min=1, max=4096, step=1),
-                IO.Int.Input("height", default=1024, min=1, max=4096, step=1),
+                IO.Int.Input("width", default=1024, min=1, max=4096, step=1, tooltip="Render width of the viewport in pixels."),
+                IO.Int.Input("height", default=1024, min=1, max=4096, step=1, tooltip="Render height of the viewport in pixels."),
             ],
             outputs=[
-                IO.File3DAny.Output(display_name="model_3d"),
-                IO.Load3DModelInfo.Output(display_name="model_3d_info"),
-                IO.Load3DCamera.Output(display_name="camera_info"),
-                IO.Int.Output(display_name="width"),
-                IO.Int.Output(display_name="height"),
+                IO.File3DAny.Output(display_name="model_3d", tooltip="Loaded 3D model file (glb/obj/stl/etc.)."),
+                IO.Load3DModelInfo.Output(display_name="model_3d_info", tooltip="Placement of each model in the scene: position, rotation, and scale (Y-up world space)."),
+                IO.Load3DCamera.Output(display_name="camera_info", tooltip="Viewport camera information: position, look-at target, zoom, and type."),
+                IO.Int.Output(display_name="width", tooltip="Render width of the viewport in pixels."),
+                IO.Int.Output(display_name="height", tooltip="Render height of the viewport in pixels."),
             ],
         )
 
