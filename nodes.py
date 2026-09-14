@@ -2541,6 +2541,7 @@ async def init_builtin_extra_nodes():
         "nodes_text.py",
         "nodes_sam3d_body.py",
         "nodes_marigold.py",
+        "nodes_seamless_tiling.py",
     ]
 
     import_failed = []
