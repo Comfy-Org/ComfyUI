@@ -31,6 +31,7 @@ from comfy_api_nodes.apis.minimax import (
 from comfy_api_nodes.util import (
     ApiEndpoint,
     download_url_to_video_output,
+    downscale_image_tensor_by_max_sides,
     poll_op,
     sync_op,
     upload_audio_to_comfyapi,
@@ -466,8 +467,13 @@ HAILUO_03_CONTEXT_IR_ENDPOINT = "/proxy/minimax/v2/h3_context_ir"
 HAILUO_03_REGENERATION_ENDPOINT = "/proxy/minimax/v2/video_regeneration"
 
 HAILUO_03_MAX_MODEL = "MiniMax H3 Max"
-HAILUO_03_MAX_ENDPOINT = "/proxy/fal/minimax/h3-max"
+HAILUO_03_MAX_TURBO_MODEL = "MiniMax H3 Max Turbo"
+HAILUO_03_MAX_ENDPOINTS = {
+    HAILUO_03_MAX_MODEL: "/proxy/fal/minimax/h3-max",
+    HAILUO_03_MAX_TURBO_MODEL: "/proxy/fal/minimax/h3-max-turbo",
+}
 HAILUO_03_MAX_PROMPT_MAX_LENGTH = 50000
+HAILUO_03_MAX_REFERENCE_IMAGE_MAX_SIDES = {"high": (5120, 2048), "standard": (2048, 1024)}
 
 
 def _hailuo03_model_inputs(include_ratio: bool = True, allow_adaptive: bool = True):
@@ -549,7 +555,7 @@ async def _hailuo03_run_task(
     return IO.NodeOutput(await download_url_to_video_output(video_url))
 
 
-def _hailuo03_max_model_inputs(include_ratio: bool = True):
+def _hailuo03_max_model_inputs(include_ratio: bool = True, allow_adaptive: bool = False):
     inputs = [
         IO.String.Input(
             "prompt",
@@ -565,11 +571,14 @@ def _hailuo03_max_model_inputs(include_ratio: bool = True):
         ),
     ]
     if include_ratio:
+        ratio_options = ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"]
+        if allow_adaptive:
+            ratio_options.insert(0, "adaptive")
         inputs.append(
             IO.Combo.Input(
                 "ratio",
-                options=["16:9", "4:3", "1:1", "3:4", "9:16", "21:9"],
-                default="16:9",
+                options=ratio_options,
+                default=ratio_options[0],
                 tooltip="Aspect ratio of the output video.",
             )
         )
@@ -598,18 +607,20 @@ def _hailuo03_max_model_inputs(include_ratio: bool = True):
 async def _hailuo03_max_run_task(
     cls: type[IO.ComfyNode],
     *,
+    model: str,
     endpoint: str,
     request: Hailuo03MaxVideoRequest,
 ) -> IO.NodeOutput:
+    base_endpoint = HAILUO_03_MAX_ENDPOINTS[model]
     submit = await sync_op(
         cls,
-        ApiEndpoint(path=f"{HAILUO_03_MAX_ENDPOINT}/{endpoint}", method="POST"),
+        ApiEndpoint(path=f"{base_endpoint}/{endpoint}", method="POST"),
         response_model=Hailuo03MaxTaskCreationResponse,
         data=request,
     )
     await poll_op(
         cls,
-        ApiEndpoint(path=f"{HAILUO_03_MAX_ENDPOINT}/requests/{submit.request_id}/status"),
+        ApiEndpoint(path=f"{base_endpoint}/requests/{submit.request_id}/status"),
         response_model=Hailuo03MaxTaskStatusResponse,
         status_extractor=lambda r: r.status,
         completed_statuses=["COMPLETED"],
@@ -618,7 +629,7 @@ async def _hailuo03_max_run_task(
     )
     result = await sync_op(
         cls,
-        ApiEndpoint(path=f"{HAILUO_03_MAX_ENDPOINT}/requests/{submit.request_id}"),
+        ApiEndpoint(path=f"{base_endpoint}/requests/{submit.request_id}"),
         response_model=Hailuo03MaxVideoResult,
     )
     return IO.NodeOutput(await download_url_to_video_output(result.video.url))
@@ -638,6 +649,7 @@ class MinimaxHailuo03TextToVideoNode(IO.ComfyNode):
                     options=[
                         IO.DynamicCombo.Option("MiniMax H3", _hailuo03_model_inputs(allow_adaptive=False)),
                         IO.DynamicCombo.Option(HAILUO_03_MAX_MODEL, _hailuo03_max_model_inputs()),
+                        IO.DynamicCombo.Option(HAILUO_03_MAX_TURBO_MODEL, _hailuo03_max_model_inputs()),
                     ],
                     tooltip="Model to use for video generation.",
                 ),
@@ -674,9 +686,12 @@ class MinimaxHailuo03TextToVideoNode(IO.ComfyNode):
                 (
                   $dur := $lookup(widgets, "model.duration");
                   $res := $lookup(widgets, "model.resolution");
-                  $rate := $lookup(widgets, "model") = "minimax h3 max"
-                    ? ($res = "480p" ? 0.0715 : 0.1144)
-                    : ($res = "768p" ? 0.1287 : 0.1859);
+                  $model := $lookup(widgets, "model");
+                  $rate := $model = "minimax h3 max turbo"
+                    ? ($res = "480p" ? 0.03575 : 0.0572)
+                    : $model = "minimax h3 max"
+                      ? ($res = "480p" ? 0.0715 : 0.1144)
+                      : ($res = "768p" ? 0.1287 : 0.1859);
                   {"type": "usd", "usd": $dur * $rate}
                 )
                 """,
@@ -691,12 +706,13 @@ class MinimaxHailuo03TextToVideoNode(IO.ComfyNode):
         watermark: bool,
     ) -> IO.NodeOutput:
         validate_string(model["prompt"], strip_whitespace=True, min_length=1)
-        if model["model"] == HAILUO_03_MAX_MODEL:
+        if model["model"] in HAILUO_03_MAX_ENDPOINTS:
             if watermark:
                 raise ValueError("Watermark is only supported by MiniMax H3.")
             validate_string(model["prompt"], strip_whitespace=False, max_length=HAILUO_03_MAX_PROMPT_MAX_LENGTH)
             return await _hailuo03_max_run_task(
                 cls,
+                model=model["model"],
                 endpoint="text-to-video",
                 request=Hailuo03MaxVideoRequest(
                     prompt=model["prompt"],
@@ -734,6 +750,9 @@ class MinimaxHailuo03FirstLastFrameNode(IO.ComfyNode):
                     options=[
                         IO.DynamicCombo.Option("MiniMax H3", _hailuo03_model_inputs(include_ratio=False)),
                         IO.DynamicCombo.Option(HAILUO_03_MAX_MODEL, _hailuo03_max_model_inputs(include_ratio=False)),
+                        IO.DynamicCombo.Option(
+                            HAILUO_03_MAX_TURBO_MODEL, _hailuo03_max_model_inputs(include_ratio=False)
+                        ),
                     ],
                     tooltip="Model to use for video generation.",
                 ),
@@ -779,9 +798,12 @@ class MinimaxHailuo03FirstLastFrameNode(IO.ComfyNode):
                 (
                   $dur := $lookup(widgets, "model.duration");
                   $res := $lookup(widgets, "model.resolution");
-                  $rate := $lookup(widgets, "model") = "minimax h3 max"
-                    ? ($res = "480p" ? 0.0715 : 0.1144)
-                    : ($res = "768p" ? 0.1287 : 0.1859);
+                  $model := $lookup(widgets, "model");
+                  $rate := $model = "minimax h3 max turbo"
+                    ? ($res = "480p" ? 0.03575 : 0.0572)
+                    : $model = "minimax h3 max"
+                      ? ($res = "480p" ? 0.0715 : 0.1144)
+                      : ($res = "768p" ? 0.1287 : 0.1859);
                   {"type": "usd", "usd": $dur * $rate}
                 )
                 """,
@@ -802,7 +824,7 @@ class MinimaxHailuo03FirstLastFrameNode(IO.ComfyNode):
             if frame is not None:
                 validate_image_aspect_ratio(frame, (2, 5), (5, 2), strict=False)  # 0.4 to 2.5
                 validate_image_dimensions(frame, min_width=256, min_height=256)
-        if model["model"] == HAILUO_03_MAX_MODEL:
+        if model["model"] in HAILUO_03_MAX_ENDPOINTS:
             if watermark:
                 raise ValueError("Watermark is only supported by MiniMax H3.")
             validate_string(model["prompt"], strip_whitespace=False, max_length=HAILUO_03_MAX_PROMPT_MAX_LENGTH)
@@ -816,6 +838,7 @@ class MinimaxHailuo03FirstLastFrameNode(IO.ComfyNode):
                 )[0]
             return await _hailuo03_max_run_task(
                 cls,
+                model=model["model"],
                 endpoint="image-to-video",
                 request=Hailuo03MaxVideoRequest(
                     prompt=model["prompt"],
@@ -866,6 +889,54 @@ class MinimaxHailuo03FirstLastFrameNode(IO.ComfyNode):
         )
 
 
+def _hailuo03_reference_inputs():
+    return [
+        IO.Autogrow.Input(
+            "reference_images",
+            template=IO.Autogrow.TemplateNames(
+                IO.Image.Input("reference_image"),
+                names=[
+                    "image_1",
+                    "image_2",
+                    "image_3",
+                    "image_4",
+                    "image_5",
+                    "image_6",
+                    "image_7",
+                    "image_8",
+                    "image_9",
+                ],
+                min=0,
+            ),
+            tooltip="Subject or style reference images, referred to in the prompt "
+            "as 'Image 1'..'Image 9' in connection order. Up to 9 images.",
+        ),
+        IO.Autogrow.Input(
+            "reference_videos",
+            template=IO.Autogrow.TemplateNames(
+                IO.Video.Input("reference_video"),
+                names=["video_1", "video_2", "video_3"],
+                min=0,
+            ),
+            tooltip="Motion or scene reference videos, referred to in the prompt "
+            "as 'Video 1'..'Video 3' in connection order. Up to 3 videos, "
+            "2-15 seconds each, 15 seconds in total.",
+        ),
+        IO.Autogrow.Input(
+            "reference_audios",
+            template=IO.Autogrow.TemplateNames(
+                IO.Audio.Input("reference_audio"),
+                names=["audio_1", "audio_2", "audio_3"],
+                min=0,
+            ),
+            tooltip="Audio references, referred to in the prompt as "
+            "'Audio 1'..'Audio 3' in connection order. Up to 3 clips, "
+            "2-15 seconds each, 15 seconds in total. Cannot be used without "
+            "a reference image or video.",
+        ),
+    ]
+
+
 class MinimaxHailuo03ReferenceNode(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -874,7 +945,7 @@ class MinimaxHailuo03ReferenceNode(IO.ComfyNode):
             display_name="MiniMax H3 Reference to Video",
             category="partner/video/MiniMax",
             description="Generate video conditioned on reference images, videos, and audio using the "
-            "MiniMax H3 model. Refer to the references in the prompt by their order: "
+            "MiniMax H3 models. Refer to the references in the prompt by their order: "
             "'Image 1', 'Image 2', 'Video 1', 'Audio 1', and so on.",
             inputs=[
                 IO.DynamicCombo.Input(
@@ -882,53 +953,23 @@ class MinimaxHailuo03ReferenceNode(IO.ComfyNode):
                     options=[
                         IO.DynamicCombo.Option(
                             "MiniMax H3",
+                            [*_hailuo03_model_inputs(), *_hailuo03_reference_inputs()],
+                        ),
+                        IO.DynamicCombo.Option(
+                            HAILUO_03_MAX_MODEL,
                             [
-                                *_hailuo03_model_inputs(),
-                                IO.Autogrow.Input(
-                                    "reference_images",
-                                    template=IO.Autogrow.TemplateNames(
-                                        IO.Image.Input("reference_image"),
-                                        names=[
-                                            "image_1",
-                                            "image_2",
-                                            "image_3",
-                                            "image_4",
-                                            "image_5",
-                                            "image_6",
-                                            "image_7",
-                                            "image_8",
-                                            "image_9",
-                                        ],
-                                        min=0,
-                                    ),
-                                    tooltip="Subject or style reference images, referred to in the prompt "
-                                    "as 'Image 1'..'Image 9' in connection order. Up to 9 images.",
+                                *_hailuo03_max_model_inputs(allow_adaptive=True),
+                                IO.Combo.Input(
+                                    "reference_detail",
+                                    options=["high", "standard"],
+                                    default="standard",
+                                    tooltip="Detail level at which reference images are sent. 'high' sends them at "
+                                    "the largest size the model uses (up to a 2048 pixel short side); "
+                                    "'standard' downsizes them to at most 2048x1024 to reduce the reference cost.",
                                 ),
-                                IO.Autogrow.Input(
-                                    "reference_videos",
-                                    template=IO.Autogrow.TemplateNames(
-                                        IO.Video.Input("reference_video"),
-                                        names=["video_1", "video_2", "video_3"],
-                                        min=0,
-                                    ),
-                                    tooltip="Motion or scene reference videos, referred to in the prompt "
-                                    "as 'Video 1'..'Video 3' in connection order. Up to 3 videos, "
-                                    "2-15 seconds each, 15 seconds in total.",
-                                ),
-                                IO.Autogrow.Input(
-                                    "reference_audios",
-                                    template=IO.Autogrow.TemplateNames(
-                                        IO.Audio.Input("reference_audio"),
-                                        names=["audio_1", "audio_2", "audio_3"],
-                                        min=0,
-                                    ),
-                                    tooltip="Audio references, referred to in the prompt as "
-                                    "'Audio 1'..'Audio 3' in connection order. Up to 3 clips, "
-                                    "2-15 seconds each, 15 seconds in total. Cannot be used without "
-                                    "a reference image or video.",
-                                ),
+                                *_hailuo03_reference_inputs(),
                             ],
-                        )
+                        ),
                     ],
                     tooltip="Model to use for video generation.",
                 ),
@@ -961,22 +1002,44 @@ class MinimaxHailuo03ReferenceNode(IO.ComfyNode):
             is_api_node=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(
-                    widgets=["model.resolution", "model.duration"],
-                    input_groups=["model.reference_images", "model.reference_videos"],
+                    widgets=["model", "model.resolution", "model.duration", "model.reference_detail"],
+                    input_groups=["model.reference_images", "model.reference_videos", "model.reference_audios"],
                 ),
                 expr="""
                 (
                   $dur := $lookup(widgets, "model.duration");
-                  $rate := $lookup(widgets, "model.resolution") = "768p" ? 0.1287 : 0.1859;
+                  $res := $lookup(widgets, "model.resolution");
                   $imgsRaw := $lookup(inputGroups, "model.reference_images");
                   $imgs := $imgsRaw ? $imgsRaw : 0;
                   $vidsRaw := $lookup(inputGroups, "model.reference_videos");
                   $vids := $vidsRaw ? $vidsRaw : 0;
-                  $base := $dur * $rate + ($imgs > 5 ? ($imgs - 5) * 0.0572 : 0);
-                  $vids > 0
-                    ? {"type": "range_usd", "min_usd": $base + $vids * 2 * $rate,
-                       "max_usd": $base + 15 * $rate, "format": {"approximate": true}}
-                    : {"type": "usd", "usd": $base}
+                  $audsRaw := $lookup(inputGroups, "model.reference_audios");
+                  $auds := $audsRaw ? $audsRaw : 0;
+                  $lookup(widgets, "model") = "minimax h3 max"
+                    ? (
+                        $unitRate := $res = "480p" ? 1 : 1.6;
+                        $frameTokens := $res = "480p" ? 390 : 1008;
+                        $base := $dur * $unitRate;
+                        $minTokens := $imgs * 576 + $vids * 12 * $frameTokens + $auds * 160;
+                        $capFrames := $vids * (7 * $dur + 2);
+                        $maxFrames := $capFrames > 265 ? 265 : $capFrames;
+                        $imgMax := $lookup(widgets, "model.reference_detail") = "standard" ? 2560 : 10240;
+                        $maxTokens := $imgs * $imgMax + $maxFrames * $frameTokens + ($auds > 0 ? 1200 : 0);
+                        $minUnits := $base + ($minTokens > 4096 ? ($minTokens - 4096) * 0.0004 : 0);
+                        $maxUnits := $base + ($maxTokens > 4096 ? ($maxTokens - 4096) * 0.0004 : 0);
+                        $minUnits = $maxUnits
+                          ? {"type": "usd", "usd": $base * 0.0715}
+                          : {"type": "range_usd", "min_usd": $minUnits * 0.0715, "max_usd": $maxUnits * 0.0715,
+                             "format": {"approximate": true}}
+                      )
+                    : (
+                        $rate := $res = "768p" ? 0.1287 : 0.1859;
+                        $base := $dur * $rate + ($imgs > 5 ? ($imgs - 5) * 0.0572 : 0);
+                        $vids > 0
+                          ? {"type": "range_usd", "min_usd": $base + $vids * 2 * $rate,
+                             "max_usd": $base + 15 * $rate, "format": {"approximate": true}}
+                          : {"type": "usd", "usd": $base}
+                      )
                 )
                 """,
             ),
@@ -997,6 +1060,11 @@ class MinimaxHailuo03ReferenceNode(IO.ComfyNode):
         if not reference_images and not reference_videos:
             raise ValueError("At least one reference image or video is required.")
 
+        is_max = model["model"] == HAILUO_03_MAX_MODEL
+        min_clip_duration = 2.0 if is_max else 1.8
+        max_total_duration = 15.0 if is_max else 15.1
+        max_fps = 60.19 if is_max else 60.5
+
         for image in reference_images.values():
             validate_image_aspect_ratio(image, (2, 5), (5, 2), strict=False)  # 0.4 to 2.5
             validate_image_dimensions(image, min_width=256, min_height=256)
@@ -1007,29 +1075,81 @@ class MinimaxHailuo03ReferenceNode(IO.ComfyNode):
                 fps = float(video.get_frame_rate())
             except Exception:
                 fps = 0.0
-            if fps and not (23.9 <= fps <= 60.5):
+            if fps and not (23.9 <= fps <= max_fps):
                 raise ValueError(f"Reference video {i} is {fps:.2f} FPS. Supported range is 23.976-60 FPS.")
             try:
                 dur = video.get_duration()
             except Exception:
                 continue
-            if dur < 1.8:
+            if dur < min_clip_duration:
                 raise ValueError(f"Reference video {i} is too short: {dur:.1f}s. Minimum duration is 2 seconds.")
             total_video_duration += dur
-        if total_video_duration > 15.1:
+        if total_video_duration > max_total_duration:
             raise ValueError(
-                f"Total reference video duration is {total_video_duration:.1f}s. Maximum is 15 seconds."
+                f"Total reference video duration is {total_video_duration:.2f}s. Maximum is 15 seconds."
             )
 
         total_audio_duration = 0.0
         for i, audio in enumerate(reference_audios.values(), 1):
             dur = int(audio["waveform"].shape[-1]) / int(audio["sample_rate"])
-            if dur < 1.8:
+            if dur < min_clip_duration:
                 raise ValueError(f"Reference audio {i} is too short: {dur:.1f}s. Minimum duration is 2 seconds.")
             total_audio_duration += dur
-        if total_audio_duration > 15.1:
+        if total_audio_duration > max_total_duration:
             raise ValueError(
-                f"Total reference audio duration is {total_audio_duration:.1f}s. Maximum is 15 seconds."
+                f"Total reference audio duration is {total_audio_duration:.2f}s. Maximum is 15 seconds."
+            )
+
+        if is_max:
+            if watermark:
+                raise ValueError("Watermark is only supported by MiniMax H3.")
+            validate_string(model["prompt"], strip_whitespace=False, max_length=HAILUO_03_MAX_PROMPT_MAX_LENGTH)
+            if len(reference_images) + len(reference_videos) + len(reference_audios) > 12:
+                raise ValueError("MiniMax H3 Max accepts at most 12 reference files in total.")
+            max_long_side, max_short_side = HAILUO_03_MAX_REFERENCE_IMAGE_MAX_SIDES[model["reference_detail"]]
+            reference_image_urls = [
+                (
+                    await upload_images_to_comfyapi(
+                        cls,
+                        downscale_image_tensor_by_max_sides(
+                            image, max_long_side=max_long_side, max_short_side=max_short_side
+                        ),
+                        max_images=1,
+                        total_pixels=None,
+                        wait_label=f"Uploading image {i}",
+                    )
+                )[0]
+                for i, image in enumerate(reference_images.values(), 1)
+            ]
+            reference_video_urls = [
+                await upload_video_to_comfyapi(cls, video, wait_label=f"Uploading video {i}")
+                for i, video in enumerate(reference_videos.values(), 1)
+            ]
+            reference_audio_urls = [
+                await upload_audio_to_comfyapi(
+                    cls,
+                    audio,
+                    container_format="mp3",
+                    codec_name="libmp3lame",
+                    mime_type="audio/mpeg",
+                )
+                for audio in reference_audios.values()
+            ]
+            return await _hailuo03_max_run_task(
+                cls,
+                model=HAILUO_03_MAX_MODEL,
+                endpoint="reference-to-video",
+                request=Hailuo03MaxVideoRequest(
+                    prompt=model["prompt"],
+                    duration=model["duration"],
+                    resolution=model["resolution"],
+                    prompt_expansion_mode=model["prompt_expansion_mode"],
+                    seed=seed,
+                    aspect_ratio=model["ratio"],
+                    reference_image_urls=reference_image_urls or None,
+                    reference_video_urls=reference_video_urls or None,
+                    reference_audio_urls=reference_audio_urls or None,
+                ),
             )
 
         content: list = [Hailuo03TextContent(text=model["prompt"])]

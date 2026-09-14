@@ -165,7 +165,8 @@ def _compute_downscale_dims(src_w: int, src_h: int, total_pixels: int) -> tuple[
 def downscale_image_tensor(image: torch.Tensor, total_pixels: int = 1536 * 1024) -> torch.Tensor:
     """Downscale input image tensor to roughly the specified total pixels.
 
-    Output dimensions are even and guaranteed to fit within ``total_pixels``
+    Resized output has even dimensions and always fits within ``total_pixels``;
+    an image that already fits is returned unchanged.
     """
     samples = image.movedim(-1, 1)
     dims = _compute_downscale_dims(samples.shape[3], samples.shape[2], int(total_pixels))
@@ -173,6 +174,23 @@ def downscale_image_tensor(image: torch.Tensor, total_pixels: int = 1536 * 1024)
         return image
     new_w, new_h = dims
     return common_upscale(samples, new_w, new_h, "lanczos", "disabled").movedim(1, -1)
+
+
+def downscale_image_tensor_by_max_sides(
+    image: torch.Tensor, *, max_long_side: int, max_short_side: int
+) -> torch.Tensor:
+    """Downscale input image tensor so the long side is at most max_long_side and the short side at most max_short_side."""
+    samples = image.movedim(-1, 1)
+    height, width = samples.shape[2], samples.shape[3]
+    long_side, short_side = max(width, height), min(width, height)
+    scale_by = min(1.0, max_long_side / long_side, max_short_side / short_side)
+    if scale_by >= 1.0:
+        return image
+    long_new = max(1, math.floor(long_side * scale_by))
+    short_new = max(1, min(long_new, math.ceil(short_side * scale_by)))
+    new_width, new_height = (long_new, short_new) if width >= height else (short_new, long_new)
+    s = common_upscale(samples, new_width, new_height, "lanczos", "disabled")
+    return s.movedim(1, -1)
 
 
 def downscale_image_tensor_by_max_side(image: torch.Tensor, *, max_side: int) -> torch.Tensor:

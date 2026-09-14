@@ -1,10 +1,13 @@
 from .wav2vec2 import Wav2Vec2Model
 from .whisper import WhisperLargeV3
+from .sheetsage2 import SheetSage2
+from .sheetsage2_abc import events_to_abc
 import comfy.model_management
 import comfy.ops
 import comfy.utils
 import logging
 import torchaudio
+import torch
 
 
 class AudioEncoderModel():
@@ -13,6 +16,9 @@ class AudioEncoderModel():
         offload_device = comfy.model_management.text_encoder_offload_device()
         self.dtype = comfy.model_management.text_encoder_dtype(self.load_device)
         model_type = config.pop("model_type")
+        self.model_sample_rate = config.pop("model_sample_rate", 16000)
+        if model_type == "sheetsage2":
+            self.dtype = torch.bfloat16 if comfy.model_management.should_use_bf16(self.load_device) else torch.float32
         model_config = dict(config)
         model_config.update({
             "dtype": self.dtype,
@@ -24,9 +30,10 @@ class AudioEncoderModel():
             self.model = Wav2Vec2Model(**model_config)
         elif model_type == "whisper3":
             self.model = WhisperLargeV3(**model_config)
+        elif model_type == "sheetsage2":
+            self.model = SheetSage2(**model_config)
         self.model.eval()
         self.patcher = comfy.model_patcher.CoreModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device)
-        self.model_sample_rate = 16000
         comfy.model_management.archive_model_dtypes(self.model)
 
     def load_sd(self, sd):
@@ -44,6 +51,17 @@ class AudioEncoderModel():
         outputs["encoded_audio_all_layers"] = all_layers
         outputs["audio_samples"] = audio.shape[2]
         return outputs
+
+
+class SheetSage2AudioEncoder(AudioEncoderModel):
+    def generate_abc(self, audio, sample_rate, melody_only=True):
+        audio = torchaudio.functional.resample(audio.float().mean(dim=1), sample_rate, self.model_sample_rate)
+        comfy.model_management.load_model_gpu(self.patcher)
+        scores = []
+        for waveform in audio:
+            events = self.model.transcribe(waveform[None].to(self.load_device))
+            scores.append(events_to_abc(events, waveform.shape[-1] / self.model_sample_rate, melody_only=melody_only))
+        return scores
 
 
 def load_audio_encoder_from_sd(sd, prefix=""):
@@ -79,10 +97,12 @@ def load_audio_encoder_from_sd(sd, prefix=""):
         config = {
             "model_type": "whisper3",
         }
+    elif "encoder.feature_extractor.mel_mean" in sd and "decoder.layernorm_embedding.weight" in sd and "layer_weight" in sd:
+        config = {"model_type": "sheetsage2", "model_sample_rate": 24000}
     else:
         raise RuntimeError("ERROR: audio encoder not supported.")
 
-    audio_encoder = AudioEncoderModel(config)
+    audio_encoder = SheetSage2AudioEncoder(config) if config["model_type"] == "sheetsage2" else AudioEncoderModel(config)
     m, u = audio_encoder.load_sd(sd)
     if len(m) > 0:
         logging.warning("missing audio encoder: {}".format(m))

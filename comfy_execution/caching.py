@@ -564,19 +564,30 @@ class RAMPressureCache(LRUCache):
 
             ram_usage = RAM_CACHE_DEFAULT_RAM_USAGE
             oom_ram_usage = ram_usage
+            seen_storages = set()
             def scan_list_for_ram_usage(outputs):
                 nonlocal ram_usage, oom_ram_usage
                 if outputs is None:
                     return
+                if isinstance(outputs, Mapping):
+                    outputs = outputs.values()
+                elif not isinstance(outputs, (list, tuple)):
+                    outputs = (outputs,)
                 for output in outputs:
-                    if isinstance(output, (list, tuple)):
+                    if isinstance(output, (list, tuple, Mapping)):
                         scan_list_for_ram_usage(output)
                     elif isinstance(output, torch.Tensor) and output.device.type == 'cpu':
-                        ram_usage += output.numel() * output.element_size()
-                        oom_ram_usage += output.numel() * output.element_size()
+                        storage = output.untyped_storage()
+                        storage_key = (storage.data_ptr(), storage.nbytes())
+                        if storage_key not in seen_storages:
+                            seen_storages.add(storage_key)
+                            ram_usage += storage.nbytes()
+                            oom_ram_usage += storage.nbytes()
                     elif is_model_patcher_output(output) and self.used_generation[key] != self.generation:
                         #old ModelPatchers are the first to go
                         oom_ram_usage = 1e30
+                    elif hasattr(output, "_comfy_cache_tensors"):
+                        scan_list_for_ram_usage(output._comfy_cache_tensors())
             scan_list_for_ram_usage(cache_entry.outputs)
 
             if ram_usage < min_entry_size:

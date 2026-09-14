@@ -22,7 +22,7 @@ jobs:
       - name: Build author-only allowlist
         id: allowlist
         if: >
-          github.event_name == 'pull_request_target' ||
+          (github.event_name == 'pull_request_target' && github.event.action != 'closed') ||
           (github.event_name == 'issue_comment' && github.event.issue.pull_request && (
             github.event.comment.body == 'recheck' ||
             github.event.comment.body == 'I have read and agree to the Contributor License Agreement'
@@ -48,10 +48,10 @@ jobs:
           fi
 
       - name: CLA Assistant
-        # Run on PR events, on "recheck" comment, or when someone posts the signing phrase.
+        # Run on open/update PR events, on "recheck", or when someone posts the signing phrase.
         # IMPORTANT: this phrase must match `custom-pr-sign-comment` below.
         if: >
-          github.event_name == 'pull_request_target' ||
+          (github.event_name == 'pull_request_target' && github.event.action != 'closed') ||
           (github.event_name == 'issue_comment' && github.event.issue.pull_request && (
             github.event.comment.body == 'recheck' ||
             github.event.comment.body == 'I have read and agree to the Contributor License Agreement'
@@ -62,6 +62,8 @@ jobs:
           # PAT required to write to the centralized signatures repo.
           PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         with:
+          lock-pullrequest-aftermerge: false
+
           # Where the CLA document lives (shown to contributors)
           path-to-document: https://github.com/Comfy-Org/comfy-cla/blob/main/comfyui_icla.md
 
@@ -94,3 +96,25 @@ jobs:
 
           custom-allsigned-prcomment: |
             ✅ All contributors have signed the CLA. Thank you! This PR is ready to be merged.
+
+      - name: Lock PR containing a CLA signature or bot approval
+        if: github.event_name == 'pull_request_target' && github.event.action == 'closed' && github.event.pull_request.merged == true
+        uses: actions/github-script@v7
+        with:
+          retries: 3
+          script: |
+            const pr = context.payload.pull_request;
+            const issue = { ...context.repo, issue_number: pr.number };
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...issue,
+              per_page: 100,
+            });
+            const signed = comments.some(comment =>
+              (comment.user?.id === pr.user.id &&
+                comment.body?.trim().toLowerCase() === 'i have read and agree to the contributor license agreement') ||
+              (comment.user?.login === 'github-actions[bot]' &&
+                comment.body?.startsWith('✅ All contributors have signed the CLA. Thank you! This PR is ready to be merged.'))
+            );
+            if (signed) {
+              await github.rest.issues.lock(issue);
+            }

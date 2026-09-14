@@ -1314,7 +1314,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Conditioning & Preprocessors/Pose",
+        "category": "Preprocessors/Pose",
         "description": "Extracts multi-person pose keypoints and skeleton frame sequences from video using SDPose with built-in person detection."
       }
     ]

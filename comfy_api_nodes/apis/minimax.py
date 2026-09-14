@@ -242,6 +242,9 @@ class Hailuo03MaxVideoRequest(BaseModel):
     aspect_ratio: str | None = Field(None)
     image_url: str | None = Field(None)
     end_image_url: str | None = Field(None)
+    reference_image_urls: list[str] | None = Field(None)
+    reference_video_urls: list[str] | None = Field(None)
+    reference_audio_urls: list[str] | None = Field(None)
 
 
 class Hailuo03MaxVideoResult(BaseModel):

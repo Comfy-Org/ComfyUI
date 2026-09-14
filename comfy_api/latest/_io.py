@@ -1451,6 +1451,27 @@ class VideoEdit(ComfyTypeIO):
             })
 
 
+@comfytype(io_type="RESOLUTION_PREVIEW")
+class ResolutionPreview(ComfyTypeIO):
+    Type = dict
+
+    class Input(WidgetInput):
+        def __init__(self, id: str, display_name: str=None, optional=True, tooltip: str=None,
+                     socketless: bool=True, advanced: bool=None,
+                     ratio_widget: str="aspect_ratio", megapixels_widget: str="megapixels", multiple_widget: str="multiple"):
+            super().__init__(id, display_name, optional, tooltip, None, None, socketless, None, None, None, None, advanced)
+            self.ratio_widget = ratio_widget
+            self.megapixels_widget = megapixels_widget
+            self.multiple_widget = multiple_widget
+
+        def as_dict(self):
+            return super().as_dict() | prune_dict({
+                "ratio_widget": self.ratio_widget,
+                "megapixels_widget": self.megapixels_widget,
+                "multiple_widget": self.multiple_widget,
+            })
+
+
 @comfytype(io_type="HISTOGRAM")
 class Histogram(ComfyTypeIO):
     """A histogram represented as a list of bin counts."""
@@ -2529,5 +2550,6 @@ __all__ = [
     "Histogram",
     "Range",
     "VideoEdit",
+    "ResolutionPreview",
     "NodeReplace",
 ]

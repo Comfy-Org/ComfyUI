@@ -4223,7 +4223,7 @@
         "extra": {
           "workflowRendererVersion": "Vue-corrected"
         },
-        "category": "Video generation and editing/Image to video",
+        "category": "Video generation/Image to video",
         "description": "Generates video from a single input image using LTX-2.3."
       }
     ]

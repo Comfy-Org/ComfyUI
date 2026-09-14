@@ -10,6 +10,7 @@ if not torch.cuda.is_available():
     args.cpu = True
 
 from comfy_api_nodes.util.conversions import (  # noqa: E402
+    downscale_image_tensor_by_max_sides,
     bytesio_to_image_tensor,
     downscale_image_tensor,
     pad_images_to_common_channels,
@@ -126,3 +127,23 @@ def test_downscale_never_makes_aspect_more_elongated(width, height, total_pixels
 def test_downscale_leaves_fitting_images_untouched():
     image = torch.zeros(1, 300, 700, 3)
     assert downscale_image_tensor(image, total_pixels=700 * 300) is image
+
+
+@pytest.mark.parametrize(
+    "src, expected",
+    [
+        ((5120, 2048), (2048, 820)),
+        ((2048, 5120), (820, 2048)),
+        ((4096, 4096), (1024, 1024)),
+        ((2048, 1024), (2048, 1024)),
+        ((768, 432), (768, 432)),
+        ((1000, 3000), (683, 2048)),
+    ],
+)
+def test_downscale_by_max_sides(src, expected):
+    w, h = src
+    out = downscale_image_tensor_by_max_sides(torch.zeros(1, h, w, 3), max_long_side=2048, max_short_side=1024)
+    assert (out.shape[2], out.shape[1]) == expected
+    src_ar = max(w, h) / min(w, h)
+    out_ar = max(out.shape[1], out.shape[2]) / min(out.shape[1], out.shape[2])
+    assert out_ar <= src_ar + 1e-9
