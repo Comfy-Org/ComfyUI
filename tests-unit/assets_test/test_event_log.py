@@ -184,6 +184,7 @@ def test_a_string_value_carrying_a_forbidden_character_raises(value):
         ("stage", "scanning"),
         ("site", "reference"),
         ("error_type", "x" * 65),
+        ("error_type", ""),
         ("error_type", 7),
         ("elapsed_ms", "8123"),
         ("count", 1.5),
@@ -199,6 +200,7 @@ def test_a_string_value_carrying_a_forbidden_character_raises(value):
         "bad-stage",
         "bad-site",
         "oversized-string",
+        "empty-string",
         "non-string-error-type",
         "string-into-int-field",
         "float-into-int-field",
@@ -214,7 +216,7 @@ def test_every_validator_rejects_its_bad_value(field, value):
 
 @pytest.mark.parametrize(
     "event",
-    ["", "Seeder.scan_started", "seeder..scan", "9seeder.scan", "seeder.scan-started", "seeder scan", "seeder."],
+    ["", "Seeder.scan_started", "seeder..scan", "9seeder.scan", "seeder.scan-started", "seeder scan", "seeder.", "scanner.made_up"],
 )
 def test_an_invalid_event_name_raises(event):
     with pytest.raises(EventLogError):

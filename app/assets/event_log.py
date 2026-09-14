@@ -15,7 +15,6 @@ ride along.
 
 import logging
 import os
-import re
 import traceback
 from collections.abc import Callable
 from typing import Any
@@ -25,12 +24,26 @@ TAG = "[assets-event]"
 MAX_STRING_LENGTH = 64
 FORBIDDEN_STRING_CHARS = ("/", "\\", ":", " ", "=", '"')
 
-EVENT_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
-
 ROOTS = frozenset({"models", "input", "output", "user", "temp"})
 PHASES = frozenset({"fast", "enrich", "full"})
 STAGES = frozenset({"mark_missing", "pruning", "fast_scan", "enrich", "finalize"})
 STAT_SITES = frozenset({"discovery", "enrich"})
+ALLOWED_EVENTS = frozenset({
+    "assets.enabled",
+    "seeder.scan_started",
+    "seeder.scan_completed",
+    "seeder.scan_failed",
+    "seeder.scan_cancelled",
+    "seeder.marked_missing",
+    "seeder.batch_insert_failed",
+    "scanner.hash_failed",
+    "scanner.enrich_failed",
+    "scanner.hash_discarded_modified",
+    "scanner.fast_scan_failed",
+    "scanner.temp_sync_failed",
+    "scanner.mark_missing_failed",
+    "scanner.stat_failed",
+})
 
 
 class EventLogError(ValueError):
@@ -40,7 +53,7 @@ class EventLogError(ValueError):
 def _is_safe_string(value: Any) -> bool:
     return (
         isinstance(value, str)
-        and len(value) <= MAX_STRING_LENGTH
+        and 0 < len(value) <= MAX_STRING_LENGTH
         and not any(char in value for char in FORBIDDEN_STRING_CHARS)
     )
 
@@ -82,7 +95,7 @@ _warned_call_sites: set[tuple[str, int]] = set()
 
 
 def _find_problem(event: Any, fields: dict[str, Any]) -> str | None:
-    if not isinstance(event, str) or EVENT_NAME_PATTERN.match(event) is None:
+    if not isinstance(event, str) or event not in ALLOWED_EVENTS:
         return "invalid event name"
     for name, value in fields.items():
         validate = ALLOWED_FIELDS.get(name)

@@ -232,6 +232,27 @@ def test_modified_during_hash_emits_fieldless_discard_event(
     assert events_named(caplog, "scanner.hash_discarded_modified") == [{}]
 
 
+def test_modified_hash_event_emits_once_per_scan_and_resets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = tmp_path / "changing.safetensors"
+    path.write_bytes(b"model")
+    monkeypatch.setattr(scanner, "snapshot_hash", lambda _path: None)
+    progress = _ScanState()
+    session = hash_session(path)
+
+    with caplog.at_level(logging.INFO):
+        assert run_hash_failure(session, path, progress) is False
+        assert run_hash_failure(session, path, progress) is False
+        assert events_named(caplog, "scanner.hash_discarded_modified") == [{}]
+        assert run_hash_failure(session, path, _ScanState()) is False
+
+    assert events_named(caplog, "scanner.hash_discarded_modified") == [{}, {}]
+    assert progress.hash_failed == 0
+
+
 def test_locked_files_during_discovery_emit_stat_failed_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -250,6 +271,7 @@ def test_locked_files_during_discovery_emit_stat_failed_exactly_once(
     assert events_named(caplog, "scanner.stat_failed") == [
         {"error_type": "PermissionError", "site": "discovery"}
     ]
+    assert progress.permission_denied == 3
 
 
 def test_missing_files_during_discovery_emit_nothing(
@@ -321,6 +343,7 @@ def test_locked_files_during_enrichment_emit_stat_failed_exactly_once(
     assert events_named(caplog, "scanner.stat_failed") == [
         {"error_type": "PermissionError", "site": "enrich"}
     ]
+    assert progress.permission_denied == 2
 
 
 def test_missing_file_during_enrichment_returns_false_without_emitting(

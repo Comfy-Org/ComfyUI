@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
-from app.assets.event_log import ALLOWED_FIELDS, EVENT_NAME_PATTERN, TAG
+from app.assets.event_log import ALLOWED_EVENTS, ALLOWED_FIELDS, TAG
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_SCOPE = "<module>"
@@ -179,8 +179,8 @@ def _field_faults(call: ast.Call, aliases: Aliases) -> Iterator[tuple[str, str]]
 def _file_faults(call: ast.Call, aliases: Aliases) -> Iterator[tuple[str, str]]:
     if _is_emit_call(call.func, aliases):
         event = _event_of(call)
-        if event is None or EVENT_NAME_PATTERN.match(event) is None:
-            yield "event_names", "the event must be one string literal matching the event pattern"
+        if event not in ALLOWED_EVENTS:
+            yield "event_names", "the event must be one string literal in the allowed vocabulary"
         yield from _field_faults(call, aliases)
     elif _is_log_call(call.func) and _carries_tag(call):
         yield "tagged_logs", f"log line carries {TAG} outside event_log.emit()"
@@ -196,7 +196,7 @@ def _scan_file(root: Path, relative: str) -> tuple[Counter[CallSite], list[tuple
             continue
         if _is_emit_call(node.func, aliases):
             event = _event_of(node)
-            if event is not None and EVENT_NAME_PATTERN.match(event) is not None:
+            if event is not None and event in ALLOWED_EVENTS:
                 sites[CallSite(relative, scope, event)] += 1
         for category, reason in _file_faults(node, aliases):
             faults.append((category, f"{relative}:{node.lineno}: {reason}"))
@@ -237,7 +237,7 @@ def test_emit_fields_stay_inside_the_closed_vocabulary() -> None:
     assert SCAN.vocabulary == ()
 
 
-def test_emit_events_are_literals_matching_the_event_pattern() -> None:
+def test_emit_events_are_literals_in_the_allowed_vocabulary() -> None:
     assert SCAN.event_names == ()
 
 

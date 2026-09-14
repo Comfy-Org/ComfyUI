@@ -330,8 +330,11 @@ def build_asset_specs(
             continue
         except OSError as e:
             _log_scan_error("discovery_stat", e)
-            if progress is not None and progress.mark_emitted("stat_failed:discovery"):
-                emit("scanner.stat_failed", site="discovery", error_type=error_type(e))
+            if progress is not None:
+                if isinstance(e, PermissionError):
+                    progress.permission_denied += 1
+                if progress.mark_emitted("stat_failed:discovery"):
+                    emit("scanner.stat_failed", site="discovery", error_type=error_type(e))
             continue
         if not stat_p.st_size:
             continue
@@ -509,8 +512,11 @@ def enrich_asset(
         return False
     except OSError as e:
         _log_scan_error("enrichment_stat", e)
-        if progress is not None and progress.mark_emitted("stat_failed:enrich"):
-            emit("scanner.stat_failed", site="enrich", error_type=error_type(e))
+        if progress is not None:
+            if isinstance(e, PermissionError):
+                progress.permission_denied += 1
+            if progress.mark_emitted("stat_failed:enrich"):
+                emit("scanner.stat_failed", site="enrich", error_type=error_type(e))
         return False
 
     initial_mtime_ns = get_mtime_ns(stat_p)
@@ -537,7 +543,8 @@ def enrich_asset(
         try:
             snapshot = snapshot_hash(file_path)
             if snapshot is None:
-                emit("scanner.hash_discarded_modified")
+                if progress is None or progress.mark_emitted("hash_discarded_modified"):
+                    emit("scanner.hash_discarded_modified")
                 logging.warning(
                     "File modified during hashing (snapshot unstable), discarding hash: %s",
                     file_path,
