@@ -1168,7 +1168,9 @@
             "type": "COMBO"
           }
         ],
-        "extra": {}
+        "extra": {},
+        "category": "Preprocessors/Normal",
+        "description": "Estimates surface normals from an input image using Marigold V2, producing a normal map of surface orientation for relighting and geometry-aware processing."
       }
     ]
   },

@@ -1168,7 +1168,9 @@
             "type": "COMBO"
           }
         ],
-        "extra": {}
+        "extra": {},
+        "category": "Preprocessors/Albedo",
+        "description": "Estimates albedo from an input image using Marigold V2, separating surface color from lighting and shading for relighting and 3D asset work."
       }
     ]
   },

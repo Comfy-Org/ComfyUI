@@ -1168,7 +1168,9 @@
             "type": "COMBO"
           }
         ],
-        "extra": {}
+        "extra": {},
+        "category": "Preprocessors/Depth",
+        "description": "Estimates scene depth from an input image using Marigold V2, producing a depth map with brighter areas closer and darker areas farther."
       }
     ]
   },

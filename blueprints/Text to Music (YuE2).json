@@ -1620,7 +1620,9 @@
             "type": "STRING"
           }
         ],
-        "extra": {}
+        "extra": {},
+        "category": "Audio/Music generation",
+        "description": "Generates complete songs from a music style and lyrics using YuE2, with symbolic planning for structured melody, harmony, vocals, and accompaniment."
       }
     ]
   },
