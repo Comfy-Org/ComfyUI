@@ -6,7 +6,9 @@ import uuid
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, TypedDict, assert_never
+from typing import Literal, TypedDict
+
+from typing_extensions import assert_never
 
 import pytest
 import requests

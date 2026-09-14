@@ -7,7 +7,9 @@ import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import NotRequired, TypeAlias, TypedDict
+from typing import TypeAlias, TypedDict
+
+from typing_extensions import NotRequired
 
 import pytest
 import requests

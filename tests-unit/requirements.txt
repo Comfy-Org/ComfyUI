@@ -1,4 +1,5 @@
 pytest>=7.8.0
 pytest-aiohttp
 pytest-asyncio
+typing_extensions
 websocket-client
