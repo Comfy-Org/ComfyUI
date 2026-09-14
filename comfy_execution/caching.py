@@ -1,6 +1,7 @@
 import asyncio
 import bisect
 import itertools
+import logging
 import time
 import torch
 from typing import Sequence, Mapping, Dict
@@ -588,7 +589,13 @@ class RAMPressureCache(LRUCache):
                         oom_ram_usage = 1e30
                     elif hasattr(output, "_comfy_cache_tensors"):
                         scan_list_for_ram_usage(output._comfy_cache_tensors())
-            scan_list_for_ram_usage(cache_entry.outputs)
+            try:
+                scan_list_for_ram_usage(cache_entry.outputs)
+            except Exception:
+                logging.exception(
+                    "ram_release: failed to scan cached outputs; "
+                    "treating cache entry as evictable")
+                ram_usage = max(ram_usage, RAM_CACHE_DEFAULT_RAM_USAGE)
 
             if ram_usage < min_entry_size:
                 continue
