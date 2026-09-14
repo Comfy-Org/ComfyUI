@@ -6,6 +6,7 @@ import weakref
 from fractions import Fraction
 
 import av
+import pytest
 import torch
 
 from comfy_api.input_impl.video_types import VideoFromComponents, VideoFromFile, VideoFromList
@@ -259,6 +260,7 @@ def test_file_frame_count_decodes_when_metadata_is_missing(tmp_path):
     _create_h264_without_frame_count_metadata(path)
 
     assert VideoFromFile(path).get_frame_count() == 10
+    assert VideoFromFile(path, start_time=0.08, duration=0.2).get_frame_count() == 5
 
 
 def test_accumulated_frame_count_decodes_children_with_missing_metadata(tmp_path):
@@ -270,15 +272,16 @@ def test_accumulated_frame_count_decodes_children_with_missing_metadata(tmp_path
     assert video.get_frame_count() == 20
 
 
-def test_file_duration_decodes_raw_h264_without_timing_metadata(tmp_path):
+@pytest.fixture
+def raw_h264_file(tmp_path):
     path = tmp_path / "missing-duration.h264"
     with av.open(path, mode="w", format="h264") as output:
         stream = output.add_stream("h264", rate=25)
         stream.width = stream.height = 16
         stream.pix_fmt = "yuv420p"
-        for index in range(10):
+        for index in range(20):
             frame = av.VideoFrame.from_ndarray(
-                torch.full((16, 16, 3), index * 20, dtype=torch.uint8).numpy(), format="rgb24"
+                torch.full((16, 16, 3), index * 10, dtype=torch.uint8).numpy(), format="rgb24"
             )
             frame.pts = index
             frame.time_base = Fraction(1, 25)
@@ -291,8 +294,28 @@ def test_file_duration_decodes_raw_h264_without_timing_metadata(tmp_path):
         assert stream.frames == 0
         assert stream.duration is None
         assert stream.average_rate == 25
+        assert all(frame.pts is None for frame in container.decode(stream))
 
-    assert VideoFromFile(path).get_duration() == 0.4
+    return path
+
+
+def test_file_duration_decodes_raw_h264_without_timing_metadata(raw_h264_file):
+    assert VideoFromFile(raw_h264_file).get_duration() == 0.8
+
+
+def test_file_frame_count_decodes_raw_h264_without_timing_metadata(raw_h264_file):
+    assert VideoFromFile(raw_h264_file).get_frame_count() == 20
+
+
+@pytest.mark.parametrize("allow_seek", [False, True])
+def test_file_frame_count_rejects_trim_without_raw_h264_timing(raw_h264_file, monkeypatch, allow_seek):
+    if allow_seek:
+        # Let decoding start to exercise the missing-PTS failure after seek.
+        monkeypatch.setattr(av.container.InputContainer, "seek", lambda *args, **kwargs: None)
+    video = VideoFromFile(raw_h264_file, start_time=0.2, duration=0.4)
+
+    with pytest.raises(ValueError, match="trimmed video.*timestamps.*seeking"):
+        video.get_frame_count()
 
 
 def test_accumulated_video_reports_each_incompatible_dimension():

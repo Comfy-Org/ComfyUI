@@ -396,16 +396,28 @@ class VideoFromFile(VideoInput):
             # 3. Last resort: decode frames and count them (streaming)
             start_time, duration = self.get_active_trim_window()
             frame_count = 1
-            start_pts = int(start_time / video_stream.time_base)
+            has_trim = start_time != 0 or duration != 0
+            timing_error = "Cannot determine frame count for a trimmed video without usable timestamps and seeking"
+            if has_trim and video_stream.time_base is None:
+                raise ValueError(timing_error)
+            start_pts = int(start_time / video_stream.time_base) if has_trim else 0
             end_pts = int((start_time + duration) / video_stream.time_base) if duration else None
-            container.seek(start_pts, stream=video_stream)
+            if has_trim:
+                try:
+                    container.seek(start_pts, stream=video_stream)
+                except av.error.FFmpegError as error:
+                    raise ValueError(timing_error) from error
             frame_iterator = container.decode(video_stream)
             for frame in frame_iterator:
-                if frame.pts >= start_pts:
+                if has_trim and frame.pts is None:
+                    raise ValueError(timing_error)
+                if frame.pts is None or frame.pts >= start_pts:
                     break
             else:
                 raise ValueError(f"Could not determine frame count for file '{self.__file}'\nNo frames exist for start_time {self.__start_time}")
             for frame in frame_iterator:
+                if has_trim and frame.pts is None:
+                    raise ValueError(timing_error)
                 if end_pts is not None and frame.pts >= end_pts:
                     break
                 frame_count += 1
