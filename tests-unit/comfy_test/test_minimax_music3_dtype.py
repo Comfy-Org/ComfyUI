@@ -2,11 +2,14 @@ import torch
 
 from comfy.cli_args import args as cli_args
 
+_original_cli_args_cpu = cli_args.cpu
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
 import comfy.sd
 import comfy.supported_models
+
+cli_args.cpu = _original_cli_args_cpu
 
 
 def test_minimax_music3_fp16_manual_cast_only_for_bf16_device(monkeypatch):
