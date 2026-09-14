@@ -857,7 +857,7 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
 def attention_backend_memory_efficient(name):
     if name == "xformers":
         return True
-    if name in ("pytorch", "sage", "sage3", "flash", "comfy_kitchen_int8"):
+    if name in ("pytorch", "sage", "sage3", "flash"):
         return model_management.pytorch_attention_flash_attention()
     return False
 

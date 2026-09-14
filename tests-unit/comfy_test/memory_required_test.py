@@ -1,3 +1,4 @@
+import logging
 import math
 
 import pytest
@@ -48,6 +49,23 @@ class _LegacyMemoryModel:
         return {}
 
 
+class _KeywordOnlyLegacyMemoryModel:
+    def memory_required(self, *, input_shape, cond_shapes={}):
+        return input_shape[0] + len(cond_shapes)
+
+
+class _OpaqueMemoryRequired:
+    __signature__ = "opaque"
+
+    def __call__(self, input_shape, cond_shapes={}):
+        return input_shape[0] + len(cond_shapes)
+
+
+class _OpaqueLegacyMemoryModel:
+    def __init__(self):
+        self.memory_required = _OpaqueMemoryRequired()
+
+
 INPUT_SHAPE = (1, 16, 1, 180, 320)
 AREA = INPUT_SHAPE[0] * math.prod(INPUT_SHAPE[2:])
 DTYPE_SIZE = 2  # bf16
@@ -64,7 +82,7 @@ BACKEND_CASES = (
 )
 
 SELECTORS = tuple(case[1] for case in BACKEND_CASES)
-PYTORCH_FALLBACK_CASES = tuple(case for case in BACKEND_CASES if case[0] != "xformers")
+PYTORCH_FALLBACK_CASES = tuple(case for case in BACKEND_CASES if case[0] not in ("xformers", "comfy_kitchen_int8"))
 
 
 def _select_backend(monkeypatch, enabled_selector=None, flash_attention=False, use_split=False):
@@ -101,6 +119,18 @@ def test_pytorch_flash_fallback_makes_selected_backend_memory_efficient(monkeypa
     assert selected is getattr(comfy.ldm.modules.attention, function_name)
     assert profile is True
     assert _estimate(profile) == EFFICIENT
+
+
+def test_comfy_kitchen_float32_fallback_uses_conservative_memory_profile(monkeypatch):
+    attention = comfy.ldm.modules.attention
+    fallback_output = object()
+    monkeypatch.setattr(attention, "attention_pytorch", lambda *args, **kwargs: fallback_output)
+    selected, profile = _select_backend(monkeypatch, "comfy_kitchen_attention_enabled", flash_attention=True)
+    q = torch.zeros((1, 1, 1), dtype=torch.float32)
+
+    assert selected(q, q, q, 1, low_precision_attention=False) is fallback_output
+    assert profile is False
+    assert _estimate(profile) == CONSERVATIVE
 
 
 def test_split_attention_uses_conservative_memory_profile(monkeypatch):
@@ -174,3 +204,35 @@ def test_estimate_memory_omits_absent_attention_profile():
 
     assert "optimized_attention_memory_efficient" not in model.model_options
     assert comfy.sampler_helpers.estimate_memory(model, INPUT_SHAPE, {}) == (2, 1)
+
+
+def test_model_patcher_memory_required_preserves_legacy_override():
+    model = ModelPatcher(_LegacyMemoryModel(), torch.device("cpu"), torch.device("cpu"))
+    model.set_model_optimized_attention(lambda *args, **kwargs: None)
+
+    assert model.memory_required(INPUT_SHAPE) == 1
+
+
+def test_estimate_memory_preserves_legacy_override():
+    model = ModelPatcher(_LegacyMemoryModel(), torch.device("cpu"), torch.device("cpu"))
+    model.set_model_optimized_attention(lambda *args, **kwargs: None)
+
+    assert comfy.sampler_helpers.estimate_memory(model, INPUT_SHAPE, {}) == (2, 1)
+
+
+def test_model_patcher_memory_required_preserves_keyword_only_legacy_override():
+    model = ModelPatcher(_KeywordOnlyLegacyMemoryModel(), torch.device("cpu"), torch.device("cpu"))
+    model.set_model_optimized_attention(lambda *args, **kwargs: None)
+
+    assert model.memory_required(INPUT_SHAPE) == 1
+
+
+def test_model_patcher_memory_required_preserves_opaque_legacy_override(caplog):
+    model = ModelPatcher(_OpaqueLegacyMemoryModel(), torch.device("cpu"), torch.device("cpu"))
+    model.set_model_optimized_attention(lambda *args, **kwargs: None)
+
+    with caplog.at_level(logging.WARNING):
+        memory_required = model.memory_required(INPUT_SHAPE)
+
+    assert memory_required == 1
+    assert "Could not inspect _OpaqueLegacyMemoryModel.memory_required" in caplog.text

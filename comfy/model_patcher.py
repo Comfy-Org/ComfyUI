@@ -47,6 +47,29 @@ import comfy_aimdo.model_vbar
 def is_model_patcher_output(output):
     return isinstance(output, ModelPatcher) or isinstance(getattr(output, "patcher", None), ModelPatcher)
 
+
+def call_model_memory_required(model, *args, memory_efficient_attention=None, **kwargs):
+    """Call a model memory estimator without breaking legacy overrides."""
+    if memory_efficient_attention is not None:
+        try:
+            parameters = inspect.signature(model.memory_required).parameters
+        except (TypeError, ValueError) as error:
+            logging.warning(
+                "Could not inspect %s.memory_required; using its legacy memory estimate without an attention profile: %s",
+                type(model).__name__,
+                error,
+            )
+        else:
+            profile_parameter = parameters.get("memory_efficient_attention")
+            supports_profile = (
+                profile_parameter is not None
+                and profile_parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            ) or any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+            if supports_profile:
+                kwargs["memory_efficient_attention"] = memory_efficient_attention
+    return model.memory_required(*args, **kwargs)
+
+
 class PromptModelTracker:
     def __init__(self):
         self.models = {}
@@ -630,10 +653,11 @@ class ModelPatcher:
                 return True
 
     def memory_required(self, input_shape):
-        memory_efficient_attention = self.model_options.get("optimized_attention_memory_efficient")
-        if memory_efficient_attention is None:
-            return self.model.memory_required(input_shape=input_shape)
-        return self.model.memory_required(input_shape=input_shape, memory_efficient_attention=memory_efficient_attention)
+        return call_model_memory_required(
+            self.model,
+            input_shape=input_shape,
+            memory_efficient_attention=self.model_options.get("optimized_attention_memory_efficient"),
+        )
 
     def disable_model_cfg1_optimization(self):
         self.model_options["disable_cfg1_optimization"] = True

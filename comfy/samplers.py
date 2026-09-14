@@ -279,11 +279,12 @@ def _calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tens
                     for k, v in to_run[tt][0].conditioning.items():
                         cond_shapes[k].append(v.size())
 
-                memory_efficient_attention = model_options.get("optimized_attention_memory_efficient")
-                if memory_efficient_attention is None:
-                    memory_required = model.memory_required(input_shape, cond_shapes=cond_shapes)
-                else:
-                    memory_required = model.memory_required(input_shape, cond_shapes=cond_shapes, memory_efficient_attention=memory_efficient_attention)
+                memory_required = comfy.model_patcher.call_model_memory_required(
+                    model,
+                    input_shape,
+                    cond_shapes=cond_shapes,
+                    memory_efficient_attention=model_options.get("optimized_attention_memory_efficient"),
+                )
                 if memory_required * 1.5 < free_memory:
                     to_batch = batch_amount
                     break
@@ -449,11 +450,12 @@ def _calc_cond_batch_multigpu(model: BaseModel, conds: list[list[dict]], x_in: t
                 for tt in batch_amount:
                     for k, v in to_run[tt][0].conditioning.items():
                         cond_shapes[k].append(v.size())
-                memory_efficient_attention = model_options.get("optimized_attention_memory_efficient")
-                if memory_efficient_attention is None:
-                    memory_required = model.memory_required(input_shape, cond_shapes=cond_shapes)
-                else:
-                    memory_required = model.memory_required(input_shape, cond_shapes=cond_shapes, memory_efficient_attention=memory_efficient_attention)
+                memory_required = comfy.model_patcher.call_model_memory_required(
+                    model,
+                    input_shape,
+                    cond_shapes=cond_shapes,
+                    memory_efficient_attention=model_options.get("optimized_attention_memory_efficient"),
+                )
                 if memory_required * 1.5 < free_memory:
                     to_batch = batch_amount
                     break

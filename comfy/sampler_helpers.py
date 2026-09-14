@@ -175,12 +175,18 @@ def estimate_memory(model, noise_shape, conds):
                     cond_shapes_min[k] = [v]
 
     memory_efficient_attention = model.model_options.get("optimized_attention_memory_efficient")
-    if memory_efficient_attention is None:
-        memory_required = model.model.memory_required([noise_shape[0] * 2] + list(noise_shape[1:]), cond_shapes=cond_shapes)
-        minimum_memory_required = model.model.memory_required([noise_shape[0]] + list(noise_shape[1:]), cond_shapes=cond_shapes_min)
-    else:
-        memory_required = model.model.memory_required([noise_shape[0] * 2] + list(noise_shape[1:]), cond_shapes=cond_shapes, memory_efficient_attention=memory_efficient_attention)
-        minimum_memory_required = model.model.memory_required([noise_shape[0]] + list(noise_shape[1:]), cond_shapes=cond_shapes_min, memory_efficient_attention=memory_efficient_attention)
+    memory_required = comfy.model_patcher.call_model_memory_required(
+        model.model,
+        [noise_shape[0] * 2] + list(noise_shape[1:]),
+        cond_shapes=cond_shapes,
+        memory_efficient_attention=memory_efficient_attention,
+    )
+    minimum_memory_required = comfy.model_patcher.call_model_memory_required(
+        model.model,
+        [noise_shape[0]] + list(noise_shape[1:]),
+        cond_shapes=cond_shapes_min,
+        memory_efficient_attention=memory_efficient_attention,
+    )
     return memory_required, minimum_memory_required
 
 def prepare_sampling(model: ModelPatcher, noise_shape, conds, model_options=None, force_full_load=False, force_offload=False):
