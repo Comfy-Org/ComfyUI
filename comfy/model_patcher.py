@@ -48,17 +48,23 @@ def is_model_patcher_output(output):
     return isinstance(output, ModelPatcher) or isinstance(getattr(output, "patcher", None), ModelPatcher)
 
 
+_warned_memory_required_signatures = set()
+
+
 def call_model_memory_required(model, *args, memory_efficient_attention=None, **kwargs):
     """Call a model memory estimator without breaking legacy overrides."""
     if memory_efficient_attention is not None:
         try:
             parameters = inspect.signature(model.memory_required).parameters
         except (TypeError, ValueError) as error:
-            logging.warning(
-                "Could not inspect %s.memory_required; using its legacy memory estimate without an attention profile: %s",
-                type(model).__name__,
-                error,
-            )
+            model_type = type(model)
+            if model_type not in _warned_memory_required_signatures:
+                _warned_memory_required_signatures.add(model_type)
+                logging.warning(
+                    "Could not inspect %s.memory_required; using its legacy memory estimate without an attention profile: %s",
+                    model_type.__name__,
+                    error,
+                )
         else:
             profile_parameter = parameters.get("memory_efficient_attention")
             supports_profile = (

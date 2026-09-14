@@ -82,7 +82,7 @@ BACKEND_CASES = (
 )
 
 SELECTORS = tuple(case[1] for case in BACKEND_CASES)
-PYTORCH_FALLBACK_CASES = tuple(case for case in BACKEND_CASES if case[0] not in ("xformers", "comfy_kitchen_int8"))
+PYTORCH_FALLBACK_CASES = tuple(case for case in BACKEND_CASES if case[0] != "xformers")
 
 
 def _select_backend(monkeypatch, enabled_selector=None, flash_attention=False, use_split=False):
@@ -125,7 +125,7 @@ def test_comfy_kitchen_float32_fallback_uses_conservative_memory_profile(monkeyp
     attention = comfy.ldm.modules.attention
     fallback_output = object()
     monkeypatch.setattr(attention, "attention_pytorch", lambda *args, **kwargs: fallback_output)
-    selected, profile = _select_backend(monkeypatch, "comfy_kitchen_attention_enabled", flash_attention=True)
+    selected, profile = _select_backend(monkeypatch, "comfy_kitchen_attention_enabled")
     q = torch.zeros((1, 1, 1), dtype=torch.float32)
 
     assert selected(q, q, q, 1, low_precision_attention=False) is fallback_output
@@ -227,12 +227,14 @@ def test_model_patcher_memory_required_preserves_keyword_only_legacy_override():
     assert model.memory_required(INPUT_SHAPE) == 1
 
 
-def test_model_patcher_memory_required_preserves_opaque_legacy_override(caplog):
+def test_model_patcher_memory_required_warns_once_for_opaque_legacy_override(caplog):
     model = ModelPatcher(_OpaqueLegacyMemoryModel(), torch.device("cpu"), torch.device("cpu"))
     model.set_model_optimized_attention(lambda *args, **kwargs: None)
 
     with caplog.at_level(logging.WARNING):
         memory_required = model.memory_required(INPUT_SHAPE)
+        repeated_memory_required = model.memory_required(INPUT_SHAPE)
 
     assert memory_required == 1
-    assert "Could not inspect _OpaqueLegacyMemoryModel.memory_required" in caplog.text
+    assert repeated_memory_required == 1
+    assert caplog.text.count("Could not inspect _OpaqueLegacyMemoryModel.memory_required") == 1
