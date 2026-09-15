@@ -81,7 +81,7 @@ def test_prompt_worker_survives_execute_exception():
             self.status_messages = []
             self.history_result = {}
 
-        def execute(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
+        def execute(self, prompt, prompt_id, extra_data=None, execute_outputs=None):
             queue_calls.append(prompt_id)
             if prompt_id == "prompt-fail-id":
                 raise RuntimeError("Simulated framework exception escaping execute_async")
@@ -120,3 +120,65 @@ def test_prompt_worker_survives_execute_exception():
     prompt_ids_notified = [call.args[1]["prompt_id"] for call in executing_notifications]
     assert "prompt-fail-id" in prompt_ids_notified
     assert "prompt-success-id" in prompt_ids_notified
+
+
+def test_failed_prompt_does_not_leak_prior_prompt_history():
+    """Verify that a failed prompt following a successful prompt does not inherit prior history."""
+    class MockQueue:
+        def __init__(self):
+            self.tasks_done = []
+            self._items = [
+                ((1, "prompt-1-ok", {}, {}, [], {}), 1),
+                ((2, "prompt-2-fail", {}, {}, [], {}), 2),
+            ]
+
+        def get(self, timeout=None):
+            if self._items:
+                return self._items.pop(0)
+            raise StopWorkerLoop()
+
+        def task_done(self, item_id, history_result, status=None, process_item=None):
+            self.tasks_done.append({
+                "item_id": item_id,
+                "history_result": history_result,
+                "status": status,
+            })
+
+        def get_flags(self):
+            return {}
+
+    mock_queue = MockQueue()
+    mock_server = MagicMock()
+    mock_server.client_id = "test-client"
+    mock_asset_manager = MagicMock()
+
+    class MockExecutor:
+        def __init__(self, *args, **kwargs):
+            self.reset()
+
+        def reset(self):
+            self.success = True
+            self.status_messages = []
+            self.history_result = {}
+
+        def execute(self, prompt, prompt_id, extra_data=None, execute_outputs=None):
+            if prompt_id == "prompt-1-ok":
+                self.success = True
+                self.history_result = {"outputs": {"image": "result.png"}}
+            else:
+                # Reset per-execution state as execute_async now does
+                self.success = True
+                self.history_result = {}
+                raise RuntimeError("Crash on prompt 2")
+
+    with patch("execution.PromptExecutor", MockExecutor):
+        with pytest.raises(StopWorkerLoop):
+            prompt_worker(mock_queue, mock_server, mock_asset_manager)
+
+    assert len(mock_queue.tasks_done) == 2
+    assert mock_queue.tasks_done[0]["status"].status_str == "success"
+    assert mock_queue.tasks_done[0]["history_result"] == {"outputs": {"image": "result.png"}}
+
+    # Failed prompt must not retain prompt 1's history_result
+    assert mock_queue.tasks_done[1]["status"].status_str == "error"
+    assert mock_queue.tasks_done[1]["history_result"] == {}
