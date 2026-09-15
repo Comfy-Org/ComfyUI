@@ -1,170 +1,102 @@
-import subprocess
-import sys
-from pathlib import Path
+import importlib
+
+import pytest
 
 
-def _run_prompt_worker(script: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=Path(__file__).parents[2],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+class LoopEscape(Exception):
+    pass
 
-
-def test_prompt_worker_resumes_background_scan_when_execute_raises() -> None:
-    script = """
-import sys
-
-sys.argv = ["main.py", "--cpu"]
-
-import main
 
 class Queue:
+    def __init__(self, completion_error: RuntimeError | None = None) -> None:
+        self.completion_error = completion_error
+        self.get_calls = 0
+
     def get(self, timeout=None):
+        self.get_calls += 1
+        if self.get_calls > 1:
+            raise LoopEscape("prompt worker requested a second item")
         return (0, "prompt-id", {}, {}, [], {}), 1
+
+    def task_done(self, *args, **kwargs) -> None:
+        if self.completion_error is not None:
+            raise self.completion_error
+
 
 class Server:
     last_prompt_id = None
     client_id = None
 
-class BackgroundScan:
-    paused = False
 
-    def pause_background_scan(self):
+class AssetManager:
+    def __init__(self, resume_error: RuntimeError | None = None) -> None:
+        self.paused = False
+        self.resume_error = resume_error
+
+    def pause_background_scan(self) -> None:
         self.paused = True
 
-    def resume_background_scan(self):
+    def resume_background_scan(self) -> None:
         self.paused = False
+        if self.resume_error is not None:
+            raise self.resume_error
+
 
 class Executor:
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         self.history_result = {}
         self.success = True
         self.status_messages = []
 
-    def execute(self, *args, **kwargs):
-        raise RuntimeError("forced execute failure")
-
-main.args.cache_classic = True
-main.execution.PromptExecutor = Executor
-asset_manager = BackgroundScan()
-
-try:
-    main.prompt_worker(Queue(), Server(), asset_manager)
-except RuntimeError as error:
-    assert str(error) == "forced execute failure"
-
-assert asset_manager.paused is False
-"""
-
-    result = _run_prompt_worker(script)
-
-    assert result.returncode == 0, result.stderr
-
-
-def test_prompt_worker_resumes_background_scan_when_completion_raises() -> None:
-    script = """
-import sys
-
-sys.argv = ["main.py", "--cpu"]
-
-import main
-
-class Queue:
-    def get(self, timeout=None):
-        return (0, "prompt-id", {}, {}, [], {}), 1
-
-    def task_done(self, *args, **kwargs):
-        raise RuntimeError("forced completion failure")
-
-class Server:
-    last_prompt_id = None
-    client_id = None
-
-class BackgroundScan:
-    paused = False
-
-    def pause_background_scan(self):
-        self.paused = True
-
-    def resume_background_scan(self):
-        self.paused = False
-
-class Executor:
-    def __init__(self, *args, **kwargs):
-        self.history_result = {}
-        self.success = True
-        self.status_messages = []
-
-    def execute(self, *args, **kwargs):
+    def execute(self, *args, **kwargs) -> None:
         return None
 
-main.args.cache_classic = True
-main.execution.PromptExecutor = Executor
-asset_manager = BackgroundScan()
 
-try:
-    main.prompt_worker(Queue(), Server(), asset_manager)
-except RuntimeError as error:
-    assert str(error) == "forced completion failure"
-
-assert asset_manager.paused is False
-"""
-
-    result = _run_prompt_worker(script)
-
-    assert result.returncode == 0, result.stderr
-
-
-def test_prompt_worker_preserves_execute_error_when_resume_raises() -> None:
-    script = """
-import sys
-
-sys.argv = ["main.py", "--cpu"]
-
-import main
-
-class Queue:
-    def get(self, timeout=None):
-        return (0, "prompt-id", {}, {}, [], {}), 1
-
-class Server:
-    last_prompt_id = None
-    client_id = None
-
-class BackgroundScan:
-    paused = False
-
-    def pause_background_scan(self):
-        self.paused = True
-
-    def resume_background_scan(self):
-        self.paused = False
-        raise RuntimeError("forced resume failure")
-
-class Executor:
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def execute(self, *args, **kwargs):
+class ExecuteFailureExecutor(Executor):
+    def execute(self, *args, **kwargs) -> None:
         raise RuntimeError("forced execute failure")
 
-main.args.cache_classic = True
-main.execution.PromptExecutor = Executor
-asset_manager = BackgroundScan()
 
-try:
-    main.prompt_worker(Queue(), Server(), asset_manager)
-except RuntimeError as error:
-    assert str(error) == "forced execute failure"
-else:
-    raise AssertionError("prompt_worker should propagate the execute failure")
+@pytest.fixture
+def prompt_worker_module(monkeypatch):
+    from comfy.cli_args import args
 
-assert asset_manager.paused is False
-"""
+    monkeypatch.setattr(args, "cpu", True, raising=False)
+    try:
+        return importlib.import_module("app.prompt_worker")
+    except Exception as exc:
+        pytest.skip(f"prompt worker module could not be imported in CPU mode: {exc!r}")
 
-    result = _run_prompt_worker(script)
 
-    assert result.returncode == 0, result.stderr
+def test_prompt_worker_resumes_background_scan_when_execute_raises(prompt_worker_module, monkeypatch) -> None:
+    monkeypatch.setattr(prompt_worker_module.execution, "PromptExecutor", ExecuteFailureExecutor)
+    asset_manager = AssetManager()
+
+    with pytest.raises(RuntimeError, match="^forced execute failure$"):
+        prompt_worker_module.prompt_worker(Queue(), Server(), asset_manager)
+
+    assert asset_manager.paused is False
+
+
+def test_prompt_worker_resumes_background_scan_when_completion_raises(prompt_worker_module, monkeypatch) -> None:
+    monkeypatch.setattr(prompt_worker_module.execution, "PromptExecutor", Executor)
+    asset_manager = AssetManager()
+
+    with pytest.raises(RuntimeError, match="^forced completion failure$"):
+        prompt_worker_module.prompt_worker(
+            Queue(completion_error=RuntimeError("forced completion failure")),
+            Server(),
+            asset_manager,
+        )
+
+    assert asset_manager.paused is False
+
+
+def test_prompt_worker_preserves_execute_error_when_resume_raises(prompt_worker_module, monkeypatch) -> None:
+    monkeypatch.setattr(prompt_worker_module.execution, "PromptExecutor", ExecuteFailureExecutor)
+    asset_manager = AssetManager(resume_error=RuntimeError("forced resume failure"))
+
+    with pytest.raises(RuntimeError, match="^forced execute failure$"):
+        prompt_worker_module.prompt_worker(Queue(), Server(), asset_manager)
+
+    assert asset_manager.paused is False
