@@ -271,18 +271,19 @@ class PromptServer():
             ws = web.WebSocketResponse()
             await ws.prepare(request)
             sid = request.rel_url.query.get('clientId', '')
-            if sid:
-                # Reusing existing session, remove old
-                self.sockets.pop(sid, None)
-            else:
+            if not sid:
                 sid = uuid.uuid4().hex
 
+            old_ws = self.sockets.get(sid)
             # Store WebSocket for backward compatibility
             self.sockets[sid] = ws
             # Store metadata separately
             self.sockets_metadata[sid] = {"feature_flags": {}}
 
             try:
+                if old_ws is not None:
+                    await old_ws.close()
+
                 # Send initial state to the new client
                 await self.send("status", {"status": self.get_queue_info(), "sid": sid}, sid)
                 # On reconnect if we are the currently executing client send the current node
@@ -293,6 +294,8 @@ class PromptServer():
                 first_message = True
 
                 async for msg in ws:
+                    if self.sockets.get(sid) is not ws:
+                        break
                     if msg.type == aiohttp.WSMsgType.ERROR:
                         logging.warning('ws connection closed with exception %s' % ws.exception())
                     elif msg.type == aiohttp.WSMsgType.TEXT:
@@ -322,8 +325,9 @@ class PromptServer():
                         except Exception as e:
                             logging.error(f"Error processing WebSocket message: {e}")
             finally:
-                self.sockets.pop(sid, None)
-                self.sockets_metadata.pop(sid, None)
+                if self.sockets.get(sid) is ws:
+                    self.sockets.pop(sid, None)
+                    self.sockets_metadata.pop(sid, None)
             return ws
 
         @routes.get("/")
