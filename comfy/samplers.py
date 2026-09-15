@@ -1249,8 +1249,18 @@ class CFGGuider:
             all_devices = [device] + extra_devices
             self.model_options["multigpu_thread_pool"] = comfy.multigpu.MultiGPUThreadPool(all_devices)
 
-        with comfy.model_management.cuda_device_context(device):
+        primary_error = None
+        cleanup_errors = []
+        output = None
+
+        def cleanup(step):
             try:
+                step()
+            except BaseException as error:
+                cleanup_errors.append(error)
+
+        try:
+            with comfy.model_management.cuda_device_context(device):
                 noise = noise.to(device=device, dtype=torch.float32)
                 latent_image = latent_image.to(device=device, dtype=torch.float32)
                 sigmas = sigmas.to(device)
@@ -1260,17 +1270,36 @@ class CFGGuider:
                 for multigpu_patcher in multigpu_patchers:
                     multigpu_patcher.pre_run()
                 output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
-            finally:
-                thread_pool = self.model_options.pop("multigpu_thread_pool", None)
-                if thread_pool is not None:
-                    thread_pool.shutdown()
-                self.model_patcher.cleanup()
-                for multigpu_patcher in multigpu_patchers:
-                    multigpu_patcher.cleanup()
+        except BaseException as error:
+            primary_error = error
+        finally:
+            thread_pool = self.model_options.pop("multigpu_thread_pool", None)
+            if thread_pool is not None:
+                cleanup(thread_pool.shutdown)
+            cleanup(self.model_patcher.cleanup)
+            for multigpu_patcher in multigpu_patchers:
+                cleanup(multigpu_patcher.cleanup)
+            cleanup(lambda: comfy.sampler_helpers.cleanup_models(
+                self.conds, self.loaded_models))
+            if hasattr(self, "inner_model"):
+                del self.inner_model
+            if hasattr(self, "loaded_models"):
+                del self.loaded_models
 
-        comfy.sampler_helpers.cleanup_models(self.conds, self.loaded_models)
-        del self.inner_model
-        del self.loaded_models
+        if primary_error is not None:
+            for error in cleanup_errors:
+                if hasattr(primary_error, "add_note"):
+                    primary_error.add_note(
+                        f"cleanup failure: {type(error).__name__}: {error}")
+            raise primary_error.with_traceback(primary_error.__traceback__)
+        if cleanup_errors:
+            first = cleanup_errors[0]
+            for error in cleanup_errors[1:]:
+                if hasattr(first, "add_note"):
+                    first.add_note(
+                        f"additional cleanup failure: "
+                        f"{type(error).__name__}: {error}")
+            raise first.with_traceback(first.__traceback__)
         return output
 
     def sample(self, noise, latent_image, sampler, sigmas, denoise_mask=None, callback=None, disable_pbar=False, seed=None):

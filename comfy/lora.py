@@ -505,6 +505,31 @@ def calculate_weight(patches, weight, key, intermediate_dtype=torch.float32, ori
             diff_weight = comfy.model_management.cast_to_device(target_weight, weight.device, intermediate_dtype) - \
                           comfy.model_management.cast_to_device(original_weights[key][0][0], weight.device, intermediate_dtype)
             weight += function(strength * comfy.model_management.cast_to_device(diff_weight, weight.device, weight.dtype))
+        elif patch_type == "fooocus":
+            if (
+                not isinstance(v, (tuple, list))
+                or len(v) != 3
+                or not all(isinstance(item, torch.Tensor) for item in v)
+            ):
+                logging.warning("invalid Fooocus patch for %s", key)
+            else:
+                quantized, minimum, maximum = v
+                if quantized.shape != weight.shape:
+                    logging.warning(
+                        "WARNING SHAPE MISMATCH %s WEIGHT NOT MERGED %s != %s",
+                        key, quantized.shape, weight.shape)
+                elif strength != 0.0:
+                    quantized = comfy.model_management.cast_to_device(
+                        quantized, weight.device, torch.float32)
+                    minimum = comfy.model_management.cast_to_device(
+                        minimum, weight.device, torch.float32)
+                    maximum = comfy.model_management.cast_to_device(
+                        maximum, weight.device, torch.float32)
+                    decoded = quantized.div(255.0).mul(
+                        maximum - minimum).add(minimum)
+                    weight += function(
+                        strength * comfy.model_management.cast_to_device(
+                            decoded, weight.device, weight.dtype))
         else:
             logging.warning("patch type not recognized {} {}".format(patch_type, key))
 

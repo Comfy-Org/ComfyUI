@@ -242,6 +242,10 @@ import asyncio
 import threading
 import gc
 
+_prompt_worker_shutdown = threading.Event()
+_prompt_worker_thread = None
+_prompt_executor = None
+
 if 'torch' in sys.modules:
     logging.warning("WARNING: Potential Error in code: Torch already imported, torch should never be imported before this point.")
 
@@ -317,6 +321,7 @@ def cuda_malloc_warning():
 
 
 def prompt_worker(q, server_instance, asset_manager):
+    global _prompt_executor
     current_time: float = 0.0
     cache_ram = 0
     cache_ram_inactive = 0
@@ -337,76 +342,91 @@ def prompt_worker(q, server_instance, asset_manager):
         cache_type = execution.CacheType.NONE
 
     e = execution.PromptExecutor(server_instance, cache_type=cache_type, cache_args={ "lru" : args.cache_lru, "ram" : cache_ram, "ram_inactive" : cache_ram_inactive }, asset_manager=asset_manager )
+    _prompt_executor = e
+    maintenance_interval = e.execution_backend_maintenance_interval()
     last_gc_collect = 0
     need_gc = False
     gc_collect_interval = 10.0
 
-    while True:
-        timeout = 1000.0
-        if need_gc:
-            timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
+    try:
+        while not _prompt_worker_shutdown.is_set():
+            timeout = 1000.0
+            if need_gc:
+                timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
+            if maintenance_interval is not None:
+                timeout = min(timeout, maintenance_interval)
 
-        queue_item = q.get(timeout=timeout)
-        if queue_item is not None:
-            item, item_id = queue_item
-            execution_start_time = time.perf_counter()
-            prompt_id = item[1]
-            server_instance.last_prompt_id = prompt_id
+            queue_item = q.get(timeout=timeout)
+            if queue_item is not None:
+                item, item_id = queue_item
+                execution_start_time = time.perf_counter()
+                prompt_id = item[1]
+                server_instance.last_prompt_id = prompt_id
 
-            sensitive = item[5]
-            extra_data = item[3].copy()
-            for k in sensitive:
-                extra_data[k] = sensitive[k]
+                sensitive = item[5]
+                extra_data = item[3].copy()
+                for k in sensitive:
+                    extra_data[k] = sensitive[k]
 
-            asset_manager.pause_background_scan()
-            e.execute(item[2], prompt_id, extra_data, item[4])
+                asset_manager.pause_background_scan()
+                try:
+                    e.execute(item[2], prompt_id, extra_data, item[4])
+                except asyncio.CancelledError:
+                    if _prompt_worker_shutdown.is_set():
+                        break
+                    raise
 
-            need_gc = True
+                need_gc = True
 
-            remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
-            q.task_done(item_id,
-                        e.history_result,
-                        status=execution.PromptQueue.ExecutionStatus(
-                            status_str='success' if e.success else 'error',
-                            completed=e.success,
-                            messages=e.status_messages), process_item=remove_sensitive)
-            if server_instance.client_id is not None:
-                server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
+                remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
+                q.task_done(item_id,
+                            e.history_result,
+                            status=execution.PromptQueue.ExecutionStatus(
+                                status_str='success' if e.success else 'error',
+                                completed=e.success,
+                                messages=e.status_messages), process_item=remove_sensitive)
+                if server_instance.client_id is not None:
+                    server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
 
-            current_time = time.perf_counter()
-            execution_time = current_time - execution_start_time
+                current_time = time.perf_counter()
+                execution_time = current_time - execution_start_time
 
-            # Log Time in a more readable way after 10 minutes
-            if execution_time > 600:
-                execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
-                logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
-            else:
-                logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
+                # Log Time in a more readable way after 10 minutes
+                if execution_time > 600:
+                    execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
+                    logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
+                else:
+                    logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
 
-        flags = q.get_flags()
-        free_memory = flags.get("free_memory", False)
+            e.maintain_execution_backend()
 
-        if flags.get("unload_models", free_memory):
-            comfy.model_management.unload_all_models()
-            need_gc = True
-            last_gc_collect = 0
+            flags = q.get_flags()
+            free_memory = flags.get("free_memory", False)
 
-        if free_memory:
-            e.reset()
-            need_gc = True
-            last_gc_collect = 0
+            if flags.get("unload_models", free_memory):
+                comfy.model_management.unload_all_models()
+                need_gc = True
+                last_gc_collect = 0
 
-        if need_gc:
-            current_time = time.perf_counter()
-            if (current_time - last_gc_collect) > gc_collect_interval:
-                gc.collect()
-                comfy.model_management.soft_empty_cache()
-                last_gc_collect = current_time
-                need_gc = False
-                hook_breaker_ac10a0.restore_functions()
+            if free_memory:
+                e.reset()
+                need_gc = True
+                last_gc_collect = 0
 
-                asset_manager.queue_output_scan()
-                asset_manager.resume_background_scan()
+            if need_gc:
+                current_time = time.perf_counter()
+                if (current_time - last_gc_collect) > gc_collect_interval:
+                    gc.collect()
+                    comfy.model_management.soft_empty_cache()
+                    last_gc_collect = current_time
+                    need_gc = False
+                    hook_breaker_ac10a0.restore_functions()
+
+                    asset_manager.queue_output_scan()
+                    asset_manager.resume_background_scan()
+    finally:
+        _prompt_executor = None
+        e.close()
 
 
 async def run(server_instance, address='', port=8188, verbose=True, call_on_start=None):
@@ -508,9 +528,19 @@ def start_comfyui(asyncio_loop=None):
     if args.enable_manager and not args.disable_manager_ui:
         comfyui_manager.start()
 
+    from comfy_api.latest._sdk import (
+        load_overlay,
+        should_load_legacy_custom_nodes,
+    )
+    secure_custom_nodes = load_overlay()
+
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
-        init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
+        init_custom_nodes=should_load_legacy_custom_nodes(
+            secure_mode=secure_custom_nodes,
+            disabled=args.disable_all_custom_nodes,
+            has_whitelist=len(args.whitelist_custom_nodes) > 0,
+        ),
         init_api_nodes=not args.disable_api_nodes
     ))
 
@@ -526,7 +556,14 @@ def start_comfyui(asyncio_loop=None):
     prompt_server.add_routes()
     hijack_progress(prompt_server)
 
-    threading.Thread(target=prompt_worker, daemon=True, args=(prompt_server.prompt_queue, prompt_server, asset_manager)).start()
+    global _prompt_worker_thread
+    _prompt_worker_shutdown.clear()
+    _prompt_worker_thread = threading.Thread(
+        target=prompt_worker,
+        daemon=True,
+        args=(prompt_server.prompt_queue, prompt_server, asset_manager),
+    )
+    _prompt_worker_thread.start()
 
     if args.quick_test_for_ci:
         exit(0)
@@ -574,6 +611,10 @@ if __name__ == "__main__":
             "dynamic vram enabled and using native ComfyUI model formats instead. "
             "ComfyUI native formats like fp8, int8 and w4a8 will be faster even if they are larger than your memory."
         )
+    def stop_on_sigterm(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_on_sigterm)
     event_loop, prompt_server, start_all_func = start_comfyui()
     try:
         x = start_all_func()
@@ -582,4 +623,12 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logging.info("\nStopped server")
     finally:
+        _prompt_worker_shutdown.set()
+        if _prompt_executor is not None:
+            _prompt_executor.request_shutdown()
+        prompt_server.prompt_queue.set_flag("shutdown", True)
+        if _prompt_worker_thread is not None:
+            _prompt_worker_thread.join(timeout=5)
+            if _prompt_worker_thread.is_alive():
+                logging.error("Prompt worker did not stop within five seconds")
         prompt_server.asset_manager.shutdown()
