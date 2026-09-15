@@ -12,6 +12,7 @@ from comfy_api.feature_flags import (
     _parse_cli_feature_flags,
 )
 from comfy.comfy_api_env import (
+    comfy_cloud_base_for_api_base,
     environment_overrides_for_base,
     get_environment_overrides,
     normalize_comfy_api_base,
@@ -209,6 +210,20 @@ class TestComfyApiEnv:
     )
     def test_normalize_comfy_api_base(self, url, expected):
         assert normalize_comfy_api_base(url) == expected
+
+    @pytest.mark.parametrize(
+        "url, expected",
+        [
+            ("https://api.comfy.org", "https://cloud.comfy.org"),
+            ("https://stagingapi.comfy.org", "https://stagingcloud.comfy.org"),
+            ("https://testapi.comfy.org", "https://testcloud.comfy.org"),
+            ("https://pr-4398.testenvs.comfy.org", "https://pr-4398.testenvs.comfy.org"),
+            ("https://pr-4398-registry.testenvs.comfy.org", "https://pr-4398.testenvs.comfy.org"),
+            ("http://localhost:8189", "http://localhost:8189"),
+        ],
+    )
+    def test_comfy_cloud_base_for_api_base(self, url, expected):
+        assert comfy_cloud_base_for_api_base(url) == expected
 
     def test_config_for_staging_tier_else_none(self):
         # ephemeral testenv: friendly main host -> -registry, staging platform, dev Firebase env
