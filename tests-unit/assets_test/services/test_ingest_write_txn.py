@@ -4,6 +4,7 @@ import logging
 import sqlite3
 
 import folder_paths
+import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 import app.assets.services.ingest as ingest
@@ -94,6 +95,26 @@ def _registration_failure_event(caplog) -> str:
     ]
     assert len(events) == 1
     return events[0]
+
+
+def _seed_cached_content(mock_create_session, path: str) -> str:
+    with mock_create_session() as session:
+        content = create_content(session, path, size_bytes=os.path.getsize(path))
+        session.commit()
+        return content.id
+
+
+def _apply_cached_preflight(session, preflight, path: str, system_metadata: dict[str, int]) -> None:
+    ingest._apply_cached_registration(
+        session,
+        preflight,
+        os.path.basename(path),
+        ["output"],
+        None,
+        None,
+        path,
+        system_metadata,
+    )
 
 
 def test_executed_registration_reports_exhausted_locked_retries(monkeypatch, caplog) -> None:
@@ -197,3 +218,161 @@ def test_cached_registration_reports_terminal_write_failure(
         )
     finally:
         os.unlink(path)
+
+
+def test_cached_registration_restarts_when_content_vanishes_after_preflight(
+    mock_create_session, monkeypatch
+) -> None:
+    direct_path = _output_path("cached-direct-content-vanished.bin")
+    public_path = _output_path("cached-public-content-vanished.bin")
+    for path in (direct_path, public_path):
+        with open(path, "wb") as file:
+            file.write(b"output")
+    try:
+        direct_content_id = _seed_cached_content(mock_create_session, direct_path)
+        direct_preflight = ingest._preflight_cached_registration(direct_path)
+        assert direct_preflight is not None
+        with mock_create_session() as session:
+            content = session.get(ingest.AssetContent, direct_content_id)
+            assert content is not None
+            ingest.mark_content_missing(session, content.id)
+            session.commit()
+        with mock_create_session() as session:
+            with pytest.raises(ingest._PreflightStale):
+                _apply_cached_preflight(session, direct_preflight, direct_path, {})
+
+        public_content_id = _seed_cached_content(mock_create_session, public_path)
+        real_apply = ingest._apply_cached_registration
+        mutated = False
+
+        def vanish_then_apply(session, *args):
+            nonlocal mutated
+            if not mutated:
+                mutated = True
+                with mock_create_session() as mutation_session:
+                    content = mutation_session.get(ingest.AssetContent, public_content_id)
+                    assert content is not None
+                    ingest.mark_content_missing(mutation_session, content.id)
+                    mutation_session.commit()
+            return real_apply(session, *args)
+
+        monkeypatch.setattr(ingest, "_apply_cached_registration", vanish_then_apply)
+        assert ingest.register_cached_output(public_path) is None
+        assert mutated is True
+    finally:
+        for path in (direct_path, public_path):
+            os.unlink(path)
+
+
+def test_cached_registration_restarts_when_sibling_appears_after_preflight(
+    mock_create_session, monkeypatch
+) -> None:
+    direct_path = _output_path("cached-direct-sibling-appeared.bin")
+    public_path = _output_path("cached-public-sibling-appeared.bin")
+    for path in (direct_path, public_path):
+        with open(path, "wb") as file:
+            file.write(b"output")
+    try:
+        direct_content_id = _seed_cached_content(mock_create_session, direct_path)
+        direct_preflight = ingest._preflight_cached_registration(direct_path)
+        assert direct_preflight is not None
+        with mock_create_session() as session:
+            create_record(
+                session,
+                direct_content_id,
+                "sibling.bin",
+                system_metadata={"generation": 1},
+            )
+            session.commit()
+        with mock_create_session() as session:
+            with pytest.raises(ingest._PreflightStale):
+                _apply_cached_preflight(session, direct_preflight, direct_path, {})
+
+        public_content_id = _seed_cached_content(mock_create_session, public_path)
+        real_apply = ingest._apply_cached_registration
+        extraction_count = 0
+        mutated = False
+
+        def extract_metadata(*_args, **_kwargs):
+            nonlocal extraction_count
+            extraction_count += 1
+            return {"generation": 0}
+
+        def add_sibling_then_apply(session, *args):
+            nonlocal mutated
+            if not mutated:
+                mutated = True
+                with mock_create_session() as mutation_session:
+                    create_record(
+                        mutation_session,
+                        public_content_id,
+                        "sibling.bin",
+                        system_metadata={"generation": 2},
+                    )
+                    mutation_session.commit()
+            return real_apply(session, *args)
+
+        monkeypatch.setattr(ingest, "_extract_system_metadata_sync", extract_metadata)
+        monkeypatch.setattr(ingest, "_apply_cached_registration", add_sibling_then_apply)
+        result = ingest.register_cached_output(public_path)
+        assert result is not None
+        with mock_create_session() as session:
+            record = session.get(ingest.Asset, result.id)
+            assert record is not None
+            assert record.system_metadata == {"generation": 2}
+        assert extraction_count == 1
+        assert mutated is True
+    finally:
+        for path in (direct_path, public_path):
+            os.unlink(path)
+
+
+def test_cached_registration_restarts_when_file_changes_after_preflight(
+    mock_create_session, monkeypatch
+) -> None:
+    direct_path = _output_path("cached-direct-stat-changed.bin")
+    public_path = _output_path("cached-public-stat-changed.bin")
+    for path in (direct_path, public_path):
+        with open(path, "wb") as file:
+            file.write(b"old")
+    try:
+        _seed_cached_content(mock_create_session, direct_path)
+        direct_preflight = ingest._preflight_cached_registration(direct_path)
+        assert direct_preflight is not None
+        with open(direct_path, "wb") as file:
+            file.write(b"new bytes")
+        with mock_create_session() as session:
+            with pytest.raises(ingest._PreflightStale):
+                _apply_cached_preflight(session, direct_preflight, direct_path, {})
+
+        _seed_cached_content(mock_create_session, public_path)
+        real_apply = ingest._apply_cached_registration
+        extraction_sizes: list[int] = []
+        mutated = False
+
+        def extract_metadata(path, *_args, **_kwargs):
+            size = os.path.getsize(path)
+            extraction_sizes.append(size)
+            return {"size": size}
+
+        def rewrite_then_apply(session, *args):
+            nonlocal mutated
+            if not mutated:
+                mutated = True
+                with open(public_path, "wb") as file:
+                    file.write(b"new public bytes")
+            return real_apply(session, *args)
+
+        monkeypatch.setattr(ingest, "_extract_system_metadata_sync", extract_metadata)
+        monkeypatch.setattr(ingest, "_apply_cached_registration", rewrite_then_apply)
+        result = ingest.register_cached_output(public_path)
+        assert result is not None
+        with mock_create_session() as session:
+            record = session.get(ingest.Asset, result.id)
+            assert record is not None
+            assert record.system_metadata == {"size": len(b"new public bytes")}
+        assert extraction_sizes == [len(b"old"), len(b"new public bytes")]
+        assert mutated is True
+    finally:
+        for path in (direct_path, public_path):
+            os.unlink(path)
