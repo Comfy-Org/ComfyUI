@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import psutil
+import atexit
 import logging
 from enum import Enum
 from comfy.cli_args import args, PerformanceFeature
@@ -33,6 +34,7 @@ import comfy.memory_management
 import comfy.system_memory
 import comfy.utils
 import comfy.quant_ops
+import comfy.windows_dxgi
 import comfy_aimdo.host_buffer
 import comfy_aimdo.vram_buffer
 from comfy.internal_logging import detail
@@ -641,8 +643,11 @@ PIN_PRESSURE_HYSTERESIS = 256 * 1024 * 1024
 #Freeing registerables on pressure does imply a GPU sync, so go big on
 #the hysteresis so each expensive sync gives us back a good chunk.
 REGISTERABLE_PIN_HYSTERESIS = 2048 * 1024 * 1024
+WINDOWS_PIN_SAFETY_RESERVE = 2048 * 1024 * 1024
+WINDOWS_PIN_BUDGET_HYSTERESIS = 512 * 1024 * 1024
 WINDOWS_PIN_EVICTION_SWAP_PERCENT = 5.0
 WINDOWS_PIN_EVICTION_EMERGENCY_AVAILABLE = 512 * 1024 ** 2
+PIN_BUDGETS = {}
 
 def module_size(module):
     module_mem = 0
@@ -670,15 +675,15 @@ def models_for_pin_eviction(active, current_prompt=None):
             (current_prompt is None or pin_state["current_prompt"] == current_prompt)):
             yield model
 
-def free_model_pins(size, subsets, current_prompt, active, registrations=False):
+def free_model_pins(size, subsets, current_prompt, active, registrations=False, protected=None, prefetch_only=False):
     freed_total = 0
     for model in models_for_pin_eviction(active, current_prompt=current_prompt):
         if size <= 0:
             return freed_total
         if registrations:
-            freed = model.unregister_inactive_pins(size, subsets=subsets)
+            freed = model.unregister_inactive_pins(size, subsets=subsets, protected=protected, prefetch_only=prefetch_only)
         else:
-            freed = model.partially_unload_ram(size, subsets=subsets)
+            freed = model.partially_unload_ram(size, subsets=subsets, protected=protected)
         freed_total += freed
         size -= freed
     return freed_total
@@ -708,10 +713,12 @@ def registration_eviction_tiers(evict_active):
         ])
     return tiers
 
-def free_pins(size, evict_active=False, loaded=False):
+def free_pins(size, evict_active=False, loaded=False, protected=None):
+    if protected is None:
+        protected = set()
     freed = 0
     for subsets, current_prompt, active in pin_eviction_tiers(loaded, evict_active):
-        freed += free_model_pins(size - freed, subsets, current_prompt, active)
+        freed += free_model_pins(size - freed, subsets, current_prompt, active, protected=protected)
     return freed
 
 def should_free_pins_for_ram_pressure(shortfall):
@@ -727,10 +734,10 @@ def should_free_pins_for_ram_pressure(shortfall):
         logging.warning("Could not read Windows swap usage; falling back to RAM-pressure pin eviction: %s", err)
         return True
 
-def ensure_pin_budget(size, evict_active=False, loaded=False):
+def ensure_pin_budget(size, evict_active=False, loaded=False, device=None, protected=None):
     if args.high_ram:
         return True
-    if args.fast_disk:
+    if args.fast_disk and _pin_budget(device) is None:
         shortfall = TOTAL_PINNED_MEMORY + size - MAX_PINNED_MEMORY
     else:
         shortfall = size + max(comfy.memory_management.RAM_CACHE_HEADROOM / 2, 2048 * 1024 ** 2) - comfy.system_memory.virtual_memory_available()
@@ -738,21 +745,112 @@ def ensure_pin_budget(size, evict_active=False, loaded=False):
         return True
 
     to_free = shortfall + PIN_PRESSURE_HYSTERESIS
-    return free_pins(to_free, evict_active=evict_active, loaded=loaded) >= shortfall
+    return free_pins(to_free, evict_active=evict_active, loaded=loaded, protected=protected) >= shortfall
 
-def free_registrations(shortfall, evict_active=True):
+def _free_registrations(size, evict_active=True, protected=None, prefetch_first=False):
+    freed = 0
+    subsets = PIN_SUBSETS + LOADED_PIN_SUBSETS
+    if prefetch_first:
+        freed += free_model_pins(size, subsets, None, None, registrations=True, protected=protected, prefetch_only=True)
+    for tier_subsets, current_prompt, active in registration_eviction_tiers(evict_active):
+        if freed >= size:
+            break
+        freed += free_model_pins(size - freed, tier_subsets, current_prompt, active, registrations=True, protected=protected)
+    return freed
+
+
+def free_registrations(shortfall, evict_active=True, protected=None, prefetch_first=False):
     if MAX_PINNED_MEMORY <= 0:
         return False
     if shortfall <= 0:
         return True
 
-    shortfall += REGISTERABLE_PIN_HYSTERESIS
-    for subsets, current_prompt, active in registration_eviction_tiers(evict_active):
-        shortfall -= free_model_pins(shortfall, subsets, current_prompt, active, registrations=True)
-    return shortfall <= REGISTERABLE_PIN_HYSTERESIS
+    return _free_registrations(
+        shortfall + REGISTERABLE_PIN_HYSTERESIS,
+        evict_active=evict_active,
+        protected=protected,
+        prefetch_first=prefetch_first,
+    ) >= shortfall
 
-def ensure_pin_registerable(size, evict_active=True):
-    return free_registrations(TOTAL_PINNED_MEMORY + size - MAX_PINNED_MEMORY, evict_active=evict_active)
+
+def set_pin_budget_provider(device, provider):
+    previous = PIN_BUDGETS.get(device.index)
+    if previous is not None:
+        close = getattr(previous.provider, "close", None)
+        if close is not None:
+            close()
+    PIN_BUDGETS[device.index] = None if provider is None else comfy.windows_dxgi.LivePinBudget(
+        provider, WINDOWS_PIN_SAFETY_RESERVE, WINDOWS_PIN_BUDGET_HYSTERESIS
+    )
+
+
+def _pin_budget(device):
+    if args.disable_pinned_memory or not WINDOWS or device is None or not is_device_cuda(device):
+        return None
+    device_index = device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    if device_index not in PIN_BUDGETS:
+        provider = comfy.windows_dxgi.create_dxgi_budget_provider(device_index)
+        PIN_BUDGETS[device_index] = None if provider is None else comfy.windows_dxgi.LivePinBudget(
+            provider, WINDOWS_PIN_SAFETY_RESERVE, WINDOWS_PIN_BUDGET_HYSTERESIS
+        )
+    return PIN_BUDGETS[device_index]
+
+
+def has_live_pin_budget(device):
+    return _pin_budget(device) is not None
+
+
+def clear_pin_budget_providers():
+    for budget in PIN_BUDGETS.values():
+        if budget is not None:
+            close = getattr(budget.provider, "close", None)
+            if close is not None:
+                close()
+    PIN_BUDGETS.clear()
+
+
+atexit.register(clear_pin_budget_providers)
+
+
+def pin_budget_status(device):
+    budget = _pin_budget(device)
+    if budget is None or budget.last_info is None:
+        return None
+    return budget.last_info, budget.last_headroom, budget.evicted
+
+
+def pin_budget_query_stats(device):
+    budget = _pin_budget(device)
+    if budget is None:
+        return None
+    return budget.query_count, budget.query_ns, budget.max_query_ns
+
+
+def ensure_pin_registerable(size, evict_active=True, device=None, protected=None):
+    budget = _pin_budget(device)
+    if budget is not None:
+        try:
+            return budget.ensure(
+                size,
+                lambda target: _free_registrations(target, evict_active=evict_active, protected=protected, prefetch_first=True),
+            )
+        except (OSError, comfy.windows_dxgi.DXGIUnavailable) as err:
+            logging.debug("DXGI NON_LOCAL pin budget query failed: %s", err)
+            close = getattr(budget.provider, "close", None)
+            if close is not None:
+                close()
+            device_index = device.index
+            if device_index is None:
+                device_index = torch.cuda.current_device()
+            PIN_BUDGETS[device_index] = None
+    return free_registrations(
+        TOTAL_PINNED_MEMORY + size - MAX_PINNED_MEMORY,
+        evict_active=evict_active,
+        protected=protected,
+        prefetch_first=True,
+    )
 
 class LoadedModel:
     def __init__(self, model: ModelPatcher):
@@ -910,8 +1008,8 @@ def free_memory(memory_required, device, keep_loaded=[], for_dynamic=False, pins
         unloaded_models.append(current_loaded_models.pop(i))
 
     if not for_dynamic and pins_required > 0:
-        ensure_pin_budget(pins_required)
-        ensure_pin_registerable(pins_required)
+        ensure_pin_budget(pins_required, device=device)
+        ensure_pin_registerable(pins_required, device=device)
 
     if len(unloaded_model) > 0:
         soft_empty_cache()
