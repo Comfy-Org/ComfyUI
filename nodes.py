@@ -380,15 +380,22 @@ class VAEDecodeTiled:
 class VAEEncode:
     @classmethod
     def INPUT_TYPES(s):
-        return {"required": { "pixels": ("IMAGE", ), "vae": ("VAE", )}}
+        return {"required": { "pixels": ("IMAGE", ), "vae": ("VAE", ),
+                              "encode_as": (["Auto", "Video Frames", "Individual Images"], {"default": "Auto", "advanced": True, "tooltip": "For 3D/video VAEs: 'Video Frames' merges the batch into a temporal sequence, 'Individual Images' encodes each image independently. 'auto' uses the VAE default."}),
+                            }}
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "encode"
 
     CATEGORY = "model/latent"
     SEARCH_ALIASES = ["encode", "encode image", "image to latent"]
 
-    def encode(self, vae, pixels):
-        t = vae.encode(pixels)
+    def encode(self, vae, pixels, encode_as="Auto"):
+        not_video = None
+        if encode_as == "Individual Images":
+            not_video = True
+        elif encode_as == "Video Frames":
+            not_video = False
+        t = vae.encode(pixels, not_video=not_video)
         return ({"samples":t}, )
 
 class VAEEncodeTiled:
@@ -399,14 +406,20 @@ class VAEEncodeTiled:
                              "overlap": ("INT", {"default": 64, "min": 0, "max": 4096, "step": 32, "advanced": True}),
                              "temporal_size": ("INT", {"default": 64, "min": 8, "max": 4096, "step": 4, "tooltip": "Only used for video VAEs: Amount of frames to encode at a time.", "advanced": True}),
                              "temporal_overlap": ("INT", {"default": 8, "min": 4, "max": 4096, "step": 4, "tooltip": "Only used for video VAEs: Amount of frames to overlap.", "advanced": True}),
+                             "encode_as": (["Auto", "Video Frames", "Individual Images"], {"default": "Auto", "advanced": True, "tooltip": "For 3D/video VAEs: 'Video Frames' merges the batch into a temporal sequence, 'Individual Images' encodes each image independently. 'auto' uses the VAE default."}),
                             }}
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "encode"
 
     CATEGORY = "model/latent"
 
-    def encode(self, vae, pixels, tile_size, overlap, temporal_size=64, temporal_overlap=8):
-        t = vae.encode_tiled(pixels, tile_x=tile_size, tile_y=tile_size, overlap=overlap, tile_t=temporal_size, overlap_t=temporal_overlap)
+    def encode(self, vae, pixels, tile_size, overlap, temporal_size=64, temporal_overlap=8, encode_as="Auto"):
+        not_video = None
+        if encode_as == "Individual Images":
+            not_video = True
+        elif encode_as == "Video Frames":
+            not_video = False
+        t = vae.encode_tiled(pixels, tile_x=tile_size, tile_y=tile_size, overlap=overlap, tile_t=temporal_size, overlap_t=temporal_overlap, not_video=not_video)
         return ({"samples": t}, )
 
 class VAEEncodeForInpaint:
