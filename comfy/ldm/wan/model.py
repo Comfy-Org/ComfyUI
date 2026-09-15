@@ -578,6 +578,7 @@ class WanModel(torch.nn.Module):
         if self.ref_conv is not None:
             full_ref = kwargs.get("reference_latent", None)
             if full_ref is not None:
+                full_ref = comfy.ldm.common_dit.pad_to_patch_size(full_ref, self.patch_size[1:])
                 full_ref = self.ref_conv(full_ref).flatten(2).transpose(1, 2)
                 x = torch.concat((full_ref, x), dim=1)
                 img_offset = full_ref.shape[1]
