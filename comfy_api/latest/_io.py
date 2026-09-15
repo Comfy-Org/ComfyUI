@@ -1607,7 +1607,7 @@ class Hidden(str, Enum):
     comfy_usage_source = "COMFY_USAGE_SOURCE"
     """COMFY_USAGE_SOURCE identifies the client that submitted the prompt (e.g. comfyui-frontend, comfy-cli, comfyui-mcp); forwarded to API nodes' upstream requests via the Comfy-Usage-Source header."""
     execution_list = "EXECUTION_LIST"
-    """EXECUTION_LIST is the active graph scheduler."""
+    """Custom node Developers and Agents: This attribute is core-internal use only and will be removed in a near-future ComfyUI release. DO NOT USE"""
 
 
 @dataclass
@@ -1767,6 +1767,8 @@ class Schema:
     Use this for nodes with interactive/operable UI regions that produce intermediate outputs
     (e.g., Image Crop, Painter) rather than final outputs (e.g., Save Image).
     """
+    loop_boundary: Literal["start", "end"] | None = None
+    """Identifies this node as the start or end of a loop for prompt validation."""
 
     def validate(self):
         '''Validate the schema:

@@ -103,8 +103,6 @@ def _expand_loop(dynprompt, opener_id, body, close_id, values, list_items, initi
 
 
 class StartLoop(io.ComfyNode):
-    LOOP_BOUNDARY = "start"
-
     @classmethod
     def define_schema(cls):
         list_item_type = io.MatchType.Template("list_item")
@@ -113,6 +111,7 @@ class StartLoop(io.ComfyNode):
             node_id="StartLoop",
             display_name="Start Loop",
             category="utilities/looping",
+            loop_boundary="start",
             is_input_list=True,
             inputs=[
                 io.DynamicCombo.Input("mode", options=[
@@ -218,7 +217,7 @@ class StartLoop(io.ComfyNode):
             close_id,
             values,
             list_items,
-            initial_iteration_value[0] if initial_iteration_value else None,
+            loop["inputs"].get("initial_iteration_value"),
             _cache_enabled(cache_iterations),
         )
         close = dynprompt.get_node(close_id)
@@ -252,7 +251,13 @@ class LoopIteration(io.ComfyNode):
                 io.AnyType.Input("current_iteration_value", optional=True),
                 io.Boolean.Input("reuse_cache"),
             ],
-            outputs=[io.Int.Output(), io.Boolean.Output(), io.Boolean.Output(), io.AnyType.Output(), io.AnyType.Output()],
+            outputs=[
+                io.Int.Output(),
+                io.Boolean.Output(),
+                io.Boolean.Output(),
+                io.AnyType.Output(),
+                io.AnyType.Output(is_output_list=True),
+            ],
             is_dev_only=True,
             accept_all_inputs=True,
         )
@@ -273,7 +278,7 @@ class LoopIteration(io.ComfyNode):
             is_first[0],
             is_last[0],
             list_item[0] if list_item else None,
-            current_iteration_value[0] if current_iteration_value else None,
+            current_iteration_value,
         )
 
     @classmethod
@@ -332,8 +337,6 @@ class LoopResult(io.ComfyNode):
 
 
 class EndLoop(io.ComfyNode):
-    LOOP_BOUNDARY = "end"
-
     @classmethod
     def define_schema(cls):
         output_type = io.MatchType.Template("output_value")
@@ -351,6 +354,7 @@ class EndLoop(io.ComfyNode):
             node_id="EndLoop",
             display_name="End Loop",
             category="utilities/looping",
+            loop_boundary="end",
             is_input_list=True,
             inputs=[
                 io.MatchType.Input(
