@@ -4,6 +4,7 @@ import uuid
 import math
 import collections
 import comfy.model_management
+import comfy.model_readahead
 import comfy.conds
 import comfy.model_patcher
 import comfy.utils
@@ -199,6 +200,7 @@ def _prepare_sampling(model: ModelPatcher, noise_shape, conds, model_options=Non
         memory_required += inference_memory
         minimum_memory_required += inference_memory
     comfy.model_management.load_models_gpu([model] + models, memory_required=memory_required, minimum_memory_required=minimum_memory_required, force_full_load=force_full_load)
+    comfy.model_readahead.stop_for_sampling()
     real_model: BaseModel = model.model
 
     return real_model, conds, models
