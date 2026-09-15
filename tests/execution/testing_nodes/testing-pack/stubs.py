@@ -113,12 +113,117 @@ class StubFloat:
     def stub_float(self, value):
         return (value,)
 
+class StubStringOutput:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "value": ("STRING", {"default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    FUNCTION = "stub_string"
+
+    CATEGORY = "Testing/Stub Nodes"
+
+    def stub_string(self, value):
+        return (value,)
+
+class StubStringWithLength:
+    """STRING input with declared bounds AND opted in to runtime validation (RUNTIME_INPUT_VALIDATION = True)."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"default": "hello", "minLength": 3, "maxLength": 10}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "stub_string_with_length"
+    RUNTIME_INPUT_VALIDATION = True
+
+    CATEGORY = "Testing/Stub Nodes"
+
+    def stub_string_with_length(self, text):
+        return (torch.zeros(1, 64, 64, 3),)
+
+class StubStringWithLengthNoFlag:
+    """Same bounds as StubStringWithLength but NOT opted in - linked values must flow through unchecked."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"default": "hello", "minLength": 3, "maxLength": 10}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "stub_string_with_length_no_flag"
+
+    CATEGORY = "Testing/Stub Nodes"
+
+    def stub_string_with_length_no_flag(self, text):
+        return (torch.zeros(1, 64, 64, 3),)
+
+class StubIntWithBounds:
+    """INT input with min/max bounds AND opted in to runtime validation."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "value": ("INT", {"default": 5, "min": 1, "max": 10}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "stub_int_with_bounds"
+    RUNTIME_INPUT_VALIDATION = True
+
+    CATEGORY = "Testing/Stub Nodes"
+
+    def stub_int_with_bounds(self, value):
+        return (torch.zeros(1, 64, 64, 3),)
+
+class StubComboWithOptions:
+    """COMBO input opted in to runtime validation.
+
+    Declares ``input_types`` in VALIDATE_INPUTS to bypass the engine's link-type compatibility
+    check, allowing tests to link a STRING into a COMBO and exercise the runtime membership check.
+    """
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "choice": (["RED", "GREEN", "BLUE"],),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "stub_combo"
+    RUNTIME_INPUT_VALIDATION = True
+
+    CATEGORY = "Testing/Stub Nodes"
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, input_types):
+        return True
+
+    def stub_combo(self, choice):
+        return (torch.zeros(1, 64, 64, 3),)
+
 TEST_STUB_NODE_CLASS_MAPPINGS = {
     "StubImage": StubImage,
     "StubConstantImage": StubConstantImage,
     "StubMask": StubMask,
     "StubInt": StubInt,
     "StubFloat": StubFloat,
+    "StubStringOutput": StubStringOutput,
+    "StubStringWithLength": StubStringWithLength,
+    "StubStringWithLengthNoFlag": StubStringWithLengthNoFlag,
+    "StubIntWithBounds": StubIntWithBounds,
+    "StubComboWithOptions": StubComboWithOptions,
 }
 TEST_STUB_NODE_DISPLAY_NAME_MAPPINGS = {
     "StubImage": "Stub Image",
@@ -126,4 +231,9 @@ TEST_STUB_NODE_DISPLAY_NAME_MAPPINGS = {
     "StubMask": "Stub Mask",
     "StubInt": "Stub Int",
     "StubFloat": "Stub Float",
+    "StubStringOutput": "Stub String Output",
+    "StubStringWithLength": "Stub String With Length",
+    "StubStringWithLengthNoFlag": "Stub String With Length (No Flag)",
+    "StubIntWithBounds": "Stub Int With Bounds",
+    "StubComboWithOptions": "Stub Combo With Options",
 }
