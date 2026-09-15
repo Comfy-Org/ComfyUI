@@ -309,7 +309,7 @@ class FinalLayer(nn.Module):
         self.video_out = operations.Linear(hidden, video_dim, bias=True, dtype=torch.float32, device=device)
         self.audio_out = operations.Linear(hidden, audio_dim, bias=True, dtype=torch.float32, device=device)
 
-    def forward(self, x, t_emb, video_seg, audio_seg, sigma, sample_sigmas, shifts):
+    def forward(self, x, t_emb, video_seg, audio_seg, sigma=None, sample_sigmas=None, shifts=None):
         # video_seg / audio_seg: (start, stop, row) of the target streams, where row
         # is a mod-row index or a per-token blend (see _mod_row)
         shift, scale = self.adaln_proj(t_emb)
@@ -775,7 +775,11 @@ class MiniMaxH3Model(nn.Module):
             audio_seg = (aa, ab, rows_to_mod_index(audio_rows_t, 0) // 3)
         else:
             audio_seg = (aa, ab, t_row[seg_t["audio"]])
-        v, a = self.final_layer(h, t_emb, video_seg, audio_seg, sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a))
+        n = self.final_layer.video_out.weight.shape[0] // self.final_layer.video_out.out_features
+        if n == 1:
+            v, a = self.final_layer(h, t_emb, video_seg, audio_seg)
+        else:
+            v, a = self.final_layer(h, t_emb, video_seg, audio_seg, sigma_v, transformer_options.get("sample_sigmas"), (shift_v, shift_a))
 
         video_out = unpatchify_video(v, latent_t, lat_h // 2, lat_w // 2, self.latents_dim, self.patch_size)
         video_out = video_out[:, :, :orig_t, :orig_h, :orig_w]
