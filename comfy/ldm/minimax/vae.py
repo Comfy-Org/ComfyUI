@@ -590,11 +590,9 @@ class MiniMaxH3VideoVAE(nn.Module):
         free = comfy.model_management.get_free_memory(z_row.device)
         batch = int(max(1, min(4, free // (128 * 2**20 * z_row.shape[0]))))
         slices = [z_row[..., j_pos // self.vae_ratio:(j_pos + j_len) // self.vae_ratio] for j_pos, j_len in zip(x_idx, x_len)]
-        tiles = []
         for k in range(0, len(slices), batch):
             group = slices[k:k + batch]
-            tiles.extend(self._decode_pixels(torch.cat(group)).chunk(len(group)))
-        return tiles
+            yield from self._decode_pixels(torch.cat(group)).chunk(len(group))
 
     def tiled_decode(self, z):
         height, width = z.shape[-2] * self.vae_ratio, z.shape[-1] * self.vae_ratio
@@ -611,7 +609,9 @@ class MiniMaxH3VideoVAE(nn.Module):
             new_tails = []
             left_tail = None
             out_x = 0
-            for j, tile in enumerate(tiles):
+            # enumerate would retain the previous tile while the next batch decodes.
+            for j in range(len(x_idx)):
+                tile = next(tiles)
                 if i < len(y_idx) - 1:
                     new_tails.append(tile[..., -y_overlap[i]:, :].clone())
                 next_left_tail = tile[..., :, -x_overlap[j]:].clone() if j < len(x_idx) - 1 else None
@@ -627,9 +627,11 @@ class MiniMaxH3VideoVAE(nn.Module):
                 if canvas is None:
                     canvas = torch.empty(*tile.shape[:-2], height, width, dtype=tile.dtype, device=tile.device)
                 canvas[..., out_y:out_y + tile.shape[-2], out_x:out_x + tile.shape[-1]].copy_(tile)
+                tile_height = tile.shape[-2]
                 out_x += tile.shape[-1]
+                del tile
             row_tails = new_tails
-            out_y += tile.shape[-2]
+            out_y += tile_height
         return canvas
 
     # temporal chunking
@@ -757,7 +759,7 @@ class MiniMaxH3VideoVAE(nn.Module):
                 write_part(dec_overlap)
                 dec_overlap = None
 
-            del clip_dec, clip_z
+            del clip_dec, clip_z, clip_dec_chunk
 
         return dec
 
