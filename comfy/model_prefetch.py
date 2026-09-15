@@ -46,6 +46,20 @@ class _PauseMallocGraph:
 def pause_malloc_graph(sync=False):
     return _PauseMallocGraph(sync)
 
+class _MallocGraphScope:
+    def __init__(self, device):
+        self.device = device
+
+    def __enter__(self):
+        malloc_graph_begin(self.device)
+
+    def __exit__(self, exc_type, *args):
+        if exc_type is None:
+            malloc_graph_end()
+
+def malloc_graph_scope(device):
+    return _MallocGraphScope(device)
+
 def malloc_graph_begin(device):
     global MALLOC_GRAPH_USED
     if not malloc_graph_enabled(device):

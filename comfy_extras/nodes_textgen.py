@@ -40,6 +40,7 @@ class TextGenerate(io.ComfyNode):
                 io.DynamicCombo.Input("sampling_mode", options=sampling_options, display_name="Sampling Mode"),
                 io.Boolean.Input("thinking", optional=True, default=False, tooltip="Operate in thinking mode if the model supports it."),
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
+                io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5"], default="auto", optional=True, display_name="Speculative Decoding (MTP)", tooltip="Speed up decoding with the model's multi-token-prediction head, drafting several tokens per step and verifying them in one pass. Requires a checkpoint with MTP weights, otherwise has no effect. \"auto\" picks the draft depth from measured acceptance; 2-5 pins it. When sampling, rejection sampling preserves the sampling distribution exactly but generated sequences differ from non-MTP sampling for the same seed; greedy output may differ at rare logit ties."),
             ],
             outputs=[
                 io.String.Output(display_name="generated_text"),
@@ -47,7 +48,9 @@ class TextGenerate(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto") -> io.NodeOutput:
+
+        mtp = False if mtp == "off" else (True if mtp == "auto" else int(mtp))
 
         tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio)
 
@@ -71,7 +74,8 @@ class TextGenerate(io.ComfyNode):
             min_p=min_p,
             repetition_penalty=repetition_penalty,
             presence_penalty=presence_penalty,
-            seed=seed
+            seed=seed,
+            mtp=mtp
         )
 
         generated_text = clip.decode(generated_ids)
