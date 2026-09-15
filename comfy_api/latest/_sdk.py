@@ -13238,15 +13238,21 @@ def load_overlay(spec: Optional[str] = None) -> bool:
         module = importlib.import_module(spec)  # importable module name
 
     if module is None:
-        logger.error("SDK overlay %r could not be loaded", spec)
-        return False
+        raise RuntimeError(f"SDK overlay {spec!r} could not be loaded")
 
     register = getattr(module, "register", None)
     if not callable(register):
-        logger.error("SDK overlay %r has no register(providers) entrypoint", spec)
-        return False
+        raise RuntimeError(
+            f"SDK overlay {spec!r} has no register(providers) entrypoint"
+        )
 
     register(providers)
     providers._overlay_name = getattr(module, "__name__", spec)
     logger.info("SDK overlay loaded: %s", providers._overlay_name)
     return True
+
+
+def should_load_legacy_custom_nodes(
+    *, secure_mode: bool, disabled: bool, has_whitelist: bool
+) -> bool:
+    return not secure_mode and (not disabled or has_whitelist)
