@@ -2,9 +2,8 @@
 paths, building specs, seeding new content and records, then enriching them
 with metadata and hashes. Each spec is seeded inside its own savepoint, so one
 file whose row conflicts cannot discard the work done for the files around it.
-Enrichment counts as progress only when it produced what was asked of it — a
-requested hash that could not be computed is no progress, which is what bounds
-a pass over a file the server cannot read.
+Enrichment candidates use ordered ID pagination, so each row is selected at
+most once per pass while failed rows remain eligible for the next pass.
 """
 
 import logging
@@ -444,10 +443,42 @@ def insert_asset_specs(specs: list[SeedAssetSpec], _tag_pool: set[str]) -> int:
         return created
 
 
+def build_unenriched_candidates_statement(
+    prefixes: list[str],
+    compute_hashes: bool,
+    last_seen_id: str | None,
+    limit: int = 1000,
+) -> sa.Select[tuple[str, str, str]]:
+    query = (
+        sa.select(AssetContent.id, Asset.id, AssetContent.path)
+        .join(Asset, Asset.content_id == AssetContent.id)
+        .where(AssetContent.is_missing.is_(False))
+    )
+    if compute_hashes:
+        query = query.where(
+            sa.or_(
+                AssetContent.hash.is_(None),
+                Asset.system_metadata.is_(None),
+            )
+        )
+    else:
+        query = query.where(Asset.system_metadata.is_(None))
+    if last_seen_id is not None:
+        query = query.where(Asset.id > last_seen_id)
+    return (
+        query.where(
+            sa.or_(*(sql_path_under_prefix(AssetContent.path, p) for p in prefixes))
+        )
+        .order_by(Asset.id.asc())
+        .limit(limit)
+    )
+
+
 def get_unenriched_assets_for_roots(
     roots: tuple[RootType, ...],
     compute_hashes: bool,
     limit: int = 1000,
+    last_seen_id: str | None = None,
 ) -> list[UnenrichedContent]:
     prefixes: list[str] = []
     for root in roots:
@@ -456,27 +487,14 @@ def get_unenriched_assets_for_roots(
     if not prefixes:
         return []
 
+    query = build_unenriched_candidates_statement(
+        prefixes,
+        compute_hashes,
+        last_seen_id,
+        limit,
+    )
     with create_session() as sess:
-        query = (
-            sa.select(AssetContent.id, Asset.id, AssetContent.path)
-            .join(Asset, Asset.content_id == AssetContent.id)
-            .where(AssetContent.is_missing.is_(False))
-        )
-        if compute_hashes:
-            query = query.where(
-                sa.or_(
-                    AssetContent.hash.is_(None),
-                    Asset.system_metadata.is_(None),
-                )
-            )
-        else:
-            query = query.where(Asset.system_metadata.is_(None))
-        query = query.where(
-            sa.or_(
-                *(sql_path_under_prefix(AssetContent.path, p) for p in prefixes)
-            )
-        )
-        rows = sess.execute(query.order_by(Asset.id).limit(limit)).all()
+        rows = sess.execute(query).all()
 
     return [
         UnenrichedContent(content_id, record_id, file_path)
