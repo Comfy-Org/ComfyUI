@@ -39,6 +39,9 @@ class TestFeatureFlags:
         assert "max_upload_size" in features
         assert isinstance(features["max_upload_size"], (int, float))
 
+    def test_get_server_features_without_manager_defaults_assets_to_disabled(self):
+        assert get_server_features()["assets"] is False
+
     def test_get_connection_feature_with_missing_sid(self):
         """Test getting feature for non-existent session ID."""
         sockets_metadata = {}
