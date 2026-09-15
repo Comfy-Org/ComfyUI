@@ -4,6 +4,8 @@ import os
 import platform
 import re
 
+import comfy_aimdo.storage
+
 
 _NVME_NAMESPACE = re.compile(r"^(nvme\d+)n\d+$")
 
@@ -73,8 +75,7 @@ def fast_storage(path):
             return None
         return _linux_fast_storage(device)
     if system == "Windows":
-        from comfy_aimdo.storage import fast_disk
-        return fast_disk(path)
+        return comfy_aimdo.storage.fast_disk(path)
     return None
 
 
