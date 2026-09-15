@@ -1078,7 +1078,16 @@ class ShapeVae(nn.Module):
         self.register_buffer("resolution", torch.tensor(1024.0), persistent=False)
 
     def decode_structure(self, x: torch.Tensor) -> torch.Tensor:
-        return self.struct_dec(x)
+        if x.device.type != "mps":
+            return self.struct_dec(x)
+        # nn.Conv3d produces incorrect results on MPS (pytorch/pytorch#197114),
+        # which makes this occupancy decode come out empty. It's a small
+        # 16^3 -> 64^3 decode, so run it on CPU instead.
+        device = x.device
+        self.struct_dec.to("cpu")
+        out = self.struct_dec(x.cpu())
+        self.struct_dec.to(device)
+        return out.to(device)
 
     def decode_shape_slat(self, slat: 'SparseTensor', resolution: int):
         self.shape_dec.set_resolution(resolution)
