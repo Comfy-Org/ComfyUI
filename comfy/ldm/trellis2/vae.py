@@ -1085,8 +1085,10 @@ class ShapeVae(nn.Module):
         # 16^3 -> 64^3 decode, so run it on CPU instead.
         device = x.device
         self.struct_dec.to("cpu")
-        out = self.struct_dec(x.cpu())
-        self.struct_dec.to(device)
+        try:
+            out = self.struct_dec(x.cpu())
+        finally:
+            self.struct_dec.to(device)
         return out.to(device)
 
     def decode_shape_slat(self, slat: 'SparseTensor', resolution: int):
