@@ -52,8 +52,11 @@ jobs:
         run: |
           git config --local user.name "github-actions"
           git config --local user.email "github-actions@github.com"
-          git fetch origin ${{ github.head_ref }}
-          git checkout -B ${{ github.head_ref }} origin/${{ github.head_ref }}
+          git fetch origin "${HEAD_REF}"
+          git checkout -B "${HEAD_REF}" "origin/${HEAD_REF}"
           git add comfyui_version.py
           git diff --quiet && git diff --staged --quiet || git commit -m "chore: Update comfyui_version.py to match pyproject.toml"
-          git push origin HEAD:${{ github.head_ref }}
+          git push origin "HEAD:${HEAD_REF}"
+
+        env:
+          HEAD_REF: ${{ github.head_ref }}
