@@ -673,6 +673,7 @@ class PromptExecutor:
         self.caches = CacheSet(cache_type=self.cache_type, cache_args=self.cache_args)
         self.status_messages = []
         self.success = True
+        self.history_result = {}
 
     def add_message(self, event, data: dict, broadcast: bool):
         data = {
