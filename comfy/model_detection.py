@@ -747,6 +747,8 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["model_type"] = "vace"
             dit_config["vace_in_dim"] = state_dict['{}vace_patch_embedding.weight'.format(key_prefix)].shape[1]
             dit_config["vace_layers"] = count_blocks(state_dict_keys, '{}vace_blocks.'.format(key_prefix) + '{}.')
+            if '{}img_emb.proj.0.bias'.format(key_prefix) in state_dict_keys:  # ID-V2V, vace on an i2v model
+                dit_config["vace_image_input"] = True
         elif '{}control_adapter.conv.weight'.format(key_prefix) in state_dict_keys:
             if '{}img_emb.proj.0.bias'.format(key_prefix) in state_dict_keys:
                 dit_config["model_type"] = "camera"
