@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 import weakref
 
 import comfy_kitchen as ck
@@ -15,6 +16,7 @@ import comfy.model_prefetch
 import comfy.patcher_extension
 from comfy.ldm.minimax.model import MiniMaxH3Model
 from comfy_api.latest import ComfyExtension, io
+from comfy_extras import sparse_attention_measure as measure
 
 HEAD_DIM = 128
 BLOCK_SIZE = 64
@@ -52,10 +54,16 @@ class SparseAttnPatch:
         self.sink_conditioning = sink_conditioning
         self.verbose = verbose
         self.installed = set()    # the override closures this patch has put on the hook
+        # A ModelPatcher clone may reuse this SparseAttnPatch for many forwards.
+        # The generation is stable for that concrete owner but cannot be confused
+        # with a later patch object that happens to reuse the same source/config.
+        self.measure_owner_generation = f"core-bsa-{uuid.uuid4().hex}"
+        self.measure_capability = None
         self.reset()
 
     def reset(self):
-        self.pooled = {}          # (block, rows) -> (kmean, vscale) from the previous step
+        self.pooled = {}          # numerical pool tensors from the previous step
+        self.measure_plans = {}   # run-scoped O(T) measure bindings/bias tensors
         self.vsa_plans = {}       # small LRU of tiling plans
         self.vsa_rope = None
         self._logged = set()
@@ -170,22 +178,51 @@ def _ineligible(q, k, v, dim_head):
 
 def make_attention_override(patch: SparseAttnPatch, previous):
     """Attention override; declined calls run ``previous`` (the override that was
-    on the hook before this one) or ``func``. Dense-only in VSA mode: a
-    VSA-trained model must never see plain block-sparse attention."""
+    on the hook before this one) or ``func``. A key-measure request never falls
+    through to an unweighted provider: supported dense reasons use the explicit
+    weighted dense operator, VSA is rejected, and sparse execution binds key
+    bias plus exact K coverage before dispatch."""
     def override(func, q, k, v, heads, mask=None, attn_precision=None,
                  skip_reshape=False, skip_output_reshape=False, **kwargs):
         transformer_options = kwargs.get("transformer_options") or {}
+        request = transformer_options.get(measure.ATTENTION_MEASURE_KEY)
+        block_index = transformer_options.get("block_index")
 
-        def dense():
+        def dense_unweighted():
             args = (q, k, v, heads)
             kw = dict(mask=mask, attn_precision=attn_precision, skip_reshape=skip_reshape,
                       skip_output_reshape=skip_output_reshape, **kwargs)
             return func(*args, **kw) if previous is None else previous(func, *args, **kw)
 
+        def dense():
+            if request is None:
+                return dense_unweighted()
+            if type(block_index) is not int:
+                raise RuntimeError("attention measure requires a concrete H3 block index")
+            result = measure.dense_call(
+                patch,
+                transformer_options,
+                q,
+                k,
+                v,
+                heads,
+                mask=mask,
+                attn_precision=attn_precision,
+                skip_reshape=skip_reshape,
+                skip_output_reshape=skip_output_reshape,
+                scale=kwargs.get("scale"),
+                block_index=block_index,
+            )
+            if result is None:
+                raise RuntimeError("attention measure disappeared during dense route binding")
+            return result
+
+        if request is not None and patch.vsa:
+            raise RuntimeError("Mixed-Grid attention measure cannot execute through VSA tile planning")
         if mask is not None or patch.vsa:
             return dense()
         tokens = q.shape[2] if skip_reshape else q.shape[1]
-        reason = patch.dense_reason(transformer_options, tokens, transformer_options.get("block_index"))
+        reason = patch.dense_reason(transformer_options, tokens, block_index)
         if reason is not None:
             patch.log_once(("dense", tokens, reason), f"dense ({tokens} tokens): {reason}")
             return dense()
@@ -201,12 +238,43 @@ def make_attention_override(patch: SparseAttnPatch, previous):
             patch.log_once(("ineligible", tuple(qs.shape), reason), f"dense {tuple(qs.shape)}: {reason}")
             return dense()
         sink, sink_q = patch.sinks(transformer_options, tokens)
+        measure_plan = None
+        if request is not None:
+            if type(block_index) is not int:
+                raise RuntimeError("attention measure requires a concrete H3 block index")
+            measure_plan = measure.prepare(
+                patch,
+                transformer_options,
+                block_index=block_index,
+                q_rows=tokens,
+                kv_rows=tokens,
+                device=q.device,
+                dtype=q.dtype,
+                head_dim=dim_head,
+                mask_class="none",
+                existing_sink=sink,
+                provider=ck.sol_attn,
+                profile="weighted_exact_blocks_v1",
+                numerical_route="core_bsa_direct",
+                preprocess_digest="caller_attention_domain_v1",
+            )
+            if measure_plan is None:
+                raise RuntimeError("attention measure disappeared during sparse route binding")
+            sink = measure_plan.exact_k_block_range
         if q.dtype == torch.float32:   # the kernel quantizes to int8 anyway; bf16 keeps the fp32 range
             qs, ks, vs = (t.to(torch.bfloat16) for t in (qs, ks, vs))
-        out = ck.sol_attn(qs, ks, vs, tau=patch.tau, scale=kwargs.get("scale"),
-                          sink_blocks=list(sink), sink_q=list(sink_q), topk_ratio=patch.topk_ratio,
-                          token_aug=patch.extra_tokens).to(q.dtype)
-        patch.log_once(("sparse", tuple(qs.shape)), f"sparse {tuple(qs.shape)}, sinks {sink}/{sink_q}")
+        out = ck.sol_attn(
+            qs, ks, vs,
+            tau=patch.tau,
+            scale=kwargs.get("scale"),
+            sink_blocks=list(sink),
+            sink_q=list(sink_q),
+            key_bias=None if measure_plan is None else measure_plan.key_log_measure,
+            topk_ratio=patch.topk_ratio,
+            token_aug=patch.extra_tokens,
+        ).to(q.dtype)
+        patch.log_once(("sparse", tuple(qs.shape), None if measure_plan is None else measure_plan.semantic_digest),
+                       f"sparse {tuple(qs.shape)}, sinks {sink}/{sink_q}")
         if skip_output_reshape:
             return out.transpose(1, 2)
         return out.reshape(b, -1, heads * dim_head)
@@ -218,6 +286,7 @@ def install_override(patch: SparseAttnPatch, transformer_options):
     """Put this patch's override on top of whatever attention override is on the
     hook. Runs at patch time and again from ON_PREPARE_STATE each step, so a node
     applied later cannot silently replace it; idempotent once it is on top."""
+    measure.register(patch, transformer_options)
     current = transformer_options.get("optimized_attention_override")
     if current in patch.installed:
         return
@@ -229,6 +298,9 @@ def install_override(patch: SparseAttnPatch, transformer_options):
 def h3_eligible(attn, x, rope_freqs, transformer_options, patch: SparseAttnPatch, block_index):
     """Whether this H3 block call takes the sparse producer (decided before any work)."""
     n_tokens = x.shape[0]
+    request = transformer_options.get(measure.ATTENTION_MEASURE_KEY)
+    if request is not None and patch.vsa:
+        raise RuntimeError("Mixed-Grid attention measure cannot execute through VSA tile planning")
     if rope_freqs is None or x.dtype != torch.bfloat16 or x.device.type != "cuda" or attn.head_dim != HEAD_DIM:
         return False
     reason = patch.dense_reason(transformer_options, n_tokens, block_index)
@@ -237,6 +309,13 @@ def h3_eligible(attn, x, rope_freqs, transformer_options, patch: SparseAttnPatch
     if reason is not None:
         patch.log_once(("dense", n_tokens, reason), f"dense ({n_tokens} tokens): {reason}")
         return False
+    if request is not None and not measure.supports_key_bias(ck.sol_attn_chunked):
+        # Do not silently fall through to native full-QKV H3 attention: this path
+        # was selected specifically for the chunked producer's memory contract.
+        raise RuntimeError(
+            "Mixed-Grid attention measure requires comfy-kitchen sol_attn_chunked(key_bias=...); "
+            "the selected kitchen build does not expose that capability"
+        )
     if patch.vsa:
         layout = transformer_options.get("minimax_h3_layout")
         if layout is None or layout.seq_len != n_tokens:
@@ -254,13 +333,52 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
     kw = comfy.model_management.cast_to(attn.k_norm.weight, device=x.device)
     extra, plan, gate = {}, None, None
     n, freqs = n_tokens, rope_freqs
+    request = transformer_options.get(measure.ATTENTION_MEASURE_KEY)
     with comfy.model_prefetch.pause_malloc_graph():
         if patch.vsa:
             plan = patch.vsa_plan(transformer_options["minimax_h3_layout"], x.device)
             n = plan["n"]
             freqs = patch.vsa_rope_freqs(rope_freqs, plan)
 
-        key = (block_index, n, tuple(transformer_options.get("uuids", ())))   # statistics per conditioning branch
+        sink, sink_q = ((0, 0), (0, 0)) if patch.vsa else patch.sinks(transformer_options, n_tokens)
+        measure_plan = None
+        vdn_epilogue = None
+        if request is not None:
+            measure_plan = measure.prepare(
+                patch,
+                transformer_options,
+                block_index=block_index,
+                q_rows=n_tokens,
+                kv_rows=n_tokens,
+                device=x.device,
+                dtype=x.dtype,
+                head_dim=head_dim,
+                mask_class="none",
+                existing_sink=sink,
+                provider=ck.sol_attn_chunked,
+                profile="weighted_exact_blocks_v1",
+                numerical_route="core_bsa_h3_chunked",
+                preprocess_digest="core_h3_chunked_rms_rope_split_half_v1",
+            )
+            if measure_plan is None:
+                raise RuntimeError("attention measure disappeared during H3 chunked binding")
+            sink = measure_plan.exact_k_block_range
+            vdn_epilogue = measure.prepare_vdn_epilogue(
+                attn, x, rope_freqs, transformer_options, block_index
+            )
+
+        measure_identity = None if measure_plan is None else (
+            measure_plan.semantic_digest,
+            measure_plan.provider_identity,
+            measure_plan.owner_generation,
+            measure_plan.numerical_route,
+        )
+        key = measure.pool_key(
+            block_index,
+            n,
+            transformer_options.get("uuids", ()),
+            measure_plan,
+        )
         pooled = patch.pooled.get(key)
         first = pooled is None
         if first:
@@ -275,8 +393,8 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
         gate = attn.to_gate_compress
         if gate is not None:
             extra["coarse_gate"] = x.new_empty(n, heads * head_dim).view(1, n, heads, head_dim)
-    else:
-        sink, sink_q = patch.sinks(transformer_options, n_tokens)
+    elif measure_plan is not None:
+        extra["key_bias"] = measure_plan.key_log_measure
 
     def chunks():
         for i in range(0, n, PRODUCER_CHUNK):
@@ -300,8 +418,13 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
     pooled[1].copy_(vscale)
     patch.pooled[key] = pooled
     mode = f"VSA tiles ({n} padded rows, {sink[1]} prefix tiles)" if plan is not None else f"sinks {sink}/{sink_q}"
-    patch.log_once(("producer", n), f"sparse producer path: {n_tokens} tokens, {mode}")
-    out = out.view(n, heads * head_dim)
+    patch.log_once(("producer", n, measure_identity), f"sparse producer path: {n_tokens} tokens, {mode}")
+    out = out.view(n, heads, head_dim)
+    if vdn_epilogue is not None:
+        if plan is not None:
+            raise RuntimeError("VDN Mixed-Grid epilogue cannot consume VSA-reordered rows")
+        return vdn_epilogue.apply(out, x)
+    out = out.reshape(n, heads * head_dim)
     if plan is not None:
         out = out[plan["inv"]]
     return attn.out_proj(out)
