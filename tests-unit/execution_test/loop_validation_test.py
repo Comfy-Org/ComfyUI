@@ -6,7 +6,7 @@ import pytest
 import nodes
 from comfy_execution.validation import LoopValidationError, validate_loops
 from comfy_extras.nodes_loop import EndLoop, StartLoop
-from execution import validate_prompt
+from execution import _loop_boundary, validate_prompt
 
 
 def node(class_type, **inputs):
@@ -498,8 +498,6 @@ def test_prompt_validation_builds_each_node_schema_once(monkeypatch):
 
 
 def test_loop_boundary_does_not_rebuild_a_schema_the_class_already_has():
-    from execution import _loop_boundary
-
     StartLoop.GET_SCHEMA()
     builds = []
     original = StartLoop.define_schema.__func__
@@ -520,8 +518,6 @@ def test_loop_boundary_does_not_rebuild_a_schema_the_class_already_has():
 def test_loop_boundary_reads_a_node_that_was_registered_without_a_schema():
     """The fallback is load-bearing: the loop nodes themselves reach validation with
     SCHEMA unset, and it has to fill it in rather than answer None."""
-    from execution import _loop_boundary
-
     StartLoop.SCHEMA = None
     try:
         assert _loop_boundary(StartLoop) == "start"
