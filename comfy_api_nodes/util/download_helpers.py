@@ -17,12 +17,12 @@ from folder_paths import get_output_directory
 from . import request_logger
 from ._helpers import (
     default_base_url,
+    diagnose_connectivity,
     get_comfy_api_headers,
     is_processing_interrupted,
     sleep_with_interrupt,
     to_aiohttp_url,
 )
-from .client import _diagnose_connectivity
 from .common_exceptions import ApiServerError, LocalNetworkError, ProcessingInterrupted
 from .conversions import bytesio_to_image_tensor
 
@@ -204,7 +204,7 @@ async def download_url_to_bytesio(
                 delay *= retry_backoff
                 continue
 
-            diag = await _diagnose_connectivity()
+            diag = await diagnose_connectivity()
             if not diag["internet_accessible"]:
                 raise LocalNetworkError(
                     "Unable to connect to the network. Please check your internet connection and try again."
