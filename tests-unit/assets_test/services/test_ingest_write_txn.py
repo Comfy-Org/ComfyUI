@@ -142,3 +142,58 @@ def test_executed_registration_reports_preflight_os_error(monkeypatch, caplog) -
     assert _registration_failure_event(caplog) == (
         "[assets-event] ingest.register_failed error_type=OSError output_kind=executed"
     )
+
+
+def test_reused_upload_falls_back_after_four_stale_preflights(monkeypatch, caplog) -> None:
+    preflight = object()
+    prepared = object()
+    attempts: list[object] = []
+    fallback_result = object()
+
+    monkeypatch.setattr(ingest, "_preflight_upload_record", lambda *_args: preflight)
+    monkeypatch.setattr(ingest, "_prepare_upload_record", lambda _preflight: prepared)
+
+    def stale_apply(_session, observed_prepared):
+        attempts.append(observed_prepared)
+        raise ingest._PreflightStale
+
+    monkeypatch.setattr(ingest, "_apply_reused_upload_record", stale_apply)
+    monkeypatch.setattr(
+        ingest,
+        "_reuse_qualified_content_in_txn",
+        lambda *_args: fallback_result,
+    )
+    monkeypatch.setattr(ingest, "run_write_txn", lambda work: work(object()))
+
+    spec = ingest._UploadRecordSpec("asset", [], None, {}, None)
+    with caplog.at_level(logging.WARNING):
+        result = ingest._reuse_qualified_content("blake3:hash", spec)
+
+    assert result is fallback_result
+    assert attempts == [prepared, prepared, prepared, prepared]
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+
+
+def test_cached_registration_reports_terminal_write_failure(
+    mock_create_session, monkeypatch, caplog
+) -> None:
+    path = _output_path("cached-terminal-failure.bin")
+    with open(path, "wb") as file:
+        file.write(b"output")
+    with mock_create_session() as session:
+        create_content(session, path, size_bytes=6)
+        session.commit()
+
+    def non_retryable_failure(_work):
+        raise IntegrityError("INSERT", {}, sqlite3.IntegrityError("constraint failed"))
+
+    monkeypatch.setattr(ingest, "run_write_txn", non_retryable_failure)
+    try:
+        with caplog.at_level(logging.INFO):
+            assert ingest.register_cached_output(path) is None
+        assert _registration_failure_event(caplog) == (
+            "[assets-event] ingest.register_failed error_type=IntegrityError output_kind=cached"
+        )
+    finally:
+        os.unlink(path)
