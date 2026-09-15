@@ -124,6 +124,11 @@ def load_safetensors(ckpt):
     mv = mv[data_base_offset:]
     data_size = len(mv)
 
+    expected_data_size = max((info["data_offsets"][1] for name, info in header.items() if name != "__metadata__"), default=0)
+    if len(mv) < expected_data_size:
+        message = "buffer length ({} bytes) is smaller than the {} bytes of tensor data declared in the header".format(len(mv), expected_data_size)
+        raise ValueError("{}\n\nFile path: {}\n\nThe safetensors file is corrupt/incomplete. Check the file size and make sure you have copied/downloaded it correctly.".format(message, ckpt))
+
     sd = {}
     for name, info in header.items():
         if name == "__metadata__":
