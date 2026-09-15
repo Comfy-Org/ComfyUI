@@ -489,23 +489,17 @@ def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_di
 
     return out
 
+def rope_matrix(freqs_cis):
+    if torch.is_tensor(freqs_cis):
+        return freqs_cis
+    cos, sin, neg_sin = freqs_cis
+    half = sin.shape[-1]
+    matrix = torch.stack((cos[..., :half], neg_sin, sin, cos[..., half:]), dim=-1)
+    return matrix.reshape(*matrix.shape[:-1], 2, 2)
+
+
 def apply_rope(xq, xk, freqs_cis):
-    org_dtype = xq.dtype
-    cos = freqs_cis[0]
-    sin = freqs_cis[1]
-    nsin = freqs_cis[2]
-
-    q_embed = (xq * cos)
-    q_split = q_embed.shape[-1] // 2
-    q_embed[..., : q_split].addcmul_(xq[..., q_split :], nsin)
-    q_embed[..., q_split :].addcmul_(xq[..., : q_split], sin)
-
-    k_embed = (xk * cos)
-    k_split = k_embed.shape[-1] // 2
-    k_embed[..., : k_split].addcmul_(xk[..., k_split :], nsin)
-    k_embed[..., k_split :].addcmul_(xk[..., : k_split], sin)
-
-    return q_embed.to(org_dtype), k_embed.to(org_dtype)
+    return comfy_kitchen.apply_rope_split_half(xq, xk, rope_matrix(freqs_cis))
 
 
 class Attention(nn.Module):
@@ -822,7 +816,7 @@ class Llama2_(nn.Module):
                                     device=device)
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True,
-                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None):
+                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None, decode_buffers=None):
         if embeds is not None:
             x = embeds
         else:
@@ -858,7 +852,14 @@ class Llama2_(nn.Module):
 
         enable_graph = self.graph_dynamic_vbar_blocks and fixed_kv_decode
         if enable_graph:
-            x = x.clone()
+            if decode_buffers is None:
+                x = x.clone()
+            else:
+                hidden_buffer, rotary_buffer = decode_buffers
+                hidden_buffer.copy_(x)
+                x = hidden_buffer
+                rotary_buffer.copy_(rope_matrix(freqs_cis))
+                freqs_cis = rotary_buffer
 
         intermediate = None
         all_intermediate = None
@@ -1036,7 +1037,7 @@ class BaseGenerate:
         for step in tqdm(range(max_length), desc="Generating tokens"):
             if step > 0:
                 if compile_allocations:
-                    comfy.model_prefetch.malloc_graph_begin(self, device)
+                    comfy.model_prefetch.malloc_graph_begin(device)
                 embeds = self.model.embed_tokens(decode_tokens).to(execution_dtype)
                 current_input_ids = decode_tokens if initial_input_ids is not None else None
                 position_ids = torch.tensor([[next_pos]], device=device) if next_pos is not None else None

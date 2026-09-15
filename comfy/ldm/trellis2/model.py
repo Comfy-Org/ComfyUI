@@ -768,10 +768,7 @@ def _coords_to_proj_world(coords: torch.Tensor, resolution: int, mesh_scale: tor
         norm = coords[:, 1:].to(torch.float32) / (resolution - 1) * 2.0 - 1.0
     R = _PROJ_GRID_ROTATION.to(device=coords.device, dtype=torch.float32)
     rotated = norm @ R.T
-    if mesh_scale.ndim == 0:
-        scale_per_voxel = mesh_scale.expand(coords.shape[0])
-    else:
-        scale_per_voxel = mesh_scale.to(coords.device)[batch_ids]
+    scale_per_voxel = mesh_scale.to(coords.device).reshape(-1)[batch_ids % mesh_scale.numel()]
     world = rotated / scale_per_voxel.unsqueeze(-1) / 2.0
     return world, batch_ids
 
@@ -800,20 +797,22 @@ def _back_project_to_tokens(
 ) -> torch.Tensor:
     if coords_world.dim() == 2:
         assert batch_ids is not None
-        B = transform_matrix.shape[0]
+        n_cond = transform_matrix.shape[0]
         out = torch.zeros((coords_world.shape[0], feature_map.shape[1]),
                           device=feature_map.device, dtype=feature_map.dtype)
-        for b in range(B):
+        # multi-seed: latent sample b uses conditioning b % n_cond
+        for b in range(int(batch_ids.max().item()) + 1):
             mask = batch_ids == b
             if not mask.any():
                 continue
+            c = b % n_cond
             p = coords_world[mask].unsqueeze(0)
             uv, _, _ = _project_points_to_image(
-                p, transform_matrix[b:b+1], camera_angle_x[b:b+1], image_resolution)
+                p, transform_matrix[c:c+1], camera_angle_x[c:c+1], image_resolution)
             uv_ndc = (uv + 0.5) / image_resolution * 2.0 - 1.0
             # padding_mode='border' is load-bearing: masking out-of-frame voxels confuses
             # the SS DiT (~half the voxels go to zero, producing low poly + rotation drift).
-            sampled = _sample_features(feature_map[b:b+1], uv_ndc)
+            sampled = _sample_features(feature_map[c:c+1], uv_ndc)
             sampled = sampled.squeeze(0).transpose(0, 1)
             out[mask] = sampled
         return out
@@ -846,25 +845,14 @@ def compute_stage_proj_feats(
     batch_size: Optional[int] = None,
     device=None,
 ) -> torch.Tensor:
-    """Back-project a Pixal3D stage's feature maps onto its target voxel/grid coords.
-
-    For sparse (shape / texture) stages: pass ``coords`` (with ``coord_resolution``).
-    Returns ``[N_voxels, C]`` per-voxel features with channel count =
-    LR channels + optional HR channels.
-
-    For the dense SS stage: pass ``dense_grid_resolution`` (16) + ``batch_size``.
-    Returns ``[B, R^3, C]`` features for the dense grid.
-
-    """
+    """Back-project a stage's feature maps onto sparse coords [N, C] or the dense SS grid [B, R^3, C]; views at stride num_views are averaged."""
     if device is None:
         device = coords.device if coords is not None else proj_pack["mesh_scale"].device
     mesh_scale = proj_pack["mesh_scale"].to(device)
     T = proj_pack["transform_matrix"].to(device)
     cam_angle = proj_pack["camera_angle_x"].to(device)
+    num_views = int(proj_pack.get("num_views", 1))
     feat_map_lr, feat_map_hr, image_resolution = _select_stage_entry(proj_pack, stage)
-    feat_map_lr = feat_map_lr.to(device)
-    if feat_map_hr is not None:
-        feat_map_hr = feat_map_hr.to(device)
 
     if coords is not None:
         if coord_resolution is None:
@@ -877,13 +865,18 @@ def compute_stage_proj_feats(
                                               device=device, dtype=torch.float32)
         batch_ids = None
 
-    proj_lr = _back_project_to_tokens(coords_world, feat_map_lr, T, cam_angle,
+    out = None
+    for v in range(num_views):
+        sel = slice(v, None, num_views)
+        proj = _back_project_to_tokens(coords_world, feat_map_lr[sel].to(device), T[sel], cam_angle[sel],
                                        image_resolution=image_resolution, batch_ids=batch_ids)
-    if feat_map_hr is not None:
-        proj_hr = _back_project_to_tokens(coords_world, feat_map_hr, T, cam_angle,
-                                           image_resolution=image_resolution, batch_ids=batch_ids)
-        return torch.cat([proj_lr, proj_hr], dim=-1)
-    return proj_lr
+        if feat_map_hr is not None:
+            proj_hr = _back_project_to_tokens(coords_world, feat_map_hr[sel].to(device), T[sel], cam_angle[sel],
+                                              image_resolution=image_resolution, batch_ids=batch_ids)
+            proj = torch.cat([proj, proj_hr], dim=-1)
+        # average views in fp32 like upstream
+        out = proj.float() if out is None else out.add_(proj)
+    return out.div_(num_views).to(proj.dtype)
 
 
 def _shape_proj_cond(global_cond: torch.Tensor, image_attn_mode: str,
@@ -916,6 +909,11 @@ def _shape_proj_cond(global_cond: torch.Tensor, image_attn_mode: str,
             f"proj_feats for stage {stage!r} has {proj_feats.shape[-1]} channels, "
             f"sub-model expects {proj_in_channels}.{hint}"
         )
+
+    # multi-seed: latent sample i uses conditioning i % B
+    if batch_ids is None and logical_batch is not None and proj_feats.shape[0] != logical_batch:
+        reps = -(-logical_batch // proj_feats.shape[0])
+        proj_feats = proj_feats.repeat((reps,) + (1,) * (proj_feats.ndim - 1))[:logical_batch]
 
     # CFG-duplicate proj_feats to match the model's eval batch.
     if eval_batch is not None and logical_batch is not None and eval_batch > logical_batch:
@@ -1125,7 +1123,7 @@ class Trellis2(nn.Module):
 
         else: # structure
             struct_attn = self.image_attn_mode_structure
-            logical_batch_ss = proj_feats.shape[0] if proj_feats is not None else x.shape[0]
+            logical_batch_ss = x.shape[0] // len(cond_or_uncond) if cond_or_uncond else x.shape[0]
             struct_cond = context
             if struct_attn != "global":
                 struct_cond = _shape_proj_cond(context, struct_attn, proj_feats,
