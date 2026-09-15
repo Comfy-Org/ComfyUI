@@ -392,6 +392,63 @@ def test_seedvr2_3d_routes_to_owned_encode_tiled_on_oom():
     )
 
 
+def test_handles_tiling_decode_oom_frees_memory_before_retry():
+    wrapper = seedvr_vae_mod.VideoAutoencoderKLWrapper.__new__(
+        seedvr_vae_mod.VideoAutoencoderKLWrapper)
+    vae = _make_vae(wrapper, latent_channels=_LATENT_CHANNELS, latent_dim=3)
+
+    call_order = []
+    free_memory_call = MagicMock(side_effect=lambda *a, **k: call_order.append("free_memory"))
+    seedvr2_call = MagicMock(
+        side_effect=lambda *a, **k: call_order.append("decode_tiled_owned") or torch.zeros(1, 3, 9, 64, 64))
+
+    mm = sd_mod.model_management
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(mm, "raise_non_oom", lambda e: None))
+        stack.enter_context(patch.object(mm, "load_models_gpu", lambda *a, **k: None))
+        stack.enter_context(patch.object(mm, "soft_empty_cache", lambda: None))
+        stack.enter_context(patch.object(mm, "free_memory", free_memory_call))
+        stack.enter_context(patch.object(sd_mod.VAE, "_decode_tiled_owned", seedvr2_call))
+        stack.enter_context(patch.object(
+            seedvr_vae_mod.VideoAutoencoderKLWrapper, "decode",
+            side_effect=_force_oom))
+        vae.decode(torch.zeros(1, _LATENT_CHANNELS * 3, 8, 8))
+
+    assert call_order == ["free_memory", "decode_tiled_owned"], (
+        "decode_tiled retry for a handles_tiling VAE must free other models' "
+        f"memory before retrying; call order was {call_order}"
+    )
+    assert free_memory_call.call_args.kwargs["keep_loaded"][0].model is vae.patcher
+
+
+def test_handles_tiling_encode_oom_frees_memory_before_retry():
+    vae = _make_seedvr2_vae_fallback()
+    pixel_samples = torch.zeros((1, 8, 64, 64, 3))
+
+    call_order = []
+    free_memory_call = MagicMock(side_effect=lambda *a, **k: call_order.append("free_memory"))
+    seedvr2_call = MagicMock(
+        side_effect=lambda *a, **k: call_order.append("encode_tiled_owned") or torch.zeros(1, _LATENT_CHANNELS, 2, 8, 8))
+
+    mm = sd_mod.model_management
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(mm, "raise_non_oom", lambda e: None))
+        stack.enter_context(patch.object(mm, "load_models_gpu", lambda *a, **k: None))
+        stack.enter_context(patch.object(mm, "soft_empty_cache", lambda: None))
+        stack.enter_context(patch.object(mm, "free_memory", free_memory_call))
+        stack.enter_context(patch.object(sd_mod.VAE, "_encode_tiled_owned", seedvr2_call))
+        stack.enter_context(patch.object(
+            seedvr_vae_mod.VideoAutoencoderKLWrapper, "encode",
+            side_effect=_force_regular_encode_oom))
+        vae.encode(pixel_samples)
+
+    assert call_order == ["free_memory", "encode_tiled_owned"], (
+        "encode_tiled retry for a handles_tiling VAE must free other models' "
+        f"memory before retrying; call order was {call_order}"
+    )
+    assert free_memory_call.call_args.kwargs["keep_loaded"][0].model is vae.patcher
+
+
 def test_non_seedvr2_encode_tiled_3d_default_overlap_is_concrete():
     vae = _make_non_seedvr2_vae_fallback()
     vae.downscale_ratio = (lambda a: max(1, a // 4), 8, 8)
