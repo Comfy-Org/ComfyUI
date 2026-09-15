@@ -1747,6 +1747,7 @@ class ModelPatcher:
         self.detach(unpatch_all=False)
 
 class ModelPatcherDynamic(ModelPatcher):
+    DYNAMIC_FORCE_LOAD_MODULE_SIZE = 16 * 1024
 
     def __new__(cls, model=None, load_device=None, offload_device=None, size=0, weight_inplace_update=False):
         if load_device is not None and comfy.model_management.is_device_cpu(load_device):
@@ -1794,16 +1795,34 @@ class ModelPatcherDynamic(ModelPatcher):
     def set_in_use_by_current_prompt(self, in_use):
         self.model.dynamic_pins[self.load_device]["current_prompt"] = in_use
 
+    def _vbar_size(self):
+        #The vbar stages weight and bias cast to the model dtype, which can be wider than
+        #the dtype they are stored in.
+        size = 0
+        for *_, module_mem, n, m, _ in self._load_list(for_dynamic=True):
+            if not hasattr(m, "comfy_cast_weights") or module_mem <= self.DYNAMIC_FORCE_LOAD_MODULE_SIZE:
+                continue
+            for param_key in ("weight", "bias"):
+                weight, _, _ = get_key_weight(self.model, key_param_name_to_key(n, param_key))
+                if weight is None:
+                    continue
+                geometry = weight
+                if not isinstance(weight, QuantizedTensor):
+                    model_dtype = getattr(m, param_key + "_comfy_model_dtype", None) or weight.dtype
+                    geometry = comfy.memory_management.TensorGeometry(shape=weight.shape, dtype=model_dtype)
+                size += comfy.memory_management.vram_aligned_size(geometry)
+        return size
+
     def _vbar_get(self, create=False):
+        #One VBAR per (model, load_device); do not replace it while modules still hold _v / _v_reservations.
         if self.load_device == torch.device("cpu"):
             return None
         vbar = self.model.dynamic_vbars.get(self.load_device, None)
         if create and vbar is None:
-            # x10. We dont know what model defined type casts we have in the vbar, but virtual address
-            # space is pretty free. This will cover someone casting an entire model from FP4 to FP32
-            # with some left over.
-            vbar = comfy_aimdo.model_vbar.ModelVBAR(self.model_size() * 10, self.load_device.index)
-            self.model.dynamic_vbars[self.load_device] = vbar
+            size = self._vbar_size()
+            if size > 0:
+                vbar = comfy_aimdo.model_vbar.ModelVBAR(size, self.load_device.index)
+                self.model.dynamic_vbars[self.load_device] = vbar
         return vbar
 
     def loaded_size(self):
@@ -1961,10 +1980,12 @@ class ModelPatcherDynamic(ModelPatcher):
                     m.seed_key = n
                     m._pin_state = pin_state
                     set_dirty(m, dirty)
+                    if not hasattr(m, "_v_reservations"):
+                        m._v_reservations = {}
 
                     #Models that mix tiny and giant weights can causing lopsided stream buffer
                     #rotations and stall. force the tinys over.
-                    if module_mem > 16 * 1024:
+                    if module_mem > self.DYNAMIC_FORCE_LOAD_MODULE_SIZE:
                         force_load, v_weight_size = setup_param(self, m, n, "weight")
                         force_load_bias, v_weight_bias = setup_param(self, m, n, "bias")
                         force_load = force_load or force_load_bias
@@ -1972,7 +1993,7 @@ class ModelPatcherDynamic(ModelPatcher):
                         if force_load:
                             logging.info(f"Module {n} has resizing Lora - force loading")
                     else:
-                        force_load=True
+                        force_load = True
 
                     if force_load:
                         if hasattr(m, "_v"):
@@ -1982,7 +2003,14 @@ class ModelPatcherDynamic(ModelPatcher):
                         force_load_param(self, "bias", device_to)
                     else:
                         if vbar is not None and not hasattr(m, "_v"):
-                            m._v = vbar.alloc(v_weight_size)
+                            reservation = m._v_reservations.get(vbar)
+                            if reservation is None:
+                                reservation = vbar.alloc(v_weight_size)
+                                m._v_reservations[vbar] = reservation
+                            elif reservation[2] < v_weight_size:
+                                raise MemoryError(f"VBAR reservation for {n} is too small")
+                            m._v = (reservation[0], reservation[1], v_weight_size)
+                            m._v_signature = None
                         allocated_size += v_weight_size
 
                     for param in params:
