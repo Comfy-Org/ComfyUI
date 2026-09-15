@@ -117,6 +117,10 @@ code2idx = {"q": 0, "k": 1, "v": 2}
 
 # This function exists because at the time of writing torch.cat can't do fp8 with cuda
 def cat_tensors(tensors):
+    # Materialize lazy-casting weights (e.g. comfy.model_patcher.LazyCastingParam) whose
+    # .device property returns a placeholder object instead of a real torch.device.
+    tensors = [t.to(t.device) for t in tensors]
+
     x = 0
     for t in tensors:
         x += t.shape[0]
