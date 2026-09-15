@@ -1436,6 +1436,25 @@ def detect_layer_quantization(state_dict, prefix):
             return {"mixed_ops": True}
     return None
 
+def _resolve_quant_metadata_layer_key(state_dict, layer_key, model_prefix):
+    # Metadata layer keys may use the full diffusion-model prefix or the
+    # already-stripped form, so resolve them against the state dict.
+    if "{}.weight".format(layer_key) in state_dict:
+        return layer_key
+    if model_prefix:
+        if layer_key.startswith(model_prefix):
+            candidate = layer_key[len(model_prefix):]
+        else:
+            candidate = "{}{}".format(model_prefix, layer_key)
+        if "{}.weight".format(candidate) in state_dict:
+            return candidate
+    parts = layer_key.split(".")
+    for i in range(1, len(parts)):
+        candidate = ".".join(parts[i:])
+        if "{}.weight".format(candidate) in state_dict and "{}.comfy_quant".format(candidate) in state_dict:
+            return candidate
+    return layer_key
+
 def convert_old_quants(state_dict, model_prefix="", metadata={}):
     if metadata is None:
         metadata = {}
@@ -1492,7 +1511,11 @@ def convert_old_quants(state_dict, model_prefix="", metadata={}):
     if quant_metadata is not None:
         layers = quant_metadata["layers"]
         for k, v in layers.items():
-            state_dict["{}.comfy_quant".format(k)] = torch.tensor(list(json.dumps(v).encode('utf-8')), dtype=torch.uint8)
+            resolved_key = _resolve_quant_metadata_layer_key(state_dict, k, model_prefix)
+            marker_key = "{}.comfy_quant".format(resolved_key)
+            marker = torch.tensor(list(json.dumps(v).encode('utf-8')), dtype=torch.uint8)
+            if marker_key not in state_dict or not torch.equal(state_dict[marker_key], marker):
+                state_dict[marker_key] = marker
 
     return state_dict, metadata
 
