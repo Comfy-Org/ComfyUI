@@ -1046,6 +1046,10 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
 
                 if isinstance(input_type, list) or input_type == io.Combo.io_type:
                     if input_type == io.Combo.io_type:
+                        # Skip validation for combos with remote options — options
+                        # are fetched client-side and not available on the server.
+                        if extra_info.get("remote_combo"):
+                            continue
                         combo_options = extra_info.get("options", [])
                     else:
                         combo_options = input_type
