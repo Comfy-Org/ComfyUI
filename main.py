@@ -257,6 +257,34 @@ import comfyui_version
 import app.logger
 import hook_breaker_ac10a0
 
+# Initialize GPUDirect Storage if enabled
+def init_gds():
+    """Initialize GPUDirect Storage based on CLI arguments"""
+    if hasattr(args, 'disable_gds') and args.disable_gds:
+        logging.info("GDS explicitly disabled via --disable-gds")
+        return
+    
+    if not hasattr(args, 'enable_gds') and not hasattr(args, 'gds_prefetch') and not hasattr(args, 'gds_stats'):
+        # GDS not explicitly requested, use auto-detection
+        return
+    
+    if hasattr(args, 'enable_gds') and args.enable_gds:
+        from comfy.gds_loader import GDSConfig, init_gds as gds_init
+        
+        config = GDSConfig(
+            enabled=getattr(args, 'enable_gds', False) or getattr(args, 'gds_prefetch', False),
+            min_file_size_mb=getattr(args, 'gds_min_file_size', 100),
+            chunk_size_mb=getattr(args, 'gds_chunk_size', 64),
+            max_concurrent_streams=getattr(args, 'gds_streams', 4),
+            prefetch_enabled=getattr(args, 'gds_prefetch', True),
+            fallback_to_cpu=not getattr(args, 'gds_no_fallback', False),
+            show_stats=getattr(args, 'gds_stats', False)
+        )
+        
+        gds_init(config)
+
+# Initialize GDS
+init_gds()
 import comfy.memory_management
 import comfy.model_patcher
 
