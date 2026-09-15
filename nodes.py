@@ -1674,6 +1674,9 @@ class SaveImage:
                     "tooltip": "The prefix for the file to save. This may include formatting information such as %date:yyyy-MM-dd% or %Empty Latent Image.width% to include values from nodes."
                 })
             },
+            "optional": {
+                "accumulate": ("BOOLEAN", {"default": False, "tooltip": "When enabled, outputs accumulate into a growing gallery across queue runs instead of being replaced.", "advanced": True}),
+            },
             "hidden": {
                 "prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"
             },
@@ -1690,7 +1693,7 @@ class SaveImage:
     DESCRIPTION = "Saves the input images to your ComfyUI output directory."
     SEARCH_ALIASES = ["save", "save image", "export image", "output image", "write image", "download"]
 
-    def save_images(self, images, filename_prefix="ComfyUI", prompt=None, extra_pnginfo=None):
+    def save_images(self, images, filename_prefix="ComfyUI", prompt=None, extra_pnginfo=None, accumulate=False):
         filename_prefix += self.prefix_append
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0])
         results = list()
@@ -1732,6 +1735,9 @@ class PreviewImage(SaveImage):
     def INPUT_TYPES(s):
         return {"required":
                     {"images": ("IMAGE", ), },
+                "optional": {
+                    "accumulate": ("BOOLEAN", {"default": False, "tooltip": "When enabled, outputs accumulate into a growing gallery across queue runs instead of being replaced.", "advanced": True}),
+                },
                 "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
                 }
 
