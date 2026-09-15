@@ -72,8 +72,9 @@ class MiniMaxH3FunControl(torch.nn.Module):
         # installs an optimized_attention_override in transformer_options along
         # with routing state for the base stream (block index, layout, per-block
         # statistics); a control stream that inherits it is sparsified and routed
-        # with another tensor's bookkeeping. Five control blocks against the base
-        # model's fifty, so dense costs little and keeps the control exact.
+        # with another tensor's bookkeeping. The tower is a handful of blocks
+        # against the base model's stack, so dense costs little and keeps the
+        # control exact.
         if "optimized_attention_override" in transformer_options:
             transformer_options = {k: v for k, v in transformer_options.items()
                                    if k != "optimized_attention_override"}

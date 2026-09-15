@@ -329,7 +329,13 @@ class H3SparseBlockPatch:
         return h3_sparse_attention(self.block.attn, h, rope_freqs, transformer_options, self.patch, self.block_index)
 
     def __call__(self, args, extra):
-        if h3_eligible(self.block.attn, args["img"], args["rope_freqs"], args["transformer_options"], self.patch, self.block_index):
+        # The newest patch on a layer runs first and owns the attention choice.
+        # If two sparse nodes are stacked, the older one delegated to here must
+        # not overwrite it, which keeps the pre-composition behaviour where the
+        # last applied node won.
+        if "attention" not in args and h3_eligible(
+                self.block.attn, args["img"], args["rope_freqs"],
+                args["transformer_options"], self.patch, self.block_index):
             args = {**args, "attention": self.attention}
         if self.previous is None:
             return extra["original_block"](args)
