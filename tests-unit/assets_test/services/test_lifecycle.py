@@ -7,8 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
-from sqlalchemy.orm import Session as SASession, sessionmaker
+from sqlalchemy.orm import Session, Session as SASession, sessionmaker
 
 from app.assets import lifecycle
 from app.assets.database.models import Asset, AssetContent, Base

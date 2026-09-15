@@ -212,6 +212,7 @@ def test_scenario_4_delete_no_revival(session, tmp_path):
         assert delete_asset_reference(record_id) is True
         assert delete_asset_reference(record_id) is False
 
+    session.expire_all()
     assert get_record_by_id(session, record_id) is None
     assert session.get(AssetContent, content_id) is not None
 
