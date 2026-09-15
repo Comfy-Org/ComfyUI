@@ -272,13 +272,14 @@ class Int(ComfyTypeIO):
         '''Integer input.'''
         def __init__(self, id: str, display_name: str=None, optional=False, tooltip: str=None, lazy: bool=None,
                     default: int=None, min: int=None, max: int=None, step: int=None, control_after_generate: bool | ControlAfterGenerate=None,
-                    display_mode: NumberDisplay=None, socketless: bool=None, force_input: bool=None, extra_dict=None, raw_link: bool=None, advanced: bool=None):
+                    display_mode: NumberDisplay=None, component: str=None, socketless: bool=None, force_input: bool=None, extra_dict=None, raw_link: bool=None, advanced: bool=None):
             super().__init__(id, display_name, optional, tooltip, lazy, default, socketless, None, force_input, extra_dict, raw_link, advanced)
             self.min = min
             self.max = max
             self.step = step
             self.control_after_generate = control_after_generate
             self.display_mode = display_mode
+            self.component = component
             self.default: int
 
         def as_dict(self):
@@ -288,6 +289,7 @@ class Int(ComfyTypeIO):
                 "step": self.step,
                 "control_after_generate": self.control_after_generate,
                 "display": self.display_mode.value if self.display_mode else None,
+                "component": self.component,
             })
 
 @comfytype(io_type="FLOAT")
