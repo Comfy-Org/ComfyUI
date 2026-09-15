@@ -95,7 +95,7 @@ class LTXVEmptyLatentAudio(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="LTXVEmptyLatentAudio",
-            display_name="LTXV Empty Latent Audio",
+            display_name="Empty LTXV Latent Audio",
             category="model/latent/ltxv",
             inputs=[
                 io.Int.Input(
