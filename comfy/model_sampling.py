@@ -275,7 +275,7 @@ class ModelSamplingContinuousEDM(torch.nn.Module):
         percent = 1.0 - percent
 
         log_sigma_min = math.log(self.sigma_min)
-        return math.exp((math.log(self.sigma_max) - log_sigma_min) * percent + log_sigma_min)
+        return torch.tensor(math.exp((math.log(self.sigma_max) - log_sigma_min) * percent + log_sigma_min), dtype=torch.float32).item()
 
 
 class ModelSamplingContinuousV(ModelSamplingContinuousEDM):
@@ -333,7 +333,7 @@ class ModelSamplingDiscreteFlow(torch.nn.Module):
             return 1.0
         if percent >= 1.0:
             return 0.0
-        return time_snr_shift(self.shift, 1.0 - percent)
+        return self.sigma(torch.tensor((1.0 - percent) * self.multiplier, dtype=torch.float32)).item()
 
 class ModelSamplingAV(ModelSamplingDiscreteFlow):
     """Flow sampling for packed audio-video latents whose audio stream has its own flow shift.
@@ -447,7 +447,7 @@ class ModelSamplingFlux(torch.nn.Module):
             return 1.0
         if percent >= 1.0:
             return 0.0
-        return flux_time_shift(self.shift, 1.0, 1.0 - percent)
+        return self.sigma(torch.tensor(1.0 - percent, dtype=torch.float32)).item()
 
 
 class ModelSamplingCosmosRFlow(ModelSamplingContinuousEDM):
