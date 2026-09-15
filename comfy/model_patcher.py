@@ -213,6 +213,19 @@ def low_vram_patch_estimate_vram(model, key):
 
     return weight.numel() * model_dtype.itemsize * LOWVRAM_PATCH_ESTIMATE_MATH_FACTOR
 
+def _collect_quantized_weight_state_dict_keys(model):
+    """Return state-dict keys owned by each module's QuantizedTensor weight."""
+    keys = set()
+    for module_name, module in model.named_modules(remove_duplicate=False):
+        weight = getattr(module, "weight", None)
+        if not isinstance(weight, QuantizedTensor):
+            continue
+        prefix = f"{module_name}." if module_name else ""
+        weight_key = f"{prefix}weight"
+        keys.update(k for k in weight.state_dict(weight_key) if k != weight_key)
+        keys.add(f"{prefix}comfy_quant")
+    return keys
+
 def get_key_weight(model, key):
     set_func = None
     convert_func = None
@@ -865,11 +878,14 @@ class ModelPatcher:
 
     def get_key_patches(self, filter_prefix=None):
         model_sd = self.model_state_dict()
+        quantized_weight_state_dict_keys = _collect_quantized_weight_state_dict_keys(self.model)
         p = {}
         for k in model_sd:
             if filter_prefix is not None:
                 if not k.startswith(filter_prefix):
                     continue
+            if k in quantized_weight_state_dict_keys:
+                continue
             bk = self.backup.get(k, None)
             hbk = self.hook_backup.get(k, None)
             weight, set_func, convert_func = get_key_weight(self.model, k)
