@@ -2,8 +2,8 @@
 exposing pause, resume, cancel and progress to the API. A run seeds
 newly-observed files first, then enriches records in batches, and settles any
 pending hash-mode transition at the start of the enrich phase so a server that
-receives no prompts still completes the switch. A pass stops once batches stop
-making progress, bounding a scan over files that cannot be read.
+receives no prompts still completes the switch. An enrichment pass ends when
+its ordered candidate cursor is exhausted.
 """
 
 import logging
@@ -910,9 +910,7 @@ class _AssetSeeder:
             {"roots": list(roots), "phase": "enrich"},
         )
 
-        skip_ids: set[str] = set()
-        consecutive_empty = 0
-        max_consecutive_empty = 3
+        last_seen_id: str | None = None
 
         while True:
             if self._check_pause_and_cancel(_ScanStage.ENRICH):
@@ -924,16 +922,13 @@ class _AssetSeeder:
                 roots,
                 compute_hashes=self._compute_hashes,
                 limit=batch_size,
+                last_seen_id=last_seen_id,
             )
-
-            # Filter out previously failed references
-            if skip_ids:
-                unenriched = [row for row in unenriched if row.record_id not in skip_ids]
 
             if not unenriched:
                 break
 
-            enriched, failed_ids = enrich_assets_batch(
+            enriched, _failed_ids = enrich_assets_batch(
                 unenriched,
                 extract_metadata=True,
                 compute_hash=self._compute_hashes,
@@ -941,19 +936,7 @@ class _AssetSeeder:
                 progress=scan_state,
             )
             total_enriched += enriched
-            skip_ids.update(failed_ids)
-
-            if enriched == 0:
-                consecutive_empty += 1
-                if consecutive_empty >= max_consecutive_empty:
-                    logging.warning(
-                        "Enrich phase stopping: %d consecutive batches with no progress (%d skipped)",
-                        consecutive_empty,
-                        len(skip_ids),
-                    )
-                    break
-            else:
-                consecutive_empty = 0
+            last_seen_id = unenriched[-1].record_id
 
             now = time.perf_counter()
             if now - last_progress_time >= progress_interval:
