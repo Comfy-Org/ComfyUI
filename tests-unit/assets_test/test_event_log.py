@@ -37,7 +37,7 @@ VALID_VALUES: dict[str, list[object]] = {
     "count": [1],
     "error_type": ["ValueError", "FileNotFoundError"],
     "hashing_enabled": [True, False],
-    "site": ["discovery", "enrich"],
+    "site": ["discovery", "enrich", "reference_stat"],
     "output_kind": ["executed", "cached"],
 }
 

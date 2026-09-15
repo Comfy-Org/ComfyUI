@@ -12,6 +12,8 @@ from app.assets.event_log import TAG
 from app.assets.scanner import UnenrichedContent
 from app.assets.seeder import _ScanState
 
+from .helpers import enrich_via_prepare_apply
+
 
 EVENT_LINE_PATTERN = re.compile(
     rf"^{re.escape(TAG)} (?P<event>[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*)"
@@ -69,7 +71,7 @@ def hash_session(path: Path) -> Mock:
 
 
 def run_hash_failure(session: Mock, path: Path, progress: _ScanState) -> bool:
-    return scanner.enrich_asset(
+    return enrich_via_prepare_apply(
         session,
         file_path=str(path),
         content_id="content",
@@ -105,7 +107,7 @@ def test_scanner_safe_failures_emit_exception_type_without_path(
     def fail_session():
         raise FileNotFoundError(secret_path)
 
-    monkeypatch.setattr(scanner, "create_session", fail_session)
+    monkeypatch.setattr("app.database.db.WriteSession", fail_session)
 
     with caplog.at_level(logging.INFO):
         result = operation()
@@ -218,7 +220,7 @@ def test_modified_during_hash_emits_fieldless_discard_event(
     monkeypatch.setattr(scanner, "snapshot_hash", lambda _path: None)
 
     with caplog.at_level(logging.INFO):
-        updated = scanner.enrich_asset(
+        updated = enrich_via_prepare_apply(
             hash_session(path),
             file_path=str(path),
             content_id="content",
@@ -319,7 +321,7 @@ def test_locked_files_during_enrichment_emit_stat_failed_exactly_once(
     progress = _ScanState()
 
     with caplog.at_level(logging.INFO):
-        first = scanner.enrich_asset(
+        first = enrich_via_prepare_apply(
             Mock(),
             file_path="/private/assets/locked-1.bin",
             content_id="content-1",
@@ -328,7 +330,7 @@ def test_locked_files_during_enrichment_emit_stat_failed_exactly_once(
             compute_hash=False,
             progress=progress,
         )
-        second = scanner.enrich_asset(
+        second = enrich_via_prepare_apply(
             Mock(),
             file_path="/private/assets/locked-2.bin",
             content_id="content-2",
@@ -357,7 +359,7 @@ def test_missing_file_during_enrichment_returns_false_without_emitting(
     progress = _ScanState()
 
     with caplog.at_level(logging.INFO):
-        updated = scanner.enrich_asset(
+        updated = enrich_via_prepare_apply(
             Mock(),
             file_path="/private/assets/gone.bin",
             content_id="content",
@@ -379,12 +381,11 @@ def test_enrich_failures_emit_once_per_scan_and_reset_with_new_scan(
         UnenrichedContent("content-1", "record-1", "/private/assets/one.bin"),
         UnenrichedContent("content-2", "record-2", "/private/assets/two.bin"),
     ]
-    monkeypatch.setattr(scanner, "create_session", lambda: nullcontext(Mock()))
 
-    def fail_enrich(*_args, **_kwargs):
+    def fail_prepare(*_args, **_kwargs):
         raise FileNotFoundError("/private/assets/secret.bin")
 
-    monkeypatch.setattr(scanner, "enrich_asset", fail_enrich)
+    monkeypatch.setattr(scanner, "_prepare_enrichment", fail_prepare)
 
     with caplog.at_level(logging.INFO):
         first_result = scanner.enrich_assets_batch(rows, progress=_ScanState())
@@ -405,12 +406,11 @@ def test_enrich_exception_counts_one_failure_per_raising_row(
         UnenrichedContent("content-1", "record-1", "/private/assets/one.bin"),
         UnenrichedContent("content-2", "record-2", "/private/assets/two.bin"),
     ]
-    monkeypatch.setattr(scanner, "create_session", lambda: nullcontext(Mock()))
 
-    def fail_enrich(*_args, **_kwargs):
+    def fail_prepare(*_args, **_kwargs):
         raise FileNotFoundError("/private/assets/secret.bin")
 
-    monkeypatch.setattr(scanner, "enrich_asset", fail_enrich)
+    monkeypatch.setattr(scanner, "_prepare_enrichment", fail_prepare)
     progress = _ScanState()
 
     enriched, failed_ids = scanner.enrich_assets_batch(rows, progress=progress)

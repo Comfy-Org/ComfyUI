@@ -31,7 +31,7 @@ from app.assets.scanner import (
     tick_watch_list,
 )
 from app.assets.services.hash_mode_state import drain_transition_queue, pending_transition_count
-from app.database.db import create_session, dependencies_available
+from app.database.db import dependencies_available
 
 
 class ScanInProgressError(Exception):
@@ -873,9 +873,7 @@ class _AssetSeeder:
                 last_progress_time = now
 
         self._update_progress(scanned=len(specs), created=total_created)
-        with create_session() as session:
-            tick_watch_list(session)
-            session.commit()
+        tick_watch_list()
         logging.info(
             "Fast scan complete: %.3fs total (created=%d, skipped=%d, total_paths=%d)",
             time.perf_counter() - t_fast_start,
@@ -893,14 +891,12 @@ class _AssetSeeder:
         """
         total_enriched = 0
         scan_state = self._scan_state
-        with create_session() as session:
-            drain_pending_verifications(session)
-            tick_watch_list(session)
-            for _ in range(3):
-                drain_transition_queue(session)
-                session.commit()
-                if pending_transition_count() == 0:
-                    break
+        drain_pending_verifications()
+        tick_watch_list()
+        for _ in range(3):
+            drain_transition_queue()
+            if pending_transition_count() == 0:
+                break
         batch_size = 100
         last_progress_time = time.perf_counter()
         progress_interval = 1.0

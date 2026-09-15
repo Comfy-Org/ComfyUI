@@ -27,7 +27,7 @@ FORBIDDEN_STRING_CHARS = ("/", "\\", ":", " ", "=", '"')
 ROOTS = frozenset({"models", "input", "output", "user", "temp"})
 PHASES = frozenset({"fast", "enrich", "full"})
 STAGES = frozenset({"mark_missing", "pruning", "fast_scan", "enrich", "finalize"})
-STAT_SITES = frozenset({"discovery", "enrich"})
+STAT_SITES = frozenset({"discovery", "enrich", "reference_stat"})
 ALLOWED_EVENTS = frozenset({
     "assets.enabled",
     "seeder.scan_started",

@@ -63,13 +63,13 @@ def test_enrich_phase_settles_an_unreadable_transition_without_looping(
             yield sess
 
     attempts: list[str] = []
-    real_enrich_asset = scanner.enrich_asset
+    real_prepare_enrichment = scanner._prepare_enrichment
 
-    def counting_enrich_asset(*args, **kwargs):
-        attempts.append(kwargs["record_id"])
+    def counting_prepare_enrichment(row, *args, **kwargs):
+        attempts.append(row.record_id)
         if len(attempts) > _ATTEMPT_BUDGET:
             raise _AttemptBudgetExhausted
-        return real_enrich_asset(*args, **kwargs)
+        return real_prepare_enrichment(row, *args, **kwargs)
 
     seeder = seeder_module._AssetSeeder()
     seeder._compute_hashes = True
@@ -79,10 +79,10 @@ def test_enrich_phase_settles_an_unreadable_transition_without_looping(
     monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
     monkeypatch.setattr(hash_mode_state, "snapshot_hash", _denied)
     monkeypatch.setattr(scanner, "snapshot_hash", _denied)
-    monkeypatch.setattr(scanner, "enrich_asset", counting_enrich_asset)
+    monkeypatch.setattr(scanner, "_prepare_enrichment", counting_prepare_enrichment)
 
-    with patch("app.assets.seeder.create_session", _create_session), \
-         patch("app.assets.scanner.create_session", _create_session), \
+    with patch("app.assets.scanner.create_session", _create_session), \
+         patch("app.database.db.Session", sessionmaker(bind=db_engine)), \
          patch("app.database.db.WriteSession", sessionmaker(bind=db_engine)):
         try:
             cancelled, _enriched = seeder._run_enrich_phase(("input",))

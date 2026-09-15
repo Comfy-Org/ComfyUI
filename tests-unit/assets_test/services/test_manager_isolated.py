@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.assets import lifecycle
 from app.assets import manager as manager_module
-from app.assets import scanner, seeder as seeder_module
+from app.assets import scanner
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_content, create_record
 from app.assets.manager import AssetsEnabled
@@ -73,9 +73,9 @@ def threaded_create_session(
         with SASession(engine) as session:
             yield session
 
-    monkeypatch.setattr(seeder_module, "create_session", _create_session)
     monkeypatch.setattr(scanner, "create_session", _create_session)
     monkeypatch.setattr("app.assets.services.ingest.create_session", _create_session)
+    monkeypatch.setattr("app.database.db.Session", sessionmaker(bind=engine))
     monkeypatch.setattr("app.database.db.WriteSession", sessionmaker(bind=engine))
     yield _create_session
     engine.dispose()

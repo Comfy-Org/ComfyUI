@@ -55,9 +55,12 @@ from app.assets.services.snapshot_hash import snapshot_hash
 
 
 @pytest.fixture
-def session():
+def session(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr("app.database.db.Session", factory)
+    monkeypatch.setattr("app.database.db.WriteSession", factory)
     with Session(engine) as database_session:
         yield database_session
 
@@ -508,6 +511,7 @@ def test_scenario_18_edit_during_hash_discard(session, tmp_path):
         mtime_ns=seed_stat.st_mtime_ns,
     )
     record = create_record(session, content.id, "unstable.bin")
+    session.commit()
 
     clear_pending_verifications()
     try:
@@ -526,8 +530,10 @@ def test_scenario_18_edit_during_hash_discard(session, tmp_path):
     finally:
         clear_pending_verifications()
 
-    assert content.hash == committed_hash
-    assert content.mtime_ns == path.stat().st_mtime_ns
+    session.expire_all()
+    refreshed = session.get(AssetContent, content.id)
+    assert refreshed.hash == committed_hash
+    assert refreshed.mtime_ns == path.stat().st_mtime_ns
 
 
 def test_writer_simulation_terminates_and_is_capped(tmp_path):

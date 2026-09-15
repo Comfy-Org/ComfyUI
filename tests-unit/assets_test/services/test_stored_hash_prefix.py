@@ -18,7 +18,6 @@ import app.assets.mode as mode_module
 import folder_paths
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_record
-from app.assets.scanner import enrich_asset
 from app.assets.scanner_changes import recover_missing_content
 from app.assets.services import asset_management, ingest
 from app.assets.services.asset_management import get_asset_detail
@@ -27,6 +26,8 @@ from app.assets.services.ingest import (
     upload_from_temp_path,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
+
+from ..helpers import enrich_via_prepare_apply as enrich_asset
 
 
 @pytest.fixture

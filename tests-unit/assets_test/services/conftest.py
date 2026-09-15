@@ -51,8 +51,11 @@ def db_engine_fk():
 
 
 @pytest.fixture
-def session(db_engine):
+def session(db_engine, monkeypatch):
     """Session fixture for tests that need direct DB access."""
+    factory = sessionmaker(bind=db_engine)
+    monkeypatch.setattr("app.database.db.Session", factory)
+    monkeypatch.setattr("app.database.db.WriteSession", factory)
     with Session(db_engine) as sess:
         yield sess
 

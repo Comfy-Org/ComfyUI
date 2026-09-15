@@ -11,12 +11,13 @@ from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.helpers import to_stored_hash
 from app.assets.scanner import (
     build_asset_specs,
-    enrich_asset,
     mark_contents_missing_outside_prefixes,
     seed_asset_specs,
     sync_prefixes_with_filesystem,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
+
+from ..helpers import enrich_via_prepare_apply
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,8 +72,8 @@ def test_enrichment_retains_absent_system_metadata_keys(session: Session, temp_d
             _ExtractedMetadata(None, {"b": 3}),
         ],
     ):
-        enrich_asset(session, str(path), content.id, record.id)
-        enrich_asset(session, str(path), content.id, record.id)
+        enrich_via_prepare_apply(session, file_path=str(path), content_id=content.id, record_id=record.id)
+        enrich_via_prepare_apply(session, file_path=str(path), content_id=content.id, record_id=record.id)
 
     assert record.system_metadata == {"a": 1, "b": 3}
 
@@ -95,7 +96,7 @@ def test_enrichment_retains_dimensions_when_image_extraction_degrades(
         ),
         patch("app.assets.scanner.extract_image_dimensions", return_value=None),
     ):
-        enrich_asset(session, str(path), content.id, record.id)
+        enrich_via_prepare_apply(session, file_path=str(path), content_id=content.id, record_id=record.id)
 
     assert record.system_metadata == {
         "filename": "image.png",
@@ -120,7 +121,7 @@ def test_enrichment_overrides_content_length_with_zero(
         "app.assets.scanner.extract_file_metadata",
         return_value=_ExtractedMetadata(None, {"content_length": 0}),
     ):
-        enrich_asset(session, str(path), content.id, record.id)
+        enrich_via_prepare_apply(session, file_path=str(path), content_id=content.id, record_id=record.id)
 
     assert record.system_metadata == {"content_length": 0}
 
@@ -217,7 +218,7 @@ def test_enrichment_keeps_equal_hash_contents_distinct(session, temp_dir: Path):
     session.add_all((record, existing_record))
     session.commit()
 
-    enriched = enrich_asset(
+    enriched = enrich_via_prepare_apply(
         session,
         file_path=str(path),
         content_id=content.id,

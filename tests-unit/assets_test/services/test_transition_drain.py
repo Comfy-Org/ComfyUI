@@ -174,6 +174,7 @@ def test_transition_drain_marks_deleted_path_missing_and_completes_transition(
     enqueue_transition_work(session, transition)
     drain_transition_queue(session)
     session.commit()
+    session.expire_all()
 
     assert session.get(AssetContent, content_id).is_missing is True, (
         "a path deleted while every server was down must be marked missing, not requeued forever"
@@ -268,6 +269,7 @@ def test_transition_drain_mixes_a_deleted_path_with_a_healthy_one(session, temp_
     enqueue_transition_work(session, transition)
     drain_transition_queue(session)
     session.commit()
+    session.expire_all()
 
     assert session.get(AssetContent, content_ids[deleted_path]).is_missing is True
     healthy_content = session.get(AssetContent, content_ids[healthy_path])
