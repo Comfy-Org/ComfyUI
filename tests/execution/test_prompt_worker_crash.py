@@ -35,6 +35,9 @@ class DummyPromptExecutor:
         self.execute_called += 1
         if self.execute_called == 1:
             raise Exception("Simulated unhandled exception!")
+        else:
+            self.success = True
+            self.history_result = {"mock_key": "mock_value_2"}
 
     def reset(self):
         pass
@@ -47,6 +50,13 @@ main.comfy.model_management.soft_empty_cache = lambda: None
 q = PromptQueue(DummyServer())
 q.put((1, "prompt_id_crash", {}, {}, [], {}))
 q.put((2, "prompt_id_ok",    {}, {}, [], {}))
+
+task_done_calls = []
+original_task_done = q.task_done
+def fake_task_done(item_id, output, status, process_item=None):
+    task_done_calls.append((item_id, output, status))
+    original_task_done(item_id, output, status=status, process_item=process_item)
+q.task_done = fake_task_done
 
 class StopWorkerException(Exception): pass
 original_get = q.get
@@ -76,6 +86,18 @@ assert _executor_instance is not None, "PromptExecutor was never instantiated"
 assert _executor_instance.execute_called == 2, (
     f"Expected execute to be called twice (crash + recovery), got {_executor_instance.execute_called}"
 )
+
+assert len(task_done_calls) == 2, f"Expected 2 task_done calls, got {len(task_done_calls)}"
+
+id1, out1, status1 = task_done_calls[0]
+assert status1.status_str == 'error', f"First prompt should have error status, got {status1.status_str}"
+assert not status1.completed, "First prompt should not be completed"
+
+id2, out2, status2 = task_done_calls[1]
+assert status2.status_str == 'success', f"Second prompt should have success status, got {status2.status_str}"
+assert status2.completed, "Second prompt should be completed"
+assert out2 == {"mock_key": "mock_value_2"}, "Second prompt should have distinct history_result"
+
 print("SUCCESS")
 """
     env = os.environ.copy()
