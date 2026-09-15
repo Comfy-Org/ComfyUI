@@ -2,19 +2,65 @@ import os
 
 import logging
 import sqlite3
+import threading
+import time
 
 import folder_paths
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 import app.assets.services.ingest as ingest
+import app.database.db as db_mod
 from app.assets.database.queries.records import create_content, create_record
+
+_BARRIER_TIMEOUT = 5
+_PROBE_BUDGET_SECONDS = 1.0
 
 
 def _output_path(name: str) -> str:
     output_dir = folder_paths.get_output_directory()
     os.makedirs(output_dir, exist_ok=True)
     return os.path.join(output_dir, name)
+
+
+@pytest.fixture
+def file_database(tmp_path, monkeypatch):
+    """A real file-backed engine (WAL + BEGIN IMMEDIATE) for lock-hold barrier tests.
+
+    ``mock_create_session`` binds an in-memory StaticPool engine, which never
+    contends on a write lock and would make a lock-hold assertion vacuously
+    true; only the production runtime engines built by ``init_db`` enforce it.
+    """
+    database_path = str(tmp_path / "assets.db")
+    monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
+    monkeypatch.setattr(db_mod, "Session", None)
+    monkeypatch.setattr(db_mod, "_db_lock", None)
+    monkeypatch.setattr(db_mod, "WriteSession", None)
+    db_mod.init_db()
+    yield database_path
+    for factory in (db_mod.Session, db_mod.WriteSession):
+        if factory is not None:
+            factory.kw["bind"].dispose()
+    db_mod._db_lock.release(force=True)
+
+
+def _probe_write() -> None:
+    db_mod.run_write_txn(
+        lambda session: session.execute(
+            text("INSERT INTO tags (name) VALUES (:name)"),
+            {"name": f"probe-{os.urandom(8).hex()}"},
+        )
+    )
+
+
+def _blocking_fake(entered: threading.Event, release: threading.Event, real_fn):
+    def fake(*args, **kwargs):
+        entered.set()
+        release.wait(timeout=_BARRIER_TIMEOUT)
+        return real_fn(*args, **kwargs)
+
+    return fake
 
 
 def test_cached_registration_skips_extraction_when_live_content_is_missing(
@@ -376,3 +422,148 @@ def test_cached_registration_restarts_when_file_changes_after_preflight(
     finally:
         for path in (direct_path, public_path):
             os.unlink(path)
+
+
+def test_cached_registration_metadata_extraction_does_not_hold_the_write_lock(
+    file_database, monkeypatch
+) -> None:
+    path = _output_path("cached-barrier-no-sibling.bin")
+    with open(path, "wb") as file:
+        file.write(b"cached barrier bytes")
+    try:
+        with db_mod.Session() as session:
+            content = create_content(session, path, size_bytes=os.path.getsize(path))
+            session.commit()
+            content_id = content.id
+
+        real_extract = ingest._extract_system_metadata_sync
+        entered = threading.Event()
+        release = threading.Event()
+        monkeypatch.setattr(
+            ingest,
+            "_extract_system_metadata_sync",
+            _blocking_fake(entered, release, real_extract),
+        )
+
+        result: dict[str, object] = {}
+
+        def _register() -> None:
+            result["registered"] = ingest.register_cached_output(path)
+
+        worker = threading.Thread(target=_register)
+        worker.start()
+        try:
+            assert entered.wait(timeout=_BARRIER_TIMEOUT)
+            started = time.monotonic()
+            _probe_write()
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+            worker.join(timeout=_BARRIER_TIMEOUT)
+
+        assert not worker.is_alive()
+        assert elapsed < _PROBE_BUDGET_SECONDS
+        registered = result["registered"]
+        assert registered is not None
+        assert registered.content_id == content_id
+        with db_mod.Session() as session:
+            record = session.get(ingest.Asset, registered.id)
+            assert record is not None
+            assert record.content_id == content_id
+    finally:
+        os.unlink(path)
+
+
+def test_upload_settle_hashing_does_not_hold_the_write_lock(
+    file_database, monkeypatch
+) -> None:
+    path = _output_path("settle-barrier.bin")
+    with open(path, "wb") as file:
+        file.write(b"incumbent barrier bytes")
+    try:
+        stat = os.stat(path)
+        with db_mod.Session() as session:
+            content = create_content(
+                session, path, size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns
+            )
+            session.commit()
+            content_id = content.id
+
+        real_snapshot_hash = ingest.snapshot_hash
+        entered = threading.Event()
+        release = threading.Event()
+        monkeypatch.setattr(
+            ingest,
+            "snapshot_hash",
+            _blocking_fake(entered, release, real_snapshot_hash),
+        )
+
+        def _settle() -> None:
+            ingest._settle_destination_before_write(path)
+
+        worker = threading.Thread(target=_settle)
+        worker.start()
+        try:
+            assert entered.wait(timeout=_BARRIER_TIMEOUT)
+            started = time.monotonic()
+            _probe_write()
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+            worker.join(timeout=_BARRIER_TIMEOUT)
+
+        assert not worker.is_alive()
+        assert elapsed < _PROBE_BUDGET_SECONDS
+
+        expected_digest, _expected_stat = real_snapshot_hash(path)
+        with db_mod.Session() as session:
+            settled = session.get(ingest.AssetContent, content_id)
+            assert settled is not None
+            assert settled.hash == ingest.to_stored_hash(expected_digest)
+            assert settled.is_missing is False
+    finally:
+        os.unlink(path)
+
+
+def test_create_record_metadata_extraction_does_not_hold_the_write_lock(
+    file_database, monkeypatch
+) -> None:
+    path = _output_path("create-record-barrier.bin")
+    with open(path, "wb") as file:
+        file.write(b"brand new record bytes")
+    try:
+        real_extract = ingest._extract_system_metadata_sync
+        entered = threading.Event()
+        release = threading.Event()
+        monkeypatch.setattr(
+            ingest,
+            "_extract_system_metadata_sync",
+            _blocking_fake(entered, release, real_extract),
+        )
+
+        result: dict[str, object] = {}
+
+        def _register() -> None:
+            result["upload"] = ingest.register_file_in_place(
+                path, "create-record-barrier.bin", ["output"]
+            )
+
+        worker = threading.Thread(target=_register)
+        worker.start()
+        try:
+            assert entered.wait(timeout=_BARRIER_TIMEOUT)
+            started = time.monotonic()
+            _probe_write()
+            elapsed = time.monotonic() - started
+        finally:
+            release.set()
+            worker.join(timeout=_BARRIER_TIMEOUT)
+
+        assert not worker.is_alive()
+        assert elapsed < _PROBE_BUDGET_SECONDS
+        upload_result = result["upload"]
+        assert upload_result is not None
+        assert upload_result.created_new is True
+        assert upload_result.ref.file_path == path
+    finally:
+        os.unlink(path)
