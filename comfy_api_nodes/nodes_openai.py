@@ -137,9 +137,14 @@ class OpenAIGPTImage1(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="OpenAIGPTImage1",
-            display_name="OpenAI GPT Image 2",
+            display_name="OpenAI GPT Image 2 (legacy)",
             category="partner/image/OpenAI",
-            description="Generates images synchronously via OpenAI's GPT Image endpoint.",
+            description=(
+                "Generates images synchronously via OpenAI's GPT Image endpoint. "
+                "This class name is historical and is kept only for compatibility with existing workflows; "
+                "the node is not limited to GPT Image 1 and defaults to the current gpt-image-2 model, "
+                "so prefer the OpenAIGPTImageNodeV2 ('OpenAI GPT Image 2') node for new workflows."
+            ),
             is_deprecated=True,
             inputs=[
                 IO.String.Input(
@@ -213,7 +218,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 ),
                 IO.Combo.Input(
                     "model",
-                    options=["gpt-image-1", "gpt-image-1.5", "gpt-image-2"],
+                    options=["gpt-image-2", "gpt-image-1.5", "gpt-image-1"],
                     default="gpt-image-2",
                     optional=True,
                 ),
