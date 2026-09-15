@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy.orm import Session as SASession
+from sqlalchemy.orm import Session as SASession, sessionmaker
 
 from app.assets import scanner, seeder as seeder_module
 from app.assets.database.models import AssetContent
@@ -82,7 +82,8 @@ def test_enrich_phase_settles_an_unreadable_transition_without_looping(
     monkeypatch.setattr(scanner, "enrich_asset", counting_enrich_asset)
 
     with patch("app.assets.seeder.create_session", _create_session), \
-         patch("app.assets.scanner.create_session", _create_session):
+         patch("app.assets.scanner.create_session", _create_session), \
+         patch("app.database.db.WriteSession", sessionmaker(bind=db_engine)):
         try:
             cancelled, _enriched = seeder._run_enrich_phase(("input",))
         except _AttemptBudgetExhausted:

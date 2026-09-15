@@ -10,7 +10,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session as SASession
+from sqlalchemy.orm import Session as SASession, sessionmaker
 
 from app.assets import mode
 from app.assets.api import routes
@@ -209,6 +209,7 @@ async def test_all_read_surfaces_agree_on_prefixed_hash(
     monkeypatch.setattr(mode, "hashing_enabled", lambda: True)
     monkeypatch.setattr(ingest, "create_session", _factory)
     monkeypatch.setattr(asset_management, "create_session", _factory)
+    monkeypatch.setattr("app.database.db.WriteSession", sessionmaker(bind=db_engine))
 
     content_bytes = b"one-asset-all-surfaces-agree"
     temp = _write_temp(content_bytes)

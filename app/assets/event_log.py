@@ -43,6 +43,7 @@ ALLOWED_EVENTS = frozenset({
     "scanner.temp_sync_failed",
     "scanner.mark_missing_failed",
     "scanner.stat_failed",
+    "ingest.register_failed",
 })
 
 
@@ -89,6 +90,7 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "error_type": _is_safe_string,
     "hashing_enabled": _is_flag,
     "site": _one_of(STAT_SITES),
+    "output_kind": _one_of(frozenset({"executed", "cached"})),
 }
 
 _warned_call_sites: set[tuple[str, int]] = set()

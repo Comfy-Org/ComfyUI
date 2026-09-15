@@ -11,7 +11,7 @@ import contextlib
 import logging
 import mimetypes
 import os
-from typing import Any, NamedTuple, Sequence
+from typing import Any, NamedTuple
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -23,12 +23,12 @@ from app.assets.database.queries.records import (
     create_record,
     mark_content_missing,
 )
+from app.assets.event_log import emit, error_type
 from app.assets.helpers import normalize_tags, to_stored_hash
 from app.assets.services.file_utils import get_mtime_ns, get_size_and_mtime_ns
 from app.assets.services.image_dimensions import extract_image_dimensions
 from app.assets.services.lookup import (
     claim_qualified_content,
-    lookup_for_from_hash,
     lookup_for_view,
     refresh_qualified_content,
 )
@@ -47,7 +47,7 @@ from app.assets.services.schemas import (
     UserMetadata,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
-from app.database.db import create_session
+from app.database.db import create_session, run_write_txn
 
 
 def _normalize_hash_input(hash_str: str) -> str:
@@ -194,28 +194,23 @@ def _move_temp_to_dest(temp_path: str, dest_abs: str) -> None:
 def _create_upload_record(
     session: Session,
     content_id: str,
-    name: str,
-    abs_path: str,
-    tags: Sequence[str],
-    mime_type: str | None,
-    user_metadata: UserMetadata,
-    preview_id: str | None,
+    prepared: "_PreparedUploadRecord",
 ) -> Asset:
-    if preview_id is not None and session.get(Asset, preview_id) is None:
-        raise ValueError(f"preview_id {preview_id!r} does not reference an existing asset")
+    preflight = prepared.preflight
+    spec = preflight.spec
     record = create_record(
         session,
         content_id,
-        name,
-        mime_type=mime_type,
-        loader_path=compute_loader_path(abs_path),
-        tags=list(tags),
-        system_metadata=_extract_system_metadata_sync(abs_path, mime_type),
+        spec.name,
+        mime_type=spec.mime_type,
+        loader_path=compute_loader_path(preflight.path),
+        tags=spec.tags,
+        system_metadata=prepared.system_metadata,
     )
-    if user_metadata:
-        record.user_metadata = dict(user_metadata)
-    if preview_id:
-        record.preview_id = preview_id
+    if spec.user_metadata:
+        record.user_metadata = dict(spec.user_metadata)
+    if spec.preview_id:
+        record.preview_id = spec.preview_id
     session.flush()
     return record
 
@@ -344,20 +339,298 @@ def _upload_destination_or_none(
         return None
 
 
-def _settle_destination_before_write(session: Session, dest_abs: str) -> None:
-    """Resolve the live row at an upload destination while its bytes still exist.
+class _UploadRecordSpec(NamedTuple):
 
-    ``upload_from_temp_path`` is about to replace whatever sits at ``dest_abs``,
-    and that write destroys the only evidence of what the incumbent row was
-    created for. So reconcile against the INCUMBENT file's own hash first: an
-    unhashed row learns the hash of the bytes it actually describes, and a row
-    whose hash no longer matches the file is retired. Both outcomes leave the
-    post-move reconciliation with a known hash to compare, so it never has to
-    read equal sizes as equal bytes.
+    name: str
+    tags: list[str]
+    mime_type: str | None
+    user_metadata: UserMetadata
+    preview_id: str | None
 
-    Running before ``lookup_for_view`` is what keeps a merely stale row from
-    being skipped as stat-inconsistent and duplicated.
-    """
+
+class _FileSignature(NamedTuple):
+
+    path: str
+    size_bytes: int
+    mtime_ns: int
+
+
+class _UploadRecordPreflight(NamedTuple):
+
+    content_id: str | None
+    stored_hash: str | None
+    path: str
+    signature: _FileSignature
+    spec: _UploadRecordSpec
+
+
+class _PreparedUploadRecord(NamedTuple):
+
+    preflight: _UploadRecordPreflight
+    system_metadata: dict[str, Any]
+
+
+class _SettleTargetPreflight(NamedTuple):
+
+    content_id: str
+    content_hash: str | None
+    content_size_bytes: int
+    content_mtime_ns: int | None
+    signature: _FileSignature
+
+
+class _PreparedSettleTarget(NamedTuple):
+
+    preflight: _SettleTargetPreflight
+    facts: _ContentFacts | None
+
+
+class _CachedRegistrationPreflight(NamedTuple):
+
+    content_id: str
+    sibling_id: str | None
+    sibling_metadata: dict[str, Any] | None
+    signature: _FileSignature | None
+
+
+class _PreflightStale(Exception):
+    pass
+
+
+def _file_signature(path: str) -> _FileSignature:
+    stat_result = os.stat(path, follow_symlinks=True)
+    return _FileSignature(path, stat_result.st_size, get_mtime_ns(stat_result))
+
+
+def _file_signature_matches(signature: _FileSignature) -> bool:
+    try:
+        return _file_signature(signature.path) == signature
+    except OSError:
+        return False
+
+
+def _preflight_upload_record(
+    stored_hash: str | None,
+    fallback_path: str | None,
+    spec: _UploadRecordSpec,
+) -> _UploadRecordPreflight | None:
+    """Check the target before metadata I/O so it does not extend the writer lease."""
+    with create_session() as session:
+        content = lookup_for_view(session, stored_hash) if stored_hash else None
+        if content is None:
+            if fallback_path is None:
+                return None
+            content_id = None
+            path = fallback_path
+        else:
+            content_id = content.id
+            path = content.path
+        if spec.preview_id is not None and session.get(Asset, spec.preview_id) is None:
+            raise ValueError(
+                f"preview_id {spec.preview_id!r} does not reference an existing asset"
+            )
+    return _UploadRecordPreflight(
+        content_id,
+        stored_hash,
+        path,
+        _file_signature(path),
+        spec,
+    )
+
+
+def _prepare_upload_record(
+    preflight: _UploadRecordPreflight,
+) -> _PreparedUploadRecord:
+    return _PreparedUploadRecord(
+        preflight,
+        _extract_system_metadata_sync(
+            preflight.path,
+            preflight.spec.mime_type,
+        ),
+    )
+
+
+def _assert_upload_preflight_current(
+    session: Session,
+    preflight: _UploadRecordPreflight,
+) -> None:
+    if not _file_signature_matches(preflight.signature):
+        raise _PreflightStale
+    preview_id = preflight.spec.preview_id
+    if preview_id is not None and session.get(Asset, preview_id) is None:
+        raise _PreflightStale
+
+
+def _create_upload_record_in_txn(
+    session: Session,
+    content_id: str,
+    spec: _UploadRecordSpec,
+    abs_path: str,
+) -> Asset:
+    if spec.preview_id is not None and session.get(Asset, spec.preview_id) is None:
+        raise ValueError(
+            f"preview_id {spec.preview_id!r} does not reference an existing asset"
+        )
+    record = create_record(
+        session,
+        content_id,
+        spec.name,
+        mime_type=spec.mime_type,
+        loader_path=compute_loader_path(abs_path),
+        tags=spec.tags,
+        system_metadata=_extract_system_metadata_sync(abs_path, spec.mime_type),
+    )
+    if spec.user_metadata:
+        record.user_metadata = dict(spec.user_metadata)
+    if spec.preview_id:
+        record.preview_id = spec.preview_id
+    session.flush()
+    return record
+
+
+def _apply_reused_upload_record(
+    session: Session,
+    prepared: _PreparedUploadRecord,
+) -> UploadResult:
+    preflight = prepared.preflight
+    content = lookup_for_view(session, preflight.stored_hash)
+    if (
+        content is None
+        or content.id != preflight.content_id
+        or content.path != preflight.path
+    ):
+        raise _PreflightStale
+    _assert_upload_preflight_current(session, preflight)
+    if not claim_qualified_content(session, content.id, preflight.stored_hash):
+        raise _PreflightStale
+    content = refresh_qualified_content(session, content.id)
+    if content is None or content.path != preflight.path:
+        raise _PreflightStale
+    record = _create_upload_record(session, content.id, prepared)
+    return _record_to_upload_result(session, record, created_new=True)
+
+
+def _reuse_qualified_content_in_txn(
+    session: Session,
+    stored_hash: str,
+    spec: _UploadRecordSpec,
+) -> UploadResult | None:
+    content = lookup_for_view(session, stored_hash)
+    if content is None:
+        return None
+    if not claim_qualified_content(session, content.id, stored_hash):
+        session.rollback()
+        return None
+    content = refresh_qualified_content(session, content.id)
+    if content is None:
+        session.rollback()
+        return None
+    record = _create_upload_record_in_txn(session, content.id, spec, content.path)
+    return _record_to_upload_result(session, record, created_new=True)
+
+
+def _reuse_qualified_content(
+    stored_hash: str,
+    spec: _UploadRecordSpec,
+) -> UploadResult | None:
+    for restart in range(4):
+        preflight = _preflight_upload_record(stored_hash, None, spec)
+        if preflight is None:
+            return None
+        prepared = _prepare_upload_record(preflight)
+        try:
+            return run_write_txn(
+                lambda session: _apply_reused_upload_record(session, prepared)
+            )
+        except _PreflightStale:
+            if restart == 3:
+                logging.warning(
+                    "Upload preflight changed three times; falling back to in-transaction metadata extraction"
+                )
+                return run_write_txn(
+                    lambda session: _reuse_qualified_content_in_txn(
+                        session,
+                        stored_hash,
+                        spec,
+                    )
+                )
+    return None
+
+
+def _preflight_settle_target(dest_abs: str) -> _SettleTargetPreflight | None:
+    """Read incumbent facts so its hash runs before, not inside, the writer lease."""
+    if not os.path.isfile(dest_abs):
+        return None
+    with create_session() as session:
+        existing = session.scalars(
+            select(AssetContent).where(
+                AssetContent.path == dest_abs,
+                AssetContent.is_missing.is_(False),
+            )
+        ).first()
+        if existing is None:
+            return None
+        signature = _file_signature(dest_abs)
+        if (
+            existing.hash is not None
+            and existing.size_bytes == signature.size_bytes
+            and existing.mtime_ns == signature.mtime_ns
+        ):
+            return None
+        return _SettleTargetPreflight(
+            existing.id,
+            existing.hash,
+            existing.size_bytes,
+            existing.mtime_ns,
+            signature,
+        )
+
+
+def _prepare_settle_target(
+    preflight: _SettleTargetPreflight,
+) -> _PreparedSettleTarget:
+    try:
+        digest, verified_stat = _snapshot_hash_with_retry(preflight.signature.path)
+    except (UploadUnstableError, OSError):
+        return _PreparedSettleTarget(preflight, None)
+    return _PreparedSettleTarget(
+        preflight,
+        _ContentFacts(
+            to_stored_hash(digest),
+            verified_stat.st_size,
+            verified_stat.st_mtime_ns,
+        ),
+    )
+
+
+def _apply_settle_target(
+    session: Session,
+    prepared: _PreparedSettleTarget,
+) -> None:
+    preflight = prepared.preflight
+    existing = session.get(AssetContent, preflight.content_id)
+    if (
+        existing is None
+        or existing.path != preflight.signature.path
+        or existing.is_missing
+        or existing.hash != preflight.content_hash
+        or existing.size_bytes != preflight.content_size_bytes
+        or existing.mtime_ns != preflight.content_mtime_ns
+        or not _file_signature_matches(preflight.signature)
+    ):
+        raise _PreflightStale
+    if prepared.facts is None:
+        mark_content_missing(session, existing.id)
+        return
+    _reconcile_live_content_at_path(
+        session,
+        preflight.signature.path,
+        prepared.facts,
+        content_written=False,
+    )
+
+
+def _settle_destination_before_write_in_txn(session: Session, dest_abs: str) -> None:
     if not os.path.isfile(dest_abs):
         return
     existing = session.scalars(
@@ -392,41 +665,106 @@ def _settle_destination_before_write(session: Session, dest_abs: str) -> None:
     )
 
 
-class _UploadRecordSpec(NamedTuple):
+def _settle_destination_before_write(dest_abs: str) -> None:
+    for restart in range(4):
+        preflight = _preflight_settle_target(dest_abs)
+        if preflight is None:
+            return
+        prepared = _prepare_settle_target(preflight)
+        try:
+            run_write_txn(lambda session: _apply_settle_target(session, prepared))
+            return
+        except _PreflightStale:
+            if restart == 3:
+                logging.warning(
+                    "Upload destination preflight changed three times; falling back to in-transaction hashing"
+                )
+                run_write_txn(
+                    lambda session: _settle_destination_before_write_in_txn(
+                        session,
+                        dest_abs,
+                    )
+                )
+                return
 
-    name: str
-    tags: list[str]
-    mime_type: str | None
-    user_metadata: UserMetadata
-    preview_id: str | None
 
+def _create_content_and_upload_record(
+    stored_hash: str,
+    path: str,
+    facts: _ContentFacts,
+    content_written: bool,
+    spec: _UploadRecordSpec,
+) -> UploadResult:
+    for restart in range(4):
+        preflight = _preflight_upload_record(None, path, spec)
+        if preflight is None:
+            raise RuntimeError("new upload record requires a destination path")
+        prepared = _prepare_upload_record(preflight)
 
-def _reuse_qualified_content(
-    session: Session, stored_hash: str, spec: _UploadRecordSpec
-) -> UploadResult | None:
-    content = lookup_for_view(session, stored_hash)
-    if content is None:
-        return None
-    content_id = content.id
-    if not claim_qualified_content(session, content_id, stored_hash):
-        session.rollback()
-        return None
-    content = refresh_qualified_content(session, content_id)
-    if content is None:
-        session.rollback()
-        return None
-    record = _create_upload_record(
-        session,
-        content_id,
-        spec.name,
-        content.path,
-        spec.tags,
-        spec.mime_type,
-        spec.user_metadata,
-        spec.preview_id,
-    )
-    session.commit()
-    return _record_to_upload_result(session, record, created_new=True)
+        def _work(session: Session) -> UploadResult:
+            _assert_upload_preflight_current(session, prepared.preflight)
+            _reconcile_live_content_at_path(
+                session,
+                path,
+                facts,
+                content_written=content_written,
+            )
+            content, inserted = create_content_reporting_insert(
+                session,
+                path,
+                stored_hash,
+                facts.size_bytes,
+                facts.mtime_ns,
+            )
+            created_content_id = content.id if inserted else None
+            try:
+                record = _create_upload_record(session, content.id, prepared)
+            except Exception:
+                session.rollback()
+                if created_content_id is not None:
+                    _discard_unreferenced_content(session, created_content_id)
+                raise
+            return _record_to_upload_result(session, record, created_new=True)
+
+        try:
+            return run_write_txn(_work)
+        except _PreflightStale:
+            if restart == 3:
+                logging.warning(
+                    "Upload record preflight changed three times; falling back to in-transaction metadata extraction"
+                )
+
+                def _fallback_work(session: Session) -> UploadResult:
+                    _reconcile_live_content_at_path(
+                        session,
+                        path,
+                        facts,
+                        content_written=content_written,
+                    )
+                    content, inserted = create_content_reporting_insert(
+                        session,
+                        path,
+                        stored_hash,
+                        facts.size_bytes,
+                        facts.mtime_ns,
+                    )
+                    created_content_id = content.id if inserted else None
+                    try:
+                        record = _create_upload_record_in_txn(
+                            session,
+                            content.id,
+                            spec,
+                            path,
+                        )
+                    except Exception:
+                        session.rollback()
+                        if created_content_id is not None:
+                            _discard_unreferenced_content(session, created_content_id)
+                        raise
+                    return _record_to_upload_result(session, record, created_new=True)
+
+                return run_write_txn(_fallback_work)
+    raise RuntimeError("upload record preflight retry loop did not return")
 
 
 def upload_from_temp_path(
@@ -452,22 +790,17 @@ def upload_from_temp_path(
         _remove_temp_path(temp_path)
         raise HashMismatchError("Uploaded file hash does not match provided hash.")
 
+    spec = _UploadRecordSpec(
+        display_name,
+        normalize_tags([*(tags or []), "uploaded"]),
+        mime_type,
+        user_metadata,
+        preview_id,
+    )
     settle_target = _upload_destination_or_none(tags, digest, client_filename, name)
-    with create_session() as session:
-        if settle_target is not None:
-            _settle_destination_before_write(session, settle_target)
-            session.commit()
-        reused = _reuse_qualified_content(
-            session,
-            stored_hash,
-            _UploadRecordSpec(
-                display_name,
-                normalize_tags([*(tags or []), "uploaded"]),
-                mime_type,
-                user_metadata,
-                preview_id,
-            ),
-        )
+    if settle_target is not None:
+        _settle_destination_before_write(settle_target)
+    reused = _reuse_qualified_content(stored_hash, spec)
     if reused is not None:
         _remove_temp_path(temp_path)
         return reused
@@ -481,36 +814,23 @@ def upload_from_temp_path(
         mime_type, client_filename, name, os.path.basename(dest_abs)
     )
     _move_temp_to_dest(temp_path, dest_abs)
-    size_bytes, mtime_ns = verified_stat.st_size, verified_stat.st_mtime_ns
-    with create_session() as session:
-        _reconcile_live_content_at_path(
-            session,
-            dest_abs,
-            _ContentFacts(stored_hash, size_bytes, mtime_ns),
-            content_written=True,
-        )
-        content, inserted = create_content_reporting_insert(
-            session, dest_abs, stored_hash, size_bytes, mtime_ns
-        )
-        created_content_id = content.id if inserted else None
-        try:
-            record = _create_upload_record(
-                session,
-                content.id,
-                display_name,
-                dest_abs,
-                normalize_tags([*(tags or []), "uploaded"]),
-                content_type,
-                user_metadata,
-                preview_id,
-            )
-            session.commit()
-        except Exception:
-            session.rollback()
-            if created_content_id is not None:
-                _discard_unreferenced_content(session, created_content_id)
-            raise
-        return _record_to_upload_result(session, record, created_new=True)
+    return _create_content_and_upload_record(
+        stored_hash,
+        dest_abs,
+        _ContentFacts(
+            stored_hash,
+            verified_stat.st_size,
+            verified_stat.st_mtime_ns,
+        ),
+        True,
+        _UploadRecordSpec(
+            display_name,
+            normalize_tags([*(tags or []), "uploaded"]),
+            content_type,
+            user_metadata,
+            preview_id,
+        ),
+    )
 
 
 def register_file_in_place(
@@ -560,38 +880,27 @@ def register_file_in_place(
     digest, verified_stat = _snapshot_hash_with_retry(locator)
     size_bytes, mtime_ns = verified_stat.st_size, verified_stat.st_mtime_ns
     stored_hash = to_stored_hash(digest)
-    with create_session() as session:
+    def _reconcile_work(session: Session) -> None:
         _reconcile_live_content_at_path(
             session,
             locator,
             _ContentFacts(stored_hash, size_bytes, mtime_ns),
             content_written=content_written,
         )
-        session.commit()
-
-    with create_session() as session:
-        content, inserted = create_content_reporting_insert(
-            session, locator, stored_hash, size_bytes, mtime_ns
-        )
-        created_content_id = content.id if inserted else None
-        try:
-            record = _create_upload_record(
-                session,
-                content.id,
-                display_name,
-                locator,
-                merged_tags,
-                content_type,
-                None,
-                None,
-            )
-            session.commit()
-        except Exception:
-            session.rollback()
-            if created_content_id is not None:
-                _discard_unreferenced_content(session, created_content_id)
-            raise
-        return _record_to_upload_result(session, record, created_new=True)
+    run_write_txn(_reconcile_work)
+    return _create_content_and_upload_record(
+        stored_hash,
+        locator,
+        _ContentFacts(stored_hash, size_bytes, mtime_ns),
+        content_written,
+        _UploadRecordSpec(
+            display_name,
+            merged_tags,
+            content_type,
+            {},
+            None,
+        ),
+    )
 
 
 def create_from_hash(
@@ -611,31 +920,154 @@ def create_from_hash(
         name, fallback=bare_digest
     )
 
-    with create_session() as session:
-        content = lookup_for_from_hash(session, stored_hash)
-        if content is None:
-            logging.warning("create_from_hash: no asset found for hash %s", hash_str)
-            return None
-        content_id = content.id
-        if not claim_qualified_content(session, content_id, stored_hash):
-            session.rollback()
-            return None
-        content = refresh_qualified_content(session, content_id)
-        if content is None:
-            session.rollback()
-            return None
-        record = _create_upload_record(
-            session,
-            content_id,
+    result = _reuse_qualified_content(
+        stored_hash,
+        _UploadRecordSpec(
             display_name,
-            content.path,
             tags or [],
             mime_type,
-            user_metadata,
+            user_metadata or {},
             preview_id,
+        ),
+    )
+    if result is None:
+        logging.warning("create_from_hash: no asset found for hash %s", hash_str)
+    return result
+
+
+def _preflight_cached_registration(
+    locator: str,
+) -> _CachedRegistrationPreflight | None:
+    """Read cached facts before metadata I/O so it does not extend the writer lease."""
+    with create_session() as session:
+        existing = session.scalars(
+            select(AssetContent).where(
+                AssetContent.path == locator,
+                AssetContent.is_missing.is_(False),
+            )
+        ).first()
+        if existing is None:
+            return None
+        sibling = session.scalars(
+            select(Asset)
+            .where(Asset.content_id == existing.id)
+            .order_by(Asset.created_at.asc(), Asset.id.asc())
+            .limit(1)
+        ).first()
+        sibling_id = sibling.id if sibling is not None else None
+        sibling_metadata = (
+            dict(sibling.system_metadata)
+            if sibling is not None and sibling.system_metadata is not None
+            else None
         )
-        session.commit()
-        return _record_to_upload_result(session, record, created_new=True)
+        content_id = existing.id
+    signature = _file_signature(locator) if sibling_id is None else None
+    return _CachedRegistrationPreflight(
+        content_id,
+        sibling_id,
+        sibling_metadata,
+        signature,
+    )
+
+
+def _apply_cached_registration(
+    session: Session,
+    preflight: _CachedRegistrationPreflight,
+    name: str,
+    path_tags: list[str],
+    mime_type: str | None,
+    job_id: str | None,
+    locator: str,
+    system_metadata: dict[str, Any] | None,
+) -> RegisteredAsset:
+    existing = session.get(AssetContent, preflight.content_id)
+    if existing is None or existing.path != locator or existing.is_missing:
+        raise _PreflightStale
+    sibling = session.scalars(
+        select(Asset)
+        .where(Asset.content_id == existing.id)
+        .order_by(Asset.created_at.asc(), Asset.id.asc())
+        .limit(1)
+    ).first()
+    sibling_id = sibling.id if sibling is not None else None
+    sibling_metadata = (
+        dict(sibling.system_metadata)
+        if sibling is not None and sibling.system_metadata is not None
+        else None
+    )
+    if (
+        sibling_id != preflight.sibling_id
+        or sibling_metadata != preflight.sibling_metadata
+        or (
+            preflight.signature is not None
+            and not _file_signature_matches(preflight.signature)
+        )
+    ):
+        raise _PreflightStale
+    record = create_record(
+        session,
+        existing.id,
+        name,
+        mime_type=mime_type,
+        job_id=job_id,
+        loader_path=compute_loader_path(locator),
+        tags=path_tags,
+        system_metadata=system_metadata,
+    )
+    return RegisteredAsset(
+        id=record.id,
+        content_id=record.content_id,
+        job_id=record.job_id,
+        name=record.name,
+    )
+
+
+def _register_cached_output_in_txn(
+    session: Session,
+    locator: str,
+    job_id: str | None,
+) -> RegisteredAsset | None:
+    existing = session.scalars(
+        select(AssetContent).where(
+            AssetContent.path == locator,
+            AssetContent.is_missing.is_(False),
+        )
+    ).first()
+    if existing is None:
+        logging.info(
+            "Cached output registration is a non-event; no live content for %s",
+            locator,
+        )
+        return None
+    name, path_tags = get_name_and_tags_from_asset_path(locator)
+    mime_type = mimetypes.guess_type(locator, strict=False)[0]
+    sibling = session.scalars(
+        select(Asset)
+        .where(Asset.content_id == existing.id)
+        .order_by(Asset.created_at.asc(), Asset.id.asc())
+        .limit(1)
+    ).first()
+    system_metadata = (
+        dict(sibling.system_metadata)
+        if sibling is not None and sibling.system_metadata is not None
+        else _extract_system_metadata_sync(locator, mime_type)
+    )
+    record = create_record(
+        session,
+        existing.id,
+        name,
+        mime_type=mime_type,
+        job_id=job_id,
+        loader_path=compute_loader_path(locator),
+        tags=path_tags,
+        system_metadata=system_metadata,
+    )
+    return RegisteredAsset(
+        id=record.id,
+        content_id=record.content_id,
+        job_id=record.job_id,
+        name=record.name,
+    )
 
 
 def register_cached_output(
@@ -643,67 +1075,53 @@ def register_cached_output(
 ) -> RegisteredAsset | None:
     locator = os.path.abspath(abs_path)
     try:
-        with create_session() as session:
-            existing = session.scalars(
-                select(AssetContent).where(
-                    AssetContent.path == locator, AssetContent.is_missing.is_(False)
-                )
-            ).first()
-            if existing is None:
+        for restart in range(4):
+            preflight = _preflight_cached_registration(locator)
+            if preflight is None:
                 logging.info(
-                    "Cached output registration is a non-event; no live content "
-                    "for %s",
+                    "Cached output registration is a non-event; no live content for %s",
                     locator,
                 )
                 return None
-
             name, path_tags = get_name_and_tags_from_asset_path(locator)
             mime_type = mimetypes.guess_type(locator, strict=False)[0]
-
-            sibling = session.scalars(
-                select(Asset)
-                .where(Asset.content_id == existing.id)
-                .order_by(Asset.created_at.asc(), Asset.id.asc())
-                .limit(1)
-            ).first()
-            if sibling is not None:
-                system_metadata = (
-                    dict(sibling.system_metadata)
-                    if sibling.system_metadata is not None
-                    else None
-                )
-            else:
+            system_metadata = preflight.sibling_metadata
+            if preflight.sibling_id is None:
                 system_metadata = _extract_system_metadata_sync(locator, mime_type)
-
             try:
-                record = create_record(
-                    session,
-                    existing.id,
-                    name,
-                    mime_type=mime_type,
-                    job_id=job_id,
-                    loader_path=compute_loader_path(locator),
-                    tags=path_tags,
-                    system_metadata=system_metadata,
+                return run_write_txn(
+                    lambda session: _apply_cached_registration(
+                        session,
+                        preflight,
+                        name,
+                        path_tags,
+                        mime_type,
+                        job_id,
+                        locator,
+                        system_metadata,
+                    )
                 )
-                session.commit()
-            except Exception:
-                session.rollback()
-                raise
-            record_id = record.id
-            record_content_id = record.content_id
-            record_job_id = record.job_id
-            record_name = record.name
-    except Exception:
+            except _PreflightStale:
+                if restart == 3:
+                    logging.warning(
+                        "Cached-output preflight changed three times; falling back to in-transaction metadata extraction"
+                    )
+                    return run_write_txn(
+                        lambda session: _register_cached_output_in_txn(
+                            session,
+                            locator,
+                            job_id,
+                        )
+                    )
+    except Exception as exc:
         logging.exception("Failed to register cached output: %s", locator)
+        emit(
+            "ingest.register_failed",
+            output_kind="cached",
+            error_type=error_type(exc),
+        )
         return None
-
-    return RegisteredAsset(
-        id=record_id,
-        content_id=record_content_id,
-        job_id=record_job_id,
-        name=record_name,
-    )
+    return None
 
 
 def register_executed_output(
@@ -719,7 +1137,7 @@ def register_executed_output(
         system_metadata = _extract_system_metadata_sync(
             locator, mime_type, stat_result
         )
-        with create_session() as session:
+        def _work(session: Session) -> RegisteredAsset:
             created_content_id: str | None = None
             try:
                 existing = session.scalars(
@@ -745,23 +1163,24 @@ def register_executed_output(
                     tags=path_tags,
                     system_metadata=system_metadata,
                 )
-                session.commit()
             except Exception:
                 session.rollback()
                 if created_content_id is not None:
                     _discard_unreferenced_content(session, created_content_id)
                 raise
-            record_id = record.id
-            record_content_id = record.content_id
-            record_job_id = record.job_id
-            record_name = record.name
-    except Exception:
-        logging.exception("Failed to register executed output: %s", locator)
-        return None
+            return RegisteredAsset(
+                id=record.id,
+                content_id=record.content_id,
+                job_id=record.job_id,
+                name=record.name,
+            )
 
-    return RegisteredAsset(
-        id=record_id,
-        content_id=record_content_id,
-        job_id=record_job_id,
-        name=record_name,
-    )
+        return run_write_txn(_work)
+    except Exception as exc:
+        logging.exception("Failed to register executed output: %s", locator)
+        emit(
+            "ingest.register_failed",
+            output_kind="executed",
+            error_type=error_type(exc),
+        )
+        return None

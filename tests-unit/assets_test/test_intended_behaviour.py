@@ -9,7 +9,7 @@ import pytest
 from aiohttp.test_utils import make_mocked_request
 from blake3 import blake3
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.assets import mode
 from app.assets.api import routes
@@ -259,6 +259,7 @@ def test_scenario_6_upload_reuses_content_never_the_record(session, tmp_path):
                 "app.assets.services.ingest.create_session",
                 lambda: nullcontext(session),
             ),
+            patch("app.database.db.WriteSession", sessionmaker(bind=session.bind)),
             patch.object(mode, "hashing_enabled", return_value=hashing),
         ):
             return upload_from_temp_path(
@@ -373,6 +374,7 @@ def test_scenario_10_cached_delivery_record(session, tmp_path):
             "app.assets.services.ingest.create_session",
             lambda: nullcontext(session),
         ),
+        patch("app.database.db.WriteSession", sessionmaker(bind=session.bind)),
     ):
         delivered = register_cached_output(str(path), job_id="delivery-job")
 
@@ -402,6 +404,7 @@ def test_scenario_10_cached_delivery_record(session, tmp_path):
             "app.assets.services.ingest.create_session",
             lambda: nullcontext(session),
         ),
+        patch("app.database.db.WriteSession", sessionmaker(bind=session.bind)),
     ):
         assert register_cached_output(str(path), job_id="second-delivery") is None
     assert {row.id for row in session.scalars(select(Asset))} == {
