@@ -625,9 +625,9 @@ class MiniMaxH3Model(nn.Module):
         # model_base passes model_sampling.timestep(sigma) = sigma * 1000
         shift_v = float(transformer_options.get("minimax_h3_sigma_shift_video", self.sigma_shift_video))
         shift_a = float(transformer_options.get("minimax_h3_sigma_shift_audio", self.sigma_shift_audio))
-        sigma_v = (timestep.flatten()[0] / 1000.0).float().clamp(min=1e-6)
-        t_v = float(1.0 - sigma_v)
-        t_a = float(1.0 - time_shift_sigma(sigma_v, shift_v, shift_a))
+        sigma_v = float((timestep.flatten()[0] / 1000.0).float().clamp(min=1e-6))
+        t_v = 1.0 - sigma_v
+        t_a = 1.0 - time_shift_sigma(sigma_v, shift_v, shift_a)
 
         # distinct timesteps are known analytically: text/pad follow video, cond rows pin near 1
         vis_aug = float(payload.get("visual_cond_noise_aug", VISUAL_COND_TIMESTEP))
@@ -674,12 +674,16 @@ class MiniMaxH3Model(nn.Module):
             return base[torch.searchsorted(levels, rows_t)]
 
         text_tags = payload.get("text_token_tags")
+        tags = payload.get("_text_token_tags_list")
+        if text_tags is not None and tags is None:
+            # pull the tag list to host once per sampling run instead of once per step
+            tags = text_tags.view(-1).tolist()
+            payload["_text_token_tags_list"] = tags
         mod_segments = []
         for a, b, kind in layout.segments:
             row_base = t_row[seg_t[kind]] * 3
-            if kind == "text" and text_tags is not None:
+            if kind == "text" and tags is not None:
                 # the presentation text span mixes tags (vision pads carry the video modality) split into tag runs
-                tags = text_tags.view(-1).tolist()
                 run_start = 0
                 for i in range(1, b - a + 1):
                     if i == b - a or tags[i] != tags[run_start]:
