@@ -10,7 +10,7 @@ import comfy.model_prefetch
 import comfy.ops
 import comfy.utils
 from comfy.ldm.yue2.model import model_config
-from comfy.text_encoders.llama import FixedKV, Llama2_
+from comfy.text_encoders.llama import FixedKV, Llama2_, rope_matrix
 
 
 EOD = 151643
@@ -165,7 +165,7 @@ class YuE2TEModel(torch.nn.Module):
         decode_buffers = None
         if fixed_kv:
             decode_buffers = (torch.empty((len(prefixes), 1, self.config.hidden_size), device=device, dtype=dtype),
-                              self.model.compute_freqs_cis(positions, device))
+                              rope_matrix(self.model.compute_freqs_cis(positions, device)))
         history = []
         end = ABC_END if phase == "abc" else MUSIC_END
         progress = comfy.utils.ProgressBar(max_tokens)

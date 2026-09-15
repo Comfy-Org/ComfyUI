@@ -489,23 +489,17 @@ def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_di
 
     return out
 
+def rope_matrix(freqs_cis):
+    if torch.is_tensor(freqs_cis):
+        return freqs_cis
+    cos, sin, neg_sin = freqs_cis
+    half = sin.shape[-1]
+    matrix = torch.stack((cos[..., :half], neg_sin, sin, cos[..., half:]), dim=-1)
+    return matrix.reshape(*matrix.shape[:-1], 2, 2)
+
+
 def apply_rope(xq, xk, freqs_cis):
-    org_dtype = xq.dtype
-    cos = freqs_cis[0]
-    sin = freqs_cis[1]
-    nsin = freqs_cis[2]
-
-    q_embed = (xq * cos)
-    q_split = q_embed.shape[-1] // 2
-    q_embed[..., : q_split].addcmul_(xq[..., q_split :], nsin)
-    q_embed[..., q_split :].addcmul_(xq[..., : q_split], sin)
-
-    k_embed = (xk * cos)
-    k_split = k_embed.shape[-1] // 2
-    k_embed[..., : k_split].addcmul_(xk[..., k_split :], nsin)
-    k_embed[..., k_split :].addcmul_(xk[..., : k_split], sin)
-
-    return q_embed.to(org_dtype), k_embed.to(org_dtype)
+    return comfy_kitchen.apply_rope_split_half(xq, xk, rope_matrix(freqs_cis))
 
 
 class Attention(nn.Module):
@@ -861,12 +855,11 @@ class Llama2_(nn.Module):
             if decode_buffers is None:
                 x = x.clone()
             else:
-                hidden_buffer, rotary_buffers = decode_buffers
+                hidden_buffer, rotary_buffer = decode_buffers
                 hidden_buffer.copy_(x)
                 x = hidden_buffer
-                for buffer, value in zip(rotary_buffers, freqs_cis):
-                    buffer.copy_(value)
-                freqs_cis = rotary_buffers
+                rotary_buffer.copy_(rope_matrix(freqs_cis))
+                freqs_cis = rotary_buffer
 
         intermediate = None
         all_intermediate = None
