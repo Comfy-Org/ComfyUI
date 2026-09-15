@@ -86,7 +86,7 @@ class ImageUpscaleWithModel(io.ComfyNode):
             try:
                 steps = in_img.shape[0] * comfy.utils.get_tiled_scale_steps(in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=overlap)
                 pbar = comfy.utils.ProgressBar(steps)
-                s = comfy.utils.tiled_scale(in_img, lambda a: upscale_model(a.float()), tile_x=tile, tile_y=tile, overlap=overlap, upscale_amount=upscale_model.scale, pbar=pbar, output_device=output_device)
+                s = comfy.utils.tiled_scale(in_img, lambda a: upscale_model(a.float()), tile_x=tile, tile_y=tile, overlap=overlap, upscale_amount=upscale_model.scale, pbar=pbar, output_device=output_device, term_pbar_desc="Upscale")
                 oom = False
             except Exception as e:
                 model_management.raise_non_oom(e)
