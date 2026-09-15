@@ -202,6 +202,16 @@ Put your SD checkpoints (the huge ckpt/safetensors files) in: models/checkpoints
 
 Put your VAE in: models/vae
 
+#### Setup helper on Linux
+
+You can use `setup.sh` helper script to streamline setup processes described below:
+
+```shell
+; install ComfyUI & Manager dependencies + nightly PyTorch build for Nvidia
+./setup.sh --manager --torch=nvidia --torch-nightly
+```
+
+**Note:** [uv](https://docs.astral.sh/uv/getting-started/installation/) required.
 
 ### AMD GPUs (Linux)
 
