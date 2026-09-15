@@ -673,6 +673,7 @@ class PromptExecutor:
         self.caches = CacheSet(cache_type=self.cache_type, cache_args=self.cache_args)
         self.status_messages = []
         self.success = True
+        self.history_result = {}
 
     def add_message(self, event, data: dict, broadcast: bool):
         data = {
@@ -739,6 +740,8 @@ class PromptExecutor:
             self.server.client_id = None
 
         self.status_messages = []
+        self.success = True
+        self.history_result = {}
         self.add_message("execution_start", { "prompt_id": prompt_id}, broadcast=False)
 
         self._notify_prompt_lifecycle("start", prompt_id)

@@ -359,7 +359,19 @@ def prompt_worker(q, server_instance, asset_manager):
                 extra_data[k] = sensitive[k]
 
             asset_manager.pause_background_scan()
-            e.execute(item[2], prompt_id, extra_data, item[4])
+            try:
+                e.execute(item[2], prompt_id, extra_data, item[4])
+            except Exception:
+                # Any exception escaping the executor (e.g. from cache
+                # maintenance or other framework-level code outside the
+                # per-node error handling) must not kill the prompt_worker
+                # thread: the HTTP server would keep running but no prompt
+                # would ever execute again ("zombie" server).
+                logging.exception(
+                    "Unhandled exception escaped PromptExecutor.execute; "
+                    "recording the prompt as failed and keeping prompt_worker alive")
+                e.success = False
+                e.history_result = getattr(e, "history_result", None) or {}
 
             need_gc = True
 
@@ -369,7 +381,7 @@ def prompt_worker(q, server_instance, asset_manager):
                         status=execution.PromptQueue.ExecutionStatus(
                             status_str='success' if e.success else 'error',
                             completed=e.success,
-                            messages=e.status_messages), process_item=remove_sensitive)
+                            messages=getattr(e, "status_messages", None) or []), process_item=remove_sensitive)
             if server_instance.client_id is not None:
                 server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
 
