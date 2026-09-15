@@ -13,12 +13,13 @@ async execute forms, and verifies:
 import asyncio
 import json
 import pathlib
+import textwrap
 import threading
 
 import pytest
 import torch
 
-from comfy_api.latest import sdk
+from comfy_api.latest import _sdk, sdk
 from comfy_api.latest._sdk import (
     BackgroundRemovalModelRef,
     CondRef,
@@ -1017,6 +1018,65 @@ def _output_of(node_cls, image):
 def test_default_backend_is_in_process():
     assert isinstance(sdk.providers.execution_backend, InProcessExecutionBackend)
     assert sdk.providers.overlay_active is False
+
+
+def test_legacy_custom_nodes_follow_local_controls():
+    assert _sdk.should_load_legacy_custom_nodes(
+        secure_mode=False,
+        disabled=False,
+        has_whitelist=False,
+    )
+    assert not _sdk.should_load_legacy_custom_nodes(
+        secure_mode=False,
+        disabled=True,
+        has_whitelist=False,
+    )
+    assert _sdk.should_load_legacy_custom_nodes(
+        secure_mode=False,
+        disabled=True,
+        has_whitelist=True,
+    )
+
+
+@pytest.mark.parametrize("has_whitelist", [False, True])
+def test_secure_mode_never_loads_legacy_custom_nodes(has_whitelist):
+    assert not _sdk.should_load_legacy_custom_nodes(
+        secure_mode=True,
+        disabled=False,
+        has_whitelist=has_whitelist,
+    )
+
+
+def test_unconfigured_overlay_preserves_local_mode(monkeypatch):
+    monkeypatch.delenv(_sdk.OVERLAY_ENV, raising=False)
+
+    assert not _sdk.load_overlay()
+
+
+def test_configured_overlay_without_entrypoint_fails_closed(tmp_path):
+    overlay = tmp_path / "broken_overlay.py"
+    overlay.write_text("VALUE = 1\n")
+
+    with pytest.raises(RuntimeError, match=r"register\(providers\)"):
+        _sdk.load_overlay(str(overlay))
+
+
+def test_configured_overlay_registers_secure_providers(tmp_path, monkeypatch):
+    overlay = tmp_path / "working_overlay.py"
+    overlay.write_text(
+        textwrap.dedent(
+            """
+            def register(providers):
+                providers.registered_by_test = True
+            """
+        )
+    )
+    providers = _sdk.Providers()
+    monkeypatch.setattr(_sdk, "providers", providers)
+
+    assert _sdk.load_overlay(str(overlay))
+    assert providers.overlay_active
+    assert providers.registered_by_test
 
 
 def test_async_sdk_node_inverts_through_real_engine():
