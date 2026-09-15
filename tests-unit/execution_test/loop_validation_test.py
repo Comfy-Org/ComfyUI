@@ -1,11 +1,12 @@
 import asyncio
+from collections import Counter
 
 import pytest
 
 import nodes
 from comfy_execution.validation import LoopValidationError, validate_loops
 from comfy_extras.nodes_loop import EndLoop, StartLoop
-from execution import validate_prompt
+from execution import _loop_boundary, validate_prompt
 
 
 def node(class_type, **inputs):
@@ -452,3 +453,76 @@ def test_loop_error_does_not_reject_independent_output(monkeypatch):
     assert good_outputs == ["independent_output"]
     assert set(node_errors) == {"left", "right", "end"}
     assert all(value["dependent_outputs"] == ["loop_output"] for value in node_errors.values())
+
+
+def test_prompt_validation_builds_each_node_schema_once(monkeypatch):
+    """Validation asks every node for its loop boundary, and that must not cost a
+    second schema build.
+
+    ``GET_SCHEMA`` re-runs ``define_schema`` on every call. ``validate_inputs``
+    needs that once per node, because a combo whose options come from
+    ``folder_paths`` has to see files added since startup before it can judge the
+    supplied value. A loop boundary is a literal, so asking for it the same way
+    doubled the work: measured at two builds per node here, and 3.4ms against
+    0.02ms for the boundary scan alone on a 200-node graph.
+    """
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "StartLoop", StartLoop)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "EndLoop", EndLoop)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Body", Body)
+    monkeypatch.setitem(nodes.NODE_CLASS_MAPPINGS, "Output", Output)
+
+    StartLoop.GET_SCHEMA()
+    EndLoop.GET_SCHEMA()
+
+    builds = Counter()
+    for cls in (StartLoop, EndLoop):
+        original = cls.define_schema.__func__
+
+        def counting(inner_cls, _original=original, _name=cls.__name__):
+            builds[_name] += 1
+            return _original(inner_cls)
+
+        monkeypatch.setattr(cls, "define_schema", classmethod(counting))
+
+    prompt = {
+        "start": node("StartLoop", cache_iterations=False),
+        "body": node("Body", left=["start", 0], right=["start", 0]),
+        "end": node("EndLoop", output_value=["body", 0], accumulate=False),
+        "output": node("Output", value=["end", 0]),
+    }
+
+    valid, _error, _good_outputs, _node_errors = asyncio.run(validate_prompt("prompt", prompt, None))
+
+    assert valid
+    assert builds == Counter({"StartLoop": 1, "EndLoop": 1})
+
+
+def test_loop_boundary_does_not_rebuild_a_schema_the_class_already_has():
+    StartLoop.GET_SCHEMA()
+    builds = []
+    original = StartLoop.define_schema.__func__
+
+    def counting(inner_cls):
+        builds.append(1)
+        return original(inner_cls)
+
+    StartLoop.define_schema = classmethod(counting)
+    try:
+        assert _loop_boundary(StartLoop) == "start"
+    finally:
+        StartLoop.define_schema = classmethod(original)
+
+    assert builds == []
+
+
+def test_loop_boundary_reads_a_node_that_was_registered_without_a_schema():
+    """The fallback is load-bearing: the loop nodes themselves reach validation with
+    SCHEMA unset, and it has to fill it in rather than answer None."""
+    StartLoop.SCHEMA = None
+    try:
+        assert _loop_boundary(StartLoop) == "start"
+        assert StartLoop.SCHEMA is not None
+    finally:
+        StartLoop.GET_SCHEMA()
+
+    assert _loop_boundary(Body) is None
