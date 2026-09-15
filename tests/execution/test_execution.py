@@ -20,6 +20,7 @@ from app.assets.scanner_admission import _should_skip_extension
 from app.assets.services.file_utils import list_files_recursively
 
 
+SERVER_STARTUP_TIMEOUT_SECONDS = 120
 ASSET_HEALTH_TIMEOUT_SECONDS = 120
 ASSET_SEED_RETRY_ATTEMPTS = 10
 ASSET_SEED_RETRY_DELAY_SECONDS = 3
@@ -354,12 +355,14 @@ class ComfyClient:
     def connect(self,
                     listen:str = '127.0.0.1',
                     port:Union[str,int] = 8188,
-                    client_id: str = str(uuid.uuid4())
+                    client_id: str = str(uuid.uuid4()),
+                    timeout=None,
                     ):
         self.client_id = client_id
         self.server_address = f"{listen}:{port}"
         ws = websocket.WebSocket()
-        ws.connect("ws://{}/ws?clientId={}".format(self.server_address, self.client_id))
+        ws.connect("ws://{}/ws?clientId={}".format(self.server_address, self.client_id), timeout=timeout)
+        ws.settimeout(None)
         self.ws = ws
 
     def queue_prompt(self, prompt, partial_execution_targets=None):
@@ -564,20 +567,19 @@ class TestExecution:
         torch.cuda.empty_cache()
 
     def start_client(self, listen:str, port:int):
-        # Start client
         comfy_client = ComfyClient()
-        # Connect to server (with retries)
-        n_tries = 5
-        for i in range(n_tries):
-            time.sleep(4)
+        deadline = time.monotonic() + SERVER_STARTUP_TIMEOUT_SECONDS
+        while True:
+            time.sleep(min(4, max(0, deadline - time.monotonic())))
             try:
-                comfy_client.connect(listen=listen, port=port)
-            except ConnectionRefusedError as e:
-                print(e)  # noqa: T201
-                print(f"({i+1}/{n_tries}) Retrying...")  # noqa: T201
+                comfy_client.connect(listen=listen, port=port, timeout=min(5, max(0.01, deadline - time.monotonic())))
+            except (ConnectionRefusedError, websocket.WebSocketTimeoutException) as error:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"ComfyUI server at {listen}:{port} did not accept a WebSocket connection within {SERVER_STARTUP_TIMEOUT_SECONDS} seconds"
+                    ) from error
             else:
-                break
-        return comfy_client
+                return comfy_client
 
     @fixture(scope="class", autouse=True)
     def shared_client(self, args_pytest, server):
