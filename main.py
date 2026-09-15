@@ -537,20 +537,19 @@ def start_comfyui(asyncio_loop=None):
     if args.enable_manager and not args.disable_manager_ui:
         comfyui_manager.start()
 
-    # Custom-node SDK overlay: if COMFY_OVERLAY_MODULE points at a module, it
-    # registers isolated execution/ctx/ref providers before nodes load. Unset =
-    # pure in-process open-source behavior.
-    try:
-        from comfy_api.latest import sdk
-        sdk.providers  # ensure module imported
-        from comfy_api.latest._sdk import load_overlay
-        load_overlay()
-    except Exception as e:
-        logging.error(f"Custom-node SDK overlay failed to load: {e}")
+    from comfy_api.latest._sdk import (
+        load_overlay,
+        should_load_legacy_custom_nodes,
+    )
+    secure_custom_nodes = load_overlay()
 
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
-        init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
+        init_custom_nodes=should_load_legacy_custom_nodes(
+            secure_mode=secure_custom_nodes,
+            disabled=args.disable_all_custom_nodes,
+            has_whitelist=len(args.whitelist_custom_nodes) > 0,
+        ),
         init_api_nodes=not args.disable_api_nodes
     ))
 
