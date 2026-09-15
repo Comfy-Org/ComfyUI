@@ -307,17 +307,49 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
     return attn.out_proj(out)
 
 
-def make_h3_block_patch(block, block_index, patch: SparseAttnPatch):
-    """Runs the block with its attention swapped for the sparse producer."""
-    def attention(h, rope_freqs=None, transformer_options={}):
-        return h3_sparse_attention(block.attn, h, rope_freqs, transformer_options, patch, block_index)
+class H3SparseBlockPatch:
+    """Runs the block with its attention swapped for the sparse producer.
 
-    def block_patch(args, extra):
-        if h3_eligible(block.attn, args["img"], args["rope_freqs"], args["transformer_options"], patch, block_index):
-            args = {**args, "attention": attention}
-        return extra["original_block"](args)
+    ``previous`` is whatever patch already owned this layer, a Fun-ControlNet
+    for instance. set_model_patch_replace assigns by key, so without composing,
+    applying sparse attention after a ControlNet silently replaced the
+    ControlNet on every layer this node touches: no error, the video simply
+    ignored its control input. The override installed by install_override
+    already composes with a previous override; this makes the block patch do
+    the same. to / cleanup / models are forwarded so the patcher can manage the
+    wrapped patch's models exactly as it did before."""
 
-    return block_patch
+    def __init__(self, block, block_index, patch, previous=None):
+        self.block = block
+        self.block_index = block_index
+        self.patch = patch
+        self.previous = previous
+
+    def attention(self, h, rope_freqs=None, transformer_options={}):
+        return h3_sparse_attention(self.block.attn, h, rope_freqs, transformer_options, self.patch, self.block_index)
+
+    def __call__(self, args, extra):
+        if h3_eligible(self.block.attn, args["img"], args["rope_freqs"], args["transformer_options"], self.patch, self.block_index):
+            args = {**args, "attention": self.attention}
+        if self.previous is None:
+            return extra["original_block"](args)
+        return self.previous(args, extra)
+
+    def to(self, device_or_dtype):
+        if hasattr(self.previous, "to"):
+            self.previous = self.previous.to(device_or_dtype)
+        return self
+
+    def cleanup(self):
+        if hasattr(self.previous, "cleanup"):
+            self.previous.cleanup()
+
+    def models(self):
+        return self.previous.models() if hasattr(self.previous, "models") else []
+
+
+def make_h3_block_patch(block, block_index, patch: SparseAttnPatch, previous=None):
+    return H3SparseBlockPatch(block, block_index, patch, previous)
 
 
 def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, end_percent, min_tokens,
@@ -341,8 +373,12 @@ def apply_block_sparse_attention(model, *, tau, topk_ratio, vsa, start_percent, 
 
     diffusion_model = model.get_model_object("diffusion_model")
     if isinstance(diffusion_model, MiniMaxH3Model):
+        # Read what already owns each layer before replacing it, so a ControlNet
+        # applied earlier in the graph keeps running.
+        existing = m.model_options.get("transformer_options", {}).get("patches_replace", {}).get("dit", {})
         for i, block in enumerate(diffusion_model.blocks):
-            m.set_model_patch_replace(make_h3_block_patch(block, i, patch), "dit", "double_block", i)
+            previous = existing.get(("double_block", i))
+            m.set_model_patch_replace(make_h3_block_patch(block, i, patch, previous), "dit", "double_block", i)
         if vsa and diffusion_model.blocks[0].attn.to_gate_compress is None:
             logging.warning("VSA: the model has no to_gate_compress layers; running the fine stage without the coarse branch")
     elif vsa:
