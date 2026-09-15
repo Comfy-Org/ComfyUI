@@ -758,12 +758,13 @@ class VaceWanModel(WanModel):
                  image_model=None,
                  vace_layers=None,
                  vace_in_dim=None,
+                 vace_image_input=False,
                  device=None,
                  dtype=None,
                  operations=None,
                  ):
 
-        super().__init__(model_type='t2v', patch_size=patch_size, text_len=text_len, in_dim=in_dim, dim=dim, ffn_dim=ffn_dim, freq_dim=freq_dim, text_dim=text_dim, out_dim=out_dim, num_heads=num_heads, num_layers=num_layers, window_size=window_size, qk_norm=qk_norm, cross_attn_norm=cross_attn_norm, eps=eps, flf_pos_embed_token_number=flf_pos_embed_token_number, image_model=image_model, device=device, dtype=dtype, operations=operations)
+        super().__init__(model_type='i2v' if vace_image_input else 't2v', patch_size=patch_size, text_len=text_len, in_dim=in_dim, dim=dim, ffn_dim=ffn_dim, freq_dim=freq_dim, text_dim=text_dim, out_dim=out_dim, num_heads=num_heads, num_layers=num_layers, window_size=window_size, qk_norm=qk_norm, cross_attn_norm=cross_attn_norm, eps=eps, flf_pos_embed_token_number=flf_pos_embed_token_number, image_model=image_model, device=device, dtype=dtype, operations=operations)
         operation_settings = {"operations": operations, "device": device, "dtype": dtype}
 
         # Vace
@@ -816,6 +817,12 @@ class VaceWanModel(WanModel):
                 context = torch.concat([context_clip, context], dim=1)
             context_img_len = clip_fea.shape[-2]
 
+        # vace blocks are t2v pretrained, they attend over text tokens only
+        if context_img_len is None:
+            context_vace = context
+        else:
+            context_vace = context[:, context_img_len:]
+
         orig_shape = list(vace_context.shape)
         vace_context = vace_context.movedim(0, 1).reshape([-1] + orig_shape[2:])
         c = self.vace_patch_embedding(vace_context.float()).to(vace_context.dtype)
@@ -850,7 +857,7 @@ class VaceWanModel(WanModel):
             ii = self.vace_layers_mapping.get(i, None)
             if ii is not None:
                 for iii in range(len(c)):
-                    c_skip, c[iii] = self.vace_blocks[ii](c[iii], x=x_orig, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+                    c_skip, c[iii] = self.vace_blocks[ii](c[iii], x=x_orig, e=e0, freqs=freqs, context=context_vace, context_img_len=None, transformer_options=transformer_options)
                     x += c_skip * vace_strength[iii]
                 del c_skip
         # head
