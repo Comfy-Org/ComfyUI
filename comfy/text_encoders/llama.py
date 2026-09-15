@@ -499,7 +499,22 @@ def rope_matrix(freqs_cis):
 
 
 def apply_rope(xq, xk, freqs_cis):
-    return comfy_kitchen.apply_rope_split_half(xq, xk, rope_matrix(freqs_cis))
+    matrix = rope_matrix(freqs_cis)
+    if matrix.ndim == 5:
+        matrix = matrix.unsqueeze(0)
+
+    q_ndim, k_ndim = xq.ndim, xk.ndim
+    if q_ndim == 3:
+        xq = xq.unsqueeze(0)
+    if k_ndim == 3:
+        xk = xk.unsqueeze(0)
+
+    xq, xk = comfy_kitchen.apply_rope_split_half(xq, xk, matrix)
+    if q_ndim == 3:
+        xq = xq.squeeze(0)
+    if k_ndim == 3:
+        xk = xk.squeeze(0)
+    return xq, xk
 
 
 class Attention(nn.Module):
