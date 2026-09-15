@@ -51,7 +51,8 @@ class SAM3TokenizerWrapper(sd1_clip.SD1Tokenizer):
     def tokenize_with_weights(self, text: str, return_word_ids=False, **kwargs):
         parsed = _parse_prompts(text)
         if len(parsed) <= 1 and (not parsed or parsed[0][1] == 1):
-            return super().tokenize_with_weights(text, return_word_ids, **kwargs)
+            prompt_text = parsed[0][0] if parsed else text
+            return super().tokenize_with_weights(prompt_text, return_word_ids, **kwargs)
         # Tokenize each prompt part separately, store per-part batches and metadata
         inner = getattr(self, self.clip)
         per_prompt = []
