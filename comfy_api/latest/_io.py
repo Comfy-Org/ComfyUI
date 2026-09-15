@@ -828,6 +828,37 @@ class Load3DModelInfo(ComfyTypeIO):
     Type = list[Model3DTransform]
 
 
+@comfytype(io_type="LOAD3D_LIGHT_INFO")
+class Load3DLightInfo(ComfyTypeIO):
+    class LightInfo(TypedDict):
+        type: str
+        color: str
+        intensity: float | int
+        position: dict[str, float | int]
+        target: NotRequired[dict[str, float | int]]
+        range: NotRequired[float | int]
+        innerConeAngle: NotRequired[float | int]
+        outerConeAngle: NotRequired[float | int]
+        radius: NotRequired[float | int]
+        castShadow: NotRequired[bool]
+        width: NotRequired[float | int]
+        height: NotRequired[float | int]
+
+    Type = list[LightInfo]
+
+
+@comfytype(io_type="LIGHT_INFO_PREVIEW")
+class LightInfoPreview(ComfyTypeIO):
+    Type = list[Load3DLightInfo.LightInfo]
+
+    class Input(WidgetInput):
+        def __init__(self, id: str, display_name: str=None, optional=False, tooltip: str=None,
+                     socketless: bool=True, default: list[dict]=None, advanced: bool=None):
+            super().__init__(id, display_name, optional, tooltip, None, default, socketless, None, None, None, None, advanced)
+            if default is None:
+                self.default = []
+
+
 @comfytype(io_type="LOAD_3D")
 class Load3D(ComfyTypeIO):
     """3D models are stored as a dictionary."""
@@ -2517,6 +2548,8 @@ __all__ = [
     "Accumulation",
     "Load3DCamera",
     "Load3DModelInfo",
+    "Load3DLightInfo",
+    "LightInfoPreview",
     "Load3D",
     "Load3DAnimation",
     "Compositor",
