@@ -16,7 +16,7 @@ from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
 
-from .llama import BaseLlama, BaseGenerate, FixedKV, FixedKVBias, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, graph_decode_enabled, penalty_active, precompute_freqs_cis
+from .llama import BaseLlama, BaseGenerate, FixedKV, FixedKVBias, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, graph_decode_enabled, penalty_active, precompute_freqs_cis, rope_matrix
 
 
 @dataclass
@@ -819,10 +819,10 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             console.update(min(n, max(0, max_length - console.n)))
 
         # rope table once per generate, sliced per step
-        ftab = self.model.compute_freqs_cis(torch.arange(cap, device=device, dtype=torch.float).unsqueeze(0), device)
+        ftab = rope_matrix(self.model.compute_freqs_cis(torch.arange(cap, device=device, dtype=torch.float).unsqueeze(0), device))
 
         def freqs_at(p, n=1):
-            return tuple(t[:, :, p:p + n] for t in ftab)
+            return ftab[:, :, p:p + n]
 
         vf = None
 
@@ -836,7 +836,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                     kv.conv_snap_backing = torch.empty((d,) + tuple(kv.conv_state.shape), device=device, dtype=kv.conv_state.dtype)
                     kv.snapshots = [(kv.snap_backing[s], kv.conv_snap_backing[s]) for s in range(d)]
             # static rope buffers: graphed layers bake their input addresses
-            vf = tuple(t.clone() for t in freqs_at(pos, d + 1))
+            vf = freqs_at(pos, d + 1).clone()
 
         set_depth(depth)
         use_graph = (device.type == "cuda"
@@ -863,7 +863,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             mtp_kv.prepare(1)
             ds["tok"] = nt_buf.clone()
             ds["hid"] = h_buf.clone()
-            ds["f"] = tuple(t.clone() for t in freqs_at(pos))
+            ds["f"] = freqs_at(pos).clone()
             side = torch.cuda.Stream()
             side.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(side):
@@ -892,8 +892,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             ds = draft_state
             ds["tok"].copy_(token)
             ds["hid"].copy_(hidden)
-            for buf, val in zip(ds["f"], f):
-                buf.copy_(val)
+            ds["f"].copy_(f)
             ds["graph"].replay()
             mtp_kv.advance(1)
             return ds["d"], ds["r"]
@@ -938,8 +937,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                 drafts.append(dk)
                 tok_in, hid_in = dk, rk
             ev = self.model.embed_tokens(torch.cat([nt_buf] + drafts, dim=1)).to(dt)
-            for buf, val in zip(vf, freqs_at(pos, depth + 1)):
-                buf.copy_(val)
+            vf.copy_(freqs_at(pos, depth + 1))
             x, _, _ = self.model.forward(None, embeds=ev, attention_mask=None, past_key_values=pkv, freqs_cis=vf)
             # all verify positions in one lm_head GEMV, accept decided GPU-side, one sync
             lg = verify_logits(x)
