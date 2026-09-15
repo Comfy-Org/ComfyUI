@@ -566,6 +566,7 @@ class RAMPressureCache(LRUCache):
 
             ram_usage = RAM_CACHE_DEFAULT_RAM_USAGE
             oom_ram_usage = ram_usage
+            sizing_failed = False
             seen_storages = set()
             def scan_list_for_ram_usage(outputs):
                 """Accumulate CPU tensor bytes and flag old model patchers for eviction."""
@@ -594,12 +595,11 @@ class RAMPressureCache(LRUCache):
             try:
                 scan_list_for_ram_usage(cache_entry.outputs)
             except Exception:
-                logging.exception(
-                    "ram_release: failed to scan cached outputs; "
-                    "treating cache entry as evictable")
-                ram_usage = max(ram_usage, RAM_CACHE_DEFAULT_RAM_USAGE)
+                logging.warning("Could not size cache entry %s; evicting it first", key, exc_info=True)
+                sizing_failed = True
+                oom_ram_usage = 1e30
 
-            if ram_usage < min_entry_size:
+            if not sizing_failed and ram_usage < min_entry_size:
                 continue
 
             oom_score *= oom_ram_usage
