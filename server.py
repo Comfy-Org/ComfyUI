@@ -504,7 +504,8 @@ class PromptServer():
                             for key in original_pil.text:
                                 metadata.add_text(key, original_pil.text[key])
                         original_pil = original_pil.convert('RGBA')
-                        mask_pil = Image.open(image.file).convert('RGBA')
+                        with Image.open(image.file) as mask_pil_raw:
+                            mask_pil = mask_pil_raw.convert('RGBA')
 
                         # alpha copy
                         new_alpha = mask_pil.getchannel('A')
