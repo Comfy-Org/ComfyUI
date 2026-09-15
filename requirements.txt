@@ -27,6 +27,7 @@ comfy-aimdo==0.5.3
 requests
 simpleeval>=1.0.0
 blake3
+cryptography
 
 #non essential dependencies:
 kornia>=0.7.1
