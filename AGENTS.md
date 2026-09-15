@@ -338,6 +338,15 @@
   advertised combo options or prompt validation.
 - Keep node changes backward compatible by default. Add inputs with sensible
   defaults and avoid changing output types unless the request requires it.
+- A new input on an existing node must go in `optional`. Stored API-format
+  prompts do not carry it, and a required input is rejected by validation with
+  `required_input_missing`.
+- An optional input with a default in its schema does not have to be provided,
+  and execution fills it in. An optional input with no default in its schema is
+  a nullable value, so its parameter in the entry function must carry the
+  default for the not-connected case. The Node Input Compatibility workflow
+  diffs the input surface against the base branch, and checks the nullable rule
+  on the branch itself.
 - Model implementations should add the minimal number of ComfyUI nodes required
   to run the model. Reuse existing nodes as much as possible; adapting the model
   to work with existing nodes is strongly preferred over creating new nodes.
