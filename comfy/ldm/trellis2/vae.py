@@ -33,6 +33,7 @@ def sparse_conv3d_init(self, in_channels, out_channels, kernel_size, stride=1, d
     self.kernel_size = tuple(kernel_size) if isinstance(kernel_size, (list, tuple)) else (kernel_size, ) * 3
     self.stride = tuple(stride) if isinstance(stride, (list, tuple)) else (stride, ) * 3
     self.dilation = tuple(dilation) if isinstance(dilation, (list, tuple)) else (dilation, ) * 3
+    self.cache_neighbor_map = True
 
     self.weight = nn.Parameter(torch.empty((out_channels, in_channels, *self.kernel_size)))
     if bias:
@@ -60,10 +61,11 @@ def sparse_conv3d_forward(self, x):
         weight,
         bias,
         neighbor_cache,
-        self.dilation
+        self.dilation,
+        self.cache_neighbor_map,
     )
 
-    if neighbor_cache is None:
+    if neighbor_cache is None and neighbor_cache_ is not None:
         x.register_spatial_cache(neighbor_cache_key, neighbor_cache_)
 
     out = x.replace(out)
@@ -142,33 +144,38 @@ class SparseChannel2Spatial(nn.Module):
         super(SparseChannel2Spatial, self).__init__()
         self.factor = factor
 
-    def forward(self, x, subdivision = None):
+    def _subdivision_plan(self, x, subdivision):
         DIM = x.coords.shape[-1] - 1
-
         cache = x.get_spatial_cache(f'channel2spatial_{self.factor}')
         if cache is None:
             if subdivision is None:
                 raise ValueError('Cache not found. Provide subdivision tensor or pair SparseChannel2Spatial with SparseSpatial2Channel.')
-            else:
-                sub = subdivision.feats         # [N, self.factor ** DIM]
-                N_leaf = sub.sum(dim=-1)        # [N]
-                subidx = sub.nonzero()[:, -1]
-                new_coords = x.coords.clone().detach()
-                new_coords[:, 1:] *= self.factor
-                new_coords = torch.repeat_interleave(new_coords, N_leaf, dim=0, output_size=subidx.shape[0])
-                for i in range(DIM):
-                    new_coords[:, i+1] += subidx // self.factor ** i % self.factor
-                idx = torch.repeat_interleave(torch.arange(x.coords.shape[0], device=x.device), N_leaf, dim=0, output_size=subidx.shape[0])
+            flat_idx = subdivision.feats.flatten().nonzero(as_tuple=True)[0]
+            idx = torch.div(flat_idx, self.factor ** DIM, rounding_mode='floor')
+            subidx = flat_idx.remainder(self.factor ** DIM)
+            new_coords = x.coords[idx]
+            new_coords[:, 1:] *= self.factor
+            for i in range(DIM):
+                new_coords[:, i+1] += subidx // self.factor ** i % self.factor
+            return new_coords, flat_idx, False
         else:
             new_coords, idx, subidx = cache
+            flat_idx = idx * self.factor ** DIM + subidx
+            return new_coords, flat_idx, True
 
+    def _apply_plan(self, x, new_coords, flat_idx, inherit_cache):
+        DIM = x.coords.shape[-1] - 1
         x_feats = x.feats.reshape(x.feats.shape[0] * self.factor ** DIM, -1)
-        new_feats = x_feats[idx * self.factor ** DIM + subidx]
+        new_feats = x_feats[flat_idx]
         out = SparseTensor(new_feats, new_coords, None if x._shape is None else torch.Size([x._shape[0], x._shape[1] // self.factor ** DIM]))
         out._scale = tuple([s / self.factor for s in x._scale])
-        if cache is not None:           # only keep cache when subdiv following it
+        if inherit_cache:           # only keep cache when subdiv following it
             out._spatial_cache = dict(x._spatial_cache)
         return out
+
+    def forward(self, x, subdivision = None):
+        new_coords, flat_idx, inherit_cache = self._subdivision_plan(x, subdivision)
+        return self._apply_plan(x, new_coords, flat_idx, inherit_cache)
 
 class SparseResBlockC2S3d(nn.Module):
     def __init__(self, channels: int, out_channels: Optional[int] = None, pred_subdiv: bool = True):
@@ -192,13 +199,15 @@ class SparseResBlockC2S3d(nn.Module):
         h = h.replace(F.silu(h.feats, inplace=True))
         h = self.conv1(h)
         subdiv_binarized = subdiv.replace(subdiv.feats > 0) if subdiv is not None else None
-        h = self.updown(h, subdiv_binarized)
-        x = self.updown(x, subdiv_binarized)
+        new_coords, flat_idx, inherit_cache = self.updown._subdivision_plan(h, subdiv_binarized)
+        h = self.updown._apply_plan(h, new_coords, flat_idx, inherit_cache)
+        skip_feats = x.feats.reshape(x.feats.shape[0] * 8, -1)[flat_idx]
+        del x, new_coords, flat_idx, subdiv_binarized
         h = h.replace(self.norm2(h.feats))
         h = h.replace(F.silu(h.feats, inplace=True))
         h = self.conv2(h)
         skip_repeat = self.out_channels // (self.channels // 8)
-        h.feats.view(h.feats.shape[0], x.feats.shape[1], skip_repeat).add_(x.feats.to(h.feats.dtype).unsqueeze(-1))
+        h.feats.view(h.feats.shape[0], skip_feats.shape[1], skip_repeat).add_(skip_feats.to(h.feats.dtype).unsqueeze(-1))
         if self.pred_subdiv:
             return h, subdiv
         else:
@@ -700,6 +709,9 @@ class SparseTensor(VarLenTensor):
     def __repr__(self) -> str:
         return f"SparseTensor(shape={self.shape}, dtype={self.dtype}, device={self.device})"
 
+    def _comfy_cache_tensors(self):
+        return self.data, self._spatial_cache
+
 def sparse_cat(inputs: List[SparseTensor], dim: int = 0) -> SparseTensor:
     if dim == 0:
         start = 0
@@ -772,14 +784,15 @@ class SparseUnetVaeDecoder(nn.Module):
                     )
                 )
             if i < len(num_blocks) - 1:
-                self.blocks[-1].append(
-                    globals()[up_block_type[i]](
-                        model_channels[i],
-                        model_channels[i+1],
-                        pred_subdiv=pred_subdiv,
-                        **block_args[i],
-                    )
+                up_block = globals()[up_block_type[i]](
+                    model_channels[i],
+                    model_channels[i+1],
+                    pred_subdiv=pred_subdiv,
+                    **block_args[i],
                 )
+                if num_blocks[i + 1] == 0:
+                    up_block.conv2.cache_neighbor_map = False
+                self.blocks[-1].append(up_block)
 
     def forward(self, x: SparseTensor, guide_subs: Optional[List[SparseTensor]] = None, return_subs: bool = False) -> SparseTensor:
         h = self.from_latent(x)
@@ -789,12 +802,17 @@ class SparseUnetVaeDecoder(nn.Module):
                 if i < len(self.blocks) - 1 and j == len(res) - 1:
                     if self.pred_subdiv:
                         h, sub = block(h)
-                        subs.append(sub)
+                        subs.append(SparseTensor(feats=sub.feats, coords=sub.coords, shape=sub.shape, scale=sub._scale))
                     else:
                         h = block(h, subdiv=guide_subs[i] if guide_subs is not None else None)
                 else:
                     h = block(h)
-        h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
+        h = SparseTensor(
+            feats=F.layer_norm(h.feats, h.feats.shape[-1:]),
+            coords=h.coords,
+            shape=h.shape,
+            scale=h._scale,
+        )
         h = self.output_layer(h)
         if return_subs:
             return h, subs

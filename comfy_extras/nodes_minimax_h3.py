@@ -17,6 +17,7 @@ import torchaudio
 
 import nodes
 import comfy.model_management
+import comfy.model_prefetch
 import comfy.model_sampling
 import comfy.nested_tensor
 import comfy.patcher_extension
@@ -256,8 +257,8 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
             category="model/conditioning/minimax",
             inputs=[
                 io.Clip.Input("clip"),
-                io.Vae.Input("vae"),
-                io.Vae.Input("audio_vae"),
+                io.Vae.Input("vae", optional=True, tooltip="Video VAE. Without it reference images/videos only condition the text encoder."),
+                io.Vae.Input("audio_vae", optional=True, tooltip="Audio VAE. Without it reference audio only conditions the text encoder."),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
                 io.Int.Input("width", default=1344, min=32, max=nodes.MAX_RESOLUTION, step=32),
                 io.Int.Input("height", default=768, min=32, max=nodes.MAX_RESOLUTION, step=32),
@@ -285,7 +286,7 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, vae, audio_vae, prompt, width, height, length, ref_image_size="match",
+    def execute(cls, clip, prompt, width, height, length, ref_image_size="match", vae=None, audio_vae=None,
                 ref_images=None, ref_videos=None, ref_video_audios=None, ref_audios=None) -> io.NodeOutput:
         latent, frame_count = _empty_av_latent(width, height, length)
 
@@ -304,9 +305,10 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
             tw = max(CANVAS_MULTIPLE, round(w * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
             th = max(CANVAS_MULTIPLE, round(h * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
             resized = _resize(img[:1], tw, th, "disabled")
-            z = vae.encode(resized)
             ref_items.append({"type": "image", "data": resized})
-            ref_blocks.append({"kind": "image", "latent_h": th // 16, "latent_w": tw // 16, "latent": z})
+            if vae is not None:
+                z = vae.encode(resized)
+                ref_blocks.append({"kind": "image", "latent_h": th // 16, "latent_w": tw // 16, "latent": z})
 
         ref_video_audios = ref_video_audios or {}
         for name, video_frames in (ref_videos or {}).items():
@@ -328,10 +330,7 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
             while n % 17 != 5:
                 n -= 1
             frames = frames[:n]
-            z = vae.encode(frames)
-            audio_latent, ref_audio_t = (None, 0)
             if soundtrack is not None:
-                audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, soundtrack)
                 # the soundtrack gets its own <Audio j> label, emitted before <Video k>
                 ref_items.append({"type": "audio"})
             # Qwen sees the video at 2 fps with timestamps
@@ -339,6 +338,12 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
             qwen_frames = frames[sample_idx]
             ref_items.append({"type": "video", "data": qwen_frames,
                               "timestamps": [i / 2.0 for i in range(len(sample_idx))]})
+            if vae is None:
+                continue
+            z = vae.encode(frames)
+            audio_latent, ref_audio_t = (None, 0)
+            if soundtrack is not None and audio_vae is not None:
+                audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, soundtrack)
             ref_blocks.append({"kind": "video_audio" if ref_audio_t else "video",
                                "latent_t": z.shape[2], "latent_h": ch // 16, "latent_w": cw // 16,
                                "ref_audio_t": ref_audio_t, "latent": z, "audio_latent": audio_latent})
@@ -346,9 +351,10 @@ class MiniMaxH3ReferenceToVideo(io.ComfyNode):
         for audio in (ref_audios or {}).values():
             if audio is None:
                 continue
-            audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, audio)
             ref_items.append({"type": "audio"})
-            ref_blocks.append({"kind": "audio", "ref_audio_t": ref_audio_t, "audio_latent": audio_latent})
+            if audio_vae is not None:
+                audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, audio)
+                ref_blocks.append({"kind": "audio", "ref_audio_t": ref_audio_t, "audio_latent": audio_latent})
 
         tokens = clip.tokenize(prompt, minimax_ref_items=ref_items)
         cond = clip.encode_from_tokens_scheduled(tokens)
@@ -473,7 +479,8 @@ class MiniMaxH3FunControlPatch:
         self.active = self.sigma_end <= sigma <= self.sigma_start
         self.control_stream = None
         if self.active:
-            self.prepare_control_latent(x[0].shape)
+            with comfy.model_prefetch.pause_malloc_graph():
+                self.prepare_control_latent(x[0].shape)
         try:
             return executor(x, timestep, context, transformer_options, **kwargs)
         finally:
@@ -535,12 +542,15 @@ class MiniMaxH3FunControlBlockPatch:
         self.previous = previous
 
     def __call__(self, args, extra_args):
-        self.control_patch.before_block(self.block_index, args)
+        # Control state must stay outside the base block's allocation scope.
+        with comfy.model_prefetch.pause_malloc_graph():
+            self.control_patch.before_block(self.block_index, args)
         if self.previous is None:
             out = extra_args["original_block"](args)
         else:
             out = self.previous(args, extra_args)
-        return self.control_patch.after_block(self.block_index, args, out)
+        with comfy.model_prefetch.pause_malloc_graph():
+            return self.control_patch.after_block(self.block_index, args, out)
 
     def to(self, device_or_dtype):
         self.control_patch.to(device_or_dtype)

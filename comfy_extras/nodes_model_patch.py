@@ -283,7 +283,7 @@ class ModelPatchLoader:
                 )
                 manual_cast_dtype = comfy.model_management.unet_manual_cast(
                     dtype, load_device, supported_dtypes=[torch.bfloat16, torch.float32])
-                operations = comfy.ops.pick_operations(dtype, manual_cast_dtype)
+                operations = comfy.ops.pick_operations(dtype, manual_cast_dtype, load_device=load_device)
 
             num_blocks = 0
             while "control_blocks.{}.after_proj.weight".format(num_blocks) in sd:
@@ -397,7 +397,7 @@ class AnimaLLLiteApply:
     FUNCTION = "apply_patch"
     EXPERIMENTAL = True
 
-    CATEGORY = "model_patches/anima"
+    CATEGORY = "model/patch/anima"
 
     def apply_patch(self, model, model_patch, image, strength, start_percent, end_percent, mask=None):
         image = image[..., :3]

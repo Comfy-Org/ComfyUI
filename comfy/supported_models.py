@@ -33,6 +33,7 @@ import comfy.text_encoders.mage_flow
 import comfy.text_encoders.joyimage
 import comfy.text_encoders.anima
 import comfy.text_encoders.ace15
+import comfy.text_encoders.yue2
 import comfy.text_encoders.longcat_image
 import comfy.text_encoders.ernie
 import comfy.text_encoders.cogvideo
@@ -2265,6 +2266,27 @@ class ACEStep15(supported_models_base.BASE):
 
         return supported_models_base.ClipTarget(comfy.text_encoders.ace15.ACE15Tokenizer, comfy.text_encoders.ace15.te(**detect))
 
+class YuE2(supported_models_base.BASE):
+    unet_config = {"audio_model": "yue2"}
+    unet_extra_config = {}
+    latent_format = latent_formats.YuE2
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+    sampling_settings = {"multiplier": 1.0}
+    memory_usage_factor = 4.0
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.YuE2(self, device=device)
+
+    def model_type(self, state_dict, prefix=""):
+        return model_base.ModelType.FLOW
+
+    def clip_target(self, state_dict={}):
+        detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, self.text_encoder_key_prefix[0])
+        return supported_models_base.ClipTarget(comfy.text_encoders.yue2.YuE2Tokenizer, comfy.text_encoders.yue2.te(**detect))
+
+
 class MiniMaxMusic3(supported_models_base.BASE):
     unet_config = {
         "audio_model": "minimax_music3",
@@ -2583,6 +2605,7 @@ models = [
     ACEStep,
     ACEStep15,
     MiniMaxMusic3,
+    YuE2,
     Omnigen2,
     Boogu,
     MageFlow,

@@ -299,7 +299,7 @@ class PreviewAudio(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="PreviewAudio",
-            search_aliases=["play audio"],
+            search_aliases=["preview", "preview audio", "play audio"],
             display_name="Preview Audio",
             category="audio",
             description="Preview the audio without saving it to the ComfyUI output directory.",

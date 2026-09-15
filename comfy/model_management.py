@@ -585,19 +585,31 @@ try:
 
             can_use_flash_attention() evaluates runtime eligibility for the given
             parameters; on a ROCm build that includes checking the gpu arch against the
-            kernel images AOTriton was compiled for. Querying it avoids assuming where
-            those images live inside the torch install. The probe tensor is shaped and
+            arches AOTriton was built for. Querying it avoids assuming where the kernel
+            images live inside the torch install. The probe tensor is shaped and
             typed to pass the unrelated SDPA checks, so False means no hardware support
             rather than a rejected shape.
+
+            It answers True on a supported arch whose kernel image was never shipped,
+            and that only fails at launch, without raising. So run one attention
+            through the flash backend and force the pending error check.
             """
             try:
+                device = get_torch_device()
                 if not torch.backends.cuda.is_flash_attention_available():  # not built with flash attention
                     return False
-                q = torch.empty((1, 1, 8, 64), dtype=torch.float16, device=get_torch_device())
+                q = torch.zeros((1, 1, 8, 64), dtype=torch.float16, device=device)
                 params = torch.backends.cuda.SDPAParams(q, q, q, None, 0.0, False, False)
-                return torch.backends.cuda.can_use_flash_attention(params, False)
-            except (AttributeError, RuntimeError, TypeError) as e:
-                logging.warning("Could not query aotriton support: {}".format(e))
+                if not torch.backends.cuda.can_use_flash_attention(params, False):
+                    return False
+                from torch.nn.attention import SDPBackend, sdpa_kernel
+                with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+                    torch.nn.functional.scaled_dot_product_attention(q, q, q)
+                torch.cuda.synchronize()
+                torch.zeros(1, device=device).add_(1).item()  # raises if the launch above failed
+                return True
+            except Exception as e:
+                logging.warning("Could not run flash attention, disabling it: {}".format(e))
                 return False
 
         logging.info("AMD arch: {}".format(arch))
@@ -605,13 +617,13 @@ try:
         if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
             if aotriton_supported():  # AMD efficient attention implementation depends on aotriton.
                 if torch_version_numeric >= (2, 7):  # works on 2.6 but doesn't actually seem to improve much
-                    if any((a in arch) for a in ["gfx90a", "gfx942", "gfx950", "gfx1100", "gfx1101", "gfx1150", "gfx1151", "gfx1170"]):  # TODO: more arches, TODO: gfx950
+                    if any((a in arch) for a in ["gfx90a", "gfx942", "gfx950", "gfx1100", "gfx1101", "gfx1150", "gfx1151", "gfx1170", "gfx1171"]):  # TODO: more arches, TODO: gfx950
                         ENABLE_PYTORCH_ATTENTION = True
                 if rocm_version >= (7, 0):
                     if any((a in arch) for a in ["gfx1200", "gfx1201"]):
                         ENABLE_PYTORCH_ATTENTION = True
         if torch_version_numeric >= (2, 7) and rocm_version >= (6, 4):
-            if any((a in arch) for a in ["gfx1200", "gfx1201", "gfx950", "gfx1170"]):  # TODO: more arches, "gfx942" gives error on pytorch nightly 2.10 1013 rocm7.0
+            if any((a in arch) for a in ["gfx1200", "gfx1201", "gfx950", "gfx1170", "gfx1171"]):  # TODO: more arches, "gfx942" gives error on pytorch nightly 2.10 1013 rocm7.0
                 SUPPORT_FP8_OPS = True
 
 except:
@@ -2090,7 +2102,25 @@ def supports_mxfp8_compute(device=None):
     return True
 
 def supports_fp64(device=None):
-    if is_device_mps(device):
+    if (device is not None and is_device_mps(device)) or mps_mode():
+        return False
+
+    if is_intel_xpu():
+        return False
+
+    if is_directml_enabled():
+        return False
+
+    if is_ixuca():
+        return False
+
+    return True
+
+def supports_int8_compute(device=None):
+    # The eager comfy_kitchen backend implements int8 weight-only quantized
+    # matmul via torch._int_mm, which PyTorch does not implement for MPS.
+    # https://github.com/pytorch/pytorch/issues/141287
+    if (device is not None and is_device_mps(device)) or mps_mode():
         return False
 
     if is_intel_xpu():
