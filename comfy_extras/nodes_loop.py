@@ -103,8 +103,6 @@ def _expand_loop(dynprompt, opener_id, body, close_id, values, list_items, initi
 
 
 class StartLoop(io.ComfyNode):
-    LOOP_BOUNDARY = "start"
-
     @classmethod
     def define_schema(cls):
         list_item_type = io.MatchType.Template("list_item")
@@ -113,6 +111,7 @@ class StartLoop(io.ComfyNode):
             node_id="StartLoop",
             display_name="Start Loop",
             category="utilities/looping",
+            loop_boundary="start",
             is_input_list=True,
             inputs=[
                 io.DynamicCombo.Input("mode", options=[
@@ -332,8 +331,6 @@ class LoopResult(io.ComfyNode):
 
 
 class EndLoop(io.ComfyNode):
-    LOOP_BOUNDARY = "end"
-
     @classmethod
     def define_schema(cls):
         output_type = io.MatchType.Template("output_value")
@@ -351,6 +348,7 @@ class EndLoop(io.ComfyNode):
             node_id="EndLoop",
             display_name="End Loop",
             category="utilities/looping",
+            loop_boundary="end",
             is_input_list=True,
             inputs=[
                 io.MatchType.Input(
