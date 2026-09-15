@@ -130,6 +130,87 @@ class HunyuanVideo15ImageToVideo(io.ComfyNode):
         return io.NodeOutput(positive, negative, out_latent)
 
 
+class HunyuanVideo15FirstLastFrameToVideo(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="HunyuanVideo15FirstLastFrameToVideo",
+            category="conditioning/video_models",
+            is_experimental=True,
+            inputs=[
+                io.Conditioning.Input("positive"),
+                io.Conditioning.Input("negative"),
+                io.Vae.Input("vae"),
+                io.Int.Input("width", default=848, min=16, max=nodes.MAX_RESOLUTION, step=16),
+                io.Int.Input("height", default=480, min=16, max=nodes.MAX_RESOLUTION, step=16),
+                io.Int.Input("length", default=33, min=1, max=nodes.MAX_RESOLUTION, step=4),
+                io.Int.Input("batch_size", default=1, min=1, max=4096),
+                io.ClipVisionOutput.Input("clip_vision_start_image", optional=True),
+                io.ClipVisionOutput.Input("clip_vision_end_image", optional=True),
+                io.Image.Input("start_image", optional=True),
+                io.Image.Input("end_image", optional=True),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="positive"),
+                io.Conditioning.Output(display_name="negative"),
+                io.Latent.Output(display_name="latent"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, positive, negative, vae, width, height, length, batch_size, start_image=None, end_image=None, clip_vision_start_image=None, clip_vision_end_image=None) -> io.NodeOutput:
+
+        latent = torch.zeros([batch_size, 32, ((length - 1) // 4) + 1, height // 16, width // 16],
+                            device=comfy.model_management.intermediate_device())
+
+        concat_latent_image = torch.zeros((batch_size, 32, latent.shape[2], latent.shape[3], latent.shape[4]),
+                                         device=comfy.model_management.intermediate_device())
+
+        mask = torch.ones((1, 1, latent.shape[2], latent.shape[3], latent.shape[4]),
+                         device=comfy.model_management.intermediate_device())
+
+        if start_image is not None:
+            start_image = comfy.utils.common_upscale(start_image[:length].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+
+            encoded_start = vae.encode(start_image[:, :, :, :3])
+
+            concat_latent_image[:, :, :encoded_start.shape[2], :, :] = encoded_start
+
+            start_frames_in_latent = ((start_image.shape[0] - 1) // 4) + 1
+            mask[:, :, :start_frames_in_latent] = 0.0
+
+        if end_image is not None:
+            end_image = comfy.utils.common_upscale(end_image[-length:].movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+
+            encoded_end = vae.encode(end_image[:, :, :, :3])
+
+            end_frames_in_latent = ((end_image.shape[0] - 1) // 4) + 1
+            concat_latent_image[:, :, -end_frames_in_latent:, :, :] = encoded_end[:, :, -end_frames_in_latent:, :, :]
+
+            mask[:, :, -end_frames_in_latent:] = 0.0
+
+        positive = node_helpers.conditioning_set_values(positive, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
+        negative = node_helpers.conditioning_set_values(negative, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
+
+        clip_vision_output = None
+        if clip_vision_start_image is not None:
+            clip_vision_output = clip_vision_start_image
+
+        if clip_vision_end_image is not None:
+            if clip_vision_output is not None:
+                pass # Use only one embedding for now
+            else:
+                clip_vision_output = clip_vision_end_image
+
+        if clip_vision_output is not None:
+            positive = node_helpers.conditioning_set_values(positive, {"clip_vision_output": clip_vision_output})
+            negative = node_helpers.conditioning_set_values(negative, {"clip_vision_output": clip_vision_output})
+
+        out_latent = {}
+        out_latent["samples"] = latent
+        return io.NodeOutput(positive, negative, out_latent)
+
+
 class HunyuanVideo15SuperResolution(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -425,6 +506,7 @@ class HunyuanExtension(ComfyExtension):
             EmptyHunyuanLatentVideo,
             EmptyHunyuanVideo15Latent,
             HunyuanVideo15ImageToVideo,
+            HunyuanVideo15FirstLastFrameToVideo,
             HunyuanVideo15SuperResolution,
             HunyuanVideo15LatentUpscaleWithModel,
             LatentUpscaleModelLoader,
