@@ -35,6 +35,11 @@ import comfy.utils
 import comfy.quant_ops
 import comfy_aimdo.host_buffer
 import comfy_aimdo.vram_buffer
+# Guard pinned memory usage under --disable-pinned-memory
+if not args.disable_pinned_memory:
+    comfy_aimdo.host_buffer.ENABLE_PINNED_MEMORY = True
+else:
+    comfy_aimdo.host_buffer.ENABLE_PINNED_MEMORY = False
 from comfy.internal_logging import detail
 
 from typing import TYPE_CHECKING
