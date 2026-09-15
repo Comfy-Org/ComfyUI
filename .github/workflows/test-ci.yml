@@ -97,3 +97,16 @@ jobs:
           torch_version: ${{ matrix.torch_version }}
           google_credentials: ${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}
           comfyui_flags: ${{ matrix.flags }}
+
+  notify-failure:
+    needs: [test-stable, test-unix-nightly]
+    if: ${{ failure() && github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack of CI failure
+        uses: slackapi/slack-github-action@v2.1.0
+        with:
+          webhook: ${{ secrets.CI_ALERTS_SLACK_WEBHOOK }}
+          webhook-type: incoming-webhook
+          payload: |
+            text: ":rotating_siren: ComfyUI CI failed on `${{ github.ref_name }}`\n*Commit:* <${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.sha }}>\n*Run:* <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|view logs>\n*Dashboard:* <https://ci.comfy.org/?branch=${{ github.ref_name }}|ci.comfy.org>"
