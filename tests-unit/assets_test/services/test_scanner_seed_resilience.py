@@ -9,7 +9,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.assets.database.models import Asset, AssetContent
-from app.assets.database.queries import create_content, create_record, delete_record
+from app.assets.database.queries import (
+    create_content,
+    create_content_reporting_insert,
+    create_record,
+    delete_record,
+)
 from app.assets.scanner import SeedAssetSpec, seed_asset_specs
 from app.assets.services.snapshot_hash import snapshot_hash
 
@@ -115,10 +120,73 @@ def test_seed_logs_once_for_each_vanished_path(
     assert messages == [f"Skipping vanished asset during scan: {vanished_path}"]
 
 
-def test_seed_isolates_a_poisoned_spec_and_persists_the_specs_around_it(
+def test_seed_absorbs_live_path_conflict_and_persists_the_specs_around_it(
     session: Session, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    specs, poisoned_path = _specs_with_vanished_path(temp_dir)
+    specs, conflicted_path = _specs_with_vanished_path(temp_dir)
+
+    def _create_content_or_conflict(
+        session_arg: Session,
+        path: str,
+        *,
+        hash: str | None = None,
+        size_bytes: int = 0,
+        mtime_ns: int | None = None,
+    ) -> tuple[AssetContent, bool]:
+        if path != str(conflicted_path):
+            return create_content_reporting_insert(
+                session_arg,
+                path=path,
+                hash=hash,
+                size_bytes=size_bytes,
+                mtime_ns=mtime_ns,
+            )
+        session_arg.add(
+            AssetContent(
+                path=path,
+                hash=hash,
+                size_bytes=size_bytes,
+                mtime_ns=mtime_ns,
+            )
+        )
+        session_arg.flush()
+        session_arg.add(
+            AssetContent(
+                path=path,
+                hash=hash,
+                size_bytes=size_bytes,
+                mtime_ns=mtime_ns,
+            )
+        )
+        session_arg.flush()
+        raise AssertionError("duplicate live paths must violate the unique index")
+
+    monkeypatch.setattr(
+        "app.assets.scanner.create_content_reporting_insert",
+        _create_content_or_conflict,
+    )
+
+    created = seed_asset_specs(session, specs)
+    session.commit()
+
+    assert created == 2
+    assert _record_count(session) == 2
+    assert {record.name for record in session.scalars(select(Asset))} == {
+        "first.bin",
+        "last.bin",
+    }
+
+
+def test_seed_propagates_unrelated_integrity_error(
+    session: Session, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = temp_dir / "unrelated-integrity-error.bin"
+    path.write_bytes(b"content")
+    unrelated_error = IntegrityError(
+        "forced record creation failure",
+        {},
+        ValueError("unrelated integrity failure"),
+    )
 
     def _create_record_or_raise(
         session_arg: Session,
@@ -130,32 +198,14 @@ def test_seed_isolates_a_poisoned_spec_and_persists_the_specs_around_it(
         loader_path: str | None,
         tags: list[str],
     ) -> Asset:
-        if name == poisoned_path.name:
-            raise IntegrityError("forced record creation failure", {}, ValueError())
-        return create_record(
-            session_arg,
-            content_id,
-            name,
-            mime_type,
-            job_id,
-            loader_path,
-            tags,
-        )
+        raise unrelated_error
 
     monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
 
-    created = seed_asset_specs(session, specs)
-    session.commit()
+    with pytest.raises(IntegrityError) as raised:
+        seed_asset_specs(session, [_spec(path)])
 
-    assert created == 2
-    assert _record_count(session) == 2
-    assert {record.name for record in session.scalars(select(Asset))} == {
-        "first.bin",
-        "last.bin",
-    }, (
-        "the batch shares one transaction, so a bare rollback would erase the spec BEFORE "
-        f"the poisoned one; both neighbours of {poisoned_path.name} must survive"
-    )
+    assert raised.value is unrelated_error
 
 
 def test_seed_persists_fresh_stat_after_spec_was_built(

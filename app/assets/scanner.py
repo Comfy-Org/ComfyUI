@@ -24,6 +24,7 @@ from app.assets.database.queries import (
     create_record,
 )
 from app.assets.database.models import Asset, AssetContent
+from app.assets.database.queries.records import _is_live_path_conflict
 from app.assets.helpers import sql_path_under_prefix, to_stored_hash
 from app.assets.lifecycle import get_excluded_scan_roots
 from app.assets.scanner_changes import (
@@ -423,7 +424,9 @@ def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
                         tags=spec["tags"],
                     )
                     created += 1
-            except IntegrityError:
+            except IntegrityError as error:
+                if not _is_live_path_conflict(error):
+                    raise
                 logging.warning("Skipping asset whose row conflicts during scan: %s", path)
                 continue
     except Exception:
