@@ -633,6 +633,10 @@ def test_batch_insert_fault_reports_the_specs_committed_before_it(
     assert result == (2, 0, 3)
     assert scan_seeder._scan_state is not None
     assert scan_seeder._scan_state.created == 2
+    assert scan_seeder._errors == [
+        "Batch insert encountered an error at offset 0 after creating 2: "
+        "forced record creation failure"
+    ]
 
 
 def test_salvage_commit_failure_reports_the_original_batch_fault(
@@ -657,7 +661,8 @@ def test_salvage_commit_failure_reports_the_original_batch_fault(
         assert session.scalar(select(Asset)) is None
     assert result == (0, 0, 3)
     assert scan_seeder._errors == [
-        "Batch insert failed at offset 0: No space left on device"
+        "Batch insert encountered an error at offset 0 after creating 0: "
+        "No space left on device"
     ]
     assert events_named(caplog, "seeder.batch_insert_failed") == [
         {"error_type": "OSError"}
@@ -665,7 +670,7 @@ def test_salvage_commit_failure_reports_the_original_batch_fault(
     caller_logs = [
         record
         for record in caplog.records
-        if record.getMessage().startswith("Batch insert failed")
+        if record.getMessage().startswith("Batch insert encountered an error")
     ]
     assert len(caller_logs) == 1
     assert caller_logs[0].exc_info is not None

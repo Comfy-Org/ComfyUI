@@ -863,8 +863,15 @@ class _AssetSeeder:
                 if batch_error is not None:
                     raise batch_error
             except Exception as e:
-                self._add_error(f"Batch insert failed at offset {i}: {e}")
-                logging.exception("Batch insert failed at offset %d", i)
+                self._add_error(
+                    f"Batch insert encountered an error at offset {i} "
+                    f"after creating {created}: {e}"
+                )
+                logging.exception(
+                    "Batch insert encountered an error at offset %d after creating %d",
+                    i,
+                    created,
+                )
                 emit("seeder.batch_insert_failed", error_type=error_type(e))
 
             scanned = i + len(batch)
