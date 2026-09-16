@@ -374,9 +374,12 @@ class ModelComputeDtype:
 class ModelAttentionBackend(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        backends = ["pytorch attention"]
-        if comfy.ldm.modules.attention.COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE:
-            backends.append("comfy kitchen attention")
+        # Listed unconditionally: define_schema() runs wherever the schema is
+        # built, which is not always the machine that executes the node. A
+        # CPU-only host (or one capturing /object_info for a GPU fleet) would
+        # otherwise drop the option and leave workflows unable to select it.
+        # execute() already falls back to PyTorch when the backend is missing.
+        backends = ["pytorch attention", "comfy kitchen attention"]
         return io.Schema(
             node_id="ModelAttentionBackend",
             display_name="Model Attention Backend",
