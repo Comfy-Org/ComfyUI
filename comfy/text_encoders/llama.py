@@ -489,23 +489,32 @@ def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_di
 
     return out
 
+def rope_matrix(freqs_cis):
+    if torch.is_tensor(freqs_cis):
+        return freqs_cis
+    cos, sin, neg_sin = freqs_cis
+    half = sin.shape[-1]
+    matrix = torch.stack((cos[..., :half], neg_sin, sin, cos[..., half:]), dim=-1)
+    return matrix.reshape(*matrix.shape[:-1], 2, 2)
+
+
 def apply_rope(xq, xk, freqs_cis):
-    org_dtype = xq.dtype
-    cos = freqs_cis[0]
-    sin = freqs_cis[1]
-    nsin = freqs_cis[2]
+    matrix = rope_matrix(freqs_cis)
+    if matrix.ndim == 5:
+        matrix = matrix.unsqueeze(0)
 
-    q_embed = (xq * cos)
-    q_split = q_embed.shape[-1] // 2
-    q_embed[..., : q_split].addcmul_(xq[..., q_split :], nsin)
-    q_embed[..., q_split :].addcmul_(xq[..., : q_split], sin)
+    q_ndim, k_ndim = xq.ndim, xk.ndim
+    if q_ndim == 3:
+        xq = xq.unsqueeze(0)
+    if k_ndim == 3:
+        xk = xk.unsqueeze(0)
 
-    k_embed = (xk * cos)
-    k_split = k_embed.shape[-1] // 2
-    k_embed[..., : k_split].addcmul_(xk[..., k_split :], nsin)
-    k_embed[..., k_split :].addcmul_(xk[..., : k_split], sin)
-
-    return q_embed.to(org_dtype), k_embed.to(org_dtype)
+    xq, xk = comfy_kitchen.apply_rope_split_half(xq, xk, matrix)
+    if q_ndim == 3:
+        xq = xq.squeeze(0)
+    if k_ndim == 3:
+        xk = xk.squeeze(0)
+    return xq, xk
 
 
 class Attention(nn.Module):
@@ -822,7 +831,7 @@ class Llama2_(nn.Module):
                                     device=device)
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True,
-                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None):
+                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None, decode_buffers=None):
         if embeds is not None:
             x = embeds
         else:
@@ -858,29 +867,14 @@ class Llama2_(nn.Module):
 
         enable_graph = self.graph_dynamic_vbar_blocks and fixed_kv_decode
         if enable_graph:
-            freqs_cis_groups = freqs_cis if isinstance(freqs_cis, list) else [freqs_cis]
-            cross_step_state_key = [(x.shape, x.stride(), x.dtype, x.device)]
-            for group in freqs_cis_groups:
-                for tensor in group:
-                    cross_step_state_key.append((tensor.shape, tensor.stride(), tensor.dtype, tensor.device))
-            cross_step_state_key = tuple(cross_step_state_key)
-            cross_step_state = getattr(self, "_comfy_cross_step_state", None)
-            if cross_step_state is None or cross_step_state["key"] != cross_step_state_key:
-                static_freqs_cis = []
-                for group in freqs_cis_groups:
-                    static_freqs_cis.append(tuple(torch.empty_like(tensor) for tensor in group))
-                if not isinstance(freqs_cis, list):
-                    static_freqs_cis = static_freqs_cis[0]
-                cross_step_state = {"key": cross_step_state_key, "x": torch.empty_like(x), "freqs_cis": static_freqs_cis}
-                self._comfy_cross_step_state = cross_step_state
-                comfy.model_management._register_cross_step(self)
-            cross_step_state["x"].copy_(x)
-            static_freqs_cis_groups = cross_step_state["freqs_cis"] if isinstance(freqs_cis, list) else [cross_step_state["freqs_cis"]]
-            for source_group, target_group in zip(freqs_cis_groups, static_freqs_cis_groups):
-                for source, target in zip(source_group, target_group):
-                    target.copy_(source)
-            x = cross_step_state["x"]
-            freqs_cis = cross_step_state["freqs_cis"]
+            if decode_buffers is None:
+                x = x.clone()
+            else:
+                hidden_buffer, rotary_buffer = decode_buffers
+                hidden_buffer.copy_(x)
+                x = hidden_buffer
+                rotary_buffer.copy_(rope_matrix(freqs_cis))
+                freqs_cis = rotary_buffer
 
         intermediate = None
         all_intermediate = None
@@ -911,17 +905,24 @@ class Llama2_(nn.Module):
 
             def core():
                 nonlocal x
-                x, current_kv = layer(
+                output, current_kv = layer(
                     x=x,
                     attention_mask=mask,
                     freqs_cis=freqs_cis,
                     optimized_attention=optimized_attention,
                     past_key_value=past_kv,
                 )
+                if enable_graph:
+                    x.copy_(output)
+                else:
+                    x = output
                 if next_key_values:
                     next_key_values[i] = current_kv
 
-            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, layer, x.dtype, core=core, enable_graph=enable_graph)
+            comfy.model_prefetch.prefetch_queue_pop(
+                prefetch_queue, x.device, layer, x.dtype, core=core, enable_graph=enable_graph,
+                malloc_scope="block"
+            )
             if fixed_kv:
                 next_key_values[i].advance(seq_len)
 
@@ -932,8 +933,10 @@ class Llama2_(nn.Module):
             if i == intermediate_output:
                 intermediate = x.clone()
 
-        if prefetch_queue is not None:
-            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None)
+        comfy.model_prefetch.prefetch_queue_pop(
+            prefetch_queue, x.device, None,
+            malloc_scope="block"
+        )
 
         if self.norm is not None:
             x = self.norm(x)
@@ -1041,9 +1044,19 @@ class BaseGenerate:
         # MRoPE: prefill uses explicit 3D position_ids, decode continues from the last position
         next_pos = int(position_ids[:, -1].max()) + 1 if position_ids is not None else None
 
+        compile_allocations = self.model.graph_dynamic_vbar_blocks and comfy.model_prefetch.malloc_graph_enabled(device)
+        decode_tokens = torch.empty((embeds.shape[0], 1), dtype=torch.long, device=device)
+
         # Generation loop
         current_input_ids = initial_input_ids
         for step in tqdm(range(max_length), desc="Generating tokens"):
+            if step > 0:
+                if compile_allocations:
+                    comfy.model_prefetch.malloc_graph_begin(device)
+                embeds = self.model.embed_tokens(decode_tokens).to(execution_dtype)
+                current_input_ids = decode_tokens if initial_input_ids is not None else None
+                position_ids = torch.tensor([[next_pos]], device=device) if next_pos is not None else None
+
             # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
             extra = {}
             if step == 0 and deepstack_embeds is not None:
@@ -1052,13 +1065,16 @@ class BaseGenerate:
             x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra, embeds_info=(embeds_info if step == 0 else None))
             logits = self.logits(x)[:, -1]
             next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
-            token_id = next_token[0].item()
+
+            decode_tokens.copy_(next_token)
+            del next_token, logits, x, embeds, position_ids
+            if step > 0 and compile_allocations:
+                comfy.model_prefetch.malloc_graph_end()
+
+            token_id = decode_tokens[0].item()
             generated_token_ids.append(token_id)
 
-            embeds = self.model.embed_tokens(next_token).to(execution_dtype)
-            current_input_ids = next_token if initial_input_ids is not None else None
-            if next_pos is not None:  # advance MRoPE position for the next (decode) step
-                position_ids = torch.tensor([[next_pos]], device=device)
+            if step > 0 and next_pos is not None:
                 next_pos += 1
             pbar.update(1)
 

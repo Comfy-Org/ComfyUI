@@ -414,12 +414,12 @@ class HeyGenAvatarVideoNode(IO.ComfyNode):
                 depends_on=IO.PriceBadgeDepends(widgets=["engine"]),
                 expr="""
                 widgets.engine = "avatar_iii"
-                  ? {"type":"range_usd","min_usd":0.023881,"max_usd":0.061919,"format":{"suffix":"/second"}}
+                  ? {"type":"range_usd","min_usd":0.0143,"max_usd":0.023595,"format":{"suffix":"/second"}}
                   : widgets.engine = "avatar_v"
-                  ? {"type":"usd","usd":0.095381,"format":{"suffix":"/second"}}
+                  ? {"type":"usd","usd":0.1716,"format":{"suffix":"/second"}}
                   : widgets.engine = "avatar_iv"
-                  ? {"type":"range_usd","min_usd":0.0715,"max_usd":0.095381,"format":{"suffix":"/second"}}
-                  : {"type":"range_usd","min_usd":0.023881,"max_usd":0.095381,"format":{"suffix":"/second"}}
+                  ? {"type":"range_usd","min_usd":0.055055,"max_usd":0.115115,"format":{"suffix":"/second"}}
+                  : {"type":"range_usd","min_usd":0.0143,"max_usd":0.1716,"format":{"suffix":"/second"}}
                 """,
             ),
         )
@@ -522,7 +522,8 @@ class HeyGenCreateAvatarNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":1.43}""",
+                depends_on=IO.PriceBadgeDepends(widgets=["source"]),
+                expr="""{"type":"usd","usd": widgets.source = "photo" ? 1.8876 : 1.43}""",
             ),
         )
 
@@ -604,7 +605,7 @@ class HeyGenVideoTranslateNode(IO.ComfyNode):
                     "mode",
                     options=["speed", "precision"],
                     default="speed",
-                    tooltip="'speed' is faster; 'precision' produces higher-quality lip sync at twice the price.",
+                    tooltip="'speed' is faster; 'precision' produces higher-quality lip sync at a higher price.",
                 ),
                 IO.Boolean.Input(
                     "translate_audio_only",
@@ -638,8 +639,9 @@ class HeyGenVideoTranslateNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["mode"]),
-                expr="""{"type":"usd","usd": widgets.mode = "precision" ? 0.095381 : 0.047619,"""
+                depends_on=IO.PriceBadgeDepends(widgets=["mode", "translate_audio_only"]),
+                expr="""{"type":"usd","usd": widgets.mode = "precision" ? 0.03575 """
+                """: widgets.translate_audio_only = true ? 0.013585 : 0.019305,"""
                 """"format":{"suffix":"/second"}}""",
             ),
         )
