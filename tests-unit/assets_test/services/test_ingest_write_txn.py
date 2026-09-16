@@ -57,7 +57,7 @@ def _probe_write() -> None:
 def _blocking_fake(entered: threading.Event, release: threading.Event, real_fn):
     def fake(*args, **kwargs):
         entered.set()
-        release.wait(timeout=_BARRIER_TIMEOUT)
+        release.wait()
         return real_fn(*args, **kwargs)
 
     return fake
@@ -460,8 +460,8 @@ def test_cached_registration_metadata_extraction_does_not_hold_the_write_lock(
         finally:
             release.set()
             worker.join(timeout=_BARRIER_TIMEOUT)
+            assert not worker.is_alive()
 
-        assert not worker.is_alive()
         assert elapsed < _PROBE_BUDGET_SECONDS
         registered = result["registered"]
         assert registered is not None
@@ -511,8 +511,8 @@ def test_upload_settle_hashing_does_not_hold_the_write_lock(
         finally:
             release.set()
             worker.join(timeout=_BARRIER_TIMEOUT)
+            assert not worker.is_alive()
 
-        assert not worker.is_alive()
         assert elapsed < _PROBE_BUDGET_SECONDS
 
         expected_digest, _expected_stat = real_snapshot_hash(path)
@@ -558,8 +558,8 @@ def test_create_record_metadata_extraction_does_not_hold_the_write_lock(
         finally:
             release.set()
             worker.join(timeout=_BARRIER_TIMEOUT)
+            assert not worker.is_alive()
 
-        assert not worker.is_alive()
         assert elapsed < _PROBE_BUDGET_SECONDS
         upload_result = result["upload"]
         assert upload_result is not None

@@ -54,7 +54,7 @@ def _probe_write() -> None:
 def _blocking_fake(entered: threading.Event, release: threading.Event, real_fn):
     def fake(*args, **kwargs):
         entered.set()
-        release.wait(timeout=_BARRIER_TIMEOUT)
+        release.wait()
         return real_fn(*args, **kwargs)
 
     return fake
@@ -102,8 +102,8 @@ def test_seed_recovery_hashing_does_not_hold_the_write_lock(
     finally:
         release.set()
         worker.join(timeout=_BARRIER_TIMEOUT)
+        assert not worker.is_alive()
 
-    assert not worker.is_alive()
     assert elapsed < _PROBE_BUDGET_SECONDS
     assert result["created"] == 1
 
@@ -149,9 +149,9 @@ def test_pending_verification_hashing_does_not_hold_the_write_lock(
     finally:
         release.set()
         worker.join(timeout=_BARRIER_TIMEOUT)
+        assert not worker.is_alive()
         scanner_changes.clear_pending_verifications()
 
-    assert not worker.is_alive()
     assert elapsed < _PROBE_BUDGET_SECONDS
     assert result["processed"] == 1
 
@@ -195,9 +195,9 @@ def test_transition_hashing_does_not_hold_the_write_lock(
     finally:
         release.set()
         worker.join(timeout=_BARRIER_TIMEOUT)
+        assert not worker.is_alive()
         hash_mode_state.clear_transition_queue()
 
-    assert not worker.is_alive()
     assert elapsed < _PROBE_BUDGET_SECONDS
     assert result.get("done") is True
 
@@ -244,8 +244,8 @@ def test_b1_enrichment_hashing_does_not_hold_the_write_lock(
     finally:
         release.set()
         worker.join(timeout=_BARRIER_TIMEOUT)
+        assert not worker.is_alive()
 
-    assert not worker.is_alive()
     assert elapsed < _PROBE_BUDGET_SECONDS
     assert result["outcome"] == (1, [])
 
@@ -292,7 +292,7 @@ def test_b1_enrichment_metadata_extraction_does_not_hold_the_write_lock(
     finally:
         release.set()
         worker.join(timeout=_BARRIER_TIMEOUT)
+        assert not worker.is_alive()
 
-    assert not worker.is_alive()
     assert elapsed < _PROBE_BUDGET_SECONDS
     assert result["outcome"] == (1, [])
