@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from inspect import signature
 from pathlib import Path
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -173,8 +174,8 @@ def test_enrich_phase_reaches_healthy_candidates_after_a_full_failed_batch(
                 assert record is not None
                 record.system_metadata = {"enriched": True}
                 update_session.commit()
-            return 1, failed
-        return 0, failed
+            return 1, failed, len(rows)
+        return 0, failed, len(rows)
 
     asset_seeder = seeder_module._AssetSeeder()
     asset_seeder._run_gate.set()
@@ -211,8 +212,8 @@ def test_enrich_phase_reaches_healthy_candidates_after_four_failed_batches(
     def enrich_batch(rows, **_kwargs):
         attempted.extend(row.record_id for row in rows)
         if healthy in rows:
-            return 1, []
-        return 0, [row.record_id for row in rows]
+            return 1, [], len(rows)
+        return 0, [row.record_id for row in rows], len(rows)
 
     asset_seeder = seeder_module._AssetSeeder()
     asset_seeder._run_gate.set()
@@ -236,3 +237,104 @@ def test_enrich_phase_reaches_healthy_candidates_after_four_failed_batches(
         "record-3",
         "healthy-record",
     ]
+
+
+@pytest.mark.parametrize("interrupt_after", [0, 1], ids=["before-first", "partway"])
+def test_enrich_phase_reoffers_rows_not_attempted_before_pause(
+    db_engine,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt_after: int,
+) -> None:
+    rows = [
+        scanner.UnenrichedContent(
+            f"content-{index}", f"record-{index}", f"/{index}"
+        )
+        for index in range(3)
+    ]
+    fetch_cursors: list[str | None] = []
+    offered_batches: list[list[str]] = []
+    attempted: list[str] = []
+    pause_blocked = threading.Event()
+    interruption_triggered = False
+
+    @contextmanager
+    def _create_session():
+        with SASession(db_engine) as sess:
+            yield sess
+
+    asset_seeder = seeder_module._AssetSeeder()
+    asset_seeder._run_gate.set()
+    asset_seeder._cancel_event.clear()
+    asset_seeder.set_event_sink(
+        lambda event_type, _data: pause_blocked.set()
+        if event_type == "assets.seed.paused"
+        else None
+    )
+
+    def get_candidates(
+        _roots,
+        compute_hashes,
+        limit=1000,
+        last_seen_id=None,
+    ):
+        nonlocal interruption_triggered
+        candidates = [
+            row
+            for row in rows
+            if last_seen_id is None or row.record_id > last_seen_id
+        ][:limit]
+        fetch_cursors.append(last_seen_id)
+        offered_batches.append([row.record_id for row in candidates])
+        if interrupt_after == 0 and not interruption_triggered:
+            interruption_triggered = True
+            asset_seeder._run_gate.clear()
+        return candidates
+
+    def enrich_asset(*_args, **kwargs) -> bool:
+        nonlocal interruption_triggered
+        attempted.append(kwargs["record_id"])
+        if len(attempted) == interrupt_after and not interruption_triggered:
+            interruption_triggered = True
+            asset_seeder._run_gate.clear()
+        return True
+
+    result: list[tuple[bool, int]] = []
+    errors: list[BaseException] = []
+
+    def run_enrich_phase() -> None:
+        try:
+            result.append(asset_seeder._run_enrich_phase(("input",)))
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(
+        seeder_module, "get_unenriched_assets_for_roots", get_candidates
+    )
+    monkeypatch.setattr(scanner, "enrich_asset", enrich_asset)
+
+    with (
+        patch("app.assets.seeder.create_session", _create_session),
+        patch("app.assets.scanner.create_session", _create_session),
+    ):
+        worker = threading.Thread(target=run_enrich_phase, daemon=True)
+        worker.start()
+        try:
+            assert pause_blocked.wait(timeout=2), (
+                "the enrich loop did not block at its loop-top pause checkpoint"
+            )
+            assert fetch_cursors == [None]
+            assert worker.is_alive()
+        finally:
+            asset_seeder._run_gate.set()
+            worker.join(timeout=2)
+
+    assert worker.is_alive() is False
+    assert errors == []
+    assert result == [(False, 3)]
+    assert attempted == [row.record_id for row in rows]
+    assert offered_batches[1] == [
+        row.record_id for row in rows[interrupt_after:]
+    ]
+    assert fetch_cursors[1] == (
+        None if interrupt_after == 0 else rows[interrupt_after - 1].record_id
+    )

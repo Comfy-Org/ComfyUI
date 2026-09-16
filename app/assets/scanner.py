@@ -631,7 +631,7 @@ def enrich_assets_batch(
     compute_hash: bool = False,
     interrupt_check: Callable[[], bool] | None = None,
     progress: _ScanProgress | None = None,
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[str], int]:
     """Enrich a batch of assets.
 
     Uses a single DB session for the entire batch, committing after each
@@ -646,15 +646,17 @@ def enrich_assets_batch(
             the operation should be interrupted (e.g. paused or cancelled)
 
     Returns:
-        Tuple of (enriched_count, failed_reference_ids)
+        Tuple of (enriched_count, failed_reference_ids, consumed_count)
     """
     enriched = 0
     failed_ids: list[str] = []
+    consumed = 0
 
     with create_session() as sess:
         for row in rows:
             if interrupt_check is not None and interrupt_check():
                 break
+            consumed += 1
 
             try:
                 updated = enrich_asset(
@@ -679,4 +681,4 @@ def enrich_assets_batch(
                 sess.rollback()
                 failed_ids.append(row.record_id)
 
-    return enriched, failed_ids
+    return enriched, failed_ids, consumed
