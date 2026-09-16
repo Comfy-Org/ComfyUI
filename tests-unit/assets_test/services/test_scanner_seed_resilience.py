@@ -297,14 +297,16 @@ def test_insert_commits_successful_specs_before_propagating_batch_fault(
     monkeypatch.setattr("app.assets.scanner.create_session", _create_session)
     monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
 
-    with pytest.raises(RuntimeError, match="forced record creation failure"):
-        insert_asset_specs([_spec(path) for path in paths], set())
+    created, error = insert_asset_specs([_spec(path) for path in paths], set())
 
     with Session(db_engine) as session:
         assert {record.name for record in session.scalars(select(Asset))} == {
             "first.bin",
             "last.bin",
         }
+    assert created == 2
+    assert isinstance(error, RuntimeError)
+    assert str(error) == "forced record creation failure"
 
 
 def test_seed_skips_negative_fresh_mtime_with_warning_and_telemetry(

@@ -445,17 +445,32 @@ def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
     return created
 
 
-def insert_asset_specs(specs: list[SeedAssetSpec], _tag_pool: set[str]) -> int:
+def insert_asset_specs(
+    specs: list[SeedAssetSpec], _tag_pool: set[str]
+) -> tuple[int, Exception | None]:
     if not specs:
-        return 0
+        return 0, None
     with create_session() as sess:
+        created = 0
+        first_error: Exception | None = None
+        for spec in specs:
+            try:
+                created += seed_asset_specs(sess, [spec])
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
         try:
-            created = seed_asset_specs(sess, specs)
-        except Exception:
             sess.commit()
-            raise
-        sess.commit()
-        return created
+        except Exception:
+            if first_error is None:
+                raise
+            logging.exception("Failed to commit successful specs from failed asset batch")
+            try:
+                sess.rollback()
+            except Exception:
+                logging.exception("Failed to roll back asset batch after commit failure")
+            return 0, first_error
+        return created, first_error
 
 
 def build_unenriched_candidates_statement(
