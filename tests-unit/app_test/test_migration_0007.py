@@ -169,6 +169,36 @@ def test_0007_orm_parity(db_at_0006, tmp_path):
     assert alembic_tables == orm_tables, f"Mismatch: alembic={alembic_tables}, orm={orm_tables}"
 
 
+@pytest.mark.parametrize("table_name", ["assets", "asset_contents", "asset_tags"])
+def test_0007_index_orm_parity(db_at_0006, table_name):
+    from sqlalchemy import create_engine, inspect
+
+    import app.assets.database.models as asset_models
+
+    cfg, db_path = db_at_0006
+    command.upgrade(cfg, "head")
+
+    alembic_engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        alembic_indexes = {
+            (index["name"], tuple(index["column_names"]))
+            for index in inspect(alembic_engine).get_indexes(table_name)
+        }
+    finally:
+        alembic_engine.dispose()
+
+    orm_indexes = {
+        (index.name, tuple(index.columns.keys()))
+        for index in asset_models.Base.metadata.tables[table_name].indexes
+    }
+
+    assert alembic_indexes
+    assert orm_indexes
+    assert alembic_indexes == orm_indexes, (
+        f"Mismatch for {table_name}: alembic={alembic_indexes}, orm={orm_indexes}"
+    )
+
+
 def test_0007_downgrade_chain_past_0003_succeeds(db_at_0006):
     cfg, db_path = db_at_0006
     command.upgrade(cfg, "head")
