@@ -1,14 +1,14 @@
 import logging
-import sqlite3
 import threading
-import time
 
 import folder_paths
 import pytest
 from PIL import Image
 
 import app.database.db as db_mod
-from app.assets import lifecycle, mode
+from app.assets import lifecycle, mode, scanner
+from app.assets.database.models import Asset
+from app.assets.database.queries.records import create_content, create_record
 from app.assets.manager import default_asset_manager
 from app.assets.services.hash_mode_state import clear_transition_queue
 from app.assets.services.ingest import register_executed_output
@@ -21,7 +21,7 @@ def autoclean_unit_test_assets():
     yield
 
 
-def test_register_executed_output_waits_for_a_held_sqlite_writer(
+def test_register_executed_output_keeps_job_id_during_scanner_write_train(
     tmp_path, monkeypatch, caplog
 ) -> None:
     output_directory = tmp_path / "output"
@@ -51,39 +51,115 @@ def test_register_executed_output_waits_for_a_held_sqlite_writer(
         output_path = output_directory / "ComfyUI_00001_.png"
         Image.new("RGB", (1, 1), (255, 0, 0)).save(output_path)
 
-        holder_ready = threading.Event()
-        holder_errors: list[sqlite3.Error] = []
+        scanner_rows: list[scanner.UnenrichedContent] = []
+        for index in range(4):
+            scanner_path = output_directory / f"scanner-{index}.bin"
+            scanner_path.write_bytes(f"scanner-{index}".encode())
+            stat_result = scanner_path.stat()
 
-        def hold_write_lock() -> None:
-            connection = sqlite3.connect(database_path, timeout=1)
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                connection.execute("INSERT INTO tags (name) VALUES (?)", ("e2e-holder",))
-                holder_ready.set()
-                threading.Event().wait(timeout=2)
-                connection.commit()
-            except sqlite3.Error as error:
-                holder_errors.append(error)
-                holder_ready.set()
-            finally:
-                connection.close()
+            def seed(session, path=scanner_path, stat=stat_result) -> None:
+                content = create_content(
+                    session,
+                    str(path),
+                    size_bytes=stat.st_size,
+                    mtime_ns=stat.st_mtime_ns,
+                )
+                record = create_record(session, content.id, path.name)
+                scanner_rows.append(
+                    scanner.UnenrichedContent(
+                        content.id,
+                        record.id,
+                        str(path),
+                        needs_hash=True,
+                    )
+                )
 
-        holder = threading.Thread(target=hold_write_lock)
-        holder.start()
+            db_mod.run_write_txn(seed)
+
+        first_scanner_write_entered = threading.Event()
+        release_first_scanner_write = threading.Event()
+        second_scanner_write_committed = threading.Event()
+        registration_started = threading.Event()
+        original_apply = scanner._apply_enrichment
+        original_run_write_txn = scanner.run_write_txn
+        original_is_retryable_lock_error = db_mod._is_retryable_lock_error
+        scanner_writes = 0
+        scanner_writes_lock = threading.Lock()
+        registration_thread_id: list[int | None] = [None]
+        registration_blocked = threading.Event()
+
+        def block_first_scanner_write(session, prepared):
+            nonlocal scanner_writes
+            updated = original_apply(session, prepared)
+            with scanner_writes_lock:
+                is_first_write = scanner_writes == 0
+            if is_first_write:
+                first_scanner_write_entered.set()
+                assert release_first_scanner_write.wait(timeout=5)
+            return updated
+
+        def count_scanner_writes(work):
+            nonlocal scanner_writes
+            result = original_run_write_txn(work)
+            with scanner_writes_lock:
+                scanner_writes += 1
+                if scanner_writes >= 2:
+                    second_scanner_write_committed.set()
+            return result
+
+        def observe_registration_lock(error):
+            is_retryable = original_is_retryable_lock_error(error)
+            if threading.get_ident() == registration_thread_id[0] and is_retryable:
+                registration_blocked.set()
+            return is_retryable
+
+        monkeypatch.setattr(scanner, "_apply_enrichment", block_first_scanner_write)
+        monkeypatch.setattr(scanner, "run_write_txn", count_scanner_writes)
+        monkeypatch.setattr(db_mod, "_is_retryable_lock_error", observe_registration_lock)
+        scanner_result: dict[str, tuple[int, list[str]]] = {}
+        registration_result: dict[str, RegisteredAsset | None] = {}
+
+        def enrich_scanner_rows() -> None:
+            scanner_result["value"] = scanner.enrich_assets_batch(
+                scanner_rows,
+                extract_metadata=False,
+                compute_hash=True,
+            )
+
+        def register_output() -> None:
+            registration_thread_id[0] = threading.get_ident()
+            registration_started.set()
+            registration_result["value"] = register_executed_output(
+                str(output_path),
+                job_id="write-contention",
+            )
+
+        scanner_worker = threading.Thread(target=enrich_scanner_rows)
+        scanner_worker.start()
         try:
-            assert holder_ready.wait(timeout=2)
-            assert not holder_errors
+            assert first_scanner_write_entered.wait(timeout=5)
+            registration_worker = threading.Thread(target=register_output)
+            registration_worker.start()
+            assert registration_started.wait(timeout=5)
+            assert registration_blocked.wait(timeout=5)
+            release_first_scanner_write.set()
+            assert second_scanner_write_committed.wait(timeout=5)
             with caplog.at_level(logging.INFO):
-                started = time.monotonic()
-                result = register_executed_output(str(output_path), job_id="write-contention")
-                elapsed = time.monotonic() - started
+                registration_worker.join(timeout=5)
         finally:
-            holder.join(timeout=2)
+            release_first_scanner_write.set()
+            scanner_worker.join(timeout=5)
 
-        assert not holder.is_alive()
-        assert not holder_errors
+        assert not scanner_worker.is_alive()
+        assert not registration_worker.is_alive()
+        assert scanner_result["value"] == (len(scanner_rows), [])
+        assert scanner_writes == len(scanner_rows)
+        result = registration_result["value"]
         assert isinstance(result, RegisteredAsset)
-        assert elapsed >= 1.5
+        with db_mod.create_session() as session:
+            asset = session.get(Asset, result.id)
+            assert asset is not None
+            assert asset.job_id == "write-contention"
         assert not any("Failed to register" in record.getMessage() for record in caplog.records)
     finally:
         manager.shutdown()
