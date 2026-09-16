@@ -725,10 +725,18 @@ class PromptExecutor:
             except Exception as e:
                 _cache_logger.warning(f"Cache provider {provider.__class__.__name__} error on {event}: {e}")
 
-    def execute(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
+    def execute(self, prompt, prompt_id, extra_data=None, execute_outputs=None):
+        if extra_data is None:
+            extra_data = {}
+        if execute_outputs is None:
+            execute_outputs = []
         asyncio.run(self.execute_async(prompt, prompt_id, extra_data, execute_outputs))
 
-    async def execute_async(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
+    async def execute_async(self, prompt, prompt_id, extra_data=None, execute_outputs=None):
+        if extra_data is None:
+            extra_data = {}
+        if execute_outputs is None:
+            execute_outputs = []
         set_preview_method(extra_data.get("preview_method"))
 
         nodes.interrupt_processing(False)
