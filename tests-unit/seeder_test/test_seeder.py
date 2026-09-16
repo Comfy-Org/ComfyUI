@@ -8,11 +8,12 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.assets import scanner as scanner_module
 from app.assets import seeder as seeder_module
 from app.assets.database.models import Base
 from app.assets.database.queries import create_content, create_record, mark_content_missing
 from app.assets.event_log import TAG
-from app.assets.seeder import ScanPhase, State, _AssetSeeder, _ScanStage, _ScanState
+from app.assets.seeder import Progress, ScanPhase, State, _AssetSeeder, _ScanStage, _ScanState
 
 
 EVENT_LINE_PATTERN = re.compile(
@@ -65,6 +66,19 @@ def events_named(
     caplog: pytest.LogCaptureFixture, event_name: str
 ) -> list[EventFields]:
     return [fields for event, fields in tagged_events(caplog) if event == event_name]
+
+
+def test_idle_status_returns_a_progress_snapshot() -> None:
+    seeder = _AssetSeeder()
+    seeder._last_progress = Progress(created=1)
+
+    status = seeder.get_status()
+    assert status.progress is not None
+    status.progress.created = 999
+
+    next_status = seeder.get_status()
+    assert next_status.progress is not None
+    assert next_status.progress.created == 1
 
 
 def test_seeder_models_missing_as_content_state():
@@ -418,6 +432,52 @@ def test_standalone_mark_missing_emits_count_with_mark_missing_stage(
     assert events_named(caplog, "seeder.marked_missing") == [
         {"count": 7, "stage": "mark_missing"}
     ]
+
+
+def test_standalone_mark_missing_failure_emits_no_success_event(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scan_seeder._state = State.IDLE
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
+
+    def fail_create_session():
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(scanner_module, "create_session", fail_create_session)
+
+    with caplog.at_level(logging.INFO):
+        result = scan_seeder.mark_missing_outside_prefixes()
+
+    assert result == 0
+    assert events_named(caplog, "scanner.mark_missing_failed") == [
+        {"error_type": "RuntimeError"}
+    ]
+    assert events_named(caplog, "seeder.marked_missing") == []
+
+
+def test_scan_prune_failure_completes_without_type_error(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scan_seeder._prune_first = True
+    scan_seeder._phase = ScanPhase.FAST
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
+    monkeypatch.setattr(
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda _prefixes: None
+    )
+    monkeypatch.setattr(
+        seeder_module, "sync_temp_references_safely", lambda _progress: None
+    )
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda _roots: (0, 0, 0))
+
+    with caplog.at_level(logging.INFO):
+        scan_seeder._run_scan()
+
+    assert scan_seeder._errors == []
+    assert events_named(caplog, "seeder.marked_missing") == []
 
 
 def test_batch_insert_failure_emits_only_the_exception_type(

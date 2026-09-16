@@ -254,10 +254,11 @@ def sync_temp_references_safely(
         )
 
 
-def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int:
+def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int | None:
     """Mark references as missing when outside the given prefixes.
 
-    This is a non-destructive soft-delete. Returns count marked or 0 on failure.
+    This is a non-destructive soft-delete. Returns the count marked, or None when
+    the operation fails.
     """
     try:
         with create_session() as sess:
@@ -270,7 +271,7 @@ def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int:
             "scanner.mark_missing_failed",
             error_type=error_type(exc),
         )
-        return 0
+        return None
 
 
 def mark_contents_missing_outside_prefixes(
