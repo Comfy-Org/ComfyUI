@@ -202,6 +202,77 @@ def test_begin_immediate_and_write_retries_share_locked_only_classification(
     assert attempts == 1
 
 
+@pytest.mark.parametrize(
+    ("sqlite_errorname", "sqlite_errorcode", "message", "is_retryable"),
+    [
+        pytest.param("SQLITE_BUSY", None, "contention", True, id="busy-name"),
+        pytest.param("SQLITE_BUSY_SNAPSHOT", None, "snapshot contention", True, id="busy-snapshot-name"),
+        pytest.param("SQLITE_BUSY_TIMEOUT", None, "timed contention", True, id="busy-timeout-name"),
+        pytest.param("SQLITE_BUSY_RECOVERY", None, "recovery contention", True, id="busy-recovery-name"),
+        pytest.param("SQLITE_LOCKED", None, "table contention", True, id="locked-name"),
+        pytest.param("SQLITE_LOCKED_SHAREDCACHE", None, "shared-cache contention", True, id="locked-sharedcache-name"),
+        pytest.param(None, sqlite3.SQLITE_BUSY_SNAPSHOT, "snapshot contention", True, id="busy-snapshot-code"),
+        pytest.param(None, sqlite3.SQLITE_LOCKED_VTAB, "virtual table locked", False, id="locked-vtab-code"),
+        pytest.param(None, None, "database table is locked", True, id="python-310-locked-fallback"),
+        pytest.param(None, None, "database is busy", False, id="python-310-busy-fallback"),
+    ],
+)
+def test_begin_immediate_and_write_retries_agree_on_sqlite_result_classification(
+    memory_database,
+    monkeypatch,
+    sqlite_errorname,
+    sqlite_errorcode,
+    message,
+    is_retryable,
+):
+    def make_error():
+        error = sqlite3.OperationalError(message)
+        if sqlite_errorname is not None:
+            error.sqlite_errorname = sqlite_errorname
+        if sqlite_errorcode is not None:
+            error.sqlite_errorcode = sqlite_errorcode
+        return error
+
+    clock = {"now": 0.0}
+
+    class Connection:
+        def execute(self, _statement):
+            raise make_error()
+
+    monkeypatch.setattr(db_mod.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        db_mod.time,
+        "sleep",
+        lambda _seconds: clock.__setitem__("now", 31.0),
+    )
+
+    if is_retryable:
+        with pytest.raises(OperationalError):
+            db_mod._begin_immediate(Connection())
+    else:
+        with pytest.raises(sqlite3.OperationalError):
+            db_mod._begin_immediate(Connection())
+
+    monkeypatch.setattr(db_mod.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(db_mod.time, "sleep", lambda _seconds: None)
+    attempts = 0
+
+    def work(_session):
+        nonlocal attempts
+        attempts += 1
+        raise OperationalError("INSERT", {}, make_error())
+
+    with pytest.raises(OperationalError):
+        db_mod.run_write_txn(work)
+
+    assert attempts == (5 if is_retryable else 1)
+
+
+def test_retryable_lock_error_uses_the_python_310_message_fallback():
+    assert db_mod._is_retryable_lock_error(sqlite3.OperationalError("database table is locked"))
+    assert not db_mod._is_retryable_lock_error(sqlite3.OperationalError("database is busy"))
+
+
 def test_run_write_txn_closes_when_rollback_fails_without_masking_work_error(monkeypatch):
     class Session:
         closed = False

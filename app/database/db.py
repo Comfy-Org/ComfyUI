@@ -21,6 +21,22 @@ _WRITE_TXN_LOCK_RETRY_DEADLINE_SECONDS = 60
 _WRITE_TXN_BACKOFF_SECONDS = (0.05, 0.1, 0.2, 0.4)
 _SQLITE_BUSY_TIMEOUT_MS = 30000
 _SQLITE_WRITE_LOCK_POLL_SECONDS = 0.01
+_SQLITE_RETRYABLE_LOCK_ERROR_NAMES = frozenset({
+    "SQLITE_BUSY",
+    "SQLITE_BUSY_SNAPSHOT",
+    "SQLITE_BUSY_TIMEOUT",
+    "SQLITE_BUSY_RECOVERY",
+    "SQLITE_LOCKED",
+    "SQLITE_LOCKED_SHAREDCACHE",
+})
+_SQLITE_RETRYABLE_LOCK_ERROR_CODES = frozenset({
+    getattr(sqlite3, "SQLITE_BUSY", 5),
+    getattr(sqlite3, "SQLITE_BUSY_RECOVERY", 261),
+    getattr(sqlite3, "SQLITE_BUSY_SNAPSHOT", 517),
+    getattr(sqlite3, "SQLITE_BUSY_TIMEOUT", 773),
+    getattr(sqlite3, "SQLITE_LOCKED", 6),
+    getattr(sqlite3, "SQLITE_LOCKED_SHAREDCACHE", 262),
+})
 T = TypeVar("T")
 
 
@@ -351,6 +367,14 @@ def create_session():
 
 
 def _is_retryable_lock_error(exc: BaseException) -> bool:
+    error_name = getattr(exc, "sqlite_errorname", None)
+    if error_name is not None:
+        return error_name in _SQLITE_RETRYABLE_LOCK_ERROR_NAMES
+
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if error_code is not None:
+        return error_code in _SQLITE_RETRYABLE_LOCK_ERROR_CODES
+
     return "locked" in str(exc).lower()
 
 
