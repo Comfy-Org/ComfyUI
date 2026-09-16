@@ -580,7 +580,7 @@ def enrich_asset(
             if isinstance(exc, OSError):
                 _log_scan_error("hashing", exc)
             else:
-                logging.warning("Failed to hash %s: %s", file_path, exc)
+                logging.warning("Failed to hash %s: %s", file_path, exc, exc_info=True)
 
     record = session.get(Asset, record_id)
     if content is None or record is None or content.mtime_ns != initial_mtime_ns:

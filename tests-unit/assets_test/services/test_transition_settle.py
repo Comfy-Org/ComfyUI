@@ -1,5 +1,4 @@
 from contextlib import contextmanager
-from inspect import signature
 from pathlib import Path
 import threading
 from unittest.mock import patch
@@ -42,13 +41,12 @@ def _denied(_candidate_path: str):
 
 def _rendered_candidate_placeholder_count(failed_count: int) -> int:
     failed_ids = [f"{index:036d}" for index in range(failed_count)]
-    builder = getattr(scanner, "build_unenriched_candidates_statement")
-    pagination = (
-        failed_ids
-        if "skip_ids" in signature(builder).parameters
-        else failed_ids[-1]
+    statement = scanner.build_unenriched_candidates_statement(
+        prefixes=["/models"],
+        compute_hashes=False,
+        last_seen_id=failed_ids[-1],
+        limit=100,
     )
-    statement = builder(["/models"], False, pagination, 100)
     compiled = statement.compile(
         dialect=sqlite.dialect(),
         compile_kwargs={"render_postcompile": True},

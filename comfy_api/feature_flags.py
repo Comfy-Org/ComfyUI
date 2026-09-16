@@ -164,6 +164,9 @@ def get_server_features(assets_enabled: bool = False) -> dict[str, Any]:
     """
     Get the server's feature flags.
 
+    Args:
+        assets_enabled: Whether the server's asset support is enabled
+
     Returns:
         Dictionary of server feature flags
     """
