@@ -229,7 +229,7 @@ class TextGenerateLTX2Prompt(TextGenerate):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto") -> io.NodeOutput:
         # Gemma 3 and Gemma 4 use different chat-turn markers and image tokens.
         # The Gemma 4 text encoder is the LTX 2.4 path; Gemma 3 is LTX 2.0.
         is_gemma4 = "gemma4" in getattr(clip.tokenizer, "clip_name", "")
@@ -258,7 +258,7 @@ class TextGenerateLTX2Prompt(TextGenerate):
                 f"<start_of_turn>model\n"
             )
 
-        out = super().execute(clip, formatted_prompt, max_length, sampling_mode, image=image, thinking=thinking, use_default_template=use_default_template, video=video, audio=audio)
+        out = super().execute(clip, formatted_prompt, max_length, sampling_mode, image=image, thinking=thinking, use_default_template=use_default_template, video=video, audio=audio, mtp=mtp)
 
         # Drop reasoning, including a block left unclosed by max_length. Both system prompts ask
         # for the original prompt back when there is nothing to give; empty conditions on nothing.

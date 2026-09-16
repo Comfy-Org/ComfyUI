@@ -773,7 +773,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
 
         def verify_logits(x):
             if not head.comfy_cast_weights:
-                return F.linear(x, self.model.embed_tokens.weight.to(x), None)
+                return F.linear(x, head.weight.to(x), None)
             with comfy.ops.CastBiasWeightContext(head, x, offloadable=True) as (w, _bias):
                 return F.linear(x, w)
 
@@ -817,6 +817,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             console.update(n)
 
         verify_buffers = None
+        snapshot_bytes = sum(kv.recurrent_state.numel() * 4 + kv.conv_state.numel() * kv.conv_state.element_size()
+                             for kv in pkv if isinstance(kv, LinearKV))
 
         def set_depth(d):
             nonlocal depth, verify_buffers
@@ -982,7 +984,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                     probe[1] += accepts
                     if probe[0] == 32:
                         # deepen once acceptance sustains it and a recapture round can amortize
-                        if sampling is None and max_length - len(ids) > 512 and 1 + probe[1] / probe[0] >= 2.2:
+                        if (sampling is None and max_length - len(ids) > 512 and 1 + probe[1] / probe[0] >= 2.2
+                                and 5 * snapshot_bytes < comfy.model_management.get_free_memory(device)):
                             comfy.model_prefetch.cleanup_prefetch_queues()
                             drop_draft_graph()
                             set_depth(5)

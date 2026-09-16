@@ -1094,7 +1094,7 @@ class BaseGenerate:
             module = self.model.embed_tokens
 
         if not module.comfy_cast_weights:
-            return torch.nn.functional.linear(input, self.model.embed_tokens.weight.to(x), None)
+            return torch.nn.functional.linear(input, module.weight.to(x), None)
         with comfy.ops.CastBiasWeightContext(module, input, offloadable=True) as (weight, _bias):
             return torch.nn.functional.linear(input, weight, None)
 

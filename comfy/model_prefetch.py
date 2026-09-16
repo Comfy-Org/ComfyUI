@@ -56,6 +56,8 @@ class _MallocGraphScope:
     def __exit__(self, exc_type, *args):
         if exc_type is None:
             malloc_graph_end()
+        else:
+            cleanup_malloc_graph()
 
 def malloc_graph_scope(device):
     return _MallocGraphScope(device)
