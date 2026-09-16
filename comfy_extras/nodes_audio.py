@@ -866,6 +866,34 @@ class AudioEqualizer3Band(IO.ComfyNode):
         return IO.NodeOutput({"waveform": eq_waveform, "sample_rate": sample_rate})
 
 
+class AudioDuration(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="AudioDuration",
+            search_aliases=["audio length", "audio duration", "audio seconds"],
+            display_name="Audio Duration",
+            description="Returns the length of the audio in seconds and its sample rate.",
+            category="audio",
+            inputs=[
+                IO.Audio.Input("audio"),
+            ],
+            outputs=[
+                IO.Float.Output(display_name="duration", tooltip="Length of the audio in seconds."),
+                IO.Int.Output(display_name="sample_rate", tooltip="Sample rate of the audio in Hz."),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, audio) -> IO.NodeOutput:
+        if audio is None:
+            return IO.NodeOutput(0.0, 0)
+        waveform = audio["waveform"]
+        sample_rate = audio["sample_rate"]
+        duration = waveform.shape[-1] / float(sample_rate) if sample_rate > 0 else 0.0
+        return IO.NodeOutput(duration, sample_rate)
+
+
 class AudioExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -890,6 +918,7 @@ class AudioExtension(ComfyExtension):
             AudioAdjustVolume,
             EmptyAudio,
             AudioEqualizer3Band,
+            AudioDuration,
         ]
 
 async def comfy_entrypoint() -> AudioExtension:
