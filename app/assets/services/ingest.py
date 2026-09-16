@@ -8,9 +8,11 @@ records created for bytes it just replaced.
 """
 
 import contextlib
+import errno
 import logging
 import mimetypes
 import os
+import shutil
 from typing import Any, NamedTuple
 
 from sqlalchemy import func, select
@@ -187,6 +189,12 @@ def _move_temp_to_dest(temp_path: str, dest_abs: str) -> None:
     os.makedirs(os.path.dirname(dest_abs), exist_ok=True)
     try:
         os.replace(temp_path, dest_abs)
+    except OSError as error:
+        if error.errno == errno.EXDEV:
+            shutil.copy2(temp_path, dest_abs)
+            os.unlink(temp_path)
+            return
+        raise RuntimeError(f"failed to move uploaded file into place: {error}") from error
     except Exception as e:
         raise RuntimeError(f"failed to move uploaded file into place: {e}") from e
 
