@@ -434,7 +434,7 @@ def test_standalone_mark_missing_emits_count_with_mark_missing_stage(
     ]
 
 
-def test_standalone_mark_missing_failure_emits_no_success_event(
+def test_standalone_mark_missing_failure_returns_none_and_emits_no_success_event(
     scan_seeder: _AssetSeeder,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -450,7 +450,7 @@ def test_standalone_mark_missing_failure_emits_no_success_event(
     with caplog.at_level(logging.INFO):
         result = scan_seeder.mark_missing_outside_prefixes()
 
-    assert result == 0
+    assert result is None
     assert events_named(caplog, "scanner.mark_missing_failed") == [
         {"error_type": "RuntimeError"}
     ]

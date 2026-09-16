@@ -63,6 +63,13 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         # todo 16 - discovery/enrich stat failures, emit-once per scan per site
         CallSite("app/assets/scanner.py", "build_asset_specs", "scanner.stat_failed"),
         CallSite("app/assets/scanner.py", "enrich_asset", "scanner.stat_failed"),
+        CallSite("app/assets/scanner.py", "seed_asset_specs", "scanner.invalid_mtime"),
+        CallSite(
+            "app/assets/scanner_admission.py", "tick_watch_list", "scanner.watch_stat_failed"
+        ),
+        CallSite(
+            "app/assets/scanner_admission.py", "tick_watch_list", "scanner.watch_seed_failed"
+        ),
     }
 )
 
