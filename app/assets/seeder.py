@@ -928,7 +928,7 @@ class _AssetSeeder:
             if not unenriched:
                 break
 
-            enriched, _failed_ids = enrich_assets_batch(
+            enriched, _failed_ids, consumed = enrich_assets_batch(
                 unenriched,
                 extract_metadata=True,
                 compute_hash=self._compute_hashes,
@@ -936,7 +936,8 @@ class _AssetSeeder:
                 progress=scan_state,
             )
             total_enriched += enriched
-            last_seen_id = unenriched[-1].record_id
+            if consumed > 0:
+                last_seen_id = unenriched[consumed - 1].record_id
 
             now = time.perf_counter()
             if now - last_progress_time >= progress_interval:
