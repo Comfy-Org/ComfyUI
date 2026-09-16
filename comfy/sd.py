@@ -36,6 +36,7 @@ import os
 import comfy.utils
 import comfy.ops
 import comfy.model_prefetch
+import comfy.storage
 
 from . import clip_vision
 from . import gligen
@@ -267,7 +268,7 @@ class CLIP:
         self.tokenizer = tokenizer(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data)
         te_disable_dynamic = disable_dynamic or getattr(self.cond_stage_model, "disable_offload", False)
         ModelPatcher = comfy.model_patcher.ModelPatcher if te_disable_dynamic else comfy.model_patcher.CoreModelPatcher
-        self.patcher = ModelPatcher(self.cond_stage_model, load_device=load_device, offload_device=offload_device)
+        self.patcher = ModelPatcher(self.cond_stage_model, load_device=load_device, offload_device=offload_device, fast_disk=comfy.storage.state_dict_fast_disk(state_dict))
         #Match torch.float32 hardcode upcast in TE implemention
         self.patcher.set_model_compute_dtype(torch.float32)
         self.patcher.hook_mode = comfy.hooks.EnumHookMode.MinVram
@@ -487,6 +488,7 @@ class CLIP:
 
 class VAE:
     def __init__(self, sd=None, device=None, config=None, dtype=None, metadata=None):
+        fast_disk = comfy.storage.state_dict_fast_disk(sd)
         is_seedvr2_vae = "decoder.up_blocks.2.upsamplers.0.upscale_conv.weight" in sd
         if not is_seedvr2_vae and 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys(): #diffusers format
             sd = diffusers_convert.convert_vae_state_dict(sd)
@@ -1090,7 +1092,7 @@ class VAE:
         mp = comfy.model_patcher.CoreModelPatcher
         if self.disable_offload:
             mp = comfy.model_patcher.ModelPatcher
-        self.patcher = mp(self.first_stage_model, load_device=self.device, offload_device=offload_device)
+        self.patcher = mp(self.first_stage_model, load_device=self.device, offload_device=offload_device, fast_disk=fast_disk)
 
         m, u = self.first_stage_model.load_state_dict(sd, strict=False, assign=self.patcher.is_dynamic())
         if len(m) > 0:
@@ -2222,7 +2224,7 @@ def load_state_dict_guess_config(sd, output_vae=True, output_clip=True, output_c
         model = model_config.get_model(sd, diffusion_model_prefix, device=inital_load_device)
         ModelPatcher = comfy.model_patcher.ModelPatcher if disable_dynamic else comfy.model_patcher.CoreModelPatcher
         offload_device = model_options.get("offload_device", model_management.unet_offload_device())
-        model_patcher = ModelPatcher(model, load_device=load_device, offload_device=offload_device)
+        model_patcher = ModelPatcher(model, load_device=load_device, offload_device=offload_device, fast_disk=comfy.storage.state_dict_fast_disk(sd))
         model.load_model_weights(sd, diffusion_model_prefix, assign=model_patcher.is_dynamic())
 
     if output_vae:
@@ -2362,7 +2364,7 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
 
     model = model_config.get_model(new_sd, "")
     ModelPatcher = comfy.model_patcher.ModelPatcher if disable_dynamic else comfy.model_patcher.CoreModelPatcher
-    model_patcher = ModelPatcher(model, load_device=load_device, offload_device=offload_device)
+    model_patcher = ModelPatcher(model, load_device=load_device, offload_device=offload_device, fast_disk=comfy.storage.state_dict_fast_disk(new_sd))
     if not model_management.is_device_cpu(offload_device):
         model.to(offload_device)
     model.load_model_weights(new_sd, "", assign=model_patcher.is_dynamic())

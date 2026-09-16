@@ -30,6 +30,10 @@ from comfy_api_nodes.apis.tripo import (
     TripoP1ImageToModelRequest,
     TripoP1MultiviewToModelRequest,
     TripoP1TextToModelRequest,
+    TripoPSeriesImageToModelRequest,
+    TripoPSeriesMultiviewToModelRequest,
+    TripoPSeriesRequest,
+    TripoPSeriesTextToModelRequest,
     TripoRigModelVersion,
     TripoRigType,
     TripoSpec,
@@ -51,6 +55,7 @@ from comfy_api_nodes.util import (
     tensor_to_bytesio,
     upload_3d_model_to_comfyapi,
     upload_images_to_comfyapi,
+    validate_string,
 )
 
 MULTIVIEW_KEYS = ("front_view_url", "left_view_url", "back_view_url", "right_view_url")
@@ -2304,6 +2309,296 @@ class TripoP1MultiviewToModelNode(IO.ComfyNode):
         return glb_output(*await poll_until_finished(cls, response, average_duration=80))
 
 
+P_SERIES_MODELS = {"P2": "P2-20260801"}
+
+
+def p_series_model_input(source: str) -> IO.DynamicCombo.Input:
+    inputs: list = []
+    if source == "text":
+        inputs += [
+            IO.String.Input("prompt", multiline=True, tooltip="Up to 1024 characters."),
+            IO.String.Input("negative_prompt", multiline=True, default="", optional=True, tooltip="Up to 255 characters."),
+        ]
+    elif source == "image":
+        inputs.append(IO.Image.Input("image"))
+    else:
+        inputs += [
+            IO.Image.Input("image", tooltip="Front view (0°). Required."),
+            IO.Image.Input("image_left", optional=True, tooltip="Left view (90°), i.e. the subject's left side."),
+            IO.Image.Input("image_back", optional=True, tooltip="Back view (180°)."),
+            IO.Image.Input("image_right", optional=True, tooltip="Right view (270°), i.e. the subject's right side."),
+        ]
+    inputs += [
+        IO.Boolean.Input(
+            "quad",
+            default=False,
+            tooltip="Quad-dominant mesh, returned as FBX on the FBX output. "
+            "Off returns a triangle mesh as GLB on the GLB output.",
+        ),
+        IO.Int.Input(
+            "face_limit",
+            default=-1,
+            min=-1,
+            max=50000,
+            tooltip="Target face count: 48-50,000, or 48-25,000 with quad. -1 lets Tripo choose. "
+            "Tripo treats it as a target, so the result can exceed it.",
+        ),
+        IO.Combo.Input(
+            "texture",
+            options=["standard", "detailed", "extreme", "none"],
+            default="standard",
+            tooltip="Base color texture resolution: standard 2K, detailed 4K, extreme 8K. "
+            "none returns an untextured mesh.",
+        ),
+        IO.Boolean.Input(
+            "pbr",
+            default=True,
+            tooltip="Metallic, roughness and normal maps in addition to the base color. Ignored when texture is none.",
+        ),
+        IO.Int.Input(
+            "model_seed",
+            default=42,
+            min=0,
+            max=SEED_MAX,
+            control_after_generate=True,
+            tooltip="Seed for the geometry.",
+        ),
+    ]
+    if source == "text":
+        inputs.append(
+            IO.Int.Input(
+                "image_seed",
+                default=42,
+                min=0,
+                max=SEED_MAX,
+                advanced=True,
+                tooltip="Seed for the image Tripo draws from the prompt before modeling.",
+            )
+        )
+    else:
+        inputs += [
+            IO.Combo.Input(
+                "texture_alignment",
+                options=["original_image", "geometry"],
+                default="original_image",
+                advanced=True,
+                tooltip="Match the colors of the input image, or fit the textures to the generated geometry. "
+                "Ignored when texture is none.",
+            ),
+            IO.Combo.Input(
+                "orientation",
+                options=["default", "align_image"],
+                default="default",
+                advanced=True,
+                tooltip="align_image rotates the model to the viewpoint of the input image. Ignored when texture is none.",
+            ),
+        ]
+    if source == "image":
+        inputs.append(
+            IO.Boolean.Input(
+                "enable_image_autofix",
+                default=False,
+                advanced=True,
+                tooltip="Let Tripo enhance a low-resolution or low-quality image before modeling.",
+            )
+        )
+    inputs += [
+        IO.Int.Input(
+            "texture_seed",
+            default=42,
+            min=0,
+            max=SEED_MAX,
+            advanced=True,
+            tooltip="Seed for the textures. Ignored when texture is none.",
+        ),
+        IO.Boolean.Input(
+            "auto_size",
+            default=False,
+            advanced=True,
+            tooltip="Scale the model to its real-world size in meters through its scene transform. "
+            "Ignored when texture is none.",
+        ),
+        IO.Boolean.Input(
+            "export_uv",
+            default=True,
+            advanced=True,
+            tooltip="UV unwrap an untextured mesh. Off returns it without texture coordinates. "
+            "Textured meshes are always unwrapped.",
+        ),
+        IO.Boolean.Input(
+            "compress_geometry",
+            default=False,
+            advanced=True,
+            tooltip="Meshopt geometry compression (EXT_meshopt_compression): much smaller files, "
+            "but ComfyUI's 3D preview cannot display them. Ignored for quad meshes.",
+        ),
+    ]
+    return IO.DynamicCombo.Input(
+        "model",
+        options=[IO.DynamicCombo.Option("P2", inputs)],
+        tooltip="Tripo P-series model.",
+    )
+
+
+def p_series_price_badge() -> IO.PriceBadge:
+    return IO.PriceBadge(
+        depends_on=IO.PriceBadgeDepends(widgets=["model.texture"]),
+        expr="""
+        (
+          $texture := $lookup(widgets, "model.texture");
+          $credits := $texture = "none" ? 100 : ($texture = "extreme" ? 130 : ($texture = "detailed" ? 120 : 110));
+          {"type":"usd","usd": $credits * 0.01, "format": {"approximate": true}}
+        )
+        """,
+    )
+
+
+def p_series_request_fields(model: dict) -> dict:
+    quad = model["quad"]
+    face_limit = model["face_limit"]
+    max_face_limit = 25000 if quad else 50000
+    if face_limit != -1 and not 48 <= face_limit <= max_face_limit:
+        raise ValueError(
+            f"face_limit must be -1 or between 48 and {max_face_limit:,} for {'quad' if quad else 'triangle'} meshes."
+        )
+    fields = {
+        "model": P_SERIES_MODELS[model["model"]],
+        "quad": quad,
+        "face_limit": None if face_limit == -1 else face_limit,
+        "model_seed": model["model_seed"],
+        "compress": "geometry" if model["compress_geometry"] and not quad else None,
+    }
+    if model["texture"] == "none":
+        return fields | {"texture": False, "pbr": False, "export_uv": model["export_uv"]}
+    fields |= {
+        "texture": True,
+        "pbr": model["pbr"],
+        "texture_quality": model["texture"],
+        "texture_seed": model["texture_seed"],
+        "auto_size": model["auto_size"],
+    }
+    if "texture_alignment" in model:
+        fields |= {"texture_alignment": model["texture_alignment"], "orientation": model["orientation"]}
+    return fields
+
+
+async def p_series_generate(cls: type[IO.ComfyNode], path: str, request: TripoPSeriesRequest) -> IO.NodeOutput:
+    response = await sync_op(
+        cls,
+        endpoint=ApiEndpoint(path=path, method="POST"),
+        response_model=TripoTaskResponse,
+        data=request,
+    )
+    response_poll = await poll_task(cls, response)
+    url = get_model_url_from_response(response_poll)
+    file_format = Path(urlparse(url).path).suffix.lstrip(".").lower() or ("fbx" if request.quad else "glb")
+    model_3d = await download_url_to_file_3d(url, file_format, cls=cls)
+    return glb_or_fbx_output(response_poll.data.task_id, model_3d, legacy=False)
+
+
+class TripoPSeriesTextToModelNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="TripoPSeriesTextToModelNode",
+            display_name="Tripo P2: Text to Model",
+            category="partner/3d/Tripo",
+            description="Generates a low-poly 3D model with clean topology from a text prompt, "
+            "as a triangle mesh (GLB) or a quad-dominant mesh (FBX).",
+            search_aliases=["tripo p2", "quad mesh", "low poly"],
+            inputs=[p_series_model_input("text")],
+            outputs=model_outputs(legacy=False),
+            hidden=hidden_inputs(),
+            is_api_node=True,
+            price_badge=p_series_price_badge(),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        prompt = model["prompt"].strip()
+        negative_prompt = (model.get("negative_prompt") or "").strip()
+        validate_string(prompt, min_length=1, max_length=1024)
+        validate_string(negative_prompt, field_name="negative_prompt", max_length=255)
+        request = TripoPSeriesTextToModelRequest(
+            prompt=prompt,
+            negative_prompt=negative_prompt or None,
+            image_seed=model["image_seed"],
+            **p_series_request_fields(model),
+        )
+        return await p_series_generate(cls, "/proxy/tripo/v3/generation/text-to-model", request)
+
+
+class TripoPSeriesImageToModelNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="TripoPSeriesImageToModelNode",
+            display_name="Tripo P2: Image to Model",
+            category="partner/3d/Tripo",
+            description="Generates a low-poly 3D model with clean topology from an image, "
+            "as a triangle mesh (GLB) or a quad-dominant mesh (FBX).",
+            search_aliases=["tripo p2", "quad mesh", "low poly"],
+            inputs=[p_series_model_input("image")],
+            outputs=model_outputs(legacy=False),
+            hidden=hidden_inputs(),
+            is_api_node=True,
+            price_badge=p_series_price_badge(),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        fields = p_series_request_fields(model)
+        request = TripoPSeriesImageToModelRequest(
+            input=(await upload_images_to_comfyapi(cls, model["image"], max_images=1))[0],
+            enable_image_autofix=model["enable_image_autofix"],
+            **fields,
+        )
+        return await p_series_generate(cls, "/proxy/tripo/v3/generation/image-to-model", request)
+
+
+class TripoPSeriesMultiviewToModelNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="TripoPSeriesMultiviewToModelNode",
+            display_name="Tripo P2: Multiview to Model",
+            category="partner/3d/Tripo",
+            description="Generates a low-poly 3D model with clean topology from a front view plus one to three of the "
+            "left, back and right views, as a triangle mesh (GLB) or a quad-dominant mesh (FBX).",
+            search_aliases=["tripo p2", "quad mesh", "low poly"],
+            inputs=[p_series_model_input("multiview")],
+            outputs=model_outputs(legacy=False),
+            hidden=hidden_inputs(),
+            is_api_node=True,
+            price_badge=p_series_price_badge(),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        views = {
+            "front": model["image"],
+            "left": model.get("image_left"),
+            "back": model.get("image_back"),
+            "right": model.get("image_right"),
+        }
+        if sum(image is not None for image in views.values()) < 2:
+            raise ValueError("Connect the front view and at least one of the left, back or right views.")
+        fields = p_series_request_fields(model)
+        inputs = [
+            {view: (await upload_images_to_comfyapi(cls, image, max_images=1))[0]}
+            for view, image in views.items()
+            if image is not None
+        ]
+        return await p_series_generate(
+            cls,
+            "/proxy/tripo/v3/generation/multiview-to-model",
+            TripoPSeriesMultiviewToModelRequest(inputs=inputs, **fields),
+        )
+
+
 class TripoExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -2316,6 +2611,9 @@ class TripoExtension(ComfyExtension):
             TripoP1TextToModelNode,
             TripoP1ImageToModelNode,
             TripoP1MultiviewToModelNode,
+            TripoPSeriesTextToModelNode,
+            TripoPSeriesImageToModelNode,
+            TripoPSeriesMultiviewToModelNode,
             TripoImportModelNode,
             TripoImageToMultiviewNode,
             TripoEditMultiviewNode,

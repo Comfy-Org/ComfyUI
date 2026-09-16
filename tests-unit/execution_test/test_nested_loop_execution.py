@@ -179,6 +179,24 @@ class ListBackedScalar:
         return ([[value]],)
 
 
+class RecordCarried:
+    values = []
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"value": ("*",)}}
+
+    RETURN_TYPES = ("*",)
+    OUTPUT_IS_LIST = (True,)
+    INPUT_IS_LIST = True
+    FUNCTION = "execute"
+
+    def execute(self, value):
+        value = list(value)
+        self.values.append(value)
+        return (value,)
+
+
 class AppendIndex:
     values = []
 
@@ -289,6 +307,7 @@ def register_internal_loop_nodes(monkeypatch):
         "TestPair": Pair,
         "TestListBackedScalar": ListBackedScalar,
         "TestAppendIndex": AppendIndex,
+        "TestRecordCarried": RecordCarried,
         "TestEmptyList": EmptyList,
         "TestIntegerList": IntegerList,
         "TestCaptureLoopState": CaptureLoopState,
@@ -467,6 +486,32 @@ def test_loop_executes_final_carried_value_without_output():
     }
     execute_prompt(prompt, "carry-only-loop-test", ["close"])
     assert Increment.calls == [1, 2]
+
+
+def test_loop_carries_every_item_of_a_heterogeneous_list():
+    RecordCarried.values = []
+    prompt = {
+        "pair": {"class_type": "TestPair", "inputs": {"value": 7}},
+        "loop": {
+            "class_type": "StartLoop",
+            "inputs": {
+                "mode": "simple",
+                "mode.num_iterations": 2,
+                "initial_iteration_value": ["pair", 0],
+            },
+        },
+        "record": {"class_type": "TestRecordCarried", "inputs": {"value": ["loop", 4]}},
+        "close": {
+            "class_type": "EndLoop",
+            "inputs": {
+                "output_value": ["record", 0],
+                "next_iteration_value": ["record", 0],
+                "accumulate": False,
+            },
+        },
+    }
+    execute_prompt(prompt, "heterogeneous-carry-loop-test", ["close"])
+    assert RecordCarried.values == [[7, "7"], [7, "7"]]
 
 
 def test_loop_preserves_list_backed_carried_value():

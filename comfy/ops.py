@@ -184,9 +184,10 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         needs_cast = False
 
         xfer_source = [ s.weight, s.bias ]
-        subset = "weights"
+        fast_disk = s._pin_state["fast_disk"]
+        subset = "weights-fast" if fast_disk else "weights"
         pin = comfy.pinned_memory.get_pin(s, subset=subset)
-        if pin is None and not args.fast_disk:
+        if pin is None and not fast_disk:
             loaded_pin = comfy.pinned_memory.get_pin(s, subset="weights-loaded")
             if loaded_pin is not None or signature is not None:
                 subset = "weights-loaded"
@@ -227,7 +228,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
             if pin is not None:
                 cast_maybe_lowvram_patch([pin], dest, offload_stream)
                 return
-            if signature is None or not args.fast_disk or args.high_ram:
+            if signature is None or not fast_disk or args.high_ram:
                 comfy.pinned_memory.pin_memory(m, subset=subset, size=size)
                 pin = comfy.pinned_memory.get_pin(m, subset=subset)
             cast_maybe_lowvram_patch(source, pin, offload_stream, xfer_dest2=dest)
@@ -242,14 +243,14 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
                 lowvram_dest = get_cast_buffer(lowvram_size)
                 lowvram_source.prepare(lowvram_dest, None, copy=False, commit=True)
 
-                subset = "patches"
+                subset = "patches-fast" if fast_disk else "patches"
                 pin = comfy.pinned_memory.get_pin(lowvram_source, subset=subset)
-                if pin is None:
+                if pin is None and not fast_disk:
                     loaded_pin = comfy.pinned_memory.get_pin(lowvram_source, subset="patches-loaded")
                     if loaded_pin is not None:
                         subset = "patches-loaded"
                         pin = loaded_pin
-                    elif signature is not None and not args.fast_disk:
+                    elif signature is not None:
                         subset = "patches-loaded"
                 handle_pin(lowvram_source, pin, lowvram_source, lowvram_dest, subset=subset, size=lowvram_size)
 

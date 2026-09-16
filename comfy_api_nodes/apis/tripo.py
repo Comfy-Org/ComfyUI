@@ -448,6 +448,39 @@ class TripoP1MultiviewToModelRequest(TripoP1CommonRequest):
     orientation: str | None = None
 
 
+class TripoPSeriesRequest(BaseModel):
+    model: str = Field(..., description="P-series model version, e.g. P2-20260801")
+    quad: bool | None = Field(None, description="Quad-dominant mesh, delivered as FBX")
+    face_limit: int | None = Field(None, ge=48, le=50000, description="Target face count; at most 25000 with quad")
+    model_seed: int | None = Field(None, description="Random seed for geometry generation")
+    texture: bool | None = Field(None, description="Enable texturing")
+    pbr: bool | None = Field(None, description="Enable PBR maps")
+    texture_seed: int | None = Field(None, description="Random seed for texture generation")
+    texture_quality: str | None = Field(None, description='"standard", "detailed" or "extreme"')
+    auto_size: bool | None = Field(None, description="Scale textured models to real-world meters")
+    export_uv: bool | None = Field(None, description="UV unwrap untextured models")
+    compress: str | None = Field(None, description='Only "geometry" is supported')
+
+
+class TripoPSeriesTextToModelRequest(TripoPSeriesRequest):
+    prompt: str = Field(..., max_length=1024)
+    negative_prompt: str | None = Field(None, max_length=255)
+    image_seed: int | None = Field(None)
+
+
+class TripoPSeriesImageToModelRequest(TripoPSeriesRequest):
+    input: str = Field(..., description="Image URL or file token")
+    enable_image_autofix: bool | None = Field(None)
+    texture_alignment: str | None = Field(None, description='"original_image" or "geometry"')
+    orientation: str | None = Field(None, description='"default" or "align_image"')
+
+
+class TripoPSeriesMultiviewToModelRequest(TripoPSeriesRequest):
+    inputs: list[dict[str, str]] = Field(..., description="View-keyed image references: front, left, back, right")
+    texture_alignment: str | None = Field(None, description='"original_image" or "geometry"')
+    orientation: str | None = Field(None, description='"default" or "align_image"')
+
+
 class TripoImportModelRequest(BaseModel):
     input: str = Field(..., description="URL or file token of the model file")
 
