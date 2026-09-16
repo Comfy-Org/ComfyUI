@@ -1,6 +1,7 @@
 import os
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -92,6 +93,37 @@ def test_never_stabilizes_dropped_after_cap(session, temp_dir: Path):
 
     assert _WATCH_LIST == []
     assert session.scalars(select(AssetContent)).all() == []
+
+
+def test_stat_error_drops_entry_and_allows_other_watch_entries_to_commit(
+    session, temp_dir: Path, monkeypatch
+):
+    unreadable_path = temp_dir / "unreadable.bin"
+    stable_path = temp_dir / "stable.bin"
+    unreadable_path.write_bytes(b"unreadable")
+    stable_path.write_bytes(b"stable")
+    unreadable_stat = unreadable_path.stat()
+    stable_stat = stable_path.stat()
+    _WATCH_LIST[:] = [
+        _WatchEntry(str(unreadable_path), unreadable_stat),
+        _WatchEntry(str(stable_path), stable_stat),
+    ]
+    real_os = scanner_admission.os
+
+    def _stat(path: str):
+        if path == str(unreadable_path):
+            raise PermissionError(path)
+        return real_os.stat(path)
+
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
+    monkeypatch.setattr(scanner_admission, "os", SimpleNamespace(stat=_stat))
+
+    tick_watch_list(session)
+    session.commit()
+
+    persisted_paths = set(session.scalars(select(AssetContent.path)).all())
+    assert persisted_paths == {str(stable_path)}
+    assert _WATCH_LIST == []
 
 
 def test_stable_scan_admission_removes_watch_entry_before_next_tick(session, temp_dir: Path, monkeypatch):
