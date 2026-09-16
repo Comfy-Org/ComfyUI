@@ -215,7 +215,7 @@ class GatedDeltaNet(nn.Module):
         )
 
         fused_available = getattr(comfy_kitchen, "gated_delta_decode_is_available", None)
-        use_fused = (use_recurrent and self.key_head_dim == 128 and fused_available is not None and fused_available(x.device)
+        use_fused = (use_recurrent and fused_available is not None and fused_available(x.device, self.key_head_dim, self.value_head_dim)
                      and (seq_len == 1 or getattr(past_key_value, "snap_backing", None) is not None))
 
         # Projections (shared)
