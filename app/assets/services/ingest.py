@@ -13,6 +13,7 @@ import logging
 import mimetypes
 import os
 import shutil
+import tempfile
 from typing import Any, NamedTuple
 
 from sqlalchemy import func, select
@@ -192,8 +193,13 @@ def _move_temp_to_dest(temp_path: str, dest_abs: str) -> None:
     except OSError as error:
         if error.errno == errno.EXDEV:
             destination_dir = os.path.dirname(dest_abs)
-            destination_temp = os.path.join(destination_dir, f".{os.path.basename(dest_abs)}.tmp")
+            destination_fd, destination_temp = tempfile.mkstemp(
+                dir=destination_dir,
+                prefix=f".{os.path.basename(dest_abs)}.",
+                suffix=".tmp",
+            )
             try:
+                os.close(destination_fd)
                 shutil.copy2(temp_path, destination_temp)
                 os.replace(destination_temp, dest_abs)
             except BaseException:
