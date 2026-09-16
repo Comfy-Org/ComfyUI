@@ -22,6 +22,9 @@ class Queue:
         if self.completion_error is not None:
             raise self.completion_error
 
+    def get_flags(self):
+        return {}
+
 
 class Server:
     last_prompt_id = None
@@ -99,4 +102,21 @@ def test_prompt_worker_preserves_execute_error_when_resume_raises(prompt_worker_
     with pytest.raises(RuntimeError, match="^forced execute failure$"):
         prompt_worker_module.prompt_worker(Queue(), Server(), asset_manager)
 
+    assert asset_manager.paused is False
+
+
+def test_prompt_worker_resumes_scan_when_later_iteration_raises_before_gc(
+    prompt_worker_module,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(prompt_worker_module.execution, "PromptExecutor", Executor)
+    clock = iter((1.0, 2.0, 2.0))
+    monkeypatch.setattr(prompt_worker_module.time, "perf_counter", lambda: next(clock))
+    asset_manager = AssetManager()
+    queue = Queue()
+
+    with pytest.raises(LoopEscape, match="^prompt worker requested a second item$"):
+        prompt_worker_module.prompt_worker(queue, Server(), asset_manager)
+
+    assert queue.get_calls == 2
     assert asset_manager.paused is False

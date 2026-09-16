@@ -32,9 +32,9 @@ def prompt_worker(q, server_instance, asset_manager):
     last_gc_collect = 0
     need_gc = False
     gc_collect_interval = 10.0
+    background_scan_paused = False
 
     while True:
-        background_scan_paused = False
         try:
             timeout = 1000.0
             if need_gc:
