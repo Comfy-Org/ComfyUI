@@ -40,7 +40,7 @@ class TextGenerate(io.ComfyNode):
                 io.DynamicCombo.Input("sampling_mode", options=sampling_options, display_name="Sampling Mode"),
                 io.Boolean.Input("thinking", optional=True, default=False, tooltip="Operate in thinking mode if the model supports it."),
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
-                io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5"], default="auto", optional=True, display_name="Speculative Decoding (MTP)", tooltip="Speed up decoding with the model's multi-token-prediction head, drafting several tokens per step and verifying them in one pass. Requires a checkpoint with MTP weights, otherwise has no effect. \"auto\" picks the draft depth from measured acceptance; 2-5 pins it. When sampling, rejection sampling preserves the sampling distribution exactly but generated sequences differ from non-MTP sampling for the same seed; greedy output may differ at rare logit ties."),
+                io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth; 2-5 pins it. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
             ],
             outputs=[
                 io.String.Output(display_name="generated_text"),
