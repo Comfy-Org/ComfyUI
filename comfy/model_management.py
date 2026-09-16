@@ -1983,13 +1983,13 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
     return False
 
 def supports_fp8_compute(device=None):
+    if device is not None and not is_device_cuda(device):
+        return False
+
     if SUPPORT_FP8_OPS:
         return True
 
     if not is_nvidia():
-        return False
-
-    if device is not None and not is_device_cuda(device):
         return False
 
     props = torch.cuda.get_device_properties(device)

@@ -18,6 +18,7 @@ if not has_gpu():
 
 from comfy import ops
 from comfy.quant_ops import QUANT_ALGOS, QuantizedTensor
+import comfy.model_management as mm
 import comfy.utils
 
 
@@ -399,13 +400,14 @@ class TestMixedPrecisionOps(unittest.TestCase):
         unconditionally, which raises ValueError('Expected a cuda device, but
         got: cpu') instead of just reporting the format unsupported on CPU
         (see Comfy-Org/ComfyUI#16365)."""
-        import comfy.model_management as mm
-
         cpu_device = torch.device("cpu")
         with unittest.mock.patch.object(mm, "is_nvidia", return_value=True):
             self.assertFalse(mm.supports_fp8_compute(cpu_device))
             self.assertFalse(mm.supports_nvfp4_compute(cpu_device))
-            self.assertFalse(mm.supports_mxfp8_compute(cpu_device))
+            with unittest.mock.patch.object(mm, "torch_version_numeric", (2, 10)):
+                self.assertFalse(mm.supports_mxfp8_compute(cpu_device))
+            with unittest.mock.patch.object(mm, "SUPPORT_FP8_OPS", True):
+                self.assertFalse(mm.supports_fp8_compute(cpu_device))
 
     def test_convrot_w4a4_loads_into_params(self):
         """ConvRot W4A4 checkpoints must load as the dedicated kitchen layout."""
