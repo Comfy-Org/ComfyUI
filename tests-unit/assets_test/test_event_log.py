@@ -168,7 +168,9 @@ def test_unknown_field_raises_under_pytest():
         emit("seeder.scan_started", path="/home/x/models")
 
 
-@pytest.mark.parametrize("value", ["a/b", "a\\b", "a:b", "a b", "a=b", 'a"b'])
+@pytest.mark.parametrize(
+    "value", ["a/b", "a\\b", "a:b", "a b", "a=b", 'a"b', "a\nb", "a\rb"]
+)
 def test_a_string_value_carrying_a_forbidden_character_raises(value):
     with pytest.raises(EventLogError):
         emit("seeder.scan_failed", error_type=value)
