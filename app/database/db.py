@@ -322,6 +322,15 @@ def _migrate_and_bind(db_url, db_path, db_exists):
             timeout_ms = max(1, min(_SQLITE_BUSY_TIMEOUT_MS, remaining_ms))
         dbapi_connection.execute(f"PRAGMA busy_timeout = {int(timeout_ms)}")
 
+    @event.listens_for(writer_engine, "begin", insert=True)
+    def cap_writer_busy_timeout_before_begin(connection):
+        deadline = getattr(_attempt_lock_deadline, "value", None)
+        timeout_ms = _SQLITE_BUSY_TIMEOUT_MS
+        if deadline is not None:
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            timeout_ms = max(1, min(_SQLITE_BUSY_TIMEOUT_MS, remaining_ms))
+        connection.exec_driver_sql(f"PRAGMA busy_timeout = {int(timeout_ms)}")
+
     with reader_engine.connect():
         pass
     with writer_engine.connect():
