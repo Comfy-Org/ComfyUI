@@ -174,9 +174,9 @@ def test_executed_registration_reports_exhausted_locked_retries(monkeypatch, cap
     monkeypatch.setattr(ingest, "run_write_txn", exhausted_retries)
     try:
         with caplog.at_level(logging.INFO):
-            assert ingest.register_executed_output(path) is None
+            assert ingest.register_executed_output(path, job_id="job-locked") is None
         assert _registration_failure_event(caplog) == (
-            "[assets-event] ingest.register_failed error_type=OperationalError output_kind=executed"
+            "[assets-event] ingest.register_failed error_type=OperationalError job_id=job-locked output_kind=executed"
         )
     finally:
         os.unlink(path)
@@ -193,9 +193,9 @@ def test_executed_registration_reports_non_retryable_write_failure(monkeypatch, 
     monkeypatch.setattr(ingest, "run_write_txn", non_retryable_failure)
     try:
         with caplog.at_level(logging.INFO):
-            assert ingest.register_executed_output(path) is None
+            assert ingest.register_executed_output(path, job_id="job-integrity") is None
         assert _registration_failure_event(caplog) == (
-            "[assets-event] ingest.register_failed error_type=IntegrityError output_kind=executed"
+            "[assets-event] ingest.register_failed error_type=IntegrityError job_id=job-integrity output_kind=executed"
         )
     finally:
         os.unlink(path)
@@ -205,9 +205,9 @@ def test_executed_registration_reports_preflight_os_error(monkeypatch, caplog) -
     monkeypatch.setattr(ingest.os, "stat", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("gone")))
 
     with caplog.at_level(logging.INFO):
-        assert ingest.register_executed_output("/missing/output.bin") is None
+        assert ingest.register_executed_output("/missing/output.bin", job_id="job-preflight") is None
     assert _registration_failure_event(caplog) == (
-        "[assets-event] ingest.register_failed error_type=OSError output_kind=executed"
+        "[assets-event] ingest.register_failed error_type=OSError job_id=job-preflight output_kind=executed"
     )
 
 
@@ -258,7 +258,7 @@ def test_cached_registration_reports_terminal_write_failure(
     monkeypatch.setattr(ingest, "run_write_txn", non_retryable_failure)
     try:
         with caplog.at_level(logging.INFO):
-            assert ingest.register_cached_output(path) is None
+            assert ingest.register_cached_output(path, job_id=None) is None
         assert _registration_failure_event(caplog) == (
             "[assets-event] ingest.register_failed error_type=IntegrityError output_kind=cached"
         )

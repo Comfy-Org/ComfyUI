@@ -1124,6 +1124,7 @@ def register_cached_output(
             "ingest.register_failed",
             output_kind="cached",
             error_type=error_type(exc),
+            job_id=job_id,
         )
         return None
 
@@ -1186,5 +1187,6 @@ def register_executed_output(
             "ingest.register_failed",
             output_kind="executed",
             error_type=error_type(exc),
+            job_id=job_id,
         )
         return None
