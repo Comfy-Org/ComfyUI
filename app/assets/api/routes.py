@@ -1134,4 +1134,10 @@ async def mark_missing_assets(request: web.Request) -> web.Response:
             {"status": "scan_running", "marked": 0},
             status=409,
         )
+    if marked is None:
+        return _build_error_response(
+            500,
+            "PRUNE_FAILED",
+            "Failed to mark missing assets.",
+        )
     return web.json_response({"status": "completed", "marked": marked}, status=200)

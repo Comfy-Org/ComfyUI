@@ -1,3 +1,4 @@
+import logging
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -96,7 +97,7 @@ def test_never_stabilizes_dropped_after_cap(session, temp_dir: Path):
 
 
 def test_stat_error_drops_entry_and_allows_other_watch_entries_to_commit(
-    session, temp_dir: Path, monkeypatch
+    session, temp_dir: Path, monkeypatch, caplog: pytest.LogCaptureFixture
 ):
     unreadable_path = temp_dir / "unreadable.bin"
     stable_path = temp_dir / "stable.bin"
@@ -118,12 +119,62 @@ def test_stat_error_drops_entry_and_allows_other_watch_entries_to_commit(
     monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
     monkeypatch.setattr(scanner_admission, "os", SimpleNamespace(stat=_stat))
 
-    tick_watch_list(session)
+    with caplog.at_level(logging.INFO):
+        tick_watch_list(session)
     session.commit()
 
     persisted_paths = set(session.scalars(select(AssetContent.path)).all())
     assert persisted_paths == {str(stable_path)}
     assert _WATCH_LIST == []
+    assert any(
+        record.getMessage()
+        == f"Dropping watched asset after stat failed: {unreadable_path}"
+        for record in caplog.records
+    )
+    assert any(
+        record.getMessage()
+        == "[assets-event] scanner.watch_stat_failed error_type=PermissionError"
+        for record in caplog.records
+    )
+
+
+def test_seed_failure_does_not_stop_watch_list_drain(
+    session,
+    temp_dir: Path,
+    monkeypatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    paths = [temp_dir / name for name in ("broken.bin", "stable.bin")]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
+    attempted: list[str] = []
+
+    def seed_or_raise(_session, specs) -> int:
+        path = specs[0]["abs_path"]
+        attempted.append(path)
+        if path == str(paths[0]):
+            raise RuntimeError("forced watch seed failure")
+        return 1
+
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
+    monkeypatch.setattr("app.assets.scanner.seed_asset_specs", seed_or_raise)
+
+    with caplog.at_level(logging.INFO):
+        tick_watch_list(session)
+
+    assert attempted == [str(path) for path in paths]
+    assert _WATCH_LIST == []
+    assert any(
+        record.getMessage()
+        == f"Dropping watched asset after seeding failed: {paths[0]}"
+        for record in caplog.records
+    )
+    assert any(
+        record.getMessage()
+        == "[assets-event] scanner.watch_seed_failed error_type=RuntimeError"
+        for record in caplog.records
+    )
 
 
 def test_stable_scan_admission_removes_watch_entry_before_next_tick(session, temp_dir: Path, monkeypatch):

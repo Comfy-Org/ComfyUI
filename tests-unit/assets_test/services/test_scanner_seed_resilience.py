@@ -1,3 +1,4 @@
+import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -206,6 +207,86 @@ def test_seed_propagates_unrelated_integrity_error(
         seed_asset_specs(session, [_spec(path)])
 
     assert raised.value is unrelated_error
+
+
+def test_seed_attempts_remaining_specs_before_propagating_integrity_error(
+    session: Session, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = [temp_dir / name for name in ("first.bin", "broken.bin", "last.bin")]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    attempted: list[str] = []
+    unrelated_error = IntegrityError(
+        "forced record creation failure",
+        {},
+        ValueError("unrelated integrity failure"),
+    )
+
+    def _create_record_or_raise(
+        session_arg: Session,
+        *,
+        content_id: str,
+        name: str,
+        mime_type: str | None,
+        job_id: str | None,
+        loader_path: str | None,
+        tags: list[str],
+    ) -> Asset:
+        attempted.append(name)
+        if name == "broken.bin":
+            raise unrelated_error
+        return create_record(
+            session_arg,
+            content_id=content_id,
+            name=name,
+            mime_type=mime_type,
+            job_id=job_id,
+            loader_path=loader_path,
+            tags=tags,
+        )
+
+    monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
+
+    with pytest.raises(IntegrityError) as raised:
+        seed_asset_specs(session, [_spec(path) for path in paths])
+    session.commit()
+
+    assert raised.value is unrelated_error
+    assert attempted == ["first.bin", "broken.bin", "last.bin"]
+    assert {record.name for record in session.scalars(select(Asset))} == {
+        "first.bin",
+        "last.bin",
+    }
+
+
+def test_seed_skips_negative_fresh_mtime_with_warning_and_telemetry(
+    session: Session,
+    temp_dir: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    paths = [temp_dir / name for name in ("first.bin", "old.bin", "last.bin")]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    pre_epoch_ns = -315_547_200_000_000_000
+    os.utime(paths[1], ns=(pre_epoch_ns, pre_epoch_ns))
+
+    with caplog.at_level(logging.INFO):
+        created = seed_asset_specs(session, [_spec(path) for path in paths])
+    session.commit()
+
+    assert created == 2
+    assert {record.name for record in session.scalars(select(Asset))} == {
+        "first.bin",
+        "last.bin",
+    }
+    assert any(
+        record.getMessage() == f"Skipping asset with invalid mtime during scan: {paths[1]}"
+        for record in caplog.records
+    )
+    assert any(
+        record.getMessage() == "[assets-event] scanner.invalid_mtime"
+        for record in caplog.records
+    )
 
 
 def test_seed_persists_fresh_stat_after_spec_was_built(

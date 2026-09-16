@@ -8,6 +8,7 @@ still downloading out of the catalog.
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 import os
 import time
@@ -16,6 +17,7 @@ from typing import Final
 
 from sqlalchemy.orm import Session
 
+from app.assets.event_log import emit, error_type
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 
 PARTIAL_DOWNLOAD_EXTENSIONS = frozenset({
@@ -73,7 +75,9 @@ def tick_watch_list(session: Session) -> None:
     for entry in _WATCH_LIST:
         try:
             current = os.stat(entry.path)
-        except OSError:
+        except OSError as exc:
+            logging.warning("Dropping watched asset after stat failed: %s", entry.path)
+            emit("scanner.watch_stat_failed", error_type=error_type(exc))
             continue
         if (current.st_mtime_ns, current.st_size) == (entry.last_stat.st_mtime_ns, entry.last_stat.st_size):
             name, tags = get_name_and_tags_from_asset_path(entry.path)
@@ -88,7 +92,13 @@ def tick_watch_list(session: Session) -> None:
                 "mime_type": mimetypes.guess_type(entry.path, strict=False)[0],
                 "job_id": None,
             }
-            seed_asset_specs(session, [spec])
+            try:
+                seed_asset_specs(session, [spec])
+            except Exception as exc:
+                logging.warning(
+                    "Dropping watched asset after seeding failed: %s", entry.path
+                )
+                emit("scanner.watch_seed_failed", error_type=error_type(exc))
             continue
         entry.last_stat = current
         entry.ticks += 1

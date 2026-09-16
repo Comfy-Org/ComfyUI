@@ -441,7 +441,7 @@ class _AssetSeeder:
                 self._thread = None
         return joined
 
-    def mark_missing_outside_prefixes(self) -> int:
+    def mark_missing_outside_prefixes(self) -> int | None:
         """Mark references as missing when outside all known root prefixes.
 
         This is a non-destructive soft-delete operation. Assets and their
@@ -476,16 +476,16 @@ class _AssetSeeder:
 
             all_prefixes = get_owned_prefixes()
             marked = mark_missing_outside_prefixes_safely(all_prefixes)
-            marked_count = 0 if marked is None else marked
-            if marked is not None:
-                emit(
-                    "seeder.marked_missing",
-                    count=marked_count,
-                    stage=_ScanStage.MARK_MISSING.value,
-                )
-            if marked_count > 0:
-                logging.info("Marked %d references as missing", marked_count)
-            return marked_count
+            if marked is None:
+                return None
+            emit(
+                "seeder.marked_missing",
+                count=marked,
+                stage=_ScanStage.MARK_MISSING.value,
+            )
+            if marked > 0:
+                logging.info("Marked %d references as missing", marked)
+            return marked
         finally:
             with self._lock:
                 self._reset_to_idle()
