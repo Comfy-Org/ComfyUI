@@ -449,7 +449,11 @@ def insert_asset_specs(specs: list[SeedAssetSpec], _tag_pool: set[str]) -> int:
     if not specs:
         return 0
     with create_session() as sess:
-        created = seed_asset_specs(sess, specs)
+        try:
+            created = seed_asset_specs(sess, specs)
+        except Exception:
+            sess.commit()
+            raise
         sess.commit()
         return created
 

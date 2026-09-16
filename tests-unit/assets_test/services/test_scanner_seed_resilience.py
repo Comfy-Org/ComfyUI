@@ -1,6 +1,7 @@
 import logging
 import os
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,7 +17,7 @@ from app.assets.database.queries import (
     create_record,
     delete_record,
 )
-from app.assets.scanner import SeedAssetSpec, seed_asset_specs
+from app.assets.scanner import SeedAssetSpec, insert_asset_specs, seed_asset_specs
 from app.assets.services.snapshot_hash import snapshot_hash
 
 
@@ -257,6 +258,53 @@ def test_seed_attempts_remaining_specs_before_propagating_integrity_error(
         "first.bin",
         "last.bin",
     }
+
+
+def test_insert_commits_successful_specs_before_propagating_batch_fault(
+    db_engine, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = [temp_dir / name for name in ("first.bin", "broken.bin", "last.bin")]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+
+    @contextmanager
+    def _create_session():
+        with Session(db_engine) as session:
+            yield session
+
+    def _create_record_or_raise(
+        session_arg: Session,
+        *,
+        content_id: str,
+        name: str,
+        mime_type: str | None,
+        job_id: str | None,
+        loader_path: str | None,
+        tags: list[str],
+    ) -> Asset:
+        if name == "broken.bin":
+            raise RuntimeError("forced record creation failure")
+        return create_record(
+            session_arg,
+            content_id=content_id,
+            name=name,
+            mime_type=mime_type,
+            job_id=job_id,
+            loader_path=loader_path,
+            tags=tags,
+        )
+
+    monkeypatch.setattr("app.assets.scanner.create_session", _create_session)
+    monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
+
+    with pytest.raises(RuntimeError, match="forced record creation failure"):
+        insert_asset_specs([_spec(path) for path in paths], set())
+
+    with Session(db_engine) as session:
+        assert {record.name for record in session.scalars(select(Asset))} == {
+            "first.bin",
+            "last.bin",
+        }
 
 
 def test_seed_skips_negative_fresh_mtime_with_warning_and_telemetry(
