@@ -17,7 +17,6 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.assets import mode
-from app.assets.api.upload import delete_temp_file_if_exists
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries.records import (
     create_content_reporting_insert,
@@ -132,10 +131,11 @@ _UPLOAD_HASH_ATTEMPTS = 3
 
 
 def _remove_temp_path(temp_path: str | None) -> None:
-    if not temp_path or not os.path.exists(temp_path):
+    if not temp_path:
         return
     with contextlib.suppress(OSError):
-        os.remove(temp_path)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
     parent = os.path.dirname(temp_path)
     with contextlib.suppress(OSError):
         if parent and os.path.isdir(parent):
@@ -484,7 +484,7 @@ def upload_from_temp_path(
         )
         _move_temp_to_dest(temp_path, dest_abs)
     finally:
-        delete_temp_file_if_exists(temp_path)
+        _remove_temp_path(temp_path)
     size_bytes, mtime_ns = verified_stat.st_size, verified_stat.st_mtime_ns
     with create_session() as session:
         _reconcile_live_content_at_path(
