@@ -76,6 +76,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table("asset_system_state")
     op.drop_table("asset_tags")
+    op.execute("DROP TABLE IF EXISTS asset_meta")
     op.drop_table("assets")
     op.drop_table("asset_contents")
     op.create_table(
