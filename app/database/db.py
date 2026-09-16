@@ -182,7 +182,6 @@ def _init_file_db(db_url):
     db_path = get_db_path()
     prepare_file_db_path(db_path)
 
-    # The lock lives beside the database, so its parent directory must exist first.
     # All database reads and writes, including the legacy import, run under the lock.
     _acquire_file_lock(db_path)
     try:
