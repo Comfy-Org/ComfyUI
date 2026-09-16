@@ -324,10 +324,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
             if size not in ("auto", "1024x1024", "1024x1536", "1536x1024"):
                 raise ValueError(f"Resolution {size} is only supported by GPT Image 2 model")
 
-        if model == "gpt-image-2":
-            if background == "transparent":
-                raise ValueError("Transparent background is not supported for GPT Image 2 model")
-        elif model not in ("gpt-image-1", "gpt-image-1.5"):
+        if model not in ("gpt-image-1", "gpt-image-1.5", "gpt-image-2"):
             raise ValueError(f"Unknown model: {model}")
 
         if image is not None:
@@ -527,7 +524,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                         ),
                         IO.DynamicCombo.Option(
                             "gpt-image-2",
-                            _gpt_image_2_model_inputs(("auto", "opaque"), GPT_IMAGE_QUALITIES),
+                            _gpt_image_2_model_inputs(("auto", "opaque", "transparent"), GPT_IMAGE_QUALITIES),
                         ),
                         IO.DynamicCombo.Option("gpt-image-1.5", _gpt_image_legacy_model_inputs()),
                         IO.DynamicCombo.Option("gpt-image-1", _gpt_image_legacy_model_inputs()),
