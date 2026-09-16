@@ -1,5 +1,5 @@
 """Declares the asset schema: content rows describing bytes on disk, records
-describing what a user sees, and the tag and metadata tables hanging off them.
+describing what a user sees, and the asset_tags table hanging off them.
 The split is the point — many records can name one content row, and retiring
 content by marking it missing rather than deleting it is what keeps a path's
 history intact. Constraints declared here, not application code, are what make
