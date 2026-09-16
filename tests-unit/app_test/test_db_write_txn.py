@@ -146,6 +146,83 @@ def test_run_write_txn_retries_locked_operational_errors_then_succeeds(
     assert attempts == 3
 
 
+def test_begin_immediate_caps_a_single_wait_at_the_busy_timeout(monkeypatch):
+    clock = {"now": 0.0}
+
+    class Connection:
+        def execute(self, _statement):
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db_mod.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        db_mod.time,
+        "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+    db_mod._attempt_lock_deadline.value = 60.0
+
+    try:
+        with pytest.raises(OperationalError, match="database is locked"):
+            db_mod._begin_immediate(Connection())
+    finally:
+        db_mod._attempt_lock_deadline.value = None
+
+    assert clock["now"] == pytest.approx(30.0)
+
+
+def test_begin_immediate_and_write_retries_share_locked_only_classification(
+    memory_database, monkeypatch
+):
+    clock = {"now": 0.0}
+    attempts = 0
+
+    class Connection:
+        def execute(self, _statement):
+            raise sqlite3.OperationalError("database is busy")
+
+    monkeypatch.setattr(db_mod.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        db_mod.time,
+        "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="database is busy"):
+        db_mod._begin_immediate(Connection())
+
+    def work(_session):
+        nonlocal attempts
+        attempts += 1
+        raise OperationalError("INSERT", {}, sqlite3.OperationalError("database is busy"))
+
+    with pytest.raises(OperationalError, match="database is busy"):
+        db_mod.run_write_txn(work)
+
+    assert attempts == 1
+
+
+def test_run_write_txn_closes_when_rollback_fails_without_masking_work_error(monkeypatch):
+    class Session:
+        closed = False
+
+        def rollback(self):
+            raise RuntimeError("rollback failure")
+
+        def close(self):
+            self.closed = True
+
+    session = Session()
+    monkeypatch.setattr(db_mod, "WriteSession", lambda: session)
+
+    def work(_session):
+        raise ValueError("work failure")
+
+    with pytest.raises(ValueError, match="work failure"):
+        db_mod.run_write_txn(work)
+
+    assert session.closed
+
+
 def test_run_write_txn_reraises_nonretryable_operational_error_without_retry(memory_database):
     run_write_txn = db_mod.run_write_txn
     attempts = 0

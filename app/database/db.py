@@ -3,6 +3,7 @@ import os
 import random
 import shutil
 import sqlite3
+import sys
 import threading
 import time
 from typing import Callable, TypeVar
@@ -239,9 +240,10 @@ def _configure_runtime_connection(dbapi_connection, db_path):
 
 
 def _begin_immediate(dbapi_connection):
-    deadline = getattr(_attempt_lock_deadline, "value", None)
-    if deadline is None:
-        deadline = time.monotonic() + _SQLITE_BUSY_TIMEOUT_MS / 1000
+    retry_deadline = getattr(_attempt_lock_deadline, "value", None)
+    now = time.monotonic()
+    busy_timeout_deadline = now + _SQLITE_BUSY_TIMEOUT_MS / 1000
+    deadline = min(retry_deadline, busy_timeout_deadline) if retry_deadline is not None else busy_timeout_deadline
 
     while True:
         try:
@@ -249,8 +251,7 @@ def _begin_immediate(dbapi_connection):
             cursor.close()
             return
         except sqlite3.OperationalError as exc:
-            error_message = str(exc).lower()
-            if "locked" not in error_message and "busy" not in error_message:
+            if not _is_retryable_lock_error(exc):
                 raise
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
@@ -349,6 +350,10 @@ def create_session():
     return Session()
 
 
+def _is_retryable_lock_error(exc: BaseException) -> bool:
+    return "locked" in str(exc).lower()
+
+
 def run_write_txn(work: Callable[["SQLAlchemySession"], T]) -> T:
     """Run a write callback with bounded lock retries; its own work is not deadline-limited."""
     if getattr(_write_txn_state, "active", False):
@@ -375,13 +380,19 @@ def run_write_txn(work: Callable[["SQLAlchemySession"], T]) -> T:
                 session.commit()
                 return result
             except OperationalError as exc:
-                if "locked" not in str(exc.orig):
+                if not _is_retryable_lock_error(exc.orig):
                     raise
                 locked_error = exc
             finally:
-                session.rollback()
-                session.close()
-                _attempt_lock_deadline.value = None
+                propagating_exception = sys.exc_info()[0] is not None
+                try:
+                    session.rollback()
+                except BaseException:
+                    if not propagating_exception:
+                        raise
+                finally:
+                    session.close()
+                    _attempt_lock_deadline.value = None
 
             if attempt == len(_WRITE_TXN_BACKOFF_SECONDS) or time.monotonic() >= retry_deadline:
                 raise locked_error
