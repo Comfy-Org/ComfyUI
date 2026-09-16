@@ -159,3 +159,29 @@ def test_destination_resolution_failure_removes_temp_upload(
 
     assert not temp_path.exists()
     assert not upload_dir.exists()
+
+
+def test_successful_upload_reaps_empty_per_upload_directory(
+    mock_create_session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temp_root = tmp_path / "temp"
+    output_root = tmp_path / "output"
+    monkeypatch.setattr(folder_paths, "get_temp_directory", lambda: str(temp_root))
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(output_root))
+
+    upload_dir = temp_root / "uploads" / uuid.uuid4().hex
+    upload_dir.mkdir(parents=True)
+    temp_path = upload_dir / ".upload.part"
+    temp_path.write_bytes(b"uploaded bytes")
+
+    result = upload_from_temp_path(
+        temp_path=str(temp_path),
+        name="model.safetensors",
+        tags=["output"],
+        client_filename="model.safetensors",
+    )
+
+    assert result.created_new is True
+    assert not upload_dir.exists()
