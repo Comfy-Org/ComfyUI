@@ -251,7 +251,9 @@ def _migrate_and_bind(db_url, db_path, db_exists):
                 f"The asset catalog was rebuilt from scratch by migration "
                 f"{_DESTRUCTIVE_REVISION}: manual tags, user metadata, previews, renames, "
                 f"API-created records and job_id links from the previous database were "
-                f"discarded. The database from before the upgrade was kept at {backup_path}."
+                f"discarded. Record deletions were also discarded, so files still on disk "
+                f"will be catalogued again. The database from before the upgrade was kept "
+                f"at {backup_path}."
             )
 
     conn.close()
