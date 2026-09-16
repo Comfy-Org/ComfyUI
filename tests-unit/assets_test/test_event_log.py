@@ -292,3 +292,28 @@ def test_production_mode_still_emits_valid_events_after_a_dropped_one(caplog, mo
 
     tagged = [r.getMessage() for r in caplog.records if r.getMessage().startswith(TAG)]
     assert tagged == ["[assets-event] seeder.scan_started phase=fast"]
+
+
+def test_registration_failure_emits_at_warning_with_unchanged_tap_format(caplog):
+    caplog.clear()
+
+    with caplog.at_level(logging.INFO):
+        emit("ingest.register_failed", output_kind="executed", error_type="OperationalError")
+
+    tagged = [r for r in caplog.records if r.getMessage().startswith(TAG)]
+    assert len(tagged) == 1
+    assert tagged[0].levelno == logging.WARNING
+    assert tagged[0].getMessage() == (
+        "[assets-event] ingest.register_failed error_type=OperationalError output_kind=executed"
+    )
+
+
+def test_routine_events_stay_at_info(caplog):
+    caplog.clear()
+
+    with caplog.at_level(logging.INFO):
+        emit("seeder.scan_started", phase="fast")
+
+    tagged = [r for r in caplog.records if r.getMessage().startswith(TAG)]
+    assert len(tagged) == 1
+    assert tagged[0].levelno == logging.INFO

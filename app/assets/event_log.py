@@ -46,6 +46,10 @@ ALLOWED_EVENTS = frozenset({
     "ingest.register_failed",
 })
 
+WARNING_LEVEL_EVENTS = frozenset({
+    "ingest.register_failed",
+})
+
 
 class EventLogError(ValueError):
     """An emit() call that would break the closed event vocabulary."""
@@ -148,7 +152,8 @@ def emit(
             for name, value in sorted(fields.items())
         )
         line = f"{TAG} {event}" + (f" {pairs}" if pairs else "")
-        logging.info("%s", line)
+        log = logging.warning if event in WARNING_LEVEL_EVENTS else logging.info
+        log("%s", line)
         return
 
     if _strict_mode():
