@@ -15,6 +15,7 @@ from comfy.comfy_api_env import normalize_comfy_api_base
 from comfy.deploy_environment import get_deploy_environment
 from comfy.model_management import processing_interrupted
 from comfy_api.latest import IO
+from comfy_execution.graph_utils import is_link
 from comfy_execution.utils import get_executing_context
 from comfyui_version import __version__ as comfyui_version
 
@@ -135,6 +136,27 @@ def get_fs_object_size(path_or_object: str | BytesIO) -> int:
     if isinstance(path_or_object, str):
         return os.path.getsize(path_or_object)
     return len(path_or_object.getvalue())
+
+
+def get_output_consumers(node_cls: type[IO.ComfyNode], output_index: int) -> list[str]:
+    dynprompt = node_cls.hidden.dynprompt
+    if dynprompt is None:
+        return []
+    node_id = str(node_cls.hidden.unique_id)
+    consumers = []
+    for consumer_id in dynprompt.all_node_ids():
+        consumer = dynprompt.get_node(consumer_id)
+        for value in (consumer.get("inputs") or {}).values():
+            if is_link(value) and value[0] == node_id and value[1] == output_index:
+                title = (consumer.get("_meta") or {}).get("title") or consumer.get("class_type")
+                consumers.append(f"{title} #{dynprompt.get_display_node_id(consumer_id)}")
+    return sorted(consumers)
+
+
+def validate_output_unlinked(node_cls: type[IO.ComfyNode], output_index: int, reason: str) -> None:
+    consumers = get_output_consumers(node_cls, output_index)
+    if consumers:
+        raise ValueError(f"{reason} (currently linked: {', '.join(consumers)}).")
 
 
 def to_aiohttp_url(url: str) -> URL:
