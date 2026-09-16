@@ -150,15 +150,15 @@ def test_seed_failure_does_not_stop_watch_list_drain(
     _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
     attempted: list[str] = []
 
-    def seed_or_raise(_session, specs) -> int:
+    def seed_or_return_error(_session, specs) -> tuple[int, Exception | None]:
         path = specs[0]["abs_path"]
         attempted.append(path)
         if path == str(paths[0]):
-            raise RuntimeError("forced watch seed failure")
-        return 1
+            return 0, RuntimeError("forced watch seed failure")
+        return 1, None
 
     monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
-    monkeypatch.setattr("app.assets.scanner.seed_asset_specs", seed_or_raise)
+    monkeypatch.setattr("app.assets.scanner.seed_asset_specs", seed_or_return_error)
 
     with caplog.at_level(logging.INFO):
         tick_watch_list(session)

@@ -377,7 +377,9 @@ def build_asset_specs(
     return specs, tag_pool, skipped
 
 
-def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
+def seed_asset_specs(
+    session: Session, specs: list[SeedAssetSpec]
+) -> tuple[int, Exception | None]:
     created = 0
     first_error: Exception | None = None
     for spec in specs:
@@ -440,9 +442,7 @@ def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
         except Exception as error:
             if first_error is None:
                 first_error = error
-    if first_error is not None:
-        raise first_error
-    return created
+    return created, first_error
 
 
 def insert_asset_specs(
@@ -451,14 +451,7 @@ def insert_asset_specs(
     if not specs:
         return 0, None
     with create_session() as sess:
-        created = 0
-        first_error: Exception | None = None
-        for spec in specs:
-            try:
-                created += seed_asset_specs(sess, [spec])
-            except Exception as error:
-                if first_error is None:
-                    first_error = error
+        created, first_error = seed_asset_specs(sess, specs)
         try:
             sess.commit()
         except Exception:

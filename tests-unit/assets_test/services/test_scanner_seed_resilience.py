@@ -53,9 +53,10 @@ def test_seed_persists_remaining_specs_when_path_vanishes_before_restat(
     specs, vanished_path = _specs_with_vanished_path(temp_dir)
     vanished_path.unlink()
 
-    created = seed_asset_specs(session, specs)
+    created, error = seed_asset_specs(session, specs)
     session.commit()
 
+    assert error is None
     assert created == 2
     assert _record_count(session) == 2
 
@@ -74,9 +75,10 @@ def test_seed_persists_remaining_specs_when_path_vanishes_during_recovery_hash(
     monkeypatch.setattr("app.assets.scanner_changes.snapshot_hash", _hash_or_raise)
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, specs)
+        created, error = seed_asset_specs(session, specs)
     session.commit()
 
+    assert error is None
     assert created == 2
     assert _record_count(session) == 2
 
@@ -168,9 +170,10 @@ def test_seed_absorbs_live_path_conflict_and_persists_the_specs_around_it(
         _create_content_or_conflict,
     )
 
-    created = seed_asset_specs(session, specs)
+    created, error = seed_asset_specs(session, specs)
     session.commit()
 
+    assert error is None
     assert created == 2
     assert _record_count(session) == 2
     assert {record.name for record in session.scalars(select(Asset))} == {
@@ -204,10 +207,9 @@ def test_seed_propagates_unrelated_integrity_error(
 
     monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
 
-    with pytest.raises(IntegrityError) as raised:
-        seed_asset_specs(session, [_spec(path)])
+    _created, error = seed_asset_specs(session, [_spec(path)])
 
-    assert raised.value is unrelated_error
+    assert error is unrelated_error
 
 
 def test_seed_attempts_remaining_specs_before_propagating_integrity_error(
@@ -248,11 +250,10 @@ def test_seed_attempts_remaining_specs_before_propagating_integrity_error(
 
     monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
 
-    with pytest.raises(IntegrityError) as raised:
-        seed_asset_specs(session, [_spec(path) for path in paths])
+    _created, error = seed_asset_specs(session, [_spec(path) for path in paths])
     session.commit()
 
-    assert raised.value is unrelated_error
+    assert error is unrelated_error
     assert attempted == ["first.bin", "broken.bin", "last.bin"]
     assert {record.name for record in session.scalars(select(Asset))} == {
         "first.bin",
@@ -321,9 +322,10 @@ def test_seed_skips_negative_fresh_mtime_with_warning_and_telemetry(
     os.utime(paths[1], ns=(pre_epoch_ns, pre_epoch_ns))
 
     with caplog.at_level(logging.INFO):
-        created = seed_asset_specs(session, [_spec(path) for path in paths])
+        created, error = seed_asset_specs(session, [_spec(path) for path in paths])
     session.commit()
 
+    assert error is None
     assert created == 2
     assert {record.name for record in session.scalars(select(Asset))} == {
         "first.bin",
@@ -351,12 +353,13 @@ def test_seed_persists_fresh_stat_after_spec_was_built(
     os.utime(path, ns=(fresh_mtime_ns, fresh_mtime_ns))
     fresh_stat = path.stat()
 
-    created = seed_asset_specs(session, [spec])
+    created, error = seed_asset_specs(session, [spec])
     session.commit()
 
     persisted = session.scalar(
         select(AssetContent).where(AssetContent.path == str(path))
     )
+    assert error is None
     assert created == 1
     assert fresh_stat.st_size != spec["size_bytes"]
     assert fresh_stat.st_mtime_ns != spec["mtime_ns"]
@@ -388,8 +391,10 @@ def test_seed_record_failure_preserves_retained_live_content(
 
     monkeypatch.setattr("app.assets.scanner.create_record", _raise_record_creation)
 
-    with pytest.raises(RuntimeError, match="forced record creation failure"):
-        seed_asset_specs(session, [spec])
+    created, error = seed_asset_specs(session, [spec])
     session.rollback()
 
+    assert created == 0
+    assert isinstance(error, RuntimeError)
+    assert str(error) == "forced record creation failure"
     assert session.get(AssetContent, retained_content_id) is not None
