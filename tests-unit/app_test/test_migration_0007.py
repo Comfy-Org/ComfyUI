@@ -169,8 +169,16 @@ def test_0007_orm_parity(db_at_0006, tmp_path):
     assert alembic_tables == orm_tables, f"Mismatch: alembic={alembic_tables}, orm={orm_tables}"
 
 
-@pytest.mark.parametrize("table_name", ["assets", "asset_contents", "asset_tags"])
-def test_0007_index_orm_parity(db_at_0006, table_name):
+@pytest.mark.parametrize(
+    ("table_name", "has_indexes"),
+    [
+        ("assets", True),
+        ("asset_contents", True),
+        ("asset_tags", True),
+        ("asset_system_state", False),
+    ],
+)
+def test_0007_index_orm_parity(db_at_0006, table_name, has_indexes):
     from sqlalchemy import create_engine, inspect
 
     import app.assets.database.models as asset_models
@@ -192,8 +200,8 @@ def test_0007_index_orm_parity(db_at_0006, table_name):
         for index in asset_models.Base.metadata.tables[table_name].indexes
     }
 
-    assert alembic_indexes
-    assert orm_indexes
+    assert bool(alembic_indexes) is has_indexes
+    assert bool(orm_indexes) is has_indexes
     assert alembic_indexes == orm_indexes, (
         f"Mismatch for {table_name}: alembic={alembic_indexes}, orm={orm_indexes}"
     )
