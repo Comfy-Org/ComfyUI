@@ -115,8 +115,6 @@ def prepare_file_db_path(db_path):
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
 
-    copy_legacy_default_db(db_path)
-
 
 _db_lock = None
 
@@ -183,14 +181,13 @@ def _init_file_db(db_url):
     """Initialize a file-backed SQLite database using Alembic migrations."""
     db_path = get_db_path()
     prepare_file_db_path(db_path)
-    db_exists = os.path.exists(db_path)
 
-    # Lock BEFORE any migration work — deliberately diverging from upstream master, whose
-    # "it would block Alembic" rationale is false (the lock guards a separate `<db>.lock`
-    # file). Only this order makes revision inspection, backup, upgrade and the failure-path
-    # restore mutually exclusive between processes.
+    # The lock lives beside the database, so its parent directory must exist first.
+    # All database reads and writes, including the legacy import, run under the lock.
     _acquire_file_lock(db_path)
     try:
+        copy_legacy_default_db(db_path)
+        db_exists = os.path.exists(db_path)
         _migrate_and_bind(db_url, db_path, db_exists)
     except Exception:
         _db_lock.release()
