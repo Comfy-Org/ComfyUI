@@ -37,7 +37,8 @@ VALID_VALUES: dict[str, list[object]] = {
     "count": [1],
     "error_type": ["ValueError", "FileNotFoundError"],
     "hashing_enabled": [True, False],
-    "site": ["discovery", "enrich"],
+    "site": ["discovery", "enrich", "reference_stat"],
+    "output_kind": ["executed", "cached"],
 }
 
 
@@ -91,11 +92,11 @@ def go_to_production_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- the shared cross-repo fixture -------------------------------------------------
 
 
-def test_shared_fixture_file_holds_three_newline_terminated_lines():
+def test_shared_fixture_file_holds_four_newline_terminated_lines():
     raw = FIXTURE_PATH.read_text(encoding="utf-8")
 
     assert raw.endswith("\n")
-    assert len(raw.splitlines()) == 3
+    assert len(raw.splitlines()) == 4
 
 
 @pytest.mark.parametrize("line", fixture_lines())

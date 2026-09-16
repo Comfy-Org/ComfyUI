@@ -16,8 +16,9 @@ from aiohttp.test_utils import make_mocked_request
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
+from app.assets import scanner
 from app.assets.api import routes
-from app.assets.database.models import Asset
+from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_content, create_record
 from app.database.models import Base
 
@@ -73,6 +74,28 @@ def route_database(monkeypatch: pytest.MonkeyPatch) -> Iterator[RouteDatabase]:
     with Session(engine) as session:
         yield engine, session
     engine.dispose()
+
+
+def enrich_via_prepare_apply(
+    session: Session,
+    *,
+    file_path: str,
+    content_id: str,
+    record_id: str,
+    extract_metadata: bool = True,
+    compute_hash: bool = False,
+    progress=None,
+) -> bool:
+    content = session.get(AssetContent, content_id)
+    row = scanner.UnenrichedContent(
+        content_id, record_id, file_path, content is not None and content.hash is None
+    )
+    prepared = scanner._prepare_enrichment(row, extract_metadata, compute_hash, progress)
+    if prepared is None:
+        return False
+    updated = scanner._apply_enrichment(session, prepared)
+    session.commit()
+    return updated
 
 
 def seed_record(session: Session, seed: RecordSeed) -> Asset:

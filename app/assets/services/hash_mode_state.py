@@ -23,6 +23,7 @@ from app.assets.database.queries.records import create_content, create_record, m
 from app.assets.helpers import to_stored_hash
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 from app.assets.services.snapshot_hash import snapshot_hash
+from app.database.db import run_write_txn
 
 _KEY = "hash_mode"
 _MAX_VERIFY_ATTEMPTS: Final = 3
@@ -94,82 +95,97 @@ def enqueue_transition_work(session: Session, transition: str | None) -> None:
             _PENDING_PATHS.add(row.path)
 
 
-def _retry_or_retire(session: Session, entry: _PendingEntry) -> None:
-    entry.ticks += 1
-    if entry.ticks < _MAX_VERIFY_ATTEMPTS:
-        _PENDING_QUEUE.append(entry)
-        _PENDING_PATHS.add(entry.path)
-        return
-    content = session.scalars(
-        select(AssetContent).where(
-            AssetContent.path == entry.path, AssetContent.is_missing.is_(False)
-        )
-    ).first()
-    if content is not None:
-        content.hash = None
-    logging.warning(
-        "Could not verify %s in %d attempts; clearing its stored hash so the hash-mode "
-        "transition can complete",
-        entry.path,
-        _MAX_VERIFY_ATTEMPTS,
-    )
-
-
-def drain_transition_queue(session: Session) -> None:
+def drain_transition_queue(_session: Session | None = None) -> None:
     global _off_to_on_transition_in_flight
 
     pending_count = len(_PENDING_QUEUE)
     for _ in range(pending_count):
-        entry = _PENDING_QUEUE.popleft()
-        _PENDING_PATHS.discard(entry.path)
-        path = entry.path
+        entry = _PENDING_QUEUE[0]
+        snapshot: tuple[str, os.stat_result] | None = None
+        preparation = "ready"
         try:
-            snapshot = snapshot_hash(path)
+            snapshot = snapshot_hash(entry.path)
         except OSError:
-            _retry_or_retire(session, entry)
-            continue
-        if snapshot is None:
-            # snapshot_hash returns None for vanished and unstable files; stat distinguishes them.
+            preparation = "retry"
+        if snapshot is None and preparation != "retry":
             try:
-                os.stat(path)
+                os.stat(entry.path)
             except FileNotFoundError:
-                gone = session.scalars(
+                preparation = "gone"
+            except OSError:
+                preparation = "retry"
+            else:
+                preparation = "retry"
+
+        def _apply(session: Session) -> str:
+            if preparation == "retry" or (
+                snapshot is None and preparation != "gone"
+            ):
+                if entry.ticks + 1 < _MAX_VERIFY_ATTEMPTS:
+                    return "retry"
+                content = session.scalars(
                     select(AssetContent).where(
-                        AssetContent.path == path, AssetContent.is_missing.is_(False)
+                        AssetContent.path == entry.path,
+                        AssetContent.is_missing.is_(False),
                     )
                 ).first()
-                if gone is not None:
-                    mark_content_missing(session, gone.id)
-            except OSError:
-                _retry_or_retire(session, entry)
-            else:
-                _retry_or_retire(session, entry)
-            continue
-        digest, stat = snapshot
-        stored_hash = to_stored_hash(digest)
-        content = session.scalars(
-            select(AssetContent).where(
-                AssetContent.path == path, AssetContent.is_missing.is_(False)
-            )
-        ).first()
-        if content is None:
-            continue
-        if content.hash is None:
-            content.hash = stored_hash
-            content.size_bytes = stat.st_size
-            content.mtime_ns = stat.st_mtime_ns
-        elif content.hash != stored_hash:
+                if content is not None:
+                    content.hash = None
+                logging.warning(
+                    "Could not verify %s in %d attempts; clearing its stored hash so the hash-mode "
+                    "transition can complete",
+                    entry.path,
+                    _MAX_VERIFY_ATTEMPTS,
+                )
+                return "drop"
+            content = session.scalars(
+                select(AssetContent).where(
+                    AssetContent.path == entry.path,
+                    AssetContent.is_missing.is_(False),
+                )
+            ).first()
+            if content is None:
+                return "drop"
+            if preparation == "gone":
+                try:
+                    os.stat(entry.path)
+                except FileNotFoundError:
+                    mark_content_missing(session, content.id)
+                    return "drop"
+                except OSError:
+                    return "retry"
+                return "retry"
+            digest, stat = snapshot
             try:
-                name, tags = get_name_and_tags_from_asset_path(path)
+                current_stat = os.stat(entry.path)
+            except OSError:
+                return "retry"
+            if (
+                current_stat.st_size != stat.st_size
+                or current_stat.st_mtime_ns != stat.st_mtime_ns
+            ):
+                return "retry"
+            stored_hash = to_stored_hash(digest)
+            if content.hash is None:
+                content.hash = stored_hash
+                content.size_bytes = stat.st_size
+                content.mtime_ns = stat.st_mtime_ns
+                return "drop"
+            if content.hash == stored_hash:
+                content.size_bytes = stat.st_size
+                content.mtime_ns = stat.st_mtime_ns
+                return "drop"
+            try:
+                name, tags = get_name_and_tags_from_asset_path(entry.path)
             except ValueError:
                 logging.warning(
-                    "Skipping hash-mode split for out-of-root path: %s", path
+                    "Skipping hash-mode split for out-of-root path: %s", entry.path
                 )
-                continue
+                return "drop"
             mark_content_missing(session, content.id)
             replacement = create_content(
                 session,
-                path=path,
+                path=entry.path,
                 hash=stored_hash,
                 size_bytes=stat.st_size,
                 mtime_ns=stat.st_mtime_ns,
@@ -178,12 +194,17 @@ def drain_transition_queue(session: Session) -> None:
                 session,
                 content_id=replacement.id,
                 name=name,
-                loader_path=compute_loader_path(path),
+                loader_path=compute_loader_path(entry.path),
                 tags=tags,
             )
+            return "drop"
+
+        outcome = run_write_txn(_apply)
+        _PENDING_QUEUE.popleft()
+        if outcome == "retry":
+            _PENDING_QUEUE.append(_PendingEntry(entry.path, entry.ticks + 1))
         else:
-            content.size_bytes = stat.st_size
-            content.mtime_ns = stat.st_mtime_ns
+            _PENDING_PATHS.discard(entry.path)
     if _off_to_on_transition_in_flight and not _PENDING_QUEUE:
-        write_stored_mode(session, "on")
+        run_write_txn(lambda session: write_stored_mode(session, "on"))
         _off_to_on_transition_in_flight = False

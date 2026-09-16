@@ -9,7 +9,7 @@ import pytest
 from aiohttp.test_utils import make_mocked_request
 from blake3 import blake3
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.assets import mode
 from app.assets.api import routes
@@ -55,9 +55,12 @@ from app.assets.services.snapshot_hash import snapshot_hash
 
 
 @pytest.fixture
-def session():
+def session(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr("app.database.db.Session", factory)
+    monkeypatch.setattr("app.database.db.WriteSession", factory)
     with Session(engine) as database_session:
         yield database_session
 
@@ -209,6 +212,7 @@ def test_scenario_4_delete_no_revival(session, tmp_path):
         assert delete_asset_reference(record_id) is True
         assert delete_asset_reference(record_id) is False
 
+    session.expire_all()
     assert get_record_by_id(session, record_id) is None
     assert session.get(AssetContent, content_id) is not None
 
@@ -259,6 +263,7 @@ def test_scenario_6_upload_reuses_content_never_the_record(session, tmp_path):
                 "app.assets.services.ingest.create_session",
                 lambda: nullcontext(session),
             ),
+            patch("app.database.db.WriteSession", sessionmaker(bind=session.bind)),
             patch.object(mode, "hashing_enabled", return_value=hashing),
         ):
             return upload_from_temp_path(
@@ -373,6 +378,7 @@ def test_scenario_10_cached_delivery_record(session, tmp_path):
             "app.assets.services.ingest.create_session",
             lambda: nullcontext(session),
         ),
+        patch("app.database.db.WriteSession", sessionmaker(bind=session.bind)),
     ):
         delivered = register_cached_output(str(path), job_id="delivery-job")
 
@@ -402,6 +408,7 @@ def test_scenario_10_cached_delivery_record(session, tmp_path):
             "app.assets.services.ingest.create_session",
             lambda: nullcontext(session),
         ),
+        patch("app.database.db.WriteSession", sessionmaker(bind=session.bind)),
     ):
         assert register_cached_output(str(path), job_id="second-delivery") is None
     assert {row.id for row in session.scalars(select(Asset))} == {
@@ -505,6 +512,7 @@ def test_scenario_18_edit_during_hash_discard(session, tmp_path):
         mtime_ns=seed_stat.st_mtime_ns,
     )
     record = create_record(session, content.id, "unstable.bin")
+    session.commit()
 
     clear_pending_verifications()
     try:
@@ -523,8 +531,10 @@ def test_scenario_18_edit_during_hash_discard(session, tmp_path):
     finally:
         clear_pending_verifications()
 
-    assert content.hash == committed_hash
-    assert content.mtime_ns == path.stat().st_mtime_ns
+    session.expire_all()
+    refreshed = session.get(AssetContent, content.id)
+    assert refreshed.hash == committed_hash
+    assert refreshed.mtime_ns == path.stat().st_mtime_ns
 
 
 def test_writer_simulation_terminates_and_is_capped(tmp_path):

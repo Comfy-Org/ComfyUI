@@ -1,7 +1,6 @@
 import logging
 import re
 import threading
-from contextlib import nullcontext
 from unittest.mock import Mock
 
 import pytest
@@ -143,7 +142,6 @@ def test_enrich_phase_does_not_count_returned_ids_as_failures(
     scan_seeder: _AssetSeeder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    session = Mock()
     batches = iter(
         (
             [
@@ -153,10 +151,9 @@ def test_enrich_phase_does_not_count_returned_ids_as_failures(
             [],
         )
     )
-    monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
-    monkeypatch.setattr(seeder_module, "drain_pending_verifications", lambda _session: None)
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _session: None)
-    monkeypatch.setattr(seeder_module, "drain_transition_queue", lambda _session: None)
+    monkeypatch.setattr(seeder_module, "drain_pending_verifications", lambda: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
+    monkeypatch.setattr(seeder_module, "drain_transition_queue", lambda: None)
     monkeypatch.setattr(
         seeder_module,
         "get_unenriched_assets_for_roots",
@@ -425,7 +422,6 @@ def test_batch_insert_failure_emits_only_the_exception_type(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    session = Mock()
     monkeypatch.setattr(
         seeder_module, "sync_root_safely", lambda _root, _progress: set()
     )
@@ -446,8 +442,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
         raise PermissionError("/private/models/asset.safetensors")
 
     monkeypatch.setattr(seeder_module, "insert_asset_specs", fail_insert)
-    monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda current_session: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_fast_phase(("models",))

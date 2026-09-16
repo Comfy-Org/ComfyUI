@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import create_engine, func, select, update
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session as SASession
+from sqlalchemy.orm import Session as SASession, sessionmaker
 
 import app.assets.mode as mode_module
 import app.assets.services.ingest as ingest_module
@@ -1049,6 +1049,7 @@ def test_two_connections_hash_changed_between_lookup_and_claim_falls_back(
                 "app.assets.services.ingest.create_session",
                 lambda: _session_factory(engine),
             ),
+            patch("app.database.db.WriteSession", sessionmaker(bind=engine)),
             patch(
                 "app.assets.services.ingest.claim_qualified_content",
                 claim_after_a_rehashes,
@@ -1123,6 +1124,7 @@ def test_two_connections_competing_retirement_is_blocked_until_commit(
                 "app.assets.services.ingest.create_session",
                 lambda: _session_factory(engine),
             ),
+            patch("app.database.db.WriteSession", sessionmaker(bind=engine)),
             patch(
                 "app.assets.services.ingest._create_upload_record",
                 create_record_after_a_retires,
@@ -1227,7 +1229,7 @@ def test_upload_normalizes_tags_before_they_reach_the_query_layer(
     real_create_upload_record = ingest_module._create_upload_record
 
     def capturing_create_upload_record(*args, **kwargs):
-        captured.append(list(args[4]))
+        captured.append(list(args[2].preflight.spec.tags))
         return real_create_upload_record(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -1313,9 +1315,7 @@ def test_incumbent_reconciliation_persists_the_stat_hashing_verified(
             _mutating_snapshot_hash(dest_abs, rewritten),
         )
 
-        with mock_create_session() as session:
-            ingest_module._settle_destination_before_write(session, dest_abs)
-            session.commit()
+        ingest_module._settle_destination_before_write(dest_abs)
 
         verified_size, verified_mtime = _stat_pair(dest_abs)
         with mock_create_session() as session:

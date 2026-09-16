@@ -34,7 +34,7 @@ from app.assets.services.schemas import (
     ReferenceData,
     UserMetadata,
 )
-from app.database.db import create_session
+from app.database.db import create_session, run_write_txn
 
 
 def _record_to_detail_result(session, record) -> AssetDetailResult:
@@ -93,7 +93,7 @@ def update_asset_metadata(
     mime_type: str | None = None,
     preview_id: str | None = None,
 ) -> AssetDetailResult:
-    with create_session() as session:
+    def _work(session) -> None:
         record = get_record_by_id(session, reference_id)
         if record is None:
             raise ValueError(f"Asset {reference_id} not found")
@@ -143,7 +143,8 @@ def update_asset_metadata(
             session.flush()
             if _fetch_manual_tags(session, reference_id) != manual_tags_before:
                 bump_record_updated_at(session, reference_id)
-        session.commit()
+
+    run_write_txn(_work)
 
     detail = get_asset_detail(reference_id)
     if detail is None:
@@ -154,12 +155,13 @@ def update_asset_metadata(
 def delete_asset_reference(
     reference_id: str,
 ) -> bool:
-    with create_session() as session:
+    def _work(session) -> bool:
         if get_record_by_id(session, reference_id) is None:
             return False
         delete_record(session, reference_id)
-        session.commit()
         return True
+
+    return run_write_txn(_work)
 
 
 def asset_exists(asset_hash: str) -> bool:
@@ -189,7 +191,8 @@ def resolve_hash_to_path(
         canonical = validate_blake3_hash(asset_hash)
     except ValueError:
         return None
-    with create_session() as session:
+
+    def _work(session) -> tuple[str, str | None, str] | None:
         content = lookup_for_view(session, canonical)
         if content is None:
             return None
@@ -209,15 +212,18 @@ def resolve_hash_to_path(
             mime_type = latest_record.mime_type
         for record in records:
             update_record_access_time(session, record.id)
-        abs_path = content.path
-        session.commit()
+        return content.path, mime_type, display_name
 
-        ctype = (
-            mime_type
-            or mimetypes.guess_type(display_name)[0]
-            or mimetypes.guess_type(abs_path)[0]
-            or "application/octet-stream"
-        )
+    resolution = run_write_txn(_work)
+    if resolution is None:
+        return None
+    abs_path, mime_type, display_name = resolution
+    ctype = (
+        mime_type
+        or mimetypes.guess_type(display_name)[0]
+        or mimetypes.guess_type(abs_path)[0]
+        or "application/octet-stream"
+    )
     return DownloadResolutionResult(
         abs_path=abs_path,
         content_type=ctype,
@@ -236,7 +242,7 @@ def get_preview_file_paths(preview_ids: list[str]) -> dict[str, str]:
 def resolve_asset_for_download(
     reference_id: str,
 ) -> DownloadResolutionResult:
-    with create_session() as session:
+    def _work(session) -> tuple[str, str | None, str | None]:
         record = get_record_by_id(session, reference_id)
         if record is None:
             raise ValueError(f"AssetReference {reference_id} not found")
@@ -257,16 +263,17 @@ def resolve_asset_for_download(
         abs_path = content.path
 
         update_record_access_time(session, reference_id)
-        session.commit()
+        return abs_path, asset_mime, ref_name
 
-        ctype = (
-            asset_mime
-            or mimetypes.guess_type(ref_name or abs_path)[0]
-            or "application/octet-stream"
-        )
-        download_name = ref_name or os.path.basename(abs_path)
-        return DownloadResolutionResult(
-            abs_path=abs_path,
-            content_type=ctype,
-            download_name=download_name,
-        )
+    abs_path, asset_mime, ref_name = run_write_txn(_work)
+    ctype = (
+        asset_mime
+        or mimetypes.guess_type(ref_name or abs_path)[0]
+        or "application/octet-stream"
+    )
+    download_name = ref_name or os.path.basename(abs_path)
+    return DownloadResolutionResult(
+        abs_path=abs_path,
+        content_type=ctype,
+        download_name=download_name,
+    )

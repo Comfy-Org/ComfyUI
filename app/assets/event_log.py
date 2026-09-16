@@ -27,7 +27,7 @@ FORBIDDEN_STRING_CHARS = ("/", "\\", ":", " ", "=", '"')
 ROOTS = frozenset({"models", "input", "output", "user", "temp"})
 PHASES = frozenset({"fast", "enrich", "full"})
 STAGES = frozenset({"mark_missing", "pruning", "fast_scan", "enrich", "finalize"})
-STAT_SITES = frozenset({"discovery", "enrich"})
+STAT_SITES = frozenset({"discovery", "enrich", "reference_stat"})
 ALLOWED_EVENTS = frozenset({
     "assets.enabled",
     "seeder.scan_started",
@@ -43,6 +43,7 @@ ALLOWED_EVENTS = frozenset({
     "scanner.temp_sync_failed",
     "scanner.mark_missing_failed",
     "scanner.stat_failed",
+    "ingest.register_failed",
 })
 
 
@@ -89,6 +90,7 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "error_type": _is_safe_string,
     "hashing_enabled": _is_flag,
     "site": _one_of(STAT_SITES),
+    "output_kind": _one_of(frozenset({"executed", "cached"})),
 }
 
 _warned_call_sites: set[tuple[str, int]] = set()

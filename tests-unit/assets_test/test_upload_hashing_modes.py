@@ -15,7 +15,7 @@ import pytest
 import requests
 from aiohttp import web
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session as SASession
+from sqlalchemy.orm import Session as SASession, sessionmaker
 
 import app.assets.mode as mode_module
 import folder_paths
@@ -225,6 +225,7 @@ def test_output_not_hashed_in_on_mode(monkeypatch):
     monkeypatch.setattr(
         "app.assets.services.ingest.create_session", _fake_create_session
     )
+    monkeypatch.setattr("app.database.db.WriteSession", sessionmaker(bind=engine))
 
     output_dir = folder_paths.get_output_directory()
     os.makedirs(output_dir, exist_ok=True)

@@ -4,7 +4,8 @@ from unittest.mock import patch
 
 from app.assets.database.models import Asset, AssetContent
 from app.assets.helpers import to_stored_hash
-from app.assets.scanner import enrich_asset
+
+from ..helpers import enrich_via_prepare_apply as enrich_asset
 
 
 def _create_unhashed_record(session, path: Path) -> tuple[AssetContent, Asset]:

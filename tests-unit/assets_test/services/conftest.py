@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, event
-from sqlalchemy.orm import Session, Session as SASession
+from sqlalchemy.orm import Session, Session as SASession, sessionmaker
 
 from app.assets import mode
 from app.assets.database.models import Base
@@ -51,8 +51,11 @@ def db_engine_fk():
 
 
 @pytest.fixture
-def session(db_engine):
+def session(db_engine, monkeypatch):
     """Session fixture for tests that need direct DB access."""
+    factory = sessionmaker(bind=db_engine)
+    monkeypatch.setattr("app.database.db.Session", factory)
+    monkeypatch.setattr("app.database.db.WriteSession", factory)
     with Session(db_engine) as sess:
         yield sess
 
@@ -67,7 +70,8 @@ def mock_create_session(db_engine):
 
     with patch("app.assets.services.ingest.create_session", _create_session), \
          patch("app.assets.services.asset_management.create_session", _create_session), \
-         patch("app.assets.services.tagging.create_session", _create_session):
+         patch("app.assets.services.tagging.create_session", _create_session), \
+         patch("app.database.db.WriteSession", sessionmaker(bind=db_engine)):
         yield _create_session
 
 

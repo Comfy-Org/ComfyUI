@@ -57,12 +57,15 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite(
             "app/assets/scanner.py", "mark_missing_outside_prefixes_safely", "scanner.mark_missing_failed"
         ),
-        CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_failed"),
-        CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_discarded_modified"),
+        CallSite("app/assets/scanner.py", "_prepare_enrichment", "scanner.hash_failed"),
+        CallSite("app/assets/scanner.py", "_prepare_enrichment", "scanner.hash_discarded_modified"),
         CallSite("app/assets/scanner.py", "enrich_assets_batch", "scanner.enrich_failed"),
         # todo 16 - discovery/enrich stat failures, emit-once per scan per site
         CallSite("app/assets/scanner.py", "build_asset_specs", "scanner.stat_failed"),
-        CallSite("app/assets/scanner.py", "enrich_asset", "scanner.stat_failed"),
+        CallSite("app/assets/scanner.py", "_prepare_enrichment", "scanner.stat_failed"),
+        CallSite("app/assets/scanner.py", "_publish_reference_diagnostics", "scanner.stat_failed"),
+        CallSite("app/assets/services/ingest.py", "register_cached_output", "ingest.register_failed"),
+        CallSite("app/assets/services/ingest.py", "register_executed_output", "ingest.register_failed"),
     }
 )
 

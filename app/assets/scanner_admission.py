@@ -66,14 +66,16 @@ def _two_stat_admit(paths_with_stats: list[tuple[str, os.stat_result]]) -> tuple
     return admitted, watched
 
 
-def tick_watch_list(session: Session) -> None:
-    from app.assets.scanner import seed_asset_specs, SeedAssetSpec
+def tick_watch_list(_session: Session | None = None) -> None:
+    from app.assets.scanner import SeedAssetSpec, insert_asset_specs
 
-    remaining: list[_WatchEntry] = []
-    for entry in _WATCH_LIST:
+    queued_count = len(_WATCH_LIST)
+    for _ in range(queued_count):
+        entry = _WATCH_LIST[0]
         try:
             current = os.stat(entry.path)
         except FileNotFoundError:
+            _WATCH_LIST.pop(0)
             continue
         if (current.st_mtime_ns, current.st_size) == (entry.last_stat.st_mtime_ns, entry.last_stat.st_size):
             name, tags = get_name_and_tags_from_asset_path(entry.path)
@@ -88,10 +90,10 @@ def tick_watch_list(session: Session) -> None:
                 "mime_type": mimetypes.guess_type(entry.path, strict=False)[0],
                 "job_id": None,
             }
-            seed_asset_specs(session, [spec])
+            insert_asset_specs([spec], set(spec["tags"]))
+            _WATCH_LIST.pop(0)
             continue
-        entry.last_stat = current
-        entry.ticks += 1
-        if entry.ticks < _WATCH_SCAN_RETRIES:
-            remaining.append(entry)
-    _WATCH_LIST[:] = remaining
+        next_entry = _WatchEntry(entry.path, current, entry.ticks + 1)
+        _WATCH_LIST.pop(0)
+        if next_entry.ticks < _WATCH_SCAN_RETRIES:
+            _WATCH_LIST.append(next_entry)
