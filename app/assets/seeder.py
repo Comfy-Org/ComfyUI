@@ -10,7 +10,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Callable, TypedDict
 
@@ -410,7 +410,9 @@ class _AssetSeeder:
             progress = (
                 _snapshot_progress(self._scan_state)
                 if self._scan_state is not None
-                else self._last_progress
+                else replace(self._last_progress)
+                if self._last_progress is not None
+                else None
             )
             return ScanStatus(
                 state=self._state,
@@ -474,14 +476,16 @@ class _AssetSeeder:
 
             all_prefixes = get_owned_prefixes()
             marked = mark_missing_outside_prefixes_safely(all_prefixes)
-            emit(
-                "seeder.marked_missing",
-                count=marked,
-                stage=_ScanStage.MARK_MISSING.value,
-            )
-            if marked > 0:
-                logging.info("Marked %d references as missing", marked)
-            return marked
+            marked_count = 0 if marked is None else marked
+            if marked is not None:
+                emit(
+                    "seeder.marked_missing",
+                    count=marked_count,
+                    stage=_ScanStage.MARK_MISSING.value,
+                )
+            if marked_count > 0:
+                logging.info("Marked %d references as missing", marked_count)
+            return marked_count
         finally:
             with self._lock:
                 self._reset_to_idle()
@@ -624,13 +628,17 @@ class _AssetSeeder:
             if self._prune_first:
                 all_prefixes = get_owned_prefixes()
                 marked = mark_missing_outside_prefixes_safely(all_prefixes)
-                emit(
-                    "seeder.marked_missing",
-                    count=marked,
-                    stage=_ScanStage.PRUNING.value,
-                )
-                if marked > 0:
-                    logging.info("Marked %d refs as missing before scan", marked)
+                marked_count = 0 if marked is None else marked
+                if marked is not None:
+                    emit(
+                        "seeder.marked_missing",
+                        count=marked_count,
+                        stage=_ScanStage.PRUNING.value,
+                    )
+                if marked_count > 0:
+                    logging.info(
+                        "Marked %d refs as missing before scan", marked_count
+                    )
                 sync_temp_references_safely(scan_state)
 
             if self._check_pause_and_cancel(_ScanStage.PRUNING):
