@@ -41,7 +41,10 @@ def snapshot_hash(
     path: str, chunk_size: int = 8 * 1024 * 1024
 ) -> tuple[str, os.stat_result] | None:
     if blake3 is None:
-        raise ModuleNotFoundError("No module named 'blake3'") from _BLAKE3_IMPORT_ERROR
+        raise ModuleNotFoundError(
+            f"blake3 is required for asset hashing but could not be imported: "
+            f"{_BLAKE3_IMPORT_ERROR}"
+        ) from _BLAKE3_IMPORT_ERROR
     try:
         pre_stat = _snapshot(os.stat(path))
         hasher = blake3()
