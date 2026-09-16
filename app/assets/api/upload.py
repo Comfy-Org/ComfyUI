@@ -1,8 +1,7 @@
 """Reads a multipart upload off the wire and lands its bytes in a temporary file
 the ingest service can hash and move. The body is consumed in chunks so a large
 model never has to fit in memory. Validation failures remove any temporary file
-before they are reported to the caller. Field values are validated as they
-arrive, letting a bad request fail before its bytes are written.
+before they are reported to the caller.
 """
 
 import logging
@@ -64,6 +63,7 @@ async def parse_multipart_upload(
 
     file_written = 0
     tmp_path: str | None = None
+    parse_succeeded = False
 
     try:
         while True:
@@ -133,35 +133,39 @@ async def parse_multipart_upload(
                 provided_mime_type = ((await field.text()) or "").strip() or None
             elif fname == "preview_id":
                 provided_preview_id = ((await field.text()) or "").strip() or None
-    except UploadError:
-        delete_temp_file_if_exists(tmp_path)
-        raise
-    if not file_present and not (provided_hash and provided_hash_exists):
-        raise UploadError(
-            400, "MISSING_FILE", "Form must include a 'file' part or a known 'hash'."
+
+        if not file_present and not (provided_hash and provided_hash_exists):
+            raise UploadError(
+                400,
+                "MISSING_FILE",
+                "Form must include a 'file' part or a known 'hash'.",
+            )
+
+        if (
+            file_present
+            and file_written == 0
+            and not (provided_hash and provided_hash_exists)
+        ):
+            raise UploadError(400, "EMPTY_UPLOAD", "Uploaded file is empty.")
+
+        parsed = ParsedUpload(
+            file_present=file_present,
+            file_written=file_written,
+            file_client_name=file_client_name,
+            tmp_path=tmp_path,
+            tags_raw=tags_raw,
+            provided_name=provided_name,
+            user_metadata_raw=user_metadata_raw,
+            provided_hash=provided_hash,
+            provided_hash_exists=provided_hash_exists,
+            provided_mime_type=provided_mime_type,
+            provided_preview_id=provided_preview_id,
         )
-
-    if (
-        file_present
-        and file_written == 0
-        and not (provided_hash and provided_hash_exists)
-    ):
-        delete_temp_file_if_exists(tmp_path)
-        raise UploadError(400, "EMPTY_UPLOAD", "Uploaded file is empty.")
-
-    return ParsedUpload(
-        file_present=file_present,
-        file_written=file_written,
-        file_client_name=file_client_name,
-        tmp_path=tmp_path,
-        tags_raw=tags_raw,
-        provided_name=provided_name,
-        user_metadata_raw=user_metadata_raw,
-        provided_hash=provided_hash,
-        provided_hash_exists=provided_hash_exists,
-        provided_mime_type=provided_mime_type,
-        provided_preview_id=provided_preview_id,
-    )
+        parse_succeeded = True
+        return parsed
+    finally:
+        if not parse_succeeded:
+            delete_temp_file_if_exists(tmp_path)
 
 
 def delete_temp_file_if_exists(tmp_path: str | None) -> None:

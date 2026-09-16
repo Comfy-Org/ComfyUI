@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -35,6 +36,88 @@ async def test_multipart_id_after_file_removes_temp_upload(
         await parse_multipart_upload(request, lambda _hash: False)
 
     assert list((tmp_path / "uploads").iterdir()) == []
+
+
+def _file_field() -> AsyncMock:
+    field = AsyncMock()
+    field.name = "file"
+    field.filename = "model.safetensors"
+    field.read_chunk.side_effect = [b"uploaded bytes", b""]
+    return field
+
+
+def _multipart_request(*fields: AsyncMock) -> AsyncMock:
+    reader = AsyncMock()
+    reader.next.side_effect = [*fields, None]
+    request = AsyncMock()
+    request.content_type = "multipart/form-data"
+    request.multipart.return_value = reader
+    return request
+
+
+@pytest.mark.asyncio
+async def test_invalid_utf8_after_file_removes_temp_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(folder_paths, "get_temp_directory", lambda: str(tmp_path))
+    tags_field = AsyncMock()
+    tags_field.name = "tags"
+    tags_field.text.side_effect = UnicodeDecodeError(
+        "utf-8", b"\xff", 0, 1, "invalid start byte"
+    )
+    request = _multipart_request(_file_field(), tags_field)
+
+    with pytest.raises(UnicodeDecodeError):
+        await parse_multipart_upload(request, lambda _hash: False)
+
+    assert list((tmp_path / "uploads").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_malformed_framing_after_file_removes_temp_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(folder_paths, "get_temp_directory", lambda: str(tmp_path))
+    request = _multipart_request(_file_field())
+    request.multipart.return_value.next.side_effect = [
+        _file_field(),
+        ValueError("Reading after EOF"),
+    ]
+
+    with pytest.raises(ValueError, match="Reading after EOF"):
+        await parse_multipart_upload(request, lambda _hash: False)
+
+    assert list((tmp_path / "uploads").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_upload_removes_temp_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(folder_paths, "get_temp_directory", lambda: str(tmp_path))
+    request = _multipart_request(_file_field())
+    request.multipart.return_value.next.side_effect = [
+        _file_field(),
+        asyncio.CancelledError(),
+    ]
+
+    with pytest.raises(asyncio.CancelledError):
+        await parse_multipart_upload(request, lambda _hash: False)
+
+    assert list((tmp_path / "uploads").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_successful_parse_returns_consumable_temp_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(folder_paths, "get_temp_directory", lambda: str(tmp_path))
+    request = _multipart_request(_file_field())
+
+    parsed = await parse_multipart_upload(request, lambda _hash: False)
+
+    assert parsed.tmp_path is not None
+    assert Path(parsed.tmp_path).read_bytes() == b"uploaded bytes"
 
 
 def test_destination_resolution_failure_removes_temp_upload(
