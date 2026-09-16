@@ -1,5 +1,5 @@
-"""Owns every write to content rows, records and their tag links, plus the paged
-reads that list them. Inserts that can lose a race — a content row at a path, a
+"""Provides shared writes for content rows, records and tag links, plus the paged
+reads that list records. Inserts that can lose a race — a content row at a path, a
 tag, a tag link — run inside a savepoint and re-read the conflicting row, so a
 concurrent writer settles the call instead of raising, while a genuine
 constraint failure still surfaces. This is the sole writer of a content row's
