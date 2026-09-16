@@ -7,6 +7,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 import app.database.db as db_mod
+from app.assets import mode as mode_module
 from app.assets import scanner
 from app.assets import scanner_admission
 from app.assets import scanner_changes
@@ -111,8 +112,6 @@ def test_transition_queue_and_companion_state_survive_terminal_commit_failure(
     write_stored_mode(session, "off")
     session.commit()
 
-    from app.assets import mode as mode_module
-
     monkeypatch.setattr(mode_module, "hashing_enabled", lambda: True)
 
     clear_transition_queue()
@@ -143,8 +142,6 @@ def test_transition_in_flight_flag_survives_a_failed_final_mode_commit(
     create_content(session, str(path), size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns)
     write_stored_mode(session, "off")
     session.commit()
-
-    from app.assets import mode as mode_module
 
     monkeypatch.setattr(mode_module, "hashing_enabled", lambda: True)
 

@@ -202,7 +202,7 @@ def test_transition_hashing_does_not_hold_the_write_lock(
     assert result.get("done") is True
 
 
-def test_b1_enrichment_hashing_does_not_hold_the_write_lock(
+def test_enrichment_hashing_does_not_hold_the_write_lock(
     file_database, tmp_path, monkeypatch
 ):
     path = tmp_path / "enrich-hash.bin"
@@ -250,7 +250,7 @@ def test_b1_enrichment_hashing_does_not_hold_the_write_lock(
     assert result["outcome"] == (1, [])
 
 
-def test_b1_enrichment_metadata_extraction_does_not_hold_the_write_lock(
+def test_enrichment_metadata_extraction_does_not_hold_the_write_lock(
     file_database, tmp_path, monkeypatch
 ):
     path = tmp_path / "enrich-metadata.bin"

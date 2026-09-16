@@ -58,7 +58,7 @@ def _fast_retries(monkeypatch):
     monkeypatch.setattr(db_mod.time, "sleep", lambda _seconds: None)
 
 
-def test_group_a_transient_locked_error_retried_preserves_queue_once(
+def test_scanner_sync_transient_locked_error_retried_preserves_queue_once(
     db_engine, tmp_path: Path, monkeypatch, session
 ):
     """A commit-time locked failure that later succeeds must publish the
@@ -93,7 +93,7 @@ def test_group_a_transient_locked_error_retried_preserves_queue_once(
     scanner_changes.clear_pending_verifications()
 
 
-def test_group_a_sync_permission_diagnostic_published_exactly_once_after_retry(
+def test_scanner_sync_permission_diagnostic_published_exactly_once_after_retry(
     db_engine, tmp_path: Path, monkeypatch, session, caplog
 ):
     """A commit-time locked failure that later succeeds must publish the
@@ -135,7 +135,7 @@ def test_group_a_sync_permission_diagnostic_published_exactly_once_after_retry(
     ]
 
 
-def test_b1_counter_integrity_under_a_locked_failure_at_row_n(
+def test_enrichment_counter_integrity_under_a_locked_failure_at_row_n(
     db_engine, tmp_path: Path, session, monkeypatch
 ):
     """Injecting a locked failure at the middle row of a batch must not
