@@ -45,6 +45,7 @@ from comfyui_version import __version__
 from app.frontend_management import FrontendManager, parse_version
 from comfy_api.internal import _ComfyNodeInternal
 from app.assets.services.asset_management import resolve_hash_to_path
+from app.assets.event_log import emit
 
 from app.user_manager import UserManager
 from app.model_manager import ModelFileManager
@@ -256,6 +257,8 @@ class PromptServer():
         logging.info(f"[Prompt Server] web root: {self.web_root}")
         self.asset_manager.register_routes(self.app, self.user_manager)
         self.asset_manager.set_event_sink(self.send_sync)
+        if self.asset_manager.enabled:
+            emit("assets.enabled", hashing_enabled=args.enable_asset_hashing)
         routes = web.RouteTableDef()
         self.routes = routes
         self.last_node_id = None

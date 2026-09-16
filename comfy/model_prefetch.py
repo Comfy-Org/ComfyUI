@@ -210,7 +210,7 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
                     registerable_size += lowvram_fn.memory_required()
 
         offload_stream, fully_faulted = comfy.ops.cast_modules_with_vbar(comfy_modules, None, device, None, True, return_faulted=True)
-        if not comfy.model_management.args.fast_disk:
+        if not (comfy_modules and comfy_modules[0]._pin_state["fast_disk"]):
             comfy.model_management.ensure_pin_registerable(registerable_size)
         comfy.model_management.sync_stream(device, offload_stream)
         if fully_faulted and dtype is not None:

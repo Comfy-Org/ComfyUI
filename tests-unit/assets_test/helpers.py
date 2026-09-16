@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import NotRequired, TypeAlias, TypedDict
+from typing import TypeAlias, TypedDict
 
 import pytest
 import requests
@@ -22,17 +22,23 @@ from app.assets.database.queries.records import create_content, create_record
 from app.database.models import Base
 
 
-class AssetItem(TypedDict):
+class _AssetItemOptional(TypedDict, total=False):
+    preview_id: str
+
+
+class AssetItem(_AssetItemOptional):
     id: str
     name: str
-    preview_id: NotRequired[str]
 
 
-class AssetListBody(TypedDict):
+class _AssetListBodyOptional(TypedDict, total=False):
+    next_cursor: str
+
+
+class AssetListBody(_AssetListBodyOptional):
     assets: list[AssetItem]
     total: int
     has_more: bool
-    next_cursor: NotRequired[str]
 
 
 class ErrorItem(TypedDict):
