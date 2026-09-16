@@ -91,6 +91,7 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "hashing_enabled": _is_flag,
     "site": _one_of(STAT_SITES),
     "output_kind": _one_of(frozenset({"executed", "cached"})),
+    "job_id": _is_safe_string,
 }
 
 _warned_call_sites: set[tuple[str, int]] = set()
@@ -121,7 +122,13 @@ def _caller_call_site() -> tuple[str, int]:
     return (caller.filename, caller.lineno or 0)
 
 
-def emit(event: str, *, root: str | None = None, **fields: Any) -> None:
+def emit(
+    event: str,
+    *,
+    root: str | None = None,
+    job_id: str | None = None,
+    **fields: Any,
+) -> None:
     """Log one tagged event line.
 
     An invalid call raises in strict mode (under pytest, or with
@@ -131,6 +138,8 @@ def emit(event: str, *, root: str | None = None, **fields: Any) -> None:
     """
     if root is not None:
         fields["root"] = root
+    if job_id is not None:
+        fields["job_id"] = job_id
 
     problem = _find_problem(event, fields)
     if problem is None:

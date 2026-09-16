@@ -39,6 +39,7 @@ VALID_VALUES: dict[str, list[object]] = {
     "hashing_enabled": [True, False],
     "site": ["discovery", "enrich", "reference_stat"],
     "output_kind": ["executed", "cached"],
+    "job_id": ["job-123"],
 }
 
 
@@ -92,11 +93,11 @@ def go_to_production_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- the shared cross-repo fixture -------------------------------------------------
 
 
-def test_shared_fixture_file_holds_four_newline_terminated_lines():
+def test_shared_fixture_file_holds_five_newline_terminated_lines():
     raw = FIXTURE_PATH.read_text(encoding="utf-8")
 
     assert raw.endswith("\n")
-    assert len(raw.splitlines()) == 4
+    assert len(raw.splitlines()) == 5
 
 
 @pytest.mark.parametrize("line", fixture_lines())
@@ -123,6 +124,18 @@ def test_a_fieldless_event_still_matches_the_shared_pattern(caplog):
 
     assert line == "[assets-event] scanner.hash_discarded_modified"
     assert EVENT_LINE_PATTERN.match(line) is not None
+
+
+def test_none_job_id_is_omitted_from_the_event_line(caplog):
+    line = emit_line(
+        caplog,
+        "ingest.register_failed",
+        error_type="OSError",
+        output_kind="executed",
+        job_id=None,
+    )
+
+    assert line == "[assets-event] ingest.register_failed error_type=OSError output_kind=executed"
 
 
 def test_the_emitted_record_is_a_single_line(caplog):

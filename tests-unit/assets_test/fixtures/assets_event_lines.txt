@@ -2,3 +2,4 @@
 [assets-event] seeder.scan_started phase=enrich
 [assets-event] scanner.stat_failed error_type=PermissionError site=discovery
 [assets-event] ingest.register_failed error_type=RuntimeError output_kind=executed
+[assets-event] ingest.register_failed error_type=RuntimeError job_id=job-123 output_kind=executed
