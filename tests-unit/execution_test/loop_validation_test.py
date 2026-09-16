@@ -526,3 +526,24 @@ def test_loop_boundary_reads_a_node_that_was_registered_without_a_schema():
         StartLoop.GET_SCHEMA()
 
     assert _loop_boundary(Body) is None
+
+
+def test_loop_boundary_does_not_read_a_subclass_off_its_parent():
+    """A subclass that has never been asked must build its own schema.
+
+    GET_SCHEMA caches with `cls.SCHEMA = schema`, so a subclass inherits whatever
+    its parent was asked for. Reading that would hand validate_loops the parent's
+    boundary for a node that declares a different one, or none at all.
+    """
+    StartLoop.GET_SCHEMA()
+
+    class NotABoundary(StartLoop):
+        @classmethod
+        def define_schema(cls):
+            schema = StartLoop.define_schema()
+            schema.node_id = "NotABoundary"
+            schema.loop_boundary = None
+            return schema
+
+    assert StartLoop.SCHEMA.loop_boundary == "start"
+    assert _loop_boundary(NotABoundary) is None

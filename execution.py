@@ -1137,7 +1137,9 @@ def _loop_boundary(class_def) -> Union[str, None]:
     """
     if not issubclass(class_def, _ComfyNodeInternal):
         return None
-    schema = class_def.SCHEMA
+    # `__dict__` rather than attribute access: GET_SCHEMA caches with `cls.SCHEMA = schema`,
+    # so a subclass that has never been asked would otherwise read its parent's schema.
+    schema = class_def.__dict__.get("SCHEMA")
     if schema is None:
         schema = class_def.GET_SCHEMA()
     return schema.loop_boundary
