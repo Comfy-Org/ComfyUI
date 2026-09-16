@@ -92,13 +92,12 @@ def tick_watch_list(session: Session) -> None:
                 "mime_type": mimetypes.guess_type(entry.path, strict=False)[0],
                 "job_id": None,
             }
-            try:
-                seed_asset_specs(session, [spec])
-            except Exception as exc:
+            _created, seed_error = seed_asset_specs(session, [spec])
+            if seed_error is not None:
                 logging.warning(
                     "Dropping watched asset after seeding failed: %s", entry.path
                 )
-                emit("scanner.watch_seed_failed", error_type=error_type(exc))
+                emit("scanner.watch_seed_failed", error_type=error_type(seed_error))
             continue
         entry.last_stat = current
         entry.ticks += 1
