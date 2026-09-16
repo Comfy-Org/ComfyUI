@@ -224,12 +224,15 @@ def test_run_write_txn_held_lock_respects_remaining_deadline(file_database, monk
     writer_started = threading.Event()
 
     def hold_lock():
-        with sqlite3.connect(file_database) as holder:
+        holder = sqlite3.connect(file_database)
+        try:
             holder.execute("BEGIN IMMEDIATE")
             holder.execute("INSERT INTO tags (name) VALUES (?)", ("deadline-holder",))
             writer_started.set()
             time.sleep(5)
             holder.rollback()
+        finally:
+            holder.close()
 
     holder = threading.Thread(target=hold_lock)
     holder.start()

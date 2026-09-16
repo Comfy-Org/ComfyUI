@@ -22,10 +22,12 @@ def test_write_transaction_waits_for_held_writer_before_select_then_mutate(tmp_p
     database_path = tmp_path / "assets.db"
     monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
     monkeypatch.setattr(db_mod, "Session", None)
+    monkeypatch.setattr(db_mod, "WriteSession", None)
     monkeypatch.setattr(db_mod, "_db_lock", None)
     db_mod.init_db()
 
     reader_engine = db_mod.Session.kw["bind"]
+    writer_engine = db_mod.WriteSession.kw["bind"]
 
     def begin_deferred(connection):
         connection.exec_driver_sql("BEGIN")
@@ -34,12 +36,15 @@ def test_write_transaction_waits_for_held_writer_before_select_then_mutate(tmp_p
     writer_started = threading.Event()
 
     def hold_write_lock():
-        with sqlite3.connect(database_path) as connection:
+        connection = sqlite3.connect(database_path)
+        try:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("INSERT INTO tags (name) VALUES (?)", ("promotion-holder",))
             writer_started.set()
             time.sleep(2)
             connection.rollback()
+        finally:
+            connection.close()
 
     holder = threading.Thread(target=hold_write_lock)
     holder.start()
@@ -56,8 +61,10 @@ def test_write_transaction_waits_for_held_writer_before_select_then_mutate(tmp_p
         elapsed = time.monotonic() - started_at
     finally:
         holder.join(timeout=5)
+        assert not holder.is_alive()
         event.remove(reader_engine, "begin", begin_deferred)
         reader_engine.dispose()
+        writer_engine.dispose()
         db_mod._db_lock.release(force=True)
 
     assert result == "written"
