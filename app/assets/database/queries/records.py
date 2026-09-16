@@ -299,8 +299,9 @@ def rename_record(session: Session, id: str, name: str) -> Asset:
     record = session.get(Asset, id)
     if record is None:
         raise LookupError(id)
-    record.name = name
-    record.updated_at = get_utc_now()
+    if record.name != name:
+        record.name = name
+        record.updated_at = get_utc_now()
     session.flush()
     return record
 
