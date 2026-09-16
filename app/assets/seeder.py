@@ -856,9 +856,12 @@ class _AssetSeeder:
 
             batch = specs[i : i + batch_size]
             batch_tags = {t for spec in batch for t in spec["tags"]}
+            created = 0
             try:
-                created = insert_asset_specs(batch, batch_tags)
+                created, batch_error = insert_asset_specs(batch, batch_tags)
                 total_created += created
+                if batch_error is not None:
+                    raise batch_error
             except Exception as e:
                 self._add_error(f"Batch insert failed at offset {i}: {e}")
                 logging.exception("Batch insert failed at offset %d", i)
