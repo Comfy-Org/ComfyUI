@@ -151,8 +151,6 @@ def test_transition_in_flight_flag_survives_a_failed_final_mode_commit(
     session.commit()
 
     real_run_write_txn = scanner.run_write_txn
-    # Every entry's apply succeeds (the queue drains); only the FINAL
-    # write_stored_mode("on") commit, called once the queue is empty, fails.
     monkeypatch.setattr(
         hash_mode_state,
         "run_write_txn",
