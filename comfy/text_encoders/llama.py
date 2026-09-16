@@ -35,8 +35,6 @@ class FixedKV:
     def rollback(self, discard=1):
         # drop the rejected verify tail; stale slots and bias are overwritten by the next write/prepare
         self.index -= discard
-        if self.seqlen is not None:
-            self.seqlen.sub_(discard)
 
 @dataclass
 class FixedKVBias(FixedKV):
@@ -47,30 +45,33 @@ class FixedKVBias(FixedKV):
     def prepare(self, num_tokens):
         if self.tracker["step"] == (self.index, num_tokens):
             return
-        if self.index + num_tokens > self.bias.shape[-1]:
-            raise RuntimeError("KV cache capacity exceeded")
         self.tracker["step"] = (self.index, num_tokens)
         i = self.index
         rows = self.bias.shape[-2]
         if num_tokens <= rows:
-            min_val = torch.finfo(self.bias.dtype).min
-            lo = max(i - rows + 1, 0)
-            hi = i + rows
-            for r in range(rows):
-                self.position[r].fill_(i + r)
-                j = r - (rows - num_tokens)
-                allow = i + j if j >= 0 else i  # unused rows keep a safe (seq-1-like) staircase
-                self.bias[..., r, lo:allow + 1] = 0
-                self.bias[..., r, allow + 1:hi] = min_val
+            torch.arange(i, i + rows, out=self.position)
+            window = self.tracker[num_tokens]
+            start = i - rows + 1
+            skip = max(-start, 0)
+            end = min(i + rows, self.bias.shape[-1])
+            self.bias[..., :, start + skip:end] = window[:, skip:end - start]
         else:
             self.bias[..., :, i:i + num_tokens] = 0
 
     @staticmethod
     def shared(capacity, device, dtype):
         # all layers advance in lockstep, so the bias caches share one position/bias/tracker
-        position = torch.empty((6,), device=device, dtype=torch.int64)
-        bias = torch.full((1, 1, 6, capacity), torch.finfo(dtype).min, device=device, dtype=dtype)
-        return position, bias, {"step": -1}
+        rows = 6
+        position = torch.empty((rows,), device=device, dtype=torch.int64)
+        bias = torch.full((1, 1, rows, capacity), torch.finfo(dtype).min, device=device, dtype=dtype)
+        tracker = {"step": -1}
+        # window templates per decode width: row r serves query j = r - (rows - n) and may see slots <= index + j
+        for n in range(1, rows + 1):
+            window = torch.full((rows, 2 * rows - 1), torch.finfo(dtype).min, device=device, dtype=dtype)
+            for r in range(rows):
+                window[r, :rows + max(r - (rows - n), 0)] = 0
+            tracker[n] = window
+        return position, bias, tracker
 
     @classmethod
     def zeros(cls, batch, kv_heads, capacity, head_dim, device, dtype, shared):
@@ -84,9 +85,9 @@ class FixedKVBias(FixedKV):
         self.value[:, :, self.index:self.index + seq] = xv
         return self.key[:, :, :self.index + seq], self.value[:, :, :self.index + seq]
 
-    def decode(self, xq, xk, xv, num_heads, num_kv_heads, head_dim):
+    def decode(self, xq, xk, xv, num_kv_heads):
         # CUDA-graphable: device-side write position, masked attention over the full capacity
-        batch_size, _, seq, _ = xq.shape
+        batch_size, num_heads, seq, head_dim = xq.shape
         self.key.index_copy_(2, self.position[:seq], xk)
         self.value.index_copy_(2, self.position[:seq], xv)
         groups = num_heads // num_kv_heads
@@ -96,13 +97,6 @@ class FixedKVBias(FixedKV):
         probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(xq.dtype)
         out = probs @ self.value.unsqueeze(2)
         return out.permute(0, 3, 1, 2, 4).reshape(batch_size, seq, num_heads * head_dim)
-
-def graph_decode_enabled(module, device):
-    # same conditions as prefetch_queue_pop's capture, so eager fallbacks keep the sliced path
-    return (getattr(module, "_v_block", None) is not None
-            and comfy.model_management.NUM_STREAMS > 0
-            and not comfy.model_management.args.disable_cuda_graphs
-            and comfy.model_management.is_device_cuda(device))
 
 @dataclass
 class Llama2Config:
@@ -629,7 +623,6 @@ class Attention(nn.Module):
         optimized_attention=None,
         past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         sliding_window: Optional[int] = None,
-        graph_decode: bool = False,
     ):
         batch_size, seq_length, _ = hidden_states.shape
 
@@ -652,12 +645,7 @@ class Attention(nn.Module):
         xq, xk = apply_rope(xq, xk, freqs_cis=freqs_cis)
 
         fixed_cache = past_key_value if isinstance(past_key_value, FixedKV) else None
-        if isinstance(fixed_cache, FixedKVBias):
-            if seq_length <= 6 and attention_mask is None and graph_decode:
-                output = fixed_cache.decode(xq, xk, xv, self.num_heads, self.num_kv_heads, self.head_dim)
-                return self.o_proj(output), fixed_cache
-            xk, xv = fixed_cache.append(xk, xv)
-        elif fixed_cache is not None:
+        if fixed_cache is not None:
             xq = xq.transpose(1, 2)
             xk = xk.transpose(1, 2)
             xv = xv.transpose(1, 2)
@@ -757,7 +745,6 @@ class TransformerBlock(nn.Module):
         past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
         output = x
-        graph_decode = graph_decode_enabled(self, x.device)
         # Self Attention
         residual = x
         x = self.input_layernorm(x)
@@ -767,7 +754,6 @@ class TransformerBlock(nn.Module):
             freqs_cis=freqs_cis,
             optimized_attention=optimized_attention,
             past_key_value=past_key_value,
-            graph_decode=graph_decode,
         )
         x = residual + x
 
@@ -894,8 +880,6 @@ class Llama2_(nn.Module):
         caches = []
         flash = getattr(comfy_kitchen, "flash_attention_decode_is_available", None)
         flash_kv = self.fixed_kv and flash is not None and flash(device)
-        bias_kv = self.fixed_kv and not flash_kv
-        shared = FixedKVBias.shared(capacity, device, dtype) if bias_kv else None
         for _ in range(self.config.num_hidden_layers):
             if flash_kv:
                 key = torch.empty((batch, capacity, self.config.num_key_value_heads, self.config.head_dim), device=device, dtype=dtype)
@@ -903,8 +887,6 @@ class Llama2_(nn.Module):
                 pos = torch.empty((batch,), device=device, dtype=torch.int64)
                 seqlen = torch.zeros((batch,), device=device, dtype=torch.int32)
                 caches.append(FixedKV(key, value, 0, pos, seqlen))
-            elif bias_kv:
-                caches.append(FixedKVBias.zeros(batch, self.config.num_key_value_heads, capacity, self.config.head_dim, device, dtype, shared))
             else:
                 key = torch.empty((batch, self.config.num_key_value_heads, capacity, self.config.head_dim), device=device, dtype=dtype)
                 caches.append((key, torch.empty_like(key), 0))
@@ -920,7 +902,7 @@ class Llama2_(nn.Module):
                                     device=device)
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True,
-                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None, freqs_cis=None, decode_buffers=None):
+                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None, decode_buffers=None):
         if embeds is not None:
             x = embeds
         else:
@@ -938,15 +920,14 @@ class Llama2_(nn.Module):
         if position_ids is None:
             position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
 
-        if freqs_cis is None:
-            freqs_cis = self.compute_freqs_cis(position_ids, x.device)
+        freqs_cis = self.compute_freqs_cis(position_ids, x.device)
 
         mask = None
         if attention_mask is not None:
             mask = 1.0 - attention_mask.to(x.dtype).reshape((attention_mask.shape[0], 1, -1, attention_mask.shape[-1])).expand(attention_mask.shape[0], 1, seq_len, attention_mask.shape[-1])
             mask = mask.masked_fill(mask.to(torch.bool), torch.finfo(x.dtype).min / 4)
 
-        spec_decode = fixed_kv and 2 <= seq_len <= 6 and past_len > 0 and attention_mask is None
+        spec_decode = fixed_kv and any(isinstance(kv, FixedKVBias) for kv in past_key_values) and 2 <= seq_len <= 6 and past_len > 0 and attention_mask is None
         if seq_len > 1 and not spec_decode:  # spec verify: the staircase decode bias is causal
             causal_mask = torch.empty(past_len + seq_len, past_len + seq_len, dtype=x.dtype, device=x.device).fill_(torch.finfo(x.dtype).min / 4).triu_(1)
             if mask is not None:
@@ -980,7 +961,7 @@ class Llama2_(nn.Module):
             elif intermediate_output < 0:
                 intermediate_output = len(self.layers) + intermediate_output
 
-        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.layers), x.device, {"prefetch_dynamic_vbars": getattr(self, "prefetch_dynamic_vbars", False)})
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.layers), x.device, {"prefetch_dynamic_vbars": self.prefetch_dynamic_vbars and past_key_values is not None})
         next_key_values = list(past_key_values) if past_key_values is not None else []
         for i, layer in enumerate(self.layers):
             if all_intermediate is not None:

@@ -16,7 +16,7 @@ from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
 
-from .llama import BaseLlama, BaseGenerate, FixedKV, FixedKVBias, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, graph_decode_enabled, penalty_active, precompute_freqs_cis, rope_matrix
+from .llama import BaseLlama, BaseGenerate, FixedKV, FixedKVBias, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, penalty_active, precompute_freqs_cis, rope_matrix
 
 
 @dataclass
@@ -26,6 +26,9 @@ class LinearKV(FixedKV):
     dt_bias: torch.Tensor = None
     snapshots: list = None  # [(recurrent, conv)] taken after step 1, 2, ... of the last verify
     last_seq: int = 1
+    snap_backing: torch.Tensor = None
+    conv_snap_backing: torch.Tensor = None
+    norm_weight: torch.Tensor = None
 
     def prepare(self, num_tokens):
         pass
@@ -216,7 +219,7 @@ class GatedDeltaNet(nn.Module):
 
         fused_available = getattr(comfy_kitchen, "gated_delta_decode_is_available", None)
         use_fused = (use_recurrent and fused_available is not None and fused_available(x.device, self.key_head_dim, self.value_head_dim)
-                     and (seq_len == 1 or getattr(past_key_value, "snap_backing", None) is not None))
+                     and (seq_len == 1 or past_key_value.snap_backing is not None))
 
         # Projections (shared)
         proj = self.in_proj_qkv(x)  # [B, seq_len, conv_dim]
@@ -365,7 +368,7 @@ class GatedAttention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
 
-    def forward(self, x, attention_mask=None, freqs_cis=None, optimized_attention=None, past_key_value=None, graph_decode=False):
+    def forward(self, x, attention_mask=None, freqs_cis=None, optimized_attention=None, past_key_value=None):
         batch_size, seq_length, _ = x.shape
 
         # Project Q (with gate), K, V
@@ -387,8 +390,8 @@ class GatedAttention(nn.Module):
 
         # KV cache
         present_key_value = past_key_value
-        if past_key_value is not None and seq_length <= 6 and attention_mask is None and graph_decode:
-            output = past_key_value.decode(xq, xk, xv, self.num_heads, self.num_kv_heads, self.head_dim)
+        if past_key_value is not None and seq_length <= 6 and attention_mask is None:
+            output = past_key_value.decode(xq, xk, xv, self.num_kv_heads)
         else:
             if past_key_value is not None:
                 xk, xv = past_key_value.append(xk, xv)
@@ -412,14 +415,12 @@ class Qwen35TransformerBlock(nn.Module):
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, add=config.rms_norm_add, device=device, dtype=dtype)
 
-    def forward(self, x, attention_mask=None, freqs_cis=None, optimized_attention=None, past_key_value=None, graph_decode=None):
+    def forward(self, x, attention_mask=None, freqs_cis=None, optimized_attention=None, past_key_value=None):
         output = x
         if self.layer_type == "linear_attention":
             h, present_key_value = self.linear_attn(self.input_layernorm(x), attention_mask=attention_mask, past_key_value=past_key_value)
         else:
-            if graph_decode is None:
-                graph_decode = graph_decode_enabled(self, x.device)
-            h, present_key_value = self.self_attn(self.input_layernorm(x), attention_mask=attention_mask, freqs_cis=freqs_cis, optimized_attention=optimized_attention, past_key_value=past_key_value, graph_decode=graph_decode)
+            h, present_key_value = self.self_attn(self.input_layernorm(x), attention_mask=attention_mask, freqs_cis=freqs_cis, optimized_attention=optimized_attention, past_key_value=past_key_value)
 
         # in-place into the input buffer so CUDA-graph replays land in the static x
         x = torch.add(x, h, out=output)
@@ -705,8 +706,7 @@ class MTPHead(nn.Module):
     def forward(self, embeds, hidden, freqs_cis, past_key_value):
         x = self.fc(torch.cat([self.pre_fc_norm_embedding(embeds), self.pre_fc_norm_hidden(hidden)], dim=-1))
         attention = optimized_attention_for_device(x.device, mask=False, small_input=True)
-        # device-indexed KV path: stays valid inside the captured draft graph
-        x, _ = self.layers[0](x, attention_mask=None, freqs_cis=freqs_cis, optimized_attention=attention, past_key_value=past_key_value, graph_decode=True)
+        x, _ = self.layers[0](x, attention_mask=None, freqs_cis=freqs_cis, optimized_attention=attention, past_key_value=past_key_value)
         return self.norm(x), x  # (for logits, pre-norm hidden for recursive drafting)
 
 
@@ -739,19 +739,13 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         return super().forward(x, attention_mask=attention_mask, embeds=embeds, num_tokens=num_tokens, intermediate_output=intermediate_output, final_layer_norm_intermediate=final_layer_norm_intermediate, dtype=dtype, position_ids=position_ids, past_key_values=past_key_values)
 
     def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, **kwargs):
-        greedy = (not do_sample) or temperature == 0.0
         mtp = kwargs.pop("mtp", True)
-        common = (self.mtp is not None and mtp
-                  and kwargs.get("position_ids") is None
-                  and kwargs.get("initial_input_ids") is None)
-        spec = common and greedy and repetition_penalty == 1.0 and not kwargs.get("presence_penalty", 0.0)
-        sampled = common and not greedy
-        if not (spec or sampled):
+        if self.mtp is None or not mtp or kwargs.get("position_ids") is not None or kwargs.get("initial_input_ids") is not None:
             return super().generate(embeds=embeds, do_sample=do_sample, max_length=max_length, temperature=temperature,
                                     top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty,
                                     seed=seed, stop_tokens=stop_tokens, **kwargs)
         sampling = None
-        if sampled:
+        if do_sample and temperature != 0.0:
             sampling = {"temperature": temperature, "top_k": top_k, "top_p": top_p, "min_p": min_p,
                         "repetition_penalty": repetition_penalty,
                         "presence_penalty": kwargs.get("presence_penalty", 0.0) or 0.0,
@@ -786,13 +780,17 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         # the draft graph bakes these weights' addresses: keep them resident for the generate
         hot = list({id(m): m for m in [head, self.model.embed_tokens, *self.mtp.modules()]}.values())
         pinned = [m for m in hot if hasattr(m, "_v")]
-        if pinned:
-            comfy.ops.cast_modules_with_vbar(pinned, None, device, None, True, return_faulted=True)
 
         generator = None
         if sampling is not None:
             generator = torch.Generator(device=device).manual_seed(sampling["seed"])
         penalized = sampling is not None and penalty_active(sampling["repetition_penalty"], sampling["presence_penalty"])
+
+        # rope table once per generate, sliced per draft
+        ftab = rope_matrix(self.model.compute_freqs_cis(torch.arange(cap, device=device, dtype=torch.float).unsqueeze(0), device))
+
+        def freqs_at(p, n=1):
+            return ftab[:, :, p:p + n]
 
         # cross-step state lives in static carriers: nothing allocated inside a step may outlive it
         nt_buf = torch.empty((embeds.shape[0], 1), device=device, dtype=torch.long)
@@ -816,18 +814,12 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
 
         def update_progress(n):
             progress.update(n)
-            console.update(min(n, max(0, max_length - console.n)))
+            console.update(n)
 
-        # rope table once per generate, sliced per step
-        ftab = rope_matrix(self.model.compute_freqs_cis(torch.arange(cap, device=device, dtype=torch.float).unsqueeze(0), device))
-
-        def freqs_at(p, n=1):
-            return ftab[:, :, p:p + n]
-
-        vf = None
+        verify_buffers = None
 
         def set_depth(d):
-            nonlocal depth, vf
+            nonlocal depth, verify_buffers
             depth = d
             for kv in pkv:
                 if isinstance(kv, LinearKV):
@@ -835,8 +827,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                     kv.snap_backing = torch.empty((d,) + tuple(kv.recurrent_state.shape), device=device, dtype=torch.float32)
                     kv.conv_snap_backing = torch.empty((d,) + tuple(kv.conv_state.shape), device=device, dtype=kv.conv_state.dtype)
                     kv.snapshots = [(kv.snap_backing[s], kv.conv_snap_backing[s]) for s in range(d)]
-            # static rope buffers: graphed layers bake their input addresses
-            vf = freqs_at(pos, d + 1).clone()
+            # static hidden/rope buffers: graphed layers bake their input addresses
+            verify_buffers = (torch.empty((embeds.shape[0], d + 1, cfg.hidden_size), device=device, dtype=dt), freqs_at(pos, d + 1).clone())
 
         set_depth(depth)
         use_graph = (device.type == "cuda"
@@ -873,7 +865,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             torch.cuda.current_stream().wait_stream(side)
             del n1, r1  # freed before the capture, not shadowed inside it
             g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g):
+            with torch.cuda.graph(g, capture_error_mode="thread_local"):
                 n1, r1 = self.mtp(self.model.embed_tokens(ds["tok"]).to(dt), ds["hid"], ds["f"], mtp_kv)
                 lg1 = self.logits(n1)
                 ds["d"] = lg1[:, -1].argmax(dim=-1, keepdim=True)
@@ -897,33 +889,34 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             mtp_kv.advance(1)
             return ds["d"], ds["r"]
 
-        def col_dist(row, extra):
-            # in-window drafts penalized once, on top of the committed-token mask already applied
+        def verify_sample(lg, drafts):
+            # accept draft i w.p. p_i(draft), else sample the residual; all depth+1 columns as one batch
             s = sampling
-            if penalized and extra:
-                dm = torch.zeros_like(pen_mask).index_fill_(0, torch.cat(extra).reshape(-1), True) & ~pen_mask
-                row = torch.where(dm.unsqueeze(0), apply_penalty(row, s["repetition_penalty"], s["presence_penalty"]), row)
-            return self.processed_probs(row, s["temperature"], s["top_k"], s["top_p"], s["min_p"], 1.0, [])
-
-        def prob_of(probs, idx, tok):
+            rows = lg[0].float()
+            if penalized:
+                # committed tokens penalize every column, each draft the columns after it
+                mask = pen_mask.unsqueeze(0).repeat(depth + 1, 1)
+                for c, d in enumerate(drafts):
+                    mask[c + 1:].index_fill_(1, d.reshape(-1), True)
+                rows = torch.where(mask, apply_penalty(rows, s["repetition_penalty"], s["presence_penalty"]), rows)
+            probs, idx = self.processed_probs(rows, s["temperature"], s["top_k"], s["top_p"], s["min_p"], 1.0, [])
+            dr = torch.cat(drafts, dim=1).reshape(-1, 1)
             if idx is None:
-                return probs.gather(1, tok).reshape(())
-            return (probs * (idx == tok)).sum()
-
-        def draw(probs, idx, exclude=None):
+                p_draft = probs[:depth].gather(1, dr).reshape(-1)
+                w = probs.clone()
+                w[:depth].scatter_(1, dr, 0.0)
+            else:
+                hit = idx[:depth] == dr
+                p_draft = (probs[:depth] * hit).sum(1)
+                w = probs.clone()
+                w[:depth].masked_fill_(hit, 0.0)
             # residual: p with the draft zeroed (the rescue term only matters when discarded anyway)
-            w = probs
-            if exclude is not None:
-                if idx is None:
-                    w = probs.clone()
-                    w.scatter_(1, exclude, 0.0)
-                else:
-                    w = probs * (idx != exclude)
-                w = w + (w.sum() == 0) * probs
+            w = w + (w.sum(1, keepdim=True) == 0) * probs
             tok = torch.multinomial(w, num_samples=1, generator=generator)
-            if idx is not None:
-                return idx.gather(1, tok)
-            return tok
+            corr = tok if idx is None else idx.gather(1, tok)
+            u = torch.rand(depth, device=device, generator=generator)
+            accepted = (u < p_draft).long().cumprod(0).sum()
+            return dr, corr, accepted
 
         def step():
             # scoped so every temporary dies before the compiler bracket closes
@@ -937,8 +930,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                 drafts.append(dk)
                 tok_in, hid_in = dk, rk
             ev = self.model.embed_tokens(torch.cat([nt_buf] + drafts, dim=1)).to(dt)
-            vf.copy_(freqs_at(pos, depth + 1))
-            x, _, _ = self.model.forward(None, embeds=ev, attention_mask=None, past_key_values=pkv, freqs_cis=vf)
+            x, _, _ = self.model.forward(None, embeds=ev, attention_mask=None, past_key_values=pkv, decode_buffers=verify_buffers)
             # all verify positions in one lm_head GEMV, accept decided GPU-side, one sync
             lg = verify_logits(x)
             if sampling is None:
@@ -951,22 +943,10 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                 next_toks = tuple(toks[:, i:i + 1] for i in range(depth + 1))
                 commit = tuple(dr[:accepts]) + (t[accepts],)
             else:
-                # accept draft i w.p. p_i(draft), else sample the residual
-                lgf = lg.float()
-                if penalized:
-                    lgf = torch.where(pen_mask, apply_penalty(lgf, sampling["repetition_penalty"], sampling["presence_penalty"]), lgf)
-                dists = tuple(col_dist(lgf[:, c], drafts[:c]) for c in range(depth + 1))
-                corr = [draw(p, i, exclude=drafts[c]) for c, (p, i) in enumerate(dists[:depth])]
-                corr.append(draw(*dists[depth]))
-                u = torch.rand(depth, device=device, generator=generator)
-                a = torch.zeros((), device=device, dtype=torch.long)
-                live = torch.ones((), device=device, dtype=torch.bool)
-                for c in range(depth):
-                    live = live & (u[c] < prob_of(*dists[c], drafts[c]))
-                    a = a + live.long()
-                vals = torch.cat([d[0] for d in drafts] + [c[0] for c in corr] + [a.reshape(1)]).tolist()
+                dr, corr, accepted = verify_sample(lg, drafts)
+                vals = torch.cat([dr[:, 0], corr[:, 0], accepted.reshape(1)]).tolist()
                 dr, cv, accepts = vals[:depth], vals[depth:2 * depth + 1], vals[-1]
-                next_toks = tuple(corr)
+                next_toks = tuple(corr[i:i + 1] for i in range(depth + 1))
                 commit = tuple(dr[:accepts]) + (cv[accepts],)
             if accepts < depth:
                 for kv in pkv:
@@ -984,13 +964,19 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
 
         probe = None if fixed_depth is not None else [0, 0]  # steps, accepted drafts
         try:
+            if pinned:
+                comfy.model_prefetch.pin_modules(pinned, device, dt)
             if use_graph and len(ids) < max_length and ids[-1] not in stop_tokens:
                 draft_capture()
             while len(ids) < max_length and ids[-1] not in stop_tokens:
                 with (comfy.model_prefetch.malloc_graph_scope(device) if compile_allocations else contextlib.nullcontext()):
                     accepts, commit = step()
+                commit = list(commit[:max_length - len(ids)])
+                stop = next((i for i, t in enumerate(commit) if t in stop_tokens), None)
+                if stop is not None:
+                    del commit[stop + 1:]
                 ids.extend(commit)
-                update_progress(accepts + 1)
+                update_progress(len(commit))
                 if probe is not None:
                     probe[0] += 1
                     probe[1] += accepts
@@ -998,7 +984,6 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                         # deepen once acceptance sustains it and a recapture round can amortize
                         if sampling is None and max_length - len(ids) > 512 and 1 + probe[1] / probe[0] >= 2.2:
                             comfy.model_prefetch.cleanup_prefetch_queues()
-                            comfy.model_management.reset_cast_buffers()
                             drop_draft_graph()
                             set_depth(5)
                             if use_graph:
@@ -1009,10 +994,7 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             drop_draft_graph()
             if pinned:
                 comfy.model_prefetch.cleanup_prefetched_modules(None, pinned)
-        for j, tk in enumerate(ids):
-            if tk in stop_tokens:
-                return ids[:j + 1]
-        return ids[:max_length]
+        return ids
 
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
         model_config = self.model.config
