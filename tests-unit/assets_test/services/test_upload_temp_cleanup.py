@@ -56,6 +56,27 @@ def _multipart_request(*fields: AsyncMock) -> AsyncMock:
 
 
 @pytest.mark.asyncio
+async def test_duplicate_file_parts_are_rejected_without_leaking_temp_uploads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(folder_paths, "get_temp_directory", lambda: str(tmp_path))
+    request = _multipart_request(_file_field(), _file_field())
+
+    error: UploadError | None = None
+    try:
+        await parse_multipart_upload(request, lambda _hash: False)
+    except UploadError as exc:
+        error = exc
+
+    remaining = list((tmp_path / "uploads").iterdir())
+    assert error is not None, f"duplicate file parts accepted; temp paths remain: {remaining}"
+    assert error.status == 400
+    assert error.code == "UNSUPPORTED_FIELD"
+    assert error.message == "Multiple 'file' parts are not supported."
+    assert remaining == []
+
+
+@pytest.mark.asyncio
 async def test_invalid_utf8_after_file_removes_temp_upload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

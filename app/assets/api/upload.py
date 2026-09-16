@@ -96,6 +96,12 @@ async def parse_multipart_upload(
                         )
 
             elif fname == "file":
+                if file_present:
+                    raise UploadError(
+                        400,
+                        "UNSUPPORTED_FIELD",
+                        "Multiple 'file' parts are not supported.",
+                    )
                 file_present = True
                 file_client_name = (field.filename or "").strip()
 
