@@ -251,7 +251,7 @@ def test_run_write_txn_held_lock_respects_remaining_deadline(file_database, monk
     assert 1.5 <= elapsed < 3
 
 
-def test_run_write_txn_reduces_busy_timeout_after_intermediate_commit(
+def test_run_write_txn_reopens_immediate_transaction_after_intermediate_commit(
     file_database, monkeypatch
 ):
     run_write_txn = db_mod.run_write_txn
@@ -267,7 +267,7 @@ def test_run_write_txn_reduces_busy_timeout_after_intermediate_commit(
 
     run_write_txn(work)
 
-    assert seen_timeouts[1] < seen_timeouts[0]
+    assert seen_timeouts == [0, 0]
 
 
 def test_run_write_txn_uses_a_fresh_session_for_each_attempt(memory_database, monkeypatch):

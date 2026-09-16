@@ -2,6 +2,7 @@ import logging
 import os
 import random
 import shutil
+import sqlite3
 import threading
 import time
 from typing import Callable, TypeVar
@@ -18,6 +19,7 @@ _write_txn_state = threading.local()
 _WRITE_TXN_LOCK_RETRY_DEADLINE_SECONDS = 60
 _WRITE_TXN_BACKOFF_SECONDS = (0.05, 0.1, 0.2, 0.4)
 _SQLITE_BUSY_TIMEOUT_MS = 30000
+_SQLITE_WRITE_LOCK_POLL_SECONDS = 0.01
 T = TypeVar("T")
 
 
@@ -236,17 +238,24 @@ def _configure_runtime_connection(dbapi_connection, db_path):
         cursor.close()
 
 
-def _writer_busy_timeout_ms():
+def _begin_immediate(dbapi_connection):
     deadline = getattr(_attempt_lock_deadline, "value", None)
     if deadline is None:
-        return _SQLITE_BUSY_TIMEOUT_MS
-    remaining_ms = int((deadline - time.monotonic()) * 1000)
-    return max(1, min(_SQLITE_BUSY_TIMEOUT_MS, remaining_ms))
+        deadline = time.monotonic() + _SQLITE_BUSY_TIMEOUT_MS / 1000
 
-
-def _configure_writer_busy_timeout(dbapi_connection):
-    cursor = dbapi_connection.execute(f"PRAGMA busy_timeout = {_writer_busy_timeout_ms()}")
-    cursor.close()
+    while True:
+        try:
+            cursor = dbapi_connection.execute("BEGIN IMMEDIATE")
+            cursor.close()
+            return
+        except sqlite3.OperationalError as exc:
+            error_message = str(exc).lower()
+            if "locked" not in error_message and "busy" not in error_message:
+                raise
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise OperationalError("BEGIN IMMEDIATE", {}, exc) from exc
+            time.sleep(min(_SQLITE_WRITE_LOCK_POLL_SECONDS, remaining_seconds))
 
 
 def _migrate_and_bind(db_url, db_path, db_exists):
@@ -315,24 +324,17 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     def set_reader_sqlite_pragma(dbapi_connection, connection_record):
         _configure_runtime_connection(dbapi_connection, db_path)
 
-    writer_engine = create_engine(db_url, connect_args={"timeout": 30})
+    writer_engine = create_engine(db_url, connect_args={"timeout": 0})
 
     @event.listens_for(writer_engine, "connect")
     def set_writer_sqlite_pragma(dbapi_connection, connection_record):
         dbapi_connection.isolation_level = None
         _configure_runtime_connection(dbapi_connection, db_path)
+        dbapi_connection.execute("PRAGMA busy_timeout=0").close()
 
     @event.listens_for(writer_engine, "begin")
     def begin_immediate(connection):
-        connection.exec_driver_sql("BEGIN IMMEDIATE")
-
-    @event.listens_for(writer_engine, "checkout")
-    def cap_writer_busy_timeout(dbapi_connection, connection_record, connection_proxy):
-        _configure_writer_busy_timeout(dbapi_connection)
-
-    @event.listens_for(writer_engine, "begin", insert=True)
-    def cap_writer_busy_timeout_before_begin(connection):
-        connection.exec_driver_sql(f"PRAGMA busy_timeout = {_writer_busy_timeout_ms()}")
+        _begin_immediate(connection.connection.driver_connection)
 
     with reader_engine.connect():
         pass
@@ -367,36 +369,18 @@ def run_write_txn(work: Callable[["SQLAlchemySession"], T]) -> T:
                     raise locked_error
 
             _attempt_lock_deadline.value = retry_deadline
-            connection = None
-            session = None
+            session = WriteSession()
             try:
-                if WriteSession is Session:
-                    session = WriteSession()
-                else:
-                    writer_engine = getattr(WriteSession, "kw", {}).get("bind")
-                    if writer_engine is None:
-                        session = WriteSession()
-                    else:
-                        connection = writer_engine.connect()
-                        _configure_writer_busy_timeout(connection.connection.driver_connection)
-                        connection.begin()
-                        session = SQLAlchemySession(bind=connection, join_transaction_mode="control_fully")
                 result = work(session)
                 session.commit()
-                if connection is not None and connection.in_transaction():
-                    connection.commit()
                 return result
             except OperationalError as exc:
                 if "locked" not in str(exc.orig):
                     raise
                 locked_error = exc
             finally:
-                if session is not None:
-                    session.rollback()
-                    session.close()
-                if connection is not None:
-                    connection.rollback()
-                    connection.close()
+                session.rollback()
+                session.close()
                 _attempt_lock_deadline.value = None
 
             if attempt == len(_WRITE_TXN_BACKOFF_SECONDS) or time.monotonic() >= retry_deadline:
