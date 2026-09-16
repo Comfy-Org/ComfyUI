@@ -191,7 +191,15 @@ def _move_temp_to_dest(temp_path: str, dest_abs: str) -> None:
         os.replace(temp_path, dest_abs)
     except OSError as error:
         if error.errno == errno.EXDEV:
-            shutil.copy2(temp_path, dest_abs)
+            destination_dir = os.path.dirname(dest_abs)
+            destination_temp = os.path.join(destination_dir, f".{os.path.basename(dest_abs)}.tmp")
+            try:
+                shutil.copy2(temp_path, destination_temp)
+                os.replace(destination_temp, dest_abs)
+            except BaseException:
+                if os.path.exists(destination_temp):
+                    os.unlink(destination_temp)
+                raise
             os.unlink(temp_path)
             return
         raise RuntimeError(f"failed to move uploaded file into place: {error}") from error
@@ -541,7 +549,7 @@ def _reuse_qualified_content(
     stored_hash: str,
     spec: _UploadRecordSpec,
 ) -> UploadResult | None:
-    for restart in range(4):
+    for _restart in range(4):
         preflight = _preflight_upload_record(stored_hash, None, spec)
         if preflight is None:
             return None
@@ -551,18 +559,13 @@ def _reuse_qualified_content(
                 lambda session: _apply_reused_upload_record(session, prepared)
             )
         except _PreflightStale:
-            if restart == 3:
-                logging.warning(
-                    "Upload preflight changed three times; falling back to in-transaction metadata extraction"
-                )
-                return run_write_txn(
-                    lambda session: _reuse_qualified_content_in_txn(
-                        session,
-                        stored_hash,
-                        spec,
-                    )
-                )
-    return None
+            continue
+    logging.warning(
+        "Upload preflight changed three times; falling back to in-transaction metadata extraction"
+    )
+    return run_write_txn(
+        lambda session: _reuse_qualified_content_in_txn(session, stored_hash, spec)
+    )
 
 
 def _preflight_settle_target(dest_abs: str) -> _SettleTargetPreflight | None:
@@ -674,7 +677,7 @@ def _settle_destination_before_write_in_txn(session: Session, dest_abs: str) -> 
 
 
 def _settle_destination_before_write(dest_abs: str) -> None:
-    for restart in range(4):
+    for _restart in range(4):
         preflight = _preflight_settle_target(dest_abs)
         if preflight is None:
             return
@@ -683,17 +686,14 @@ def _settle_destination_before_write(dest_abs: str) -> None:
             run_write_txn(lambda session: _apply_settle_target(session, prepared))
             return
         except _PreflightStale:
-            if restart == 3:
-                logging.warning(
-                    "Upload destination preflight changed three times; falling back to in-transaction hashing"
-                )
-                run_write_txn(
-                    lambda session: _settle_destination_before_write_in_txn(
-                        session,
-                        dest_abs,
-                    )
-                )
-                return
+            continue
+    logging.warning(
+        "Upload destination preflight changed three times; falling back to in-transaction hashing"
+    )
+    run_write_txn(
+        lambda session: _settle_destination_before_write_in_txn(session, dest_abs)
+    )
+    return
 
 
 def _create_content_and_upload_record(
@@ -703,7 +703,7 @@ def _create_content_and_upload_record(
     content_written: bool,
     spec: _UploadRecordSpec,
 ) -> UploadResult:
-    for restart in range(4):
+    for _restart in range(4):
         preflight = _preflight_upload_record(None, path, spec)
         if preflight is None:
             raise RuntimeError("new upload record requires a destination path")
@@ -737,42 +737,37 @@ def _create_content_and_upload_record(
         try:
             return run_write_txn(_work)
         except _PreflightStale:
-            if restart == 3:
-                logging.warning(
-                    "Upload record preflight changed three times; falling back to in-transaction metadata extraction"
-                )
+            continue
 
-                def _fallback_work(session: Session) -> UploadResult:
-                    _reconcile_live_content_at_path(
-                        session,
-                        path,
-                        facts,
-                        content_written=content_written,
-                    )
-                    content, inserted = create_content_reporting_insert(
-                        session,
-                        path,
-                        stored_hash,
-                        facts.size_bytes,
-                        facts.mtime_ns,
-                    )
-                    created_content_id = content.id if inserted else None
-                    try:
-                        record = _create_upload_record_in_txn(
-                            session,
-                            content.id,
-                            spec,
-                            path,
-                        )
-                    except Exception:
-                        session.rollback()
-                        if created_content_id is not None:
-                            _discard_unreferenced_content(session, created_content_id)
-                        raise
-                    return _record_to_upload_result(session, record, created_new=True)
+    logging.warning(
+        "Upload record preflight changed three times; falling back to in-transaction metadata extraction"
+    )
 
-                return run_write_txn(_fallback_work)
-    raise RuntimeError("upload record preflight retry loop did not return")
+    def _fallback_work(session: Session) -> UploadResult:
+        _reconcile_live_content_at_path(
+            session,
+            path,
+            facts,
+            content_written=content_written,
+        )
+        content, inserted = create_content_reporting_insert(
+            session,
+            path,
+            stored_hash,
+            facts.size_bytes,
+            facts.mtime_ns,
+        )
+        created_content_id = content.id if inserted else None
+        try:
+            record = _create_upload_record_in_txn(session, content.id, spec, path)
+        except Exception:
+            session.rollback()
+            if created_content_id is not None:
+                _discard_unreferenced_content(session, created_content_id)
+            raise
+        return _record_to_upload_result(session, record, created_new=True)
+
+    return run_write_txn(_fallback_work)
 
 
 def upload_from_temp_path(
@@ -1083,7 +1078,7 @@ def register_cached_output(
 ) -> RegisteredAsset | None:
     locator = os.path.abspath(abs_path)
     try:
-        for restart in range(4):
+        for _restart in range(4):
             preflight = _preflight_cached_registration(locator)
             if preflight is None:
                 logging.info(
@@ -1110,17 +1105,13 @@ def register_cached_output(
                     )
                 )
             except _PreflightStale:
-                if restart == 3:
-                    logging.warning(
-                        "Cached-output preflight changed three times; falling back to in-transaction metadata extraction"
-                    )
-                    return run_write_txn(
-                        lambda session: _register_cached_output_in_txn(
-                            session,
-                            locator,
-                            job_id,
-                        )
-                    )
+                continue
+        logging.warning(
+            "Cached-output preflight changed three times; falling back to in-transaction metadata extraction"
+        )
+        return run_write_txn(
+            lambda session: _register_cached_output_in_txn(session, locator, job_id)
+        )
     except Exception as exc:
         logging.exception("Failed to register cached output: %s", locator)
         emit(
@@ -1129,7 +1120,6 @@ def register_cached_output(
             error_type=error_type(exc),
         )
         return None
-    return None
 
 
 def register_executed_output(
