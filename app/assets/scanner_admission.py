@@ -73,7 +73,7 @@ def tick_watch_list(session: Session) -> None:
     for entry in _WATCH_LIST:
         try:
             current = os.stat(entry.path)
-        except FileNotFoundError:
+        except OSError:
             continue
         if (current.st_mtime_ns, current.st_size) == (entry.last_stat.st_mtime_ns, entry.last_stat.st_size):
             name, tags = get_name_and_tags_from_asset_path(entry.path)
