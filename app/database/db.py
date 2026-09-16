@@ -365,6 +365,7 @@ def run_write_txn(work: Callable[["SQLAlchemySession"], T]) -> T:
     locked_error = None
     try:
         for attempt in range(len(_WRITE_TXN_BACKOFF_SECONDS) + 1):
+            retryable_lock_error = False
             if attempt > 0:
                 if time.monotonic() >= retry_deadline:
                     raise locked_error
@@ -383,12 +384,15 @@ def run_write_txn(work: Callable[["SQLAlchemySession"], T]) -> T:
                 if not _is_retryable_lock_error(exc.orig):
                     raise
                 locked_error = exc
+                retryable_lock_error = True
             finally:
                 propagating_exception = sys.exc_info()[0] is not None
                 try:
                     session.rollback()
                 except BaseException:
-                    if not propagating_exception:
+                    if retryable_lock_error:
+                        logging.warning("Write transaction rollback failed after locked error; retrying", exc_info=True)
+                    elif not propagating_exception:
                         raise
                 finally:
                     session.close()

@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import sqlite3
@@ -221,6 +222,45 @@ def test_run_write_txn_closes_when_rollback_fails_without_masking_work_error(mon
         db_mod.run_write_txn(work)
 
     assert session.closed
+
+
+def test_run_write_txn_retries_when_rollback_fails_after_handled_lock(monkeypatch, caplog):
+    class Session:
+        def __init__(self, rollback_fails):
+            self.closed = False
+            self.rollback_fails = rollback_fails
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            if self.rollback_fails:
+                raise RuntimeError("rollback failure")
+
+        def close(self):
+            self.closed = True
+
+    first_session = Session(rollback_fails=True)
+    second_session = Session(rollback_fails=False)
+    sessions = iter((first_session, second_session))
+    monkeypatch.setattr(db_mod, "WriteSession", lambda: next(sessions))
+    monkeypatch.setattr(db_mod.time, "sleep", lambda _seconds: None)
+    attempts = 0
+
+    def work(_session):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OperationalError("INSERT", {}, sqlite3.OperationalError("database is locked"))
+        return "written"
+
+    with caplog.at_level(logging.WARNING):
+        assert db_mod.run_write_txn(work) == "written"
+
+    assert first_session.closed
+    assert second_session.closed
+    assert attempts == 2
+    assert "rollback failed" in caplog.text
 
 
 def test_run_write_txn_reraises_nonretryable_operational_error_without_retry(memory_database):
