@@ -173,6 +173,37 @@ def asset_exists(asset_hash: str) -> bool:
         return lookup_for_view(session, canonical) is not None
 
 
+def _preflight_hash_resolution(
+    canonical: str,
+) -> tuple[str, str, str | None, str, list[str]] | None:
+    """Qualify candidate rows and choose the served one before the writer lease is taken."""
+    with create_session() as session:
+        content = lookup_for_view(session, canonical)
+        if content is None:
+            return None
+
+        records = list(
+            session.scalars(
+                select(Asset)
+                .where(Asset.content_id == content.id)
+                .order_by(Asset.created_at, Asset.id)
+            )
+        )
+        display_name = os.path.basename(content.path)
+        mime_type = None
+        if records:
+            latest_record = records[-1]
+            display_name = latest_record.name or display_name
+            mime_type = latest_record.mime_type
+        return (
+            content.id,
+            content.path,
+            mime_type,
+            display_name,
+            [record.id for record in records],
+        )
+
+
 def resolve_hash_to_path(
     asset_hash: str,
 ) -> DownloadResolutionResult | None:
@@ -192,32 +223,23 @@ def resolve_hash_to_path(
     except ValueError:
         return None
 
-    def _work(session) -> tuple[str, str | None, str] | None:
-        content = lookup_for_view(session, canonical)
-        if content is None:
+    preflight = _preflight_hash_resolution(canonical)
+    if preflight is None:
+        return None
+    content_id, abs_path, mime_type, display_name, record_ids = preflight
+
+    if record_ids:
+        def _work(session) -> bool:
+            content = session.get(AssetContent, content_id)
+            if content is None or content.is_missing or content.hash != canonical:
+                return False
+            for record_id in record_ids:
+                update_record_access_time(session, record_id)
+            return True
+
+        if not run_write_txn(_work):
             return None
 
-        records = list(
-            session.scalars(
-                select(Asset)
-                .where(Asset.content_id == content.id)
-                .order_by(Asset.created_at, Asset.id)
-            )
-        )
-        display_name = os.path.basename(content.path)
-        mime_type = None
-        if records:
-            latest_record = records[-1]
-            display_name = latest_record.name or display_name
-            mime_type = latest_record.mime_type
-        for record in records:
-            update_record_access_time(session, record.id)
-        return content.path, mime_type, display_name
-
-    resolution = run_write_txn(_work)
-    if resolution is None:
-        return None
-    abs_path, mime_type, display_name = resolution
     ctype = (
         mime_type
         or mimetypes.guess_type(display_name)[0]
@@ -242,30 +264,29 @@ def get_preview_file_paths(preview_ids: list[str]) -> dict[str, str]:
 def resolve_asset_for_download(
     reference_id: str,
 ) -> DownloadResolutionResult:
-    def _work(session) -> tuple[str, str | None, str | None]:
+    with create_session() as session:
         record = get_record_by_id(session, reference_id)
         if record is None:
             raise ValueError(f"AssetReference {reference_id} not found")
-
         content = session.get(AssetContent, record.content_id)
-        if (
-            content is None
-            or content.is_missing
-            or not os.path.isfile(content.path)
-        ):
-            raise FileNotFoundError(
-                f"No live content for AssetReference {reference_id} "
-                f"(content id={record.content_id}, name={record.name})"
-            )
-
+        content_missing = content is None or content.is_missing
+        candidate_path = None if content is None else content.path
         ref_name = record.name
         asset_mime = record.mime_type
-        abs_path = content.path
+        content_id = record.content_id
 
+    if content_missing or candidate_path is None or not os.path.isfile(candidate_path):
+        raise FileNotFoundError(
+            f"No live content for AssetReference {reference_id} "
+            f"(content id={content_id}, name={ref_name})"
+        )
+
+    abs_path = candidate_path
+
+    def _work(session) -> None:
         update_record_access_time(session, reference_id)
-        return abs_path, asset_mime, ref_name
 
-    abs_path, asset_mime, ref_name = run_write_txn(_work)
+    run_write_txn(_work)
     ctype = (
         asset_mime
         or mimetypes.guess_type(ref_name or abs_path)[0]

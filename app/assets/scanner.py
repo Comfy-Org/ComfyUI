@@ -185,64 +185,149 @@ def sync_references_with_filesystem(
     )
 
 
+class _ReferenceObservation(NamedTuple):
+
+    content_id: str
+    path: str
+    observed_size_bytes: int | None
+    observed_mtime_ns: int | None
+    stat_result: os.stat_result | None
+
+
+class _ReferenceDiagnostic(NamedTuple):
+
+    path: str
+    error: OSError
+
+
+def _catalogued_references(
+    session: Session, prefixes: list[str]
+) -> list[tuple[str, str, int | None, int | None]]:
+    return [
+        (content.id, content.path, content.size_bytes, content.mtime_ns)
+        for content in live_contents_under_prefixes(session, prefixes)
+    ]
+
+
+def observe_references_on_filesystem(
+    prefixes: list[str],
+    progress: _ScanProgress | None = None,
+    diagnostics: list[_ReferenceDiagnostic] | None = None,
+    session: Session | None = None,
+) -> tuple[list[_ReferenceObservation], set[str]]:
+    """Stat every catalogued reference without holding the writer lease.
+
+    Returns only observations that require a write, so an unchanged root applies nothing
+    and never acquires the write lock.
+    """
+    if session is not None:
+        catalogued = _catalogued_references(session, prefixes)
+    else:
+        with create_session() as read_session:
+            catalogued = _catalogued_references(read_session, prefixes)
+
+    observations: list[_ReferenceObservation] = []
+    survivors: set[str] = set()
+    for content_id, path, size_bytes, mtime_ns in catalogued:
+        try:
+            stat_result = os.stat(path, follow_symlinks=True)
+        except FileNotFoundError:
+            observations.append(
+                _ReferenceObservation(content_id, path, size_bytes, mtime_ns, None)
+            )
+        except PermissionError as e:
+            if diagnostics is None:
+                _log_scan_error("reference_stat", e)
+                if progress is not None:
+                    progress.permission_denied += 1
+                logging.debug("Permission denied accessing %s", path)
+            else:
+                diagnostics.append(_ReferenceDiagnostic(path, e))
+        except OSError as e:
+            if diagnostics is None:
+                _log_scan_error("reference_stat", e)
+                logging.debug("OSError checking %s: %s", path, e)
+            else:
+                diagnostics.append(_ReferenceDiagnostic(path, e))
+            observations.append(
+                _ReferenceObservation(content_id, path, size_bytes, mtime_ns, None)
+            )
+        else:
+            survivors.add(os.path.abspath(path))
+            if stat_result.st_mtime_ns != mtime_ns:
+                observations.append(
+                    _ReferenceObservation(
+                        content_id, path, size_bytes, mtime_ns, stat_result
+                    )
+                )
+
+    return observations, survivors
+
+
+def apply_reference_observations(
+    session: Session,
+    observations: list[_ReferenceObservation],
+    pending_verification_ids: list[str] | None = None,
+) -> None:
+    """Apply pre-computed observations. Performs no filesystem I/O."""
+    if not observations:
+        return
+    hashing_is_enabled = mode.hashing_enabled()
+    for observation in observations:
+        content = session.get(AssetContent, observation.content_id)
+        if content is None:
+            continue
+        if (
+            content.size_bytes != observation.observed_size_bytes
+            or content.mtime_ns != observation.observed_mtime_ns
+        ):
+            continue
+        if observation.stat_result is None:
+            mark_content_missing(session, observation.content_id)
+            continue
+        detect_content_change(
+            session,
+            content,
+            observation.stat_result,
+            hashing_is_enabled=hashing_is_enabled,
+            pending_verification_ids=pending_verification_ids,
+        )
+
+
 def sync_prefixes_with_filesystem(
     session: Session,
     prefixes: list[str],
     collect_existing_paths: bool = False,
     progress: _ScanProgress | None = None,
     pending_verification_ids: list[str] | None = None,
-    diagnostics: list[OSError] | None = None,
+    diagnostics: list[_ReferenceDiagnostic] | None = None,
 ) -> set[str] | None:
     if not prefixes:
         return set() if collect_existing_paths else None
 
-    survivors: set[str] = set()
-    for content in live_contents_under_prefixes(session, prefixes):
-        try:
-            stat_result = os.stat(content.path, follow_symlinks=True)
-        except FileNotFoundError:
-            mark_content_missing(session, content.id)
-        except PermissionError as e:
-            if diagnostics is None:
-                _log_scan_error("reference_stat", e)
-                if progress is not None:
-                    progress.permission_denied += 1
-                logging.debug("Permission denied accessing %s", content.path)
-            else:
-                diagnostics.append(e)
-        except OSError as e:
-            if diagnostics is None:
-                _log_scan_error("reference_stat", e)
-                logging.debug("OSError checking %s: %s", content.path, e)
-            else:
-                diagnostics.append(e)
-            mark_content_missing(session, content.id)
-        else:
-            detect_content_change(
-                session,
-                content,
-                stat_result,
-                hashing_is_enabled=mode.hashing_enabled(),
-                pending_verification_ids=pending_verification_ids,
-            )
-            survivors.add(os.path.abspath(content.path))
+    observations, survivors = observe_references_on_filesystem(
+        prefixes, progress=progress, diagnostics=diagnostics, session=session
+    )
+    apply_reference_observations(
+        session, observations, pending_verification_ids=pending_verification_ids
+    )
 
     return survivors if collect_existing_paths else None
 
 
 def _publish_reference_diagnostics(
-    diagnostics: list[OSError], progress: _ScanProgress | None
+    diagnostics: list[_ReferenceDiagnostic], progress: _ScanProgress | None
 ) -> None:
-    for diagnostic in diagnostics:
-        _log_scan_error("reference_stat", diagnostic)
-        if isinstance(diagnostic, PermissionError):
+    for path, error in diagnostics:
+        _log_scan_error("reference_stat", error)
+        if isinstance(error, PermissionError):
             if progress is not None:
                 progress.permission_denied += 1
-            logging.debug("Permission denied accessing reference")
+            logging.debug("Permission denied accessing %s", path)
         else:
-            logging.debug("OSError checking reference: %s", diagnostic)
+            logging.debug("OSError checking %s: %s", path, error)
         if progress is None or progress.mark_emitted("stat_failed:reference_stat"):
-            emit("scanner.stat_failed", site="reference_stat", error_type=error_type(diagnostic))
+            emit("scanner.stat_failed", site="reference_stat", error_type=error_type(error))
 
 
 def _is_under_prefixes(path: str, prefixes: list[str]) -> bool:
@@ -257,19 +342,20 @@ def sync_root_safely(
     Returns survivors (existing paths) or empty set on failure.
     """
     try:
-        def _work(sess: Session) -> tuple[set[str], list[str], list[OSError]]:
-            pending_verification_ids: list[str] = []
-            diagnostics: list[OSError] = []
-            survivors = sync_references_with_filesystem(
-                sess,
-                root,
-                collect_existing_paths=True,
-                pending_verification_ids=pending_verification_ids,
-                diagnostics=diagnostics,
-            )
-            return survivors or set(), pending_verification_ids, diagnostics
+        diagnostics: list[_ReferenceDiagnostic] = []
+        observations, survivors = observe_references_on_filesystem(
+            get_scan_prefixes_for_root(root), diagnostics=diagnostics
+        )
 
-        survivors, pending_verification_ids, diagnostics = run_write_txn(_work)
+        pending_verification_ids: list[str] = []
+        if observations:
+            def _work(sess: Session) -> None:
+                apply_reference_observations(
+                    sess, observations, pending_verification_ids=pending_verification_ids
+                )
+
+            run_write_txn(_work)
+
         for content_id in pending_verification_ids:
             queue_pending_verification(content_id)
         _publish_reference_diagnostics(diagnostics, progress)
@@ -289,18 +375,20 @@ def sync_temp_references_safely(
 ) -> None:
     """Retire temp references whose file is gone; temp is never scanned, so nothing else stats them."""
     try:
-        def _work(sess: Session) -> tuple[list[str], list[OSError]]:
-            pending_verification_ids: list[str] = []
-            diagnostics: list[OSError] = []
-            sync_prefixes_with_filesystem(
-                sess,
-                get_temp_prefixes(),
-                pending_verification_ids=pending_verification_ids,
-                diagnostics=diagnostics,
-            )
-            return pending_verification_ids, diagnostics
+        diagnostics: list[_ReferenceDiagnostic] = []
+        observations, _ = observe_references_on_filesystem(
+            get_temp_prefixes(), diagnostics=diagnostics
+        )
 
-        pending_verification_ids, diagnostics = run_write_txn(_work)
+        pending_verification_ids: list[str] = []
+        if observations:
+            def _work(sess: Session) -> None:
+                apply_reference_observations(
+                    sess, observations, pending_verification_ids=pending_verification_ids
+                )
+
+            run_write_txn(_work)
+
         for content_id in pending_verification_ids:
             queue_pending_verification(content_id)
         _publish_reference_diagnostics(diagnostics, progress)

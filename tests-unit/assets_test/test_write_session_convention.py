@@ -42,9 +42,14 @@ READ_ONLY_CREATE_SESSION_CALL_SITES = frozenset(
         # would acquire a write lease for no persisted work.
         CreateSessionCallSite("app/assets/lifecycle.py", "enqueue_mode_transition_work"),
         CreateSessionCallSite("app/assets/scanner.py", "get_unenriched_assets_for_roots"),
+        # This reads the catalogue so the stat walk runs before the writer lease is taken.
+        CreateSessionCallSite("app/assets/scanner.py", "observe_references_on_filesystem"),
         # This preflight reads a content path and stats it before outside-transaction hashing.
         CreateSessionCallSite("app/assets/scanner_changes.py", "_preflight_pending_verification"),
         CreateSessionCallSite("app/assets/services/asset_management.py", "get_asset_detail"),
+        # These qualify candidate rows with filesystem I/O before the writer lease is taken.
+        CreateSessionCallSite("app/assets/services/asset_management.py", "_preflight_hash_resolution"),
+        CreateSessionCallSite("app/assets/services/asset_management.py", "resolve_asset_for_download"),
         CreateSessionCallSite("app/assets/services/asset_management.py", "asset_exists"),
         CreateSessionCallSite("app/assets/services/asset_management.py", "get_preview_file_paths"),
         # These preflights read decision facts before metadata or hash I/O outside the writer lease.

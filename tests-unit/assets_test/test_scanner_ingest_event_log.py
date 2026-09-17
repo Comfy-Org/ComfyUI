@@ -107,6 +107,7 @@ def test_scanner_safe_failures_emit_exception_type_without_path(
     def fail_session():
         raise FileNotFoundError(secret_path)
 
+    monkeypatch.setattr("app.database.db.Session", fail_session)
     monkeypatch.setattr("app.database.db.WriteSession", fail_session)
 
     with caplog.at_level(logging.INFO):
@@ -121,7 +122,9 @@ def test_permission_error_in_reference_sync_increments_scan_counter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     secret_path = "/private/assets/unreadable.safetensors"
-    content = SimpleNamespace(id="content", path=secret_path)
+    content = SimpleNamespace(
+        id="content", path=secret_path, size_bytes=1, mtime_ns=1
+    )
     progress = _ScanState()
 
     def deny_stat(*_args, **_kwargs):
