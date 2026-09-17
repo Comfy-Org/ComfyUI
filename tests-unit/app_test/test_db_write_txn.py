@@ -366,7 +366,7 @@ def test_run_write_txn_reraises_non_operational_error_without_retry(memory_datab
     assert attempts == 1
 
 
-def test_run_write_txn_reraises_terminal_locked_error_after_five_attempts(
+def test_run_write_txn_reraises_in_callback_locked_error_after_five_attempts(
     memory_database, monkeypatch
 ):
     run_write_txn = db_mod.run_write_txn
@@ -632,3 +632,54 @@ def test_disabled_assets_startup_survives_a_filesystem_that_rejects_wal(tmp_path
         _dispose_runtime_engines()
         if db_mod._db_lock is not None:
             db_mod._db_lock.release(force=True)
+
+
+def test_begin_time_contention_does_not_reach_the_in_callback_attempt_count(
+    file_database, monkeypatch
+):
+    """Contention at BEGIN IMMEDIATE spends its deadline polling, not on the backoff table.
+
+    The 5-attempt regime is reachable only when the lock error surfaces from inside the
+    callback, so a test that fabricates it there cannot detect this difference.
+    """
+    run_write_txn = db_mod.run_write_txn
+    monkeypatch.setattr(db_mod, "_SQLITE_BUSY_TIMEOUT_MS", 200)
+    monkeypatch.setattr(db_mod, "_WRITE_TXN_LOCK_RETRY_DEADLINE_SECONDS", 0.5)
+
+    lock_held = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        holder = sqlite3.connect(file_database)
+        try:
+            holder.execute("BEGIN IMMEDIATE")
+            holder.execute("INSERT INTO tags (name) VALUES (?)", ("begin-contention-holder",))
+            lock_held.set()
+            release.wait(timeout=30)
+            holder.rollback()
+        finally:
+            holder.close()
+
+    attempts = 0
+
+    def work(session):
+        nonlocal attempts
+        attempts += 1
+        session.execute(text("INSERT INTO tags (name) VALUES ('contended')"))
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    try:
+        assert lock_held.wait(timeout=5)
+        with pytest.raises(OperationalError, match="database is locked"):
+            run_write_txn(work)
+        assert holder.is_alive(), "holder must still own the write lock at refusal time"
+    finally:
+        release.set()
+        holder.join(timeout=6)
+
+    assert not holder.is_alive()
+    assert 0 < attempts < 5, (
+        f"BEGIN-time contention consumed the deadline in {attempts} attempts; "
+        "the 5-attempt backoff table governs only in-callback lock errors"
+    )
