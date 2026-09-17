@@ -4,8 +4,7 @@ import torch
 from comfy.cli_args import args
 
 # Must precede the import: comfy.model_management picks its device at import time, and a CUDA
-# build with no driver raises there. Same guard, same placement, as every other test module
-# that imports it.
+# build with no driver raises there.
 if not torch.cuda.is_available():
     args.cpu = True
 
