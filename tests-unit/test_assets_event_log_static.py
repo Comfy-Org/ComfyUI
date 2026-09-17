@@ -68,6 +68,9 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
             "app/assets/scanner_admission.py", "tick_watch_list", "scanner.watch_stat_failed"
         ),
         CallSite(
+            "app/assets/scanner_admission.py", "tick_watch_list", "scanner.watch_spec_failed"
+        ),
+        CallSite(
             "app/assets/scanner_admission.py", "tick_watch_list", "scanner.watch_seed_failed"
         ),
     }
