@@ -498,7 +498,9 @@ class _AssetSeeder:
         """Check if cancellation has been requested."""
         return self._cancel_event.is_set()
 
-    def _is_paused_or_cancelled(self) -> bool:
+    def _is_paused_or_cancelled(
+        self, stage: _ScanStage = _ScanStage.ENRICH
+    ) -> bool:
         """Non-blocking check: True if paused or cancelled.
 
         Use as interrupt_check for I/O-bound work (e.g. hashing) so that
@@ -508,7 +510,7 @@ class _AssetSeeder:
         """
         cancelled = self._cancel_event.is_set()
         if cancelled:
-            self._record_cancel_stage(_ScanStage.ENRICH)
+            self._record_cancel_stage(stage)
         return not self._run_gate.is_set() or cancelled
 
     def _record_cancel_stage(self, stage: _ScanStage) -> None:
@@ -624,7 +626,12 @@ class _AssetSeeder:
 
             if self._prune_first:
                 all_prefixes = get_owned_prefixes()
-                marked = mark_missing_outside_prefixes_safely(all_prefixes)
+                marked = mark_missing_outside_prefixes_safely(
+                    all_prefixes,
+                    interrupt_check=lambda: self._is_paused_or_cancelled(
+                        _ScanStage.PRUNING
+                    ),
+                )
                 emit(
                     "seeder.marked_missing",
                     count=marked,
@@ -632,7 +639,12 @@ class _AssetSeeder:
                 )
                 if marked > 0:
                     logging.info("Marked %d refs as missing before scan", marked)
-                sync_temp_references_safely(scan_state)
+                sync_temp_references_safely(
+                    scan_state,
+                    interrupt_check=lambda: self._is_paused_or_cancelled(
+                        _ScanStage.PRUNING
+                    ),
+                )
 
             if self._check_pause_and_cancel(_ScanStage.PRUNING):
                 logging.info("Asset scan cancelled after pruning phase")
@@ -789,7 +801,15 @@ class _AssetSeeder:
         for r in roots:
             if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
                 return total_created, skipped_existing, 0
-            existing_paths.update(sync_root_safely(r, scan_state))
+            existing_paths.update(
+                sync_root_safely(
+                    r,
+                    scan_state,
+                    interrupt_check=lambda: self._is_paused_or_cancelled(
+                        _ScanStage.FAST_SCAN
+                    ),
+                )
+            )
         logging.debug(
             "Fast scan: sync_root phase took %.3fs (%d existing paths)",
             time.perf_counter() - t_sync,

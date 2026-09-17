@@ -44,6 +44,8 @@ READ_ONLY_CREATE_SESSION_CALL_SITES = frozenset(
         CreateSessionCallSite("app/assets/scanner.py", "get_unenriched_assets_for_roots"),
         # This reads the catalogue so the stat walk runs before the writer lease is taken.
         CreateSessionCallSite("app/assets/scanner.py", "observe_references_on_filesystem"),
+        # This reads the ids to prune before bounded write transactions mark them missing.
+        CreateSessionCallSite("app/assets/scanner.py", "mark_missing_outside_prefixes_safely"),
         # This preflight reads a content path and stats it before outside-transaction hashing.
         CreateSessionCallSite("app/assets/scanner_changes.py", "_preflight_pending_verification"),
         CreateSessionCallSite("app/assets/services/asset_management.py", "get_asset_detail"),

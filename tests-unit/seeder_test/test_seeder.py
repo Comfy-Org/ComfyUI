@@ -310,7 +310,9 @@ def test_idle_reset_survives_a_raising_cancellation_emit(
     monkeypatch.setattr(scan_seeder, "_check_pause_and_cancel", cancel_at_pruning)
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 0
+        seeder_module,
+        "mark_missing_outside_prefixes_safely",
+        lambda prefixes, interrupt_check=None: 0,
     )
 
     original_emit = seeder_module.emit
@@ -337,7 +339,9 @@ def test_scan_paused_after_its_last_phase_still_completes(
     scan_seeder._phase = ScanPhase.ENRICH
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 0
+        seeder_module,
+        "mark_missing_outside_prefixes_safely",
+        lambda prefixes, interrupt_check=None: 0,
     )
 
     def pause_while_finishing(roots) -> tuple[bool, int]:
@@ -373,6 +377,93 @@ def test_enrich_interrupt_records_the_enrich_cancellation_stage(
     assert scan_seeder._scan_state.cancel_stage == "enrich"
 
 
+def test_root_sync_interrupt_records_the_fast_scan_cancellation_stage(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _RootSyncCaptured(Exception):
+        pass
+
+    captured_interrupt = None
+
+    def capture_root_interrupt(
+        _root, _progress, interrupt_check=None
+    ) -> set[str]:
+        nonlocal captured_interrupt
+        captured_interrupt = interrupt_check
+        raise _RootSyncCaptured
+
+    monkeypatch.setattr(seeder_module, "sync_root_safely", capture_root_interrupt)
+
+    with pytest.raises(_RootSyncCaptured):
+        scan_seeder._run_fast_phase(("models",))
+
+    scan_seeder._cancel_event.set()
+    assert captured_interrupt is not None
+    assert captured_interrupt() is True
+    assert scan_seeder._scan_state is not None
+    assert scan_seeder._scan_state.cancel_stage == _ScanStage.FAST_SCAN.value
+
+
+def test_prune_interrupt_records_the_pruning_cancellation_stage(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, bool | str | None] = {}
+    scan_seeder._prune_first = True
+    scan_seeder._phase = ScanPhase.FAST
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
+
+    def cancel_during_prune(_prefixes, interrupt_check=None) -> int:
+        scan_seeder._cancel_event.set()
+        observed["result"] = interrupt_check()
+        assert scan_seeder._scan_state is not None
+        observed["stage"] = scan_seeder._scan_state.cancel_stage
+        return 0
+
+    monkeypatch.setattr(
+        seeder_module, "mark_missing_outside_prefixes_safely", cancel_during_prune
+    )
+    monkeypatch.setattr(
+        seeder_module,
+        "sync_temp_references_safely",
+        lambda _progress, interrupt_check=None: None,
+    )
+
+    scan_seeder._run_scan()
+
+    assert observed == {"result": True, "stage": _ScanStage.PRUNING.value}
+
+
+def test_temp_sync_interrupt_records_the_pruning_cancellation_stage(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, bool | str | None] = {}
+    scan_seeder._prune_first = True
+    scan_seeder._phase = ScanPhase.FAST
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
+    monkeypatch.setattr(
+        seeder_module,
+        "mark_missing_outside_prefixes_safely",
+        lambda _prefixes, interrupt_check=None: 0,
+    )
+
+    def cancel_during_temp(_progress, interrupt_check=None) -> None:
+        scan_seeder._cancel_event.set()
+        observed["result"] = interrupt_check()
+        assert scan_seeder._scan_state is not None
+        observed["stage"] = scan_seeder._scan_state.cancel_stage
+
+    monkeypatch.setattr(
+        seeder_module, "sync_temp_references_safely", cancel_during_temp
+    )
+
+    scan_seeder._run_scan()
+
+    assert observed == {"result": True, "stage": _ScanStage.PRUNING.value}
+
+
 def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
     scan_seeder: _AssetSeeder,
     monkeypatch: pytest.MonkeyPatch,
@@ -382,10 +473,14 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
     scan_seeder._phase = ScanPhase.FAST
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 5
+        seeder_module,
+        "mark_missing_outside_prefixes_safely",
+        lambda prefixes, interrupt_check=None: 5,
     )
     monkeypatch.setattr(
-        seeder_module, "sync_temp_references_safely", lambda _progress: None
+        seeder_module,
+        "sync_temp_references_safely",
+        lambda _progress, interrupt_check=None: None,
     )
     monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
 
@@ -423,7 +518,9 @@ def test_batch_insert_failure_emits_only_the_exception_type(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(
-        seeder_module, "sync_root_safely", lambda _root, _progress: set()
+        seeder_module,
+        "sync_root_safely",
+        lambda _root, _progress, interrupt_check=None: set(),
     )
     monkeypatch.setattr(
         seeder_module, "collect_paths_for_roots", lambda roots: ["asset.safetensors"]
@@ -460,7 +557,9 @@ def test_fast_phase_seeds_in_bounded_batches_it_can_park_between(
 ) -> None:
     specs = [{"tags": []} for _ in range(60)]
     monkeypatch.setattr(
-        seeder_module, "sync_root_safely", lambda _root, _progress: set()
+        seeder_module,
+        "sync_root_safely",
+        lambda _root, _progress, interrupt_check=None: set(),
     )
     monkeypatch.setattr(
         seeder_module, "collect_paths_for_roots", lambda roots: ["asset.safetensors"] * 60

@@ -282,7 +282,8 @@ def apply_reference_observations(
         if content is None:
             continue
         if (
-            content.size_bytes != observation.observed_size_bytes
+            content.is_missing
+            or content.size_bytes != observation.observed_size_bytes
             or content.mtime_ns != observation.observed_mtime_ns
         ):
             continue
@@ -339,7 +340,9 @@ def _is_under_prefixes(path: str, prefixes: list[str]) -> bool:
 
 
 def sync_root_safely(
-    root: RootType, progress: _ScanProgress | None = None
+    root: RootType,
+    progress: _ScanProgress | None = None,
+    interrupt_check: Callable[[], bool] | None = None,
 ) -> set[str]:
     """Sync a single root's references with the filesystem.
 
@@ -351,17 +354,29 @@ def sync_root_safely(
             get_scan_prefixes_for_root(root), diagnostics=diagnostics
         )
 
-        pending_verification_ids: list[str] = []
-        if observations:
-            def _work(sess: Session) -> None:
-                apply_reference_observations(
-                    sess, observations, pending_verification_ids=pending_verification_ids
-                )
+        committed_ids: list[str] = []
+        try:
+            for index in range(0, len(observations), MAX_WRITE_BATCH):
+                if interrupt_check is not None and interrupt_check():
+                    break
+                chunk = observations[index : index + MAX_WRITE_BATCH]
 
-            run_write_txn(_work)
+                def _apply_chunk(
+                    sess: Session, chunk: list[_ReferenceObservation] = chunk
+                ) -> list[str]:
+                    pending_verification_ids: list[str] = []
+                    apply_reference_observations(
+                        sess,
+                        chunk,
+                        pending_verification_ids=pending_verification_ids,
+                    )
+                    return pending_verification_ids
 
-        for content_id in pending_verification_ids:
-            queue_pending_verification(content_id)
+                committed_ids.extend(run_write_txn(_apply_chunk))
+        finally:
+            for content_id in committed_ids:
+                queue_pending_verification(content_id)
+
         _publish_reference_diagnostics(diagnostics, progress)
         return survivors
     except Exception as exc:
@@ -376,6 +391,7 @@ def sync_root_safely(
 
 def sync_temp_references_safely(
     progress: _ScanProgress | None = None,
+    interrupt_check: Callable[[], bool] | None = None,
 ) -> None:
     """Retire temp references whose file is gone; temp is never scanned, so nothing else stats them."""
     try:
@@ -384,17 +400,29 @@ def sync_temp_references_safely(
             get_temp_prefixes(), diagnostics=diagnostics
         )
 
-        pending_verification_ids: list[str] = []
-        if observations:
-            def _work(sess: Session) -> None:
-                apply_reference_observations(
-                    sess, observations, pending_verification_ids=pending_verification_ids
-                )
+        committed_ids: list[str] = []
+        try:
+            for index in range(0, len(observations), MAX_WRITE_BATCH):
+                if interrupt_check is not None and interrupt_check():
+                    break
+                chunk = observations[index : index + MAX_WRITE_BATCH]
 
-            run_write_txn(_work)
+                def _apply_chunk(
+                    sess: Session, chunk: list[_ReferenceObservation] = chunk
+                ) -> list[str]:
+                    pending_verification_ids: list[str] = []
+                    apply_reference_observations(
+                        sess,
+                        chunk,
+                        pending_verification_ids=pending_verification_ids,
+                    )
+                    return pending_verification_ids
 
-        for content_id in pending_verification_ids:
-            queue_pending_verification(content_id)
+                committed_ids.extend(run_write_txn(_apply_chunk))
+        finally:
+            for content_id in committed_ids:
+                queue_pending_verification(content_id)
+
         _publish_reference_diagnostics(diagnostics, progress)
     except Exception as exc:
         logging.exception("temp reference sync failed: %s", exc)
@@ -405,22 +433,52 @@ def sync_temp_references_safely(
         )
 
 
-def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int:
+def mark_missing_outside_prefixes_safely(
+    prefixes: list[str], interrupt_check: Callable[[], bool] | None = None
+) -> int:
     """Mark references as missing when outside the given prefixes.
 
-    This is a non-destructive soft-delete. Returns count marked or 0 on failure.
+    This is a non-destructive soft-delete. Returns the count committed before completion,
+    interruption, or failure.
     """
+    marked_so_far = 0
     try:
-        return run_write_txn(
-            lambda session: mark_contents_missing_outside_prefixes(session, prefixes)
-        )
+        with create_session() as session:
+            contents = session.scalars(
+                sa.select(AssetContent).where(AssetContent.is_missing.is_(False))
+            )
+            content_ids = [
+                content.id
+                for content in contents
+                if not _is_under_prefixes(content.path, prefixes)
+            ]
+
+        for index in range(0, len(content_ids), MAX_WRITE_BATCH):
+            if interrupt_check is not None and interrupt_check():
+                break
+            chunk = content_ids[index : index + MAX_WRITE_BATCH]
+
+            def _mark_chunk(
+                session: Session, chunk: list[str] = chunk
+            ) -> int:
+                marked = 0
+                for content_id in chunk:
+                    content = session.get(AssetContent, content_id)
+                    if content is None or content.is_missing:
+                        continue
+                    mark_content_missing(session, content_id)
+                    marked += 1
+                return marked
+
+            marked_so_far += run_write_txn(_mark_chunk)
+        return marked_so_far
     except Exception as exc:
         logging.exception("marking missing assets failed: %s", exc)
         emit(
             "scanner.mark_missing_failed",
             error_type=error_type(exc),
         )
-        return 0
+        return marked_so_far
 
 
 def mark_contents_missing_outside_prefixes(

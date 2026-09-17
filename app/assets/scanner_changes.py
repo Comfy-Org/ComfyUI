@@ -14,7 +14,7 @@ from typing import Literal, NamedTuple
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from app.assets.database.models import AssetContent
+from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import (
     create_content,
     create_record,
@@ -175,6 +175,12 @@ def detect_content_change(
         # Ruling #10: size drift with unchanged mtime is undefined behavior.
         return
     if hashing_is_enabled:
+        if content.hash is None:
+            session.execute(
+                sa.update(Asset)
+                .where(Asset.content_id == content.id)
+                .values(system_metadata=None)
+            )
         if pending_verification_ids is None:
             queue_pending_verification(content.id)
         elif content.id not in pending_verification_ids:
@@ -189,6 +195,11 @@ def detect_content_change(
         content.size_bytes = stat_result.st_size
         content.mtime_ns = stat_result.st_mtime_ns
         content.hash = None
+        session.execute(
+            sa.update(Asset)
+            .where(Asset.content_id == content.id)
+            .values(system_metadata=None)
+        )
         return
     split_content(session, content, stat_result, hash_value=None)
 
