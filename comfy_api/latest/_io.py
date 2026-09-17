@@ -1323,8 +1323,8 @@ class DynamicGroup(ComfyTypeI):
     Template fields must be widget inputs without force_input or nested dynamic inputs.
     Submit fields as '<group>.<index>.<field>', using indices below max without leading zeros.
     The '<group>.' prefix is reserved for group fields, not separate sibling inputs.
-    min/max are integers that count submitted rows (defaults: 0/50), even when optional=True.
-    max also bounds the reconstructed list length and cannot exceed 100.
+    min/max are integers that count submitted rows (defaults: 0/20), even when optional=True.
+    max also bounds the reconstructed list length and cannot exceed 20.
     Each submitted row follows the template's required/optional field declarations.
 
     Missing positions are dicts whose fields are None. Missing optional fields are
@@ -1335,10 +1335,10 @@ class DynamicGroup(ComfyTypeI):
     """
 
     Type = list[dict[str, Any]]
-    _MaxRows = 100
+    _MaxRows = 20
 
     class Input(DynamicInput):
-        def __init__(self, id: str, template: list[WidgetInput], min: int=0, max: int=50,
+        def __init__(self, id: str, template: list[WidgetInput], min: int=0, max: int=20,
                      display_name: str=None, optional: bool=False, tooltip: str=None,
                      lazy: bool=None, extra_dict=None, group_name: str="Group"):
             super().__init__(id, display_name, optional, tooltip, lazy, extra_dict)

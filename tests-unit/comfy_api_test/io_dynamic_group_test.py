@@ -38,7 +38,7 @@ def test_serializes_one_template_with_field_requirements():
     ("rows", [io.Float.Input("x")], {"min": -1}),
     ("rows", [io.Float.Input("x")], {"min": 2, "max": 1}),
     ("rows", [io.Float.Input("x")], {"max": 0}),
-    ("rows", [io.Float.Input("x")], {"max": 101}),
+    ("rows", [io.Float.Input("x")], {"max": 21}),
 ])
 def test_rejects_invalid_template_or_limits(group_id, template, limits):
     with pytest.raises(ValueError):
@@ -140,13 +140,20 @@ def test_rejects_malformed_row_keys(key):
     assert key in str(error.value)
 
 
+def test_default_max_is_exposed_and_enforced():
+    group = io.DynamicGroup.Input("rows", template=[io.Float.Input("x")])
+    assert create_input_dict_v1([group])["required"]["rows"][1]["max"] == 20
+    with pytest.raises(ValueError, match="exceeds the index limit of 19"):
+        _reconstruct(group, {"rows.20.x": 0.5})
+
+
 def test_largest_supported_index_preserves_position():
-    group = io.DynamicGroup.Input("rows", template=[io.Float.Input("x")], max=100)
-    rows = _reconstruct(group, {"rows.99.x": 0.5})["rows"]
-    assert rows == [{"x": None}] * 99 + [{"x": 0.5}]
+    group = io.DynamicGroup.Input("rows", template=[io.Float.Input("x")], max=20)
+    rows = _reconstruct(group, {"rows.19.x": 0.5})["rows"]
+    assert rows == [{"x": None}] * 19 + [{"x": 0.5}]
 
 
-@pytest.mark.parametrize("maximum,index", [(1, 1), (1, 99), (2, 2), (50, 50), (100, 100), (1, 1_000_000)])
+@pytest.mark.parametrize("maximum,index", [(1, 1), (1, 99), (2, 2), (20, 20), (20, 100), (1, 1_000_000)])
 def test_rejects_out_of_range_index_before_registering_padding(maximum, index):
     group = io.DynamicGroup.Input("rows", template=[io.Float.Input("x")], max=maximum)
     expanded = {"required": {}, "optional": {}, "dynamic_paths": {}, "dynamic_paths_default_value": {}, "list_paths": set()}
