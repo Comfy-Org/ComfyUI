@@ -177,6 +177,81 @@ def test_seed_failure_does_not_stop_watch_list_drain(
     )
 
 
+def test_spec_construction_failure_drops_the_entry_without_wedging_the_watch_list(
+    session,
+    temp_dir: Path,
+    monkeypatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    changing_path = temp_dir / "changing.bin"
+    unresolvable_path = temp_dir / "unresolvable.bin"
+    stable_path = temp_dir / "stable.bin"
+    for path in (changing_path, unresolvable_path, stable_path):
+        path.write_bytes(path.name.encode())
+    changing_stat = changing_path.stat()
+    changing_path.write_bytes(b"still-downloading-and-now-longer")
+    _WATCH_LIST[:] = [
+        _WatchEntry(str(changing_path), changing_stat),
+        _WatchEntry(str(unresolvable_path), unresolvable_path.stat()),
+        _WatchEntry(str(stable_path), stable_path.stat()),
+    ]
+    resolve_name_and_tags = scanner_admission.get_name_and_tags_from_asset_path
+
+    def _name_and_tags(path: str) -> tuple[str, list[str]]:
+        if path == str(unresolvable_path):
+            raise ValueError(
+                "Path is not within input, output, temp, or configured model bases: "
+                f"{path}"
+            )
+        return resolve_name_and_tags(path)
+
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
+    monkeypatch.setattr(
+        scanner_admission, "get_name_and_tags_from_asset_path", _name_and_tags
+    )
+
+    with caplog.at_level(logging.INFO):
+        tick_watch_list(session)
+    session.commit()
+
+    assert set(session.scalars(select(AssetContent.path)).all()) == {str(stable_path)}
+    assert [(entry.path, entry.ticks) for entry in _WATCH_LIST] == [
+        (str(changing_path), 1)
+    ]
+    assert any(
+        record.getMessage()
+        == f"Dropping watched asset after spec construction failed: {unresolvable_path}"
+        for record in caplog.records
+    )
+    assert any(
+        record.getMessage()
+        == "[assets-event] scanner.watch_spec_failed error_type=ValueError"
+        for record in caplog.records
+    )
+
+
+def test_unexpected_fault_mid_drain_leaves_unvisited_entries_on_the_watch_list(
+    session, temp_dir: Path, monkeypatch
+) -> None:
+    paths = [temp_dir / name for name in ("first.bin", "exploding.bin", "untouched.bin")]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
+
+    def seed_or_explode(_session, specs) -> tuple[int, Exception | None]:
+        if specs[0]["abs_path"] == str(paths[1]):
+            raise MemoryError("forced unrecoverable fault")
+        return 1, None
+
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
+    monkeypatch.setattr("app.assets.scanner.seed_asset_specs", seed_or_explode)
+
+    with pytest.raises(MemoryError, match="^forced unrecoverable fault$"):
+        tick_watch_list(session)
+
+    assert [entry.path for entry in _WATCH_LIST] == [str(paths[2])]
+
+
 def test_stable_scan_admission_removes_watch_entry_before_next_tick(session, temp_dir: Path, monkeypatch):
     path = temp_dir / "stable.bin"
     path.write_bytes(b"complete")

@@ -45,6 +45,7 @@ ALLOWED_EVENTS = frozenset({
     "scanner.stat_failed",
     "scanner.invalid_mtime",
     "scanner.watch_stat_failed",
+    "scanner.watch_spec_failed",
     "scanner.watch_seed_failed",
 })
 
