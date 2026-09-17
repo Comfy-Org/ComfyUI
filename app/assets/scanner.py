@@ -38,7 +38,6 @@ from app.assets.scanner_changes import (
     prepare_missing_content_recovery,
     queue_pending_recovery,
     queue_pending_verification,
-    recover_missing_content,
     recover_missing_content_from_preparation,
 )
 from app.assets.scanner_admission import (
@@ -71,6 +70,10 @@ __all__ = [
 # Temp is deliberately absent: it is wiped before every scan, so walking it finds nothing.
 RootType = Literal["models", "input", "output"]
 
+# A scan's worth of rows in one transaction would hold the writer lock for the whole
+# scan, so seeding commits in batches this size.
+MAX_WRITE_BATCH = 25
+
 
 class _ScanProgress(Protocol):
     hash_failed: int
@@ -83,7 +86,8 @@ class _ScanProgress(Protocol):
 class SeedAssetSpec(TypedDict):
 
     abs_path: str
-    # Walk-time diagnostics only: seeding persists the seed-time restat instead.
+    # Walk-time diagnostics only: seeding uses the stat taken by insert_asset_specs
+    # before the write transaction.
     size_bytes: int
     mtime_ns: int
     info_name: str
@@ -521,9 +525,21 @@ def build_asset_specs(
     return specs, tag_pool, skipped
 
 
+def stat_seed_specs(specs: list[SeedAssetSpec]) -> dict[str, os.stat_result | None]:
+    stats: dict[str, os.stat_result | None] = {}
+    for spec in specs:
+        path = os.path.abspath(spec["abs_path"])
+        try:
+            stats[path] = os.stat(path, follow_symlinks=True)
+        except OSError:
+            stats[path] = None
+    return stats
+
+
 def seed_asset_specs(
     session: Session,
     specs: list[SeedAssetSpec],
+    stats: dict[str, os.stat_result | None],
     prepared_recoveries: dict[str, PreparedRecovery | None] | None = None,
     pending_recovery_paths: list[str] | None = None,
 ) -> int:
@@ -534,23 +550,11 @@ def seed_asset_specs(
             path = os.path.abspath(spec["abs_path"])
             try:
                 with session.begin_nested():
-                    try:
-                        stat_result = os.stat(path, follow_symlinks=True)
-                    except OSError:
+                    stat_result = stats.get(path)
+                    if stat_result is None:
                         logging.warning("Skipping vanished asset during scan: %s", path)
                         continue
-                    if prepared_recoveries is None:
-                        try:
-                            recovery = recover_missing_content(
-                                session,
-                                path,
-                                stat_result,
-                                hashing_is_enabled=mode.hashing_enabled(),
-                            )
-                        except OSError:
-                            logging.warning("Skipping vanished asset during scan: %s", path)
-                            continue
-                    elif mode.hashing_enabled():
+                    if prepared_recoveries is not None and mode.hashing_enabled():
                         prepared = prepared_recoveries.get(path)
                         if prepared is None:
                             logging.warning("Skipping vanished asset during scan: %s", path)
@@ -604,14 +608,15 @@ def seed_asset_specs(
 def insert_asset_specs(specs: list[SeedAssetSpec], _tag_pool: set[str]) -> int:
     if not specs:
         return 0
+    stats = stat_seed_specs(specs)
     prepared_recoveries: dict[str, PreparedRecovery | None] = {}
     if mode.hashing_enabled():
-        for spec in specs:
-            path = os.path.abspath(spec["abs_path"])
+        for path, stat_result in stats.items():
+            if stat_result is None:
+                prepared_recoveries[path] = None
+                continue
             try:
-                prepared_recoveries[path] = prepare_missing_content_recovery(
-                    path, os.stat(path, follow_symlinks=True)
-                )
+                prepared_recoveries[path] = prepare_missing_content_recovery(path, stat_result)
             except OSError:
                 prepared_recoveries[path] = None
 
@@ -620,6 +625,7 @@ def insert_asset_specs(specs: list[SeedAssetSpec], _tag_pool: set[str]) -> int:
         created = seed_asset_specs(
             sess,
             specs,
+            stats,
             prepared_recoveries,
             pending_recovery_paths,
         )

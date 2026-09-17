@@ -18,7 +18,10 @@ import app.assets.mode as mode_module
 import folder_paths
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_record
-from app.assets.scanner_changes import recover_missing_content
+from app.assets.scanner_changes import (
+    prepare_missing_content_recovery,
+    recover_missing_content_from_preparation,
+)
 from app.assets.services import asset_management, ingest
 from app.assets.services.asset_management import get_asset_detail
 from app.assets.services.ingest import (
@@ -185,8 +188,12 @@ def test_recovery_matches_prefixed_stored_hash(session, temp_dir):
     path.unlink()
     path.write_bytes(original_bytes)
     stat = os.stat(str(path))
-    result = recover_missing_content(
-        session, str(path), stat, hashing_is_enabled=True
+    result = recover_missing_content_from_preparation(
+        session,
+        str(path),
+        stat,
+        prepare_missing_content_recovery(str(path), stat),
+        [],
     )
 
     assert result == "recovered"

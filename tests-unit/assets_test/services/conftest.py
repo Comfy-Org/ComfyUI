@@ -9,6 +9,32 @@ from sqlalchemy.orm import Session, Session as SASession, sessionmaker
 
 from app.assets import mode
 from app.assets.database.models import Base
+from app.assets.scanner import SeedAssetSpec, seed_asset_specs, stat_seed_specs
+from app.assets.scanner_changes import PreparedRecovery, prepare_missing_content_recovery
+
+
+def seed_with_recovery(
+    session: Session, specs: list[SeedAssetSpec]
+) -> tuple[int, list[str]]:
+    """Seed the way insert_asset_specs does, minus its write transaction.
+
+    Recovery reads the stat and the hash taken before the transaction opened, so a
+    caller that hands seed_asset_specs bare specs gets no recovery at all.
+    """
+    stats = stat_seed_specs(specs)
+    prepared: dict[str, PreparedRecovery | None] = {}
+    if mode.hashing_enabled():
+        for path, stat_result in stats.items():
+            if stat_result is None:
+                prepared[path] = None
+                continue
+            try:
+                prepared[path] = prepare_missing_content_recovery(path, stat_result)
+            except OSError:
+                prepared[path] = None
+    pending: list[str] = []
+    created = seed_asset_specs(session, specs, stats, prepared, pending)
+    return created, pending
 
 
 @pytest.fixture(autouse=True)

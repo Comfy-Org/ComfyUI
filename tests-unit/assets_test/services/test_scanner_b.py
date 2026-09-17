@@ -13,6 +13,7 @@ from app.assets.scanner import (
     build_asset_specs,
     mark_contents_missing_outside_prefixes,
     seed_asset_specs,
+    stat_seed_specs,
     sync_prefixes_with_filesystem,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
@@ -133,7 +134,8 @@ def test_seed_creates_content_and_record(session, temp_dir: Path):
     (input_root / "second.png").write_bytes(b"second")
 
     with patch("folder_paths.get_input_directory", return_value=str(input_root)):
-        created = seed_asset_specs(session, _build_seed_specs(input_root))
+        specs = _build_seed_specs(input_root)
+        created = seed_asset_specs(session, specs, stat_seed_specs(specs))
     session.commit()
 
     contents = list(session.scalars(select(AssetContent).order_by(AssetContent.path)))
@@ -156,7 +158,8 @@ def test_prune_marks_missing_not_deletes(session, temp_dir: Path):
     file_path.write_bytes(b"content")
 
     with patch("folder_paths.get_input_directory", return_value=str(input_root)):
-        seed_asset_specs(session, _build_seed_specs(input_root))
+        specs = _build_seed_specs(input_root)
+        seed_asset_specs(session, specs, stat_seed_specs(specs))
     session.commit()
 
     marked = mark_contents_missing_outside_prefixes(session, prefixes=[])

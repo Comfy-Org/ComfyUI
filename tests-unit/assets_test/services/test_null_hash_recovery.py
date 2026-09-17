@@ -8,7 +8,7 @@ from sqlalchemy import select
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries.records import create_content, create_record
 from app.assets.helpers import to_stored_hash
-from app.assets.scanner import SeedAssetSpec, clear_pending_verifications, seed_asset_specs
+from app.assets.scanner import SeedAssetSpec, clear_pending_verifications
 from app.assets.services import hash_mode_state
 from app.assets.services.hash_mode_state import (
     clear_transition_queue,
@@ -18,6 +18,8 @@ from app.assets.services.hash_mode_state import (
     write_stored_mode,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
+
+from .conftest import seed_with_recovery
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +83,7 @@ def test_deleted_null_hash_row_recovers_via_scanner_after_restore(
     assert path.stat().st_mtime_ns == stat.st_mtime_ns, "setup: mtime must round-trip exactly"
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, _ = seed_with_recovery(session, [_spec(path)])
     session.commit()
 
     assert created == 0, "the original row must recover — no fresh content row minted"
@@ -118,7 +120,7 @@ def test_different_bytes_restored_at_same_path_does_not_recover_old_row(
     path.write_bytes(b"a completely different, much longer payload than the original")
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, _ = seed_with_recovery(session, [_spec(path)])
     session.commit()
 
     assert created == 1, "a genuinely different file must take the normal new-content path"
@@ -158,7 +160,7 @@ def test_same_size_different_mtime_restored_at_same_path_does_not_recover_old_ro
     assert path.stat().st_size == stat.st_size, "setup: size must match so only mtime disambiguates"
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, _ = seed_with_recovery(session, [_spec(path)])
     session.commit()
 
     assert created == 1, "a same-size-but-different-mtime restore must take the new-content path"
@@ -190,7 +192,7 @@ def test_two_missing_null_hash_candidates_at_same_path_do_not_recover(
     session.commit()
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, _ = seed_with_recovery(session, [_spec(path)])
     session.commit()
 
     assert created == 1, "ambiguous candidates must fall through to the normal new-content path"

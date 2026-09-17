@@ -68,66 +68,6 @@ def pending_recovery_count() -> int:
     return len(_pending_recovery_paths)
 
 
-def recover_missing_content(
-    session: Session, path: str, stat_result: os.stat_result, hashing_is_enabled: bool
-) -> Literal["recovered", "no_match", "unstable"]:
-    if not hashing_is_enabled:
-        return "no_match"
-    occupied = session.scalar(
-        sa.select(AssetContent.id)
-        .where(AssetContent.path == path, AssetContent.is_missing.is_(False))
-        .limit(1)
-    )
-    if occupied is not None:
-        return "no_match"
-    snapshot = snapshot_hash(path)
-    if snapshot is None:
-        if path not in _pending_recovery_paths:
-            _pending_recovery_paths.append(path)
-        return "unstable"
-    digest, verified_stat = snapshot
-    stored_hash = to_stored_hash(digest)
-    matches = list(
-        session.scalars(
-            sa.select(AssetContent).where(
-                AssetContent.path == path,
-                AssetContent.is_missing.is_(True),
-                AssetContent.hash == stored_hash,
-            )
-        )
-    )
-    if len(matches) == 1:
-        recovered = matches[0]
-        unset_content_missing(session, recovered.id)
-        recovered.size_bytes = verified_stat.st_size
-        recovered.mtime_ns = verified_stat.st_mtime_ns
-        return "recovered"
-    if len(matches) > 1:
-        return "no_match"
-    null_hash_matches = list(
-        session.scalars(
-            sa.select(AssetContent).where(
-                AssetContent.path == path,
-                AssetContent.is_missing.is_(True),
-                AssetContent.hash.is_(None),
-            )
-        )
-    )
-    if len(null_hash_matches) != 1:
-        return "no_match"
-    candidate = null_hash_matches[0]
-    if (candidate.size_bytes, candidate.mtime_ns) != (
-        verified_stat.st_size,
-        verified_stat.st_mtime_ns,
-    ):
-        return "no_match"
-    unset_content_missing(session, candidate.id)
-    candidate.hash = stored_hash
-    candidate.size_bytes = verified_stat.st_size
-    candidate.mtime_ns = verified_stat.st_mtime_ns
-    return "recovered"
-
-
 def recover_missing_content_from_preparation(
     session: Session,
     path: str,

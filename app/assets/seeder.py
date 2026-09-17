@@ -16,6 +16,7 @@ from typing import Any, Callable, TypedDict
 
 from app.assets.event_log import emit, error_type
 from app.assets.scanner import (
+    MAX_WRITE_BATCH,
     RootType,
     build_asset_specs,
     collect_paths_for_roots,
@@ -832,7 +833,7 @@ class _AssetSeeder:
         if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
             return total_created, skipped_existing, total_paths
 
-        batch_size = 500
+        batch_size = MAX_WRITE_BATCH
         last_progress_time = time.perf_counter()
         progress_interval = 1.0
 

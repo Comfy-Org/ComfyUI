@@ -452,3 +452,58 @@ def test_batch_insert_failure_emits_only_the_exception_type(
     ]
     tagged = "\n".join(record.getMessage() for record in caplog.records if TAG in record.getMessage())
     assert "/private/models/asset.safetensors" not in tagged
+
+
+def test_fast_phase_seeds_in_bounded_batches_it_can_park_between(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    specs = [{"tags": []} for _ in range(60)]
+    monkeypatch.setattr(
+        seeder_module, "sync_root_safely", lambda _root, _progress: set()
+    )
+    monkeypatch.setattr(
+        seeder_module, "collect_paths_for_roots", lambda roots: ["asset.safetensors"] * 60
+    )
+    monkeypatch.setattr(
+        seeder_module,
+        "build_asset_specs",
+        lambda paths, existing_paths, enable_metadata_extraction, progress=None: (
+            specs,
+            {},
+            0,
+        ),
+    )
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
+
+    batch_sizes: list[int] = []
+    first_batch_written = threading.Event()
+    parked = threading.Event()
+
+    def record_batch(batch, _batch_tags) -> int:
+        batch_sizes.append(len(batch))
+        if len(batch_sizes) == 1:
+            scan_seeder.pause()
+            first_batch_written.set()
+        return 0
+
+    monkeypatch.setattr(seeder_module, "insert_asset_specs", record_batch)
+    scan_seeder.set_event_sink(
+        lambda event, _data: parked.set() if event == "assets.seed.paused" else None
+    )
+
+    worker = threading.Thread(target=scan_seeder._run_fast_phase, args=(("models",),))
+    worker.start()
+    try:
+        assert first_batch_written.wait(timeout=SCAN_JOIN_TIMEOUT)
+        assert parked.wait(timeout=SCAN_JOIN_TIMEOUT), (
+            "one write transaction per scan leaves nowhere to park; the batches between "
+            "them are what make a pause and a fair share of the writer lock possible"
+        )
+        assert batch_sizes == [25], "a paused scan must not open the next write transaction"
+    finally:
+        scan_seeder.resume()
+        worker.join(timeout=SCAN_JOIN_TIMEOUT)
+
+    assert worker.is_alive() is False
+    assert batch_sizes == [25, 25, 10]

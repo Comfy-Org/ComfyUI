@@ -31,6 +31,7 @@ from app.assets.lifecycle import wipe_temp_db_rows
 from app.assets.scanner import (
     build_asset_specs,
     seed_asset_specs,
+    stat_seed_specs,
     sync_prefixes_with_filesystem,
 )
 from app.assets.scanner_admission import _should_skip_extension
@@ -114,7 +115,7 @@ def _scan_pass(session, root: Path) -> int:
     specs, _tag_pool, _skipped = build_asset_specs(
         list_files_recursively(str(root)), survivors or set()
     )
-    return seed_asset_specs(session, specs)
+    return seed_asset_specs(session, specs, stat_seed_specs(specs))
 
 
 @contextmanager
