@@ -4,6 +4,10 @@ import sqlite3
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import create_engine, inspect
+
+import app.assets.database.models as asset_models
+from app.assets.database.models import Base
 
 _BASELINE_0006 = "0006_add_loader_path"
 
@@ -57,10 +61,6 @@ def test_0007_downgrade_restores_0006_schema(db_at_0006):
 
 
 def test_0007_downgrade_drops_shipped_asset_meta(tmp_path):
-    from sqlalchemy import create_engine
-
-    from app.assets.database.models import Base
-
     db_path = str(tmp_path / "shipped_0007.db")
     cfg = _make_config(db_path)
     engine = create_engine(f"sqlite:///{db_path}")
@@ -179,10 +179,6 @@ def test_0007_orm_parity(db_at_0006, tmp_path):
     ],
 )
 def test_0007_index_orm_parity(db_at_0006, table_name, has_indexes):
-    from sqlalchemy import create_engine, inspect
-
-    import app.assets.database.models as asset_models
-
     cfg, db_path = db_at_0006
     command.upgrade(cfg, "head")
 
