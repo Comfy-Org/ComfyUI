@@ -746,34 +746,13 @@ def _create_content_and_upload_record(
             continue
 
     logging.warning(
-        "Upload record preflight changed three times; falling back to in-transaction metadata extraction"
+        "Upload preflight for a new asset did not settle in 4 attempts; refusing the upload "
+        "rather than persisting content facts and file metadata that describe different bytes"
     )
-
-    def _fallback_work(session: Session) -> UploadResult:
-        _reconcile_live_content_at_path(
-            session,
-            path,
-            facts,
-            content_written=content_written,
-        )
-        content, inserted = create_content_reporting_insert(
-            session,
-            path,
-            stored_hash,
-            facts.size_bytes,
-            facts.mtime_ns,
-        )
-        created_content_id = content.id if inserted else None
-        try:
-            record = _create_upload_record_in_txn(session, content.id, spec, path)
-        except Exception:
-            session.rollback()
-            if created_content_id is not None:
-                _discard_unreferenced_content(session, created_content_id)
-            raise
-        return _record_to_upload_result(session, record, created_new=True)
-
-    return run_write_txn(_fallback_work)
+    raise RuntimeError(
+        f"Upload preflight for {path} did not settle in 4 attempts; "
+        "refusing to persist content facts and file metadata that describe different bytes"
+    )
 
 
 def upload_from_temp_path(
