@@ -97,9 +97,30 @@ def test_file_database_configures_runtime_pragmas(file_database):
             session.execute(text("PRAGMA journal_mode")).scalar_one(),
             session.execute(text("PRAGMA busy_timeout")).scalar_one(),
             session.execute(text("PRAGMA foreign_keys")).scalar_one(),
+            session.execute(text("PRAGMA query_only")).scalar_one(),
         )
 
-    assert pragmas == ("wal", 30000, 1)
+    assert pragmas == ("wal", 30000, 1, 1)
+
+
+def test_reader_session_cannot_write(file_database):
+    with pytest.raises(OperationalError, match="readonly"):
+        with db_mod.create_session() as reader:
+            reader.execute(text("INSERT INTO tags (name) VALUES ('ro')"))
+            reader.commit()
+
+    db_mod.run_write_txn(
+        lambda session: session.execute(text("INSERT INTO tags (name) VALUES ('rw')"))
+    )
+
+    with db_mod.create_session() as fresh_reader:
+        names = (
+            fresh_reader.execute(text("SELECT name FROM tags WHERE name IN ('ro', 'rw')"))
+            .scalars()
+            .all()
+        )
+
+    assert names == ["rw"]
 
 
 def test_runtime_connection_rejects_non_wal_journal_mode():
@@ -498,6 +519,13 @@ def test_memory_database_uses_degraded_write_transaction_wiring(memory_database)
     assert run_write_txn(lambda _session: "written") == "written"
 
 
+def test_memory_database_leaves_its_shared_session_writable(memory_database):
+    with db_mod.create_session() as session:
+        query_only = session.execute(text("PRAGMA query_only")).scalar_one()
+
+    assert query_only == 0
+
+
 def test_migration_backup_checkpoints_crash_style_wal_before_copy(tmp_path, monkeypatch):
     database_path = _crash_style_wal_database(tmp_path)
     _migrate_crash_style_database(database_path, monkeypatch)
@@ -600,6 +628,23 @@ def test_disabled_assets_startup_leaves_journal_mode_unpromoted(file_database_wi
         connection.close()
 
     assert journal_mode.lower() != "wal"
+
+
+def test_disabled_assets_startup_leaves_its_shared_session_writable(file_database_without_assets):
+    with db_mod.create_session() as session:
+        query_only = session.execute(text("PRAGMA query_only")).scalar_one()
+        session.execute(text("INSERT INTO tags (name) VALUES ('shared-writer')"))
+        session.commit()
+
+    with db_mod.create_session() as fresh_reader:
+        names = (
+            fresh_reader.execute(text("SELECT name FROM tags WHERE name = 'shared-writer'"))
+            .scalars()
+            .all()
+        )
+
+    assert query_only == 0
+    assert names == ["shared-writer"]
 
 
 def test_disabled_assets_startup_writes_no_wal_sidecars(file_database_without_assets):

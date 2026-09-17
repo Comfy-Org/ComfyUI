@@ -1,3 +1,10 @@
+"""SQLite engine wiring for the runtime database.
+
+Readers get a WAL engine with a 30s busy_timeout and query_only; writes go
+through a writer engine that takes the lock up front with BEGIN IMMEDIATE and is
+retried by run_write_txn. Memory and disabled-assets startups share one engine.
+"""
+
 import logging
 import os
 import random
@@ -382,6 +389,7 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     @event.listens_for(reader_engine, "connect")
     def set_reader_sqlite_pragma(dbapi_connection, connection_record):
         _configure_runtime_connection(dbapi_connection, db_path)
+        dbapi_connection.execute("PRAGMA query_only=ON").close()
 
     writer_engine = build_writer_engine(db_url, db_path)
 
