@@ -137,13 +137,14 @@ def test_pending_verification_hashing_does_not_hold_the_write_lock(
     path.write_bytes(b"verify me")
     stat = path.stat()
 
-    with db_mod.Session() as session:
+    def _seed(session):
         content = create_content(
             session, str(path), size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns
         )
         create_record(session, content.id, "verify-me.bin")
-        session.commit()
-        content_id = content.id
+        return content.id
+
+    content_id = db_mod.run_write_txn(_seed)
 
     scanner_changes.clear_pending_verifications()
     scanner_changes.queue_pending_verification(content_id)
@@ -183,9 +184,11 @@ def test_transition_hashing_does_not_hold_the_write_lock(
     path.write_bytes(b"transition me")
     stat = path.stat()
 
-    with db_mod.Session() as session:
-        create_content(session, str(path), size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns)
-        session.commit()
+    db_mod.run_write_txn(
+        lambda session: create_content(
+            session, str(path), size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns
+        )
+    )
 
     hash_mode_state.clear_transition_queue()
     hash_mode_state._PENDING_QUEUE.append(hash_mode_state._PendingEntry(str(path)))
@@ -227,13 +230,14 @@ def test_enrichment_hashing_does_not_hold_the_write_lock(
     path.write_bytes(b"enrich me via hash")
     stat = path.stat()
 
-    with db_mod.Session() as session:
+    def _seed(session):
         content = create_content(
             session, str(path), size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns
         )
         record = create_record(session, content.id, "enrich-hash.bin")
-        session.commit()
-        content_id, record_id = content.id, record.id
+        return content.id, record.id
+
+    content_id, record_id = db_mod.run_write_txn(_seed)
 
     row = scanner.UnenrichedContent(content_id, record_id, str(path), True)
 
@@ -273,13 +277,14 @@ def test_enrichment_metadata_extraction_does_not_hold_the_write_lock(
     path.write_bytes(b"enrich me via metadata")
     stat = path.stat()
 
-    with db_mod.Session() as session:
+    def _seed(session):
         content = create_content(
             session, str(path), size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns
         )
         record = create_record(session, content.id, "enrich-metadata.bin")
-        session.commit()
-        content_id, record_id = content.id, record.id
+        return content.id, record.id
+
+    content_id, record_id = db_mod.run_write_txn(_seed)
 
     row = scanner.UnenrichedContent(content_id, record_id, str(path), False)
 
@@ -321,12 +326,13 @@ def test_scanner_reference_stat_walk_does_not_hold_the_write_lock(
     path.write_bytes(b"catalogued bytes")
     stat = path.stat()
 
-    with db_mod.Session() as session:
+    def _seed(session):
         content = create_content(
             session, str(path), size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns
         )
         create_record(session, content.id, "catalogued.bin")
-        session.commit()
+
+    db_mod.run_write_txn(_seed)
 
     entered = threading.Event()
     release = threading.Event()
@@ -371,7 +377,7 @@ def test_download_hash_resolution_does_not_hold_the_write_lock(
     digest = "b" * 64
     stored_hash = f"blake3:{digest}"
 
-    with db_mod.Session() as session:
+    def _seed(session):
         content = create_content(
             session,
             str(path),
@@ -380,7 +386,8 @@ def test_download_hash_resolution_does_not_hold_the_write_lock(
             mtime_ns=stat.st_mtime_ns,
         )
         create_record(session, content.id, "servable.bin")
-        session.commit()
+
+    db_mod.run_write_txn(_seed)
 
     entered = threading.Event()
     release = threading.Event()
