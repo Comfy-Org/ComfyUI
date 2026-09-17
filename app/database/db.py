@@ -182,7 +182,11 @@ def _init_file_db(db_url):
     db_path = get_db_path()
     prepare_file_db_path(db_path)
 
-    # All database reads and writes, including the legacy import, run under the lock.
+    # Lock BEFORE any of the work below — deliberately diverging from upstream master, whose
+    # "it would block Alembic" rationale is false (the lock guards a separate `<db>.lock` file,
+    # not the database Alembic connects to). Only this order makes the legacy import, the
+    # existence probe deciding whether a backup is taken, revision inspection, backup, upgrade
+    # and the failure-path restore mutually exclusive between processes.
     _acquire_file_lock(db_path)
     try:
         copy_legacy_default_db(db_path)
