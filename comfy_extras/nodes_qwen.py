@@ -12,6 +12,7 @@ class TextEncodeQwenImageEdit(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="TextEncodeQwenImageEdit",
+            display_name="Text Encode Qwen Image Edit",
             category="model/conditioning/qwen image",
             inputs=[
                 io.Clip.Input("clip"),
@@ -55,6 +56,7 @@ class TextEncodeQwenImageEditPlus(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="TextEncodeQwenImageEditPlus",
+            display_name="Text Encode Qwen Image Edit Plus",
             category="model/conditioning/qwen image",
             inputs=[
                 io.Clip.Input("clip"),
