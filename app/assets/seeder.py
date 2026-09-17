@@ -862,6 +862,10 @@ class _AssetSeeder:
                 total_created += created
                 if batch_error is not None:
                     raise batch_error
+            except MemoryError:
+                # Recording this as a batch failure would march the scan through
+                # every remaining batch while the process is out of memory.
+                raise
             except Exception as e:
                 self._add_error(
                     f"Batch insert encountered an error at offset {i} "

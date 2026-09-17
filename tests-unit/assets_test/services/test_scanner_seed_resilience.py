@@ -212,6 +212,37 @@ def test_seed_propagates_unrelated_integrity_error(
     assert error is unrelated_error
 
 
+def test_seed_raises_memory_error_instead_of_attempting_later_specs(
+    session: Session, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = []
+    for name in ("first.bin", "second.bin"):
+        path = temp_dir / name
+        path.write_bytes(b"content")
+        paths.append(path)
+    attempted: list[str] = []
+
+    def _create_record_or_exhaust(
+        session_arg: Session,
+        *,
+        content_id: str,
+        name: str,
+        mime_type: str | None,
+        job_id: str | None,
+        loader_path: str | None,
+        tags: list[str],
+    ) -> Asset:
+        attempted.append(name)
+        raise MemoryError("out of memory")
+
+    monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_exhaust)
+
+    with pytest.raises(MemoryError):
+        seed_asset_specs(session, [_spec(path) for path in paths])
+
+    assert attempted == ["first.bin"]
+
+
 def test_seed_attempts_remaining_specs_before_propagating_integrity_error(
     session: Session, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

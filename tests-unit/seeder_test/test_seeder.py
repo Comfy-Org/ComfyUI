@@ -639,6 +639,22 @@ def test_batch_insert_fault_reports_the_specs_committed_before_it(
     ]
 
 
+def test_batch_memory_error_stops_the_scan_instead_of_continuing(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(MemoryError):
+        _run_faulting_fast_phase(
+            scan_seeder,
+            monkeypatch,
+            tmp_path,
+            MemoryError("out of memory"),
+        )
+
+    assert scan_seeder._errors == []
+
+
 def test_salvage_commit_failure_reports_the_original_batch_fault(
     scan_seeder: _AssetSeeder,
     monkeypatch: pytest.MonkeyPatch,
