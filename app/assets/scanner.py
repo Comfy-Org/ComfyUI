@@ -382,6 +382,10 @@ def seed_asset_specs(
 ) -> tuple[int, Exception | None]:
     created = 0
     first_error: Exception | None = None
+    # Counted, not gated through _ScanProgress.mark_emitted like its neighbours, because this
+    # function takes no progress object. Ungated, a restored archive of pre-epoch mtimes puts
+    # one event per file into the closed-vocabulary stream.
+    invalid_mtimes = 0
     for spec in specs:
         path = os.path.abspath(spec["abs_path"])
         try:
@@ -395,7 +399,7 @@ def seed_asset_specs(
                     logging.warning(
                         "Skipping asset with invalid mtime during scan: %s", path
                     )
-                    emit("scanner.invalid_mtime")
+                    invalid_mtimes += 1
                     continue
                 try:
                     recovery = recover_missing_content(
@@ -442,6 +446,8 @@ def seed_asset_specs(
         except Exception as error:
             if first_error is None:
                 first_error = error
+    if invalid_mtimes:
+        emit("scanner.invalid_mtime", count=invalid_mtimes)
     return created, first_error
 
 

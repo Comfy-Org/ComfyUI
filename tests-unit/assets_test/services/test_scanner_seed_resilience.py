@@ -335,10 +335,41 @@ def test_seed_skips_negative_fresh_mtime_with_warning_and_telemetry(
         record.getMessage() == f"Skipping asset with invalid mtime during scan: {paths[1]}"
         for record in caplog.records
     )
-    assert any(
-        record.getMessage() == "[assets-event] scanner.invalid_mtime"
+    assert [
+        record.getMessage()
         for record in caplog.records
-    )
+        if record.getMessage().startswith("[assets-event] scanner.invalid_mtime")
+    ] == ["[assets-event] scanner.invalid_mtime count=1"]
+
+
+def test_seed_emits_one_invalid_mtime_event_for_a_whole_batch_of_pre_epoch_files(
+    session: Session,
+    temp_dir: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    paths = [temp_dir / f"restored-{index}.bin" for index in range(5)]
+    pre_epoch_ns = -315_547_200_000_000_000
+    for path in paths:
+        _ = path.write_bytes(path.name.encode())
+        os.utime(path, ns=(pre_epoch_ns, pre_epoch_ns))
+
+    with caplog.at_level(logging.INFO):
+        created, error = seed_asset_specs(session, [_spec(path) for path in paths])
+    session.commit()
+
+    assert error is None
+    assert created == 0
+    assert _record_count(session) == 0
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("[assets-event] scanner.invalid_mtime")
+    ] == ["[assets-event] scanner.invalid_mtime count=5"]
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Skipping asset with invalid mtime")
+    ] == [f"Skipping asset with invalid mtime during scan: {path}" for path in paths]
 
 
 def test_seed_persists_fresh_stat_after_spec_was_built(
