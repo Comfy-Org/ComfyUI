@@ -20,6 +20,7 @@ def _invoke_writer(work):
 
 def test_write_transaction_waits_for_held_writer_before_select_then_mutate(tmp_path, monkeypatch):
     database_path = tmp_path / "assets.db"
+    monkeypatch.setattr(db_mod.args, "enable_assets", True)
     monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
     monkeypatch.setattr(db_mod, "Session", None)
     monkeypatch.setattr(db_mod, "WriteSession", None)

@@ -200,3 +200,22 @@ def test_default_asset_manager_enables_assets_when_dependencies_are_available(
     monkeypatch.setattr(manager, "dependencies_available", lambda: True)
 
     assert isinstance(manager.default_asset_manager(), AssetsEnabled)
+
+
+def test_noassets_startup_cleans_temp_even_when_the_database_is_unusable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleaned: list[bool] = []
+
+    def unusable_database() -> None:
+        raise RuntimeError("no such table: hash_mode_state")
+
+    monkeypatch.setattr(manager, "record_hash_mode_transition_intent", unusable_database)
+    monkeypatch.setattr(
+        manager, "run_startup", lambda *, enable_assets: cleaned.append(enable_assets)
+    )
+
+    with pytest.raises(RuntimeError):
+        _no_assets().startup()
+
+    assert cleaned == [False]

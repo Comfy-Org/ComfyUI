@@ -33,6 +33,7 @@ def file_database(tmp_path, monkeypatch):
     true; only the production runtime engines built by ``init_db`` enforce it.
     """
     database_path = str(tmp_path / "assets.db")
+    monkeypatch.setattr(db_mod.args, "enable_assets", True)
     monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
     monkeypatch.setattr(db_mod, "Session", None)
     monkeypatch.setattr(db_mod, "_db_lock", None)
@@ -567,3 +568,43 @@ def test_create_record_metadata_extraction_does_not_hold_the_write_lock(
         assert upload_result.ref.file_path == path
     finally:
         os.unlink(path)
+
+
+def test_unsettled_new_upload_persists_nothing_rather_than_mixing_facts(
+    file_database, monkeypatch, caplog
+) -> None:
+    from sqlalchemy import select
+
+    from app.assets.database.models import Asset, AssetContent
+
+    path = _output_path("unsettled-upload.bin")
+    with open(path, "wb") as handle:
+        handle.write(b"first bytes")
+
+    stored_hash = "blake3:" + "c" * 64
+    stat_result = os.stat(path)
+    facts = ingest._ContentFacts(stored_hash, stat_result.st_size, stat_result.st_mtime_ns)
+    spec = ingest._UploadRecordSpec("unsettled-upload.bin", [], None, {}, None)
+
+    real_assert = ingest._assert_upload_preflight_current
+
+    def always_stale(_session, _preflight):
+        raise ingest._PreflightStale
+
+    monkeypatch.setattr(ingest, "_assert_upload_preflight_current", always_stale)
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(RuntimeError, match="did not settle"):
+            ingest._create_content_and_upload_record(
+                stored_hash, path, facts, True, spec
+            )
+
+    monkeypatch.setattr(ingest, "_assert_upload_preflight_current", real_assert)
+
+    with db_mod.Session() as session:
+        contents = list(session.scalars(select(AssetContent).where(AssetContent.path == path)))
+        records = list(session.scalars(select(Asset)))
+
+    assert contents == [], "refused upload must not leave a content row behind"
+    assert records == [], "refused upload must not leave an asset record behind"
+    os.unlink(path)

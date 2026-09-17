@@ -3,7 +3,6 @@ import os
 import shutil
 import sqlite3
 import threading
-import time
 
 import pytest
 from alembic import command
@@ -27,6 +26,7 @@ def _dispose_runtime_engines():
 @pytest.fixture
 def file_database(tmp_path, monkeypatch):
     database_path = str(tmp_path / "assets.db")
+    monkeypatch.setattr(db_mod.args, "enable_assets", True)
     monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
     monkeypatch.setattr(db_mod, "Session", None)
     monkeypatch.setattr(db_mod, "_db_lock", None)
@@ -40,6 +40,7 @@ def file_database(tmp_path, monkeypatch):
 
 @pytest.fixture
 def memory_database(monkeypatch):
+    monkeypatch.setattr(db_mod.args, "enable_assets", True)
     monkeypatch.setattr(db_mod.args, "database_url", "sqlite:///:memory:")
     monkeypatch.setattr(db_mod, "Session", None)
     if hasattr(db_mod, "WriteSession"):
@@ -82,6 +83,7 @@ def _crash_style_wal_database(tmp_path) -> str:
 
 
 def _migrate_crash_style_database(database_path: str, monkeypatch) -> None:
+    monkeypatch.setattr(db_mod.args, "enable_assets", True)
     monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
     monkeypatch.setattr(db_mod, "Session", None)
     if hasattr(db_mod, "WriteSession"):
@@ -408,16 +410,17 @@ def test_run_write_txn_deadline_gates_attempt_starts(memory_database, monkeypatc
 
 def test_run_write_txn_held_lock_respects_remaining_deadline(file_database, monkeypatch):
     run_write_txn = db_mod.run_write_txn
-    monkeypatch.setattr(db_mod, "_WRITE_TXN_LOCK_RETRY_DEADLINE_SECONDS", 2)
-    writer_started = threading.Event()
+    monkeypatch.setattr(db_mod, "_WRITE_TXN_LOCK_RETRY_DEADLINE_SECONDS", 0.5)
+    lock_held = threading.Event()
+    release = threading.Event()
 
     def hold_lock():
         holder = sqlite3.connect(file_database)
         try:
             holder.execute("BEGIN IMMEDIATE")
             holder.execute("INSERT INTO tags (name) VALUES (?)", ("deadline-holder",))
-            writer_started.set()
-            time.sleep(5)
+            lock_held.set()
+            release.wait(timeout=30)
             holder.rollback()
         finally:
             holder.close()
@@ -425,18 +428,20 @@ def test_run_write_txn_held_lock_respects_remaining_deadline(file_database, monk
     holder = threading.Thread(target=hold_lock)
     holder.start()
     try:
-        assert writer_started.wait(timeout=5)
-        started_at = time.monotonic()
+        assert lock_held.wait(timeout=5)
         with pytest.raises(OperationalError, match="database is locked"):
             run_write_txn(
                 lambda session: session.execute(text("INSERT INTO tags (name) VALUES ('blocked')"))
             )
-        elapsed = time.monotonic() - started_at
+        assert not release.is_set(), (
+            "refusal must come from the retry deadline, not from the holder releasing"
+        )
+        assert holder.is_alive(), "holder must still own the write lock at refusal time"
     finally:
+        release.set()
         holder.join(timeout=6)
 
     assert not holder.is_alive()
-    assert 1.5 <= elapsed < 3
 
 
 def test_run_write_txn_reopens_immediate_transaction_after_intermediate_commit(
@@ -518,6 +523,7 @@ def test_failed_migration_restores_crash_style_wal_backup_and_removes_sidecars(
         raise RuntimeError("upgrade failure")
 
     monkeypatch.setattr(db_mod.command, "upgrade", fail_upgrade)
+    monkeypatch.setattr(db_mod.args, "enable_assets", True)
     monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
     monkeypatch.setattr(db_mod, "Session", None)
     if hasattr(db_mod, "WriteSession"):
@@ -567,3 +573,62 @@ def test_migration_uses_wal_only_for_runtime_engines(tmp_path, monkeypatch):
     assert "journal_mode=delete" in inspection_commands
     assert "journal_mode=wal" not in inspection_commands
     assert "journal_mode=wal" in runtime_commands
+
+
+@pytest.fixture
+def file_database_without_assets(tmp_path, monkeypatch):
+    database_path = str(tmp_path / "assets.db")
+    monkeypatch.setattr(db_mod.args, "enable_assets", False)
+    monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
+    monkeypatch.setattr(db_mod, "Session", None)
+    monkeypatch.setattr(db_mod, "_db_lock", None)
+    monkeypatch.setattr(db_mod, "WriteSession", None)
+    db_mod.init_db()
+    yield database_path
+    _dispose_runtime_engines()
+    db_mod._db_lock.release(force=True)
+
+
+def test_disabled_assets_startup_leaves_journal_mode_unpromoted(file_database_without_assets):
+    with db_mod.create_session() as session:
+        session.execute(text("SELECT 1"))
+
+    connection = sqlite3.connect(file_database_without_assets)
+    try:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+    finally:
+        connection.close()
+
+    assert journal_mode.lower() != "wal"
+
+
+def test_disabled_assets_startup_writes_no_wal_sidecars(file_database_without_assets):
+    with db_mod.create_session() as session:
+        session.execute(text("SELECT 1"))
+
+    directory = os.path.dirname(file_database_without_assets)
+    sidecars = [name for name in os.listdir(directory) if name.endswith(("-wal", "-shm"))]
+
+    assert sidecars == []
+
+
+def test_disabled_assets_startup_survives_a_filesystem_that_rejects_wal(tmp_path, monkeypatch):
+    database_path = str(tmp_path / "assets.db")
+    monkeypatch.setattr(db_mod.args, "enable_assets", False)
+    monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
+    monkeypatch.setattr(db_mod, "Session", None)
+    monkeypatch.setattr(db_mod, "_db_lock", None)
+    monkeypatch.setattr(db_mod, "WriteSession", None)
+
+    def reject_wal(dbapi_connection, db_path):
+        raise RuntimeError(f"SQLite WAL could not be enabled for database '{db_path}'.")
+
+    monkeypatch.setattr(db_mod, "_configure_runtime_connection", reject_wal)
+    try:
+        db_mod.init_db()
+        with db_mod.create_session() as session:
+            session.execute(text("SELECT 1"))
+    finally:
+        _dispose_runtime_engines()
+        if db_mod._db_lock is not None:
+            db_mod._db_lock.release(force=True)

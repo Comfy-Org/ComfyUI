@@ -240,6 +240,26 @@ def _upgrade_discards_the_catalog(script, target_rev, current_rev):
     )
 
 
+def _assets_writer_enabled():
+    return bool(getattr(args, "enable_assets", False))
+
+
+def _bind_single_engine_without_wal(db_url):
+    global Session, WriteSession
+    engine = create_engine(db_url)
+
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    with engine.connect():
+        pass
+    Session = sessionmaker(bind=engine)
+    WriteSession = Session
+
+
 def _configure_runtime_connection(dbapi_connection, db_path):
     cursor = dbapi_connection.cursor()
     try:
@@ -273,6 +293,22 @@ def _begin_immediate(dbapi_connection):
             if remaining_seconds <= 0:
                 raise OperationalError("BEGIN IMMEDIATE", {}, exc) from exc
             time.sleep(min(_SQLITE_WRITE_LOCK_POLL_SECONDS, remaining_seconds))
+
+
+def build_writer_engine(db_url, db_path):
+    engine = create_engine(db_url, connect_args={"timeout": 0})
+
+    @event.listens_for(engine, "connect")
+    def set_writer_sqlite_pragma(dbapi_connection, connection_record):
+        dbapi_connection.isolation_level = None
+        _configure_runtime_connection(dbapi_connection, db_path)
+        dbapi_connection.execute("PRAGMA busy_timeout=0").close()
+
+    @event.listens_for(engine, "begin")
+    def begin_immediate(connection):
+        _begin_immediate(connection.connection.driver_connection)
+
+    return engine
 
 
 def _migrate_and_bind(db_url, db_path, db_exists):
@@ -334,6 +370,12 @@ def _migrate_and_bind(db_url, db_path, db_exists):
                 f"discarded. The database from before the upgrade was kept at {backup_path}."
             )
 
+    global Session, WriteSession
+
+    if not _assets_writer_enabled():
+        _bind_single_engine_without_wal(db_url)
+        return
+
     # Redundant with busy_timeout by design: both set pysqlite's 30-second limit.
     reader_engine = create_engine(db_url, connect_args={"timeout": 30})
 
@@ -341,23 +383,12 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     def set_reader_sqlite_pragma(dbapi_connection, connection_record):
         _configure_runtime_connection(dbapi_connection, db_path)
 
-    writer_engine = create_engine(db_url, connect_args={"timeout": 0})
-
-    @event.listens_for(writer_engine, "connect")
-    def set_writer_sqlite_pragma(dbapi_connection, connection_record):
-        dbapi_connection.isolation_level = None
-        _configure_runtime_connection(dbapi_connection, db_path)
-        dbapi_connection.execute("PRAGMA busy_timeout=0").close()
-
-    @event.listens_for(writer_engine, "begin")
-    def begin_immediate(connection):
-        _begin_immediate(connection.connection.driver_connection)
+    writer_engine = build_writer_engine(db_url, db_path)
 
     with reader_engine.connect():
         pass
     with writer_engine.connect():
         pass
-    global Session, WriteSession
     Session = sessionmaker(bind=reader_engine)
     WriteSession = sessionmaker(bind=writer_engine)
 
