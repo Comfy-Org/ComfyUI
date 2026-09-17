@@ -236,9 +236,9 @@ class MoGeModelV3(MoGeModelV2):
         device = coord.device
         logz = coord[..., 2]
 
-        # Binning has to happen in fp32: 1/256 steps are finer than fp16 resolves over the
-        # usual log-depth range, so a half-precision round would collapse neighbouring voxels.
-        z_bin = torch.round(logz * self.refiner_depth_resolution).long()
+        # Bin in fp32: logz * 256 lands where fp16's ULP exceeds 1 for far geometry, which would
+        # collapse neighbouring voxels. The refiner itself runs at the activation dtype.
+        z_bin = torch.round(logz.float() * self.refiner_depth_resolution).long()
         z_bin = z_bin - z_bin.amin(dim=(1, 2), keepdim=True)
 
         rows = torch.arange(H, device=device).view(1, H, 1).expand(B, H, W)
@@ -253,11 +253,12 @@ class MoGeModelV3(MoGeModelV2):
     def forward(self, image: torch.Tensor, num_tokens: int, refine_steps: int = 3) -> Dict[str, torch.Tensor]:
         feats, conditioning, cls_token = self._trunk(image, num_tokens)
 
-        coord = self.points_head(feats)[-1].permute(0, 2, 3, 1).float()
+        coord = self.points_head(feats)[-1].permute(0, 2, 3, 1)
         for _ in range(refine_steps):
             coord = torch.cat([coord[..., :2], self._refine_logz(coord, conditioning).unsqueeze(-1)], dim=-1)
 
-        return self._heads(feats, cls_token, coord.permute(0, 3, 1, 2), image.shape[-2:])
+        # _remap_points takes exp(logz), which overflows fp16 past ~11.1, so hand the heads fp32.
+        return self._heads(feats, cls_token, coord.permute(0, 3, 1, 2).float(), image.shape[-2:])
 
     @classmethod
     def _detect_config(cls, sd) -> Dict[str, Any]:
