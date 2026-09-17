@@ -281,10 +281,11 @@ def test_seed_attempts_remaining_specs_before_propagating_integrity_error(
 
     monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
 
-    _created, error = seed_asset_specs(session, [_spec(path) for path in paths])
+    created, error = seed_asset_specs(session, [_spec(path) for path in paths])
     session.commit()
 
     assert error is unrelated_error
+    assert created == 2
     assert attempted == ["first.bin", "broken.bin", "last.bin"]
     assert {record.name for record in session.scalars(select(Asset))} == {
         "first.bin",
