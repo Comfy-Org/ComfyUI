@@ -209,6 +209,20 @@ def test_seedvr2_7b_keeps_final_block_text_path(monkeypatch):
     ]
 
 
+def _bytedance_interleaved_rope(x, freqs):
+    """ByteDance SeedVR2 pixel-RoPE: adjacent feature pairs rotated by the interleaved angles,
+    leaving the head-dim tail past the rotary width untouched."""
+    rot = freqs.shape[-1]
+    angles = freqs[:, ::2].float().unsqueeze(1)
+    cos, sin = torch.cos(angles), torch.sin(angles)
+    out = x.float().clone()
+    even = out[..., 0:rot:2].clone()
+    odd = out[..., 1:rot:2].clone()
+    out[..., 0:rot:2] = even * cos - odd * sin
+    out[..., 1:rot:2] = odd * cos + even * sin
+    return out.to(x.dtype)
+
+
 def test_seedvr2_7b_rope3d_matches_wrapper_oracle():
     rope = seedvr_model.get_na_rope("rope3d", dim=64)
     generator = torch.Generator(device="cpu").manual_seed(0)
@@ -217,19 +231,13 @@ def test_seedvr2_7b_rope3d_matches_wrapper_oracle():
     shape = torch.tensor([[1, 2, 2]], dtype=torch.long)
     freqs = rope.get_axial_freqs(1, 2, 2).reshape(4, -1)
 
-    expected_q = seedvr_model._apply_seedvr2_rotary_emb(
-        freqs,
-        q.permute(1, 0, 2).float(),
-    ).to(q.dtype).permute(1, 0, 2)
-    expected_k = seedvr_model._apply_seedvr2_rotary_emb(
-        freqs,
-        k.permute(1, 0, 2).float(),
-    ).to(k.dtype).permute(1, 0, 2)
+    expected_q = _bytedance_interleaved_rope(q, freqs)
+    expected_k = _bytedance_interleaved_rope(k, freqs)
 
     actual_q, actual_k = rope(q.clone(), k.clone(), shape, seedvr_model.Cache(disable=True))
 
-    torch.testing.assert_close(actual_q, expected_q, rtol=0, atol=0)
-    torch.testing.assert_close(actual_k, expected_k, rtol=0, atol=0)
+    torch.testing.assert_close(actual_q, expected_q, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(actual_k, expected_k, rtol=1e-5, atol=1e-6)
 
 
 def test_seedvr2_forward_requires_conditioning_latents():

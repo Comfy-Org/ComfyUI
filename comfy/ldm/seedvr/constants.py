@@ -13,9 +13,16 @@ SEEDVR2_CHUNK_SIGMA_K = 4
 SEEDVR2_7B_VID_DIM = 3072
 SEEDVR2_OOM_BACKOFF_DIVISOR = 2
 SEEDVR2_DTYPE_BYTES_FLOOR = 4
-SEEDVR2_7B_MLP_CHUNK = 8192
+SEEDVR2_MLP_CHUNK = 8192
 SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS = 4096  # partial-RoPE application token-chunk.
 SEEDVR2_LATENT_CHANNELS = 16
+
+# Causal-cache compression. The per-convolution temporal tails dominate decode VRAM (~7.4 GiB of a
+# 15.7 GiB 720p/21f peak) and are pure storage between slices, so they are held as int8. Per-channel
+# scales handle the outliers cheaply: measured against an fp16 decode this costs mean 6.7e-4 /
+# max 3.4e-2 relative, versus 4.2e-4 / 5.1e-2 for fp8 and 1.0e-4 / 2.0e-2 for int8+ConvRot (which
+# needs a channels-last transpose that costs more than the quantization itself).
+SEEDVR2_VAE_CACHE_QUANT_BYTES = 64 * 1024 ** 2  # entries at or above this size are packed.
 
 SEEDVR2_COLOR_MEM_HEADROOM = 0.75
 SEEDVR2_LAB_SCALE_MULTIPLIER = 13

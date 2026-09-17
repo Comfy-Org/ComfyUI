@@ -124,6 +124,78 @@ def test_seedvr2_7b_swin_attention_forward_uses_optimized_var_attention(monkeypa
     assert call["cu_seqlens_k"] == [0, 7, 14]
 
 
+def _make_swin_attention(rope_type, dim=16, heads=2, head_dim=8):
+    torch.manual_seed(0)
+    attn = seedvr_model.NaSwinAttention(
+        vid_dim=dim,
+        txt_dim=dim,
+        heads=heads,
+        head_dim=head_dim,
+        qk_bias=False,
+        qk_norm=comfy_ops.disable_weight_init.RMSNorm,
+        qk_norm_eps=1e-6,
+        rope_type=rope_type,
+        rope_dim=head_dim,
+        shared_weights=False,
+        window=(2, 2, 2),
+        window_method="720pwin_by_size_bysize",
+        version=(rope_type == "rope3d"),
+        device="cpu",
+        dtype=torch.float32,
+        operations=comfy_ops.disable_weight_init,
+    )
+    for param in attn.parameters():
+        torch.nn.init.normal_(param, std=0.5)
+    return attn
+
+
+@pytest.mark.parametrize("rope_type", [None, "rope3d", "mmrope3d"])
+def test_seedvr2_swin_attention_batched_samples_match_one_at_a_time(rope_type):
+    """A batched cond+uncond forward must give each sample its own text tokens."""
+    attn = _make_swin_attention(rope_type)
+    generator = torch.Generator(device="cpu").manual_seed(3)
+    vids = [torch.randn(2, 6, 6, 16, generator=generator), torch.randn(3, 6, 8, 16, generator=generator)]
+    txts = [torch.randn(5, 16, generator=generator), torch.randn(7, 16, generator=generator)]
+
+    vid, vid_shape = seedvr_model.flatten(vids)
+    txt, txt_shape = seedvr_model.flatten(txts)
+    batched_vid, batched_txt = attn(vid, txt, vid_shape, txt_shape, seedvr_model.Cache())
+
+    single_vid, single_txt = [], []
+    for one_vid, one_txt in zip(vids, txts):
+        vid_i, vid_shape_i = seedvr_model.flatten([one_vid])
+        txt_i, txt_shape_i = seedvr_model.flatten([one_txt])
+        out_vid, out_txt = attn(vid_i, txt_i, vid_shape_i, txt_shape_i, seedvr_model.Cache())
+        single_vid.append(out_vid)
+        single_txt.append(out_txt)
+
+    torch.testing.assert_close(batched_vid, torch.cat(single_vid), rtol=1e-4, atol=1e-5)
+    torch.testing.assert_close(batched_txt, torch.cat(single_txt), rtol=1e-4, atol=1e-5)
+
+
+def test_var_attention_optimized_split_batches_equal_length_windows(monkeypatch):
+    heads = 2
+    head_dim = 3
+    q = torch.arange(36, dtype=torch.float32).reshape(6, heads, head_dim)
+    k = q + 100
+    v = q + 200
+    cu = [0, 2, 4, 6]
+    calls = []
+
+    def fake_optimized_attention(q_arg, k_arg, v_arg, heads_arg, **kwargs):
+        calls.append(tuple(q_arg.shape))
+        return q_arg + v_arg
+
+    monkeypatch.setattr(attention, "optimized_attention", fake_optimized_attention)
+
+    out = var_attention_optimized_split(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
+
+    assert calls == [(3, heads, 2, head_dim)], (
+        f"equal-length windows must share one batched attention call; got {calls}"
+    )
+    torch.testing.assert_close(out, q + v, rtol=0, atol=0)
+
+
 def test_var_attention_optimized_split_calls_dense_backend_per_window(monkeypatch):
     heads = 2
     head_dim = 3

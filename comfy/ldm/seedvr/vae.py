@@ -20,6 +20,7 @@ from comfy.ldm.seedvr.constants import (
     BYTEDANCE_VAE_SPATIAL_DOWNSAMPLE,
     BYTEDANCE_VAE_TEMPORAL_DOWNSAMPLE,
     SEEDVR2_LATENT_CHANNELS,
+    SEEDVR2_VAE_CACHE_QUANT_BYTES,
 )
 from comfy.ldm.modules.attention import optimized_attention
 from comfy.ldm.modules.diffusionmodules.model import vae_attention
@@ -246,6 +247,89 @@ def ignore_padding(model):
         yield
     finally:
         model.padding = orig_padding
+
+_CACHE_MISS = object()
+_HADAMARD_CACHE = {}
+
+
+class CausalMemoryCache:
+    """Per-convolution temporal cache, held quantized between slices.
+
+    Every causal convolution keeps the tail of its input so the next slice can continue. At full
+    output resolution those tails are the single largest consumer of decode VRAM while being pure
+    storage — never read except by the next slice's first convolution — so the large ones are packed
+    to int8. ConvRot rotates the per-channel outliers that otherwise dominate low-bit activation
+    error. Falls back to holding the tensor as-is whenever quantization is unavailable.
+    """
+
+    def __init__(self):
+        self.plain = {}
+        self.packed = {}
+
+    def _packable(self, value):
+        return (
+            torch.is_tensor(value)
+            and value.dim() == 5
+            and value.device.type == "cuda"
+            and value.numel() * value.element_size() >= SEEDVR2_VAE_CACHE_QUANT_BYTES
+            and value.shape[1] & (value.shape[1] - 1) == 0
+        )
+
+    def __setitem__(self, key, value):
+        self.plain.pop(key, None)
+        self.packed.pop(key, None)
+        if not self._packable(value):
+            self.plain[key] = value
+            return
+        # Rotate the channels before quantizing, the way ConvRot does: per-channel outliers are what
+        # low-bit activations die on, and the error compounds slice over slice. A Hadamard rotation
+        # is a bmm over a free reshape of (b c t h w), so it costs none of the channels-last
+        # transpose that the [tokens, dim] kernels would need.
+        b, c, t, h, w = value.shape
+        rot = self._rotation(c, value)
+        rotated = torch.bmm(rot.expand(b, c, c), value.reshape(b, c, -1))
+        # Per-token scale: rotation spreads each token's outliers across all channels, so the
+        # scale that matters is per position, not per channel.
+        scale = rotated.abs().amax(dim=1, keepdim=True).clamp_min(1e-8) / 127.0
+        qdata = (rotated / scale).round_().clamp_(-127, 127).to(torch.int8)
+        self.packed[key] = (qdata, scale, (b, c, t, h, w), value.dtype)
+
+    def get(self, key, default=None):
+        if key in self.plain:
+            return self.plain[key]
+        entry = self.packed.get(key)
+        if entry is None:
+            return default
+        qdata, scale, (b, c, t, h, w), dtype = entry
+        rotated = qdata.to(dtype) * scale
+        rot = self._rotation(c, rotated)
+        # Hadamard is orthonormal, so the inverse is its transpose.
+        return torch.bmm(rot.transpose(1, 2).expand(b, c, c), rotated).reshape(b, c, t, h, w)
+
+    @staticmethod
+    def _rotation(channels, like):
+        cached = _HADAMARD_CACHE.get((channels, like.device, like.dtype))
+        if cached is None:
+            h = torch.ones((1, 1), device=like.device, dtype=torch.float32)
+            while h.shape[0] < channels:
+                h = torch.cat([torch.cat([h, h], dim=1), torch.cat([h, -h], dim=1)], dim=0)
+            cached = (h / math.sqrt(channels)).to(like.dtype).unsqueeze(0)
+            _HADAMARD_CACHE[(channels, like.device, like.dtype)] = cached
+        return cached
+
+    def pop(self, key, default=None):
+        self.packed.pop(key, None)
+        return self.plain.pop(key, default)
+
+    def __contains__(self, key):
+        return key in self.plain or key in self.packed
+
+    def __getitem__(self, key):
+        value = self.get(key, _CACHE_MISS)
+        if value is _CACHE_MISS:
+            raise KeyError(key)
+        return value
+
 
 class MemoryState(Enum):
     DISABLED = 0
@@ -1380,7 +1464,7 @@ class VideoAutoencoderKL(nn.Module):
 
     def slicing_encode(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_slicing and (x.shape[2] - 1) > self.slicing_sample_min_size:
-            memory_cache = {}
+            memory_cache = CausalMemoryCache()
             split_size = max(
                 self.slicing_sample_min_size,
                 getattr(self, "temporal_downsample_factor", 1),
@@ -1408,7 +1492,7 @@ class VideoAutoencoderKL(nn.Module):
 
     def slicing_decode(self, z: torch.Tensor) -> torch.Tensor:
         if self.use_slicing and (z.shape[2] - 1) > self.slicing_latent_min_size:
-            memory_cache = {}
+            memory_cache = CausalMemoryCache()
             z_slices = z[:, :, 1:].split(split_size=self.slicing_latent_min_size, dim=2)
             decoded_slices = [
                 self._decode(

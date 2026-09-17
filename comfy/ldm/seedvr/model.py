@@ -16,13 +16,14 @@ from comfy.ldm.seedvr.constants import (
     BYTEDANCE_ROPE_MAX_FREQ,
     BYTEDANCE_SINUSOIDAL_DIM,
     ROPE_THETA,
-    SEEDVR2_7B_MLP_CHUNK,
+    SEEDVR2_MLP_CHUNK,
     SEEDVR2_7B_VID_DIM,
     SEEDVR2_LATENT_CHANNELS,
     SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS,
 )
 import comfy.model_management
 import comfy.ops
+import comfy.quant_ops
 
 class Cache:
     def __init__(self, disable=False, prefix="", cache=None):
@@ -47,19 +48,6 @@ class Cache:
             cache=self.cache,
         )
 
-def repeat_concat(
-    vid: torch.FloatTensor,  # (VL ... c)
-    txt: torch.FloatTensor,  # (TL ... c)
-    vid_len: torch.LongTensor,  # (n*b)
-    txt_len: torch.LongTensor,  # (b)
-    txt_repeat: List,  # (n)
-) -> torch.FloatTensor:  # (L ... c)
-    vid = torch.split(vid, vid_len.tolist())
-    txt = torch.split(txt, txt_len.tolist())
-    txt = [[x] * n for x, n in zip(txt, txt_repeat)]
-    txt = list(chain(*txt))
-    return torch.cat(list(chain(*zip(vid, txt))))
-
 def repeat_concat_idx(
     vid_len: torch.LongTensor,  # (n*b)
     txt_len: torch.LongTensor,  # (b)
@@ -67,12 +55,18 @@ def repeat_concat_idx(
 ) -> Tuple[
     Callable,
     Callable,
+    List,
 ]:
     device = vid_len.device
     vid_idx = torch.arange(vid_len.sum(), device=device)
     txt_idx = torch.arange(len(vid_idx), len(vid_idx) + txt_len.sum(), device=device)
     txt_repeat_list = txt_repeat.tolist()
-    tgt_idx = repeat_concat(vid_idx, txt_idx, vid_len, txt_len, txt_repeat_list)
+    vid_blocks = torch.split(vid_idx, vid_len.tolist())
+    txt_blocks = list(chain(*([x] * n for x, n in zip(torch.split(txt_idx, txt_len.tolist()), txt_repeat_list))))
+    seq_len = [vid.numel() + txt.numel() for vid, txt in zip(vid_blocks, txt_blocks)]
+    # Stable sort by length so equal-length windows end up adjacent and can share one attention call.
+    order = sorted(range(len(seq_len)), key=seq_len.__getitem__)
+    tgt_idx = torch.cat([block for i in order for block in (vid_blocks[i], txt_blocks[i])])
     src_idx = torch.argsort(tgt_idx)
     txt_idx_len = len(tgt_idx) - len(vid_idx)
     repeat_txt_len = (txt_len * txt_repeat).tolist()
@@ -88,6 +82,7 @@ def repeat_concat_idx(
     return (
         lambda vid, txt: torch.cat([vid, txt])[tgt_idx],
         lambda all: unconcat_coalesce(all),
+        cumulative_lengths([seq_len[i] for i in order]),
     )
 
 def cumulative_lengths(lengths):
@@ -274,12 +269,8 @@ class NaRotaryEmbedding3d(RotaryEmbedding3d):
     ]:
         freqs = cache("rope_freqs_3d", lambda: self.get_freqs(shape))
         freqs = freqs.to(device=q.device)
-        q = q.transpose(0, 1)
-        k = k.transpose(0, 1)
-        q = _apply_seedvr2_rotary_emb(freqs, q.float()).to(q.dtype)
-        k = _apply_seedvr2_rotary_emb(freqs, k.float()).to(k.dtype)
-        q = q.transpose(0, 1)
-        k = k.transpose(0, 1)
+        q = _apply_rope1_partial(q, freqs)
+        k = _apply_rope1_partial(k, freqs)
         return q, k
 
     @torch._dynamo.disable
@@ -300,7 +291,7 @@ class NaRotaryEmbedding3d(RotaryEmbedding3d):
         for f, h, w in shape.tolist():
             freqs = plain_rope.get_axial_freqs(f, h, w)
             freq_list.append(freqs.view(-1, freqs.size(-1)))
-        return torch.cat(freq_list, dim=0)
+        return _to_flux_freqs_cis(torch.cat(freq_list, dim=0))
 
 
 class MMRotaryEmbeddingBase(RotaryEmbeddingBase):
@@ -313,48 +304,9 @@ class MMRotaryEmbeddingBase(RotaryEmbeddingBase):
         )
         self.mm = True
 
-def slice_at_dim(t, dim_slice: slice, *, dim):
-    dim += (t.ndim if dim < 0 else 0)
-    colons = [slice(None)] * t.ndim
-    colons[dim] = dim_slice
-    return t[tuple(colons)]
-
-def rotate_half(x):
-    x = x.reshape(*x.shape[:-1], x.shape[-1] // 2, 2)
-    x1, x2 = x.unbind(dim = -1)
-    x = torch.stack((-x2, x1), dim = -1)
-    return x.flatten(-2)
 def exists(val):
     return val is not None
 
-def _apply_seedvr2_rotary_emb(
-    freqs: torch.Tensor,
-    t: torch.Tensor,
-    start_index: int = 0,
-    scale: float = 1.0,
-    seq_dim: int = -2,
-    freqs_seq_dim: int | None = None,
-) -> torch.Tensor:
-    dtype = t.dtype
-    if freqs_seq_dim is None and (freqs.ndim == 2 or t.ndim == 3):
-        freqs_seq_dim = 0
-
-    if t.ndim == 3 or freqs_seq_dim is not None:
-        seq_len = t.shape[seq_dim]
-        freqs = slice_at_dim(freqs, slice(-seq_len, None), dim=freqs_seq_dim)
-
-    rot_feats = freqs.shape[-1]
-    end_index = start_index + rot_feats
-
-    t_left = t[..., :start_index]
-    t_middle = t[..., start_index:end_index]
-    t_right = t[..., end_index:]
-
-    freqs = freqs.to(device=t_middle.device, dtype=t_middle.dtype)
-    cos = freqs.cos() * scale
-    sin = freqs.sin() * scale
-    t_middle = (t_middle * cos) + (rotate_half(t_middle) * sin)
-    return torch.cat((t_left, t_middle, t_right), dim=-1).to(dtype)
 
 def _to_flux_freqs_cis(freqs_interleaved: torch.Tensor) -> torch.Tensor:
     angles = freqs_interleaved[..., ::2].float()
@@ -365,16 +317,26 @@ def _to_flux_freqs_cis(freqs_interleaved: torch.Tensor) -> torch.Tensor:
 
 
 def _apply_rope1_partial(t: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-    out = t.clone() if t.requires_grad or comfy.model_management.in_training else t
+    """Rotate the leading ``2 * freqs_cis.shape[-3]`` head features of an (L, heads, dim) tensor.
+
+    The 4-D token-major view with 6-D frequencies is what the fused kernel dispatches on;
+    a 3-D tensor silently falls back to the elementwise reference path.
+    """
+    training = comfy.model_management.in_training or t.requires_grad
+    out = t.clone() if training else t
     rot_d = 2 * freqs_cis.shape[-3]
-    seq_len = out.shape[-2]
+    view = out.unsqueeze(0)
+    if rot_d != view.shape[-1]:
+        view = view[..., :rot_d]
+    freqs_cis = freqs_cis[None, :, None]
+    seq_len = out.shape[0]
     for start in range(0, seq_len, SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS):
         end = min(start + SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS, seq_len)
-        freqs_chunk = freqs_cis[start:end]
-        if rot_d == out.shape[-1]:
-            out[..., start:end, :] = apply_rope1(out[..., start:end, :], freqs_chunk).to(out.dtype)
+        chunk, freqs_chunk = view[:, start:end], freqs_cis[:, start:end]
+        if training:
+            chunk.copy_(apply_rope1(chunk, freqs_chunk))
         else:
-            out[..., start:end, :rot_d] = apply_rope1(out[..., start:end, :rot_d], freqs_chunk).to(out.dtype)
+            comfy.quant_ops.ck.apply_rope1_(chunk, freqs_chunk)
     return out
 
 
@@ -390,6 +352,7 @@ class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
         txt_q: torch.FloatTensor,  # L h d
         txt_k: torch.FloatTensor,  # L h d
         txt_shape: torch.LongTensor,  # B 1
+        vid_txt_shape: torch.LongTensor,  # B 1, text length of the sample each vid entry belongs to
         cache: Cache,
     ) -> Tuple[
         torch.FloatTensor,
@@ -399,26 +362,17 @@ class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
     ]:
         vid_freqs, txt_freqs = cache(
             "mmrope_freqs_3d",
-            lambda: self.get_freqs(vid_shape, txt_shape),
+            lambda: self.get_freqs(vid_shape, txt_shape, vid_txt_shape),
         )
         target_device = vid_q.device
         if vid_freqs.device != target_device:
             vid_freqs = vid_freqs.to(target_device)
         if txt_freqs.device != target_device:
             txt_freqs = txt_freqs.to(target_device)
-        vid_q = vid_q.transpose(0, 1)
-        vid_k = vid_k.transpose(0, 1)
         vid_q = _apply_rope1_partial(vid_q, vid_freqs)
         vid_k = _apply_rope1_partial(vid_k, vid_freqs)
-        vid_q = vid_q.transpose(0, 1)
-        vid_k = vid_k.transpose(0, 1)
-
-        txt_q = txt_q.transpose(0, 1)
-        txt_k = txt_k.transpose(0, 1)
         txt_q = _apply_rope1_partial(txt_q, txt_freqs)
         txt_k = _apply_rope1_partial(txt_k, txt_freqs)
-        txt_q = txt_q.transpose(0, 1)
-        txt_k = txt_k.transpose(0, 1)
         return vid_q, vid_k, txt_q, txt_k
 
     @torch._dynamo.disable  # Disable compilation: .tolist() is data-dependent and causes graph breaks
@@ -426,6 +380,7 @@ class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
         self,
         vid_shape: torch.LongTensor,
         txt_shape: torch.LongTensor,
+        vid_txt_shape: torch.LongTensor,
     ) -> Tuple[
         torch.Tensor,
         torch.Tensor,
@@ -434,9 +389,9 @@ class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
         max_temporal = 0
         max_height = 0
         max_width = 0
-        max_txt_len = 0
+        max_txt_len = max(txt_shape[:, 0].tolist())
 
-        for (f, h, w), l in zip(vid_shape.tolist(), txt_shape[:, 0].tolist()):
+        for (f, h, w), l in zip(vid_shape.tolist(), vid_txt_shape[:, 0].tolist()):
             max_temporal = max(max_temporal, l + f)
             max_height = max(max_height, h)
             max_width = max(max_width, w)
@@ -451,12 +406,14 @@ class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
             ).float()
             txt_freqs = self.get_axial_freqs(max_txt_len + 16)
 
-        vid_freq_list, txt_freq_list = [], []
-        for (f, h, w), l in zip(vid_shape.tolist(), txt_shape[:, 0].tolist()):
-            vid_freq = vid_freqs[l : l + f, :h, :w].reshape(-1, vid_freqs.size(-1))
-            txt_freq = txt_freqs[:l].repeat(1, 3).reshape(-1, vid_freqs.size(-1))
-            vid_freq_list.append(vid_freq)
-            txt_freq_list.append(txt_freq)
+        vid_freq_list = [
+            vid_freqs[l : l + f, :h, :w].reshape(-1, vid_freqs.size(-1))
+            for (f, h, w), l in zip(vid_shape.tolist(), vid_txt_shape[:, 0].tolist())
+        ]
+        txt_freq_list = [
+            txt_freqs[:l].repeat(1, 3).reshape(-1, vid_freqs.size(-1))
+            for l in txt_shape[:, 0].tolist()
+        ]
         vid_freqs_interleaved = torch.cat(vid_freq_list, dim=0)
         txt_freqs_interleaved = torch.cat(txt_freq_list, dim=0)
 
@@ -579,7 +536,7 @@ def window_idx(
     window_fn: Callable[[torch.Tensor], List[torch.Tensor]],
 ):
     hid_idx = torch.arange(hid_shape.prod(-1).sum(), device=hid_shape.device).unsqueeze(-1)
-    tgt_idx, tgt_shape, tgt_windows, tgt_len_list, tgt_windows_list = window(hid_idx, hid_shape, window_fn)
+    tgt_idx, tgt_shape, tgt_windows, _, _ = window(hid_idx, hid_shape, window_fn)
     tgt_idx = tgt_idx.squeeze(-1)
     src_idx = torch.argsort(tgt_idx)
     return (
@@ -587,8 +544,6 @@ def window_idx(
         lambda hid: torch.index_select(hid, 0, src_idx),
         tgt_shape,
         tgt_windows,
-        tgt_len_list,
-        tgt_windows_list,
     )
 
 class NaSwinAttention(NaMMAttention):
@@ -630,11 +585,12 @@ class NaSwinAttention(NaMMAttention):
             window_slices = self.window_op((t, h, w), self.window)
             return [x[st, sh, sw] for (st, sh, sw) in window_slices]
 
-        window_partition, window_reverse, window_shape, window_count, vid_len_win_list, window_count_list = cache_win(
+        window_partition, window_reverse, window_shape, window_count = cache_win(
             "win_transform",
             lambda: window_idx(vid_shape, make_window),
         )
         vid_qkv_win = window_partition(vid_qkv)
+        del vid_qkv
 
         vid_qkv_win = vid_qkv_win.reshape(vid_qkv_win.shape[0], 3, self.heads, self.head_dim)
         txt_qkv = txt_qkv.reshape(txt_qkv.shape[0], 3, self.heads, self.head_dim)
@@ -654,44 +610,35 @@ class NaSwinAttention(NaMMAttention):
             if self.version_7b:
                 vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
             elif self.rope.mm:
-                _, num_h, _ = txt_q.shape
-                txt_q_repeat = txt_q.flatten(1, 2)
-                txt_q_repeat = unflatten(txt_q_repeat, txt_shape)
-                txt_q_repeat = [[x] * n for x, n in zip(txt_q_repeat, window_count_list)]
-                txt_q_repeat = list(chain(*txt_q_repeat))
-                txt_q_repeat, txt_shape_repeat = flatten(txt_q_repeat)
-                txt_q_repeat = txt_q_repeat.reshape(txt_q_repeat.shape[0], num_h, self.head_dim)
-
-                txt_k_repeat = txt_k.flatten(1, 2)
-                txt_k_repeat = unflatten(txt_k_repeat, txt_shape)
-                txt_k_repeat = [[x] * n for x, n in zip(txt_k_repeat, window_count_list)]
-                txt_k_repeat = list(chain(*txt_k_repeat))
-                txt_k_repeat, _ = flatten(txt_k_repeat)
-                txt_k_repeat = txt_k_repeat.reshape(txt_k_repeat.shape[0], num_h, self.head_dim)
-
+                # Each window carries the text length of the sample it came from, which offsets its vid freqs.
+                txt_shape_win = cache_win(
+                    "txt_shape_win",
+                    lambda: torch.repeat_interleave(txt_shape, window_count.to(txt_shape.device), dim=0),
+                )
                 vid_q, vid_k, txt_q, txt_k = self.rope(
-                    vid_q, vid_k, window_shape, txt_q_repeat, txt_k_repeat, txt_shape_repeat, cache_win
+                    vid_q, vid_k, window_shape, txt_q, txt_k, txt_shape, txt_shape_win, cache_win
                 )
             else:
                 vid_q, vid_k = self.rope(vid_q, vid_k, window_shape, cache_win)
 
-        txt_len_win_list = cache_win(
-            "txt_len_list",
-            lambda: [txt_len for txt_len, window_count in zip(txt_len.tolist(), window_count_list) for _ in range(window_count)],
-        )
-        all_len_win = cache_win("all_len", lambda: [vid_len + txt_len for vid_len, txt_len in zip(vid_len_win_list, txt_len_win_list)])
-        concat_win, unconcat_win = cache_win(
+        concat_win, unconcat_win, cu_seqlens_win = cache_win(
             "mm_pnp", lambda: repeat_concat_idx(vid_len_win, txt_len, window_count)
         )
+        q = concat_win(vid_q, txt_q)
+        del vid_q, txt_q
+        k = concat_win(vid_k, txt_k)
+        del vid_k, txt_k
+        v = concat_win(vid_v, txt_v)
+        del vid_v, txt_v, vid_qkv_win, txt_qkv
         out = optimized_var_attention(
-            q=concat_win(vid_q, txt_q),
-            k=concat_win(vid_k, txt_k),
-            v=concat_win(vid_v, txt_v),
+            q=q, k=k, v=v,
             heads=self.heads, skip_reshape=True, skip_output_reshape=True,
-            cu_seqlens_q=cache_win("vid_seqlens_q", lambda: cumulative_lengths(all_len_win)),
-            cu_seqlens_k=cache_win("vid_seqlens_k", lambda: cumulative_lengths(all_len_win)),
+            cu_seqlens_q=cu_seqlens_win,
+            cu_seqlens_k=cu_seqlens_win,
         )
+        del q, k, v
         vid_out, txt_out = unconcat_win(out)
+        del out
 
         vid_out = vid_out.flatten(1, 2)
         txt_out = txt_out.flatten(1, 2)
@@ -736,7 +683,11 @@ class SwiGLUMLP(nn.Module):
         self.proj_in = operations.Linear(dim, hidden_dim, bias=False, device=device, dtype=dtype)
 
     def forward(self, x: torch.FloatTensor) -> torch.FloatTensor:
-        return self.proj_out(F.silu(self.proj_in_gate(x)) * self.proj_in(x))
+        gate = self.proj_in_gate(x)
+        up = self.proj_in(x)
+        if comfy.model_management.in_training or x.requires_grad:
+            return self.proj_out(F.silu(gate) * up)
+        return self.proj_out(F.silu(gate, inplace=True).mul_(up))
 
 def get_mlp(mlp_type: Optional[str] = "normal"):
     if mlp_type == "normal":
@@ -803,8 +754,16 @@ class NaMMSRTransformerBlock(nn.Module):
         self.ada = MMModule(ada, dim=dim, emb_dim=emb_dim, layers=["attn", "mlp"], shared_weights=shared_weights, vid_only=is_last_layer, device=device, dtype=dtype)
         self.is_last_layer = is_last_layer
         self.version = version
+        self.norm_eps = norm_eps
 
-    def _seedvr2_7b_mlp(
+    def _norm_ada_in(self, norm, vid, txt, layer, ada_kwargs):
+        """Normalize then modulate, as one fused kernel outside of training."""
+        if comfy.model_management.in_training or vid.requires_grad:
+            vid, txt = norm(vid, txt)
+            return self.ada(vid, txt, layer=layer, mode="in", **ada_kwargs)
+        return self.ada(vid, txt, layer=layer, mode="in", norm_eps=self.norm_eps, **ada_kwargs)
+
+    def _chunked_mlp(
         self,
         vid: torch.FloatTensor,
         txt: torch.FloatTensor,
@@ -813,12 +772,14 @@ class NaMMSRTransformerBlock(nn.Module):
         torch.FloatTensor,
     ]:
         vid_module = self.mlp.vid if not self.mlp.shared_weights else self.mlp.all
-        if comfy.model_management.in_training or vid.requires_grad:
-            vid = torch.cat([vid_module(chunk) for chunk in vid.split(SEEDVR2_7B_MLP_CHUNK, dim=0)], dim=0)
+        if vid.shape[0] <= SEEDVR2_MLP_CHUNK:
+            vid = vid_module(vid)
+        elif comfy.model_management.in_training or vid.requires_grad:
+            vid = torch.cat([vid_module(chunk) for chunk in vid.split(SEEDVR2_MLP_CHUNK, dim=0)], dim=0)
         else:
             vid_out = None
             offset = 0
-            for chunk in vid.split(SEEDVR2_7B_MLP_CHUNK, dim=0):
+            for chunk in vid.split(SEEDVR2_MLP_CHUNK, dim=0):
                 chunk_out = vid_module(chunk)
                 if vid_out is None:
                     vid_out = chunk_out.new_empty((vid.shape[0], *chunk_out.shape[1:]))
@@ -856,18 +817,13 @@ class NaMMSRTransformerBlock(nn.Module):
             "branch_tag": MMArg("vid", "txt"),
         }
 
-        vid_attn, txt_attn = self.attn_norm(vid, txt)
-        vid_attn, txt_attn = self.ada(vid_attn, txt_attn, layer="attn", mode="in", **ada_kwargs)
+        vid_attn, txt_attn = self._norm_ada_in(self.attn_norm, vid, txt, "attn", ada_kwargs)
         vid_attn, txt_attn = self.attn(vid_attn, txt_attn, vid_shape, txt_shape, cache)
         vid_attn, txt_attn = self.ada(vid_attn, txt_attn, layer="attn", mode="out", **ada_kwargs)
         vid_attn, txt_attn = (vid_attn + vid), (txt_attn + txt)
 
-        vid_mlp, txt_mlp = self.mlp_norm(vid_attn, txt_attn)
-        vid_mlp, txt_mlp = self.ada(vid_mlp, txt_mlp, layer="mlp", mode="in", **ada_kwargs)
-        if self.version:
-            vid_mlp, txt_mlp = self._seedvr2_7b_mlp(vid_mlp, txt_mlp)
-        else:
-            vid_mlp, txt_mlp = self.mlp(vid_mlp, txt_mlp)
+        vid_mlp, txt_mlp = self._norm_ada_in(self.mlp_norm, vid_attn, txt_attn, "mlp", ada_kwargs)
+        vid_mlp, txt_mlp = self._chunked_mlp(vid_mlp, txt_mlp)
         vid_mlp, txt_mlp = self.ada(vid_mlp, txt_mlp, layer="mlp", mode="out", **ada_kwargs)
         vid_mlp, txt_mlp = (vid_mlp + vid_attn), (txt_mlp + txt_attn)
 
@@ -1021,36 +977,53 @@ class AdaSingle(nn.Module):
         cache: Optional[Cache] = None,
         branch_tag: str = "",
         hid_len: Optional[torch.LongTensor] = None,  # b
+        norm_eps: Optional[float] = None,
     ) -> torch.FloatTensor:
         if cache is None:
             cache = Cache(disable=True)
         idx = self.layers.index(layer)
         emb = emb.reshape(emb.shape[0], -1, len(self.layers), 3)[:, :, idx, :]
-        emb = expand_dims(emb, 1, hid.ndim + 1)
 
-        if hid_len is not None:
-            emb = cache(
-                f"emb_repeat_{idx}_{branch_tag}",
-                lambda: torch.repeat_interleave(emb, hid_len, dim=0),
-            )
+        if hid_len is None or emb.shape[0] == 1:
+            # A single sample's modulation broadcasts over every token, so it never needs materializing.
+            emb = expand_dims(emb, 1, hid.ndim + 1)
+            return self._modulate(hid, layer, mode, *emb.unbind(-1), norm_eps=norm_eps)
 
         shiftA, scaleA, gateA = emb.unbind(-1)
-        shiftB, scaleB, gateB = (
-            getattr(self, f"{layer}_shift", None),
-            getattr(self, f"{layer}_scale", None),
-            getattr(self, f"{layer}_gate", None),
-        )
+        # The fused norm is out of place, so its per-sample slices land in a fresh buffer.
+        out = torch.empty_like(hid) if norm_eps is not None else hid
+        offset = 0
+        for i, length in enumerate(cache(f"hid_len_list_{branch_tag}", hid_len.tolist)):
+            modulated = self._modulate(
+                hid[offset:offset + length], layer, mode, shiftA[i], scaleA[i], gateA[i], norm_eps=norm_eps,
+            )
+            if norm_eps is not None:
+                out[offset:offset + length] = modulated
+            offset += length
+        return out
 
+    def _modulate(
+        self,
+        hid: torch.FloatTensor,
+        layer: str,
+        mode: str,
+        shiftA: torch.FloatTensor,
+        scaleA: torch.FloatTensor,
+        gateA: torch.FloatTensor,
+        norm_eps: Optional[float] = None,
+    ) -> torch.FloatTensor:
         if mode == "in":
-            shiftB = comfy.ops.cast_to_input(shiftB, hid)
-            scaleB = comfy.ops.cast_to_input(scaleB, hid)
+            shiftB = comfy.ops.cast_to_input(getattr(self, f"{layer}_shift"), hid)
+            scaleB = comfy.ops.cast_to_input(getattr(self, f"{layer}_scale"), hid)
+            if norm_eps is not None:
+                # rms_adaln applies rmsnorm(x) * (1 + scale) + shift, so hand it scale - 1.
+                return comfy.quant_ops.ck.rms_adaln(hid, scaleA + scaleB - 1.0, shiftA + shiftB, norm_eps)
             return hid.mul_(scaleA + scaleB).add_(shiftA + shiftB)
         if mode == "out":
+            gateB = getattr(self, f"{layer}_gate", None)
             if gateB is not None:
-                gateB = comfy.ops.cast_to_input(gateB, hid)
-                return hid.mul_(gateA + gateB)
-            else:
-                return hid.mul_(gateA)
+                return hid.mul_(gateA + comfy.ops.cast_to_input(gateB, hid))
+            return hid.mul_(gateA)
 
         raise ValueError(f"Unknown AdaSingle mode: {mode}")
 
