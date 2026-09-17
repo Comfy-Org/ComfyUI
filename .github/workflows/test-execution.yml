@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main, master, release/** ]
   pull_request:
-    branches: [ main, master, release/** ]
+    branches: [ main, master, release/**, jaeone94/dynamic-group-contract ]
 
 jobs:
   test:
