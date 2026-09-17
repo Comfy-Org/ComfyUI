@@ -455,7 +455,10 @@ class _AssetSeeder:
         a full scan of all roots or during maintenance.
 
         Returns:
-            Number of references marked as missing
+            Number of references marked as missing, or None when the marking
+            itself failed. Zero and None are deliberately distinct: zero means
+            nothing was outside the known prefixes, None means the answer is
+            unknown, so callers must not report a failed prune as a clean one.
 
         Raises:
             ScanInProgressError: If a scan is currently running
