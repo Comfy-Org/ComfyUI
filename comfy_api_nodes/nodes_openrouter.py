@@ -433,7 +433,9 @@ _IMAGE_SIZES: dict[str, dict[str, tuple[int, int]]] = {
         "3:4": (1312, 1760),
     },
 }
-_IMAGE_ASPECT_RATIOS = list(_IMAGE_SIZES["1K"])
+_IMAGE_AUTO_ASPECT_RATIO = "auto"
+_IMAGE_ASPECT_RATIOS = [*_IMAGE_SIZES["1K"], _IMAGE_AUTO_ASPECT_RATIO]
+_IMAGE_AUTO_OUTPUT_SIZE = _IMAGE_SIZES["1.5K"]["1:1"]
 _IMAGE_PROMPT_MAX_CHARS = 20000
 _IMAGE_MAX_REFERENCES = 5
 _IMAGE_REFERENCE_MAX_PIXELS = 2048 * 2048
@@ -459,14 +461,16 @@ def _image_model_option(spec: _ImageModelSpec) -> IO.DynamicCombo.Option:
                 "aspect_ratio",
                 options=_IMAGE_ASPECT_RATIOS,
                 default="1:1",
-                tooltip="Aspect ratio of the generated image, also applied when reference images are connected.",
+                tooltip="Aspect ratio of the generated image, also applied when reference images are connected. "
+                "'auto' lets the model choose the ratio for text to image (rendered at the 1.5K size) and keeps "
+                "the aspect ratio of the first reference image when editing.",
             ),
             IO.Combo.Input(
                 "resolution",
                 options=list(_IMAGE_SIZES),
                 default="1K",
                 tooltip="Output size tier. 1K is about 1 megapixel (1:1 is 1024x1024, 16:9 is 1360x768); "
-                "1.5K is about 2.3 megapixels (1:1 is 1536x1536, 16:9 is 2048x1152).",
+                "1.5K is about 2.3 megapixels (1:1 is 1536x1536, 16:9 is 2048x1152). Ignored when aspect_ratio is 'auto'.",
             ),
             IO.Autogrow.Input(
                 "images",
@@ -504,6 +508,7 @@ def _image_price_badge_jsonata() -> str:
         ratio_tokens = ", ".join(f'"{ratio}": {_image_tokens(w, h)}' for ratio, (w, h) in table.items())
         size_tables.append(f'"{tier.lower()}": {{{ratio_tokens}}}')
     default_out = _image_tokens(*_IMAGE_SIZES["1K"]["1:1"])
+    auto_out = _image_tokens(*_IMAGE_AUTO_OUTPUT_SIZE)
     ref_max_tokens = _IMAGE_REFERENCE_MAX_PIXELS // 1024
     return (
         "(\n"
@@ -521,7 +526,8 @@ def _image_price_badge_jsonata() -> str:
         "    ? ($length($prompt) + 2 * $count($match($prompt, /[^\\x00-\\x7F]/))) / 4 : 0;\n"
         '  $table := $type($res) = "string" ? $lookup($outTokens, $res) : null;\n'
         '  $sized := ($type($table) = "object" and $type($ar) = "string") ? $lookup($table, $ar) : null;\n'
-        f'  $out := $type($sized) = "number" ? $sized : {default_out};\n'
+        f'  $out := $ar = "{_IMAGE_AUTO_ASPECT_RATIO}" ? ($refs > 0 ? {default_out} : {auto_out})'
+        f' : ($type($sized) = "number" ? $sized : {default_out});\n'
         "  $r ? ($refs > 0 ? {\n"
         '    "type": "range_usd",\n'
         '    "min_usd": ($promptTokens * $r[0] + $out * $r[2]) * 1.43 / 1000000,\n'
@@ -581,7 +587,11 @@ class OpenRouterImageNode(IO.ComfyNode):
         prompt: str = model["prompt"]
         validate_string(prompt, strip_whitespace=True, min_length=1)
         validate_string(prompt, strip_whitespace=False, max_length=_IMAGE_PROMPT_MAX_CHARS)
-        width, height = _IMAGE_SIZES[model["resolution"]][model["aspect_ratio"]]
+        aspect_ratio: str = model["aspect_ratio"]
+        size: str | None = None
+        if aspect_ratio != _IMAGE_AUTO_ASPECT_RATIO:
+            width, height = _IMAGE_SIZES[model["resolution"]][aspect_ratio]
+            size = f"{width}x{height}"
 
         reference_images = [
             image for images in (model.get("images") or {}).values() if images is not None for image in images
@@ -610,7 +620,8 @@ class OpenRouterImageNode(IO.ComfyNode):
             data=OpenRouterImageRequest(
                 model=slug,
                 prompt=prompt,
-                size=f"{width}x{height}",
+                aspect_ratio=aspect_ratio if size is None else None,
+                size=size,
                 input_references=input_references,
             ),
         )
