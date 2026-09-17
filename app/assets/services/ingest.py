@@ -28,7 +28,7 @@ from app.assets.database.queries.records import (
 )
 from app.assets.event_log import emit, error_type
 from app.assets.helpers import normalize_tags, to_stored_hash
-from app.assets.services.file_utils import get_mtime_ns, get_size_and_mtime_ns
+from app.assets.services.file_utils import get_mtime_ns
 from app.assets.services.image_dimensions import extract_image_dimensions
 from app.assets.services.lookup import (
     claim_qualified_content,
@@ -483,33 +483,6 @@ def _assert_upload_preflight_current(
         raise _PreflightStale
 
 
-def _create_upload_record_in_txn(
-    session: Session,
-    content_id: str,
-    spec: _UploadRecordSpec,
-    abs_path: str,
-) -> Asset:
-    if spec.preview_id is not None and session.get(Asset, spec.preview_id) is None:
-        raise ValueError(
-            f"preview_id {spec.preview_id!r} does not reference an existing asset"
-        )
-    record = create_record(
-        session,
-        content_id,
-        spec.name,
-        mime_type=spec.mime_type,
-        loader_path=compute_loader_path(abs_path),
-        tags=spec.tags,
-        system_metadata=_extract_system_metadata_sync(abs_path, spec.mime_type),
-    )
-    if spec.user_metadata:
-        record.user_metadata = dict(spec.user_metadata)
-    if spec.preview_id:
-        record.preview_id = spec.preview_id
-    session.flush()
-    return record
-
-
 def _apply_reused_upload_record(
     session: Session,
     prepared: _PreparedUploadRecord,
@@ -532,25 +505,6 @@ def _apply_reused_upload_record(
     return _record_to_upload_result(session, record, created_new=True)
 
 
-def _reuse_qualified_content_in_txn(
-    session: Session,
-    stored_hash: str,
-    spec: _UploadRecordSpec,
-) -> UploadResult | None:
-    content = lookup_for_view(session, stored_hash)
-    if content is None:
-        return None
-    if not claim_qualified_content(session, content.id, stored_hash):
-        session.rollback()
-        return None
-    content = refresh_qualified_content(session, content.id)
-    if content is None:
-        session.rollback()
-        return None
-    record = _create_upload_record_in_txn(session, content.id, spec, content.path)
-    return _record_to_upload_result(session, record, created_new=True)
-
-
 def _reuse_qualified_content(
     stored_hash: str,
     spec: _UploadRecordSpec,
@@ -566,12 +520,7 @@ def _reuse_qualified_content(
             )
         except _PreflightStale:
             continue
-    logging.warning(
-        "Upload preflight changed three times; falling back to in-transaction metadata extraction"
-    )
-    return run_write_txn(
-        lambda session: _reuse_qualified_content_in_txn(session, stored_hash, spec)
-    )
+    raise UploadUnstableError("upload preflight changed on every attempt")
 
 
 def _preflight_settle_target(dest_abs: str) -> _SettleTargetPreflight | None:
@@ -647,41 +596,6 @@ def _apply_settle_target(
     )
 
 
-def _settle_destination_before_write_in_txn(session: Session, dest_abs: str) -> None:
-    if not os.path.isfile(dest_abs):
-        return
-    existing = session.scalars(
-        select(AssetContent).where(
-            AssetContent.path == dest_abs,
-            AssetContent.is_missing.is_(False),
-        )
-    ).first()
-    if existing is None:
-        return
-    size_bytes, mtime_ns = get_size_and_mtime_ns(dest_abs)
-    if (
-        existing.hash is not None
-        and existing.size_bytes == size_bytes
-        and existing.mtime_ns == mtime_ns
-    ):
-        return
-    try:
-        incumbent_digest, verified_stat = _snapshot_hash_with_retry(dest_abs)
-    except (UploadUnstableError, OSError):
-        mark_content_missing(session, existing.id)
-        return
-    _reconcile_live_content_at_path(
-        session,
-        dest_abs,
-        _ContentFacts(
-            to_stored_hash(incumbent_digest),
-            verified_stat.st_size,
-            verified_stat.st_mtime_ns,
-        ),
-        content_written=False,
-    )
-
-
 def _settle_destination_before_write(dest_abs: str) -> None:
     for _restart in range(4):
         preflight = _preflight_settle_target(dest_abs)
@@ -693,13 +607,7 @@ def _settle_destination_before_write(dest_abs: str) -> None:
             return
         except _PreflightStale:
             continue
-    logging.warning(
-        "Upload destination preflight changed three times; falling back to in-transaction hashing"
-    )
-    run_write_txn(
-        lambda session: _settle_destination_before_write_in_txn(session, dest_abs)
-    )
-    return
+    raise UploadUnstableError("upload destination changed on every attempt")
 
 
 def _create_content_and_upload_record(
@@ -1010,54 +918,6 @@ def _apply_cached_registration(
     )
 
 
-def _register_cached_output_in_txn(
-    session: Session,
-    locator: str,
-    job_id: str | None,
-) -> RegisteredAsset | None:
-    existing = session.scalars(
-        select(AssetContent).where(
-            AssetContent.path == locator,
-            AssetContent.is_missing.is_(False),
-        )
-    ).first()
-    if existing is None:
-        logging.info(
-            "Cached output registration is a non-event; no live content for %s",
-            locator,
-        )
-        return None
-    name, path_tags = get_name_and_tags_from_asset_path(locator)
-    mime_type = mimetypes.guess_type(locator, strict=False)[0]
-    sibling = session.scalars(
-        select(Asset)
-        .where(Asset.content_id == existing.id)
-        .order_by(Asset.created_at.asc(), Asset.id.asc())
-        .limit(1)
-    ).first()
-    system_metadata = (
-        dict(sibling.system_metadata)
-        if sibling is not None and sibling.system_metadata is not None
-        else _extract_system_metadata_sync(locator, mime_type)
-    )
-    record = create_record(
-        session,
-        existing.id,
-        name,
-        mime_type=mime_type,
-        job_id=job_id,
-        loader_path=compute_loader_path(locator),
-        tags=path_tags,
-        system_metadata=system_metadata,
-    )
-    return RegisteredAsset(
-        id=record.id,
-        content_id=record.content_id,
-        job_id=record.job_id,
-        name=record.name,
-    )
-
-
 def register_cached_output(
     abs_path: str, job_id: str | None = None
 ) -> RegisteredAsset | None:
@@ -1092,11 +952,10 @@ def register_cached_output(
             except _PreflightStale:
                 continue
         logging.warning(
-            "Cached-output preflight changed three times; falling back to in-transaction metadata extraction"
+            "Cached-output preflight changed on every attempt; not registering %s",
+            locator,
         )
-        return run_write_txn(
-            lambda session: _register_cached_output_in_txn(session, locator, job_id)
-        )
+        return None
     except Exception as exc:
         logging.exception("Failed to register cached output: %s", locator)
         emit(

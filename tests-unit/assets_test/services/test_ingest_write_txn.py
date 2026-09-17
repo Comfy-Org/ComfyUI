@@ -1,17 +1,22 @@
 import os
 
+import json
 import logging
 import sqlite3
 import threading
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import folder_paths
 import pytest
+from aiohttp import web
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 import app.assets.services.ingest as ingest
 import app.database.db as db_mod
+from app.assets.api import routes, schemas_in
 from app.assets.database.queries.records import create_content, create_record
 
 _BARRIER_TIMEOUT = 5
@@ -62,6 +67,185 @@ def _blocking_fake(entered: threading.Event, release: threading.Event, real_fn):
         return real_fn(*args, **kwargs)
 
     return fake
+
+
+class _FilesystemInsideWriteTxn(BaseException):
+    """Barrier trip. Derives from BaseException so ``except Exception`` cannot eat it."""
+
+
+class _WriteTxnFsBarrier:
+    """Runs write-transaction callables and fails if one of them touches the disk."""
+
+    def __init__(self) -> None:
+        self.depth = 0
+
+    def run_write_txn(self, work):
+        self.depth += 1
+        try:
+            return work(object())
+        finally:
+            self.depth -= 1
+
+    def _guard(self, label: str, real):
+        def guarded(*args, **kwargs):
+            if self.depth:
+                raise _FilesystemInsideWriteTxn(f"{label} ran inside run_write_txn")
+            return real(*args, **kwargs)
+
+        return guarded
+
+    def install(self, monkeypatch) -> None:
+        monkeypatch.setattr(ingest, "run_write_txn", self.run_write_txn)
+        for name in ("_extract_system_metadata_sync", "_snapshot_hash_with_retry"):
+            monkeypatch.setattr(ingest, name, self._guard(name, getattr(ingest, name)))
+        monkeypatch.setattr(
+            ingest.os.path,
+            "isfile",
+            self._guard("os.path.isfile", os.path.isfile),
+        )
+
+
+@pytest.fixture
+def write_txn_fs_barrier(monkeypatch) -> _WriteTxnFsBarrier:
+    barrier = _WriteTxnFsBarrier()
+    barrier.install(monkeypatch)
+    return barrier
+
+
+def test_reused_upload_refuses_after_four_stale_preflights(
+    write_txn_fs_barrier, monkeypatch
+) -> None:
+    preflight = object()
+    prepared = object()
+    attempts: list[object] = []
+
+    monkeypatch.setattr(ingest, "_preflight_upload_record", lambda *_args: preflight)
+    monkeypatch.setattr(ingest, "_prepare_upload_record", lambda _preflight: prepared)
+
+    def stale_apply(_session, observed_prepared):
+        attempts.append(observed_prepared)
+        raise ingest._PreflightStale
+
+    monkeypatch.setattr(ingest, "_apply_reused_upload_record", stale_apply)
+
+    spec = ingest._UploadRecordSpec("asset", [], None, {}, None)
+    with pytest.raises(ingest.UploadUnstableError):
+        ingest._reuse_qualified_content("blake3:hash", spec)
+
+    assert attempts == [prepared, prepared, prepared, prepared]
+
+
+def test_settle_destination_refuses_after_four_stale_preflights(
+    write_txn_fs_barrier, monkeypatch
+) -> None:
+    preflight = object()
+    prepared = object()
+    attempts: list[object] = []
+
+    monkeypatch.setattr(ingest, "_preflight_settle_target", lambda _dest: preflight)
+    monkeypatch.setattr(ingest, "_prepare_settle_target", lambda _preflight: prepared)
+
+    def stale_apply(_session, observed_prepared):
+        attempts.append(observed_prepared)
+        raise ingest._PreflightStale
+
+    monkeypatch.setattr(ingest, "_apply_settle_target", stale_apply)
+
+    with pytest.raises(ingest.UploadUnstableError):
+        ingest._settle_destination_before_write(_output_path("settle-unstable.bin"))
+
+    assert attempts == [prepared, prepared, prepared, prepared]
+
+
+def test_cached_registration_gives_up_after_four_stale_preflights(
+    write_txn_fs_barrier, monkeypatch, caplog
+) -> None:
+    path = _output_path("cached-always-stale.bin")
+    with open(path, "wb") as file:
+        file.write(b"output")
+
+    preflight = SimpleNamespace(
+        content_id="content-always-stale",
+        sibling_id=None,
+        sibling_metadata=None,
+        signature=None,
+    )
+    attempts: list[str] = []
+
+    monkeypatch.setattr(
+        ingest, "_preflight_cached_registration", lambda _locator: preflight
+    )
+
+    def stale_apply(_session, _preflight, *_args):
+        attempts.append("apply")
+        raise ingest._PreflightStale
+
+    monkeypatch.setattr(ingest, "_apply_cached_registration", stale_apply)
+
+    try:
+        with caplog.at_level(logging.INFO):
+            assert ingest.register_cached_output(path) is None
+    finally:
+        os.unlink(path)
+
+    assert len(attempts) == 4
+    warnings = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "preflight changed" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == [], (
+        "giving up is an expected outcome, not a crash"
+    )
+    assert not [
+        r
+        for r in caplog.records
+        if r.getMessage().startswith("[assets-event] ingest.register_failed")
+    ], "giving up is not a registration failure event"
+
+
+@pytest.mark.asyncio
+async def test_upload_route_reports_an_unsettleable_destination_as_unstable(
+    write_txn_fs_barrier, monkeypatch, tmp_path
+) -> None:
+    temp_path = tmp_path / "unstable-destination.bin"
+    temp_path.write_bytes(b"upload bytes")
+
+    parsed = schemas_in.ParsedUpload(
+        file_present=True,
+        file_written=temp_path.stat().st_size,
+        file_client_name="unstable-destination.bin",
+        tmp_path=str(temp_path),
+        tags_raw=["output", "unit-tests"],
+        provided_name="unstable-destination.bin",
+        user_metadata_raw=None,
+        provided_hash=None,
+        provided_hash_exists=None,
+    )
+    monkeypatch.setattr(routes, "_ASSETS_ENABLED", True)
+    monkeypatch.setattr(
+        routes, "parse_multipart_upload", AsyncMock(return_value=parsed)
+    )
+    monkeypatch.setattr(
+        routes,
+        "USER_MANAGER",
+        SimpleNamespace(get_request_user_id=lambda _request: "test-user"),
+    )
+    monkeypatch.setattr(ingest, "_preflight_settle_target", lambda _dest: object())
+    monkeypatch.setattr(ingest, "_prepare_settle_target", lambda _preflight: object())
+
+    def stale_apply(_session, _prepared):
+        raise ingest._PreflightStale
+
+    monkeypatch.setattr(ingest, "_apply_settle_target", stale_apply)
+
+    response = await routes.upload_asset(AsyncMock(spec=web.Request))
+
+    assert isinstance(response, web.Response)
+    assert response.status == 500
+    body = json.loads(response.body)
+    assert body["error"]["code"] == "UPLOAD_UNSTABLE"
 
 
 def test_cached_registration_skips_extraction_when_live_content_is_missing(
@@ -210,37 +394,6 @@ def test_executed_registration_reports_preflight_os_error(monkeypatch, caplog) -
     assert _registration_failure_event(caplog) == (
         "[assets-event] ingest.register_failed error_type=OSError job_id=job-preflight output_kind=executed"
     )
-
-
-def test_reused_upload_falls_back_after_four_stale_preflights(monkeypatch, caplog) -> None:
-    preflight = object()
-    prepared = object()
-    attempts: list[object] = []
-    fallback_result = object()
-
-    monkeypatch.setattr(ingest, "_preflight_upload_record", lambda *_args: preflight)
-    monkeypatch.setattr(ingest, "_prepare_upload_record", lambda _preflight: prepared)
-
-    def stale_apply(_session, observed_prepared):
-        attempts.append(observed_prepared)
-        raise ingest._PreflightStale
-
-    monkeypatch.setattr(ingest, "_apply_reused_upload_record", stale_apply)
-    monkeypatch.setattr(
-        ingest,
-        "_reuse_qualified_content_in_txn",
-        lambda *_args: fallback_result,
-    )
-    monkeypatch.setattr(ingest, "run_write_txn", lambda work: work(object()))
-
-    spec = ingest._UploadRecordSpec("asset", [], None, {}, None)
-    with caplog.at_level(logging.WARNING):
-        result = ingest._reuse_qualified_content("blake3:hash", spec)
-
-    assert result is fallback_result
-    assert attempts == [prepared, prepared, prepared, prepared]
-    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
-    assert len(warnings) == 1
 
 
 def test_cached_registration_reports_terminal_write_failure(
@@ -432,7 +585,7 @@ def test_cached_registration_metadata_extraction_does_not_hold_the_write_lock(
     with open(path, "wb") as file:
         file.write(b"cached barrier bytes")
     try:
-        with db_mod.Session() as session:
+        with db_mod.WriteSession() as session:
             content = create_content(session, path, size_bytes=os.path.getsize(path))
             session.commit()
             content_id = content.id
@@ -483,7 +636,7 @@ def test_upload_settle_hashing_does_not_hold_the_write_lock(
         file.write(b"incumbent barrier bytes")
     try:
         stat = os.stat(path)
-        with db_mod.Session() as session:
+        with db_mod.WriteSession() as session:
             content = create_content(
                 session, path, size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns
             )

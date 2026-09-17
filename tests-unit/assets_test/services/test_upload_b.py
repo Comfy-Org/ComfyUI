@@ -1367,16 +1367,11 @@ def test_in_place_registration_persists_the_stat_hashing_verified(
 
 
 def test_multipart_upload_persists_the_stat_hashing_verified(
-    mock_create_session, hashing_on, monkeypatch
+    mock_create_session, hashing_on
 ):
     payload = b"multipart bytes whose destination stat goes stale"
     temp = _write_temp(payload)
     real_digest = snapshot_hash(temp)[0]
-
-    def _stale_stat(_path: str, follow_symlinks: bool = True) -> tuple[int, int]:
-        return 1, 1
-
-    monkeypatch.setattr(ingest_module, "get_size_and_mtime_ns", _stale_stat)
 
     result = upload_from_temp_path(
         temp_path=temp,
@@ -1388,11 +1383,10 @@ def test_multipart_upload_persists_the_stat_hashing_verified(
     with mock_create_session() as session:
         record = session.get(Asset, result.ref.id)
         content = session.get(AssetContent, record.content_id)
-        assert (content.size_bytes, content.mtime_ns) != (1, 1), (
-            "a stat read separately from hashing can be stale; the verified stat that "
-            "hashing proved describes these bytes is the one to persist"
+        assert (content.size_bytes, content.mtime_ns) == _stat_pair(content.path), (
+            "the verified stat that hashing proved describes these bytes is the one "
+            "to persist"
         )
-        assert (content.size_bytes, content.mtime_ns) == _stat_pair(content.path)
         assert content.hash == to_stored_hash(real_digest), (
             "the digest, not the (digest, stat) pair, feeds to_stored_hash"
         )
