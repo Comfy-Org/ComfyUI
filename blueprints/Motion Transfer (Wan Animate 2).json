@@ -1313,10 +1313,10 @@
               "Node name for S&R": "CLIPTextEncode"
             },
             "widgets_values": [
-              "Character Description: Cartoon character lost\nBackground description: The background is an empty white room"
+              ""
             ],
             "widgets_values_named": {
-              "text": "Character Description: Cartoon character lost\nBackground description: The background is an empty white room"
+              "text": ""
             },
             "color": "#232",
             "bgcolor": "#353"
