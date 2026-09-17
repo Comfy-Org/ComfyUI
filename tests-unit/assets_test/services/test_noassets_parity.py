@@ -204,7 +204,7 @@ def test_server_features_match_manager_when_asset_dependencies_are_unavailable(
     asset_manager = manager.default_asset_manager()
 
     assert asset_manager.enabled is False
-    assert feature_flags.get_server_features()["assets"] is False
+    assert feature_flags.get_server_features(asset_manager.enabled)["assets"] is False
 
 
 def test_default_asset_manager_enables_assets_when_dependencies_are_available(
