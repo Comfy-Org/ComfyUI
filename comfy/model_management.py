@@ -1219,7 +1219,9 @@ def text_encoder_offload_device():
 def text_encoder_device():
     if args.gpu_only:
         return get_torch_device()
-    elif vram_state in (VRAMState.HIGH_VRAM, VRAMState.NORMAL_VRAM) or comfy.memory_management.aimdo_enabled:
+    if comfy.memory_management.aimdo_enabled:
+        return get_torch_device()
+    elif vram_state in (VRAMState.HIGH_VRAM, VRAMState.NORMAL_VRAM):
         if should_use_fp16(prioritize_performance=False):
             return get_torch_device()
         else:
