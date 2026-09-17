@@ -6,7 +6,7 @@ import pytest
 import nodes
 from comfy_execution.validation import LoopValidationError, validate_loops
 from comfy_extras.nodes_loop import EndLoop, StartLoop
-from execution import _loop_boundary, validate_prompt
+from execution import _cached_schema, validate_prompt
 
 
 def node(class_type, **inputs):
@@ -497,7 +497,7 @@ def test_prompt_validation_builds_each_node_schema_once(monkeypatch):
     assert builds == Counter({"StartLoop": 1, "EndLoop": 1})
 
 
-def test_loop_boundary_does_not_rebuild_a_schema_the_class_already_has():
+def test_cached_schema_does_not_rebuild_a_schema_the_class_already_has():
     StartLoop.GET_SCHEMA()
     builds = []
     original = StartLoop.define_schema.__func__
@@ -508,33 +508,27 @@ def test_loop_boundary_does_not_rebuild_a_schema_the_class_already_has():
 
     StartLoop.define_schema = classmethod(counting)
     try:
-        assert _loop_boundary(StartLoop) == "start"
+        assert _cached_schema(StartLoop).loop_boundary == "start"
     finally:
         StartLoop.define_schema = classmethod(original)
 
     assert builds == []
 
 
-def test_loop_boundary_reads_a_node_that_was_registered_without_a_schema():
-    """The fallback is load-bearing: the loop nodes themselves reach validation with
-    SCHEMA unset, and it has to fill it in rather than answer None."""
+def test_cached_schema_builds_the_schema_of_a_node_registered_without_one():
+    """The loop nodes themselves reach validation with SCHEMA unset."""
     StartLoop.SCHEMA = None
     try:
-        assert _loop_boundary(StartLoop) == "start"
+        assert _cached_schema(StartLoop).loop_boundary == "start"
         assert StartLoop.SCHEMA is not None
     finally:
         StartLoop.GET_SCHEMA()
 
-    assert _loop_boundary(Body) is None
+    assert _cached_schema(Body) is None
 
 
-def test_loop_boundary_does_not_read_a_subclass_off_its_parent():
-    """A subclass that has never been asked must build its own schema.
-
-    GET_SCHEMA caches with `cls.SCHEMA = schema`, so a subclass inherits whatever
-    its parent was asked for. Reading that would hand validate_loops the parent's
-    boundary for a node that declares a different one, or none at all.
-    """
+def test_cached_schema_does_not_read_a_subclass_off_its_parent():
+    """A subclass that has never been asked builds its own schema."""
     StartLoop.GET_SCHEMA()
 
     class NotABoundary(StartLoop):
@@ -546,4 +540,4 @@ def test_loop_boundary_does_not_read_a_subclass_off_its_parent():
             return schema
 
     assert StartLoop.SCHEMA.loop_boundary == "start"
-    assert _loop_boundary(NotABoundary) is None
+    assert _cached_schema(NotABoundary).loop_boundary is None

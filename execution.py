@@ -1125,24 +1125,17 @@ def full_type_name(klass):
         return klass.__qualname__
     return module + '.' + klass.__qualname__
 
-def _loop_boundary(class_def) -> Union[str, None]:
-    """The node's declared loop boundary, without rebuilding its schema.
+def _cached_schema(class_def):
+    """The node's v3 schema, or None for a node that has none.
 
-    GET_SCHEMA re-runs define_schema on every call, and that is deliberate: a node
-    whose combo options come from folder_paths.get_filename_list has to pick up
-    files added since startup. Asking it here costs 3.4ms on a 200-node graph, on
-    every prompt submission, for a literal that cannot change. The schema the class
-    already holds answers in 0.02ms, and the fallback both covers the node types
-    registered without one and fills it in for the next prompt.
+    GET_SCHEMA is expensive; the SCHEMA the class already holds is cheap.
     """
     if not issubclass(class_def, _ComfyNodeInternal):
         return None
-    # `__dict__` rather than attribute access: GET_SCHEMA caches with `cls.SCHEMA = schema`,
-    # so a subclass that has never been asked would otherwise read its parent's schema.
     schema = class_def.__dict__.get("SCHEMA")
     if schema is None:
         schema = class_def.GET_SCHEMA()
-    return schema.loop_boundary
+    return schema
 
 
 async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[str], None]):
@@ -1196,7 +1189,8 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
     start_nodes = set()
     end_nodes = set()
     for node_id, node in prompt.items():
-        boundary = _loop_boundary(nodes.NODE_CLASS_MAPPINGS[node["class_type"]])
+        schema = _cached_schema(nodes.NODE_CLASS_MAPPINGS[node["class_type"]])
+        boundary = schema.loop_boundary if schema is not None else None
         if boundary == "start":
             start_nodes.add(node_id)
         elif boundary == "end":
