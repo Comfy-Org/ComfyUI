@@ -80,3 +80,24 @@ def temp_dir():
     """Temporary directory for file operations."""
     with tempfile.TemporaryDirectory() as tmpdir:
         yield Path(tmpdir)
+
+
+@pytest.fixture
+def production_writer_database(tmp_path, monkeypatch):
+    """Bind the real runtime engines so rollback and savepoint paths run under
+    BEGIN IMMEDIATE semantics rather than the in-memory fixture's looser ones.
+    """
+    import app.database.db as db_mod
+
+    database_path = str(tmp_path / "assets.db")
+    monkeypatch.setattr(db_mod.args, "enable_assets", True)
+    monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
+    monkeypatch.setattr(db_mod, "Session", None)
+    monkeypatch.setattr(db_mod, "_db_lock", None)
+    monkeypatch.setattr(db_mod, "WriteSession", None)
+    db_mod.init_db()
+    yield database_path
+    for factory in (db_mod.Session, db_mod.WriteSession):
+        if factory is not None:
+            factory.kw["bind"].dispose()
+    db_mod._db_lock.release(force=True)
