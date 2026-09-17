@@ -8,6 +8,8 @@ rebuilds the file from the opaque painted sibling so the original image
 survives under the painted mask (#16139).
 """
 
+import asyncio
+import hashlib
 import io
 import os
 
@@ -15,6 +17,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
+import server
 from server import repair_clipspace_painted_masked
 
 
@@ -141,8 +144,6 @@ def test_upload_flow_repairs_before_collision_handling(tmp_path):
     """A colliding masked upload still saves repaired bytes under the renamed
     target: repair resolves from the original filename before the collision
     loop renames it (#16139 review)."""
-    import server
-
     original = np.full((4, 4, 3), 120, dtype=np.uint8)
     masked = make_rgba(np.zeros((4, 4, 3), dtype=np.uint8), np.full((4, 4), 255, dtype=np.uint8))
     painted = make_rgba(original, np.full((4, 4), 255, dtype=np.uint8))
@@ -164,7 +165,6 @@ def test_upload_flow_repairs_before_collision_handling(tmp_path):
         target.write_bytes(data)
         return target
 
-    import asyncio
     target = asyncio.run(run())
     with Image.open(target) as img:
         arr = np.array(img.convert("RGB"))
@@ -174,14 +174,11 @@ def test_upload_flow_repairs_before_collision_handling(tmp_path):
 def test_upload_flow_duplicate_detects_repaired_bytes(tmp_path):
     """When the existing target already holds the repaired bytes, the
     duplicate hash check sees a duplicate instead of colliding."""
-    import hashlib
-
     original = np.full((4, 4, 3), 200, dtype=np.uint8)
     masked = make_rgba(np.zeros((4, 4, 3), dtype=np.uint8), np.full((4, 4), 255, dtype=np.uint8))
     painted = make_rgba(original, np.full((4, 4), 255, dtype=np.uint8))
     (tmp_path / "clipspace-painted-1.png").write_bytes(painted)
 
-    import server
     upload = FakeUpload(masked, "clipspace-painted-masked-1.png")
     repaired = server.repair_clipspace_painted_masked(upload, upload.filename, str(tmp_path))
     upload.file.seek(0)
