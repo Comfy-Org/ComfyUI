@@ -4,8 +4,8 @@ with metadata and hashes. Each spec is seeded inside its own savepoint, so one
 file whose row conflicts cannot discard the work done for the files around it.
 Enrichment candidates use ordered ID pagination, so each row is attempted at
 most once per pass while failed rows remain eligible for the next pass. A pause
-can end a batch early, and the cursor holds at the last row actually attempted,
-so the rows behind it are offered again once the scan resumes.
+can end a batch early, and the cursor holds at the last row the batch attempted,
+so the rows it never reached are selected again when the scan resumes.
 """
 
 import logging
