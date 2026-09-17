@@ -1,5 +1,3 @@
-import dis
-
 import nodes
 import node_helpers
 import torch
