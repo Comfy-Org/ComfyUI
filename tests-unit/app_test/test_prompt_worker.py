@@ -1,6 +1,15 @@
-import importlib
-
 import pytest
+import torch
+
+from comfy.cli_args import args
+
+# Must precede the import: comfy.model_management picks its device at import time, and a CUDA
+# build with no driver raises there. Same guard, same placement, as every other test module
+# that imports it.
+if not torch.cuda.is_available():
+    args.cpu = True
+
+import app.prompt_worker as prompt_worker_module  # noqa: E402
 
 
 class LoopEscape(Exception):
@@ -60,18 +69,7 @@ class ExecuteFailureExecutor(Executor):
         raise RuntimeError("forced execute failure")
 
 
-@pytest.fixture
-def prompt_worker_module(monkeypatch):
-    from comfy.cli_args import args
-
-    monkeypatch.setattr(args, "cpu", True, raising=False)
-    try:
-        return importlib.import_module("app.prompt_worker")
-    except Exception as exc:
-        pytest.skip(f"prompt worker module could not be imported in CPU mode: {exc!r}")
-
-
-def test_prompt_worker_resumes_background_scan_when_execute_raises(prompt_worker_module, monkeypatch) -> None:
+def test_prompt_worker_resumes_background_scan_when_execute_raises(monkeypatch) -> None:
     monkeypatch.setattr(prompt_worker_module.execution, "PromptExecutor", ExecuteFailureExecutor)
     asset_manager = AssetManager()
 
@@ -81,7 +79,7 @@ def test_prompt_worker_resumes_background_scan_when_execute_raises(prompt_worker
     assert asset_manager.paused is False
 
 
-def test_prompt_worker_resumes_background_scan_when_completion_raises(prompt_worker_module, monkeypatch) -> None:
+def test_prompt_worker_resumes_background_scan_when_completion_raises(monkeypatch) -> None:
     monkeypatch.setattr(prompt_worker_module.execution, "PromptExecutor", Executor)
     asset_manager = AssetManager()
 
@@ -95,7 +93,7 @@ def test_prompt_worker_resumes_background_scan_when_completion_raises(prompt_wor
     assert asset_manager.paused is False
 
 
-def test_prompt_worker_preserves_execute_error_when_resume_raises(prompt_worker_module, monkeypatch) -> None:
+def test_prompt_worker_preserves_execute_error_when_resume_raises(monkeypatch) -> None:
     monkeypatch.setattr(prompt_worker_module.execution, "PromptExecutor", ExecuteFailureExecutor)
     asset_manager = AssetManager(resume_error=RuntimeError("forced resume failure"))
 
@@ -105,10 +103,7 @@ def test_prompt_worker_preserves_execute_error_when_resume_raises(prompt_worker_
     assert asset_manager.paused is False
 
 
-def test_prompt_worker_resumes_scan_when_later_iteration_raises_before_gc(
-    prompt_worker_module,
-    monkeypatch,
-) -> None:
+def test_prompt_worker_resumes_scan_when_later_iteration_raises_before_gc(monkeypatch) -> None:
     monkeypatch.setattr(prompt_worker_module.execution, "PromptExecutor", Executor)
     clock = iter((1.0, 2.0, 2.0))
     monkeypatch.setattr(prompt_worker_module.time, "perf_counter", lambda: next(clock))
