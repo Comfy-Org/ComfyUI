@@ -66,6 +66,11 @@ folder_names_and_paths["optical_flow"] = ([os.path.join(models_dir, "optical_flo
 
 folder_names_and_paths["detection"] = ([os.path.join(models_dir, "detection")], supported_pt_extensions)
 
+folder_names_and_paths["semantic_segmentation"] = ([os.path.join(models_dir, "semantic_segmentation")], supported_pt_extensions)
+folder_names_and_paths["sams"] = ([os.path.join(models_dir, "sams")], {".safetensors", ".sft"})
+folder_names_and_paths["onnx"] = ([os.path.join(models_dir, "onnx")], {".onnx"})
+folder_names_and_paths["inpaint"] = ([os.path.join(models_dir, "inpaint")], supported_pt_extensions | {".patch"})
+
 output_directory = os.path.join(base_path, "output")
 temp_directory = os.path.join(base_path, "temp")
 input_directory = os.path.join(base_path, "input")

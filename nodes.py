@@ -831,17 +831,17 @@ class VAELoader:
 
     CATEGORY = "model/loaders"
 
-    #TODO: scale factor?
-    def load_vae(self, vae_name):
+    @classmethod
+    def load_vae_state_dict(cls, vae_name):
         metadata = None
         vae_path = None
         if vae_name == "pixel_space":
             sd = {}
             sd["pixel_space_vae"] = torch.tensor(1.0)
-        elif vae_name in self.image_taes:
-            sd = self.load_taesd(vae_name)
+        elif vae_name in cls.image_taes:
+            sd = cls.load_taesd(vae_name)
         else:
-            if os.path.splitext(vae_name)[0] in self.video_taes:
+            if os.path.splitext(vae_name)[0] in cls.video_taes:
                 vae_path = folder_paths.get_full_path_or_raise("vae_approx", vae_name)
             else:
                 vae_path = folder_paths.get_full_path_or_raise("vae", vae_name)
@@ -851,6 +851,11 @@ class VAELoader:
                 metadata = {"tae_latent_channels": 128}
             else:
                 metadata["tae_latent_channels"] = 128
+        return sd, metadata, vae_path
+
+    #TODO: scale factor?
+    def load_vae(self, vae_name):
+        sd, metadata, vae_path = self.load_vae_state_dict(vae_name)
         vae = comfy.sd.VAE(sd=sd, metadata=metadata)
         vae.throw_exception_if_invalid()
         # Register a reload factory on the patcher so multigpu deepclones
