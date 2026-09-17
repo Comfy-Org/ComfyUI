@@ -443,6 +443,10 @@ def seed_asset_specs(
                 continue
             if first_error is None:
                 first_error = error
+        except MemoryError:
+            # Deferring this one would keep allocating for every remaining spec
+            # while the process is already out of memory.
+            raise
         except Exception as error:
             if first_error is None:
                 first_error = error
