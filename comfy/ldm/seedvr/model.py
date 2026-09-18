@@ -757,8 +757,13 @@ class NaMMSRTransformerBlock(nn.Module):
         self.norm_eps = norm_eps
 
     def _norm_ada_in(self, norm, vid, txt, layer, ada_kwargs):
-        """Normalize then modulate, as one fused kernel outside of training."""
-        if comfy.model_management.in_training or vid.requires_grad:
+        """Normalize then modulate as one fused kernel, only where norm and ada own the same
+        branches (the last block's attn_norm covers txt, its ada does not)."""
+        fusable = (
+            not (comfy.model_management.in_training or vid.requires_grad)
+            and norm.vid_only == self.ada.vid_only
+        )
+        if not fusable:
             vid, txt = norm(vid, txt)
             return self.ada(vid, txt, layer=layer, mode="in", **ada_kwargs)
         return self.ada(vid, txt, layer=layer, mode="in", norm_eps=self.norm_eps, **ada_kwargs)
@@ -982,14 +987,23 @@ class AdaSingle(nn.Module):
         if cache is None:
             cache = Cache(disable=True)
         idx = self.layers.index(layer)
-        emb = emb.reshape(emb.shape[0], -1, len(self.layers), 3)[:, :, idx, :]
 
-        if hid_len is None or emb.shape[0] == 1:
+        def sliced():
+            e = emb.reshape(emb.shape[0], -1, len(self.layers), 3)[:, :, idx, :]
+            return expand_dims(e, 1, hid.ndim + 1)
+
+        if hid_len is None:
+            mod = sliced()
+        else:
+            # Keyed as the reference: vid_out_ada (layers=["out"], idx 0) aliases the blocks' "attn" entry
+            # and takes their modulation; slicing its own would be 2*dim wide. The 3B weights expect this.
+            mod = cache(f"emb_repeat_{idx}_{branch_tag}", sliced)
+
+        shiftA, scaleA, gateA = mod.unbind(-1)
+        if hid_len is None or mod.shape[0] == 1:
             # A single sample's modulation broadcasts over every token, so it never needs materializing.
-            emb = expand_dims(emb, 1, hid.ndim + 1)
-            return self._modulate(hid, layer, mode, *emb.unbind(-1), norm_eps=norm_eps)
+            return self._modulate(hid, layer, mode, shiftA, scaleA, gateA, norm_eps=norm_eps)
 
-        shiftA, scaleA, gateA = emb.unbind(-1)
         # The fused norm is out of place, so its per-sample slices land in a fresh buffer.
         out = torch.empty_like(hid) if norm_eps is not None else hid
         offset = 0

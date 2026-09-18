@@ -1264,6 +1264,14 @@ class VAE:
                 batch_number = int(free_memory / memory_used)
                 batch_number = max(1, batch_number)
 
+                # A VAE with a reliable estimate skips the doomed untiled attempt.
+                if getattr(self.first_stage_model, "comfy_decode_estimate_is_reliable", False):
+                    if memory_used > free_memory:
+                        logging.info("VAE decode needs more than the free VRAM; tiling directly.")
+                        raise model_management.OOM_EXCEPTION(
+                            "decode estimate exceeds free memory; going straight to tiled"
+                        )
+
                 # Pre-allocate output for VAEs that support direct buffer writes
                 preallocated = False
                 if getattr(self.first_stage_model, 'comfy_has_chunked_io', False):
@@ -1307,6 +1315,13 @@ class VAE:
                         pixel_samples = self.decode_tiled_(samples_in)
                 elif dims == 3:
                     tile = 256 // self.spacial_compression_decode()
+                    # A VAE that can size its own tiles raises the 256-pixel floor.
+                    prefers_tile = getattr(self.first_stage_model, "preferred_decode_tile", None)
+                    if prefers_tile is not None:
+                        try:
+                            tile = max(tile, int(prefers_tile(self.device)))
+                        except Exception:
+                            logging.exception("Falling back to the default decode tile size.")
                     overlap = tile // 4
                     if self.handles_tiling:
                         memory_used = self.memory_used_decode(self._tile_bounded_shape(samples_in.shape, tile, tile, None), self.vae_dtype)

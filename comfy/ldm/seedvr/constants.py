@@ -17,12 +17,22 @@ SEEDVR2_MLP_CHUNK = 8192
 SEEDVR2_ROPE_PARTIAL_CHUNK_TOKENS = 4096  # partial-RoPE application token-chunk.
 SEEDVR2_LATENT_CHANNELS = 16
 
-# Causal-cache compression. The per-convolution temporal tails dominate decode VRAM (~7.4 GiB of a
-# 15.7 GiB 720p/21f peak) and are pure storage between slices, so they are held as int8. Per-channel
-# scales handle the outliers cheaply: measured against an fp16 decode this costs mean 6.7e-4 /
-# max 3.4e-2 relative, versus 4.2e-4 / 5.1e-2 for fp8 and 1.0e-4 / 2.0e-2 for int8+ConvRot (which
-# needs a channels-last transpose that costs more than the quantization itself).
-SEEDVR2_VAE_CACHE_QUANT_BYTES = 64 * 1024 ** 2  # entries at or above this size are packed.
+# VAE temporal caches: int8-packed (rotated, per-token scales) between slices.
+SEEDVR2_VAE_CACHE_QUANT_BYTES = 64 * 1024 ** 2         # tails at or above this size are packed.
+SEEDVR2_VAE_CACHE_QUANT_CHUNK_BYTES = 32 * 1024 ** 2   # working-copy budget per pack/unpack block.
+SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL = 4600             # packed caches per output-frame pixel.
+SEEDVR2_CACHE_OFFLOAD_HOST_RATIO = 3.0                 # offload to pinned RAM only with this much of it free.
+
+# VAE decode peak estimate (caches offloaded, one-frame tail); fitted 1.14-1.25x above measured.
+SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL = 6500            # working set, per output-frame pixel.
+SEEDVR2_DECODE_BYTES_PER_OUTPUT_PIXEL = 6              # decoded fp16 frames, per output pixel.
+SEEDVR2_DECODE_FIXED_BYTES = 1600 * 1024 ** 2
+SEEDVR2_DECODE_LAB_BYTES_PER_OUTPUT_PIXEL = 160        # colour correction is per frame in the node.
+
+# Tiled decode, in latent units (8 output pixels each).
+SEEDVR2_TILE_MEM_HEADROOM = 0.6
+SEEDVR2_MIN_TILE_LATENT = 32
+SEEDVR2_MAX_TILE_LATENT = 96                           # 768 px; larger tiles measured no faster.
 
 SEEDVR2_COLOR_MEM_HEADROOM = 0.75
 SEEDVR2_LAB_SCALE_MULTIPLIER = 13

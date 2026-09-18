@@ -21,16 +21,57 @@ from comfy.ldm.seedvr.constants import (
     BYTEDANCE_VAE_TEMPORAL_DOWNSAMPLE,
     SEEDVR2_LATENT_CHANNELS,
     SEEDVR2_VAE_CACHE_QUANT_BYTES,
+    SEEDVR2_VAE_CACHE_QUANT_CHUNK_BYTES,
+    SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL,
+    SEEDVR2_DECODE_BYTES_PER_OUTPUT_PIXEL,
+    SEEDVR2_DECODE_FIXED_BYTES,
+    SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL,
+    SEEDVR2_CACHE_OFFLOAD_HOST_RATIO,
+    SEEDVR2_DECODE_LAB_BYTES_PER_OUTPUT_PIXEL,
+    SEEDVR2_MAX_TILE_LATENT,
+    SEEDVR2_MIN_TILE_LATENT,
+    SEEDVR2_TILE_MEM_HEADROOM,
 )
 from comfy.ldm.modules.attention import optimized_attention
 from comfy.ldm.modules.diffusionmodules.model import vae_attention
 
+import collections
 import math
 from enum import Enum
 
 import logging
 import comfy.model_management
 import comfy.ops
+import comfy.system_memory
+import comfy_kitchen
+
+_CL = torch.channels_last_3d
+
+from comfy_kitchen.tensor.int8_utils import _build_hadamard as _ck_hadamard, _rotate_activation as _ck_rotate
+
+
+def _ck_eligible(x):
+    """fp16 on CUDA: the channels_last_3d path; the kitchen conv itself needs the fp16-accumulate opt-in."""
+    return x.is_cuda and x.dtype == torch.float16 and x.dim() == 5
+
+
+def _fp16_accumulate_wanted(x):
+    """The kitchen conv accumulates in fp16 (1.4-1.9x over cuDNN on this decoder, 73.9 -> 58 dB
+    against fp32); it is taken only when the user opted into fp16 accumulation, as the MiniMax H3
+    VAE and the fp16 GEMMs do."""
+    return comfy.ops._fp16_linear_wanted(x)
+
+
+def _ndhwc_like(t):
+    """channels_last_3d, or a frame window of such a tensor (batch of one)."""
+    return t.is_contiguous(memory_format=_CL) or (t.dim() == 5 and t.stride(1) == 1 and t.stride(4) == t.size(1))
+
+
+def _match_layout(t, ref):
+    """Return ``t`` in ``ref``'s memory format, so a cat that lists it first keeps the layout."""
+    if ref.is_contiguous(memory_format=_CL) and not t.is_contiguous(memory_format=_CL):
+        return t.contiguous(memory_format=_CL)
+    return t
 ops = comfy.ops.manual_cast
 
 
@@ -253,18 +294,130 @@ _HADAMARD_CACHE = {}
 
 
 class CausalMemoryCache:
-    """Per-convolution temporal cache, held quantized between slices.
+    """Per-convolution temporal tails, int8-packed (rotated, per-token scales) between slices.
 
-    Every causal convolution keeps the tail of its input so the next slice can continue. At full
-    output resolution those tails are the single largest consumer of decode VRAM while being pure
-    storage — never read except by the next slice's first convolution — so the large ones are packed
-    to int8. ConvRot rotates the per-channel outliers that otherwise dominate low-bit activation
-    error. Falls back to holding the tensor as-is whenever quantization is unavailable.
+    CUDA channels_last tails pack through the kitchen's ConvRot quantizer; NCDHW tails through the
+    blocked torch path; anything else is held plain. Packed tails are offloaded to pinned host
+    memory, and a tail can be a ring of per-frame entries so extending it packs one frame.
     """
 
-    def __init__(self):
+    # Offload packed tails to pinned host memory; they were 64% of the live memory under the peak.
+    offload_default = True
+
+    def __init__(self, offload=None):
         self.plain = {}
         self.packed = {}
+        self.offload = self.offload_default if offload is None else offload
+        self._order = []       # keys in packing order, which is the order the next slice reads them
+        self._host = {}        # key -> pinned (qdata, scale) buffers, reused across slices
+        self._ready = {}       # key -> event: its host copy has landed
+        self._staged = {}      # key -> (qdata, scale, event) already brought back for its reader
+        self._pending = collections.deque()  # (event, tensors) sources a copy still reads
+        self._stream = None
+        self._device = None
+        # A key's cache can be held as a ring of per-frame entries (subkeys), so a caller that
+        # extends the sequence by one frame packs one frame instead of re-packing the whole tail.
+        self._rings = {}       # key -> deque of subkeys, oldest first
+        self._ring_serial = 0
+
+    def _transfer_stream(self, device):
+        if self._stream is None:
+            self._stream = torch.cuda.Stream(device=device)
+        return self._stream
+
+    def _reap(self):
+        """Drop the sources of device-to-host copies that have completed."""
+        while self._pending and self._pending[0][0].query():
+            self._pending.popleft()
+
+    def _stash(self, key, qdata, scale):
+        """Start the copy of a packed tail to its pinned buffers; the tensors stay alive until it lands."""
+        stream = self._transfer_stream(qdata.device)
+        self._device = qdata.device
+        host = self._host.get(key)
+        if (host is None or host[0].shape != qdata.shape or host[0].stride() != qdata.stride()
+                or host[1].shape != scale.shape or host[1].dtype != scale.dtype):
+            try:
+                host = (torch.empty_like(qdata, device="cpu", pin_memory=True),
+                        torch.empty_like(scale, device="cpu", pin_memory=True))
+            except RuntimeError as e:   # no more lockable host memory: keep the rest resident
+                logging.warning(f"SeedVR2 VAE: cannot pin host memory for the temporal cache, keeping it on the GPU ({e})")
+                self.offload = False
+                return False
+            self._host[key] = host
+        stream.wait_stream(torch.cuda.current_stream(qdata.device))  # after the pack kernels
+        with torch.cuda.stream(stream):
+            host[0].copy_(qdata, non_blocking=True)
+            host[1].copy_(scale, non_blocking=True)
+            event = torch.cuda.Event()
+            event.record(stream)
+        self._ready[key] = event
+        self._pending.append((event, qdata, scale))
+        self._reap()
+        return True
+
+    def _bring_back(self, key, device):
+        """Start the copy of a tail from its pinned buffers; returns (qdata, scale, event)."""
+        stream = self._transfer_stream(device)
+        hq, hs = self._host[key]
+        # Allocated on the compute stream (used and freed there); the transfer stream must not
+        # write a block that queued compute work may still be releasing.
+        qdata, scale = torch.empty_like(hq, device=device), torch.empty_like(hs, device=device)
+        stream.wait_stream(torch.cuda.current_stream(device))
+        stream.wait_event(self._ready[key])   # the host copy must have landed
+        with torch.cuda.stream(stream):
+            qdata.copy_(hq, non_blocking=True)
+            scale.copy_(hs, non_blocking=True)
+            event = torch.cuda.Event()
+            event.record(stream)
+        return qdata, scale, event
+
+    def _fetch(self, key, device):
+        staged = self._staged.pop(key, None)
+        qdata, scale, event = staged if staged is not None else self._bring_back(key, device)
+        torch.cuda.current_stream(device).wait_event(event)
+        return qdata, scale
+
+    def _top(self, key):
+        return key[0] if isinstance(key, tuple) and len(key) == 2 and key[0] in self._rings else key
+
+    def _entries_of(self, top):
+        ring = self._rings.get(top)
+        return list(ring) if ring is not None else [top]
+
+    def _prefetch_after(self, top, device):
+        """The reader after this one is next in line; have its tail on the way while this one runs."""
+        try:
+            nxt = self._order[self._order.index(top) + 1]
+        except (ValueError, IndexError):
+            return
+        for sub in self._entries_of(nxt):
+            if sub not in self._staged and sub in self._host and self.packed.get(sub, (0,))[0] is None:
+                self._staged[sub] = self._bring_back(sub, device)
+
+    def has_ring(self, key):
+        return key in self._rings
+
+    def push_frames(self, key, frames, keep):
+        """Extend ``key``'s tail by ``frames``, keeping the last ``keep``; each frame is its own entry."""
+        if key in self.plain or key in self.packed:
+            whole = self.pop(key)
+            ring = self._rings[key] = collections.deque()
+            for j in range(whole.size(2)):
+                self._ring_serial += 1
+                sub = (key, self._ring_serial)
+                self[sub] = whole[:, :, j:j + 1].clone(memory_format=_CL)
+                ring.append(sub)
+        ring = self._rings.setdefault(key, collections.deque())
+        for j in range(frames.size(2)):
+            self._ring_serial += 1
+            sub = (key, self._ring_serial)
+            self[sub] = frames[:, :, j:j + 1].clone(memory_format=_CL)
+            ring.append(sub)
+        while len(ring) > keep:
+            self.discard(ring.popleft())
+        if key not in self._order:
+            self._order.append(key)
 
     def _packable(self, value):
         return (
@@ -273,38 +426,119 @@ class CausalMemoryCache:
             and value.device.type == "cuda"
             and value.numel() * value.element_size() >= SEEDVR2_VAE_CACHE_QUANT_BYTES
             and value.shape[1] & (value.shape[1] - 1) == 0
+            and (value.is_contiguous() or value.is_contiguous(memory_format=_CL))
         )
 
+    @staticmethod
+    def _token_blocks(shape, element_size):
+        """(start, stop) token spans holding one working copy under the chunk budget."""
+        b, c, t, h, w = shape
+        tokens = t * h * w
+        step = max(1, SEEDVR2_VAE_CACHE_QUANT_CHUNK_BYTES // max(1, b * c * element_size))
+        return [(start, min(start + step, tokens)) for start in range(0, tokens, step)]
+
     def __setitem__(self, key, value):
+        if key in self._rings:   # a whole tail replaces the ring
+            for sub in self._rings.pop(key):
+                self.discard(sub)
         self.plain.pop(key, None)
         self.packed.pop(key, None)
+        self._staged.pop(key, None)
         if not self._packable(value):
             self.plain[key] = value
             return
-        # Rotate the channels before quantizing, the way ConvRot does: per-channel outliers are what
-        # low-bit activations die on, and the error compounds slice over slice. A Hadamard rotation
-        # is a bmm over a free reshape of (b c t h w), so it costs none of the channels-last
-        # transpose that the [tokens, dim] kernels would need.
-        b, c, t, h, w = value.shape
-        rot = self._rotation(c, value)
-        rotated = torch.bmm(rot.expand(b, c, c), value.reshape(b, c, -1))
-        # Per-token scale: rotation spreads each token's outliers across all channels, so the
-        # scale that matters is per position, not per channel.
-        scale = rotated.abs().amax(dim=1, keepdim=True).clamp_min(1e-8) / 127.0
-        qdata = (rotated / scale).round_().clamp_(-127, 127).to(torch.int8)
-        self.packed[key] = (qdata, scale, (b, c, t, h, w), value.dtype)
+        # Hadamard rotation before quantizing (ConvRot): a bmm over a free reshape.
+        b, c = value.shape[:2]
+        cl = not value.is_contiguous() and value.is_contiguous(memory_format=_CL)
+        if cl and not (value.is_cuda and c % 64 == 0):
+            self.plain[key] = value   # the kitchen's quantizer is CUDA and groups channels by 64
+            return
+        if cl:
+            # The kitchen's quantizer: fused rotate+quantize at 256 groups, else rotate then quantize.
+            from comfy_kitchen.backends import cuda as _ck_cuda
+            group = 256 if c % 256 == 0 else 64
+            x2d = value.permute(0, 2, 3, 4, 1).reshape(-1, c)              # (b*tokens, c), a view
+            if group == 256:
+                qdata, scale = _ck_cuda.quantize_int8_rowwise_convrot(x2d, group)
+            else:
+                qdata, scale = _ck_cuda.quantize_int8_rowwise(
+                    _ck_rotate(x2d, _ck_hadamard(group, device=x2d.device, dtype=x2d.dtype), group))
+            entry = (qdata, scale, value.dtype, ("ck", group, tuple(value.shape)))
+            if self.offload and self._stash(key, qdata, scale):
+                top = self._top(key)
+                if top not in self._order:
+                    self._order.append(top)
+                self.packed[key] = (None, None, value.dtype, entry[3])
+            else:
+                self.packed[key] = entry
+            return
+        rot = self._rotation(c, value).expand(b, c, c)
+        source = value.view(b, c, -1)
+        qdata = torch.empty(value.shape, device=value.device, dtype=torch.int8)
+        scale = torch.empty((b, 1, *value.shape[2:]), device=value.device, dtype=value.dtype)
+        qdata_flat, scale_flat = qdata.view(b, c, -1), scale.view(b, 1, -1)
+        for start, stop in self._token_blocks(value.shape, value.element_size()):
+            rotated = torch.bmm(rot, source[:, :, start:stop])
+            # Per-token scale: rotation spreads each token's outliers across all channels, so the
+            # scale that matters is per position, not per channel.
+            # inf-norm is amax(abs(..)) as one fused reduction, without the full-size abs() temporary.
+            block_scale = torch.linalg.vector_norm(
+                rotated, float("inf"), dim=1, keepdim=True,
+            ).clamp_min(1e-8) / 127.0
+            rotated.div_(block_scale).round_().clamp_(-127, 127)
+            # Assigning fp16 into the int8 buffer casts in the same pass the copy already makes.
+            qdata_flat[:, :, start:stop] = rotated
+            scale_flat[:, :, start:stop] = block_scale
+        if self.offload and value.is_cuda and self._stash(key, qdata, scale):
+            top = self._top(key)
+            if top not in self._order:
+                self._order.append(top)
+            self.packed[key] = (None, None, value.dtype, False)   # its data is on the host
+            return
+        self.packed[key] = (qdata, scale, value.dtype, False)
 
     def get(self, key, default=None):
+        ring = self._rings.get(key)
+        if ring is not None:
+            frames = [self._get_entry(sub) for sub in ring]
+            if self.offload and self._device is not None:
+                self._prefetch_after(key, self._device)
+            return torch.cat(frames, dim=2) if len(frames) > 1 else frames[0]
         if key in self.plain:
             return self.plain[key]
-        entry = self.packed.get(key)
-        if entry is None:
+        if key not in self.packed:
             return default
-        qdata, scale, (b, c, t, h, w), dtype = entry
-        rotated = qdata.to(dtype) * scale
-        rot = self._rotation(c, rotated)
+        out = self._get_entry(key)
+        if self.offload and self._device is not None:
+            self._prefetch_after(key, self._device)
+        return out
+
+    def _get_entry(self, key):
+        if key in self.plain:   # below the packing threshold, or unpackable
+            return self.plain[key]
+        entry = self.packed[key]
+        qdata, scale, dtype, cl = entry
+        if qdata is None:
+            self._reap()
+            qdata, scale = self._fetch(key, self._device)
+        if isinstance(cl, tuple):   # the kitchen scheme: ("ck", group, shape)
+            from comfy_kitchen.backends import cuda as _ck_cuda
+            _, group, shape = cl
+            b, c, t, h, w = shape
+            flat = _ck_cuda.dequantize_int8_simple_dtype(qdata, scale, _ck_cuda.DTYPE_TO_CODE[dtype])
+            # the regular Hadamard is symmetric and orthonormal: the same rotation undoes it
+            flat = _ck_rotate(flat, _ck_hadamard(group, device=flat.device, dtype=flat.dtype), group)
+            return flat.view(b, t, h, w, c).permute(0, 4, 1, 2, 3)
+        b, c = qdata.shape[:2]
+        out = torch.empty(qdata.shape, device=qdata.device, dtype=dtype)
         # Hadamard is orthonormal, so the inverse is its transpose.
-        return torch.bmm(rot.transpose(1, 2).expand(b, c, c), rotated).reshape(b, c, t, h, w)
+        rot_t = self._rotation(c, out).transpose(1, 2).expand(b, c, c)
+        qdata_flat, scale_flat, out_flat = qdata.view(b, c, -1), scale.view(b, 1, -1), out.view(b, c, -1)
+        for start, stop in self._token_blocks(qdata.shape, out.element_size()):
+            # int8 * dtype promotes, so the dequantize is one pass rather than a cast then a multiply.
+            block = qdata_flat[:, :, start:stop] * scale_flat[:, :, start:stop]
+            torch.bmm(rot_t, block, out=out_flat[:, :, start:stop])
+        return out
 
     @staticmethod
     def _rotation(channels, like):
@@ -318,17 +552,47 @@ class CausalMemoryCache:
         return cached
 
     def pop(self, key, default=None):
+        ring = self._rings.pop(key, None)
+        if ring is not None:
+            frames = [self._get_entry(sub) for sub in ring]
+            for sub in ring:
+                self.discard(sub)
+            return torch.cat(frames, dim=2) if len(frames) > 1 else frames[0]
+        if key in self.plain:
+            return self.plain.pop(key)
+        if key not in self.packed:
+            return default
+        value = self._get_entry(key)
         self.packed.pop(key, None)
-        return self.plain.pop(key, default)
+        self._staged.pop(key, None)
+        self._ready.pop(key, None)
+        return value
+
+    def discard(self, key):
+        """Drop an entry without bringing it back: retired ring frames are never read again."""
+        self.plain.pop(key, None)
+        self.packed.pop(key, None)
+        self._staged.pop(key, None)
+        self._ready.pop(key, None)
+        self._host.pop(key, None)
 
     def __contains__(self, key):
-        return key in self.plain or key in self.packed
+        return key in self.plain or key in self.packed or key in self._rings
 
     def __getitem__(self, key):
         value = self.get(key, _CACHE_MISS)
         if value is _CACHE_MISS:
             raise KeyError(key)
         return value
+
+
+def _offload_caches_for(frame_pixels):
+    """Whether a decode of this output frame area sends its temporal caches to pinned host memory:
+    only when the host has several times the set free, since pinned memory is locked RAM."""
+    if not CausalMemoryCache.offload_default:
+        return False
+    needed = frame_pixels * SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL
+    return comfy.system_memory.virtual_memory_available() > needed * SEEDVR2_CACHE_OFFLOAD_HOST_RATIO
 
 
 class MemoryState(Enum):
@@ -478,23 +742,38 @@ class Attention(nn.Module):
         return hidden_states
 
 
-def causal_norm_wrapper(norm_layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
+def causal_norm_wrapper(norm_layer: nn.Module, x: torch.Tensor, silu: bool = False) -> torch.Tensor:
+    """Per-frame normalization, with the SiLU folded in where the kernel does both."""
     input_dtype = x.dtype
     if isinstance(norm_layer, (nn.LayerNorm, nn.RMSNorm)):
         if x.ndim == 4:
             x = x.permute(0, 2, 3, 1)
             x = norm_layer(x)
             x = x.permute(0, 3, 1, 2)
+            if silu:
+                x = F.silu(x)
             return x.to(input_dtype)
         if x.ndim == 5:
             x = x.permute(0, 2, 3, 4, 1)
             x = norm_layer(x)
             x = x.permute(0, 4, 1, 2, 3)
+            if silu:
+                x = F.silu(x)
             return x.to(input_dtype)
     if isinstance(norm_layer, (nn.GroupNorm, nn.BatchNorm2d, nn.SyncBatchNorm)):
         if x.ndim <= 4:
-            return norm_layer(x).to(input_dtype)
+            out = norm_layer(x)
+            if silu:
+                out = F.silu(out)
+            return out.to(input_dtype)
         if x.ndim == 5:
+            if _ck_eligible(x) and isinstance(norm_layer, nn.GroupNorm) and norm_layer.affine:
+                # Per-frame statistics, like the reshape below; accepts either layout and emits
+                # channels_last_3d, which is where the convolution wants its input.
+                weight, bias = comfy.ops.cast_bias_weight(norm_layer, x)
+                return comfy_kitchen.group_norm_silu_pad3d(
+                    x, weight, bias, norm_layer.num_groups, norm_layer.eps, (0, 0, 0, 0, 0), silu,
+                ).to(input_dtype)
             b, c, t, h, w = x.shape
             x = x.transpose(1, 2).reshape(b * t, c, h, w)
             memory_occupy = x.numel() * x.element_size() / 1024**3
@@ -516,6 +795,8 @@ def causal_norm_wrapper(norm_layer: nn.Module, x: torch.Tensor) -> torch.Tensor:
             else:
                 x = norm_layer(x)
             x = x.reshape((b, t, x.size(1), x.size(2), x.size(3))).transpose(1, 2)
+            if silu:
+                x = F.silu(x)
             return x.to(input_dtype)
     raise TypeError(f"SeedVR2 VAE unsupported norm layer type: {type(norm_layer).__name__}")
 
@@ -523,7 +804,7 @@ _receptive_field_t = Literal["half", "full"]
 
 def extend_head(tensor, times: int = 2, memory = None):
     if memory is not None:
-        return torch.cat((memory.to(tensor), tensor), dim=2)
+        return torch.cat((_match_layout(memory.to(tensor), tensor), tensor), dim=2)
     if times < 0:
         raise ValueError(f"SeedVR2 VAE extend_head expected times >= 0, got {times}.")
     if times == 0:
@@ -531,17 +812,18 @@ def extend_head(tensor, times: int = 2, memory = None):
     else:
         tile_repeat = [1] * tensor.ndim
         tile_repeat[2] = times
-        return torch.cat(tensors=(torch.tile(tensor[:, :, :1], tile_repeat), tensor), dim=2)
+        head = _match_layout(torch.tile(tensor[:, :, :1], tile_repeat), tensor)
+        return torch.cat(tensors=(head, tensor), dim=2)
 
 def cache_send_recv(tensor, cache_size, times, memory=None):
     recv_buffer = None
 
     if memory is not None:
-        recv_buffer = memory.to(tensor[0])
+        recv_buffer = _match_layout(memory.to(tensor[0]), tensor[0])
     elif times > 0:
         tile_repeat = [1] * tensor[0].ndim
         tile_repeat[2] = times
-        recv_buffer = torch.tile(tensor[0][:, :, :1], tile_repeat)
+        recv_buffer = _match_layout(torch.tile(tensor[0][:, :, :1], tile_repeat), tensor[0])
 
     return recv_buffer
 
@@ -572,6 +854,210 @@ class InflatedCausalConv3d(ops.Conv3d):
                 self.logged_once = True
             return F.conv3d(input, weight, bias, *args, **kwargs)
 
+    def _conv_without_padding_copy(self, x, prev_cache, padding):
+        """Convolve with native symmetric padding and slice off the surplus; None with a halo or stride."""
+        if prev_cache is not None or any(st != 1 for st in self.stride):
+            return None
+
+        pads = ((padding[4], padding[5]), (padding[2], padding[3]), (padding[0], padding[1]))
+        native = tuple(max(lo, hi) for lo, hi in pads)
+
+        orig_padding = self.padding
+        self.padding = native
+        try:
+            out = torch.nn.Conv3d.forward(self, x)
+        finally:
+            self.padding = orig_padding
+
+        for i, (dim, (lo, hi)) in enumerate(zip((2, 3, 4), pads)):
+            width = self.dilation[i] * (self.kernel_size[i] - 1)
+            length = x.size(dim) + lo + hi - width
+            start = native[i] - lo
+            if start or out.size(dim) != length:
+                out = out.narrow(dim, start, length)
+        return out
+
+    @staticmethod
+    def _padded_input(x, prev_cache, padding, concat_dim, channels_last=None):
+        """The conv's padded input (halo included) in one buffer, written once; ``copy_`` also casts the halo."""
+        pads = ((padding[4], padding[5]), (padding[2], padding[3]), (padding[0], padding[1]))
+        cache_len = 0 if prev_cache is None else prev_cache.size(concat_dim)
+        if cache_len == 0 and not any(lo or hi for lo, hi in pads):
+            return x.contiguous(memory_format=_CL) if channels_last else x
+
+        shape = list(x.shape)
+        for dim, (lo, hi) in zip((2, 3, 4), pads):
+            shape[dim] += lo + hi
+        shape[concat_dim] += cache_len
+
+        if channels_last is None:
+            channels_last = x.is_contiguous(memory_format=_CL)
+        buf = torch.empty(shape, dtype=x.dtype, device=x.device,
+                          memory_format=_CL if channels_last else torch.contiguous_format)
+        for dim, (lo, hi) in zip((2, 3, 4), pads):
+            if lo:
+                buf.narrow(dim, 0, lo).zero_()
+            if hi:
+                buf.narrow(dim, shape[dim] - hi, hi).zero_()
+
+        core = buf
+        for dim, (lo, hi) in zip((2, 3, 4), pads):
+            core = core.narrow(dim, lo, shape[dim] - lo - hi)
+        if cache_len:
+            core.narrow(concat_dim, 0, cache_len).copy_(prev_cache)
+            core.narrow(concat_dim, cache_len, x.size(concat_dim)).copy_(x)
+        else:
+            core.copy_(x)
+        return buf
+
+    def _ck_applies(self, x):
+        """Whether this conv runs on the channels_last_3d path; any input layout, the pad copy lands it there."""
+        return (_ck_eligible(x) and self.padding_mode == "zeros" and self.groups == 1
+                and all(d == 1 for d in self.dilation))
+
+    def _ck_conv(self, padded):
+        """Run an already-padded channels_last_3d input through the conv, kitchen or cuDNN."""
+        weight, bias = comfy.ops.cast_bias_weight(self, padded)
+        if weight.dtype != torch.float16:
+            with ignore_padding(self):
+                return torch.nn.Conv3d.forward(self, padded)
+        weight = self._ck_filter(weight)
+        if _fp16_accumulate_wanted(padded):
+            return comfy_kitchen.fp16_conv3d(padded, weight, bias, stride=tuple(self.stride))
+        # cuDNN keeps channels_last_3d in and out, so the layout still saves its transposes
+        return F.conv3d(padded, weight, bias, stride=tuple(self.stride))
+
+    def _ck_filter(self, weight):
+        """The NDHWC copy of the filter, made once while the weights stay resident: cast_bias_weight
+        hands back the same tensor each call then, so identity is a sound cache key."""
+        if getattr(self, "_ck_weight_src", None) is not weight:
+            self._ck_weight = weight.contiguous(memory_format=_CL)
+            self._ck_weight_src = weight
+        return self._ck_weight
+
+    def _symmetric_padding(self):
+        return tuple(p for p in reversed(self.padding) for _ in range(2))
+
+    # The ck kernels index a buffer with 32-bit byte offsets; a view handed to one call stays
+    # under this many elements (2 GiB of fp16), which is one call at 1080p and two at 1440p.
+    _CK_MAX_VIEW_ELEMENTS = 2 ** 30
+
+    # Buffered convs the CPU may run ahead of the GPU: with a stream-ordered allocator every buffer
+    # allocated ahead is live until the GPU releases it (unthrottled: 2.5x the peak).
+    _CK_INFLIGHT_DEPTH = 2
+    _ck_inflight = collections.deque()
+
+    @classmethod
+    def _ck_throttle(cls):
+        while len(cls._ck_inflight) >= cls._CK_INFLIGHT_DEPTH:
+            cls._ck_inflight.popleft().synchronize()
+
+    @classmethod
+    def _ck_launched(cls, device):
+        event = torch.cuda.Event()
+        event.record(torch.cuda.current_stream(device))
+        cls._ck_inflight.append(event)
+
+    def _ck_buffered(self, like, x_shape, memory_state, memory_cache, write_body, residual=None):
+        """Run this conv from one padded buffer: halo in front, ``write_body`` writes the padded frames
+        behind it, and the conv reads and writes frame-window views. ``residual`` goes into the kitchen
+        conv's epilogue (added explicitly on the cuDNN path). Replicates forward()'s cache handling.
+        """
+        b, c, t, h, w = x_shape
+        _, ph, pw = self.padding
+        kt = self.kernel_size[0]
+        cache_size = kt - self.stride[0]
+        if memory_cache is None:
+            memory_cache = CausalMemoryCache(offload=False)   # DISABLED: nothing is kept anyway
+        elif memory_state != MemoryState.ACTIVE:
+            memory_cache.pop(self, None)
+        memory = memory_cache.get(self)
+        has_memory = memory is not None
+        halo = cache_size if has_memory else self.temporal_padding * 2
+        hp, wp = h + 2 * ph, w + 2 * pw
+
+        self._ck_throttle()
+        buf = torch.empty((b, c, halo + t, hp, wp), dtype=like.dtype, device=like.device, memory_format=_CL)
+        write_body(buf[:, :, halo:])
+        del write_body   # and with it the source it captured: nothing but the buffer feeds the conv
+        if halo:
+            front = buf[:, :, :halo]
+            if has_memory:
+                front[:, :, :, ph:ph + h, pw:pw + w].copy_(memory)
+                del memory   # the unpacked halo is two full frames; nothing past the copy needs it
+                for dim, lo, hi in ((3, ph, ph + h), (4, pw, pw + w)):
+                    if lo:
+                        front.narrow(dim, 0, lo).zero_()
+                        front.narrow(dim, hi, lo).zero_()   # symmetric border
+            else:
+                # extend_head's tiled first frame, already padded
+                front.copy_(buf[:, :, halo:halo + 1].expand(-1, -1, halo, -1, -1))
+        if cache_size and memory_state in (MemoryState.INITIALIZING, MemoryState.ACTIVE):
+            core = buf[:, :, :, ph:ph + h, pw:pw + w]
+            if has_memory:
+                # the halo frames are already the cache's newest entries: push only the new ones
+                # (push_frames splits a tail that was stored whole before extending it)
+                memory_cache.push_frames(self, core[:, :, halo:][:, :, -min(t, cache_size):], cache_size)
+            else:
+                memory_cache.push_frames(self, core[:, :, -cache_size:], cache_size)
+
+        weight, bias = comfy.ops.cast_bias_weight(self, buf)
+        weight = self._ck_filter(weight)
+        stride = tuple(self.stride)
+        if not _fp16_accumulate_wanted(buf):
+            out = F.conv3d(buf, weight, bias, stride=stride)   # cuDNN, NDHWC in and out
+            if residual is not None:
+                out += residual
+            self._ck_launched(out.device)
+            return out
+        zt = buf.size(2) - kt + 1
+        out = torch.empty((b, weight.size(0), zt, hp - self.kernel_size[1] + 1, wp - self.kernel_size[2] + 1),
+                          dtype=buf.dtype, device=buf.device, memory_format=_CL)
+        # each call's input and output views stay under the kernel's 32-bit offsets
+        per_frame = max(c * hp * wp, weight.size(0) * out.size(3) * out.size(4))
+        chunk = max(1, min(zt, self._CK_MAX_VIEW_ELEMENTS // per_frame - (kt - 1)))
+        fused_residual = residual
+        if residual is not None and (residual.shape != out.shape or residual.dtype != out.dtype
+                                     or not _ndhwc_like(residual)):
+            fused_residual = None   # the epilogue wants the output's shape and layout; add after
+        for z0 in range(0, zt, chunk):
+            z1 = min(zt, z0 + chunk)
+            comfy_kitchen.fp16_conv3d(buf[:, :, z0:z1 + kt - 1], weight, bias,
+                                      residual=None if fused_residual is None else fused_residual[:, :, z0:z1],
+                                      stride=stride, out=out[:, :, z0:z1])
+        if residual is not None and fused_residual is None:
+            out += residual
+        self._ck_launched(out.device)
+        return out
+
+    def _ck_buffered_applies(self, x, memory_state):
+        """Whether _ck_buffered can take this call: the frame-offset write needs a batch of one,
+        and stride is not folded into the buffer sizes."""
+        if not (self._ck_applies(x) and memory_state != MemoryState.UNSET and x.size(0) == 1):
+            return False
+        if tuple(self.stride) != (1, 1, 1):
+            return False
+        return self.weight.dtype == torch.float16 or bool(getattr(self, "weight_function", None))
+
+    def fused_norm_conv(self, source, norm, memory_state, memory_cache, residual=None):
+        """GroupNorm + SiLU written straight into the conv's buffer; ``source`` (a 1-list) is emptied
+        once read so the activation is freed early. None when the fused path does not apply."""
+        x = source[0]
+        if not (self._ck_buffered_applies(x, memory_state) and isinstance(norm, nn.GroupNorm)
+                and norm.affine):
+            return None
+        _, ph, pw = self.padding
+        gw, gb = comfy.ops.cast_bias_weight(norm, x)
+        like, shape = x.new_empty(0), x.shape
+        del x
+
+        def write_body(dst):
+            comfy_kitchen.group_norm_silu_pad3d(
+                source.pop(), gw, gb, norm.num_groups, norm.eps, (pw, pw, ph, ph, 0), True,
+                zero_pad=True, out=dst,
+            )
+        return self._ck_buffered(like, shape, memory_state, memory_cache, write_body, residual=residual)
+
     def memory_limit_conv(
         self,
         x,
@@ -583,6 +1069,8 @@ class InflatedCausalConv3d(ops.Conv3d):
         if math.isinf(self.memory_limit):
             if prev_cache is not None:
                 x = torch.cat([prev_cache, x], dim=split_dim - 1)
+            if self._ck_applies(x):
+                return self._ck_conv(self._padded_input(x, None, self._symmetric_padding(), split_dim - 1, channels_last=True))
             return super().forward(x)
 
         shape = list(x.size())
@@ -592,18 +1080,14 @@ class InflatedCausalConv3d(ops.Conv3d):
             shape[-3 + i] += pad_sum
         memory_occupy = math.prod(shape) * x.element_size() / 1024**3  # GiB
         if memory_occupy < self.memory_limit or split_dim == x.ndim:
-            x_concat = x
-            if prev_cache is not None:
-                x_concat = torch.cat([prev_cache, x], dim=split_dim - 1)
-
-            def pad_and_forward():
-                padded = F.pad(x_concat, padding, mode='constant', value=0.0)
-                if not padded.is_contiguous():
-                    padded = padded.contiguous()
-                with ignore_padding(self):
-                    return torch.nn.Conv3d.forward(self, padded)
-
-            return pad_and_forward()
+            if self._ck_applies(x):
+                return self._ck_conv(self._padded_input(x, prev_cache, padding, split_dim - 1, channels_last=True))
+            out = self._conv_without_padding_copy(x, prev_cache, padding)
+            if out is not None:
+                return out
+            padded = self._padded_input(x, prev_cache, padding, split_dim - 1)
+            with ignore_padding(self):
+                return torch.nn.Conv3d.forward(self, padded)
 
         num_splits = math.ceil(memory_occupy / self.memory_limit)
         size_per_split = x.size(split_dim) // num_splits
@@ -678,9 +1162,26 @@ class InflatedCausalConv3d(ops.Conv3d):
         mem_size = self.stride[0] - self.kernel_size[0]
         memory = memory_cache.get(self) if memory_cache is not None else None
         if (memory is not None) and (memory_state == MemoryState.ACTIVE):
-            input = extend_head(input, memory=memory, times=-1)
+            head = memory.to(input)
+        elif self.temporal_padding:
+            head = torch.tile(input[:, :, :1], [1, 1, self.temporal_padding * 2, 1, 1])
         else:
-            input = extend_head(input, times=self.temporal_padding * 2)
+            head = None
+        if self._ck_applies(input):
+            # The halo and the zero border share one buffer: the kernel needs a padded copy
+            # anyway, so the cat that extend_head would do is folded into it. On the largest
+            # activations that is one full pass and one activation's worth of peak.
+            padded = self._padded_input(input, head, self._symmetric_padding(), 2, channels_last=True)
+            if mem_size != 0 and memory_state != MemoryState.DISABLED and memory_cache is not None:
+                # From the halo'd buffer, as extend_head's result would be: a one-frame slice
+                # still leaves a two-frame cache. The spatial border is cropped back off.
+                _, ph, pw = self.padding
+                tail = padded[:, :, mem_size:, ph:padded.size(3) - ph or None, pw:padded.size(4) - pw or None]
+                memory_cache[self] = tail.detach().clone(memory_format=_CL)
+            elif memory_cache is not None and memory_state != MemoryState.DISABLED:
+                memory_cache.pop(self, None)
+            return self._ck_conv(padded)
+        input = input if head is None else torch.cat((_match_layout(head, input), input), dim=2)
         next_memory = (
             input[:, :, mem_size:].detach()
             if (mem_size != 0 and memory_state != MemoryState.DISABLED)
@@ -720,7 +1221,12 @@ class InflatedCausalConv3d(ops.Conv3d):
                 input[0] = torch.cat([cache, input[0]], dim=2)
                 cache = None
             if cache_size <= input[-1].size(2):
-                memory_cache[self] = input[-1][:, :, -cache_size:].detach().contiguous()
+                # clone, not contiguous(): for a batch of one a frame slice of an NDHWC tensor
+                # already satisfies the channels_last_3d check, and contiguous() would return the
+                # view, pinning the whole activation for the next slice instead of two frames.
+                tail = input[-1][:, :, -cache_size:].detach()
+                memory_cache[self] = tail.clone(
+                    memory_format=_CL if input[-1].is_contiguous(memory_format=_CL) else torch.contiguous_format)
 
         padding = tuple(x for x in reversed(self.padding) for _ in range(2))
         for i in range(len(input)):
@@ -795,17 +1301,66 @@ class Upsample3D(nn.Module):
         if hidden_states.shape[1] != self.channels:
             raise ValueError(f"SeedVR2 upsample expected {self.channels} channels, got {hidden_states.shape[1]}.")
 
-        hidden_states = self.upscale_conv(hidden_states)
+        if (_ck_eligible(hidden_states) and _fp16_accumulate_wanted(hidden_states)
+                and hidden_states.is_contiguous(memory_format=_CL)):
+            weight, bias = comfy.ops.cast_bias_weight(self.upscale_conv, hidden_states)
+            if getattr(self, "_ck_up_weight_src", None) is not weight:
+                self._ck_up_weight = weight.contiguous(memory_format=_CL)
+                self._ck_up_weight_src = weight
+            hidden_states = comfy_kitchen.fp16_conv3d(hidden_states, self._ck_up_weight, bias)
+        else:
+            hidden_states = self.upscale_conv(hidden_states)
         b, channels, f, h, w = hidden_states.shape
         c = channels // (self.spatial_ratio * self.spatial_ratio * self.temporal_ratio)
+        # channels_last_3d is only defined for 5-D tensors, so decide before the view.
+        keep_layout = hidden_states.is_contiguous(memory_format=_CL)
+        buffered = keep_layout and self.conv._ck_buffered_applies(hidden_states, memory_state)
         hidden_states = hidden_states.view(b, self.spatial_ratio, self.spatial_ratio, self.temporal_ratio, c, f, h, w)
-        hidden_states = hidden_states.permute(0, 4, 5, 3, 6, 1, 7, 2).reshape(
-            b,
-            c,
-            f * self.temporal_ratio,
-            h * self.spatial_ratio,
-            w * self.spatial_ratio,
-        )
+        f_out, h_out, w_out = f * self.temporal_ratio, h * self.spatial_ratio, w * self.spatial_ratio
+        if buffered:
+            # One strided copy from the (b, sr, sr, tr, c, f, h, w) view into the conv's padded buffer;
+            # the source is boxed so the copy is the last thing to hold it.
+            sr, tr = self.spatial_ratio, self.temporal_ratio
+            drop_head = self.temporal_up and memory_state != MemoryState.ACTIVE
+            _, ph, pw = self.conv.padding
+            like = hidden_states.new_empty(0)                 # dtype/device only, shares nothing
+            source = [hidden_states]
+            del hidden_states
+
+            def as_split(core, frames):
+                """(b, c, F, H, W) view -> (b, sr, sr, tr, c, f, h, w), the source's order."""
+                return core.view(b, c, frames // tr, tr, h, sr, w, sr).permute(0, 5, 7, 3, 1, 2, 4, 6)
+
+            def write_body(dst):
+                for dim, lo, hi in ((3, ph, ph + h_out), (4, pw, pw + w_out)):
+                    if lo:
+                        dst.narrow(dim, 0, lo).zero_()
+                        dst.narrow(dim, hi, dst.size(dim) - hi).zero_()
+                core = dst[:, :, :, ph:ph + h_out, pw:pw + w_out]           # (b, c, F', H, W)
+                src = source.pop()
+                if not drop_head:
+                    as_split(core, f_out).copy_(src)
+                    return
+                # frame 0 <- (f=0, t=0); frames 1.. <- f >= 1 (temporal_up means tr == 2)
+                core[:, :, 0].view(b, c, h, sr, w, sr).permute(0, 3, 5, 1, 2, 4).copy_(
+                    src[:, :, :, 0, :, 0])
+                as_split(core[:, :, 1:], f_out - tr).copy_(src[:, :, :, :, :, 1:])
+            return self.conv._ck_buffered(like, (b, c, f_out - int(drop_head), h_out, w_out),
+                                          memory_state, memory_cache, write_body)
+        if keep_layout:
+            # Same element mapping as below, written so the copy lands in NDHWC and the
+            # following convolution keeps the layout.
+            hidden_states = hidden_states.permute(0, 5, 3, 6, 1, 7, 2, 4).reshape(
+                b, f * self.temporal_ratio, h * self.spatial_ratio, w * self.spatial_ratio, c,
+            ).permute(0, 4, 1, 2, 3)
+        else:
+            hidden_states = hidden_states.permute(0, 4, 5, 3, 6, 1, 7, 2).reshape(
+                b,
+                c,
+                f * self.temporal_ratio,
+                h * self.spatial_ratio,
+                w * self.spatial_ratio,
+            )
 
         if self.temporal_up and memory_state != MemoryState.ACTIVE:
             hidden_states = remove_head(hidden_states)
@@ -928,13 +1483,10 @@ class ResnetBlock3D(nn.Module):
             )
 
     def forward(self, input_tensor, temb, memory_state = None, memory_cache = None):
-        hidden_states = input_tensor
-
-        hidden_states = causal_norm_wrapper(self.norm1, hidden_states)
-
-        hidden_states = self.nonlinearity(hidden_states)
-
-        hidden_states = self.conv1(hidden_states, memory_state=memory_state, memory_cache=memory_cache)
+        hidden_states = self.conv1.fused_norm_conv([input_tensor], self.norm1, memory_state, memory_cache)
+        if hidden_states is None:
+            hidden_states = causal_norm_wrapper(self.norm1, input_tensor, silu=True)
+            hidden_states = self.conv1(hidden_states, memory_state=memory_state, memory_cache=memory_cache)
 
         if self.time_emb_proj is not None:
             if not self.skip_time_act:
@@ -944,18 +1496,22 @@ class ResnetBlock3D(nn.Module):
         if temb is not None:
             hidden_states = hidden_states + temb
 
-        hidden_states = causal_norm_wrapper(self.norm2, hidden_states)
-
-        hidden_states = self.nonlinearity(hidden_states)
-
-        hidden_states = self.conv2(hidden_states, memory_state=memory_state, memory_cache=memory_cache)
-
         if self.conv_shortcut is not None:
             input_tensor = self.conv_shortcut(input_tensor, memory_state=memory_state, memory_cache=memory_cache)
 
-        output_tensor = (input_tensor + hidden_states) / self.output_scale_factor
-
-        return output_tensor
+        # The skip connection rides in the conv's epilogue when the scale is one (it always is in
+        # the decoder), which spares a pass over the output per block.
+        residual = input_tensor if self.output_scale_factor == 1.0 else None
+        source = [hidden_states]
+        del hidden_states
+        hidden_states = self.conv2.fused_norm_conv(source, self.norm2, memory_state, memory_cache, residual=residual)
+        if hidden_states is None:
+            hidden_states = causal_norm_wrapper(self.norm2, source.pop(), silu=True)
+            hidden_states = self.conv2(hidden_states, memory_state=memory_state, memory_cache=memory_cache)
+            residual = None
+        if residual is None:
+            return (input_tensor + hidden_states) / self.output_scale_factor
+        return hidden_states
 
 
 class DownEncoderBlock3D(nn.Module):
@@ -1272,8 +1828,7 @@ class Encoder3D(nn.Module):
 
         sample = self.mid_block(sample, memory_state=memory_state, memory_cache=memory_cache)
 
-        sample = causal_norm_wrapper(self.conv_norm_out, sample)
-        sample = self.conv_act(sample)
+        sample = causal_norm_wrapper(self.conv_norm_out, sample, silu=True)
         sample = self.conv_out(sample, memory_state=memory_state, memory_cache=memory_cache)
 
         return sample
@@ -1359,6 +1914,15 @@ class Decoder3D(nn.Module):
         )
 
 
+    # Frames per pass through the spatial-only tail; None runs a slice's frames at once.
+    tail_frames = 1
+
+    def _tail(self, sample, latent_embeds, memory_state, memory_cache):
+        for up_block in self.up_blocks[self.temporal_up_num:]:
+            sample = up_block(sample, latent_embeds, memory_state=memory_state, memory_cache=memory_cache)
+        sample = causal_norm_wrapper(self.conv_norm_out, sample, silu=True)
+        return self.conv_out(sample, memory_state=memory_state, memory_cache=memory_cache)
+
     def forward(
         self,
         sample: torch.FloatTensor,
@@ -1374,12 +1938,24 @@ class Decoder3D(nn.Module):
         sample = self.mid_block(sample, latent_embeds, memory_state=memory_state, memory_cache=memory_cache)
         sample = sample.to(upscale_dtype)
 
-        for up_block in self.up_blocks:
+        for up_block in self.up_blocks[:self.temporal_up_num]:
             sample = up_block(sample, latent_embeds, memory_state=memory_state, memory_cache=memory_cache)
 
-        sample = causal_norm_wrapper(self.conv_norm_out, sample)
-        sample = self.conv_act(sample)
-        sample = self.conv_out(sample, memory_state=memory_state, memory_cache=memory_cache)
+        chunk = self.tail_frames
+        if not chunk or sample.size(2) <= chunk:
+            return self._tail(sample, latent_embeds, memory_state, memory_cache)
+        # The tail is spatial-only and causal: run it a few frames at a time, the cache carrying state.
+        if memory_state == MemoryState.DISABLED or memory_cache is None:
+            # a local cache for this call, under the same host-memory policy as a sliced decode
+            ups = sum(1 for blk in self.up_blocks[self.temporal_up_num:] if blk.upsamplers is not None)
+            frame_pixels = sample.size(-2) * sample.size(-1) * 4 ** ups
+            memory_cache = CausalMemoryCache(offload=_offload_caches_for(frame_pixels))
+            memory_state = MemoryState.INITIALIZING
+        outs = []
+        for i, piece in enumerate(sample.split(chunk, dim=2)):
+            state = memory_state if i == 0 else MemoryState.ACTIVE
+            outs.append(self._tail(piece, latent_embeds, state, memory_cache))
+        sample = torch.cat(outs, dim=2)
 
         return sample
 
@@ -1439,9 +2015,9 @@ class VideoAutoencoderKL(nn.Module):
         return posterior
 
     def decode_(
-        self, z: torch.Tensor, return_dict: bool = True
+        self, z: torch.Tensor, return_dict: bool = True, output_buffer=None
     ):
-        decoded = self.slicing_decode(z)
+        decoded = self.slicing_decode(z, output_buffer=output_buffer)
 
         if not return_dict:
             return (decoded,)
@@ -1490,25 +2066,49 @@ class VideoAutoencoderKL(nn.Module):
         else:
             return self._encode(x)
 
-    def slicing_decode(self, z: torch.Tensor) -> torch.Tensor:
+    def _offload_caches(self, z):
+        """Offload the temporal caches only when the host has room for several times the pinned set."""
+        if not z.is_cuda:
+            return False
+        return self._offload_caches_for(z.shape[-2] * z.shape[-1] * self.spatial_downsample_factor ** 2)
+
+    @staticmethod
+    def _offload_caches_for(frame_pixels):
+        return _offload_caches_for(frame_pixels)
+
+    def slicing_decode(self, z: torch.Tensor, output_buffer=None) -> torch.Tensor:
+        """Decode slice by slice; with ``output_buffer`` each slice is written into it (no cat, no accumulation)."""
         if self.use_slicing and (z.shape[2] - 1) > self.slicing_latent_min_size:
-            memory_cache = CausalMemoryCache()
+            memory_cache = CausalMemoryCache(offload=self._offload_caches(z))
             z_slices = z[:, :, 1:].split(split_size=self.slicing_latent_min_size, dim=2)
-            decoded_slices = [
-                self._decode(
-                    torch.cat((z[:, :, :1], z_slices[0]), dim=2),
-                    memory_state=MemoryState.INITIALIZING,
-                    memory_cache=memory_cache,
-                )
-            ]
+            decoded_slices = []
+            write_pos = 0
+
+            def emit(decoded):
+                nonlocal write_pos
+                if output_buffer is None:
+                    decoded_slices.append(decoded)
+                    return
+                frames = decoded.size(2)
+                output_buffer[:, :, write_pos:write_pos + frames].copy_(
+                    decoded[..., :output_buffer.size(-2), :output_buffer.size(-1)])
+                write_pos += frames
+
+            emit(self._decode(
+                torch.cat((z[:, :, :1], z_slices[0]), dim=2),
+                memory_state=MemoryState.INITIALIZING,
+                memory_cache=memory_cache,
+            ))
             for z_idx in range(1, len(z_slices)):
-                decoded_slices.append(
-                    self._decode(z_slices[z_idx], memory_state=MemoryState.ACTIVE, memory_cache=memory_cache)
-                )
-            out = torch.cat(decoded_slices, dim=2)
-            return out
-        else:
-            return self._decode(z)
+                emit(self._decode(z_slices[z_idx], memory_state=MemoryState.ACTIVE, memory_cache=memory_cache))
+            if output_buffer is not None:
+                return output_buffer
+            return torch.cat(decoded_slices, dim=2)
+        decoded = self._decode(z)
+        if output_buffer is None:
+            return decoded
+        output_buffer.copy_(decoded[..., :output_buffer.size(-2), :output_buffer.size(-1)])
+        return output_buffer
 
     def forward(self, x: torch.FloatTensor, mode: Literal["encode", "decode", "all"] = "all"):
         def _unwrap(value):
@@ -1551,7 +2151,25 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         z, _ = self._encode_with_raw_latent(x)
         return z
 
-    def decode(self, z, seedvr2_tiling=None):
+    # sd.py preallocates the output on its device/dtype and hands slices of it to decode(); the
+    # decoded frames then never accumulate on the GPU (see slicing_decode).
+    comfy_has_chunked_io = True
+
+    def decode_output_shape(self, input_shape):
+        b, c, t, h, w = self._latent_dims(input_shape)
+        frames = max(1, (t - 1) * BYTEDANCE_VAE_TEMPORAL_DOWNSAMPLE + 1)
+        ph, pw = h * self.spatial_downsample_factor, w * self.spatial_downsample_factor
+        return (b, 3, frames, ph - ph % 2, pw - pw % 2)
+
+    @staticmethod
+    def _latent_dims(shape):
+        """(b, c, t, h, w) of a 5-D latent or the collapsed 4-D (B, 16*T, H, W) form."""
+        if len(shape) == 5:
+            return tuple(shape)
+        b, tc, h, w = shape
+        return b, SEEDVR2_LATENT_CHANNELS, tc // SEEDVR2_LATENT_CHANNELS, h, w
+
+    def decode(self, z, seedvr2_tiling=None, output_buffer=None):
         seedvr2_tiling = {} if seedvr2_tiling is None else seedvr2_tiling
         if not isinstance(seedvr2_tiling, dict):
             raise RuntimeError(
@@ -1607,6 +2225,8 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
                 # pipeline can keep batch and time distinct on the tiled path.
                 x = x.unsqueeze(2)
         else:
+            if output_buffer is not None:
+                return super().decode_(latent, output_buffer=output_buffer)
             x = super().decode_(latent)
 
         h, w = x.shape[-2:]
@@ -1614,11 +2234,39 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         h2 = h - (h % 2)
         x = x[..., :h2, :w2]
 
+        if output_buffer is not None:   # the tiled path: one copy into the caller's frames
+            output_buffer.copy_(x)
+            return output_buffer
         return x
 
-    def decode_tiled(self, z, tile_x=32, tile_y=32, overlap=8, tile_t=None, overlap_t=None):
+    # comfy_memory_used_decode is fitted against measured peaks, so a decode it says will not fit
+    # can be tiled without trying first. See preferred_decode_tile for the sizing that follows.
+    comfy_decode_estimate_is_reliable = True
+
+    def preferred_decode_tile(self, device):
+        """Spatial tile side, in latent units, that fits the free VRAM."""
+        return self._tile_side_for_budget(device)
+
+    def _tile_side_for_budget(self, device):
+        """Largest square tile whose decode fits the free VRAM, from the same per-pixel figure as the estimate."""
+        free = comfy.model_management.get_free_memory(device)
+        budget = free * SEEDVR2_TILE_MEM_HEADROOM - SEEDVR2_DECODE_FIXED_BYTES
+        if budget <= 0:
+            return SEEDVR2_MIN_TILE_LATENT
+        area = budget / SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL
+        side = int(math.sqrt(max(area, 1.0))) // self.spatial_downsample_factor
+        side = (side // 8) * 8  # keep tiles a whole number of latent blocks
+        return max(SEEDVR2_MIN_TILE_LATENT, min(SEEDVR2_MAX_TILE_LATENT, side))
+
+    def decode_tiled(self, z, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
         # SeedVR2's causal VAE owns temporal via the MemoryState cache; external
         # temporal tiling breaks that continuity, so only spatial tiling is applied.
+        if tile_x is None or tile_y is None:
+            side = self._tile_side_for_budget(z.device)
+            tile_x = side if tile_x is None else tile_x
+            tile_y = side if tile_y is None else tile_y
+        if overlap is None:
+            overlap = max(8, min(tile_x, tile_y) // 8)
         sf = self.spatial_downsample_factor
         seedvr2_tiling = {
             "enable_tiling": True,
@@ -1663,14 +2311,14 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         return samples
 
     def comfy_memory_used_decode(self, shape):
-        bytes_per_output_pixel = 160
+        """Peak device memory of a decode, in bytes: one frame's area sets it, the clip barely moves it."""
 
-        def output_pixels(latent_t, latent_h, latent_w):
-            output_t = max(1, (latent_t - 1) * 4 + 1)
-            return output_t * latent_h * 8 * latent_w * 8
+        def frame_area(latent_h, latent_w):
+            return latent_h * 8 * latent_w * 8
 
-        # SeedVR2 decode performs full-frame LAB histogram matching: fp32 channels
-        # plus int64 sort indices dominate peak memory, not the VAE weight dtype.
+        def output_frames(latent_t):
+            return max(1, (latent_t - 1) * 4 + 1)
+
         if len(shape) == 5:
             candidates = []
             if shape[1] == SEEDVR2_LATENT_CHANNELS:
@@ -1679,13 +2327,27 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
                 candidates.append((shape[1], shape[2], shape[3]))
             if len(candidates) == 0:
                 candidates.append((shape[2], shape[3], shape[4]))
-            pixels = max(output_pixels(*candidate) for candidate in candidates)
+            latent_t, latent_h, latent_w = max(candidates, key=lambda c: frame_area(c[1], c[2]))
         elif len(shape) == 4:
             latent_t = max(1, (shape[1] + SEEDVR2_LATENT_CHANNELS - 1) // SEEDVR2_LATENT_CHANNELS)
-            pixels = output_pixels(latent_t, shape[2], shape[3])
+            latent_h, latent_w = shape[2], shape[3]
         else:
-            pixels = output_pixels(1, shape[-2], shape[-1])
-        return pixels * bytes_per_output_pixel
+            latent_t, latent_h, latent_w = 1, shape[-2], shape[-1]
+
+        area = frame_area(latent_h, latent_w)
+        frames = output_frames(latent_t)
+        decode_peak = (
+            area * SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL
+            + frames * area * SEEDVR2_DECODE_BYTES_PER_OUTPUT_PIXEL
+            + SEEDVR2_DECODE_FIXED_BYTES
+        )
+        if not self._offload_caches_for(area):
+            decode_peak += area * SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL   # the temporal caches stay resident
+        # The node's colour correction runs after the decode, one frame (LAB) or a free-memory
+        # sized chunk (wavelet, adain) at a time with its own OOM back-off, so it never coincides
+        # with the decode's working set and only a frame of it is worth reserving.
+        colour_transfer = area * SEEDVR2_DECODE_LAB_BYTES_PER_OUTPUT_PIXEL
+        return int(max(decode_peak, colour_transfer))
 
     def set_memory_limit(self, conv_max_mem: Optional[float], norm_max_mem: Optional[float]):
         set_norm_limit(norm_max_mem)
