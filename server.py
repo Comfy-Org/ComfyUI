@@ -1,6 +1,7 @@
 import errno
 import os
 import sys
+import time
 import asyncio
 import traceback
 import time
@@ -1393,6 +1394,8 @@ class PromptServer():
             await send_socket_catch_exception(self.sockets[sid].send_json, message)
 
     def send_sync(self, event, data, sid=None):
+        if isinstance(data, dict):
+            data["happen_at"] = time.time()
         self.loop.call_soon_threadsafe(
             self.messages.put_nowait, (event, data, sid))
 
