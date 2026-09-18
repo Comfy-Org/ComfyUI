@@ -119,7 +119,7 @@ class TextEncodeQwenImage21(io.ComfyNode):
                 io.String.Input("negative_prompt", multiline=True, dynamic_prompts=True),
                 io.Vae.Input("vae", optional=True),
                 io.Int.Input("resolution", default=1024, min=0, max=4096, step=32,
-                             tooltip="Reference images are resized to about resolution x resolution pixels, at multiples of 32. 0 keeps each reference at its own size, rounded to a multiple of 32."),
+                             tooltip="Reference images are resized to about resolution x resolution pixels, at multiples of 32, preserving aspect ratio. 0 keeps each reference at its own size, rounded to a multiple of 32. "),
                 io.Autogrow.Input(
                     "images",
                     template=io.Autogrow.TemplateNames(
@@ -134,7 +134,7 @@ class TextEncodeQwenImage21(io.ComfyNode):
                 io.Conditioning.Output(display_name="positive"),
                 io.Conditioning.Output(display_name="negative"),
                 io.Latent.Output(display_name="latent",
-                                 tooltip="Empty latent on the first reference image's grid. Sampling at any other size shifts the edit."),
+                                 tooltip="Empty latent on the first reference image's size, to match with sampling as any other size shifts the edit."),
             ],
         )
 
