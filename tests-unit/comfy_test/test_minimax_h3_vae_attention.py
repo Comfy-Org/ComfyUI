@@ -14,10 +14,13 @@ import torch
 
 from comfy.cli_args import args as cli_args
 
+_previous_cpu = cli_args.cpu
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
 import comfy.ldm.minimax.vae as vae_module  # noqa: E402
+
+cli_args.cpu = _previous_cpu
 
 
 class _PreNorm:
