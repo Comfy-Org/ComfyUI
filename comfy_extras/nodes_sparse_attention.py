@@ -279,7 +279,18 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
     else:
         sink, sink_q = patch.sinks(transformer_options, n_tokens)
 
+    can_hold_qkv = (
+        getattr(attn.qkv_proj, "quant_format", None) == "int8_tensorwise"
+        and getattr(attn.qkv_proj, "layout_type", None) == "TensorWiseINT8Layout"
+        and not getattr(attn.qkv_proj, "_full_precision_mm", False)
+        and not getattr(attn.qkv_proj, "comfy_force_cast_weights", False)
+        and getattr(attn.qkv_proj, "pre_quant_scale", None) is None
+        and not getattr(attn.qkv_proj, "weight_function", ())
+        and not getattr(attn.qkv_proj, "bias_function", ())
+    )
+
     def chunks():
+        "Yield QKV chunks, retaining only the validated INT8 VBAR fallback cast."
         held_ctx = None
         held_weight = held_bias = None
         latch_next = False
@@ -294,25 +305,32 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
                         extra["coarse_gate"].view(n, heads * head_dim)[i:i + xc.shape[0]] = gate(xc)
 
                 if held_ctx is None and latch_next:
+                    # Mirror MixedPrecisionOps.Linear's int8 weight-only inference cast,
+                    # but keep that cast alive for the remaining producer chunks.
                     held_ctx = comfy.ops.CastBiasWeightContext(
                         attn.qkv_proj,
-                        xc,
+                        input=None,
+                        dtype=attn.qkv_proj.weight.dtype,
+                        device=xc.device,
+                        bias_dtype=xc.dtype,
                         offloadable=True,
                         compute_dtype=xc.dtype,
                         want_requant=True,
                     )
                     held_weight, held_bias = held_ctx.__enter__()
+                    held_weight = held_weight.to(dtype=xc.dtype)
 
                 if held_ctx is None:
                     y = attn.qkv_proj(xc)
                     latch_next = (
-                        hasattr(attn.qkv_proj, "_v")
+                        can_hold_qkv
+                        and hasattr(attn.qkv_proj, "_v")
                         and attn.qkv_proj.weight.device != xc.device
                         and getattr(attn.qkv_proj, "_v_signature", None) is None
                     )
                 else:
                     comfy.ops.run_every_op()
-                    y = torch.nn.functional.linear(xc, held_weight, held_bias)
+                    y = attn.qkv_proj._forward(xc, held_weight, held_bias)
 
                 yield y
         finally:
