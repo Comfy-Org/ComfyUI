@@ -8,6 +8,7 @@ so a restored file can never leave two live rows describing one location.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -249,26 +250,11 @@ def _apply_pending_verification(
         return "drop"
     assert preflight.path is not None
     if preflight.outcome == "gone":
-        try:
-            os.stat(preflight.path, follow_symlinks=True)
-        except FileNotFoundError:
-            mark_content_missing(session, content.id)
-            return "processed"
-        except OSError:
-            return "retry"
-        return "retry"
+        mark_content_missing(session, content.id)
+        return "processed"
     if preflight.outcome == "retry" or snapshot is None:
         return "retry"
     digest, verified_stat = snapshot
-    try:
-        current_stat = os.stat(preflight.path, follow_symlinks=True)
-    except OSError:
-        return "retry"
-    if (
-        current_stat.st_size != verified_stat.st_size
-        or current_stat.st_mtime_ns != verified_stat.st_mtime_ns
-    ):
-        return "retry"
     stored_hash = to_stored_hash(digest)
     if content.hash == stored_hash or content.hash is None:
         content.hash = stored_hash
@@ -279,10 +265,16 @@ def _apply_pending_verification(
     return "processed"
 
 
-def drain_pending_verifications(_session: Session | None = None, limit: int | None = None) -> int:
+def drain_pending_verifications(
+    _session: Session | None = None,
+    limit: int | None = None,
+    interrupt_check: Callable[[], bool] | None = None,
+) -> int:
     queued_count = min(len(_pending_verification_ids), limit or len(_pending_verification_ids))
     processed = 0
     for _ in range(queued_count):
+        if interrupt_check and interrupt_check():
+            break
         content_id = _pending_verification_ids[0]
         preflight = _preflight_pending_verification(content_id)
         snapshot: tuple[str, os.stat_result] | None = None

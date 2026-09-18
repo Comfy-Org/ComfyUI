@@ -48,6 +48,7 @@ def test_off_to_on_transition_hashes_null_rows_and_persists_mode(session, temp_d
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
+    session.commit()
     drain_transition_queue(session)
     session.commit()
 
@@ -72,6 +73,7 @@ def test_transition_drain_splits_changed_content(session, temp_dir, monkeypatch)
     path.write_bytes(b"new bytes")
 
     enqueue_transition_work(session, "off_to_on")
+    session.commit()
     drain_transition_queue(session)
     session.commit()
 
@@ -107,6 +109,7 @@ def test_transition_drain_serves_unchanged_content_whose_stored_stat_went_stale(
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
+    session.commit()
     drain_transition_queue(session)
     session.commit()
 
@@ -143,6 +146,7 @@ def test_transition_drain_requeues_permission_errors_and_processes_other_paths(
     monkeypatch.setattr(hash_mode_state, "snapshot_hash", hash_or_raise)
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
+    session.commit()
 
     drain_transition_queue(session)
 
@@ -172,6 +176,7 @@ def test_transition_drain_marks_deleted_path_missing_and_completes_transition(
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
+    session.commit()
     drain_transition_queue(session)
     session.commit()
     session.expire_all()
@@ -211,6 +216,7 @@ def test_transition_drain_requeues_transient_stat_error_without_marking_it_missi
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
+    session.commit()
     drain_transition_queue(session)
     session.commit()
 
@@ -236,6 +242,7 @@ def test_transition_drain_requeues_unstable_present_file_without_marking_it_miss
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
+    session.commit()
     drain_transition_queue(session)
     session.commit()
 
@@ -267,6 +274,7 @@ def test_transition_drain_mixes_a_deleted_path_with_a_healthy_one(session, temp_
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
+    session.commit()
     drain_transition_queue(session)
     session.commit()
     session.expire_all()
@@ -300,6 +308,7 @@ def test_transition_drain_skips_out_of_root_path(session, temp_dir, monkeypatch,
         get_name_and_tags_from_asset_path(str(outside_path))
 
     enqueue_transition_work(session, "off_to_on")
+    session.commit()
 
     with caplog.at_level(logging.WARNING):
         try:
@@ -340,6 +349,7 @@ def test_transition_drain_clears_an_unverifiable_hash_only_on_the_third_attempt(
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
+    session.commit()
 
     def warnings_naming_the_path() -> list[str]:
         return [r.getMessage() for r in caplog.records if str(path) in r.getMessage()]
@@ -410,6 +420,7 @@ def test_transition_drain_retires_only_the_unreadable_path_and_hashes_the_health
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
+    session.commit()
     for _ in range(3):
         drain_transition_queue(session)
         session.commit()

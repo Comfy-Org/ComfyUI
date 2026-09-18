@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import app.database.db as db_mod
 from app.assets import scanner_admission
 from app.assets import scanner_changes
 from app.assets.database.models import AssetContent
@@ -81,6 +82,11 @@ def test_transition_queue_retries_without_losing_companion_path(
     session, monkeypatch
 ):
     path = "/unreadable/transition.bin"
+    db_mod.run_write_txn(
+        lambda write_session: write_session.add(
+            AssetContent(path=path, hash=None, size_bytes=0, mtime_ns=None)
+        )
+    )
     entry = _PendingEntry(path)
     _PENDING_QUEUE.append(entry)
     _PENDING_PATHS.add(path)

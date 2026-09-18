@@ -894,7 +894,11 @@ class _AssetSeeder:
                 last_progress_time = now
 
         self._update_progress(scanned=len(specs), created=total_created)
-        tick_watch_list()
+        tick_watch_list(
+            interrupt_check=lambda: self._is_paused_or_cancelled(
+                _ScanStage.FAST_SCAN
+            )
+        )
         logging.info(
             "Fast scan complete: %.3fs total (created=%d, skipped=%d, total_paths=%d)",
             time.perf_counter() - t_fast_start,
@@ -912,10 +916,10 @@ class _AssetSeeder:
         """
         total_enriched = 0
         scan_state = self._scan_state
-        drain_pending_verifications()
-        tick_watch_list()
+        drain_pending_verifications(interrupt_check=self._is_paused_or_cancelled)
+        tick_watch_list(interrupt_check=self._is_paused_or_cancelled)
         for _ in range(3):
-            drain_transition_queue()
+            drain_transition_queue(interrupt_check=self._is_paused_or_cancelled)
             if pending_transition_count() == 0:
                 break
         batch_size = 100

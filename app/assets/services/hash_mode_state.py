@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 from collections import deque
 from dataclasses import dataclass
 from typing import Final
@@ -23,7 +24,7 @@ from app.assets.database.queries.records import create_content, create_record, m
 from app.assets.helpers import to_stored_hash
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 from app.assets.services.snapshot_hash import snapshot_hash
-from app.database.db import run_write_txn
+from app.database.db import create_session, run_write_txn
 
 _KEY = "hash_mode"
 _MAX_VERIFY_ATTEMPTS: Final = 3
@@ -95,42 +96,63 @@ def enqueue_transition_work(session: Session, transition: str | None) -> None:
             _PENDING_PATHS.add(row.path)
 
 
-def drain_transition_queue(_session: Session | None = None) -> None:
+def _preflight_transition_entry(path: str) -> tuple[str, int, int | None] | None:
+    with create_session() as session:
+        content = session.scalars(
+            select(AssetContent).where(
+                AssetContent.path == path,
+                AssetContent.is_missing.is_(False),
+            )
+        ).first()
+        if content is None:
+            return None
+        return content.id, content.size_bytes, content.mtime_ns
+
+
+def drain_transition_queue(
+    _session: Session | None = None,
+    interrupt_check: Callable[[], bool] | None = None,
+) -> None:
     global _off_to_on_transition_in_flight
 
     pending_count = len(_PENDING_QUEUE)
     for _ in range(pending_count):
+        if interrupt_check and interrupt_check():
+            break
         entry = _PENDING_QUEUE[0]
+        preflight = _preflight_transition_entry(entry.path)
         snapshot: tuple[str, os.stat_result] | None = None
-        preparation = "ready"
-        try:
-            snapshot = snapshot_hash(entry.path)
-        except OSError:
-            preparation = "retry"
-        if snapshot is None and preparation != "retry":
+        preparation = "drop" if preflight is None else "ready"
+        if preflight is not None:
             try:
-                os.stat(entry.path)
-            except FileNotFoundError:
-                preparation = "gone"
+                snapshot = snapshot_hash(entry.path)
             except OSError:
                 preparation = "retry"
-            else:
-                preparation = "retry"
+            if snapshot is None and preparation != "retry":
+                try:
+                    os.stat(entry.path)
+                except FileNotFoundError:
+                    preparation = "gone"
+                except OSError:
+                    preparation = "retry"
+                else:
+                    preparation = "retry"
 
         def _apply(session: Session) -> str:
+            if preflight is None:
+                return "drop"
+            content_id, size_bytes, mtime_ns = preflight
+            content = session.get(AssetContent, content_id)
+            if content is None or content.is_missing or content.path != entry.path:
+                return "drop"
+            if content.size_bytes != size_bytes or content.mtime_ns != mtime_ns:
+                return "retry"
             if preparation == "retry" or (
                 snapshot is None and preparation != "gone"
             ):
                 if entry.ticks + 1 < _MAX_VERIFY_ATTEMPTS:
                     return "retry"
-                content = session.scalars(
-                    select(AssetContent).where(
-                        AssetContent.path == entry.path,
-                        AssetContent.is_missing.is_(False),
-                    )
-                ).first()
-                if content is not None:
-                    content.hash = None
+                content.hash = None
                 logging.warning(
                     "Could not verify %s in %d attempts; clearing its stored hash so the hash-mode "
                     "transition can complete",
@@ -138,33 +160,10 @@ def drain_transition_queue(_session: Session | None = None) -> None:
                     _MAX_VERIFY_ATTEMPTS,
                 )
                 return "drop"
-            content = session.scalars(
-                select(AssetContent).where(
-                    AssetContent.path == entry.path,
-                    AssetContent.is_missing.is_(False),
-                )
-            ).first()
-            if content is None:
-                return "drop"
             if preparation == "gone":
-                try:
-                    os.stat(entry.path)
-                except FileNotFoundError:
-                    mark_content_missing(session, content.id)
-                    return "drop"
-                except OSError:
-                    return "retry"
-                return "retry"
+                mark_content_missing(session, content.id)
+                return "drop"
             digest, stat = snapshot
-            try:
-                current_stat = os.stat(entry.path)
-            except OSError:
-                return "retry"
-            if (
-                current_stat.st_size != stat.st_size
-                or current_stat.st_mtime_ns != stat.st_mtime_ns
-            ):
-                return "retry"
             stored_hash = to_stored_hash(digest)
             if content.hash is None:
                 content.hash = stored_hash

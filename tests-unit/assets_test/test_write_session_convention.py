@@ -54,6 +54,8 @@ READ_ONLY_CREATE_SESSION_CALL_SITES = frozenset(
         CreateSessionCallSite("app/assets/services/asset_management.py", "resolve_asset_for_download"),
         CreateSessionCallSite("app/assets/services/asset_management.py", "asset_exists"),
         CreateSessionCallSite("app/assets/services/asset_management.py", "get_preview_file_paths"),
+        # This reads the transition row before hashing starts outside the writer lease.
+        CreateSessionCallSite("app/assets/services/hash_mode_state.py", "_preflight_transition_entry"),
         # These preflights read decision facts before metadata or hash I/O outside the writer lease.
         CreateSessionCallSite("app/assets/services/ingest.py", "_preflight_upload_record"),
         CreateSessionCallSite("app/assets/services/ingest.py", "_preflight_settle_target"),

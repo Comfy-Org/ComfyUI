@@ -11,6 +11,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
@@ -66,11 +67,16 @@ def _two_stat_admit(paths_with_stats: list[tuple[str, os.stat_result]]) -> tuple
     return admitted, watched
 
 
-def tick_watch_list(_session: Session | None = None) -> None:
+def tick_watch_list(
+    _session: Session | None = None,
+    interrupt_check: Callable[[], bool] | None = None,
+) -> None:
     from app.assets.scanner import SeedAssetSpec, insert_asset_specs
 
     queued_count = len(_WATCH_LIST)
     for _ in range(queued_count):
+        if interrupt_check and interrupt_check():
+            break
         entry = _WATCH_LIST[0]
         try:
             current = os.stat(entry.path)

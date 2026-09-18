@@ -151,9 +151,11 @@ def test_enrich_phase_does_not_count_returned_ids_as_failures(
             [],
         )
     )
-    monkeypatch.setattr(seeder_module, "drain_pending_verifications", lambda: None)
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
-    monkeypatch.setattr(seeder_module, "drain_transition_queue", lambda: None)
+    monkeypatch.setattr(
+        seeder_module, "drain_pending_verifications", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda **_kwargs: None)
+    monkeypatch.setattr(seeder_module, "drain_transition_queue", lambda **_kwargs: None)
     monkeypatch.setattr(
         seeder_module,
         "get_unenriched_assets_for_roots",
@@ -405,6 +407,80 @@ def test_root_sync_interrupt_records_the_fast_scan_cancellation_stage(
     assert scan_seeder._scan_state.cancel_stage == _ScanStage.FAST_SCAN.value
 
 
+def test_fast_watch_interrupt_records_the_fast_scan_cancellation_stage(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _WatchInterruptCaptured(Exception):
+        pass
+
+    captured_interrupt = None
+
+    monkeypatch.setattr(
+        seeder_module,
+        "sync_root_safely",
+        lambda _root, _progress, interrupt_check=None: set(),
+    )
+    monkeypatch.setattr(seeder_module, "collect_paths_for_roots", lambda _roots: [])
+    monkeypatch.setattr(
+        seeder_module,
+        "build_asset_specs",
+        lambda *_args, **_kwargs: ([], {}, 0),
+    )
+    monkeypatch.setattr(scan_seeder, "_check_pause_and_cancel", lambda _stage: False)
+
+    def capture_watch_interrupt(*, interrupt_check=None) -> None:
+        nonlocal captured_interrupt
+        captured_interrupt = interrupt_check
+        raise _WatchInterruptCaptured
+
+    monkeypatch.setattr(seeder_module, "tick_watch_list", capture_watch_interrupt)
+
+    with pytest.raises(_WatchInterruptCaptured):
+        scan_seeder._run_fast_phase(("models",))
+
+    scan_seeder._cancel_event.set()
+    assert captured_interrupt is not None
+    assert captured_interrupt() is True
+    assert scan_seeder._scan_state is not None
+    assert scan_seeder._scan_state.cancel_stage == _ScanStage.FAST_SCAN.value
+
+
+def test_enrich_drains_receive_the_enrich_interrupt_predicate(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DrainInterruptsCaptured(Exception):
+        pass
+
+    captured_interrupts = []
+
+    def capture_interrupt(*, interrupt_check=None) -> None:
+        captured_interrupts.append(interrupt_check)
+
+    def capture_transition_interrupt(*, interrupt_check=None) -> None:
+        captured_interrupts.append(interrupt_check)
+        raise _DrainInterruptsCaptured
+
+    monkeypatch.setattr(
+        seeder_module, "drain_pending_verifications", capture_interrupt
+    )
+    monkeypatch.setattr(seeder_module, "tick_watch_list", capture_interrupt)
+    monkeypatch.setattr(
+        seeder_module, "drain_transition_queue", capture_transition_interrupt
+    )
+
+    with pytest.raises(_DrainInterruptsCaptured):
+        scan_seeder._run_enrich_phase(("models",))
+
+    scan_seeder._cancel_event.set()
+    assert len(captured_interrupts) == 3
+    assert all(interrupt_check is not None for interrupt_check in captured_interrupts)
+    assert all(interrupt_check() is True for interrupt_check in captured_interrupts)
+    assert scan_seeder._scan_state is not None
+    assert scan_seeder._scan_state.cancel_stage == _ScanStage.ENRICH.value
+
+
 def test_prune_interrupt_records_the_pruning_cancellation_stage(
     scan_seeder: _AssetSeeder,
     monkeypatch: pytest.MonkeyPatch,
@@ -539,7 +615,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
         raise PermissionError("/private/models/asset.safetensors")
 
     monkeypatch.setattr(seeder_module, "insert_asset_specs", fail_insert)
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda **_kwargs: None)
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_fast_phase(("models",))
@@ -573,7 +649,7 @@ def test_fast_phase_seeds_in_bounded_batches_it_can_park_between(
             0,
         ),
     )
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda **_kwargs: None)
 
     batch_sizes: list[int] = []
     first_batch_written = threading.Event()
