@@ -30,3 +30,10 @@ def test_negative_entry_raises_instead_of_silently_misparsing():
     # expect from other sparse-attention implementations' conventions.
     with pytest.raises(ValueError):
         parse_block_list("38-45,-1")
+
+
+def test_empty_component_raises():
+    with pytest.raises(ValueError):
+        parse_block_list("1,,2")
+    with pytest.raises(ValueError):
+        parse_block_list("1,")
