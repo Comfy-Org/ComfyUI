@@ -108,11 +108,13 @@ def test_disable_actually_stops_scanning_and_ingest_not_just_http() -> None:
     from app.assets.api import routes
     from app.assets.manager import AssetsEnabled
 
-    started: list[str] = []
+    started: list[tuple] = []
     mgr = AssetsEnabled(SimpleNamespace(enable_assets=True, enable_asset_hashing=False))
     routes._ASSETS_ENABLED = True
     seeder = manager_mod.asset_seeder
     was_disabled = seeder.is_disabled()
+    real_start = seeder.start
+    seeder.start = lambda *a, **kw: started.append((a, kw))
     try:
         mgr.disable(RuntimeError("database is locked"))
 
@@ -120,10 +122,11 @@ def test_disable_actually_stops_scanning_and_ingest_not_just_http() -> None:
             "queue_output_scan's existing gate reads the seeder, so disable() must arm it"
         )
         mgr.ensure_scan_started()
-        assert started == []
+        assert started == [], "a disabled manager must not start the seeder"
         assert mgr.register_upload("/tmp/x.png", "x", "input", "", content_written=True) is None
         assert mgr.register_executed_output("/tmp/x.png", "job-1") is None
         assert mgr.register_cached_output("/tmp/x.png", "job-1") is None
     finally:
+        seeder.start = real_start
         seeder._disabled = was_disabled
         routes._ASSETS_ENABLED = False
