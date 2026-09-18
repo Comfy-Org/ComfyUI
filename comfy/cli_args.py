@@ -142,6 +142,7 @@ cache_group.add_argument("--cache-classic", action="store_true", help="Use the o
 cache_group.add_argument("--cache-lru", type=int, default=0, help="Use LRU caching with a maximum of N node results cached. May use more RAM/VRAM.")
 cache_group.add_argument("--cache-none", action="store_true", help="Reduced RAM/VRAM usage at the expense of executing every node for each run.")
 cache_group.add_argument("--high-ram", action="store_true", help="Can improve performance slightly on high RAM or on systems where pagefile use is preferred over model loading.")
+parser.add_argument("--disable-subgraph-caching", action="store_true", help="Experimental: do not keep outputs of nodes inside subgraphs in the cache between runs. Values leaving a subgraph and output nodes still cache normally. Composes with any cache mode.")
 
 attn_group = parser.add_mutually_exclusive_group()
 attn_group.add_argument("--use-split-cross-attention", action="store_true", help="Use the split cross attention optimization. Ignored when xformers is used.")
