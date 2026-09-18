@@ -4,7 +4,8 @@ from typing import Any, Callable, Protocol
 from aiohttp import web
 
 from app.assets import mode
-from app.assets.api.routes import register_assets_routes
+from app.assets.api.routes import close_assets_feature_gate, register_assets_routes
+from app.assets.event_log import emit, error_type
 from app.assets.lifecycle import record_hash_mode_transition_intent, run_shutdown, run_startup
 from app.assets.seeder import ScanPhase, asset_seeder
 from app.assets.services.ingest import (
@@ -24,6 +25,8 @@ class AssetManager(Protocol):
     def enabled(self) -> bool: ...
 
     def startup(self) -> None: ...
+
+    def disable(self, exc: BaseException) -> None: ...
 
     def shutdown(self) -> None: ...
 
@@ -83,6 +86,9 @@ class NoAssets:
         run_startup(enable_assets=False)
         record_hash_mode_transition_intent()
 
+    def disable(self, exc: BaseException) -> None:
+        return
+
     def shutdown(self) -> None:
         _shutdown_assets()
 
@@ -132,15 +138,21 @@ class NoAssets:
 class AssetsEnabled:
     def __init__(self, args: _ArgsLike) -> None:
         self._args = args
+        self._disabled = False
 
     @property
     def enabled(self) -> bool:
-        return True
+        return not self._disabled
 
     def startup(self) -> None:
         mode.init(self._args)
         record_hash_mode_transition_intent()
         run_startup(enable_assets=True)
+
+    def disable(self, exc: BaseException) -> None:
+        self._disabled = True
+        close_assets_feature_gate()
+        emit("assets.disabled", error_type=error_type(exc))
 
     def shutdown(self) -> None:
         _shutdown_assets()

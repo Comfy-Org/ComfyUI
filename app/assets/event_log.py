@@ -30,6 +30,7 @@ STAGES = frozenset({"mark_missing", "pruning", "fast_scan", "enrich", "finalize"
 STAT_SITES = frozenset({"discovery", "enrich", "reference_stat"})
 ALLOWED_EVENTS = frozenset({
     "assets.enabled",
+    "assets.disabled",
     "seeder.scan_started",
     "seeder.scan_completed",
     "seeder.scan_failed",
@@ -48,6 +49,7 @@ ALLOWED_EVENTS = frozenset({
 
 WARNING_LEVEL_EVENTS = frozenset({
     "ingest.register_failed",
+    "assets.disabled",
 })
 
 

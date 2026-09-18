@@ -1,6 +1,8 @@
+import logging
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -64,3 +66,32 @@ def test_noassets_emits_no_enabled_event(tmp_path: Path) -> None:
     output = run_quick_startup(tmp_path)
 
     assert f"{TAG} assets.enabled " not in output
+
+
+def test_disable_announces_itself_on_the_event_channel(caplog) -> None:
+    """A degrade must reach the monitor, which only reads the tagged channel.
+
+    PromptServer emits assets.enabled during __init__, before setup_database can
+    fail, so a monitor has already been told assets are up by the time a database
+    failure degrades them. Without a contradicting event it keeps believing that.
+    """
+    from app.assets.api import routes
+    from app.assets.manager import AssetsEnabled
+
+    manager = AssetsEnabled(SimpleNamespace(enable_assets=True, enable_asset_hashing=False))
+    routes._ASSETS_ENABLED = True
+    try:
+        with caplog.at_level(logging.WARNING):
+            manager.disable(FileNotFoundError(2, "No such file", "/home/alice/models/secret.db"))
+
+        assert manager.enabled is False
+        assert routes._ASSETS_ENABLED is False, "already-registered routes must start answering 503"
+
+        tagged = [line for line in caplog.text.splitlines() if f"{TAG} assets.disabled" in line]
+        assert len(tagged) == 1, "the monitor needs exactly one disabled event"
+        assert "error_type=FileNotFoundError" in tagged[0]
+        assert "/home/alice" not in tagged[0], (
+            "OSError embeds its path in str(); the event must carry only the class name"
+        )
+    finally:
+        routes._ASSETS_ENABLED = False

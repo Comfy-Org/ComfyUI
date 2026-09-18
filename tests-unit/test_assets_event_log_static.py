@@ -45,6 +45,7 @@ EXPECTED_CALL_SITES: Counter[CallSite] = Counter(
     (
         # todo 10 - seeder lifecycle + the single assets.enabled site
         CallSite("server.py", "__init__", "assets.enabled"),
+        CallSite("app/assets/manager.py", "disable", "assets.disabled"),
         CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_started"),
         CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_completed"),
         CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_failed"),

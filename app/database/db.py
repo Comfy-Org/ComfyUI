@@ -47,6 +47,10 @@ _SQLITE_RETRYABLE_LOCK_ERROR_CODES = frozenset({
 T = TypeVar("T")
 
 
+class WalUnavailableError(RuntimeError):
+    """WAL journal mode was refused, which SQLite does on network filesystems."""
+
+
 try:
     from alembic import command
     from alembic.config import Config
@@ -273,7 +277,7 @@ def _configure_runtime_connection(dbapi_connection, db_path):
         cursor.execute("PRAGMA foreign_keys=ON")
         journal_mode = cursor.execute("PRAGMA journal_mode=WAL").fetchone()[0]
         if journal_mode.lower() != "wal":
-            raise RuntimeError(
+            raise WalUnavailableError(
                 f"SQLite WAL could not be enabled for database '{db_path}'. "
                 "SQLite WAL is not supported on network filesystems."
             )
