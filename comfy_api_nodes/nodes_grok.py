@@ -325,9 +325,14 @@ class GrokImageEditNode(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="GrokImageEditNode",
-            display_name="Grok Image Edit",
+            display_name="Grok Image Edit (legacy)",
             category="partner/image/Grok",
-            description="Modify an existing image based on a text prompt",
+            description=(
+                "Modify an existing image based on a text prompt. "
+                "This class name is historical and is kept only for compatibility with existing workflows; "
+                "it supports the current models, "
+                "so prefer the GrokImageEditNodeV2 ('Grok Image Edit') node for new workflows."
+            ),
             inputs=[
                 IO.Combo.Input(
                     "model",
