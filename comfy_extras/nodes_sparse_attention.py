@@ -26,9 +26,15 @@ VSA_PLAN_CACHE = 4
 def parse_block_list(text):
     """'0, 1, 47-49' -> {0, 1, 47, 48, 49}."""
     blocks = set()
-    for part in re.findall(r"\d+\s*-\s*\d+|\d+", text or ""):
-        if "-" in part:
-            a, b = (int(x) for x in part.split("-"))
+    for part in (p.strip() for p in (text or "").split(",")):
+        if not part:
+            continue
+        match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part) or re.fullmatch(r"\d+", part)
+        if match is None:
+            raise ValueError(f"BlockSparseAttention: invalid dense_blocks entry {part!r}; "
+                              "use a block number or a range like '47-49'")
+        if match.lastindex:
+            a, b = int(match.group(1)), int(match.group(2))
             blocks.update(range(min(a, b), max(a, b) + 1))
         else:
             blocks.add(int(part))
