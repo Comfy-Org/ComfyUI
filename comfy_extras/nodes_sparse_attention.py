@@ -12,6 +12,7 @@ import torch
 
 import comfy.model_management
 import comfy.model_prefetch
+import comfy.ops
 import comfy.patcher_extension
 from comfy.ldm.minimax.model import MiniMaxH3Model
 from comfy_api.latest import ComfyExtension, io
@@ -279,15 +280,44 @@ def h3_sparse_attention(attn, x, rope_freqs, transformer_options, patch: SparseA
         sink, sink_q = patch.sinks(transformer_options, n_tokens)
 
     def chunks():
-        for i in range(0, n, PRODUCER_CHUNK):
-            if plan is None:
-                yield attn.qkv_proj(x[i:i + PRODUCER_CHUNK])
-                continue
-            idx = plan["src"][i:i + PRODUCER_CHUNK]
-            xc = x[idx.clamp_min(0)] * (idx >= 0).unsqueeze(1).to(x.dtype)   # pad rows zero
-            if gate is not None:
-                extra["coarse_gate"].view(n, heads * head_dim)[i:i + xc.shape[0]] = gate(xc)
-            yield attn.qkv_proj(xc)
+        held_ctx = None
+        held_weight = held_bias = None
+        latch_next = False
+        try:
+            for i in range(0, n, PRODUCER_CHUNK):
+                if plan is None:
+                    xc = x[i:i + PRODUCER_CHUNK]
+                else:
+                    idx = plan["src"][i:i + PRODUCER_CHUNK]
+                    xc = x[idx.clamp_min(0)] * (idx >= 0).unsqueeze(1).to(x.dtype)   # pad rows zero
+                    if gate is not None:
+                        extra["coarse_gate"].view(n, heads * head_dim)[i:i + xc.shape[0]] = gate(xc)
+
+                if held_ctx is None and latch_next:
+                    held_ctx = comfy.ops.CastBiasWeightContext(
+                        attn.qkv_proj,
+                        xc,
+                        offloadable=True,
+                        compute_dtype=xc.dtype,
+                        want_requant=True,
+                    )
+                    held_weight, held_bias = held_ctx.__enter__()
+
+                if held_ctx is None:
+                    y = attn.qkv_proj(xc)
+                    latch_next = (
+                        hasattr(attn.qkv_proj, "_v")
+                        and attn.qkv_proj.weight.device != xc.device
+                        and getattr(attn.qkv_proj, "_v_signature", None) is None
+                    )
+                else:
+                    comfy.ops.run_every_op()
+                    y = torch.nn.functional.linear(xc, held_weight, held_bias)
+
+                yield y
+        finally:
+            if held_ctx is not None:
+                held_ctx.__exit__(None, None, None)
 
     out, kmean, vscale = ck.sol_attn_chunked(
         chunks, n, heads, freqs, (qw, kw),
