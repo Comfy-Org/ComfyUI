@@ -4,7 +4,10 @@ from pathlib import Path
 import folder_paths
 import pytest
 from blake3 import blake3
+import sqlalchemy as sa
 from sqlalchemy import select
+
+import app.database.db as db_mod
 
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries.records import create_content, create_record
@@ -394,6 +397,9 @@ def test_transition_drain_clears_an_unverifiable_hash_only_on_the_third_attempt(
     )
 
 
+_MAX_DRAIN_TICKS = 10
+
+
 def test_transition_drain_retires_only_the_unreadable_path_and_hashes_the_healthy_one(
     session, temp_dir, monkeypatch
 ):
@@ -432,3 +438,54 @@ def test_transition_drain_retires_only_the_unreadable_path_and_hashes_the_health
     assert session.get(AssetContent, unreadable_id).hash is None
     assert hash_mode_state.pending_transition_count() == 0
     assert read_stored_mode(session) == "on"
+
+
+def test_transition_drain_retires_an_entry_that_keeps_losing_the_row_compare_and_set(
+    session, temp_dir, monkeypatch, caplog
+):
+    """A CAS mismatch must spend the retirement budget, not requeue forever.
+
+    The mode flip is gated on the queue draining, so an entry that always loses the
+    compare-and-set would keep the transition pending for the process lifetime and
+    spend a write transaction on every tick.
+    """
+    path = temp_dir / "always-racing.bin"
+    content_id, _ = _seed_hashed_row(session, path, b"bytes that keep moving")
+    write_stored_mode(session, "off")
+    monkeypatch.setattr(hash_mode_state._mode, "hashing_enabled", lambda: True)
+
+    transition = record_transition_intent(session)
+    enqueue_transition_work(session, transition)
+    session.commit()
+
+    # Lose the CAS on every attempt: bump the row's mtime after the preflight reads it.
+    real_preflight = hash_mode_state._preflight_transition_entry
+
+    def preflight_then_race(entry_path: str):
+        result = real_preflight(entry_path)
+        if result is not None:
+            db_mod.run_write_txn(
+                lambda s: s.execute(
+                    sa.update(AssetContent)
+                    .where(AssetContent.id == content_id)
+                    .values(mtime_ns=AssetContent.mtime_ns + 1000)
+                )
+            )
+        return result
+
+    monkeypatch.setattr(hash_mode_state, "_preflight_transition_entry", preflight_then_race)
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(_MAX_DRAIN_TICKS):
+            drain_transition_queue(session)
+            session.commit()
+            session.expire_all()
+            if hash_mode_state.pending_transition_count() == 0:
+                break
+
+    assert hash_mode_state.pending_transition_count() == 0, (
+        "a permanently racing row must be retired by the attempt budget, not requeued forever"
+    )
+    assert read_stored_mode(session) == "on", (
+        "the mode flip is gated on the queue emptying, so a stuck entry wedges it"
+    )

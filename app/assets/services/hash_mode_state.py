@@ -145,11 +145,10 @@ def drain_transition_queue(
             content = session.get(AssetContent, content_id)
             if content is None or content.is_missing or content.path != entry.path:
                 return "drop"
-            if content.size_bytes != size_bytes or content.mtime_ns != mtime_ns:
-                return "retry"
-            if preparation == "retry" or (
-                snapshot is None and preparation != "gone"
-            ):
+            row_changed = (
+                content.size_bytes != size_bytes or content.mtime_ns != mtime_ns
+            )
+            if row_changed or preparation == "retry":
                 if entry.ticks + 1 < _MAX_VERIFY_ATTEMPTS:
                     return "retry"
                 content.hash = None

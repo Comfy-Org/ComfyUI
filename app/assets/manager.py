@@ -151,6 +151,7 @@ class AssetsEnabled:
 
     def disable(self, exc: BaseException) -> None:
         self._disabled = True
+        asset_seeder.disable()
         close_assets_feature_gate()
         emit("assets.disabled", error_type=error_type(exc))
 
@@ -163,6 +164,8 @@ class AssetsEnabled:
         register_assets_routes(app, user_manager)
 
     def ensure_scan_started(self) -> None:
+        if self._disabled:
+            return None
         asset_seeder.start(roots=("models", "input", "output"))
 
     def pause_background_scan(self) -> None:
@@ -189,6 +192,8 @@ class AssetsEnabled:
         *,
         content_written: bool,
     ) -> UploadAssetView | None:
+        if self._disabled:
+            return None
         try:
             tag = upload_type if upload_type in ("input", "output") else "input"
             tags = [tag] + get_known_subfolder_tags(subfolder)
@@ -218,11 +223,15 @@ class AssetsEnabled:
     def register_executed_output(
         self, abs_path: str, job_id: str | None
     ) -> RegisteredAsset | None:
+        if self._disabled:
+            return None
         return ingest_register_executed_output(abs_path, job_id)
 
     def register_cached_output(
         self, abs_path: str, job_id: str | None
     ) -> RegisteredAsset | None:
+        if self._disabled:
+            return None
         return ingest_register_cached_output(abs_path, job_id)
 
     def set_event_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:

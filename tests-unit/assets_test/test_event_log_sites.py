@@ -95,3 +95,35 @@ def test_disable_announces_itself_on_the_event_channel(caplog) -> None:
         )
     finally:
         routes._ASSETS_ENABLED = False
+
+
+def test_disable_actually_stops_scanning_and_ingest_not_just_http() -> None:
+    """A degrade must disarm the write paths, not only the aiohttp routes.
+
+    `enabled` is read once, by PromptServer.__init__, which has already run by the
+    time setup_database can fail. So flipping it is invisible to every later caller:
+    the scanner and the three ingest entry points have to be gated directly.
+    """
+    from app.assets import manager as manager_mod
+    from app.assets.api import routes
+    from app.assets.manager import AssetsEnabled
+
+    started: list[str] = []
+    mgr = AssetsEnabled(SimpleNamespace(enable_assets=True, enable_asset_hashing=False))
+    routes._ASSETS_ENABLED = True
+    seeder = manager_mod.asset_seeder
+    was_disabled = seeder.is_disabled()
+    try:
+        mgr.disable(RuntimeError("database is locked"))
+
+        assert seeder.is_disabled(), (
+            "queue_output_scan's existing gate reads the seeder, so disable() must arm it"
+        )
+        mgr.ensure_scan_started()
+        assert started == []
+        assert mgr.register_upload("/tmp/x.png", "x", "input", "", content_written=True) is None
+        assert mgr.register_executed_output("/tmp/x.png", "job-1") is None
+        assert mgr.register_cached_output("/tmp/x.png", "job-1") is None
+    finally:
+        seeder._disabled = was_disabled
+        routes._ASSETS_ENABLED = False
