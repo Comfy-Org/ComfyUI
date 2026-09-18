@@ -1,0 +1,64 @@
+{
+  "37": {
+    "class_type": "UNETLoader",
+    "_meta": {"title": "Wan UNET"},
+    "inputs": {"unet_name": "wan2.1_t2v_1.3B.safetensors", "weight_dtype": "default"}
+  },
+  "38": {
+    "class_type": "CLIPLoader",
+    "_meta": {"title": "Wan CLIP"},
+    "inputs": {"clip_name": "umt5_xxl_umt5-xxl-enc-bf16_comfy.safetensors", "type": "wan"}
+  },
+  "39": {
+    "class_type": "VAELoader",
+    "_meta": {"title": "Wan VAE"},
+    "inputs": {"vae_name": "wan_2.1_vae.pth"}
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Prompt"},
+    "inputs": {
+      "text": "Cinematic slow dolly-in: a pristine, completely empty luxury hotel suite on a clifftop floor overlooking the Pacific Ocean, cool morning light; a single housekeeper in a white uniform slowly tucks the corner of a made bed, wipes a marble counter, and closes the door. Vast negative space, melancholic blue ocean light. Film grain, photorealistic, 8k.",
+      "clip": ["38", 0]
+    }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "_meta": {"title": "Negative Prompt"},
+    "inputs": {
+      "text": "static, blurry, watermark, text, logo, low quality, deformed, distorted face, extra limbs, oversaturated, cartoon, anime",
+      "clip": ["38", 0]
+    }
+  },
+  "40": {
+    "class_type": "EmptyHunyuanLatentVideo",
+    "_meta": {"title": "Latent Video (49 frames, 480p)"},
+    "inputs": {"width": 832, "height": 480, "length": 49, "batch_size": 1}
+  },
+  "3": {
+    "class_type": "KSampler",
+    "_meta": {"title": "KSampler"},
+    "inputs": {
+      "seed": 42,
+      "steps": 30,
+      "cfg": 6.0,
+      "sampler_name": "uni_pc",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "model": ["37", 0],
+      "positive": ["6", 0],
+      "negative": ["7", 0],
+      "latent_image": ["40", 0]
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "_meta": {"title": "VAE Decode"},
+    "inputs": {"samples": ["3", 0], "vae": ["39", 0]}
+  },
+  "10": {
+    "class_type": "SaveImage",
+    "_meta": {"title": "Save Frames"},
+    "inputs": {"images": ["8", 0], "filename_prefix": "scene"}
+  }
+}
