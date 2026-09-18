@@ -28,4 +28,6 @@ def test_dynamic_combo_valid_value_still_resolves():
 
     valid_inputs, _hidden, _v3_data = _io.get_finalized_class_inputs(DCTestNode.INPUT_TYPES(), node_inputs)
 
-    assert "combo" in valid_inputs["required"]
+    # option1's own nested input ("combo.string") must be expanded into the schema
+    # too, not just the combo selector itself.
+    assert set(valid_inputs["required"]) == {"combo", "combo.string"}
