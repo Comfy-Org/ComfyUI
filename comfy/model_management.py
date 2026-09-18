@@ -1774,7 +1774,7 @@ def force_upcast_attention_dtype():
         upcast = True
 
     if upcast:
-        return {torch.float16: torch.float32}
+        return {torch.float16: torch.float32, torch.bfloat16: torch.float32}
     else:
         return None
 

@@ -85,6 +85,39 @@ def get_attn_precision(attn_precision, current_dtype):
         return FORCE_UPCAST_ATTENTION_DTYPE[current_dtype]
     return attn_precision
 
+# MPS uses 32-bit indexing internally for many ops; a single attention matrix
+# (b*heads * seq_q * seq_k) at or above ~2^31 elements silently corrupts instead
+# of raising, regardless of how much unified memory is free. Shared by every
+# attention implementation that needs to force chunking to stay under that limit.
+MPS_MAX_ATTN_ELEMENTS = 2 ** 30
+
+def _mps_forced_attn_chunk_steps(elements_full, steps):
+    if elements_full <= MPS_MAX_ATTN_ELEMENTS:
+        return steps
+    mps_steps = 2 ** math.ceil(math.log(elements_full / MPS_MAX_ATTN_ELEMENTS, 2))
+    return max(mps_steps, steps)
+
+def _mps_cap_subquad_chunk_sizes(batch_x_heads, q_tokens, k_tokens, query_chunk_size, kv_chunk_size):
+    effective_kv = kv_chunk_size if kv_chunk_size is not None else max(1, int(math.sqrt(k_tokens)))
+    elements_full = batch_x_heads * min(query_chunk_size, q_tokens) * effective_kv
+    if elements_full <= MPS_MAX_ATTN_ELEMENTS:
+        return query_chunk_size, kv_chunk_size
+
+    # Cap kv_chunk_size too (only if the caller had set one explicitly) in case
+    # batch_x_heads*kv_chunk_size alone already exceeds the ceiling -- unrealistic
+    # for current model shapes, but keeps the "regardless of free memory" guarantee
+    # symmetric with the other MPS attention fixes rather than relying on query
+    # capping alone.
+    max_kv_for_ceiling = max(1, MPS_MAX_ATTN_ELEMENTS // batch_x_heads)
+    new_kv = min(effective_kv, max_kv_for_ceiling)
+    if kv_chunk_size is not None and new_kv < kv_chunk_size:
+        kv_chunk_size = new_kv
+        effective_kv = new_kv
+
+    new_query_chunk_size = max(1, MPS_MAX_ATTN_ELEMENTS // (batch_x_heads * effective_kv))
+    query_chunk_size = min(query_chunk_size, new_query_chunk_size)
+    return query_chunk_size, kv_chunk_size
+
 def exists(val):
     return val is not None
 
@@ -227,32 +260,50 @@ def attention_basic(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
         q, k, v = _reshape_qkv_to_heads(q, k, v, b, heads, dim_head, kwargs.get("enable_gqa", False))
         q, k, v = map(lambda t: t.permute(0, 2, 1, 3).reshape(b * heads, -1, dim_head).contiguous(), (q, k, v))
 
-    # force cast to fp32 to avoid overflowing
-    if attn_precision == torch.float32:
-        sim = einsum('b i d, b j d -> b i j', q.float(), k.float()) * scale
-    else:
-        sim = einsum('b i d, b j d -> b i j', q, k) * scale
+    steps = 1
+    if q.device.type == "mps":
+        elements_full = q.shape[0] * q.shape[1] * k.shape[1]
+        steps = _mps_forced_attn_chunk_steps(elements_full, steps)
+    slice_size = math.ceil(q.shape[1] / steps)
 
-    del q, k
-
+    is_bool_mask = False
     if exists(mask):
         if mask.dtype == torch.bool:
+            is_bool_mask = True
             mask = rearrange(mask, 'b ... -> b (...)') #TODO: check if this bool part matches pytorch attention
-            max_neg_value = -torch.finfo(sim.dtype).max
+            max_neg_value = -torch.finfo(torch.float32 if attn_precision == torch.float32 else q.dtype).max
             mask = repeat(mask, 'b j -> (b h) () j', h=h)
-            sim.masked_fill_(~mask, max_neg_value)
         else:
             if len(mask.shape) == 2:
                 bs = 1
             else:
                 bs = mask.shape[0]
             mask = mask.reshape(bs, -1, mask.shape[-2], mask.shape[-1]).expand(b, heads, -1, -1).reshape(-1, mask.shape[-2], mask.shape[-1])
-            sim.add_(mask)
 
-    # attention, what we cannot get enough of
-    sim = sim.softmax(dim=-1)
+    out = torch.empty((q.shape[0], q.shape[1], v.shape[2]), dtype=v.dtype, device=q.device)
+    for i in range(0, q.shape[1], slice_size):
+        end = min(i + slice_size, q.shape[1])
+        # force cast to fp32 to avoid overflowing
+        if attn_precision == torch.float32:
+            sim = einsum('b i d, b j d -> b i j', q[:, i:end].float(), k.float()) * scale
+        else:
+            sim = einsum('b i d, b j d -> b i j', q[:, i:end], k) * scale
 
-    out = einsum('b i j, b j d -> b i d', sim.to(v.dtype), v)
+        if exists(mask):
+            if is_bool_mask:
+                sim.masked_fill_(~mask, max_neg_value)
+            else:
+                if mask.shape[1] == 1:
+                    sim += mask
+                else:
+                    sim += mask[:, i:end]
+
+        # attention, what we cannot get enough of
+        sim = sim.softmax(dim=-1)
+
+        out[:, i:end] = einsum('b i j, b j d -> b i d', sim.to(v.dtype), v)
+
+    del q, k
 
     if skip_output_reshape:
         out = (
@@ -319,6 +370,10 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
 
     if query_chunk_size is None:
         query_chunk_size = 512
+
+    if query.device.type == "mps":
+        query_chunk_size, kv_chunk_size = _mps_cap_subquad_chunk_sizes(
+            batch_x_heads, q_tokens, k_tokens, query_chunk_size, kv_chunk_size)
 
     if mask is not None:
         if len(mask.shape) == 2:
@@ -392,6 +447,12 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
         # print(f"Expected tensor size:{tensor_size/gb:0.1f}GB, cuda free:{mem_free_cuda/gb:0.1f}GB "
         #      f"torch free:{mem_free_torch/gb:0.1f} total:{mem_free_total/gb:0.1f} steps:{steps}")
 
+    # See _mps_forced_attn_chunk_steps for why this is needed on MPS, independent
+    # of the memory-based steps calculation above.
+    if q.device.type == "mps":
+        elements_full = q.shape[0] * q.shape[1] * k.shape[1]
+        steps = _mps_forced_attn_chunk_steps(elements_full, steps)
+
     if steps > 64:
         max_res = math.floor(math.sqrt(math.sqrt(mem_free_total / 2.5)) / 8) * 64
         raise RuntimeError(f'Not enough memory, use lower resolution (max approx. {max_res}x{max_res}). '
@@ -409,7 +470,7 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     cleared_cache = False
     while True:
         try:
-            slice_size = q.shape[1] // steps if (q.shape[1] % steps) == 0 else q.shape[1]
+            slice_size = min(q.shape[1], math.ceil(q.shape[1] / steps))
             for i in range(0, q.shape[1], slice_size):
                 end = i + slice_size
                 if upcast:
@@ -427,11 +488,16 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
                         else:
                             s1 += mask[:, i:end]
 
-                s2 = s1.softmax(dim=-1).to(v.dtype)
+                s2 = s1.softmax(dim=-1)
+                if not upcast:
+                    s2 = s2.to(v.dtype)
                 del s1
                 first_op_done = True
 
-                r1[:, i:end] = einsum('b i j, b j d -> b i d', s2, v)
+                if upcast:
+                    r1[:, i:end] = einsum('b i j, b j d -> b i d', s2, v.float()).to(r1.dtype)
+                else:
+                    r1[:, i:end] = einsum('b i j, b j d -> b i d', s2, v)
                 del s2
             break
         except Exception as e:
@@ -543,6 +609,8 @@ else:
 
 @wrap_attn
 def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    attn_precision = get_attn_precision(attn_precision, q.dtype)
+
     if skip_reshape:
         b, _, _, dim_head = q.shape
     else:
@@ -559,15 +627,44 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
         if mask.ndim == 3:
             mask = mask.unsqueeze(1)
 
+    do_upcast = attn_precision == torch.float32
+    if do_upcast:
+        orig_dtype = q.dtype
+        q, k, v = q.float(), k.float(), v.float()
+        if mask is not None and mask.dtype != torch.bool:
+            mask = mask.float()
+
     sdpa_keys = ("scale", "enable_gqa")
     sdpa_extra = {k: v for k, v in kwargs.items() if k in sdpa_keys}
 
     if SDP_BATCH_LIMIT >= b:
-        out = comfy.ops.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False, **sdpa_extra)
-        if not skip_output_reshape:
-            out = (
-                out.transpose(1, 2).reshape(b, -1, heads * dim_head)
-            )
+        # See _mps_forced_attn_chunk_steps: on MPS a single attention matrix over
+        # ~2^31 elements silently corrupts, so chunk over seq_q to stay under that.
+        steps = 1
+        if q.device.type == "mps":
+            elements_full = q.shape[0] * q.shape[1] * q.shape[2] * k.shape[2]
+            steps = _mps_forced_attn_chunk_steps(elements_full, steps)
+
+        if steps == 1:
+            out = comfy.ops.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0, is_causal=False, **sdpa_extra)
+            if not skip_output_reshape:
+                out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+        else:
+            slice_size = math.ceil(q.shape[2] / steps)
+            raw_out = torch.empty((b, q.shape[1], q.shape[2], dim_head), dtype=q.dtype, layout=q.layout, device=q.device)
+            for i in range(0, q.shape[2], slice_size):
+                end = i + slice_size
+                mask_chunk = mask
+                if mask is not None and mask.shape[-2] != 1:
+                    mask_chunk = mask[..., i:end, :]
+                raw_out[:, :, i:end] = comfy.ops.scaled_dot_product_attention(
+                    q[:, :, i:end], k, v, attn_mask=mask_chunk, dropout_p=0.0, is_causal=False, **sdpa_extra
+                )
+
+            if skip_output_reshape:
+                out = raw_out
+            else:
+                out = raw_out.transpose(1, 2).reshape(b, -1, heads * dim_head)
     else:
         out = torch.empty((b, q.shape[2], heads * dim_head), dtype=q.dtype, layout=q.layout, device=q.device)
         for i in range(0, b, SDP_BATCH_LIMIT):
@@ -583,6 +680,9 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
                 attn_mask=m,
                 dropout_p=0.0, is_causal=False, **sdpa_extra
             ).transpose(1, 2).reshape(-1, q.shape[2], heads * dim_head)
+
+    if do_upcast:
+        out = out.to(orig_dtype)
     return out
 
 def _comfy_kitchen_int8_inputs(q, k, v, heads, mask, skip_reshape, enable_gqa):
