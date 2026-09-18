@@ -39,7 +39,8 @@ jobs:
         - uses: actions/setup-python@v5
           with:
             python-version: 3.${{ inputs.python_minor }}.${{ inputs.python_patch }}
-        - shell: bash
+        - name: Set up embedded Python and install nightly PyTorch
+          shell: bash
           run: |
             cd ..
             cp -r ComfyUI ComfyUI_copy
@@ -55,8 +56,11 @@ jobs:
             sed -i '1i../ComfyUI' ./python3${{ inputs.python_minor }}._pth
 
             rm ./Lib/site-packages/torch/lib/dnnl.lib #I don't think this is actually used and I need the space
-            cd ..
 
+        - name: Bundle nightly portable layout
+          shell: bash
+          run: |
+            cd ..
             git clone --depth 1 https://github.com/comfyanonymous/taesd
             cp taesd/*.safetensors ./ComfyUI_copy/models/vae_approx/
 
@@ -74,12 +78,18 @@ jobs:
             echo "call update_comfyui.bat nopause
             ..\python_embeded\python.exe -s -m pip install --upgrade --pre torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/nightly/cu${{ inputs.cu }} -r ../ComfyUI/requirements.txt pygit2
             pause" > ./update/update_comfyui_and_python_dependencies.bat
-            cd ..
 
+        - name: Create nightly portable 7z archive
+          shell: bash
+          run: |
+            cd ..
             "C:\Program Files\7-Zip\7z.exe" a -t7z -m0=lzma2 -mx=9 -mfb=128 -md=512m -ms=on -mf=BCJ2 ComfyUI_windows_portable_nightly_pytorch.7z ComfyUI_windows_portable_nightly_pytorch
             mv ComfyUI_windows_portable_nightly_pytorch.7z ComfyUI/ComfyUI_windows_portable_nvidia_or_cpu_nightly_pytorch.7z
 
-            cd ComfyUI_windows_portable_nightly_pytorch
+        - name: Quick-test nightly portable package
+          shell: bash
+          run: |
+            cd ../ComfyUI_windows_portable_nightly_pytorch
             python_embeded/python.exe -s ComfyUI/main.py --quick-test-for-ci --cpu
 
             ls
