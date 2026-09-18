@@ -22,6 +22,29 @@ if model_management.xformers_enabled():
     import xformers.ops
 
 SAGE_ATTENTION_IS_AVAILABLE = False
+SAGE_SMOOTH_K_MIN_SEQ = 1024   # never smooth short key sequences (text encoder, cross-attention)
+SAGE_SMOOTH_K_MIN_MEAN_RATIO = 0.8   # smooth only when the shared key component dominates the keys
+
+
+def _sage_should_smooth_k(k, tensor_layout):
+    """SageAttention key smoothing subtracts the per-head key mean before quantizing K to int8.
+    It is exact (softmax ignores a per-row constant) and matters when the keys share a large
+    common component that would otherwise consume the int8 range. It is useless or slightly
+    harmful when they do not, and harmful on short sequences where the mean is the signal.
+    Gate on both: sequence length, and the size of the key mean relative to the keys."""
+    seq_dim = 2 if tensor_layout == "HND" else 1
+    seq_len = k.shape[seq_dim]
+    if seq_len < SAGE_SMOOTH_K_MIN_SEQ:
+        return False
+    # A global statistic: a strided token subsample is plenty, and fp32 accumulation
+    # without materialising an fp32 copy keeps this well under a millisecond.
+    step = max(1, seq_len // 512)
+    ks = k[(slice(None),) * seq_dim + (slice(0, None, step),)]
+    mean_norm = torch.linalg.vector_norm(ks.mean(dim=seq_dim, dtype=torch.float32), dim=-1).mean()
+    key_norm = torch.linalg.vector_norm(ks, dim=-1, dtype=torch.float32).mean()
+    return bool(mean_norm > SAGE_SMOOTH_K_MIN_MEAN_RATIO * key_norm)
+
+
 SAGE_ATTENTION_SUPPORTS_MASK = False
 try:
     from sageattention import sageattn
@@ -671,7 +694,10 @@ def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=
         if mask.ndim == 3:
             mask = mask.unsqueeze(1)
 
-    sage_kwargs = {"is_causal": False, "tensor_layout": tensor_layout, "sm_scale": kwargs.get("scale", None), "smooth_k": False}
+    smooth_k = _sage_should_smooth_k(k, tensor_layout)
+    if smooth_k:
+        k = k.clone()  # sageattention 1.x subtracts the key mean in place
+    sage_kwargs = {"is_causal": False, "tensor_layout": tensor_layout, "sm_scale": kwargs.get("scale", None), "smooth_k": smooth_k}
     if mask is not None:
         sage_kwargs["attn_mask"] = mask
 
