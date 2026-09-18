@@ -1234,8 +1234,13 @@ class WanAnimateToVideo(io.ComfyNode):
                 if character_mask.ndim == 4:
                     character_mask = character_mask.unsqueeze(1)
                 character_mask = comfy.utils.common_upscale(character_mask[:, :, :length], concat_latent_image.shape[-1], concat_latent_image.shape[-2], "nearest-exact", "center")
-                if character_mask.shape[2] > ref_images_num:
-                    mask_refmotion[:, :, ref_images_num:character_mask.shape[2]] = character_mask[:, :, ref_images_num:]
+                # Same row layout as the continue_motion rows above: pixel frame 0 fills the 4 rows of latent 0, frame f >= 1 sits at row f + 3.
+                if ref_images_num == 0:
+                    mask_refmotion[:, :, :4] = character_mask[:, :, :1]
+                start = max(ref_images_num, 1)
+                end = min(character_mask.shape[2], latent_length * 4 - 3)
+                if end > start:
+                    mask_refmotion[:, :, start + 3:end + 3] = character_mask[:, :, start:end]
 
         concat_latent_image = torch.cat((concat_latent_image, vae.encode(image[:, :, :, :3])), dim=2)
 
