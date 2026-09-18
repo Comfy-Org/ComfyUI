@@ -21,7 +21,8 @@ def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
     else:
         device = pos.device
 
-    scale = torch.linspace(0, (dim - 2) / dim, steps=dim//2, dtype=torch.float64, device=device)
+    dtype = torch.float32 if comfy.model_management.is_ixuca() else torch.float64
+    scale = torch.linspace(0, (dim - 2) / dim, steps=dim//2, dtype=dtype, device=device)
     omega = 1.0 / (theta**scale)
     out = torch.einsum("...n,d->...nd", pos.to(dtype=torch.float32, device=device), omega)
     out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
