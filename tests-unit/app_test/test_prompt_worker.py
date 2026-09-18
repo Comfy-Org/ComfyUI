@@ -8,10 +8,10 @@ from comfy.cli_args import args
 _original_cpu = args.cpu
 if not torch.cuda.is_available():
     args.cpu = True
-
-import app.prompt_worker as prompt_worker_module  # noqa: E402
-
-args.cpu = _original_cpu
+try:
+    import app.prompt_worker as prompt_worker_module
+finally:
+    args.cpu = _original_cpu
 
 class LoopEscape(Exception):
     pass
