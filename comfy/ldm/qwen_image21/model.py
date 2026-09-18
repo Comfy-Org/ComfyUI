@@ -321,7 +321,7 @@ class QwenImage21Transformer2DModel(nn.Module):
         blocks_replace = transformer_options.get("patches_replace", {}).get("dit", {})
         cache, cached = None, False
         # a cached step runs target rows only, so anything hooked into a block would see a different sequence from step 2
-        hooked = blocks_replace or patches.get("single_block") or patches.get("attn1_patch")
+        hooked = blocks_replace or patches.get("post_input") or patches.get("single_block") or patches.get("attn1_patch")
         if self.prefix_cache_enabled and prefix_len > 0 and not hooked:
             key = prefix_cache_key(x, context, ref_latents, image_slots)
             cache_bytes = 2 * len(self.transformer_blocks) * B * prefix_len * self.inner_dim * hidden_states.element_size()

@@ -830,8 +830,8 @@ class VAE:
                 self.working_dtypes = [torch.bfloat16, torch.float32]
             elif "decoder.middle.0.residual.0.gamma" in sd:
                 wan22_layout = "decoder.upsamples.0.upsamples.0.residual.2.weight" in sd
-                head = sd["decoder.head.2.weight"]
-                if wan22_layout and head.shape[2] == 1:  # Qwen Image 2.1 VAE: Wan 2.2 layout, temporal kernel 1, no patchify, RGBA
+                head = sd.get("decoder.head.2.weight", None)
+                if wan22_layout and head is not None and head.ndim == 5 and head.shape[2] == 1:  # Qwen Image 2.1 VAE: Wan 2.2 layout, temporal kernel 1, no patchify, RGBA
                     self.upscale_ratio = 16
                     self.downscale_ratio = 16
                     self.latent_channels = 64

@@ -959,7 +959,8 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["num_layers"] = count_blocks(state_dict_keys, '{}transformer_blocks.'.format(key_prefix) + '{}.')
         return dit_config
 
-    if '{}txt_in.text_norm.weight'.format(key_prefix) in state_dict_keys and '{}modulation.1.weight'.format(key_prefix) in state_dict_keys:  # Qwen Image 2.1
+    qwen_image21_keys = ['txt_in.text_norm.weight', 'modulation.1.weight', 'transformer_blocks.0.attn.norm_q.weight', 'img_in.weight', 'proj_out.weight']
+    if all('{}{}'.format(key_prefix, k) in state_dict_keys for k in qwen_image21_keys) and any('{}transformer_blocks.0.img_mlp.{}.weight'.format(key_prefix, k) in state_dict_keys for k in ('gate_up', 'proj')):  # Qwen Image 2.1
         dit_config = {}
         dit_config["image_model"] = "qwen_image21"
         head_dim = state_dict['{}transformer_blocks.0.attn.norm_q.weight'.format(key_prefix)].shape[0]

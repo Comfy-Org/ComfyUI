@@ -158,6 +158,7 @@ class TextEncodeQwenImage21(io.ComfyNode):
                 height = round(math.sqrt(resolution * resolution / ratio) / 32) * 32
             else:
                 width, height = round(samples.shape[3] / 32) * 32, round(samples.shape[2] / 32) * 32
+            width, height = max(32, width), max(32, height)
             if (width, height) == (samples.shape[3], samples.shape[2]):
                 s = image[:1]
             else:
