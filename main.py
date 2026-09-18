@@ -317,6 +317,7 @@ def cuda_malloc_warning():
 
 
 def prompt_worker(q, server_instance, asset_manager):
+    """Drain the prompt queue, executing each item and keeping the loop alive on exception."""
     current_time: float = 0.0
     cache_ram = 0
     cache_ram_inactive = 0
@@ -359,8 +360,14 @@ def prompt_worker(q, server_instance, asset_manager):
                 extra_data[k] = sensitive[k]
 
             asset_manager.pause_background_scan()
-            e.execute(item[2], prompt_id, extra_data, item[4])
-
+            try:
+                e.execute(item[2], prompt_id, extra_data, item[4])
+            except Exception:
+                logging.exception(
+                    "Unhandled exception escaped PromptExecutor.execute; "
+                    "recording the prompt as failed and keeping prompt_worker alive")
+                e.success = False
+                e.history_result = getattr(e, "history_result", None) or {}
             need_gc = True
 
             remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
