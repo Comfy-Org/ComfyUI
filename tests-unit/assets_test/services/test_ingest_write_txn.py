@@ -115,85 +115,100 @@ def stubbed_write_txn(monkeypatch) -> _StubbedWriteTxn:
     return barrier
 
 
-def test_reused_upload_refuses_after_four_stale_preflights(
-    stubbed_write_txn, monkeypatch
-) -> None:
+def _reuse_path(monkeypatch, _tmp):
     preflight = SimpleNamespace(signature=object())
     prepared = object()
-    attempts: list[object] = []
-
-    monkeypatch.setattr(ingest, "_preflight_upload_record", lambda *_args: preflight)
-    monkeypatch.setattr(ingest, "_prepare_upload_record", lambda _preflight: prepared)
-    monkeypatch.setattr(ingest, "_assert_signature_current", lambda _signature: None)
-
-    def stale_apply(_session, observed_prepared):
-        attempts.append(observed_prepared)
-        raise ingest._PreflightStale
-
-    monkeypatch.setattr(ingest, "_apply_reused_upload_record", stale_apply)
-
+    monkeypatch.setattr(ingest, "_preflight_upload_record", lambda *_a: preflight)
+    monkeypatch.setattr(ingest, "_prepare_upload_record", lambda _p: prepared)
     spec = ingest._UploadRecordSpec("asset", [], None, {}, None)
-    with pytest.raises(ingest.UploadUnstableError):
-        ingest._reuse_qualified_content("blake3:hash", spec)
+    return (
+        "_apply_reused_upload_record",
+        prepared,
+        lambda: ingest._reuse_qualified_content("blake3:hash", spec),
+    )
 
-    assert attempts == [prepared, prepared, prepared, prepared]
 
-
-def test_settle_destination_refuses_after_four_stale_preflights(
-    stubbed_write_txn, monkeypatch
-) -> None:
+def _settle_path(monkeypatch, _tmp):
     preflight = SimpleNamespace(signature=object())
     prepared = SimpleNamespace(facts=None)
-    attempts: list[object] = []
-
-    monkeypatch.setattr(ingest, "_preflight_settle_target", lambda _dest: preflight)
-    monkeypatch.setattr(ingest, "_prepare_settle_target", lambda _preflight: prepared)
-    monkeypatch.setattr(ingest, "_assert_signature_current", lambda _signature: None)
-
-    def stale_apply(_session, observed_prepared):
-        attempts.append(observed_prepared)
-        raise ingest._PreflightStale
-
-    monkeypatch.setattr(ingest, "_apply_settle_target", stale_apply)
-
-    with pytest.raises(ingest.UploadUnstableError):
-        ingest._settle_destination_before_write(_output_path("settle-unstable.bin"))
-
-    assert attempts == [prepared, prepared, prepared, prepared]
+    monkeypatch.setattr(ingest, "_preflight_settle_target", lambda _d: preflight)
+    monkeypatch.setattr(ingest, "_prepare_settle_target", lambda _p: prepared)
+    return (
+        "_apply_settle_target",
+        prepared,
+        lambda: ingest._settle_destination_before_write(_output_path("settle-unstable.bin")),
+    )
 
 
-def test_cached_registration_gives_up_after_four_stale_preflights(
-    stubbed_write_txn, monkeypatch, caplog
-) -> None:
+def _cached_path(monkeypatch, _tmp):
     path = _output_path("cached-always-stale.bin")
     with open(path, "wb") as file:
         file.write(b"output")
-
     preflight = SimpleNamespace(
         content_id="content-always-stale",
         sibling_id=None,
         sibling_metadata=None,
         signature=None,
     )
-    attempts: list[str] = []
+    monkeypatch.setattr(ingest, "_preflight_cached_registration", lambda _l: preflight)
+    return "_apply_cached_registration", None, lambda: ingest.register_cached_output(path)
 
+
+@pytest.mark.parametrize(
+    ("build_path", "raises"),
+    [
+        pytest.param(_reuse_path, True, id="reused-upload"),
+        pytest.param(_settle_path, True, id="settle-destination"),
+        pytest.param(_cached_path, False, id="cached-registration"),
+    ],
+)
+def test_ingest_paths_refuse_after_four_stale_preflights(
+    stubbed_write_txn, monkeypatch, tmp_path, build_path, raises
+) -> None:
+    """A preflight that never settles is refused, not persisted from mixed facts."""
+    monkeypatch.setattr(ingest, "_assert_signature_current", lambda _s: None)
+    apply_name, expected_prepared, invoke = build_path(monkeypatch, tmp_path)
+    attempts: list[object] = []
+
+    def stale_apply(_session, observed, *_args):
+        attempts.append(observed)
+        raise ingest._PreflightStale
+
+    monkeypatch.setattr(ingest, apply_name, stale_apply)
+
+    if raises:
+        with pytest.raises(ingest.UploadUnstableError):
+            invoke()
+    else:
+        assert invoke() is None
+
+    assert len(attempts) == 4, "the retry budget is four attempts, then refusal"
+    if expected_prepared is not None:
+        assert attempts == [expected_prepared] * 4
+
+
+def test_cached_registration_refusal_is_an_outcome_not_a_crash(
+    stubbed_write_txn, monkeypatch, caplog
+) -> None:
+    path = _output_path("cached-refusal-logging.bin")
+    with open(path, "wb") as file:
+        file.write(b"output")
     monkeypatch.setattr(
-        ingest, "_preflight_cached_registration", lambda _locator: preflight
+        ingest,
+        "_preflight_cached_registration",
+        lambda _l: SimpleNamespace(
+            content_id="c", sibling_id=None, sibling_metadata=None, signature=None
+        ),
     )
 
     def stale_apply(_session, _preflight, *_args):
-        attempts.append("apply")
         raise ingest._PreflightStale
 
     monkeypatch.setattr(ingest, "_apply_cached_registration", stale_apply)
 
-    try:
-        with caplog.at_level(logging.INFO):
-            assert ingest.register_cached_output(path) is None
-    finally:
-        os.unlink(path)
+    with caplog.at_level(logging.INFO):
+        assert ingest.register_cached_output(path) is None
 
-    assert len(attempts) == 4
     warnings = [
         r.getMessage()
         for r in caplog.records
@@ -865,39 +880,55 @@ def test_new_content_retries_when_pretransaction_signature_check_is_stale_once(
     assert checks == 2
 
 
-def test_executed_registration_reports_exhausted_locked_retries(monkeypatch, caplog) -> None:
-    path = _output_path("executed-locked-retries.bin")
+def _raise_locked(_work):
+    raise OperationalError("INSERT", {}, sqlite3.OperationalError("database is locked"))
+
+
+def _raise_integrity(_work):
+    raise IntegrityError("INSERT", {}, sqlite3.IntegrityError("constraint failed"))
+
+
+@pytest.mark.parametrize(
+    ("failure", "kind", "job_id", "expected"),
+    [
+        pytest.param(
+            _raise_locked, "executed", "job-locked",
+            "error_type=OperationalError job_id=job-locked output_kind=executed",
+            id="executed-exhausted-lock-retries",
+        ),
+        pytest.param(
+            _raise_integrity, "executed", "job-integrity",
+            "error_type=IntegrityError job_id=job-integrity output_kind=executed",
+            id="executed-non-retryable-write",
+        ),
+        pytest.param(
+            _raise_integrity, "cached", None,
+            "error_type=IntegrityError output_kind=cached",
+            id="cached-terminal-write",
+        ),
+    ],
+)
+def test_registration_failure_is_reported_and_never_raised(
+    mock_create_session, monkeypatch, caplog, failure, kind, job_id, expected
+) -> None:
+    """A terminal write failure yields no asset id and one structured event."""
+    path = _output_path(f"registration-failure-{kind}-{job_id}.bin")
     with open(path, "wb") as file:
         file.write(b"output")
+    if kind == "cached":
+        with mock_create_session() as session:
+            create_content(session, path, size_bytes=6)
+            session.commit()
 
-    def exhausted_retries(_work):
-        raise OperationalError("INSERT", {}, sqlite3.OperationalError("database is locked"))
-
-    monkeypatch.setattr(ingest, "run_write_txn", exhausted_retries)
+    monkeypatch.setattr(ingest, "run_write_txn", failure)
+    register = (
+        ingest.register_executed_output if kind == "executed" else ingest.register_cached_output
+    )
     try:
         with caplog.at_level(logging.INFO):
-            assert ingest.register_executed_output(path, job_id="job-locked") is None
+            assert register(path, job_id=job_id) is None
         assert _registration_failure_event(caplog) == (
-            "[assets-event] ingest.register_failed error_type=OperationalError job_id=job-locked output_kind=executed"
-        )
-    finally:
-        os.unlink(path)
-
-
-def test_executed_registration_reports_non_retryable_write_failure(monkeypatch, caplog) -> None:
-    path = _output_path("executed-non-retryable.bin")
-    with open(path, "wb") as file:
-        file.write(b"output")
-
-    def non_retryable_failure(_work):
-        raise IntegrityError("INSERT", {}, sqlite3.IntegrityError("constraint failed"))
-
-    monkeypatch.setattr(ingest, "run_write_txn", non_retryable_failure)
-    try:
-        with caplog.at_level(logging.INFO):
-            assert ingest.register_executed_output(path, job_id="job-integrity") is None
-        assert _registration_failure_event(caplog) == (
-            "[assets-event] ingest.register_failed error_type=IntegrityError job_id=job-integrity output_kind=executed"
+            f"[assets-event] ingest.register_failed {expected}"
         )
     finally:
         os.unlink(path)
@@ -911,30 +942,6 @@ def test_executed_registration_reports_preflight_os_error(monkeypatch, caplog) -
     assert _registration_failure_event(caplog) == (
         "[assets-event] ingest.register_failed error_type=OSError job_id=job-preflight output_kind=executed"
     )
-
-
-def test_cached_registration_reports_terminal_write_failure(
-    mock_create_session, monkeypatch, caplog
-) -> None:
-    path = _output_path("cached-terminal-failure.bin")
-    with open(path, "wb") as file:
-        file.write(b"output")
-    with mock_create_session() as session:
-        create_content(session, path, size_bytes=6)
-        session.commit()
-
-    def non_retryable_failure(_work):
-        raise IntegrityError("INSERT", {}, sqlite3.IntegrityError("constraint failed"))
-
-    monkeypatch.setattr(ingest, "run_write_txn", non_retryable_failure)
-    try:
-        with caplog.at_level(logging.INFO):
-            assert ingest.register_cached_output(path, job_id=None) is None
-        assert _registration_failure_event(caplog) == (
-            "[assets-event] ingest.register_failed error_type=IntegrityError output_kind=cached"
-        )
-    finally:
-        os.unlink(path)
 
 
 def test_cached_registration_apply_rejects_changed_content_row_with_sibling(
