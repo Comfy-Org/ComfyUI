@@ -298,8 +298,11 @@ class Attention(nn.Module):
             # fused per-head RMSNorm + partial split-half rope, in place when autograd is off
             rms_rope = (comfy.quant_ops.ck.rms_rope_split_half if torch.is_grad_enabled()
                         else comfy.quant_ops.ck.rms_rope_split_half_)
+            # qk_norm_scale is a non-persistent buffer on this module, which the
+            # lowvram loader's per-parameter device transfer never touches (it
+            # only moves modules that own weights); keep it in step with query.
             query, key = rms_rope(
-                query, key, rotary_pos_emb, self.qk_norm_scale,
+                query, key, rotary_pos_emb, self.qk_norm_scale.to(query.device),
                 epsilon=self.norm_q.eps, rot_dim=rotary_pos_emb.shape[-3] * 2)
         else:
             query = comfy.rmsnorm.rms_norm(query, self.norm_q.weight, self.norm_q.eps)
