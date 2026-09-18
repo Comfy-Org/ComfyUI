@@ -1,7 +1,15 @@
 #Rename this to extra_model_paths.yaml and ComfyUI will load it
+#
+# DEPRECATED: extra_model_paths.yaml is superseded by extra_paths.yaml, which supports
+# all path configuration (system dirs, custom_nodes, and models) in a cleaner format.
+# See extra_paths.yaml.example. This file continues to work for backward compatibility.
 
 #config for comfyui
 #your base path should be either an existing comfy install or a central folder where you store all of your models, loras, etc.
+
+# When base_path is set, any standard subdirectory that exists on disk is automatically
+# registered — the explicit paths below are optional and only needed to override a
+# category or point it to a non-standard location.
 
 #comfyui:
 #     base_path: path/to/comfyui/
