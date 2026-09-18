@@ -40,6 +40,7 @@ class TextGenerate(io.ComfyNode):
                 io.DynamicCombo.Input("sampling_mode", options=sampling_options, display_name="Sampling Mode"),
                 io.Boolean.Input("thinking", optional=True, default=False, tooltip="Operate in thinking mode if the model supports it."),
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
+                io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth; 2-5 pins it. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
             ],
             outputs=[
                 io.String.Output(display_name="generated_text"),
@@ -47,7 +48,9 @@ class TextGenerate(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto") -> io.NodeOutput:
+
+        mtp = False if mtp == "off" else (True if mtp == "auto" else int(mtp))
 
         tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio)
 
@@ -71,7 +74,8 @@ class TextGenerate(io.ComfyNode):
             min_p=min_p,
             repetition_penalty=repetition_penalty,
             presence_penalty=presence_penalty,
-            seed=seed
+            seed=seed,
+            mtp=mtp
         )
 
         generated_text = clip.decode(generated_ids)
@@ -225,7 +229,7 @@ class TextGenerateLTX2Prompt(TextGenerate):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto") -> io.NodeOutput:
         # Gemma 3 and Gemma 4 use different chat-turn markers and image tokens.
         # The Gemma 4 text encoder is the LTX 2.4 path; Gemma 3 is LTX 2.0.
         is_gemma4 = "gemma4" in getattr(clip.tokenizer, "clip_name", "")
@@ -254,7 +258,7 @@ class TextGenerateLTX2Prompt(TextGenerate):
                 f"<start_of_turn>model\n"
             )
 
-        out = super().execute(clip, formatted_prompt, max_length, sampling_mode, image=image, thinking=thinking, use_default_template=use_default_template, video=video, audio=audio)
+        out = super().execute(clip, formatted_prompt, max_length, sampling_mode, image=image, thinking=thinking, use_default_template=use_default_template, video=video, audio=audio, mtp=mtp)
 
         # Drop reasoning, including a block left unclosed by max_length. Both system prompts ask
         # for the original prompt back when there is nothing to give; empty conditions on nothing.

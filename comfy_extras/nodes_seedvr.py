@@ -426,7 +426,7 @@ class SeedVR2TemporalChunk(io.ComfyNode):
         return io.Schema(
             node_id="SeedVR2TemporalChunk",
             display_name="Split SeedVR2 Latent",
-            category="model/latent/batch",
+            category="model/latent/seedvr",
             description="Split a SeedVR2 video latent into overlapping temporal chunks small enough to sample one at a time within VRAM, wiring latents outputs to both Apply SeedVR2 Conditioning and the sampler latent input before recombining with Merge SeedVR2 Latents.",
             search_aliases=["seedvr2", "split", "chunk", "temporal", "video upscale", "rebatch"],
             inputs=[
@@ -520,7 +520,7 @@ class SeedVR2TemporalMerge(io.ComfyNode):
         return io.Schema(
             node_id="SeedVR2TemporalMerge",
             display_name="Merge SeedVR2 Latents",
-            category="model/latent/batch",
+            category="model/latent/seedvr",
             is_input_list=True,
             description="Recombine sampled SeedVR2 latent temporal chunks into one latent, crossfading each overlap with a Hann window sized by the temporal_overlap wired from Split SeedVR2 Latent.",
             search_aliases=["seedvr2", "merge", "temporal", "hann", "crossfade"],
