@@ -239,7 +239,14 @@ def test_enrichment_hashing_does_not_hold_the_write_lock(
 
     content_id, record_id = db_mod.run_write_txn(_seed)
 
-    row = scanner.UnenrichedContent(content_id, record_id, str(path), True)
+    row = scanner.UnenrichedContent(
+        content_id,
+        record_id,
+        str(path),
+        True,
+        observed_size_bytes=stat.st_size,
+        observed_mtime_ns=stat.st_mtime_ns,
+    )
 
     entered = threading.Event()
     release = threading.Event()
@@ -286,7 +293,14 @@ def test_enrichment_metadata_extraction_does_not_hold_the_write_lock(
 
     content_id, record_id = db_mod.run_write_txn(_seed)
 
-    row = scanner.UnenrichedContent(content_id, record_id, str(path), False)
+    row = scanner.UnenrichedContent(
+        content_id,
+        record_id,
+        str(path),
+        False,
+        observed_size_bytes=stat.st_size,
+        observed_mtime_ns=stat.st_mtime_ns,
+    )
 
     entered = threading.Event()
     release = threading.Event()
@@ -315,6 +329,61 @@ def test_enrichment_metadata_extraction_does_not_hold_the_write_lock(
 
     assert probe_error is None, _LEASE_HELD
     assert result["outcome"] == (1, [])
+
+
+def test_enrichment_apply_does_not_stat_inside_write_transaction(
+    file_database, tmp_path, monkeypatch
+):
+    path = tmp_path / "enrich-without-in-transaction-stat.bin"
+    path.write_bytes(b"prepared before the write")
+    stat_result = path.stat()
+
+    def seed(session):
+        content = create_content(
+            session,
+            str(path),
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+        )
+        record = create_record(session, content.id, path.name)
+        return content.id, record.id
+
+    content_id, record_id = db_mod.run_write_txn(seed)
+    row = scanner.UnenrichedContent(
+        content_id,
+        record_id,
+        str(path),
+        observed_size_bytes=stat_result.st_size,
+        observed_mtime_ns=stat_result.st_mtime_ns,
+    )
+    real_run_write_txn = scanner.run_write_txn
+    real_stat = scanner.os.stat
+    inside = False
+
+    def track_write_transaction(work):
+        def tracked_work(session):
+            nonlocal inside
+            inside = True
+            try:
+                return work(session)
+            finally:
+                inside = False
+
+        return real_run_write_txn(tracked_work)
+
+    def reject_in_transaction_stat(*args, **kwargs):
+        if inside:
+            raise AssertionError("enrichment stat ran inside the write transaction")
+        return real_stat(*args, **kwargs)
+
+    monkeypatch.setattr(scanner, "run_write_txn", track_write_transaction)
+    monkeypatch.setattr(scanner.os, "stat", reject_in_transaction_stat)
+
+    result = scanner.enrich_assets_batch(
+        [row], extract_metadata=True, compute_hash=False
+    )
+
+    assert result == (1, [])
 
 
 def test_scanner_reference_stat_walk_does_not_hold_the_write_lock(

@@ -52,7 +52,7 @@ def test_register_executed_output_keeps_job_id_during_scanner_write_train(
         Image.new("RGB", (1, 1), (255, 0, 0)).save(output_path)
 
         scanner_rows: list[scanner.UnenrichedContent] = []
-        for index in range(4):
+        for index in range(30):
             scanner_path = output_directory / f"scanner-{index}.bin"
             scanner_path.write_bytes(f"scanner-{index}".encode())
             stat_result = scanner_path.stat()
@@ -71,6 +71,8 @@ def test_register_executed_output_keeps_job_id_during_scanner_write_train(
                         record.id,
                         str(path),
                         needs_hash=True,
+                        observed_size_bytes=stat.st_size,
+                        observed_mtime_ns=stat.st_mtime_ns,
                     )
                 )
 
@@ -80,7 +82,7 @@ def test_register_executed_output_keeps_job_id_during_scanner_write_train(
         release_first_scanner_write = threading.Event()
         second_scanner_write_committed = threading.Event()
         registration_started = threading.Event()
-        original_apply = scanner._apply_enrichment
+        original_apply = scanner._apply_enrichments
         original_run_write_txn = scanner.run_write_txn
         original_is_retryable_lock_error = db_mod._is_retryable_lock_error
         scanner_writes = 0
@@ -88,15 +90,15 @@ def test_register_executed_output_keeps_job_id_during_scanner_write_train(
         registration_thread_id: list[int | None] = [None]
         registration_blocked = threading.Event()
 
-        def block_first_scanner_write(session, prepared):
+        def block_first_scanner_write(session, prepared_list):
             nonlocal scanner_writes
-            updated = original_apply(session, prepared)
+            applied = original_apply(session, prepared_list)
             with scanner_writes_lock:
                 is_first_write = scanner_writes == 0
             if is_first_write:
                 first_scanner_write_entered.set()
                 assert release_first_scanner_write.wait(timeout=5)
-            return updated
+            return applied
 
         def count_scanner_writes(work):
             nonlocal scanner_writes
@@ -113,7 +115,7 @@ def test_register_executed_output_keeps_job_id_during_scanner_write_train(
                 registration_blocked.set()
             return is_retryable
 
-        monkeypatch.setattr(scanner, "_apply_enrichment", block_first_scanner_write)
+        monkeypatch.setattr(scanner, "_apply_enrichments", block_first_scanner_write)
         monkeypatch.setattr(scanner, "run_write_txn", count_scanner_writes)
         monkeypatch.setattr(db_mod, "_is_retryable_lock_error", observe_registration_lock)
         scanner_result: dict[str, tuple[int, list[str]]] = {}
@@ -153,7 +155,7 @@ def test_register_executed_output_keeps_job_id_during_scanner_write_train(
         assert not scanner_worker.is_alive()
         assert not registration_worker.is_alive()
         assert scanner_result["value"] == (len(scanner_rows), [])
-        assert scanner_writes == len(scanner_rows)
+        assert scanner_writes == 2
         result = registration_result["value"]
         assert isinstance(result, RegisteredAsset)
         with db_mod.create_session() as session:

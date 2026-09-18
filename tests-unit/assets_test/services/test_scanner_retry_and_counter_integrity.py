@@ -42,15 +42,49 @@ def _fail_commit_once_then_succeed(engine):
 
 
 def _fail_run_write_txn_at(real_run_write_txn, fail_index: int):
-    calls = {"count": -1}
+    calls = {"count": 0}
 
     def wrapper(work):
+        call_index = calls["count"]
         calls["count"] += 1
-        if calls["count"] == fail_index:
+        if call_index == fail_index:
             raise _LOCKED_ERROR
         return real_run_write_txn(work)
 
-    return wrapper
+    return wrapper, calls
+
+
+def _seed_enrichment_rows(tmp_path: Path, count: int) -> list[scanner.UnenrichedContent]:
+    paths = [tmp_path / f"row-{index}.bin" for index in range(count)]
+    for index, path in enumerate(paths):
+        path.write_bytes(f"payload-{index}".encode())
+
+    def seed(write_session):
+        rows: list[scanner.UnenrichedContent] = []
+        for path in paths:
+            stat_result = path.stat()
+            content = AssetContent(
+                path=str(path),
+                hash=None,
+                size_bytes=stat_result.st_size,
+                mtime_ns=stat_result.st_mtime_ns,
+            )
+            write_session.add(content)
+            write_session.flush()
+            record = create_record(write_session, content.id, path.name)
+            rows.append(
+                scanner.UnenrichedContent(
+                    content.id,
+                    record.id,
+                    str(path),
+                    needs_hash=True,
+                    observed_size_bytes=content.size_bytes,
+                    observed_mtime_ns=content.mtime_ns,
+                )
+            )
+        return rows
+
+    return db_mod.run_write_txn(seed)
 
 
 @pytest.fixture(autouse=True)
@@ -135,54 +169,59 @@ def test_scanner_sync_permission_diagnostic_published_exactly_once_after_retry(
     ]
 
 
-def test_enrichment_counter_integrity_under_a_locked_failure_at_row_n(
-    db_engine, tmp_path: Path, session, monkeypatch
-):
-    """Injecting a locked failure at the middle row of a batch must not
-    double-mark the surviving rows, and must match a clean run exactly."""
-    paths = [tmp_path / f"row-{i}.bin" for i in range(3)]
-    rows = []
-    for i, path in enumerate(paths):
-        path.write_bytes(f"payload-{i}".encode())
-        stat = path.stat()
-        content = AssetContent(
-            path=str(path), hash=None, size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns
-        )
-        session.add(content)
-        session.flush()
-        record = create_record(session, content.id, path.name)
-        rows.append(scanner.UnenrichedContent(content.id, record.id, str(path), True))
-    session.commit()
-    content_ids = [row.content_id for row in rows]
-
+def test_enrichment_batch_failure_rolls_back_every_row_and_counts_each_failure(
+    tmp_path: Path, session, monkeypatch
+) -> None:
+    rows = _seed_enrichment_rows(tmp_path, 3)
     real_run_write_txn = scanner.run_write_txn
-    monkeypatch.setattr(
-        scanner, "run_write_txn", _fail_run_write_txn_at(real_run_write_txn, fail_index=1)
+    failing_run_write_txn, calls = _fail_run_write_txn_at(
+        real_run_write_txn, fail_index=0
     )
+    monkeypatch.setattr(
+        scanner, "run_write_txn", failing_run_write_txn
+    )
+    progress = _ScanState()
+
+    enriched, failed_ids = scanner.enrich_assets_batch(
+        rows,
+        extract_metadata=False,
+        compute_hash=True,
+        progress=progress,
+    )
+
+    assert calls["count"] == 1
+    assert enriched == 0
+    assert failed_ids == [row.record_id for row in rows]
+    assert progress.enrich_failed == 3
+    session.expire_all()
+    assert all(
+        session.get(AssetContent, row.content_id).hash is None for row in rows
+    )
+
+
+def test_enrichment_later_batch_failure_preserves_first_batch(
+    tmp_path: Path, session, monkeypatch
+) -> None:
+    rows = _seed_enrichment_rows(tmp_path, 30)
+    real_run_write_txn = scanner.run_write_txn
+    failing_run_write_txn, calls = _fail_run_write_txn_at(
+        real_run_write_txn, fail_index=1
+    )
+    monkeypatch.setattr(scanner, "run_write_txn", failing_run_write_txn)
 
     enriched, failed_ids = scanner.enrich_assets_batch(
         rows, extract_metadata=False, compute_hash=True
     )
 
-    assert enriched == 2
-    assert failed_ids == [rows[1].record_id]
-
-    hashes_after_failure = {
-        content_id: session.get(AssetContent, content_id).hash for content_id in content_ids
-    }
-    assert hashes_after_failure[content_ids[1]] is None
-    assert hashes_after_failure[content_ids[0]] is not None
-    assert hashes_after_failure[content_ids[2]] is not None
-
-    monkeypatch.setattr(scanner, "run_write_txn", real_run_write_txn)
-    retry_enriched, retry_failed_ids = scanner.enrich_assets_batch(
-        [rows[1]], extract_metadata=False, compute_hash=True
-    )
-    assert retry_enriched == 1
-    assert retry_failed_ids == []
+    assert calls["count"] == 2
+    assert enriched == scanner.MAX_WRITE_BATCH
+    assert failed_ids == [row.record_id for row in rows[scanner.MAX_WRITE_BATCH :]]
     session.expire_all()
-    final_hashes = {
-        content_id: session.get(AssetContent, content_id).hash for content_id in content_ids
-    }
-    assert all(value is not None for value in final_hashes.values())
-    assert len(session.scalars(scanner.sa.select(AssetContent)).all()) == 3
+    assert all(
+        session.get(AssetContent, row.content_id).hash is not None
+        for row in rows[: scanner.MAX_WRITE_BATCH]
+    )
+    assert all(
+        session.get(AssetContent, row.content_id).hash is None
+        for row in rows[scanner.MAX_WRITE_BATCH :]
+    )

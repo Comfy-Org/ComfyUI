@@ -63,7 +63,12 @@ def tagged_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 def hash_session(path: Path) -> Mock:
     stat_result = path.stat()
-    content = SimpleNamespace(hash=None, mtime_ns=stat_result.st_mtime_ns)
+    content = SimpleNamespace(
+        hash=None,
+        size_bytes=stat_result.st_size,
+        mtime_ns=stat_result.st_mtime_ns,
+        is_missing=False,
+    )
     record = SimpleNamespace(system_metadata=None, mime_type=None)
     session = Mock()
     session.get.side_effect = lambda _model, row_id: content if row_id == "content" else record

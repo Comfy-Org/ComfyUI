@@ -104,6 +104,8 @@ class UnenrichedContent:
     record_id: str
     file_path: str
     needs_hash: bool = False
+    observed_size_bytes: int = 0
+    observed_mtime_ns: int | None = None
 
 
 class _PreparedEnrichment(NamedTuple):
@@ -714,6 +716,8 @@ def get_unenriched_assets_for_roots(
                 Asset.id,
                 AssetContent.path,
                 AssetContent.hash.is_(None).label("needs_hash"),
+                AssetContent.size_bytes,
+                AssetContent.mtime_ns,
             )
             .join(Asset, Asset.content_id == AssetContent.id)
             .where(AssetContent.is_missing.is_(False))
@@ -735,8 +739,15 @@ def get_unenriched_assets_for_roots(
         rows = sess.execute(query.order_by(Asset.id).limit(limit)).all()
 
     return [
-        UnenrichedContent(content_id, record_id, file_path, needs_hash)
-        for content_id, record_id, file_path, needs_hash in rows
+        UnenrichedContent(
+            content_id,
+            record_id,
+            file_path,
+            needs_hash,
+            observed_size_bytes,
+            observed_mtime_ns,
+        )
+        for content_id, record_id, file_path, needs_hash, observed_size_bytes, observed_mtime_ns in rows
     ]
 
 
@@ -818,42 +829,43 @@ def _prepare_enrichment(
     )
 
 
-def _apply_enrichment(session: Session, prepared: _PreparedEnrichment) -> bool:
-    row = prepared.row
-    content = session.get(AssetContent, row.content_id)
-    record = session.get(Asset, row.record_id)
-    if content is None or record is None:
-        return False
-    try:
-        current_stat = os.stat(row.file_path, follow_symlinks=True)
-    except OSError:
-        return False
-    if (
-        content.mtime_ns != get_mtime_ns(prepared.stat_result)
-        or current_stat.st_size != prepared.stat_result.st_size
-        or get_mtime_ns(current_stat) != get_mtime_ns(prepared.stat_result)
-    ):
-        logging.info(
-            "Content %s changed during enrichment, discarding stale result",
-            row.content_id,
-        )
-        return False
-    hash_applied = False
-    if prepared.stored_hash is not None and content.hash is None:
-        content.hash = prepared.stored_hash
-        hash_applied = True
+def _apply_enrichments(
+    session: Session, prepared: list[_PreparedEnrichment]
+) -> list[str]:
+    applied_ids: list[str] = []
+    for item in prepared:
+        row = item.row
+        content = session.get(AssetContent, row.content_id)
+        record = session.get(Asset, row.record_id)
+        if (
+            content is None
+            or record is None
+            or content.is_missing
+            or content.size_bytes != row.observed_size_bytes
+            or content.mtime_ns != row.observed_mtime_ns
+        ):
+            continue
 
-    if prepared.system_metadata is not None:
-        record.system_metadata = {
-            **(record.system_metadata or {}),
-            **prepared.system_metadata,
-        }
-    if prepared.mime_type is not None:
-        record.mime_type = prepared.mime_type
+        hash_applied = False
+        if item.stored_hash is not None and content.hash is None:
+            content.hash = item.stored_hash
+            content.size_bytes = item.stat_result.st_size
+            content.mtime_ns = get_mtime_ns(item.stat_result)
+            hash_applied = True
 
-    if prepared.hash_requested and prepared.stored_hash is None:
-        return False
-    return hash_applied or prepared.system_metadata is not None or prepared.mime_type is not None
+        if item.system_metadata is not None:
+            record.system_metadata = {
+                **(record.system_metadata or {}),
+                **item.system_metadata,
+            }
+        if item.mime_type is not None:
+            record.mime_type = item.mime_type
+
+        if item.hash_requested and item.stored_hash is None:
+            continue
+        if hash_applied or item.system_metadata is not None or item.mime_type is not None:
+            applied_ids.append(row.record_id)
+    return applied_ids
 
 
 def enrich_assets_batch(
@@ -863,48 +875,64 @@ def enrich_assets_batch(
     interrupt_check: Callable[[], bool] | None = None,
     progress: _ScanProgress | None = None,
 ) -> tuple[int, list[str]]:
-    """Enrich a batch of assets.
-
-    Uses a single DB session for the entire batch, committing after each
-    individual asset to avoid long-held transactions while eliminating
-    per-asset session creation overhead.
-
-    Args:
-        rows: List of UnenrichedReferenceRow from get_unenriched_assets_for_roots
-        extract_metadata: If True, extract metadata for each asset
-        compute_hash: If True, compute hash for each asset
-        interrupt_check: Optional non-blocking callable that returns True if
-            the operation should be interrupted (e.g. paused or cancelled)
-
-    Returns:
-        Tuple of (enriched_count, failed_reference_ids)
+    """Prepares up to MAX_WRITE_BATCH rows on the scanner thread (stat, metadata,
+    optional hash), then applies them in one write transaction with a per-row
+    compare-and-set on the stored size/mtime; stale rows are skipped and left for
+    the next sync.
     """
     enriched = 0
     failed_ids: list[str] = []
 
-    for row in rows:
-        if interrupt_check is not None and interrupt_check():
-            break
-        try:
-            prepared = _prepare_enrichment(
-                row, extract_metadata, compute_hash, progress
-            )
+    for index in range(0, len(rows), MAX_WRITE_BATCH):
+        prepared_list: list[_PreparedEnrichment] = []
+        interrupted = False
+        for row in rows[index : index + MAX_WRITE_BATCH]:
+            if interrupt_check is not None and interrupt_check():
+                interrupted = True
+                break
+            try:
+                prepared = _prepare_enrichment(
+                    row, extract_metadata, compute_hash, progress
+                )
+            except Exception as exc:
+                if progress is not None:
+                    progress.enrich_failed += 1
+                if progress is None or progress.mark_emitted("enrich_failed"):
+                    emit("scanner.enrich_failed", error_type=error_type(exc))
+                logging.warning("Failed to enrich %s: %s", row.file_path, exc)
+                failed_ids.append(row.record_id)
+                continue
             if prepared is None:
                 failed_ids.append(row.record_id)
                 continue
-            updated = run_write_txn(
-                lambda session: _apply_enrichment(session, prepared)
-            )
-            if updated:
-                enriched += 1
+            prepared_list.append(prepared)
+
+        if prepared_list:
+            try:
+                applied = run_write_txn(
+                    lambda session, prepared_list=prepared_list: _apply_enrichments(
+                        session, prepared_list
+                    )
+                )
+            except Exception as exc:
+                if progress is not None:
+                    progress.enrich_failed += len(prepared_list)
+                if progress is None or progress.mark_emitted("enrich_failed"):
+                    emit("scanner.enrich_failed", error_type=error_type(exc))
+                logging.warning(
+                    "Failed to enrich %d assets: %s", len(prepared_list), exc
+                )
+                failed_ids.extend(item.row.record_id for item in prepared_list)
             else:
-                failed_ids.append(row.record_id)
-        except Exception as exc:
-            if progress is not None:
-                progress.enrich_failed += 1
-            if progress is None or progress.mark_emitted("enrich_failed"):
-                emit("scanner.enrich_failed", error_type=error_type(exc))
-            logging.warning("Failed to enrich %s: %s", row.file_path, exc)
-            failed_ids.append(row.record_id)
+                enriched += len(applied)
+                applied_ids = set(applied)
+                failed_ids.extend(
+                    item.row.record_id
+                    for item in prepared_list
+                    if item.row.record_id not in applied_ids
+                )
+
+        if interrupted:
+            break
 
     return enriched, failed_ids

@@ -88,14 +88,19 @@ def enrich_via_prepare_apply(
 ) -> bool:
     content = session.get(AssetContent, content_id)
     row = scanner.UnenrichedContent(
-        content_id, record_id, file_path, content is not None and content.hash is None
+        content_id,
+        record_id,
+        file_path,
+        content is not None and content.hash is None,
+        observed_size_bytes=content.size_bytes if content is not None else 0,
+        observed_mtime_ns=content.mtime_ns if content is not None else None,
     )
     prepared = scanner._prepare_enrichment(row, extract_metadata, compute_hash, progress)
     if prepared is None:
         return False
-    updated = scanner._apply_enrichment(session, prepared)
+    applied = scanner._apply_enrichments(session, [prepared])
     session.commit()
-    return updated
+    return bool(applied)
 
 
 def seed_record(session: Session, seed: RecordSeed) -> Asset:
