@@ -892,6 +892,11 @@ class Llama2_(nn.Module):
                 caches.append((key, torch.empty_like(key), 0))
         return caches
 
+    def init_decode_buffers(self, batch, device, dtype):
+        hidden = torch.empty((batch, 1, self.config.hidden_size), device=device, dtype=dtype)
+        positions = torch.zeros((1, 1), device=device, dtype=torch.int64)
+        return hidden, rope_matrix(self.compute_freqs_cis(positions, device))
+
     def compute_freqs_cis(self, position_ids, device):
         return precompute_freqs_cis(self.config.head_dim,
                                     position_ids,
@@ -1129,6 +1134,11 @@ class BaseGenerate:
         next_pos = int(position_ids[:, -1].max()) + 1 if position_ids is not None else None
 
         compile_allocations = self.model.graph_dynamic_vbar_blocks and comfy.model_prefetch.malloc_graph_enabled(device)
+        decode_buffers = None
+        if compile_allocations and not comfy.model_management.args.disable_cuda_graphs:
+            init_decode_buffers = getattr(self.model, "init_decode_buffers", None)
+            if init_decode_buffers is not None:
+                decode_buffers = init_decode_buffers(embeds.shape[0], device, execution_dtype)
         decode_tokens = torch.empty((embeds.shape[0], 1), dtype=torch.long, device=device)
         penalize = penalty_active(repetition_penalty, presence_penalty)
         penalty_mask = None
@@ -1145,6 +1155,8 @@ class BaseGenerate:
 
             # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
             extra = {}
+            if decode_buffers is not None:
+                extra["decode_buffers"] = decode_buffers
             if step == 0 and deepstack_embeds is not None:
                 extra["deepstack_embeds"] = deepstack_embeds
                 extra["visual_pos_masks"] = visual_pos_masks
