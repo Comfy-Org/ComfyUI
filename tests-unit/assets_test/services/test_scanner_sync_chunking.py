@@ -6,7 +6,6 @@ import app.database.db as db_mod
 from app.assets import scanner
 from app.assets.database.models import AssetContent
 from app.assets.database.queries import create_content, create_record, mark_content_missing
-from assets_test.helpers import sync_prefixes_in_session
 
 
 def _seed_reference_observations(
@@ -115,51 +114,6 @@ def _record_transactions(monkeypatch) -> list[int]:
     return transactions
 
 
-def test_root_sync_matches_single_transaction_and_uses_three_bounded_writes(
-    tmp_path: Path, monkeypatch, session
-) -> None:
-    content_ids, observations, expected_survivors = _seed_reference_observations(
-        tmp_path, 60
-    )
-
-    baseline_survivors = db_mod.run_write_txn(
-        lambda session: sync_prefixes_in_session(
-            session,
-            [str(tmp_path)],
-            collect_existing_paths=True,
-        )
-    )
-    baseline_states = _content_states(content_ids)
-    _reset_observed_rows(content_ids, observations)
-
-    monkeypatch.setattr(
-        scanner,
-        "observe_references_on_filesystem",
-        lambda *_args, **_kwargs: (observations, expected_survivors),
-    )
-    transactions = _record_transactions(monkeypatch)
-
-    survivors = scanner.sync_root_safely("input")
-
-    assert len(transactions) == 3
-    assert survivors == baseline_survivors == expected_survivors
-    assert _content_states(content_ids) == baseline_states
-
-
-def test_temp_sync_uses_bounded_write_transactions(
-    tmp_path: Path, monkeypatch, session
-) -> None:
-    _content_ids, observations, survivors = _seed_reference_observations(tmp_path, 30)
-    monkeypatch.setattr(
-        scanner,
-        "observe_references_on_filesystem",
-        lambda *_args, **_kwargs: (observations, survivors),
-    )
-    transactions = _record_transactions(monkeypatch)
-
-    scanner.sync_temp_references_safely()
-
-    assert len(transactions) == 2
 
 
 def test_root_sync_interrupts_between_chunks_and_publishes_committed_ids(

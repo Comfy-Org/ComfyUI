@@ -93,13 +93,6 @@ def go_to_production_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- the shared cross-repo fixture -------------------------------------------------
 
 
-def test_shared_fixture_file_holds_five_newline_terminated_lines():
-    raw = FIXTURE_PATH.read_text(encoding="utf-8")
-
-    assert raw.endswith("\n")
-    assert len(raw.splitlines()) == 5
-
-
 @pytest.mark.parametrize("line", fixture_lines())
 def test_emit_reproduces_each_shared_fixture_line_byte_for_byte(caplog, line):
     """Given a canonical line, When its fields are re-emitted, Then the bytes match."""

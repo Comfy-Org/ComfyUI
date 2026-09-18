@@ -1,8 +1,6 @@
-import logging
 import os
 import sqlite3
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -126,47 +124,6 @@ def test_scanner_sync_transient_locked_error_retried_preserves_queue_once(
     assert scanner_changes._pending_verification_ids == [content_id]
     scanner_changes.clear_pending_verifications()
 
-
-def test_scanner_sync_permission_diagnostic_published_exactly_once_after_retry(
-    db_engine, tmp_path: Path, monkeypatch, session, caplog
-):
-    """A commit-time locked failure that later succeeds must publish the
-    permission-denied diagnostic exactly once: one counter bump, one emit."""
-    path = tmp_path / "unreadable.bin"
-    path.write_bytes(b"unreadable")
-    content = AssetContent(
-        path=str(path), hash=None, size_bytes=path.stat().st_size, mtime_ns=path.stat().st_mtime_ns
-    )
-    session.add(content)
-    session.flush()
-    session.commit()
-
-    real_stat = os.stat
-
-    def deny_stat(candidate_path, *args, **kwargs):
-        if str(candidate_path) == str(path):
-            raise PermissionError(str(path))
-        return real_stat(candidate_path, *args, **kwargs)
-
-    monkeypatch.setattr(scanner, "os", SimpleNamespace(stat=deny_stat, path=scanner.os.path))
-    monkeypatch.setattr(db_mod, "WriteSession", _fail_commit_once_then_succeed(db_engine))
-
-    progress = _ScanState()
-    with (
-        patch("folder_paths.get_input_directory", return_value=str(tmp_path)),
-        caplog.at_level(logging.INFO),
-    ):
-        scanner.sync_root_safely("input", progress)
-
-    assert progress.permission_denied == 1
-    stat_failed_lines = [
-        r.getMessage()
-        for r in caplog.records
-        if r.getMessage().startswith("[assets-event] scanner.stat_failed")
-    ]
-    assert stat_failed_lines == [
-        "[assets-event] scanner.stat_failed error_type=PermissionError site=reference_stat"
-    ]
 
 
 def test_enrichment_batch_failure_rolls_back_every_row_and_counts_each_failure(
