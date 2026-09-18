@@ -959,6 +959,26 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["num_layers"] = count_blocks(state_dict_keys, '{}transformer_blocks.'.format(key_prefix) + '{}.')
         return dit_config
 
+    if '{}txt_in.text_norm.weight'.format(key_prefix) in state_dict_keys and '{}modulation.1.weight'.format(key_prefix) in state_dict_keys:  # Qwen Image 2.1
+        dit_config = {}
+        dit_config["image_model"] = "qwen_image21"
+        head_dim = state_dict['{}transformer_blocks.0.attn.norm_q.weight'.format(key_prefix)].shape[0]
+        inner_dim = state_dict['{}img_in.weight'.format(key_prefix)].shape[0]
+        dit_config["in_channels"] = state_dict['{}img_in.weight'.format(key_prefix)].shape[1]
+        dit_config["out_channels"] = state_dict['{}proj_out.weight'.format(key_prefix)].shape[0]
+        dit_config["num_layers"] = count_blocks(state_dict_keys, '{}transformer_blocks.'.format(key_prefix) + '{}.')
+        dit_config["attention_head_dim"] = head_dim
+        dit_config["num_attention_heads"] = inner_dim // head_dim
+        dit_config["context_in_dim"] = state_dict['{}txt_in.text_norm.weight'.format(key_prefix)].shape[0]
+        # gate and up projections fuse into one GEMM when their rows can be concatenated: plain weights or per-row scales; a comfy-saved file is already fused
+        gate_up = state_dict.get('{}transformer_blocks.0.img_mlp.gate_up.weight'.format(key_prefix), None)
+        if gate_up is not None:
+            dit_config["mlp_ratio"] = gate_up.shape[0] // 2 // inner_dim
+        else:
+            dit_config["mlp_ratio"] = state_dict['{}transformer_blocks.0.img_mlp.proj.weight'.format(key_prefix)].shape[0] // inner_dim
+        dit_config["fused_mlp"] = gate_up is not None
+        return dit_config
+
     if '{}txt_norm.weight'.format(key_prefix) in state_dict_keys:  # Qwen Image
         dit_config = {}
         dit_config["image_model"] = "qwen_image"
