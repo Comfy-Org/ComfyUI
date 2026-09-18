@@ -1235,7 +1235,7 @@
           }
         ],
         "extra": {},
-        "category": "Audio/Music generation",
+        "category": "Audio",
         "description": "Generates complete songs up to five minutes from a music caption and lyrics using MiniMax Music 3."
       }
     ]
