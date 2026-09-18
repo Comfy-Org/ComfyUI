@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import uuid
 from io import BytesIO
 
@@ -394,7 +393,7 @@ class PreviewImage(_UIOutput):
     def __init__(self, image: Image.Type, animated: bool = False, cls: type[ComfyNode] = None, **kwargs):
         self.values = ImageSaveHelper.save_images(
             image,
-            filename_prefix="ComfyUI_temp_" + ''.join(random.choice("abcdefghijklmnopqrstupvxyz") for _ in range(5)),
+            filename_prefix="ComfyUI_temp_" + uuid.uuid4().hex[:5],
             folder_type=FolderType.temp,
             cls=cls,
             compress_level=1,
@@ -418,7 +417,7 @@ class PreviewAudio(_UIOutput):
     def __init__(self, audio: dict, cls: type[ComfyNode] = None, **kwargs):
         self.values = AudioSaveHelper.save_audio(
             audio,
-            filename_prefix="ComfyUI_temp_" + "".join(random.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(5)),
+            filename_prefix="ComfyUI_temp_" + uuid.uuid4().hex[:5],
             folder_type=FolderType.temp,
             cls=cls,
             format="flac",
