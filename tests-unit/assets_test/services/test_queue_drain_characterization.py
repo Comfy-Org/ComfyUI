@@ -55,7 +55,7 @@ def test_pending_verification_requeues_after_hash_oserror(session, temp_dir, mon
         lambda _path: (_ for _ in ()).throw(PermissionError("denied")),
     )
 
-    processed = drain_pending_verifications(session)
+    processed = drain_pending_verifications()
 
     assert processed == 0
     assert scanner_changes._pending_verification_ids == [content.id]
@@ -73,7 +73,7 @@ def test_watch_list_keeps_entries_when_stat_raises(session, temp_dir, monkeypatc
     )
 
     with pytest.raises(PermissionError):
-        tick_watch_list(session)
+        tick_watch_list()
 
     assert _WATCH_LIST == [entry]
 
@@ -97,7 +97,7 @@ def test_transition_queue_retries_without_losing_companion_path(
         lambda _path: (_ for _ in ()).throw(PermissionError("denied")),
     )
 
-    drain_transition_queue(session)
+    drain_transition_queue()
 
     assert list(_PENDING_QUEUE) == [_PendingEntry(path, ticks=1)]
     assert _PENDING_PATHS == {path}
@@ -120,7 +120,7 @@ def test_transition_queue_exhaustion_clears_companion_and_persists_mode(
     )
 
     for _ in range(3):
-        drain_transition_queue(session)
+        drain_transition_queue()
         session.commit()
 
     assert list(_PENDING_QUEUE) == []

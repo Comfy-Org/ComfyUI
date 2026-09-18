@@ -189,10 +189,11 @@ def detect_content_change(
         return
     if content.size_bytes == stat_result.st_size:
         # User identity rule: a same-size mtime bump (rsync, cloud sync, backup restore) is the
-        # same file — never split, or the record's tags and metadata are destroyed.
+        # same file — never split, or the record's user tags and identity are destroyed.
         # The stored hash goes with the refreshed stat: OFF mode cannot prove the bytes, and a
         # refreshed stat alone would re-qualify the row to be served under a digest it may no
-        # longer match.
+        # longer match. Extracted metadata described the old bytes, so it is cleared alongside
+        # the hash and the next enrich pass re-derives it.
         content.size_bytes = stat_result.st_size
         content.mtime_ns = stat_result.st_mtime_ns
         content.hash = None
@@ -266,7 +267,6 @@ def _apply_pending_verification(
 
 
 def drain_pending_verifications(
-    _session: Session | None = None,
     limit: int | None = None,
     interrupt_check: Callable[[], bool] | None = None,
 ) -> int:

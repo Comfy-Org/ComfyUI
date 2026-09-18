@@ -89,7 +89,7 @@ def test_never_stabilizes_dropped_after_cap(session, temp_dir: Path):
         target_ns = max(path.stat().st_mtime_ns, previous_target_ns) + 1_000_000
         os.utime(path, ns=(target_ns, target_ns))
         previous_target_ns = target_ns
-        tick_watch_list(session)
+        tick_watch_list()
 
     assert _WATCH_LIST == []
     assert session.scalars(select(AssetContent)).all() == []
@@ -112,7 +112,7 @@ def test_stable_scan_admission_removes_watch_entry_before_next_tick(session, tem
         ),
         patch("app.assets.scanner.seed_asset_specs") as seed_asset_specs,
     ):
-        tick_watch_list(session)
+        tick_watch_list()
 
     assert admitted == [str(path)]
     assert watched == []

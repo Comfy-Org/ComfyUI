@@ -15,8 +15,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy.orm import Session
-
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 
 PARTIAL_DOWNLOAD_EXTENSIONS = frozenset({
@@ -68,7 +66,6 @@ def _two_stat_admit(paths_with_stats: list[tuple[str, os.stat_result]]) -> tuple
 
 
 def tick_watch_list(
-    _session: Session | None = None,
     interrupt_check: Callable[[], bool] | None = None,
 ) -> None:
     from app.assets.scanner import SeedAssetSpec, insert_asset_specs

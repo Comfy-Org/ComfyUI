@@ -72,7 +72,7 @@ def test_deleted_null_hash_row_recovers_via_scanner_after_restore(
     path.unlink()
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
-    drain_transition_queue(session)
+    drain_transition_queue()
     session.commit()
     assert session.get(AssetContent, content_id).is_missing is True, (
         "precondition: A1's drain marked the row missing on delete"
@@ -113,7 +113,7 @@ def test_different_bytes_restored_at_same_path_does_not_recover_old_row(
     path.unlink()
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
-    drain_transition_queue(session)
+    drain_transition_queue()
     session.commit()
     assert session.get(AssetContent, content_id).is_missing is True
 
@@ -149,7 +149,7 @@ def test_same_size_different_mtime_restored_at_same_path_does_not_recover_old_ro
     path.unlink()
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
-    drain_transition_queue(session)
+    drain_transition_queue()
     session.commit()
     assert session.get(AssetContent, content_id).is_missing is True
 

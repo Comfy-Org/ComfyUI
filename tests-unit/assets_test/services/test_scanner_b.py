@@ -11,14 +11,16 @@ from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.helpers import to_stored_hash
 from app.assets.scanner import (
     build_asset_specs,
-    mark_contents_missing_outside_prefixes,
     seed_asset_specs,
     stat_seed_specs,
-    sync_prefixes_with_filesystem,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
 
 from ..helpers import enrich_via_prepare_apply
+from assets_test.helpers import (
+    mark_contents_missing_outside_prefixes_in_session,
+    sync_prefixes_in_session,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +164,7 @@ def test_prune_marks_missing_not_deletes(session, temp_dir: Path):
         seed_asset_specs(session, specs, stat_seed_specs(specs))
     session.commit()
 
-    marked = mark_contents_missing_outside_prefixes(session, prefixes=[])
+    marked = mark_contents_missing_outside_prefixes_in_session(session, prefixes=[])
     session.commit()
 
     content = session.scalar(select(AssetContent))
@@ -184,7 +186,7 @@ def test_unhashed_missing_content_gets_tagged(session, temp_dir: Path):
     session.add(record)
     session.commit()
 
-    sync_prefixes_with_filesystem(session, prefixes=[str(temp_dir)])
+    sync_prefixes_in_session(session, prefixes=[str(temp_dir)])
     session.commit()
 
     session.expire_all()

@@ -106,7 +106,6 @@ class _IngestWriteTxnFsTracker:
         monkeypatch.setattr(ingest, "run_write_txn", track_write_transaction)
         for name in (
             "lookup_for_view",
-            "refresh_qualified_content",
             "_file_signature",
             "_file_signature_matches",
         ):

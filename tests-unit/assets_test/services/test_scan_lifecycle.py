@@ -8,8 +8,8 @@ from app.assets.scanner import (
     build_asset_specs,
     seed_asset_specs,
     stat_seed_specs,
-    sync_prefixes_with_filesystem,
 )
+from assets_test.helpers import sync_prefixes_in_session
 
 
 def _scan(session, root: Path) -> int:
@@ -31,7 +31,7 @@ def test_e2e_scan_seed_detect_prune(session, temp_dir: Path):
         edited.write_bytes(b"replacement")
         (root / "partial.part").write_bytes(b"partial")
         with patch("app.assets.scanner.mode.hashing_enabled", return_value=False):
-            sync_prefixes_with_filesystem(session, [str(root)])
+            sync_prefixes_in_session(session, [str(root)])
             _scan(session, root)
     session.commit()
     contents = list(session.scalars(select(AssetContent)))

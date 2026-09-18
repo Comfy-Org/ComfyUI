@@ -87,12 +87,15 @@ def _extract_system_metadata_sync(
 def _discard_unreferenced_content(session: Session, content_id: str) -> None:
     """Remove a content row left orphaned by a failed registration.
 
-    ``create_content`` inserts inside a SAVEPOINT (``begin_nested``); under
-    pysqlite that insert survives the enclosing ``rollback`` because pysqlite
-    has no real nested transaction. When the follow-on ``create_record`` fails
-    we would otherwise leak an unreferenced content row, so delete it explicitly
-    once we have confirmed no record points at it. Best-effort: cleanup errors
-    are logged and swallowed so the original failure is what surfaces.
+    ``create_content`` inserts inside a SAVEPOINT (``begin_nested``). On the
+    in-memory and no-WAL engines that insert survives the enclosing
+    ``rollback``, because pysqlite opens no real transaction, so the follow-on
+    ``create_record`` failing would leak an unreferenced content row. The WAL
+    writer engine does undo it, so there the queries below find nothing and only
+    cost a fresh ``BEGIN IMMEDIATE``; the compensation cannot be skipped on that
+    basis, because a caller's session may be bound to either kind of engine and
+    the binding is not knowable from here. Best-effort: cleanup errors are
+    logged and swallowed so the original failure is what surfaces.
     """
     try:
         ref_count = session.scalar(

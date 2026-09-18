@@ -6,6 +6,7 @@ import app.database.db as db_mod
 from app.assets import scanner
 from app.assets.database.models import AssetContent
 from app.assets.database.queries import create_content, create_record, mark_content_missing
+from assets_test.helpers import sync_prefixes_in_session
 
 
 def _seed_reference_observations(
@@ -122,7 +123,7 @@ def test_root_sync_matches_single_transaction_and_uses_three_bounded_writes(
     )
 
     baseline_survivors = db_mod.run_write_txn(
-        lambda session: scanner.sync_prefixes_with_filesystem(
+        lambda session: sync_prefixes_in_session(
             session,
             [str(tmp_path)],
             collect_existing_paths=True,

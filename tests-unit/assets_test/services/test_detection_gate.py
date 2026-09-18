@@ -10,10 +10,10 @@ from app.assets.helpers import to_stored_hash
 from app.assets.scanner import (
     clear_pending_verifications,
     drain_pending_verifications,
-    sync_prefixes_with_filesystem,
 )
 from app.assets.scanner_changes import queue_pending_verification
 from app.assets.services.snapshot_hash import snapshot_hash
+from assets_test.helpers import sync_prefixes_in_session
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +63,7 @@ def test_off_mode_same_size_touch_does_not_split(session, temp_dir: Path):
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
         patch("app.assets.scanner.mode.hashing_enabled", return_value=False),
     ):
-        sync_prefixes_with_filesystem(session, [str(input_root)])
+        sync_prefixes_in_session(session, [str(input_root)])
     session.commit()
 
     contents = list(session.scalars(select(AssetContent)))
@@ -86,7 +86,7 @@ def test_off_mode_size_change_splits(session, temp_dir: Path):
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
         patch("app.assets.scanner.mode.hashing_enabled", return_value=False),
     ):
-        sync_prefixes_with_filesystem(session, [str(input_root)])
+        sync_prefixes_in_session(session, [str(input_root)])
     session.commit()
 
     contents = list(session.scalars(select(AssetContent).order_by(AssetContent.created_at)))
@@ -107,8 +107,8 @@ def test_hash_mode_touch_refreshes_mtime(session, temp_dir: Path):
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
         patch("app.assets.scanner.mode.hashing_enabled", return_value=True),
     ):
-        sync_prefixes_with_filesystem(session, [str(input_root)])
-        processed = drain_pending_verifications(session)
+        sync_prefixes_in_session(session, [str(input_root)])
+        processed = drain_pending_verifications()
     session.commit()
 
     refreshed = session.get(AssetContent, old_content.id)
@@ -133,8 +133,8 @@ def test_hash_mode_real_edit_splits(session, temp_dir: Path):
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
         patch("app.assets.scanner.mode.hashing_enabled", return_value=True),
     ):
-        sync_prefixes_with_filesystem(session, [str(input_root)])
-        drain_pending_verifications(session)
+        sync_prefixes_in_session(session, [str(input_root)])
+        drain_pending_verifications()
     session.commit()
 
     contents = list(session.scalars(select(AssetContent).order_by(AssetContent.created_at)))
@@ -158,8 +158,8 @@ def test_old_record_id_resolves_to_missing_content_after_split(session, temp_dir
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
         patch("app.assets.scanner.mode.hashing_enabled", return_value=True),
     ):
-        sync_prefixes_with_filesystem(session, [str(input_root)])
-        drain_pending_verifications(session)
+        sync_prefixes_in_session(session, [str(input_root)])
+        drain_pending_verifications()
     session.commit()
 
     session.expire_all()
@@ -186,7 +186,7 @@ def test_hash_mode_split_uses_stat_from_the_verified_snapshot(session, temp_dir:
 
     monkeypatch.setattr("app.assets.scanner_changes.snapshot_hash", mutate_then_hash)
 
-    processed = drain_pending_verifications(session)
+    processed = drain_pending_verifications()
 
     live_content = session.scalar(
         select(AssetContent).where(AssetContent.is_missing.is_(False))

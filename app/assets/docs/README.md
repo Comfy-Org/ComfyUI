@@ -95,6 +95,8 @@ In hash mode, verify the new bytes. Refresh the existing content row if the hash
 
 With hashing off, a change to both modification time and size is handled the same way as a hash difference: the old content is marked missing and new content and a new asset record are created. A modification-time change alone refreshes the existing row's file facts and clears its stored hash (see Hashing modes).
 
+Whenever a scan observes that a content row's bytes changed, it also clears the extracted metadata of every record pointing at that row, because that metadata describes the previous bytes. The record itself survives with its name, user tags and user metadata intact; only the extracted metadata is dropped, and the next enrichment pass re-derives it. A client reading such a record in between sees `metadata` absent rather than stale, and this does not count as an edit, so `updated_at` does not advance.
+
 An asset record never changes from one byte identity to another. Existing history references therefore continue to point to the old, already-missing content instead of silently serving new bytes.
 
 ### Deleted path reused

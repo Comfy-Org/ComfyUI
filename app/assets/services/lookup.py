@@ -15,7 +15,6 @@ import folder_paths
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.assets import mode
 from app.assets.database.models import AssetContent
 
 
@@ -77,19 +76,6 @@ def claim_qualified_content(session: Session, content_id: str, hash: str) -> boo
         .values(is_missing=False)
     )
     return result.rowcount == 1
-
-
-def refresh_qualified_content(session: Session, content_id: str) -> AssetContent | None:
-    content = session.get(AssetContent, content_id, populate_existing=True)
-    if content is None or not _qualifies(content):
-        return None
-    return content
-
-
-def lookup_for_from_hash(session: Session, hash: str) -> AssetContent | None:
-    if not mode.hashing_enabled():
-        return None
-    return next(qualified_content_iterator(session, hash), None)
 
 
 def lookup_for_view(session: Session, hash: str) -> AssetContent | None:

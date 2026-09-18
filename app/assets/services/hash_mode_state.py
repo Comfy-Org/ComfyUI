@@ -110,7 +110,6 @@ def _preflight_transition_entry(path: str) -> tuple[str, int, int | None] | None
 
 
 def drain_transition_queue(
-    _session: Session | None = None,
     interrupt_check: Callable[[], bool] | None = None,
 ) -> None:
     global _off_to_on_transition_in_flight

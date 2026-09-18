@@ -349,7 +349,7 @@ def test_accepted_mtime_bump_is_not_re_detected_by_the_next_scan(
 
     detect_content_change(session, content, path.stat(), hashing_is_enabled=True)
 
-    assert drain_pending_verifications(session) == 0
+    assert drain_pending_verifications() == 0
 
     detect_content_change(session, content, path.stat(), hashing_is_enabled=False)
     session.commit()
@@ -381,7 +381,7 @@ def test_dropped_hash_is_refilled_in_place_by_a_later_hash_mode_pass(
     assert record_id in _candidates_under(session, temp_dir, compute_hashes=True)
 
     enqueue_transition_work(session, "off_to_on")
-    drain_transition_queue(session)
+    drain_transition_queue()
     session.commit()
     session.expire_all()
 
@@ -475,7 +475,7 @@ def test_transition_drain_split_replacement_has_null_metadata(
     path.write_bytes(b"different new bytes")
 
     enqueue_transition_work(session, "off_to_on")
-    drain_transition_queue(session)
+    drain_transition_queue()
     session.commit()
     session.expire_all()
 

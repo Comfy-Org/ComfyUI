@@ -138,7 +138,11 @@ def test_permission_error_in_reference_sync_increments_scan_counter(
     monkeypatch.setattr(scanner, "os", SimpleNamespace(stat=deny_stat, path=scanner.os.path))
     monkeypatch.setattr(scanner, "live_contents_under_prefixes", lambda _session, _prefixes: [content])
 
-    scanner.sync_prefixes_with_filesystem(Mock(), ["/private/assets"], progress=progress)
+    diagnostics: list = []
+    scanner.observe_references_on_filesystem(
+        ["/private/assets"], diagnostics=diagnostics, session=Mock()
+    )
+    scanner._publish_reference_diagnostics(diagnostics, progress)
 
     assert progress.permission_denied == 1
 

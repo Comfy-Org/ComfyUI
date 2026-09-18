@@ -173,24 +173,6 @@ def collect_models_files() -> list[str]:
     return out
 
 
-def sync_references_with_filesystem(
-    session,
-    root: RootType,
-    collect_existing_paths: bool = False,
-    progress: _ScanProgress | None = None,
-    pending_verification_ids: list[str] | None = None,
-    diagnostics: list[OSError] | None = None,
-) -> set[str] | None:
-    return sync_prefixes_with_filesystem(
-        session,
-        get_scan_prefixes_for_root(root),
-        collect_existing_paths=collect_existing_paths,
-        progress=progress,
-        pending_verification_ids=pending_verification_ids,
-        diagnostics=diagnostics,
-    )
-
-
 class _ReferenceObservation(NamedTuple):
 
     content_id: str
@@ -217,8 +199,7 @@ def _catalogued_references(
 
 def observe_references_on_filesystem(
     prefixes: list[str],
-    progress: _ScanProgress | None = None,
-    diagnostics: list[_ReferenceDiagnostic] | None = None,
+    diagnostics: list[_ReferenceDiagnostic],
     session: Session | None = None,
 ) -> tuple[list[_ReferenceObservation], set[str]]:
     """Stat every catalogued reference without holding the writer lease.
@@ -242,19 +223,9 @@ def observe_references_on_filesystem(
                 _ReferenceObservation(content_id, path, size_bytes, mtime_ns, None)
             )
         except PermissionError as e:
-            if diagnostics is None:
-                _log_scan_error("reference_stat", e)
-                if progress is not None:
-                    progress.permission_denied += 1
-                logging.debug("Permission denied accessing %s", path)
-            else:
-                diagnostics.append(_ReferenceDiagnostic(path, e))
+            diagnostics.append(_ReferenceDiagnostic(path, e))
         except OSError as e:
-            if diagnostics is None:
-                _log_scan_error("reference_stat", e)
-                logging.debug("OSError checking %s: %s", path, e)
-            else:
-                diagnostics.append(_ReferenceDiagnostic(path, e))
+            diagnostics.append(_ReferenceDiagnostic(path, e))
             observations.append(
                 _ReferenceObservation(content_id, path, size_bytes, mtime_ns, None)
             )
@@ -299,27 +270,6 @@ def apply_reference_observations(
             hashing_is_enabled=hashing_is_enabled,
             pending_verification_ids=pending_verification_ids,
         )
-
-
-def sync_prefixes_with_filesystem(
-    session: Session,
-    prefixes: list[str],
-    collect_existing_paths: bool = False,
-    progress: _ScanProgress | None = None,
-    pending_verification_ids: list[str] | None = None,
-    diagnostics: list[_ReferenceDiagnostic] | None = None,
-) -> set[str] | None:
-    if not prefixes:
-        return set() if collect_existing_paths else None
-
-    observations, survivors = observe_references_on_filesystem(
-        prefixes, progress=progress, diagnostics=diagnostics, session=session
-    )
-    apply_reference_observations(
-        session, observations, pending_verification_ids=pending_verification_ids
-    )
-
-    return survivors if collect_existing_paths else None
 
 
 def _publish_reference_diagnostics(
@@ -481,18 +431,6 @@ def mark_missing_outside_prefixes_safely(
             error_type=error_type(exc),
         )
         return marked_so_far
-
-
-def mark_contents_missing_outside_prefixes(
-    session: Session, prefixes: list[str]
-) -> int:
-    contents = session.scalars(
-        sa.select(AssetContent).where(AssetContent.is_missing.is_(False))
-    )
-    missing = [content for content in contents if not _is_under_prefixes(content.path, prefixes)]
-    for content in missing:
-        mark_content_missing(session, content.id)
-    return len(missing)
 
 
 def collect_paths_for_roots(roots: tuple[RootType, ...]) -> list[str]:

@@ -13,12 +13,14 @@ import pytest
 import requests
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
+import sqlalchemy as sa
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
 from app.assets import scanner
 from app.assets.api import routes
 from app.assets.database.models import Asset, AssetContent
+from app.assets.database.queries.records import mark_content_missing
 from app.assets.database.queries.records import create_content, create_record
 from app.database.models import Base
 
@@ -203,3 +205,50 @@ def assert_hash_fields_consistent(
             assert h == expected_hash, (
                 f"hash must equal expected: got {h!r}, expected {expected_hash!r}"
             )
+
+
+def sync_prefixes_in_session(
+    session: Session,
+    prefixes: list[str],
+    collect_existing_paths: bool = False,
+    progress=None,
+    pending_verification_ids: list[str] | None = None,
+    diagnostics=None,
+) -> set[str] | None:
+    """Observe and apply a prefix sync inside one caller-supplied session.
+
+    Production drives this through `sync_root_safely`, which owns its own
+    chunked transactions. Tests that need to inspect the result inside their own
+    session compose the same two live calls here rather than production carrying
+    a synchronous entry point nothing ships against.
+    """
+    if not prefixes:
+        return set() if collect_existing_paths else None
+
+    collected = diagnostics if diagnostics is not None else []
+    observations, survivors = scanner.observe_references_on_filesystem(
+        prefixes, diagnostics=collected, session=session
+    )
+    scanner.apply_reference_observations(
+        session, observations, pending_verification_ids=pending_verification_ids
+    )
+    if diagnostics is None:
+        scanner._publish_reference_diagnostics(collected, progress)
+    return survivors if collect_existing_paths else None
+
+
+def mark_contents_missing_outside_prefixes_in_session(
+    session: Session, prefixes: list[str]
+) -> int:
+    """Mark every live content outside `prefixes` missing, in the caller's session."""
+    contents = session.scalars(
+        sa.select(AssetContent).where(AssetContent.is_missing.is_(False))
+    )
+    missing = [
+        content
+        for content in contents
+        if not scanner._is_under_prefixes(content.path, prefixes)
+    ]
+    for content in missing:
+        mark_content_missing(session, content.id)
+    return len(missing)

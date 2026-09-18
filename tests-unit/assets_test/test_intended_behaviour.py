@@ -32,7 +32,6 @@ from app.assets.scanner import (
     build_asset_specs,
     seed_asset_specs,
     stat_seed_specs,
-    sync_prefixes_with_filesystem,
 )
 from app.assets.scanner_admission import _should_skip_extension
 from app.assets.scanner_changes import (
@@ -49,10 +48,10 @@ from app.assets.services.asset_management import (
 from app.assets.services.file_utils import list_files_recursively
 from app.assets.services.ingest import register_cached_output, upload_from_temp_path
 from app.assets.services.lookup import (
-    lookup_for_from_hash,
     lookup_for_view,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
+from assets_test.helpers import sync_prefixes_in_session
 
 
 @pytest.fixture
@@ -109,7 +108,7 @@ def _seed_content_row(session, path: Path, hash_value: str | None = None):
 
 
 def _scan_pass(session, root: Path) -> int:
-    survivors = sync_prefixes_with_filesystem(
+    survivors = sync_prefixes_in_session(
         session, [str(root)], collect_existing_paths=True
     )
     specs, _tag_pool, _skipped = build_asset_specs(
@@ -234,8 +233,8 @@ def test_scenario_6_upload_reuses_content_never_the_record(session, tmp_path):
     still share one ``AssetContent`` row, in BOTH modes — uploads hash
     unconditionally (``upload_from_temp_path`` calls
     ``_snapshot_hash_with_retry`` before it consults anything) and
-    ``lookup_for_view`` never asks ``mode.hashing_enabled``, unlike
-    ``lookup_for_from_hash``. What changed is record identity: a re-upload is a
+    ``lookup_for_view`` never asks ``mode.hashing_enabled``. What changed is
+    record identity: a re-upload is a
     new delivery, so it gets a new record carrying the attributes THAT request
     supplied, instead of silently handing back an older record that never saw
     them.
@@ -520,7 +519,7 @@ def test_scenario_18_edit_during_hash_discard(session, tmp_path):
         queue_pending_verification(content.id)
         with _writer_lands_mid_hash(path, b"a-concurrent-writer-was-here"):
             assert snapshot_hash(str(path)) is None
-            assert drain_pending_verifications(session) == 0
+            assert drain_pending_verifications() == 0
 
         assert content.hash == committed_hash
         assert content.is_missing is False
@@ -528,7 +527,7 @@ def test_scenario_18_edit_during_hash_discard(session, tmp_path):
         assert [row.id for row in session.scalars(select(AssetContent))] == [content.id]
 
         path.write_bytes(committed)
-        assert drain_pending_verifications(session) == 1
+        assert drain_pending_verifications() == 1
     finally:
         clear_pending_verifications()
 
@@ -688,7 +687,7 @@ def test_scenario_27_fail_closed_previews_fromhash(session, tmp_path):
 
     def from_hash():
         with patch.object(mode, "hashing_enabled", return_value=True):
-            return lookup_for_from_hash(session, digest)
+            return lookup_for_view(session, digest)
 
     def serving() -> tuple[bool, object]:
         with patch(
