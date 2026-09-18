@@ -318,3 +318,67 @@ def enables_dynamic_vram():
     if args.enable_dynamic_vram:
         return True
     return not args.disable_dynamic_vram and not args.highvram and not args.gpu_only and not args.novram and not args.cpu
+
+
+# CLI flags whose value is a local filesystem path (or a connection string that
+# embeds one, like --database-url's sqlite:///... URI). /system_stats echoes
+# sys.argv back to any unauthenticated client, so these values are redacted by
+# redact_sensitive_argv() below before that happens. Flags take exactly one
+# value unless listed in SENSITIVE_ARGV_MULTI_FLAGS.
+SENSITIVE_ARGV_FLAGS = {
+    "--tls-keyfile",
+    "--tls-certfile",
+    "--base-directory",
+    "--output-directory",
+    "--temp-directory",
+    "--input-directory",
+    "--front-end-root",
+    "--user-directory",
+    "--models-directory",
+    "--database-url",
+}
+
+# Flags that accept one or more values after them (argparse nargs='+'), so every
+# value up to the next "-"-prefixed token must be redacted, not just the first.
+SENSITIVE_ARGV_MULTI_FLAGS = {
+    "--extra-model-paths-config",
+}
+
+
+def redact_sensitive_argv(argv):
+    """Return a copy of argv with the values of path-bearing flags replaced with "*".
+
+    Flag names (and every other argument) are left untouched so callers such as
+    the frontend's system-stats panel and "Copy System Info" feature can still
+    show which flags were passed, without leaking local directory layout,
+    usernames, or other filesystem details contained in their values.
+    """
+    redacted = []
+    i = 0
+    n = len(argv)
+    while i < n:
+        tok = argv[i]
+        name = tok.partition("=")[0]
+        if name in SENSITIVE_ARGV_FLAGS:
+            if "=" in tok:
+                redacted.append(f"{name}=*")
+            else:
+                redacted.append(tok)
+                if i + 1 < n and not argv[i + 1].startswith("-"):
+                    redacted.append("*")
+                    i += 1
+        elif name in SENSITIVE_ARGV_MULTI_FLAGS:
+            if "=" in tok:
+                redacted.append(f"{name}=*")
+            else:
+                redacted.append(tok)
+                had_value = False
+                while i + 1 < n and not argv[i + 1].startswith("-"):
+                    had_value = True
+                    i += 1
+                if had_value:
+                    redacted.append("*")
+        else:
+            redacted.append(tok)
+        i += 1
+    return redacted
