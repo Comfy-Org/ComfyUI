@@ -125,6 +125,23 @@ class MiniMaxH3TEModel(comfy.sd1_clip.SD1ClipModel):
         super().__init__(device=device, dtype=dtype, name="qwen3vl_32b",
                          clip_model=MiniMaxH3ClipModel, model_options=model_options)
 
+    def memory_estimation_function(self, token_weight_pairs, device=None):
+        text = 2.0 * 1024 * 1024 * 1024  # ~2 GB
+
+        constant = 0.14  # ~400 MB per RGB Megapixel
+        image_dim = 0
+
+        token_weight_pairs: list[list[tuple[int | dict, float]]] = token_weight_pairs.get("qwen3vl_32b", [])
+        for batch in token_weight_pairs:
+            for token, weight in batch:
+                if not isinstance(token, dict):
+                    continue
+                if token["type"] == "image":
+                    tensor: torch.Tensor = token["data"]
+                    image_dim += tensor.numel()  # B, H, W, C
+
+        return image_dim * constant * 1024 + text
+
 
 class MiniMaxQwenSDTokenizer(Qwen3VLSDTokenizer):
     def __init__(self, *args, **kwargs):
