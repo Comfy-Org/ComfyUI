@@ -8,6 +8,7 @@ still downloading out of the catalog.
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 import os
 import time
@@ -16,6 +17,7 @@ from typing import Final
 
 from sqlalchemy.orm import Session
 
+from app.assets.event_log import emit, error_type
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 
 PARTIAL_DOWNLOAD_EXTENSIONS = frozenset({
@@ -70,28 +72,48 @@ def tick_watch_list(session: Session) -> None:
     from app.assets.scanner import seed_asset_specs, SeedAssetSpec
 
     remaining: list[_WatchEntry] = []
-    for entry in _WATCH_LIST:
-        try:
-            current = os.stat(entry.path)
-        except FileNotFoundError:
-            continue
-        if (current.st_mtime_ns, current.st_size) == (entry.last_stat.st_mtime_ns, entry.last_stat.st_size):
-            name, tags = get_name_and_tags_from_asset_path(entry.path)
-            spec: SeedAssetSpec = {
-                "abs_path": entry.path,
-                "size_bytes": current.st_size,
-                "mtime_ns": current.st_mtime_ns,
-                "info_name": name,
-                "tags": tags,
-                "fname": compute_loader_path(entry.path),
-                "metadata": None,
-                "mime_type": mimetypes.guess_type(entry.path, strict=False)[0],
-                "job_id": None,
-            }
-            seed_asset_specs(session, [spec])
-            continue
-        entry.last_stat = current
-        entry.ticks += 1
-        if entry.ticks < _WATCH_SCAN_RETRIES:
-            remaining.append(entry)
-    _WATCH_LIST[:] = remaining
+    unvisited = iter(list(_WATCH_LIST))
+    try:
+        for entry in unvisited:
+            try:
+                current = os.stat(entry.path)
+            except OSError as exc:
+                logging.warning("Dropping watched asset after stat failed: %s", entry.path)
+                emit("scanner.watch_stat_failed", error_type=error_type(exc))
+                continue
+            if (current.st_mtime_ns, current.st_size) == (entry.last_stat.st_mtime_ns, entry.last_stat.st_size):
+                try:
+                    name, tags = get_name_and_tags_from_asset_path(entry.path)
+                    spec: SeedAssetSpec = {
+                        "abs_path": entry.path,
+                        "size_bytes": current.st_size,
+                        "mtime_ns": current.st_mtime_ns,
+                        "info_name": name,
+                        "tags": tags,
+                        "fname": compute_loader_path(entry.path),
+                        "metadata": None,
+                        "mime_type": mimetypes.guess_type(entry.path, strict=False)[0],
+                        "job_id": None,
+                    }
+                except Exception as exc:
+                    logging.warning(
+                        "Dropping watched asset after spec construction failed: %s", entry.path
+                    )
+                    emit("scanner.watch_spec_failed", error_type=error_type(exc))
+                    continue
+                _created, seed_error = seed_asset_specs(session, [spec])
+                if seed_error is not None:
+                    logging.warning(
+                        "Dropping watched asset after seeding failed: %s", entry.path
+                    )
+                    emit("scanner.watch_seed_failed", error_type=error_type(seed_error))
+                continue
+            entry.last_stat = current
+            entry.ticks += 1
+            if entry.ticks < _WATCH_SCAN_RETRIES:
+                remaining.append(entry)
+    finally:
+        # Skipping this write wedges the list: drained entries stay on it and are re-attempted
+        # every tick, while entries past the fault never reach the increment _WATCH_SCAN_RETRIES
+        # needs to retire them. Draining the iterator keeps entries the loop never reached.
+        _WATCH_LIST[:] = remaining + list(unvisited)

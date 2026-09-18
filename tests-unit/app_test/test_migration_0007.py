@@ -4,6 +4,10 @@ import sqlite3
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import create_engine, inspect
+
+import app.assets.database.models as asset_models
+from app.assets.database.models import Base
 
 _BASELINE_0006 = "0006_add_loader_path"
 
@@ -33,6 +37,7 @@ def test_0007_upgrade_from_0006(db_at_0006):
     assert "asset_contents" in tables
     assert "asset_system_state" in tables
     assert "asset_references" not in tables
+    assert "asset_meta" not in tables
 
 
 def test_0007_schema_has_expected_columns(db_at_0006):
@@ -53,6 +58,53 @@ def test_0007_downgrade_restores_0006_schema(db_at_0006):
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "asset_references" in tables
     assert "asset_contents" not in tables
+
+
+def test_0007_downgrade_drops_shipped_asset_meta(tmp_path):
+    db_path = str(tmp_path / "shipped_0007.db")
+    cfg = _make_config(db_path)
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE asset_meta (
+                asset_id VARCHAR(36) NOT NULL,
+                key VARCHAR(256) NOT NULL,
+                ordinal INTEGER NOT NULL,
+                val_str VARCHAR(2048),
+                val_num NUMERIC(38, 10),
+                val_bool BOOLEAN,
+                val_json JSON,
+                CONSTRAINT ck_asset_meta_has_value CHECK (
+                    val_str IS NOT NULL OR val_num IS NOT NULL OR
+                    val_bool IS NOT NULL OR val_json IS NOT NULL
+                ),
+                PRIMARY KEY (asset_id, key, ordinal),
+                FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+            );
+            CREATE INDEX ix_asset_meta_key ON asset_meta (key);
+            CREATE INDEX ix_asset_meta_key_val_str ON asset_meta (key, val_str);
+            CREATE INDEX ix_asset_meta_key_val_num ON asset_meta (key, val_num);
+            CREATE INDEX ix_asset_meta_key_val_bool ON asset_meta (key, val_bool);
+            """
+        )
+        conn.commit()
+    engine.dispose()
+    command.stamp(cfg, "0007_record_content_split")
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='asset_meta'"
+        ).fetchone()
+
+    command.downgrade(cfg, _BASELINE_0006)
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='asset_meta'"
+        ).fetchone() is None
+        assert list(conn.execute("PRAGMA foreign_key_check")) == []
 
 
 def test_0007_invariants_on_migrated_db(db_at_0006):
@@ -95,7 +147,6 @@ def test_0007_invariants_on_migrated_db(db_at_0006):
 def test_0007_orm_parity(db_at_0006, tmp_path):
     from sqlalchemy import create_engine, inspect
 
-    import app.assets.database.models as asset_models
     from app.database.models import Base
 
     cfg, db_path = db_at_0006
@@ -109,26 +160,47 @@ def test_0007_orm_parity(db_at_0006, tmp_path):
             )
         }
 
-    alembic_engine = create_engine(f"sqlite:///{db_path}")
     orm_db = str(tmp_path / "orm.db")
     engine = create_engine(f"sqlite:///{orm_db}")
-    alembic_inspector = inspect(alembic_engine)
     Base.metadata.create_all(engine)
     orm_inspector = inspect(engine)
     orm_tables = set(orm_inspector.get_table_names())
-    assert asset_models.AssetMeta.__tablename__ == "asset_meta"
-
-    alembic_indexes = {
-        (index["name"], tuple(index["column_names"]))
-        for index in alembic_inspector.get_indexes("asset_meta")
-    }
-    orm_indexes = {
-        (index.name, tuple(index.columns.keys()))
-        for index in Base.metadata.tables["asset_meta"].indexes
-    }
 
     assert alembic_tables == orm_tables, f"Mismatch: alembic={alembic_tables}, orm={orm_tables}"
-    assert alembic_indexes == orm_indexes, f"Mismatch: alembic={alembic_indexes}, orm={orm_indexes}"
+
+
+@pytest.mark.parametrize(
+    ("table_name", "has_indexes"),
+    [
+        ("assets", True),
+        ("asset_contents", True),
+        ("asset_tags", True),
+        ("asset_system_state", False),
+    ],
+)
+def test_0007_index_orm_parity(db_at_0006, table_name, has_indexes):
+    cfg, db_path = db_at_0006
+    command.upgrade(cfg, "head")
+
+    alembic_engine = create_engine(f"sqlite:///{db_path}")
+    try:
+        alembic_indexes = {
+            (index["name"], tuple(index["column_names"]))
+            for index in inspect(alembic_engine).get_indexes(table_name)
+        }
+    finally:
+        alembic_engine.dispose()
+
+    orm_indexes = {
+        (index.name, tuple(index.columns.keys()))
+        for index in asset_models.Base.metadata.tables[table_name].indexes
+    }
+
+    assert bool(alembic_indexes) is has_indexes
+    assert bool(orm_indexes) is has_indexes
+    assert alembic_indexes == orm_indexes, (
+        f"Mismatch for {table_name}: alembic={alembic_indexes}, orm={orm_indexes}"
+    )
 
 
 def test_0007_downgrade_chain_past_0003_succeeds(db_at_0006):

@@ -63,6 +63,16 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         # todo 16 - discovery/enrich stat failures, emit-once per scan per site
         CallSite("app/assets/scanner.py", "build_asset_specs", "scanner.stat_failed"),
         CallSite("app/assets/scanner.py", "enrich_asset", "scanner.stat_failed"),
+        CallSite("app/assets/scanner.py", "seed_asset_specs", "scanner.invalid_mtime"),
+        CallSite(
+            "app/assets/scanner_admission.py", "tick_watch_list", "scanner.watch_stat_failed"
+        ),
+        CallSite(
+            "app/assets/scanner_admission.py", "tick_watch_list", "scanner.watch_spec_failed"
+        ),
+        CallSite(
+            "app/assets/scanner_admission.py", "tick_watch_list", "scanner.watch_seed_failed"
+        ),
     }
 )
 
@@ -124,10 +134,30 @@ def _resolve_aliases(tree: ast.Module) -> Aliases:
     return Aliases(frozenset(module), frozenset(emit), frozenset(error_type))
 
 
+def _dotted_name(node: ast.expr) -> str | None:
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
 def _is_emit_call(func: ast.expr, aliases: Aliases) -> bool:
-    if isinstance(func, ast.Attribute) and func.attr == "emit" and isinstance(func.value, ast.Name):
-        return func.value.id in aliases.module
+    if isinstance(func, ast.Attribute) and func.attr == "emit":
+        return _dotted_name(func.value) in aliases.module
     return isinstance(func, ast.Name) and func.id in aliases.emit
+
+
+def _is_unresolvable_emit_call(func: ast.expr, aliases: Aliases) -> bool:
+    return (
+        bool(aliases.module)
+        and isinstance(func, ast.Attribute)
+        and func.attr == "emit"
+        and _dotted_name(func.value) is None
+    )
 
 
 def _is_error_type_call(value: ast.expr, aliases: Aliases) -> bool:
@@ -135,8 +165,8 @@ def _is_error_type_call(value: ast.expr, aliases: Aliases) -> bool:
     if not isinstance(value, ast.Call):
         return False
     func = value.func
-    if isinstance(func, ast.Attribute) and func.attr == "error_type" and isinstance(func.value, ast.Name):
-        return func.value.id in aliases.module
+    if isinstance(func, ast.Attribute) and func.attr == "error_type":
+        return _dotted_name(func.value) in aliases.module
     return isinstance(func, ast.Name) and func.id in aliases.error_type
 
 
@@ -177,7 +207,9 @@ def _field_faults(call: ast.Call, aliases: Aliases) -> Iterator[tuple[str, str]]
 
 
 def _file_faults(call: ast.Call, aliases: Aliases) -> Iterator[tuple[str, str]]:
-    if _is_emit_call(call.func, aliases):
+    if _is_unresolvable_emit_call(call.func, aliases):
+        yield "event_names", "the emit receiver cannot be resolved statically"
+    elif _is_emit_call(call.func, aliases):
         event = _event_of(call)
         if event not in ALLOWED_EVENTS:
             yield "event_names", "the event must be one string literal in the allowed vocabulary"
@@ -201,6 +233,12 @@ def _scan_file(root: Path, relative: str) -> tuple[Counter[CallSite], list[tuple
         for category, reason in _file_faults(node, aliases):
             faults.append((category, f"{relative}:{node.lineno}: {reason}"))
     return sites, faults
+
+
+def _write_scan_fixture(root: Path, relative: str, source: str) -> None:
+    path = root / relative
+    path.parent.mkdir(parents=True)
+    path.write_text(source, encoding="utf-8")
 
 
 def scan_repository(root: Path = REPO_ROOT) -> Scan:
@@ -258,3 +296,37 @@ def test_call_sites_match_the_manifest() -> None:
         "EXPECTED_CALL_SITES"
     )
     assert not missing, f"manifest call sites absent from the tree: {sorted(missing)}"
+
+
+def test_qualified_event_log_import_is_scanned(tmp_path: Path) -> None:
+    relative = "app/assets/qualified.py"
+    _write_scan_fixture(
+        tmp_path,
+        relative,
+        "import app.assets.event_log\n\n"
+        "def probe():\n"
+        '    app.assets.event_log.emit("seeder.scan_started", phase="fast")\n',
+    )
+
+    sites, faults = _scan_file(tmp_path, relative)
+
+    assert faults == []
+    assert sites == Counter(
+        {CallSite(relative, "probe", "seeder.scan_started"): 1}
+    )
+
+
+def test_unresolvable_emit_receiver_is_a_scan_failure(tmp_path: Path) -> None:
+    relative = "app/assets/dynamic.py"
+    _write_scan_fixture(
+        tmp_path,
+        relative,
+        "from app.assets import event_log\n\n"
+        "def probe(provider):\n"
+        '    provider().emit("seeder.scan_started", phase="fast")\n',
+    )
+
+    sites, faults = _scan_file(tmp_path, relative)
+
+    assert sites == Counter()
+    assert [category for category, _reason in faults] == ["event_names"]
