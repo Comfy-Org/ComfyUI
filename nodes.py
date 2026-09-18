@@ -16,6 +16,7 @@ import logging
 
 from PIL import Image, ImageOps, ImageSequence
 from PIL.PngImagePlugin import PngInfo
+import av
 
 import numpy as np
 import safetensors.torch
@@ -1758,11 +1759,18 @@ class LoadImage:
         dtype = comfy.model_management.intermediate_dtype()
         device = comfy.model_management.intermediate_device()
 
-        components = InputImpl.VideoFromFile(image_path).get_components()
-        if components.images.shape[0] > 0:
+        try:
+            components = InputImpl.VideoFromFile(image_path).get_components()
+        except av.error.FFmpegError:
+            # ffmpeg's format probe can pick the wrong demuxer for a valid image (e.g. a JPEG
+            # detected as mpegts, most often when the file has no extension), so let Pillow
+            # try it before giving up.
+            components = None
+        if components is not None and components.images.shape[0] > 0:
             return (components.images.to(device=device, dtype=dtype), (1.0 - components.alpha[..., -1]).to(device=device, dtype=dtype) if components.alpha is not None else torch.zeros((components.images.shape[0], 64, 64), dtype=dtype, device=device))
 
         # This code is left here to handle animated webp which pyav does not support loading
+        # and images that pyav could not open.
         img = node_helpers.pillow(Image.open, image_path)
 
         output_images = []
