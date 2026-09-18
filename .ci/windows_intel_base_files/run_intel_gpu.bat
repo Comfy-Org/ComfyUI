@@ -1,2 +1,2 @@
-.\python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build
+.\python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build --enable-manager
 pause
