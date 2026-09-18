@@ -33,7 +33,6 @@ from app.assets.services.image_dimensions import extract_image_dimensions
 from app.assets.services.lookup import (
     claim_qualified_content,
     lookup_for_view,
-    refresh_qualified_content,
 )
 from app.assets.services.metadata_extract import extract_file_metadata
 from app.assets.services.path_utils import (
@@ -341,6 +340,7 @@ def _reconcile_live_content_at_path(
         and existing.size_bytes == facts.size_bytes
     ):
         existing.hash = facts.stored_hash
+        existing.size_bytes = facts.size_bytes
         existing.mtime_ns = facts.mtime_ns
         session.flush()
         return
@@ -382,6 +382,8 @@ class _UploadRecordPreflight(NamedTuple):
     content_id: str | None
     stored_hash: str | None
     path: str
+    row_size_bytes: int | None
+    row_mtime_ns: int | None
     signature: _FileSignature
     spec: _UploadRecordSpec
 
@@ -412,6 +414,8 @@ class _CachedRegistrationPreflight(NamedTuple):
     content_id: str
     sibling_id: str | None
     sibling_metadata: dict[str, Any] | None
+    row_size_bytes: int
+    row_mtime_ns: int | None
     signature: _FileSignature | None
 
 
@@ -422,13 +426,6 @@ class _PreflightStale(Exception):
 def _file_signature(path: str) -> _FileSignature:
     stat_result = os.stat(path, follow_symlinks=True)
     return _FileSignature(path, stat_result.st_size, get_mtime_ns(stat_result))
-
-
-def _file_signature_matches(signature: _FileSignature) -> bool:
-    try:
-        return _file_signature(signature.path) == signature
-    except OSError:
-        return False
 
 
 def _preflight_upload_record(
@@ -444,18 +441,30 @@ def _preflight_upload_record(
                 return None
             content_id = None
             path = fallback_path
+            row_size_bytes = None
+            row_mtime_ns = None
         else:
             content_id = content.id
             path = content.path
+            row_size_bytes = content.size_bytes
+            row_mtime_ns = content.mtime_ns
         if spec.preview_id is not None and session.get(Asset, spec.preview_id) is None:
             raise ValueError(
                 f"preview_id {spec.preview_id!r} does not reference an existing asset"
             )
+    signature = _file_signature(path)
+    if content_id is not None and (
+        signature.size_bytes,
+        signature.mtime_ns if row_mtime_ns is not None else None,
+    ) != (row_size_bytes, row_mtime_ns):
+        raise _PreflightStale
     return _UploadRecordPreflight(
         content_id,
         stored_hash,
         path,
-        _file_signature(path),
+        row_size_bytes,
+        row_mtime_ns,
+        signature,
         spec,
     )
 
@@ -472,13 +481,16 @@ def _prepare_upload_record(
     )
 
 
-def _assert_upload_preflight_current(
-    session: Session,
-    preflight: _UploadRecordPreflight,
-) -> None:
-    if not _file_signature_matches(preflight.signature):
+def _assert_signature_current(signature: _FileSignature) -> None:
+    try:
+        current = _file_signature(signature.path)
+    except OSError:
+        raise _PreflightStale from None
+    if current != signature:
         raise _PreflightStale
-    preview_id = preflight.spec.preview_id
+
+
+def _assert_preview_exists(session: Session, preview_id: str | None) -> None:
     if preview_id is not None and session.get(Asset, preview_id) is None:
         raise _PreflightStale
 
@@ -488,18 +500,16 @@ def _apply_reused_upload_record(
     prepared: _PreparedUploadRecord,
 ) -> UploadResult:
     preflight = prepared.preflight
-    content = lookup_for_view(session, preflight.stored_hash)
+    content = session.get(AssetContent, preflight.content_id)
     if (
         content is None
-        or content.id != preflight.content_id
-        or content.path != preflight.path
+        or content.is_missing
+        or (content.size_bytes, content.mtime_ns)
+        != (preflight.row_size_bytes, preflight.row_mtime_ns)
     ):
         raise _PreflightStale
-    _assert_upload_preflight_current(session, preflight)
+    _assert_preview_exists(session, preflight.spec.preview_id)
     if not claim_qualified_content(session, content.id, preflight.stored_hash):
-        raise _PreflightStale
-    content = refresh_qualified_content(session, content.id)
-    if content is None or content.path != preflight.path:
         raise _PreflightStale
     record = _create_upload_record(session, content.id, prepared)
     return _record_to_upload_result(session, record, created_new=True)
@@ -510,11 +520,12 @@ def _reuse_qualified_content(
     spec: _UploadRecordSpec,
 ) -> UploadResult | None:
     for _restart in range(4):
-        preflight = _preflight_upload_record(stored_hash, None, spec)
-        if preflight is None:
-            return None
-        prepared = _prepare_upload_record(preflight)
         try:
+            preflight = _preflight_upload_record(stored_hash, None, spec)
+            if preflight is None:
+                return None
+            prepared = _prepare_upload_record(preflight)
+            _assert_signature_current(preflight.signature)
             return run_write_txn(
                 lambda session: _apply_reused_upload_record(session, prepared)
             )
@@ -582,7 +593,6 @@ def _apply_settle_target(
         or existing.hash != preflight.content_hash
         or existing.size_bytes != preflight.content_size_bytes
         or existing.mtime_ns != preflight.content_mtime_ns
-        or not _file_signature_matches(preflight.signature)
     ):
         raise _PreflightStale
     if prepared.facts is None:
@@ -598,11 +608,20 @@ def _apply_settle_target(
 
 def _settle_destination_before_write(dest_abs: str) -> None:
     for _restart in range(4):
-        preflight = _preflight_settle_target(dest_abs)
-        if preflight is None:
-            return
-        prepared = _prepare_settle_target(preflight)
         try:
+            preflight = _preflight_settle_target(dest_abs)
+            if preflight is None:
+                return
+            prepared = _prepare_settle_target(preflight)
+            if prepared.facts is not None and (
+                prepared.facts.size_bytes,
+                prepared.facts.mtime_ns,
+            ) != (
+                preflight.signature.size_bytes,
+                preflight.signature.mtime_ns,
+            ):
+                raise _PreflightStale
+            _assert_signature_current(preflight.signature)
             run_write_txn(lambda session: _apply_settle_target(session, prepared))
             return
         except _PreflightStale:
@@ -618,37 +637,43 @@ def _create_content_and_upload_record(
     spec: _UploadRecordSpec,
 ) -> UploadResult:
     for _restart in range(4):
-        preflight = _preflight_upload_record(None, path, spec)
-        if preflight is None:
-            raise RuntimeError("new upload record requires a destination path")
-        prepared = _prepare_upload_record(preflight)
-
-        def _work(session: Session) -> UploadResult:
-            _assert_upload_preflight_current(session, prepared.preflight)
-            _reconcile_live_content_at_path(
-                session,
-                path,
-                facts,
-                content_written=content_written,
-            )
-            content, inserted = create_content_reporting_insert(
-                session,
-                path,
-                stored_hash,
-                facts.size_bytes,
-                facts.mtime_ns,
-            )
-            created_content_id = content.id if inserted else None
-            try:
-                record = _create_upload_record(session, content.id, prepared)
-            except Exception:
-                session.rollback()
-                if created_content_id is not None:
-                    _discard_unreferenced_content(session, created_content_id)
-                raise
-            return _record_to_upload_result(session, record, created_new=True)
-
         try:
+            preflight = _preflight_upload_record(None, path, spec)
+            if preflight is None:
+                raise RuntimeError("new upload record requires a destination path")
+            prepared = _prepare_upload_record(preflight)
+            if (
+                preflight.signature.size_bytes,
+                preflight.signature.mtime_ns,
+            ) != (facts.size_bytes, facts.mtime_ns):
+                raise _PreflightStale
+            _assert_signature_current(preflight.signature)
+
+            def _work(session: Session) -> UploadResult:
+                _assert_preview_exists(session, prepared.preflight.spec.preview_id)
+                _reconcile_live_content_at_path(
+                    session,
+                    path,
+                    facts,
+                    content_written=content_written,
+                )
+                content, inserted = create_content_reporting_insert(
+                    session,
+                    path,
+                    stored_hash,
+                    facts.size_bytes,
+                    facts.mtime_ns,
+                )
+                created_content_id = content.id if inserted else None
+                try:
+                    record = _create_upload_record(session, content.id, prepared)
+                except Exception:
+                    session.rollback()
+                    if created_content_id is not None:
+                        _discard_unreferenced_content(session, created_content_id)
+                    raise
+                return _record_to_upload_result(session, record, created_new=True)
+
             return run_write_txn(_work)
         except _PreflightStale:
             continue
@@ -657,7 +682,7 @@ def _create_content_and_upload_record(
         "Upload preflight for a new asset did not settle in 4 attempts; refusing the upload "
         "rather than persisting content facts and file metadata that describe different bytes"
     )
-    raise RuntimeError(
+    raise UploadUnstableError(
         f"Upload preflight for {path} did not settle in 4 attempts; "
         "refusing to persist content facts and file metadata that describe different bytes"
     )
@@ -857,11 +882,15 @@ def _preflight_cached_registration(
             else None
         )
         content_id = existing.id
+        row_size_bytes = existing.size_bytes
+        row_mtime_ns = existing.mtime_ns
     signature = _file_signature(locator) if sibling_id is None else None
     return _CachedRegistrationPreflight(
         content_id,
         sibling_id,
         sibling_metadata,
+        row_size_bytes,
+        row_mtime_ns,
         signature,
     )
 
@@ -877,7 +906,13 @@ def _apply_cached_registration(
     system_metadata: dict[str, Any] | None,
 ) -> RegisteredAsset:
     existing = session.get(AssetContent, preflight.content_id)
-    if existing is None or existing.path != locator or existing.is_missing:
+    if (
+        existing is None
+        or existing.path != locator
+        or existing.is_missing
+        or (existing.size_bytes, existing.mtime_ns)
+        != (preflight.row_size_bytes, preflight.row_mtime_ns)
+    ):
         raise _PreflightStale
     sibling = session.scalars(
         select(Asset)
@@ -894,10 +929,6 @@ def _apply_cached_registration(
     if (
         sibling_id != preflight.sibling_id
         or sibling_metadata != preflight.sibling_metadata
-        or (
-            preflight.signature is not None
-            and not _file_signature_matches(preflight.signature)
-        )
     ):
         raise _PreflightStale
     record = create_record(
@@ -924,19 +955,21 @@ def register_cached_output(
     locator = os.path.abspath(abs_path)
     try:
         for _restart in range(4):
-            preflight = _preflight_cached_registration(locator)
-            if preflight is None:
-                logging.info(
-                    "Cached output registration is a non-event; no live content for %s",
-                    locator,
-                )
-                return None
-            name, path_tags = get_name_and_tags_from_asset_path(locator)
-            mime_type = mimetypes.guess_type(locator, strict=False)[0]
-            system_metadata = preflight.sibling_metadata
-            if preflight.sibling_id is None:
-                system_metadata = _extract_system_metadata_sync(locator, mime_type)
             try:
+                preflight = _preflight_cached_registration(locator)
+                if preflight is None:
+                    logging.info(
+                        "Cached output registration is a non-event; no live content for %s",
+                        locator,
+                    )
+                    return None
+                name, path_tags = get_name_and_tags_from_asset_path(locator)
+                mime_type = mimetypes.guess_type(locator, strict=False)[0]
+                system_metadata = preflight.sibling_metadata
+                if preflight.sibling_id is None:
+                    system_metadata = _extract_system_metadata_sync(locator, mime_type)
+                if preflight.signature is not None:
+                    _assert_signature_current(preflight.signature)
                 return run_write_txn(
                     lambda session: _apply_cached_registration(
                         session,

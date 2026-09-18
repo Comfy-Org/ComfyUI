@@ -99,3 +99,36 @@ def test_transition_intent_terminal_failure_preserves_global(
         lifecycle.record_hash_mode_transition_intent()
 
     assert lifecycle._hash_mode_transition == "off_to_on"
+
+
+def test_enqueue_mode_transition_work_does_not_commit_reader_session(
+    mock_create_session, monkeypatch
+) -> None:
+    db_mod.run_write_txn(
+        lambda session: session.add(
+            lifecycle.AssetContent(
+                path="/catalogued.bin",
+                size_bytes=1,
+                mtime_ns=1,
+            )
+        )
+    )
+
+    @contextmanager
+    def read_only_session():
+        with mock_create_session() as reader:
+            monkeypatch.setattr(
+                reader,
+                "commit",
+                lambda: (_ for _ in ()).throw(
+                    AssertionError("read-only path must not commit")
+                ),
+            )
+            yield reader
+
+    lifecycle._hash_mode_transition = "off_to_on"
+    monkeypatch.setattr(lifecycle, "create_session", read_only_session)
+
+    lifecycle.enqueue_mode_transition_work()
+
+    assert hash_mode_state.pending_transition_count() == 1

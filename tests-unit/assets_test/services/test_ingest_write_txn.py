@@ -115,12 +115,13 @@ def write_txn_fs_barrier(monkeypatch) -> _WriteTxnFsBarrier:
 def test_reused_upload_refuses_after_four_stale_preflights(
     write_txn_fs_barrier, monkeypatch
 ) -> None:
-    preflight = object()
+    preflight = SimpleNamespace(signature=object())
     prepared = object()
     attempts: list[object] = []
 
     monkeypatch.setattr(ingest, "_preflight_upload_record", lambda *_args: preflight)
     monkeypatch.setattr(ingest, "_prepare_upload_record", lambda _preflight: prepared)
+    monkeypatch.setattr(ingest, "_assert_signature_current", lambda _signature: None)
 
     def stale_apply(_session, observed_prepared):
         attempts.append(observed_prepared)
@@ -138,12 +139,13 @@ def test_reused_upload_refuses_after_four_stale_preflights(
 def test_settle_destination_refuses_after_four_stale_preflights(
     write_txn_fs_barrier, monkeypatch
 ) -> None:
-    preflight = object()
-    prepared = object()
+    preflight = SimpleNamespace(signature=object())
+    prepared = SimpleNamespace(facts=None)
     attempts: list[object] = []
 
     monkeypatch.setattr(ingest, "_preflight_settle_target", lambda _dest: preflight)
     monkeypatch.setattr(ingest, "_prepare_settle_target", lambda _preflight: prepared)
+    monkeypatch.setattr(ingest, "_assert_signature_current", lambda _signature: None)
 
     def stale_apply(_session, observed_prepared):
         attempts.append(observed_prepared)
@@ -232,8 +234,11 @@ async def test_upload_route_reports_an_unsettleable_destination_as_unstable(
         "USER_MANAGER",
         SimpleNamespace(get_request_user_id=lambda _request: "test-user"),
     )
-    monkeypatch.setattr(ingest, "_preflight_settle_target", lambda _dest: object())
-    monkeypatch.setattr(ingest, "_prepare_settle_target", lambda _preflight: object())
+    preflight = SimpleNamespace(signature=object())
+    prepared = SimpleNamespace(facts=None)
+    monkeypatch.setattr(ingest, "_preflight_settle_target", lambda _dest: preflight)
+    monkeypatch.setattr(ingest, "_prepare_settle_target", lambda _preflight: prepared)
+    monkeypatch.setattr(ingest, "_assert_signature_current", lambda _signature: None)
 
     def stale_apply(_session, _prepared):
         raise ingest._PreflightStale
@@ -348,6 +353,515 @@ def _apply_cached_preflight(session, preflight, path: str, system_metadata: dict
     )
 
 
+def test_reused_upload_apply_compares_the_row_to_preflight_row_values(
+    mock_create_session, tmp_path
+) -> None:
+    path = tmp_path / "reuse-row-behind-disk.bin"
+    path.write_bytes(b"newer disk bytes")
+    signature = ingest._file_signature(str(path))
+    stored_hash = "blake3:" + "a" * 64
+
+    def seed(session):
+        content = create_content(
+            session,
+            str(path),
+            hash=stored_hash,
+            size_bytes=3,
+            mtime_ns=7,
+        )
+        return content.id
+
+    content_id = db_mod.run_write_txn(seed)
+    preflight = ingest._UploadRecordPreflight(
+        content_id,
+        stored_hash,
+        str(path),
+        3,
+        7,
+        signature,
+        ingest._UploadRecordSpec(path.name, [], None, {}, None),
+    )
+    prepared = ingest._PreparedUploadRecord(preflight, {})
+
+    result = db_mod.run_write_txn(
+        lambda session: ingest._apply_reused_upload_record(session, prepared)
+    )
+
+    assert result.content_id == content_id
+
+
+def test_reconcile_unhashed_live_content_writes_hash_size_and_mtime_together(
+    mock_create_session, tmp_path
+) -> None:
+    path = tmp_path / "unhashed-live-content.bin"
+    path.write_bytes(b"same-size bytes")
+    facts = ingest._ContentFacts(
+        "blake3:" + "f" * 64,
+        path.stat().st_size,
+        path.stat().st_mtime_ns,
+    )
+
+    def seed(session):
+        content = create_content(
+            session,
+            str(path),
+            size_bytes=facts.size_bytes,
+            mtime_ns=1,
+        )
+        return content.id
+
+    content_id = db_mod.run_write_txn(seed)
+    db_mod.run_write_txn(
+        lambda session: ingest._reconcile_live_content_at_path(
+            session,
+            str(path),
+            facts,
+            content_written=False,
+        )
+    )
+
+    with mock_create_session() as session:
+        content = session.get(ingest.AssetContent, content_id)
+        assert content is not None
+        assert (content.hash, content.size_bytes, content.mtime_ns) == facts
+
+
+def test_reused_upload_apply_rejects_a_row_changed_after_preflight(
+    mock_create_session, tmp_path
+) -> None:
+    path = tmp_path / "reuse-row-mutated.bin"
+    path.write_bytes(b"stable bytes")
+    stat_result = path.stat()
+    stored_hash = "blake3:" + "b" * 64
+
+    def seed(session):
+        content = create_content(
+            session,
+            str(path),
+            hash=stored_hash,
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+        )
+        return content.id
+
+    content_id = db_mod.run_write_txn(seed)
+    spec = ingest._UploadRecordSpec(path.name, [], None, {}, None)
+    preflight = ingest._preflight_upload_record(stored_hash, None, spec)
+    assert preflight is not None
+    prepared = ingest._prepare_upload_record(preflight)
+
+    def mutate_row(session):
+        content = session.get(ingest.AssetContent, content_id)
+        assert content is not None
+        content.mtime_ns = stat_result.st_mtime_ns + 1
+
+    db_mod.run_write_txn(mutate_row)
+
+    with pytest.raises(ingest._PreflightStale):
+        db_mod.run_write_txn(
+            lambda session: ingest._apply_reused_upload_record(session, prepared)
+        )
+
+
+def test_reused_upload_apply_accepts_a_qualified_row_without_mtime(
+    mock_create_session, tmp_path
+) -> None:
+    path = tmp_path / "reuse-row-without-mtime.bin"
+    path.write_bytes(b"stable bytes")
+    stored_hash = "blake3:" + "c" * 64
+
+    def seed(session):
+        content = create_content(
+            session,
+            str(path),
+            hash=stored_hash,
+            size_bytes=path.stat().st_size,
+            mtime_ns=None,
+        )
+        return content.id
+
+    content_id = db_mod.run_write_txn(seed)
+    spec = ingest._UploadRecordSpec(path.name, [], None, {}, None)
+    preflight = ingest._preflight_upload_record(stored_hash, None, spec)
+    assert preflight is not None
+    assert preflight.row_mtime_ns is None
+    prepared = ingest._prepare_upload_record(preflight)
+
+    result = db_mod.run_write_txn(
+        lambda session: ingest._apply_reused_upload_record(session, prepared)
+    )
+
+    assert result.content_id == content_id
+
+
+def test_upload_preflight_rejects_a_file_changed_after_qualification(
+    mock_create_session, tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "qualification-gap.bin"
+    path.write_bytes(b"qualified bytes")
+    stat_result = path.stat()
+    stored_hash = "blake3:" + "d" * 64
+    db_mod.run_write_txn(
+        lambda session: create_content(
+            session,
+            str(path),
+            hash=stored_hash,
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+        )
+    )
+    real_file_signature = ingest._file_signature
+
+    def mutate_then_sign(file_path: str):
+        path.write_bytes(b"changed after qualification")
+        return real_file_signature(file_path)
+
+    monkeypatch.setattr(ingest, "_file_signature", mutate_then_sign)
+
+    with pytest.raises(ingest._PreflightStale):
+        ingest._preflight_upload_record(
+            stored_hash,
+            None,
+            ingest._UploadRecordSpec(path.name, [], None, {}, None),
+        )
+
+
+def test_reused_upload_retries_when_pretransaction_signature_check_is_stale_once(
+    mock_create_session, tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "reuse-retry.bin"
+    path.write_bytes(b"stable bytes")
+    stat_result = path.stat()
+    stored_hash = "blake3:" + "e" * 64
+    db_mod.run_write_txn(
+        lambda session: create_content(
+            session,
+            str(path),
+            hash=stored_hash,
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+        )
+    )
+    checks = 0
+
+    def stale_once(_signature):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            raise ingest._PreflightStale
+
+    monkeypatch.setattr(ingest, "_assert_signature_current", stale_once, raising=False)
+
+    result = ingest._reuse_qualified_content(
+        stored_hash,
+        ingest._UploadRecordSpec(path.name, [], None, {}, None),
+    )
+
+    assert result is not None
+    assert checks == 2
+
+
+def test_settle_apply_compares_the_row_to_preflight_row_values(
+    mock_create_session, tmp_path
+) -> None:
+    path = tmp_path / "settle-row-behind-disk.bin"
+    path.write_bytes(b"newer disk bytes")
+    signature = ingest._file_signature(str(path))
+
+    def seed(session):
+        content = create_content(
+            session,
+            str(path),
+            hash="blake3:" + "1" * 64,
+            size_bytes=3,
+            mtime_ns=7,
+        )
+        return content.id
+
+    content_id = db_mod.run_write_txn(seed)
+    preflight = ingest._SettleTargetPreflight(
+        content_id,
+        "blake3:" + "1" * 64,
+        3,
+        7,
+        signature,
+    )
+
+    db_mod.run_write_txn(
+        lambda session: ingest._apply_settle_target(
+            session,
+            ingest._PreparedSettleTarget(preflight, None),
+        )
+    )
+
+    with mock_create_session() as session:
+        content = session.get(ingest.AssetContent, content_id)
+        assert content is not None
+        assert content.is_missing is True
+
+
+def test_settle_apply_rejects_a_row_changed_after_preflight(
+    mock_create_session, tmp_path
+) -> None:
+    path = tmp_path / "settle-row-mutated.bin"
+    path.write_bytes(b"stable bytes")
+    stat_result = path.stat()
+
+    def seed(session):
+        content = create_content(
+            session,
+            str(path),
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+        )
+        return content.id
+
+    content_id = db_mod.run_write_txn(seed)
+    preflight = ingest._preflight_settle_target(str(path))
+    assert preflight is not None
+
+    def mutate_row(session):
+        content = session.get(ingest.AssetContent, content_id)
+        assert content is not None
+        content.mtime_ns = stat_result.st_mtime_ns + 1
+
+    db_mod.run_write_txn(mutate_row)
+
+    with pytest.raises(ingest._PreflightStale):
+        db_mod.run_write_txn(
+            lambda session: ingest._apply_settle_target(
+                session,
+                ingest._PreparedSettleTarget(preflight, None),
+            )
+        )
+
+
+def test_settle_apply_accepts_a_preflight_row_without_mtime(
+    mock_create_session, tmp_path
+) -> None:
+    path = tmp_path / "settle-row-without-mtime.bin"
+    path.write_bytes(b"stable bytes")
+
+    def seed(session):
+        content = create_content(
+            session,
+            str(path),
+            size_bytes=path.stat().st_size,
+            mtime_ns=None,
+        )
+        return content.id
+
+    content_id = db_mod.run_write_txn(seed)
+    preflight = ingest._preflight_settle_target(str(path))
+    assert preflight is not None
+    assert preflight.content_mtime_ns is None
+
+    db_mod.run_write_txn(
+        lambda session: ingest._apply_settle_target(
+            session,
+            ingest._PreparedSettleTarget(preflight, None),
+        )
+    )
+
+    with mock_create_session() as session:
+        content = session.get(ingest.AssetContent, content_id)
+        assert content is not None
+        assert content.is_missing is True
+
+
+def test_settle_retries_when_hash_facts_do_not_match_the_preflight_signature(
+    monkeypatch,
+) -> None:
+    signature = ingest._FileSignature("/settle.bin", 4, 5)
+    preflight = ingest._SettleTargetPreflight("content", None, 4, 5, signature)
+    preparations = 0
+    transactions = 0
+
+    monkeypatch.setattr(ingest, "_preflight_settle_target", lambda _path: preflight)
+
+    def prepare(_preflight):
+        nonlocal preparations
+        preparations += 1
+        facts = ingest._ContentFacts(
+            "blake3:" + "2" * 64,
+            6 if preparations == 1 else signature.size_bytes,
+            signature.mtime_ns,
+        )
+        return ingest._PreparedSettleTarget(preflight, facts)
+
+    def run_once(_work):
+        nonlocal transactions
+        transactions += 1
+
+    monkeypatch.setattr(ingest, "_prepare_settle_target", prepare)
+    monkeypatch.setattr(ingest, "_assert_signature_current", lambda _signature: None)
+    monkeypatch.setattr(ingest, "run_write_txn", run_once)
+
+    ingest._settle_destination_before_write(signature.path)
+
+    assert preparations == 2
+    assert transactions == 1
+
+
+def test_settle_retries_when_pretransaction_signature_check_is_stale_once(
+    monkeypatch,
+) -> None:
+    signature = ingest._FileSignature("/settle.bin", 4, 5)
+    preflight = ingest._SettleTargetPreflight("content", None, 4, 5, signature)
+    prepared = ingest._PreparedSettleTarget(
+        preflight,
+        ingest._ContentFacts("blake3:" + "3" * 64, 4, 5),
+    )
+    checks = 0
+    transactions = 0
+
+    monkeypatch.setattr(ingest, "_preflight_settle_target", lambda _path: preflight)
+    monkeypatch.setattr(ingest, "_prepare_settle_target", lambda _preflight: prepared)
+
+    def stale_once(_signature):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            raise ingest._PreflightStale
+
+    def run_once(_work):
+        nonlocal transactions
+        transactions += 1
+
+    monkeypatch.setattr(ingest, "_assert_signature_current", stale_once)
+    monkeypatch.setattr(ingest, "run_write_txn", run_once)
+
+    ingest._settle_destination_before_write(signature.path)
+
+    assert checks == 2
+    assert transactions == 1
+
+
+def test_settle_restarts_when_destination_changes_after_hash_preparation(
+    mock_create_session, tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "settle-changed-after-prepare.bin"
+    path.write_bytes(b"incumbent bytes")
+    stat_result = path.stat()
+    db_mod.run_write_txn(
+        lambda session: create_content(
+            session,
+            str(path),
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+        )
+    )
+    real_prepare = ingest._prepare_settle_target
+    preparations = 0
+
+    def mutate_after_first_prepare(preflight):
+        nonlocal preparations
+        preparations += 1
+        prepared = real_prepare(preflight)
+        if preparations == 1:
+            path.write_bytes(b"replacement bytes are different")
+        return prepared
+
+    monkeypatch.setattr(ingest, "_prepare_settle_target", mutate_after_first_prepare)
+
+    ingest._settle_destination_before_write(str(path))
+
+    assert preparations == 2
+
+
+def test_new_content_retries_when_preflight_signature_does_not_match_hash_facts(
+    mock_create_session, tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "new-content-hash-snapshot.bin"
+    original_bytes = b"hashed bytes"
+    path.write_bytes(original_bytes)
+    original_stat = path.stat()
+    stored_hash = "blake3:" + "4" * 64
+    facts = ingest._ContentFacts(
+        stored_hash,
+        original_stat.st_size,
+        original_stat.st_mtime_ns,
+    )
+    spec = ingest._UploadRecordSpec(path.name, [], None, {}, None)
+    real_preflight = ingest._preflight_upload_record
+    preflights = 0
+
+    def change_before_first_preflight(*args):
+        nonlocal preflights
+        preflights += 1
+        if preflights == 1:
+            path.write_bytes(b"newer bytes with another size")
+        else:
+            path.write_bytes(original_bytes)
+            os.utime(
+                path,
+                ns=(original_stat.st_mtime_ns, original_stat.st_mtime_ns),
+            )
+        return real_preflight(*args)
+
+    monkeypatch.setattr(ingest, "_preflight_upload_record", change_before_first_preflight)
+
+    result = ingest._create_content_and_upload_record(
+        stored_hash,
+        str(path),
+        facts,
+        True,
+        spec,
+    )
+
+    assert result.content_id is not None
+    assert preflights == 2
+
+
+def test_new_content_retries_when_pretransaction_signature_check_is_stale_once(
+    monkeypatch,
+) -> None:
+    signature = ingest._FileSignature("/new-content.bin", 4, 5)
+    spec = ingest._UploadRecordSpec("new-content.bin", [], None, {}, None)
+    preflight = ingest._UploadRecordPreflight(
+        None,
+        None,
+        signature.path,
+        None,
+        None,
+        signature,
+        spec,
+    )
+    prepared = ingest._PreparedUploadRecord(preflight, {})
+    facts = ingest._ContentFacts("blake3:" + "5" * 64, 4, 5)
+    preflights = 0
+    checks = 0
+    result = object()
+
+    def preflight_once(*_args):
+        nonlocal preflights
+        preflights += 1
+        return preflight
+
+    def stale_once(_signature):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            raise ingest._PreflightStale
+
+    monkeypatch.setattr(ingest, "_preflight_upload_record", preflight_once)
+    monkeypatch.setattr(ingest, "_prepare_upload_record", lambda _preflight: prepared)
+    monkeypatch.setattr(ingest, "_assert_signature_current", stale_once)
+    monkeypatch.setattr(ingest, "run_write_txn", lambda _work: result)
+
+    observed = ingest._create_content_and_upload_record(
+        facts.stored_hash,
+        signature.path,
+        facts,
+        True,
+        spec,
+    )
+
+    assert observed is result
+    assert preflights == 2
+    assert checks == 2
+
+
 def test_executed_registration_reports_exhausted_locked_retries(monkeypatch, caplog) -> None:
     path = _output_path("executed-locked-retries.bin")
     with open(path, "wb") as file:
@@ -418,6 +932,117 @@ def test_cached_registration_reports_terminal_write_failure(
         )
     finally:
         os.unlink(path)
+
+
+def test_cached_registration_apply_rejects_changed_content_row_with_sibling(
+    mock_create_session, tmp_path
+) -> None:
+    path = tmp_path / "cached-sibling-row-mutated.bin"
+    path.write_bytes(b"cached bytes")
+    stat_result = path.stat()
+
+    def seed(session):
+        content = create_content(
+            session,
+            str(path),
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+        )
+        create_record(session, content.id, "sibling.bin", system_metadata={"source": 1})
+        return content.id
+
+    content_id = db_mod.run_write_txn(seed)
+    preflight = ingest._preflight_cached_registration(str(path))
+    assert preflight is not None
+    assert preflight.sibling_id is not None
+
+    def mutate_row(session):
+        content = session.get(ingest.AssetContent, content_id)
+        assert content is not None
+        content.mtime_ns = stat_result.st_mtime_ns + 1
+
+    db_mod.run_write_txn(mutate_row)
+
+    with mock_create_session() as session:
+        with pytest.raises(ingest._PreflightStale):
+            _apply_cached_preflight(session, preflight, str(path), {"source": 1})
+
+
+def test_cached_registration_apply_rejects_changed_content_row_without_sibling(
+    mock_create_session, tmp_path
+) -> None:
+    path = tmp_path / "cached-no-sibling-row-mutated.bin"
+    path.write_bytes(b"cached bytes")
+    stat_result = path.stat()
+
+    def seed(session):
+        content = create_content(
+            session,
+            str(path),
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+        )
+        return content.id
+
+    content_id = db_mod.run_write_txn(seed)
+    preflight = ingest._preflight_cached_registration(str(path))
+    assert preflight is not None
+    assert preflight.sibling_id is None
+
+    def mutate_row(session):
+        content = session.get(ingest.AssetContent, content_id)
+        assert content is not None
+        content.mtime_ns = stat_result.st_mtime_ns + 1
+
+    db_mod.run_write_txn(mutate_row)
+
+    with mock_create_session() as session:
+        with pytest.raises(ingest._PreflightStale):
+            _apply_cached_preflight(session, preflight, str(path), {})
+
+
+def test_cached_registration_retries_when_pretransaction_signature_check_is_stale_once(
+    monkeypatch
+) -> None:
+    path = _output_path("cached-retry.bin")
+    with open(path, "wb") as file:
+        file.write(b"cached bytes")
+    signature = ingest._file_signature(path)
+    preflight = SimpleNamespace(
+        content_id="content",
+        sibling_id="sibling",
+        sibling_metadata={"source": 1},
+        signature=signature,
+        row_size_bytes=signature.size_bytes,
+        row_mtime_ns=signature.mtime_ns,
+    )
+    preflights = 0
+    checks = 0
+    result = object()
+
+    def preflight_once(_locator):
+        nonlocal preflights
+        preflights += 1
+        return preflight
+
+    def stale_once(_signature):
+        nonlocal checks
+        checks += 1
+        if checks == 1:
+            raise ingest._PreflightStale
+
+    monkeypatch.setattr(ingest, "_preflight_cached_registration", preflight_once)
+    monkeypatch.setattr(ingest, "_assert_signature_current", stale_once)
+    monkeypatch.setattr(ingest, "run_write_txn", lambda _work: result)
+
+    try:
+        observed = ingest.register_cached_output(path)
+    finally:
+        os.unlink(path)
+
+    assert observed is result
+    assert preflights == 2
+    assert checks == 2
 
 
 def test_cached_registration_restarts_when_content_vanishes_after_preflight(
@@ -539,14 +1164,14 @@ def test_cached_registration_restarts_when_file_changes_after_preflight(
         _seed_cached_content(mock_create_session, direct_path)
         direct_preflight = ingest._preflight_cached_registration(direct_path)
         assert direct_preflight is not None
+        assert direct_preflight.signature is not None
         with open(direct_path, "wb") as file:
             file.write(b"new bytes")
-        with mock_create_session() as session:
-            with pytest.raises(ingest._PreflightStale):
-                _apply_cached_preflight(session, direct_preflight, direct_path, {})
+        with pytest.raises(ingest._PreflightStale):
+            ingest._assert_signature_current(direct_preflight.signature)
 
         _seed_cached_content(mock_create_session, public_path)
-        real_apply = ingest._apply_cached_registration
+        real_assert_signature_current = ingest._assert_signature_current
         extraction_sizes: list[int] = []
         mutated = False
 
@@ -555,16 +1180,16 @@ def test_cached_registration_restarts_when_file_changes_after_preflight(
             extraction_sizes.append(size)
             return {"size": size}
 
-        def rewrite_then_apply(session, *args):
+        def rewrite_then_assert(signature):
             nonlocal mutated
             if not mutated:
                 mutated = True
                 with open(public_path, "wb") as file:
                     file.write(b"new public bytes")
-            return real_apply(session, *args)
+            return real_assert_signature_current(signature)
 
         monkeypatch.setattr(ingest, "_extract_system_metadata_sync", extract_metadata)
-        monkeypatch.setattr(ingest, "_apply_cached_registration", rewrite_then_apply)
+        monkeypatch.setattr(ingest, "_assert_signature_current", rewrite_then_assert)
         result = ingest.register_cached_output(public_path)
         assert result is not None
         with mock_create_session() as session:
@@ -739,20 +1364,23 @@ def test_unsettled_new_upload_persists_nothing_rather_than_mixing_facts(
     facts = ingest._ContentFacts(stored_hash, stat_result.st_size, stat_result.st_mtime_ns)
     spec = ingest._UploadRecordSpec("unsettled-upload.bin", [], None, {}, None)
 
-    real_assert = ingest._assert_upload_preflight_current
+    real_assert = ingest._assert_signature_current
+    attempts = 0
 
-    def always_stale(_session, _preflight):
+    def always_stale(_signature):
+        nonlocal attempts
+        attempts += 1
         raise ingest._PreflightStale
 
-    monkeypatch.setattr(ingest, "_assert_upload_preflight_current", always_stale)
+    monkeypatch.setattr(ingest, "_assert_signature_current", always_stale)
 
     with caplog.at_level(logging.WARNING):
-        with pytest.raises(RuntimeError, match="did not settle"):
+        with pytest.raises(ingest.UploadUnstableError, match="did not settle"):
             ingest._create_content_and_upload_record(
                 stored_hash, path, facts, True, spec
             )
 
-    monkeypatch.setattr(ingest, "_assert_upload_preflight_current", real_assert)
+    monkeypatch.setattr(ingest, "_assert_signature_current", real_assert)
 
     with db_mod.Session() as session:
         contents = list(session.scalars(select(AssetContent).where(AssetContent.path == path)))
@@ -760,4 +1388,5 @@ def test_unsettled_new_upload_persists_nothing_rather_than_mixing_facts(
 
     assert contents == [], "refused upload must not leave a content row behind"
     assert records == [], "refused upload must not leave an asset record behind"
+    assert attempts == 4
     os.unlink(path)

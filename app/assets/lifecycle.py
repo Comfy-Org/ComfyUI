@@ -41,7 +41,6 @@ def record_hash_mode_transition_intent() -> None:
 def enqueue_mode_transition_work() -> None:
     with create_session() as session:
         enqueue_transition_work(session, _hash_mode_transition)
-        session.commit()
 
 
 def wipe_temp_db_rows(session) -> tuple[int, int]:

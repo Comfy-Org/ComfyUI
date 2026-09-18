@@ -38,8 +38,7 @@ class CreateSessionCallSite(NamedTuple):
 READ_ONLY_CREATE_SESSION_CALL_SITES = frozenset(
     {
         CreateSessionCallSite("app/assets/api/routes.py", "list_assets_route"),
-        # This commits only SELECTs and in-memory queue changes, so a writer retry
-        # would acquire a write lease for no persisted work.
+        # This reads the catalogue and fills in-memory queues; no commit.
         CreateSessionCallSite("app/assets/lifecycle.py", "enqueue_mode_transition_work"),
         CreateSessionCallSite("app/assets/scanner.py", "get_unenriched_assets_for_roots"),
         # This reads the catalogue so the stat walk runs before the writer lease is taken.

@@ -5,11 +5,11 @@ from sqlalchemy import select
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_content, mark_content_missing
 from app.assets.helpers import to_stored_hash
-from app.assets.services.ingest import create_from_hash
-from app.assets.services.lookup import (
-    claim_qualified_content as _real_claim_qualified_content,
-    refresh_qualified_content as _real_refresh_qualified_content,
+from app.assets.services.ingest import (
+    _assert_signature_current as _real_assert_signature_current,
 )
+from app.assets.services.ingest import create_from_hash
+from app.assets.services.lookup import claim_qualified_content as _real_claim_qualified_content
 
 
 def test_create_from_hash_with_prefixed_hash_finds_existing_content(
@@ -94,7 +94,7 @@ def test_content_retired_between_lookup_and_claim_mints_nothing(
         assert retired.path == str(path)
 
 
-def test_file_vanishing_between_claim_and_refresh_mints_nothing(
+def test_file_vanishing_before_write_transaction_mints_nothing(
     mock_create_session, monkeypatch, temp_dir
 ):
     digest = "d" * 64
@@ -103,12 +103,12 @@ def test_file_vanishing_between_claim_and_refresh_mints_nothing(
     monkeypatch.setattr("app.assets.mode.hashing_enabled", lambda: True)
     content_id = _seed_live_content(mock_create_session, path, digest)
 
-    def delete_file_then_refresh(session, refreshed_id):
+    def delete_file_then_assert(signature):
         path.unlink()
-        return _real_refresh_qualified_content(session, refreshed_id)
+        return _real_assert_signature_current(signature)
 
     with patch(
-        "app.assets.services.ingest.refresh_qualified_content", delete_file_then_refresh
+        "app.assets.services.ingest._assert_signature_current", delete_file_then_assert
     ):
         result = create_from_hash(f"blake3:{digest}", "derived.bin")
 

@@ -1,6 +1,8 @@
+import os
 import threading
 import uuid
 
+import folder_paths
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
@@ -11,6 +13,7 @@ from app.assets import scanner
 from app.assets import scanner_changes
 from app.assets.database.queries.records import create_content, create_record
 from app.assets.services import hash_mode_state
+from app.assets.services import ingest
 
 _BARRIER_TIMEOUT = 5
 _PROBE_LOCK_DEADLINE_SECONDS = 0.5
@@ -82,6 +85,160 @@ def _blocking_fake(entered: threading.Event, release: threading.Event, real_fn):
         return real_fn(*args, **kwargs)
 
     return fake
+
+
+class _IngestWriteTxnFsTracker:
+    def __init__(self, monkeypatch) -> None:
+        self.calls: list[str] = []
+        self.inside = False
+        real_run_write_txn = ingest.run_write_txn
+
+        def track_write_transaction(work):
+            def tracked_work(session):
+                self.inside = True
+                try:
+                    return work(session)
+                finally:
+                    self.inside = False
+
+            return real_run_write_txn(tracked_work)
+
+        monkeypatch.setattr(ingest, "run_write_txn", track_write_transaction)
+        for name in (
+            "lookup_for_view",
+            "refresh_qualified_content",
+            "_file_signature",
+            "_file_signature_matches",
+        ):
+            if hasattr(ingest, name):
+                real = getattr(ingest, name)
+                monkeypatch.setattr(ingest, name, self._track(name, real))
+        monkeypatch.setattr(ingest.os, "stat", self._track("os.stat", os.stat))
+        monkeypatch.setattr(
+            ingest.os.path,
+            "isfile",
+            self._track("os.path.isfile", os.path.isfile),
+        )
+
+    def _track(self, label: str, real):
+        def tracked(*args, **kwargs):
+            if self.inside:
+                self.calls.append(label)
+            return real(*args, **kwargs)
+
+        return tracked
+
+
+@pytest.fixture
+def ingest_write_txn_fs_tracker(monkeypatch) -> _IngestWriteTxnFsTracker:
+    return _IngestWriteTxnFsTracker(monkeypatch)
+
+
+def test_reused_upload_does_not_touch_the_filesystem_inside_write_transaction(
+    file_database, tmp_path, ingest_write_txn_fs_tracker
+) -> None:
+    existing_path = tmp_path / "reuse-existing.bin"
+    existing_path.write_bytes(b"shared bytes")
+    stat_result = existing_path.stat()
+    digest, _ = ingest._snapshot_hash_with_retry(str(existing_path))
+    stored_hash = ingest.to_stored_hash(digest)
+
+    db_mod.run_write_txn(
+        lambda session: create_content(
+            session,
+            str(existing_path),
+            hash=stored_hash,
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+        )
+    )
+    upload_path = tmp_path / "reuse-upload.part"
+    upload_path.write_bytes(b"shared bytes")
+
+    result = ingest.upload_from_temp_path(str(upload_path), name="reuse.bin")
+
+    assert result.content_id is not None
+    assert ingest_write_txn_fs_tracker.calls == []
+
+
+def test_new_upload_does_not_touch_the_filesystem_inside_write_transaction(
+    file_database, tmp_path, monkeypatch, ingest_write_txn_fs_tracker
+) -> None:
+    upload_path = tmp_path / "new-upload.part"
+    upload_path.write_bytes(b"new bytes")
+    destination = tmp_path / "new-upload.bin"
+    monkeypatch.setattr(
+        ingest,
+        "_hash_mode_dest_path",
+        lambda *_args: str(destination),
+    )
+
+    result = ingest.upload_from_temp_path(
+        str(upload_path),
+        name="new-upload.bin",
+        tags=["output"],
+    )
+
+    assert result.ref.file_path == str(destination)
+    assert ingest_write_txn_fs_tracker.calls == []
+
+
+def test_cached_registration_does_not_touch_the_filesystem_inside_write_transaction(
+    file_database, ingest_write_txn_fs_tracker
+) -> None:
+    path = os.path.join(folder_paths.get_output_directory(), "cached-output.bin")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as file:
+        file.write(b"cached bytes")
+    stat_result = os.stat(path)
+    db_mod.run_write_txn(
+        lambda session: create_content(
+            session,
+            path,
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+        )
+    )
+
+    try:
+        result = ingest.register_cached_output(path)
+    finally:
+        os.unlink(path)
+
+    assert result is not None
+    assert ingest_write_txn_fs_tracker.calls == []
+
+
+def test_settle_destination_does_not_touch_the_filesystem_inside_write_transaction(
+    file_database, tmp_path, ingest_write_txn_fs_tracker
+) -> None:
+    path = tmp_path / "settle-output.bin"
+    path.write_bytes(b"incumbent bytes")
+    stat_result = path.stat()
+    db_mod.run_write_txn(
+        lambda session: create_content(
+            session,
+            str(path),
+            size_bytes=stat_result.st_size,
+            mtime_ns=stat_result.st_mtime_ns,
+        )
+    )
+
+    ingest._settle_destination_before_write(str(path))
+
+    assert ingest_write_txn_fs_tracker.calls == []
+
+
+def test_register_file_in_place_does_not_touch_the_filesystem_inside_write_transaction(
+    file_database, tmp_path, ingest_write_txn_fs_tracker
+) -> None:
+    path = tmp_path / "register-in-place.bin"
+    path.write_bytes(b"in-place bytes")
+
+    result = ingest.register_file_in_place(str(path), path.name, ["output"])
+
+    assert result.ref.file_path == str(path)
+    assert ingest_write_txn_fs_tracker.calls == []
 
 
 def test_seed_recovery_hashing_does_not_hold_the_write_lock(
