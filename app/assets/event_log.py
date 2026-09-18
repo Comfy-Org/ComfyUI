@@ -8,9 +8,9 @@ without parsing prose, and the existing human-readable lines stay exactly as
 they are.
 
 The field vocabulary is closed. Only the names in :data:`ALLOWED_FIELDS` may be
-carried, each has a validator, and no string value may contain a path separator
-or logfmt delimiter — so file names, paths, asset ids and content hashes cannot
-ride along.
+carried, each has a validator, and no string value may contain a path separator,
+logfmt delimiter or line break — so file names, paths, asset ids and content
+hashes cannot ride along.
 """
 
 import logging
@@ -22,7 +22,7 @@ from typing import Any
 TAG = "[assets-event]"
 
 MAX_STRING_LENGTH = 64
-FORBIDDEN_STRING_CHARS = ("/", "\\", ":", " ", "=", '"')
+FORBIDDEN_STRING_CHARS = ("/", "\\", ":", " ", "=", '"', "\n", "\r")
 
 ROOTS = frozenset({"models", "input", "output", "user", "temp"})
 PHASES = frozenset({"fast", "enrich", "full"})
@@ -43,6 +43,10 @@ ALLOWED_EVENTS = frozenset({
     "scanner.temp_sync_failed",
     "scanner.mark_missing_failed",
     "scanner.stat_failed",
+    "scanner.invalid_mtime",
+    "scanner.watch_stat_failed",
+    "scanner.watch_spec_failed",
+    "scanner.watch_seed_failed",
 })
 
 

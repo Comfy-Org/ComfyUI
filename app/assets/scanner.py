@@ -22,6 +22,7 @@ from app.assets import mode
 from app.assets.event_log import emit, error_type
 from app.assets.database.queries import (
     create_content_reporting_insert,
+    is_live_path_conflict,
     mark_content_missing,
     create_record,
 )
@@ -53,7 +54,6 @@ from app.assets.services.path_utils import (
     get_comfy_models_folders,
     get_name_and_tags_from_asset_path,
 )
-from app.assets.services.ingest import _discard_unreferenced_content
 from app.assets.services.snapshot_hash import snapshot_hash
 from app.database.db import create_session
 
@@ -255,10 +255,11 @@ def sync_temp_references_safely(
         )
 
 
-def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int:
+def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int | None:
     """Mark references as missing when outside the given prefixes.
 
-    This is a non-destructive soft-delete. Returns count marked or 0 on failure.
+    This is a non-destructive soft-delete. Returns the count marked, or None when
+    the operation fails.
     """
     try:
         with create_session() as sess:
@@ -271,7 +272,7 @@ def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int:
             "scanner.mark_missing_failed",
             error_type=error_type(exc),
         )
-        return 0
+        return None
 
 
 def mark_contents_missing_outside_prefixes(
@@ -376,73 +377,103 @@ def build_asset_specs(
     return specs, tag_pool, skipped
 
 
-def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
+def seed_asset_specs(
+    session: Session, specs: list[SeedAssetSpec]
+) -> tuple[int, Exception | None]:
     created = 0
-    created_content_ids: list[str] = []
-    try:
-        for spec in specs:
-            path = os.path.abspath(spec["abs_path"])
-            try:
-                with session.begin_nested():
-                    try:
-                        stat_result = os.stat(path, follow_symlinks=True)
-                    except OSError:
-                        logging.warning("Skipping vanished asset during scan: %s", path)
-                        continue
-                    try:
-                        recovery = recover_missing_content(
-                            session,
-                            path,
-                            stat_result,
-                            hashing_is_enabled=mode.hashing_enabled(),
-                        )
-                    except OSError:
-                        logging.warning("Skipping vanished asset during scan: %s", path)
-                        continue
-                    if recovery != "no_match":
-                        continue
-                    content, inserted = create_content_reporting_insert(
+    first_error: Exception | None = None
+    # Counted, not gated through _ScanProgress.mark_emitted like its neighbours, because this
+    # function takes no progress object. Ungated, a restored archive of pre-epoch mtimes puts
+    # one event per file into the closed-vocabulary stream.
+    invalid_mtimes = 0
+    for spec in specs:
+        path = os.path.abspath(spec["abs_path"])
+        try:
+            with session.begin_nested():
+                try:
+                    stat_result = os.stat(path, follow_symlinks=True)
+                except OSError:
+                    logging.warning("Skipping vanished asset during scan: %s", path)
+                    continue
+                if get_mtime_ns(stat_result) < 0:
+                    logging.warning(
+                        "Skipping asset with invalid mtime during scan: %s", path
+                    )
+                    invalid_mtimes += 1
+                    continue
+                try:
+                    recovery = recover_missing_content(
                         session,
-                        path=path,
-                        hash=None,
-                        size_bytes=stat_result.st_size,
-                        mtime_ns=get_mtime_ns(stat_result),
+                        path,
+                        stat_result,
+                        hashing_is_enabled=mode.hashing_enabled(),
                     )
-                    if inserted:
-                        created_content_ids.append(content.id)
-                    existing_record = session.scalar(
-                        sa.select(Asset.id).where(Asset.content_id == content.id).limit(1)
-                    )
-                    if existing_record is not None:
-                        continue
-                    create_record(
-                        session,
-                        content_id=content.id,
-                        name=spec["info_name"],
-                        mime_type=spec["mime_type"],
-                        job_id=spec["job_id"],
-                        loader_path=spec["fname"],
-                        tags=spec["tags"],
-                    )
-                    created += 1
-            except IntegrityError:
-                logging.warning("Skipping asset whose row conflicts during scan: %s", path)
+                except OSError:
+                    logging.warning("Skipping vanished asset during scan: %s", path)
+                    continue
+                if recovery != "no_match":
+                    continue
+                content, _inserted = create_content_reporting_insert(
+                    session,
+                    path=path,
+                    hash=None,
+                    size_bytes=stat_result.st_size,
+                    mtime_ns=get_mtime_ns(stat_result),
+                )
+                existing_record = session.scalar(
+                    sa.select(Asset.id).where(Asset.content_id == content.id).limit(1)
+                )
+                if existing_record is not None:
+                    continue
+                create_record(
+                    session,
+                    content_id=content.id,
+                    name=spec["info_name"],
+                    mime_type=spec["mime_type"],
+                    job_id=spec["job_id"],
+                    loader_path=spec["fname"],
+                    tags=spec["tags"],
+                )
+                created += 1
+        except IntegrityError as error:
+            if is_live_path_conflict(error):
+                logging.warning(
+                    "Skipping asset whose row conflicts during scan: %s", path
+                )
                 continue
-    except Exception:
-        session.rollback()
-        for content_id in created_content_ids:
-            _discard_unreferenced_content(session, content_id)
-        raise
-    return created
+            if first_error is None:
+                first_error = error
+        except MemoryError:
+            # Deferring this one would keep allocating for every remaining spec
+            # while the process is already out of memory.
+            raise
+        except Exception as error:
+            if first_error is None:
+                first_error = error
+    if invalid_mtimes:
+        emit("scanner.invalid_mtime", count=invalid_mtimes)
+    return created, first_error
 
 
-def insert_asset_specs(specs: list[SeedAssetSpec], _tag_pool: set[str]) -> int:
+def insert_asset_specs(
+    specs: list[SeedAssetSpec], _tag_pool: set[str]
+) -> tuple[int, Exception | None]:
     if not specs:
-        return 0
+        return 0, None
     with create_session() as sess:
-        created = seed_asset_specs(sess, specs)
-        sess.commit()
-        return created
+        created, first_error = seed_asset_specs(sess, specs)
+        try:
+            sess.commit()
+        except Exception:
+            if first_error is None:
+                raise
+            logging.exception("Failed to commit successful specs from failed asset batch")
+            try:
+                sess.rollback()
+            except Exception:
+                logging.exception("Failed to roll back asset batch after commit failure")
+            return 0, first_error
+        return created, first_error
 
 
 def build_unenriched_candidates_statement(
