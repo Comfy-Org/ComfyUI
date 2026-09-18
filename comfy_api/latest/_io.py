@@ -1263,11 +1263,20 @@ class DynamicCombo(ComfyTypeI):
                 if option["key"] == key:
                     selected_option = option
                     break
-            if selected_option is not None:
-                parse_class_inputs(out_dict, live_inputs, selected_option["inputs"], curr_prefix)
-                # add self to inputs
-                out_dict[input_type][finalized_id] = value
-                out_dict["dynamic_paths"][finalized_id] = finalize_prefix(curr_prefix, curr_prefix[-1])
+            if selected_option is None:
+                # The live value doesn't match any current option - e.g. a workflow saved before
+                # this node's option values were renamed. Silently doing nothing here used to drop
+                # this input out of the resolved schema entirely, which surfaced much later as a
+                # confusing "missing required positional argument" TypeError during execution.
+                valid_keys = [option["key"] for option in options]
+                raise ValueError(
+                    f"Invalid value {key!r} for input {finalized_id!r}: must be one of {valid_keys}. "
+                    "This can happen when a node's available options changed after the workflow was saved."
+                )
+            parse_class_inputs(out_dict, live_inputs, selected_option["inputs"], curr_prefix)
+            # add self to inputs
+            out_dict[input_type][finalized_id] = value
+            out_dict["dynamic_paths"][finalized_id] = finalize_prefix(curr_prefix, curr_prefix[-1])
 
 @comfytype(io_type="COMFY_DYNAMICSLOT_V3")
 class DynamicSlot(ComfyTypeI):
