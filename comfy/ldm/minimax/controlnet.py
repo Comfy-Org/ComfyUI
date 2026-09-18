@@ -42,8 +42,6 @@ class MiniMaxH3FunControl(torch.nn.Module):
             for i in range(len(self.injection_layers))])
 
     def init_stream(self, h, control_latent, layout, t_emb):
-        if any(kind not in ("text", "audio", "video") for _, _, kind in layout.segments):
-            raise ValueError("MiniMax H3 Fun ControlNet does not support keyframe or reference conditioning")
         adaln_in = self.control_blocks[0].adaln_proj.linear.in_features
         if t_emb.shape[-1] != adaln_in:
             raise RuntimeError(
@@ -59,8 +57,13 @@ class MiniMaxH3FunControl(torch.nn.Module):
         elif target_rows.shape[1] > patch_dim:
             raise ValueError("MiniMax H3 control input has {} columns but the model patch expects {}".format(target_rows.shape[1], patch_dim))
 
+        # keyframe/reference conditioning rows get a zero control row
+        img_update = layout.img_update.to(h.device)
+        rows = torch.zeros(img_update.shape[0], patch_dim, dtype=torch.float32, device=h.device)
+        rows[img_update] = target_rows
+
         c = h.clone()
-        c[layout.img_pos.to(h.device)] = self.control_proj_in(target_rows).to(h.dtype)
+        c[layout.img_pos.to(h.device)] = self.control_proj_in(rows).to(h.dtype)
         return self.control_blocks[0].before_proj(c).add_(h)
 
     def step(self, index, c, t_emb, mod_segments, rope_freqs, transformer_options):

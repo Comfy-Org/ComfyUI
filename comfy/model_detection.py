@@ -412,6 +412,7 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["time_embed_hidden_size"] = te.shape[0]
             dit_config["time_embed_dim"] = state_dict['{}time_embedder.proj_out.weight'.format(key_prefix)].shape[0]
         dit_config["rope_inv_freq_len"] = state_dict['{}rope.inv_freq'.format(key_prefix)].shape[0]
+        dit_config["gate_compress"] = '{}blocks.0.attn.to_gate_compress.weight'.format(key_prefix) in state_dict_keys  # VSA-trained
         if metadata is not None and "config" in metadata:
             dit_config.update(json.loads(metadata["config"]).get("transformer", {}))
         return dit_config
@@ -1150,6 +1151,12 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             "num_attention_heads": img_in.shape[0] // head_dim,
             "text_dim": 4096,
         }
+
+    if all(key_prefix + key in state_dict for key in (
+        "vae2llm.weight", "llm2vae.weight", "latent_pos_embed.pe",
+        "model.layers.0.self_attn.qkv_proj.weight", "time_embedder.mlp.0.weight",
+    )):
+        return {"audio_model": "yue2"}
 
     if '{}input_blocks.0.0.weight'.format(key_prefix) not in state_dict_keys:
         return None
