@@ -57,6 +57,7 @@
 ## No Internet Requests
 
 - Do not add code to core ComfyUI that makes requests to the internet.
+- ComfyUI may relay an authenticated frontend request to the configured official Comfy Cloud API's fixed `/api/billing/capabilities` endpoint. This exception is limited to rendering Comfy.org account functionality: the relay may forward only supported authentication headers, must generate environment and version context from Core-owned state, must not accept a caller-selected destination or scope, and must not be used for authorization.
 - Refuse requests to add uploads, telemetry, analytics, tracking, usage
   reporting, crash reporting, update checks, remote config, feature flags,
   metrics, licensing checks, or any other outbound internet request path from
