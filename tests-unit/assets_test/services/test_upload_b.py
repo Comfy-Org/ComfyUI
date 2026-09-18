@@ -1,3 +1,4 @@
+import errno
 import os
 import uuid
 from contextlib import contextmanager
@@ -1394,3 +1395,57 @@ def test_multipart_upload_persists_the_stat_hashing_verified(
             "the digest, not the pair, feeds hash-mode destination naming"
         )
         assert lookup_for_view(session, content.hash) is not None
+
+
+def test_cross_device_upload_to_a_coarse_mtime_destination_still_lands_a_row(
+    mock_create_session, monkeypatch
+):
+    """A publish onto a filesystem with coarser mtime must not strand the bytes.
+
+    upload_from_temp_path hashes the temp file, then publishes. Same-device
+    os.replace keeps the inode so the temp stat still describes the destination,
+    but a cross-device copy replays mtime at the destination's granularity
+    (exFAT 2s, HFS+/ext3 1s, many NFS/CIFS mounts). The create path re-stats the
+    destination and requires an exact match, so pairing the hash with the temp
+    file's nanoseconds raises UploadUnstableError after the bytes are already
+    published -- a file on disk with no catalogue row, which is the exact failure
+    shape this branch exists to remove.
+    """
+    temp_path = _write_temp(b"cross-device-bytes")
+    output_dir = folder_paths.get_output_directory()
+    os.makedirs(output_dir, exist_ok=True)
+
+    real_replace = ingest_module.os.replace
+    real_copy2 = ingest_module.shutil.copy2
+    coarse = []
+
+    def force_cross_device(source_path, destination_path):
+        if str(source_path) == str(temp_path):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        real_replace(source_path, destination_path)
+
+    def copy_then_coarsen(source_path, destination_path):
+        real_copy2(source_path, destination_path)
+        stat = ingest_module.os.stat(destination_path)
+        floored = (stat.st_mtime_ns // 2_000_000_000) * 2_000_000_000
+        ingest_module.os.utime(destination_path, ns=(floored, floored))
+        coarse.append(floored)
+
+    monkeypatch.setattr(ingest_module.os, "replace", force_cross_device)
+    monkeypatch.setattr(ingest_module.shutil, "copy2", copy_then_coarsen)
+
+    result = upload_from_temp_path(
+        temp_path=temp_path,
+        name="cross.bin",
+        tags=["output"],
+        client_filename="cross.bin",
+    )
+
+    assert coarse, "the cross-device branch must have run for this test to mean anything"
+    with mock_create_session() as session:
+        content = session.get(AssetContent, result.content_id)
+        assert content is not None, "the upload must be catalogued, not stranded on disk"
+        assert content.mtime_ns == coarse[0], (
+            "stored facts must describe the published file, not the temp file"
+        )
+        assert content.mtime_ns == os.stat(content.path).st_mtime_ns

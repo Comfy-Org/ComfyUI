@@ -185,7 +185,13 @@ def _guess_upload_mime_type(
     return guessed or "application/octet-stream"
 
 
-def _move_temp_to_dest(temp_path: str, dest_abs: str) -> None:
+def _move_temp_to_dest(temp_path: str, dest_abs: str) -> os.stat_result:
+    """Publish the upload and return the destination's own stat.
+
+    A cross-device copy replays the modification time at the destination
+    filesystem's granularity, so the published file is the only authority on
+    the facts stored beside its hash.
+    """
     os.makedirs(os.path.dirname(dest_abs), exist_ok=True)
     try:
         os.replace(temp_path, dest_abs)
@@ -205,11 +211,12 @@ def _move_temp_to_dest(temp_path: str, dest_abs: str) -> None:
                 if os.path.exists(destination_temp):
                     os.unlink(destination_temp)
                 raise
-            os.unlink(temp_path)
-            return
+            _remove_temp_path(temp_path)
+            return os.stat(dest_abs)
         raise RuntimeError(f"failed to move uploaded file into place: {error}") from error
     except Exception as e:
         raise RuntimeError(f"failed to move uploaded file into place: {e}") from e
+    return os.stat(dest_abs)
 
 
 def _create_upload_record(
@@ -734,14 +741,14 @@ def upload_from_temp_path(
     content_type = _guess_upload_mime_type(
         mime_type, client_filename, name, os.path.basename(dest_abs)
     )
-    _move_temp_to_dest(temp_path, dest_abs)
+    published_stat = _move_temp_to_dest(temp_path, dest_abs)
     return _create_content_and_upload_record(
         stored_hash,
         dest_abs,
         _ContentFacts(
             stored_hash,
-            verified_stat.st_size,
-            verified_stat.st_mtime_ns,
+            published_stat.st_size,
+            published_stat.st_mtime_ns,
         ),
         True,
         _UploadRecordSpec(
@@ -801,14 +808,6 @@ def register_file_in_place(
     digest, verified_stat = _snapshot_hash_with_retry(locator)
     size_bytes, mtime_ns = verified_stat.st_size, verified_stat.st_mtime_ns
     stored_hash = to_stored_hash(digest)
-    def _reconcile_work(session: Session) -> None:
-        _reconcile_live_content_at_path(
-            session,
-            locator,
-            _ContentFacts(stored_hash, size_bytes, mtime_ns),
-            content_written=content_written,
-        )
-    run_write_txn(_reconcile_work)
     return _create_content_and_upload_record(
         stored_hash,
         locator,

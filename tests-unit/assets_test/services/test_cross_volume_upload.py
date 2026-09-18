@@ -129,3 +129,44 @@ def test_move_temp_to_dest_keeps_final_destination_intact_when_cross_volume_copy
     assert destination.read_bytes() == b"existing"
     assert source.read_bytes() == b"upload"
     assert not list(destination.parent.glob(f".{destination.name}*.tmp"))
+
+
+def test_move_temp_to_dest_reports_the_published_files_own_stat(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The destination's stat is authoritative, not the temp file's.
+
+    A cross-device publish replays mtime through copy2, but the destination
+    filesystem stores it at its own granularity (exFAT 2s, HFS+/ext3 1s, many
+    NFS/CIFS mounts). The caller pairs these facts with the content hash, and
+    the upload path later re-stats the destination and requires an exact match,
+    so reporting the temp file's nanoseconds strands the bytes with no row.
+    """
+    source = tmp_path / "upload.part"
+    destination = tmp_path / "output" / "upload.bin"
+    source.write_bytes(b"upload")
+    coarse_mtime_ns = (source.stat().st_mtime_ns // 2_000_000_000) * 2_000_000_000
+
+    real_replace = ingest.os.replace
+
+    def fail_cross_volume_move(source_path: str, destination_path: str) -> None:
+        if source_path == str(source) and destination_path == str(destination):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        real_replace(source_path, destination_path)
+
+    real_copy2 = ingest.shutil.copy2
+
+    def copy_then_coarsen(source_path: str, destination_path: str) -> None:
+        real_copy2(source_path, destination_path)
+        ingest.os.utime(destination_path, ns=(coarse_mtime_ns, coarse_mtime_ns))
+
+    monkeypatch.setattr(ingest.os, "replace", fail_cross_volume_move)
+    monkeypatch.setattr(ingest.shutil, "copy2", copy_then_coarsen)
+
+    published = ingest._move_temp_to_dest(str(source), str(destination))
+
+    assert published.st_mtime_ns == destination.stat().st_mtime_ns
+    assert published.st_mtime_ns == coarse_mtime_ns, (
+        "the returned stat must describe the published file, not the temp file"
+    )
+    assert published.st_size == destination.stat().st_size
