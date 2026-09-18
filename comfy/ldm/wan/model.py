@@ -15,6 +15,31 @@ import comfy.ops
 import comfy.patcher_extension
 
 
+_AMD_ARCH_CACHE = {}
+
+
+def _amd_arch(device):
+    if device.type != "cuda":
+        return None
+    key = (device.type, device.index)
+    if key in _AMD_ARCH_CACHE:
+        return _AMD_ARCH_CACHE[key]
+    arch_name = torch.cuda.get_device_properties(device).gcnArchName
+    arch = arch_name.split(":", 1)[0]
+    _AMD_ARCH_CACHE[key] = arch
+    return arch
+
+
+def _should_make_qkv_contiguous(q, k, v):
+    if not comfy.model_management.is_amd() or q.shape[-2] < 5000 or q.shape[-1] != 128:
+        return False
+    if all(x.is_contiguous() for x in (q, k, v)):
+        return False
+    if _amd_arch(q.device) != "gfx1151":
+        return False
+    return True
+
+
 def sinusoidal_embedding_1d(dim, position):
     # preprocess
     assert dim % 2 == 0
@@ -81,13 +106,26 @@ class WanSelfAttention(nn.Module):
         q = qkv_fn_q(x)
         k = qkv_fn_k(x)
 
-        x = optimized_attention(
-            q.view(b, s, n * d),
-            k.view(b, s, n * d),
-            self.v(x).view(b, s, n * d),
-            heads=self.num_heads,
-            transformer_options=transformer_options,
-        )
+        v = self.v(x)
+        q_attn = q.transpose(1, 2)
+        k_attn = k.transpose(1, 2)
+        v_attn = v.view(b, s, n, d).transpose(1, 2)
+        if _should_make_qkv_contiguous(q_attn, k_attn, v_attn):
+            q_attn, k_attn, v_attn = (x.contiguous() for x in (q_attn, k_attn, v_attn))
+            x = optimized_attention(
+                q_attn, k_attn, v_attn,
+                heads=self.num_heads,
+                skip_reshape=True,
+                transformer_options=transformer_options,
+            )
+        else:
+            x = optimized_attention(
+                q.view(b, s, n * d),
+                k.view(b, s, n * d),
+                v.view(b, s, n * d),
+                heads=self.num_heads,
+                transformer_options=transformer_options,
+            )
 
         if "attn1_patch" in patches:
             for p in patches["attn1_patch"]:
