@@ -2110,7 +2110,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def DESCRIPTION(cls):  # noqa
-        if cls._DESCRIPTION is None:
+        if cls.__dict__.get("_DESCRIPTION") is None:
             cls.GET_SCHEMA()
         return cls._DESCRIPTION
 
@@ -2118,7 +2118,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def CATEGORY(cls):  # noqa
-        if cls._CATEGORY is None:
+        if cls.__dict__.get("_CATEGORY") is None:
             cls.GET_SCHEMA()
         return cls._CATEGORY
 
@@ -2126,7 +2126,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def EXPERIMENTAL(cls):  # noqa
-        if cls._EXPERIMENTAL is None:
+        if cls.__dict__.get("_EXPERIMENTAL") is None:
             cls.GET_SCHEMA()
         return cls._EXPERIMENTAL
 
@@ -2134,7 +2134,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def DEPRECATED(cls):  # noqa
-        if cls._DEPRECATED is None:
+        if cls.__dict__.get("_DEPRECATED") is None:
             cls.GET_SCHEMA()
         return cls._DEPRECATED
 
@@ -2142,7 +2142,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def DEV_ONLY(cls):  # noqa
-        if cls._DEV_ONLY is None:
+        if cls.__dict__.get("_DEV_ONLY") is None:
             cls.GET_SCHEMA()
         return cls._DEV_ONLY
 
@@ -2150,7 +2150,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def API_NODE(cls):  # noqa
-        if cls._API_NODE is None:
+        if cls.__dict__.get("_API_NODE") is None:
             cls.GET_SCHEMA()
         return cls._API_NODE
 
@@ -2158,7 +2158,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def OUTPUT_NODE(cls):  # noqa
-        if cls._OUTPUT_NODE is None:
+        if cls.__dict__.get("_OUTPUT_NODE") is None:
             cls.GET_SCHEMA()
         return cls._OUTPUT_NODE
 
@@ -2166,7 +2166,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def HAS_INTERMEDIATE_OUTPUT(cls):  # noqa
-        if cls._HAS_INTERMEDIATE_OUTPUT is None:
+        if cls.__dict__.get("_HAS_INTERMEDIATE_OUTPUT") is None:
             cls.GET_SCHEMA()
         return cls._HAS_INTERMEDIATE_OUTPUT
 
@@ -2174,7 +2174,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def INPUT_IS_LIST(cls):  # noqa
-        if cls._INPUT_IS_LIST is None:
+        if cls.__dict__.get("_INPUT_IS_LIST") is None:
             cls.GET_SCHEMA()
         return cls._INPUT_IS_LIST
     _OUTPUT_IS_LIST = None
@@ -2182,7 +2182,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def OUTPUT_IS_LIST(cls):  # noqa
-        if cls._OUTPUT_IS_LIST is None:
+        if cls.__dict__.get("_OUTPUT_IS_LIST") is None:
             cls.GET_SCHEMA()
         return cls._OUTPUT_IS_LIST
 
@@ -2190,7 +2190,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def RETURN_TYPES(cls):  # noqa
-        if cls._RETURN_TYPES is None:
+        if cls.__dict__.get("_RETURN_TYPES") is None:
             cls.GET_SCHEMA()
         return cls._RETURN_TYPES
 
@@ -2198,7 +2198,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def RETURN_NAMES(cls):  # noqa
-        if cls._RETURN_NAMES is None:
+        if cls.__dict__.get("_RETURN_NAMES") is None:
             cls.GET_SCHEMA()
         return cls._RETURN_NAMES
 
@@ -2206,7 +2206,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def OUTPUT_TOOLTIPS(cls):  # noqa
-        if cls._OUTPUT_TOOLTIPS is None:
+        if cls.__dict__.get("_OUTPUT_TOOLTIPS") is None:
             cls.GET_SCHEMA()
         return cls._OUTPUT_TOOLTIPS
 
@@ -2214,7 +2214,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def NOT_IDEMPOTENT(cls):  # noqa
-        if cls._NOT_IDEMPOTENT is None:
+        if cls.__dict__.get("_NOT_IDEMPOTENT") is None:
             cls.GET_SCHEMA()
         return cls._NOT_IDEMPOTENT
 
@@ -2222,7 +2222,7 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
     @final
     @classproperty
     def ACCEPT_ALL_INPUTS(cls):  # noqa
-        if cls._ACCEPT_ALL_INPUTS is None:
+        if cls.__dict__.get("_ACCEPT_ALL_INPUTS") is None:
             cls.GET_SCHEMA()
         return cls._ACCEPT_ALL_INPUTS
 
@@ -2248,30 +2248,30 @@ class _ComfyNodeBaseInternal(_ComfyNodeInternal):
         cls.VALIDATE_CLASS()
         schema = cls.FINALIZE_SCHEMA()
         schema.validate()
-        if cls._DESCRIPTION is None:
+        if cls.__dict__.get("_DESCRIPTION") is None:
             cls._DESCRIPTION = schema.description
-        if cls._CATEGORY is None:
+        if cls.__dict__.get("_CATEGORY") is None:
             cls._CATEGORY = schema.category
-        if cls._EXPERIMENTAL is None:
+        if cls.__dict__.get("_EXPERIMENTAL") is None:
             cls._EXPERIMENTAL = schema.is_experimental
-        if cls._DEPRECATED is None:
+        if cls.__dict__.get("_DEPRECATED") is None:
             cls._DEPRECATED = schema.is_deprecated
-        if cls._DEV_ONLY is None:
+        if cls.__dict__.get("_DEV_ONLY") is None:
             cls._DEV_ONLY = schema.is_dev_only
-        if cls._API_NODE is None:
+        if cls.__dict__.get("_API_NODE") is None:
             cls._API_NODE = schema.is_api_node
-        if cls._OUTPUT_NODE is None:
+        if cls.__dict__.get("_OUTPUT_NODE") is None:
             cls._OUTPUT_NODE = schema.is_output_node
-        if cls._HAS_INTERMEDIATE_OUTPUT is None:
+        if cls.__dict__.get("_HAS_INTERMEDIATE_OUTPUT") is None:
             cls._HAS_INTERMEDIATE_OUTPUT = schema.has_intermediate_output
-        if cls._INPUT_IS_LIST is None:
+        if cls.__dict__.get("_INPUT_IS_LIST") is None:
             cls._INPUT_IS_LIST = schema.is_input_list
-        if cls._NOT_IDEMPOTENT is None:
+        if cls.__dict__.get("_NOT_IDEMPOTENT") is None:
             cls._NOT_IDEMPOTENT = schema.not_idempotent
-        if cls._ACCEPT_ALL_INPUTS is None:
+        if cls.__dict__.get("_ACCEPT_ALL_INPUTS") is None:
             cls._ACCEPT_ALL_INPUTS = schema.accept_all_inputs
 
-        if cls._RETURN_TYPES is None:
+        if cls.__dict__.get("_RETURN_TYPES") is None:
             output = []
             output_name = []
             output_is_list = []
