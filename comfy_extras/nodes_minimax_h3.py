@@ -408,7 +408,8 @@ class MiniMaxH3SigmaShift(io.ComfyNode):
 
 
 class MiniMaxH3FunControlPatch:
-    def __init__(self, model_patch, vae, control_video, mask, source_video, strength, sigma_start, sigma_end):
+    def __init__(self, model_patch, vae, control_video, mask, source_video, strength, sigma_start, sigma_end,
+                 fade_in_frames=0, fade_out_frames=0):
         self.model_patch = model_patch
         self.vae = vae
         self.control_video = control_video
@@ -417,10 +418,14 @@ class MiniMaxH3FunControlPatch:
         self.strength = strength
         self.sigma_start = sigma_start
         self.sigma_end = sigma_end
+        self.fade_in_frames = int(fade_in_frames)
+        self.fade_out_frames = int(fade_out_frames)
         self.control_latent = None
         self.control_latent_shape = None
         self.control_stream = None
         self.pristine_stream = None
+        self.video_row_scale = None
+        self.video_row_scale_cache_key = None
         self.active = False
 
     def _fit_frames(self, frames, frame_count, width, height):
@@ -493,6 +498,56 @@ class MiniMaxH3FunControlPatch:
         # stash only: control weight loads here would clobber the base block's freshly staged weights
         self.pristine_stream = args["img"].clone()
 
+    def _video_row_scale(self, layout, video_rows):
+        _, latent_t, _, _, _ = layout.signature
+        if latent_t <= 0:
+            raise RuntimeError("MiniMax H3 frame ease expected at least one video temporal token")
+        if video_rows % latent_t != 0:
+            raise RuntimeError(
+                "MiniMax H3 frame ease video row count {} is not divisible by latent_t {}".format(
+                    video_rows, latent_t))
+
+        frame_rows = video_rows // latent_t
+        token_spans = [FRAME_PER_TOKEN[k % len(FRAME_PER_TOKEN)] for k in range(latent_t)]
+        frame_count = sum(token_spans)
+        fade_in = min(max(self.fade_in_frames, 0), frame_count)
+        fade_out = min(max(self.fade_out_frames, 0), frame_count)
+        cache_key = (latent_t, video_rows, fade_in, fade_out)
+        if self.video_row_scale is not None and self.video_row_scale_cache_key == cache_key:
+            return self.video_row_scale
+
+        envelope = torch.ones(frame_count, dtype=torch.float32)
+        if fade_in > 0:
+            if fade_in == 1:
+                envelope[0] = 0.0
+            else:
+                t = torch.linspace(0.0, 1.0, fade_in, dtype=torch.float32)
+                envelope[:fade_in] = torch.minimum(
+                    envelope[:fade_in], t * t * (3.0 - 2.0 * t))
+
+        if fade_out > 0:
+            if fade_out == 1:
+                envelope[-1] = 0.0
+            else:
+                t = torch.linspace(0.0, 1.0, fade_out, dtype=torch.float32)
+                envelope[-fade_out:] = torch.minimum(
+                    envelope[-fade_out:], 1.0 - t * t * (3.0 - 2.0 * t))
+
+        token_weights = []
+        cursor = 0
+        for span in token_spans:
+            token_weights.append(envelope[cursor:cursor + span].mean())
+            cursor += span
+        row_scale = torch.stack(token_weights).repeat_interleave(frame_rows).contiguous()
+        if row_scale.numel() != video_rows:
+            raise RuntimeError(
+                "MiniMax H3 frame ease built {} row weights for a {}-row target video segment".format(
+                    row_scale.numel(), video_rows))
+
+        self.video_row_scale = row_scale
+        self.video_row_scale_cache_key = cache_key
+        return row_scale
+
     def after_block(self, block_index, args, out):
         if not self.active:
             return out
@@ -505,7 +560,21 @@ class MiniMaxH3FunControlPatch:
         self.control_stream, skip = self.model_patch.model.step(
             control_index, self.control_stream, args["t_emb"], args["mod_segments"], args["rope_freqs"],
             transformer_options=args["transformer_options"])
-        skip[args["layout"].audio_pos.to(skip.device)] = 0
+        layout = args["layout"]
+        skip[layout.audio_pos.to(skip.device)] = 0
+
+        if self.fade_in_frames > 0 or self.fade_out_frames > 0:
+            target_video = next(
+                ((a, b) for a, b, kind in reversed(layout.segments) if kind == "video"),
+                None,
+            )
+            if target_video is None:
+                raise RuntimeError("MiniMax H3 frame ease could not find the target video segment")
+            video_start, video_end = target_video
+            row_scale = self._video_row_scale(layout, video_end - video_start)
+            skip[video_start:video_end].mul_(
+                row_scale.to(device=skip.device, dtype=skip.dtype).unsqueeze(-1))
+
         out["img"].add_(skip, alpha=self.strength)
         return out
 
@@ -521,6 +590,8 @@ class MiniMaxH3FunControlPatch:
         self.control_latent_shape = None
         self.control_stream = None
         self.pristine_stream = None
+        self.video_row_scale = None
+        self.video_row_scale_cache_key = None
         self.active = False
 
     def models(self):
@@ -586,6 +657,10 @@ class MiniMaxH3FunControlNetApply(io.ComfyNode):
                 io.Float.Input("strength", default=1.0, min=0.0, max=10.0, step=0.01),
                 io.Float.Input("start_percent", default=0.0, min=0.0, max=1.0, step=0.001, advanced=True),
                 io.Float.Input("end_percent", default=1.0, min=0.0, max=1.0, step=0.001, advanced=True),
+                io.Int.Input("fade_in_frames", default=0, min=0, max=3600, step=1, advanced=True,
+                             tooltip="Ease Fun ControlNet from 0 to full strength over this many output-video frames."),
+                io.Int.Input("fade_out_frames", default=0, min=0, max=3600, step=1, advanced=True,
+                             tooltip="Ease Fun ControlNet from full strength to 0 over this many output-video frames."),
                 io.Image.Input("control_video", optional=True),
                 io.Mask.Input("mask", optional=True, tooltip="1 marks the regions to regenerate."),
                 io.Image.Input("source_video", optional=True, tooltip="Video behind the mask; only read when a mask is given."),
@@ -595,7 +670,7 @@ class MiniMaxH3FunControlNetApply(io.ComfyNode):
 
     @classmethod
     def execute(cls, model, model_patch, vae, strength, start_percent, end_percent,
-                control_video=None, mask=None, source_video=None) -> io.NodeOutput:
+                fade_in_frames=0, fade_out_frames=0, control_video=None, mask=None, source_video=None) -> io.NodeOutput:
         if strength == 0 or (control_video is None and mask is None):
             return io.NodeOutput(model)
 
@@ -610,6 +685,8 @@ class MiniMaxH3FunControlNetApply(io.ComfyNode):
             strength,
             float(model_sampling.percent_to_sigma(start_percent)),
             float(model_sampling.percent_to_sigma(end_percent)),
+            fade_in_frames=fade_in_frames,
+            fade_out_frames=fade_out_frames,
         )
         patch.register(model_patched)
         return io.NodeOutput(model_patched)
