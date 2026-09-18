@@ -296,7 +296,7 @@ class LabelEmbedder(nn.Module):
         Drops labels to enable classifier-free guidance.
         """
         if force_drop_ids is None:
-            drop_ids = torch.rand(labels.shape[0]).cuda() < self.dropout_prob
+            drop_ids = torch.rand(labels.shape[0], device=labels.device) < self.dropout_prob
         else:
             drop_ids = force_drop_ids == 1
         labels = torch.where(drop_ids, self.num_classes, labels)
@@ -328,7 +328,7 @@ class CaptionEmbedder(nn.Module):
         Drops labels to enable classifier-free guidance.
         """
         if force_drop_ids is None:
-            drop_ids = torch.rand(caption.shape[0]).cuda() < self.uncond_prob
+            drop_ids = torch.rand(caption.shape[0], device=caption.device) < self.uncond_prob
         else:
             drop_ids = force_drop_ids == 1
         caption = torch.where(drop_ids[:, None, None, None], self.y_embedding, caption)
@@ -363,7 +363,7 @@ class CaptionEmbedderDoubleBr(nn.Module):
         Drops labels to enable classifier-free guidance.
         """
         if force_drop_ids is None:
-            drop_ids = torch.rand(global_caption.shape[0]).cuda() < self.uncond_prob
+            drop_ids = torch.rand(global_caption.shape[0], device=global_caption.device) < self.uncond_prob
         else:
             drop_ids = force_drop_ids == 1
         global_caption = torch.where(drop_ids[:, None], self.embedding, global_caption)
