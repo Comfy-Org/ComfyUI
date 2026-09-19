@@ -23,6 +23,7 @@ import logging
 import comfy.ldm.lightricks.av_model
 import comfy.ldm.minimax.model
 import comfy.ldm.minimax_music.dit
+import comfy.ldm.yue2.model
 import comfy.nested_tensor
 import comfy.ldm.lightricks.symmetric_patchifier
 import comfy.context_windows
@@ -68,6 +69,7 @@ import comfy.ldm.ideogram4.model
 import comfy.ldm.krea2.model
 import comfy.ldm.kandinsky5.model
 import comfy.ldm.anima.model
+import comfy.ldm.trellis2.model
 import comfy.ldm.ace.ace_step15
 import comfy.ldm.cogvideo.model
 import comfy.ldm.rt_detr.rtdetr_v4
@@ -75,6 +77,9 @@ import comfy.ldm.ernie.model
 import comfy.ldm.sam3.detector
 import comfy.ldm.hidream_o1.model
 from comfy.ldm.hidream_o1.conditioning import build_extra_conds
+import comfy.ldm.sensenova.conditioning
+import comfy.ldm.sensenova.model
+from comfy.ldm.sensenova.sampling import SenseNovaModelSampling, time_snr_shift
 import comfy.ldm.depth_anything_3.model
 
 import comfy.model_management
@@ -1920,6 +1925,23 @@ class WAN22(WAN21):
     def scale_latent_inpaint(self, sigma, noise, latent_image, **kwargs):
         return latent_image
 
+class Trellis2(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None, unet_model=comfy.ldm.trellis2.model.Trellis2):
+        super().__init__(model_config, model_type, device, unet_model)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        embeds = kwargs.get("embeds")
+        out["embeds"] = comfy.conds.CONDRegular(embeds)
+        # CONDConstant: shared across pos/neg
+        for k in ("trellis2_coords", "trellis2_coord_counts",
+                  "trellis2_generation_mode", "trellis2_shape_slat",
+                  "trellis2_proj_feats", "trellis2_model_frame"):
+            v = kwargs.get(k)
+            if v is not None:
+                out[k] = comfy.conds.CONDConstant(v)
+        return out
+
 class WAN21_FlowRVS(WAN21):
     def __init__(self, model_config, model_type=ModelType.IMG_TO_IMG_FLOW, image_to_video=False, device=None):
         model_config.unet_config["model_type"] = "t2v"
@@ -2324,6 +2346,134 @@ class HiDreamO1(BaseModel):
             out[k] = cls(v)
         return out
 
+class SenseNovaSharedRegular(comfy.conds.CONDRegular):
+    """Keep the shared text/reference prefix at one copy per guidance branch."""
+
+    def process_cond(self, batch_size, **kwargs):
+        return self._copy_with(self.cond)
+
+class SenseNovaSharedList(comfy.conds.CONDList):
+    def process_cond(self, batch_size, **kwargs):
+        return self._copy_with(self.cond)
+
+class SenseNovaU15(BaseModel):
+    PATCH_SIZE = 32
+
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.sensenova.model.SenseNovaU15)
+        self.model_sampling = SenseNovaModelSampling(model_config)
+        self.memory_usage_factor_conds = ("reference_images",)
+
+    def process_timestep(self, timestep, **kwargs):
+        base_timestep = timestep / self.model_sampling.multiplier
+        return 1.0 - time_snr_shift(self.model_sampling.shift, 1.0 - base_timestep)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        text_input_ids = kwargs.get("text_input_ids")
+        if text_input_ids is not None:
+            device = kwargs["device"]
+            reference_images = kwargs.get("reference_latents")
+            if reference_images is not None:
+                reference_images = comfy.ldm.sensenova.conditioning.preprocess_references(reference_images)
+            image_only = kwargs.get("prompt_type") == "negative"
+            indexes = None
+            prefix_mask = None
+            if reference_images:
+                reference_grids = [
+                    (
+                        max(1, math.ceil(image.shape[-2] / self.PATCH_SIZE)),
+                        max(1, math.ceil(image.shape[-1] / self.PATCH_SIZE)),
+                    )
+                    for image in reference_images
+                ]
+                text_input_ids = comfy.ldm.sensenova.conditioning.condition_input_ids(
+                    text_input_ids,
+                    reference_grids,
+                    image_only=image_only,
+                )
+                indexes = comfy.ldm.sensenova.conditioning.thw_indexes(text_input_ids, reference_grids)
+                prefix_mask = comfy.ldm.sensenova.conditioning.block_causal_mask(
+                    indexes, dtype=self.get_dtype_inference()
+                )
+
+            if kwargs.get("hooks") is None:
+                dtype = self.get_dtype_inference()
+                prefix_keys, prefix_values, prefix_time = (
+                    self.diffusion_model.preprocess_prefix(
+                        text_input_ids.to(device=device),
+                        [
+                            image.to(device=device, dtype=dtype)
+                            for image in reference_images
+                        ]
+                        if reference_images
+                        else None,
+                        indexes.to(device=device) if indexes is not None else None,
+                        prefix_mask.to(device=device)
+                        if prefix_mask is not None
+                        else None,
+                    )
+                )
+                out["prefix_keys"] = SenseNovaSharedList(prefix_keys)
+                out["prefix_values"] = SenseNovaSharedList(prefix_values)
+                out["prefix_time"] = SenseNovaSharedRegular(prefix_time)
+            else:
+                if reference_images:
+                    out["prefix_indexes"] = SenseNovaSharedRegular(indexes)
+                    out["prefix_mask"] = SenseNovaSharedRegular(prefix_mask)
+                    out["reference_images"] = SenseNovaSharedList(reference_images)
+                out["text_input_ids"] = SenseNovaSharedRegular(text_input_ids)
+        return out
+
+    def extra_conds_shapes(self, **kwargs):
+        images = kwargs.get("reference_latents")
+        images = comfy.ldm.sensenova.conditioning.split_reference_batches(images) if images is not None else []
+        reference_grids = [
+            (
+                max(1, math.ceil(image.shape[-3] / self.PATCH_SIZE)),
+                max(1, math.ceil(image.shape[-2] / self.PATCH_SIZE)),
+            )
+            for image in images
+        ]
+        reference_pixels = sum(
+            height * width * self.PATCH_SIZE**2
+            for height, width in reference_grids
+        )
+        out = {}
+        if reference_pixels:
+            out["reference_images"] = [1, 3, reference_pixels]
+        text_input_ids = kwargs.get("text_input_ids")
+        if text_input_ids is not None:
+            if reference_grids:
+                length = comfy.ldm.sensenova.conditioning.conditioned_input_length(
+                    text_input_ids.shape[1],
+                    reference_grids,
+                    image_only=kwargs.get("prompt_type") == "negative",
+                )
+            else:
+                length = text_input_ids.shape[1]
+            out["prefix_mask"] = [1, 1, length, length]
+            if kwargs.get("hooks") is None:
+                prefix_shape = [
+                    1,
+                    comfy.ldm.sensenova.model.NUM_KV_HEADS,
+                    comfy.ldm.sensenova.model.NUM_LAYERS
+                    * length
+                    * comfy.ldm.sensenova.model.HEAD_DIM,
+                ]
+                out["prefix_keys"] = prefix_shape
+                out["prefix_values"] = prefix_shape
+        return out
+
+    def memory_required(self, input_shape, cond_shapes={}):
+        memory = super().memory_required(input_shape, cond_shapes)
+        dtype_size = comfy.model_management.dtype_size(self.get_dtype_inference())
+        return memory + sum(
+            math.prod(shape) * dtype_size
+            for key in ("prefix_mask", "prefix_keys", "prefix_values")
+            for shape in cond_shapes.get(key, ())
+        )
+
 class Chroma(Flux):
     def __init__(self, model_config, model_type=ModelType.FLUX, device=None, unet_model=comfy.ldm.chroma.model.Chroma):
         super().__init__(model_config, model_type, device=device, unet_model=unet_model)
@@ -2401,6 +2551,25 @@ class ACEStep15(BaseModel):
 
         out['refer_audio'] = comfy.conds.CONDRegular(refer_audio)
         return out
+
+class YuE2(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.yue2.model.YuE2)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        context = kwargs["cross_attn"].to(device=kwargs["device"], dtype=self.get_dtype_inference())
+        out["c_crossattn"] = comfy.conds.CONDRegular(context)
+        out["yue2_chunks"] = comfy.conds.CONDConstant(kwargs["yue2_chunks"])
+        return out
+
+    def extra_conds_shapes(self, **kwargs):
+        return {"c_crossattn": kwargs["cross_attn"].shape}
+
+    def memory_required(self, input_shape, cond_shapes={}):
+        context_size = sum(math.prod(shape) for shape in cond_shapes.get("c_crossattn", []))
+        return super().memory_required(input_shape, cond_shapes) + context_size * comfy.model_management.dtype_size(self.get_dtype_inference())
+
 
 class MiniMaxMusic3(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):

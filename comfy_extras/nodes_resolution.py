@@ -52,6 +52,10 @@ class ResolutionSelector(io.ComfyNode):
                     step=0.1,
                     tooltip="Target total megapixels. 1.0 MP ≈ 1024x1024 for square.",
                 ),
+                io.ResolutionPreview.Input(
+                    "preview",
+                    tooltip="Live preview of the calculated output resolution.",
+                ),
                 io.Int.Input(
                     id="multiple",
                     default=8,
@@ -73,7 +77,7 @@ class ResolutionSelector(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, aspect_ratio: str, megapixels: float, multiple: int) -> io.NodeOutput:
+    def execute(cls, aspect_ratio: str, megapixels: float, multiple: int, preview=None) -> io.NodeOutput:
         w_ratio, h_ratio = ASPECT_RATIOS[aspect_ratio]
         total_pixels = megapixels * 1024 * 1024
         scale = math.sqrt(total_pixels / (w_ratio * h_ratio))

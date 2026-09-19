@@ -119,7 +119,7 @@ def asset_app(monkeypatch, tmp_path):
         monkeypatch.setattr(
             asset_routes,
             "resolve_asset_for_download",
-            lambda reference_id, owner_id: DownloadResolutionResult(
+            lambda reference_id: DownloadResolutionResult(
                 abs_path=str(svg),
                 content_type=stored_mime_type,
                 download_name="thumb.svg",

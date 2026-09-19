@@ -4,7 +4,12 @@ from unittest.mock import patch
 
 import pytest
 
-from app.assets.api.routes import _build_asset_response
+from app.assets.api.routes import _build_asset_response, _build_record_response
+from app.assets.database.queries.records import (
+    create_content,
+    create_record,
+    mark_content_missing,
+)
 from app.assets.services.schemas import AssetData, AssetDetailResult, ReferenceData
 
 _TS = datetime(2024, 1, 1, 0, 0, 0)
@@ -30,6 +35,7 @@ def _make_result(
     tags: list[str] | None = None,
     user_metadata: dict | None = None,
     with_asset: bool = True,
+    is_missing: bool = False,
 ) -> AssetDetailResult:
     ref = ReferenceData(
         id=ref_id,
@@ -43,7 +49,12 @@ def _make_result(
         last_access_time=_TS,
     )
     asset = (
-        AssetData(hash="blake3:abc", size_bytes=1024, mime_type=mime_type)
+        AssetData(
+            hash="blake3:abc",
+            size_bytes=1024,
+            mime_type=mime_type,
+            is_missing=is_missing,
+        )
         if with_asset
         else None
     )
@@ -298,3 +309,77 @@ def test_no_preview_url_without_content(sandboxed_comfy_roots: Path):
     )
 
     assert resp.preview_url is None, "no asset row means there is nothing to preview"
+
+
+def test_no_self_preview_url_when_content_is_missing(sandboxed_comfy_roots: Path):
+    resp = _build_asset_response(
+        _make_result(
+            name="gone.png",
+            file_path=str(sandboxed_comfy_roots / "output" / "gone.png"),
+            mime_type="image/png",
+            is_missing=True,
+        ),
+        {},
+    )
+
+    assert resp.preview_url is None, (
+        "a missing-content record must not advertise a preview of its own bytes; "
+        "those bytes are gone, so /api/view would 404"
+    )
+
+
+def test_missing_content_still_shows_a_nominated_preview(sandboxed_comfy_roots: Path):
+    result = _make_result(
+        name="gone.safetensors",
+        file_path=str(sandboxed_comfy_roots / "models" / "checkpoints" / "gone.safetensors"),
+        mime_type="application/safetensors",
+        preview_id="preview-ref",
+        is_missing=True,
+    )
+
+    resp = _build_asset_response(
+        result, {"preview-ref": str(sandboxed_comfy_roots / "output" / "thumb.png")}
+    )
+
+    assert resp.preview_url == "/api/view?type=output&filename=thumb.png", (
+        "suppression targets self-content only; a nominated (live) preview still "
+        "stands in for a missing record"
+    )
+
+
+def test_record_response_shows_self_preview_url_for_live_content(
+    sandboxed_comfy_roots: Path, session
+):
+    content = create_content(
+        session, path=str(sandboxed_comfy_roots / "output" / "live.png")
+    )
+    record = create_record(
+        session, content_id=content.id, name="live.png", mime_type="image/png"
+    )
+    session.commit()
+
+    resp = _build_record_response(record, [], {})
+
+    assert resp.preview_url == "/api/view?type=output&filename=live.png", (
+        "a live record still previews its own bytes — the positive control that "
+        "proves the missing-case suppression is what withholds the URL"
+    )
+
+
+def test_record_response_has_no_self_preview_url_when_content_is_missing(
+    sandboxed_comfy_roots: Path, session
+):
+    content = create_content(
+        session, path=str(sandboxed_comfy_roots / "output" / "gone.png")
+    )
+    record = create_record(
+        session, content_id=content.id, name="gone.png", mime_type="image/png"
+    )
+    mark_content_missing(session, content.id)
+    session.commit()
+
+    resp = _build_record_response(record, ["missing"], {})
+
+    assert resp.preview_url is None, (
+        "the list surface must also withhold a missing record's self-preview URL"
+    )
