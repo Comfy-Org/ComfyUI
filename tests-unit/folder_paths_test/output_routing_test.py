@@ -13,6 +13,11 @@ import output_routing
 SAMPLE_POLICY_PATH = Path(__file__).resolve().parents[2] / "output-policy.metadata-example.json"
 
 
+@pytest.fixture(autouse=True)
+def reset_output_routing_policy(monkeypatch):
+    monkeypatch.setattr(folder_paths, "output_routing_policy", output_routing.legacy_policy())
+
+
 def test_output_policy_routes_dimensions_to_filename_and_preserves_counter(monkeypatch, tmp_path):
     output_dir = tmp_path / "output"
     policy_path = tmp_path / "policy.json"
@@ -87,7 +92,6 @@ def test_output_policy_rejects_unsafe_relative_output_directory(monkeypatch, tmp
         "version": 1,
         "output_directory": output_directory,
     }), encoding="utf-8")
-    monkeypatch.setattr(folder_paths, "output_routing_policy", output_routing.legacy_policy())
 
     with pytest.raises(output_routing.OutputRoutingError):
         folder_paths.configure_output_routing(str(policy_path))
@@ -113,8 +117,14 @@ def test_output_policy_without_filename_template_preserves_filename_stem(monkeyp
     assert subfolder == os.path.join("archive", "portraits")
 
 
-def test_shipped_sample_policy_routes_output_and_temp_profiles():
-    policy = output_routing.load_policy(str(SAMPLE_POLICY_PATH))
+def test_shipped_sample_policy_routes_output_and_temp_profiles(monkeypatch, tmp_path):
+    configured_output_dir = tmp_path / "output"
+    configured_temp_dir = tmp_path / "temp"
+    monkeypatch.setattr(folder_paths, "output_directory", str(configured_output_dir))
+    monkeypatch.setattr(folder_paths, "temp_directory", str(configured_temp_dir))
+    monkeypatch.setattr(folder_paths.args, "output_directory", None)
+    folder_paths.configure_output_routing(str(SAMPLE_POLICY_PATH))
+    policy = folder_paths.output_routing_policy
     context = output_routing.OutputRouteContext(
         width=640,
         height=480,
@@ -126,7 +136,9 @@ def test_shipped_sample_policy_routes_output_and_temp_profiles():
         output_folder, output_stem = output_routing.resolve_route(policy, "output", context)
         temp_folder, temp_stem = output_routing.resolve_route(policy, "temp", context)
 
-    assert policy.output_directory == "F:\\ComfyUI\\_Output"
+    assert policy.output_directory == "_Output"
+    assert folder_paths.get_output_directory() == str(configured_output_dir / "_Output")
+    assert folder_paths.get_temp_directory() == str(configured_temp_dir)
     assert output_folder == os.path.join("2026-09-05", "portraits")
     assert output_stem == "ComfyUI_640x480"
     assert temp_folder == os.path.join("temp", "2026-09-05", "portraits")
@@ -141,7 +153,6 @@ def test_output_policy_rejects_unsafe_or_unknown_templates(monkeypatch, tmp_path
         "profiles": {"invalid": {"folder_template": template}},
     }), encoding="utf-8")
 
-    monkeypatch.setattr(folder_paths, "output_routing_policy", output_routing.legacy_policy())
     with pytest.raises(output_routing.OutputRoutingError):
         folder_paths.configure_output_routing(str(policy_path))
 
@@ -157,6 +168,5 @@ def test_output_policy_rejects_unsafe_or_unsupported_filename_templates(monkeypa
         }},
     }), encoding="utf-8")
 
-    monkeypatch.setattr(folder_paths, "output_routing_policy", output_routing.legacy_policy())
     with pytest.raises(output_routing.OutputRoutingError):
         folder_paths.configure_output_routing(str(policy_path))

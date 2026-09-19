@@ -50,7 +50,7 @@ for the filename. Given a date of 2026-09-06, a 1024x1024 image, and filename
 prefix `campaign/final`, the standard PNG saver writes:
 
 ```text
-F:\ComfyUI\_Output\2026-09-06\campaign\final_1024x1024_00001_.png
+<configured-output-root>/_Output/2026-09-06/campaign/final_1024x1024_00001_.png
 ```
 
 It is a field-coverage example, not a recommended default layout: resolution in
@@ -137,10 +137,11 @@ model-specific graph test.
 
 2. Run any workflow containing Save Image. Set its `filename_prefix` to
    `campaign/final` and save a 1024x1024 image.
-3. Confirm the first file is created under:
+3. Confirm the first file is created beneath the configured output root. With
+   the normal standalone defaults, the path is:
 
    ```text
-   F:\ComfyUI\_Output\YYYY-MM-DD\campaign\final_1024x1024_00001_.png
+   <ComfyUI base>/output/_Output/YYYY-MM-DD/campaign/final_1024x1024_00001_.png
    ```
 
 4. Run it again with the same prefix and dimensions. Confirm the filename ends

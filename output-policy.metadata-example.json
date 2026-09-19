@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "output_directory": "F:\\ComfyUI\\_Output",
+  "output_directory": "_Output",
   "defaults": {
     "output": "all-supported-fields-output",
     "temp": "all-supported-fields-temp"
