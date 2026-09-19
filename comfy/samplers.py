@@ -1218,8 +1218,6 @@ class CFGGuider:
         return sampling_function(self.inner_model, x, timestep, self.conds.get("negative", None), self.conds.get("positive", None), self.cfg, model_options=model_options, seed=seed)
 
     def inner_sample(self, noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=None):
-        self.inner_model.latent_shapes = latent_shapes
-
         if latent_image is not None and torch.count_nonzero(latent_image) > 0: #Don't shift the empty latent image.
             latent_image = self.inner_model.process_latent_in(latent_image)
 
@@ -1284,6 +1282,7 @@ class CFGGuider:
         else:
             latent_shapes = [latent_image.shape]
             sampler_shapes = [tuple(latent_image.shape)]
+        self.model_patcher.model.latent_shapes = latent_shapes
         detail("Sampler: model=%s latent_shapes=%s", self.model_patcher.model.__class__.__name__, sampler_shapes)
 
         if len(latent_shapes) > 1 and callback is not None:
