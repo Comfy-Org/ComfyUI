@@ -840,8 +840,8 @@ class VAE:
                     ddconfig = {"dim": sd["encoder.conv1.weight"].shape[0], "dec_dim": sd["decoder.head.0.gamma"].shape[0], "z_dim": self.latent_channels, "dim_mult": [1, 2, 4, 8, 8], "num_res_blocks": 2, "attn_scales": [], "temperal_downsample": [False, True, True, True], "dropout": 0.0, "image_channels": self.output_channels, "patch_size": 1, "temporal_kernel": 1}
                     self.first_stage_model = comfy.ldm.wan.vae2_2.WanVAE(**ddconfig)
                     self.working_dtypes = [torch.bfloat16, torch.float16, torch.float32]
-                    self.memory_used_encode = lambda shape, dtype: 700 * shape[2] * shape[3] * model_management.dtype_size(dtype)
-                    self.memory_used_decode = lambda shape, dtype: 1600 * shape[2] * shape[3] * (16 * 16) * model_management.dtype_size(dtype)
+                    self.memory_used_encode = lambda shape, dtype: 600 * shape[2] * shape[3] * model_management.dtype_size(dtype)
+                    self.memory_used_decode = lambda shape, dtype: 900 * shape[2] * shape[3] * (16 * 16) * model_management.dtype_size(dtype)
                 elif wan22_layout:  # Wan 2.2 VAE
                     self.upscale_ratio = (lambda a: max(0, a * 4 - 3), 16, 16)
                     self.upscale_index_formula = (4, 16, 16)

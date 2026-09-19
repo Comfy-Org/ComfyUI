@@ -97,7 +97,10 @@ class Resample(nn.Module):
                     x = x.reshape(b, c, t * 2, h, w)
         t = x.shape[2]
         x = rearrange(x, "b c t h w -> (b t) c h w")
-        x = self.resample(x)
+        if feat_cache is None and self.mode in ("upsample2d", "upsample3d"):
+            x = strip_apply(self.resample, x, scale=2)
+        else:
+            x = self.resample(x)
         x = rearrange(x, "(b t) c h w -> b c t h w", t=t)
 
         if self.mode == "downsample3d":
@@ -113,6 +116,31 @@ class Resample(nn.Module):
                     feat_cache[idx] = cache_x
                     feat_idx[0] += 1
         return x
+
+
+STRIP_ELEMS = 2 ** 24
+
+
+def strip_apply(fn, x, scale=1, halo=1, out=None):
+    # strips of rows bound cudnn's conv workspace, a halo row per 3x3 conv keeps them exact
+    n = -(-x.numel() * scale * scale // STRIP_ELEMS)
+    if n <= 1 and out is None:
+        return fn(x)
+    add = out is not None
+    size = x.shape[-2]
+    step = -(-size // n)
+    for a in range(0, size, step):
+        b = min(size, a + step)
+        lo = max(0, a - halo)
+        y = fn(x.narrow(-2, lo, min(size, b + halo) - lo)).narrow(-2, (a - lo) * scale, (b - a) * scale)
+        if out is None:
+            out = y.new_empty(*y.shape[:-2], size * scale, y.shape[-1])
+        dst = out.narrow(-2, a * scale, (b - a) * scale)
+        if add:
+            dst.add_(y)
+        else:
+            dst.copy_(y)
+    return out
 
 
 def conv3x3(in_dim, out_dim, temporal_kernel=3):
@@ -141,6 +169,9 @@ class ResidualBlock(nn.Module):
             if in_dim != out_dim else nn.Identity())
 
     def forward(self, x, feat_cache=None, feat_idx=[0]):
+        if feat_cache is None:
+            # single image: the whole block runs in strips so its intermediates never exist at full size
+            return strip_apply(lambda s: self.residual(s).add_(self.shortcut(s)), x, halo=2)
         old_x = x
         for layer in self.residual:
             if isinstance(layer, CausalConv3d) and feat_cache is not None:
@@ -380,6 +411,8 @@ class Up_ResidualBlock(nn.Module):
         for module in self.upsamples:
             x_main = module(x_main, feat_cache, feat_idx)
         if self.avg_shortcut is not None:
+            if feat_cache is None:
+                return strip_apply(lambda s: self.avg_shortcut(s, first_chunk), x, scale=self.avg_shortcut.factor_s, halo=0, out=x_main)
             x_shortcut = self.avg_shortcut(x, first_chunk)
             return x_main + x_shortcut
         else:
