@@ -1275,7 +1275,8 @@ class ModelPatcher:
                 full_load = True
             current_used = self.model.model_loaded_weight_memory
             try:
-                self.load(device_to, lowvram_model_memory=current_used + extra_memory, force_patch_weights=force_patch_weights, full_load=full_load)
+                with comfy.model_management.cuda_device_context(device_to):
+                    self.load(device_to, lowvram_model_memory=current_used + extra_memory, force_patch_weights=force_patch_weights, full_load=full_load)
             except Exception as e:
                 self.detach()
                 raise e
@@ -2153,7 +2154,8 @@ class ModelPatcherDynamic(ModelPatcher):
             self.patch_model(load_weights=False)
 
             try:
-                self.load(device_to, dirty=dirty)
+                with comfy.model_management.cuda_device_context(device_to):
+                    self.load(device_to, dirty=dirty)
             except Exception as e:
                 self.detach()
                 raise e
