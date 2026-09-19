@@ -13,7 +13,14 @@ import numpy as np
 import math
 import os
 import torch
-from .._util import VideoContainer, VideoCodec, VideoComponents, normalize_crop_rect
+from .._util import (
+    VideoContainer,
+    VideoCodec,
+    VideoComponents,
+    normalize_crop_rect,
+    apply_spatial_ops,
+    spatial_ops_dimensions,
+)
 import comfy.utils
 import logging
 
@@ -247,7 +254,20 @@ class VideoFromFile(VideoInput):
         self.__file = file
         self.__start_time = start_time
         self.__duration = duration
-        self.__crop = crop
+        self.__spatial_ops = [("crop_aligned", *crop)] if crop is not None else []
+
+    def _with_spatial_ops(self, ops: list[tuple], start_time: float | None = None,
+                          duration: float | None = None) -> "VideoFromFile":
+        """Copy of this video carrying ops, the ordered crop and scale steps applied to
+        each decoded frame after rotation metadata. The step format stays private to this
+        class; callers reach it through as_cropped() and as_resized()."""
+        clone = VideoFromFile(
+            self.get_stream_source(),
+            start_time=self.__start_time if start_time is None else start_time,
+            duration=self.__duration if duration is None else duration,
+        )
+        clone.__spatial_ops = list(ops)
+        return clone
 
     def get_stream_source(self) -> str | io.BytesIO:
         """
@@ -271,21 +291,23 @@ class VideoFromFile(VideoInput):
         Returns:
             Tuple of (width, height)
         """
-        if isinstance(self.__file, io.BytesIO):
-            self.__file.seek(0)  # Reset the BytesIO object to the beginning
-        with av.open(self.__file, mode='r') as container:
-            for stream in container.streams:
-                if stream.type == 'video':
-                    assert isinstance(stream, av.VideoStream)
-                    if self.__crop is None:
+        if not self.__spatial_ops:
+            if isinstance(self.__file, io.BytesIO):
+                self.__file.seek(0)  # Reset the BytesIO object to the beginning
+            with av.open(self.__file, mode='r') as container:
+                for stream in container.streams:
+                    if stream.type == 'video':
+                        assert isinstance(stream, av.VideoStream)
                         return stream.width, stream.height
+            raise ValueError(f"No video stream found in file '{self.__file}'")
+        return self.get_display_dimensions()
 
-                    display_width, display_height = self._get_display_dimensions()
-                    rect = normalize_crop_rect(*self.__crop, display_width, display_height)
-                    if rect is not None:
-                        return rect[2], rect[3]
-                    return display_width, display_height
-        raise ValueError(f"No video stream found in file '{self.__file}'")
+    def get_display_dimensions(self) -> tuple[int, int]:
+        width, height = self._get_display_dimensions()
+        return spatial_ops_dimensions(self.__spatial_ops, width, height)
+
+    def has_pending_frame_edits(self) -> bool:
+        return bool(self.__spatial_ops)
 
     def _get_display_dimensions(self) -> tuple[int, int]:
         if isinstance(self.__file, io.BytesIO):
@@ -481,8 +503,7 @@ class VideoFromFile(VideoInput):
         streams = [video_stream]
         has_first_audio_frame = False
         checked_alpha = False
-        crop_rect = None
-        crop_resolved = False
+        spatial_ops = self.__spatial_ops
 
         # Default to False so we decode until EOF if duration is 0
         video_done = False
@@ -556,14 +577,19 @@ class VideoFromFile(VideoInput):
                         rotation_quadrant = _rotation_quadrant(frame)
                         if rotation_quadrant:
                             img = np.rot90(img, k=rotation_quadrant, axes=(0, 1)).copy()
-                        if self.__crop is not None:
-                            if not crop_resolved:
-                                crop_rect = normalize_crop_rect(*self.__crop, img.shape[1], img.shape[0])
-                                crop_resolved = True
-                            if crop_rect is not None:
-                                cx, cy, cw, ch = crop_rect
-                                img = np.ascontiguousarray(img[cy:cy + ch, cx:cx + cw])
-                        if alphas is None:
+                        if spatial_ops:
+                            # Resize each frame as it is decoded so only target sized
+                            # tensors are retained. common_upscale is batch independent,
+                            # so this matches scaling the whole stack at once.
+                            image = process_image_format(torch.from_numpy(img).unsqueeze(0))
+                            if alphas is None:
+                                frames.append(apply_spatial_ops(image, spatial_ops)[0])
+                            else:
+                                frames.append(apply_spatial_ops(image[..., :-1], spatial_ops)[0])
+                                alphas.append(
+                                    apply_spatial_ops(image[..., -1], spatial_ops, is_mask=True)[0].unsqueeze(-1)
+                                )
+                        elif alphas is None:
                             frames.append(torch.from_numpy(img))
                         else:
                             frames.append(torch.from_numpy(img[..., :-1]))
@@ -592,9 +618,11 @@ class VideoFromFile(VideoInput):
                     else:
                         audio_frames.append(frame.to_ndarray())
 
-        images = process_image_format(torch.stack(frames)) if len(frames) > 0 else torch.zeros(0, 0, 0, 3)
+        # Frames were already converted per frame when spatial ops ran.
+        stack_transform = (lambda a: a) if spatial_ops else process_image_format
+        images = stack_transform(torch.stack(frames)) if len(frames) > 0 else torch.zeros(0, 0, 0, 3)
         if alphas is not None:
-            alphas = process_image_format(torch.stack(alphas)) if len(alphas) > 0 else torch.zeros(0, 0, 0, 1)
+            alphas = stack_transform(torch.stack(alphas)) if len(alphas) > 0 else torch.zeros(0, 0, 0, 1)
 
         # Get frame rate
         frame_rate = Fraction(video_stream.average_rate) if video_stream.average_rate else Fraction(1)
@@ -662,7 +690,7 @@ class VideoFromFile(VideoInput):
                 reuse_streams = False
             if self.__start_time or self.__duration:
                 reuse_streams = False
-            if self.__crop is not None:
+            if self.__spatial_ops:
                 reuse_streams = False
 
             if not reuse_streams:
@@ -863,11 +891,12 @@ class VideoFromFile(VideoInput):
                                 out_width, out_height = frame.height, frame.width
                             else:
                                 out_width, out_height = frame.width, frame.height
-                            if self.__crop is not None:
-                                crop_rect = normalize_crop_rect(*self.__crop, out_width, out_height)
-                                if crop_rect is not None:
-                                    out_width, out_height = crop_rect[2], crop_rect[3]
-                            if (out_width % 2 or out_height % 2) and crop_rect is None:
+                            out_width, out_height = spatial_ops_dimensions(
+                                self.__spatial_ops, out_width, out_height
+                            )
+                            # The encoder needs even dimensions; an odd size produced by a
+                            # resize stays the video's logical size and is only trimmed here.
+                            if out_width % 2 or out_height % 2:
                                 even_width = out_width - out_width % 2
                                 even_height = out_height - out_height % 2
                                 if even_width > 0 and even_height > 0:
@@ -923,6 +952,16 @@ class VideoFromFile(VideoInput):
                                 rotation_filter = (g_src, g_sink)
                             rotation_filter[0].push(frame)
                             frame = rotation_filter[1].pull()
+                        if self.__spatial_ops:
+                            # Scale in tensor space with common_upscale rather than the
+                            # swscale scale filter, so a resized VIDEO matches the
+                            # Resize Image/Mask node's IMAGE output exactly.
+                            array = torch.from_numpy(frame.to_ndarray(format="gbrpf32le"))
+                            array = apply_spatial_ops(array.unsqueeze(0), self.__spatial_ops)[0]
+                            scaled = av.VideoFrame.from_ndarray(array.numpy(), format="gbrpf32le")
+                            scaled.pts = frame.pts
+                            scaled.time_base = frame.time_base
+                            frame = scaled
                         if crop_rect is not None:
                             if crop_filter is None:
                                 g = av.filter.Graph()
@@ -1044,11 +1083,8 @@ class VideoFromFile(VideoInput):
     def as_trimmed(
         self, start_time: float = 0, duration: float = 0, strict_duration: bool = True
     ) -> VideoInput | None:
-        trimmed = VideoFromFile(
-            self.get_stream_source(),
-            start_time=start_time + self.__start_time,
-            duration=duration,
-            crop=self.__crop,
+        trimmed = self._with_spatial_ops(
+            self.__spatial_ops, start_time=start_time + self.__start_time, duration=duration
         )
         if strict_duration and duration and trimmed.get_duration() < duration:
             return None
@@ -1060,29 +1096,23 @@ class VideoFromFile(VideoInput):
         if int(width) <= 0 or int(height) <= 0:
             return self
 
-        display_width, display_height = self._get_display_dimensions()
-        outer = (
-            normalize_crop_rect(*self.__crop, display_width, display_height)
-            if self.__crop is not None
-            else None
-        )
-        if outer is None:
-            rect = normalize_crop_rect(x, y, width, height, display_width, display_height)
-        else:
-            inner = normalize_crop_rect(x, y, width, height, outer[2], outer[3])
-            rect = (
-                (outer[0] + inner[0], outer[1] + inner[1], inner[2], inner[3])
-                if inner is not None
-                else None
-            )
+        rect = normalize_crop_rect(x, y, width, height, *self.get_display_dimensions())
         if rect is None:
             return self
-        return VideoFromFile(
-            self.get_stream_source(),
-            start_time=self.__start_time,
-            duration=self.__duration,
-            crop=rect,
-        )
+        return self._with_spatial_ops(self.__spatial_ops + [("crop", *rect)])
+
+    def as_resized(
+        self,
+        width: int,
+        height: int,
+        upscale_method: str,
+        crop: str = "disabled",
+        post_crop: tuple[int, int, int, int] | None = None,
+    ) -> VideoInput:
+        ops = self.__spatial_ops + [("scale", int(width), int(height), upscale_method, crop)]
+        if post_crop is not None:
+            ops.append(("crop", *(int(value) for value in post_crop)))
+        return self._with_spatial_ops(ops)
 
 
 class VideoFromComponents(VideoInput):
@@ -1090,8 +1120,8 @@ class VideoFromComponents(VideoInput):
     Class representing video input from tensors.
     """
 
-    def __init__(self, components: VideoComponents, bit_depth: int = 8, color_space: str = "sRGB"):
-        if color_space not in VIDEO_COLOR_TRANSFERS:
+    def __init__(self, components: VideoComponents, bit_depth: int = 8, color_space: str | None = "sRGB"):
+        if color_space is not None and color_space not in VIDEO_COLOR_TRANSFERS:
             raise ValueError(f"Unsupported video color space: {color_space}")
         self.__components = components
         # Tensor components have no inherent bit depth; this is the depth used when encoding.
@@ -1111,7 +1141,7 @@ class VideoFromComponents(VideoInput):
         return self.__bit_depth
 
     def get_color_space(self) -> str:
-        return self.__color_space
+        return "auto" if self.__color_space is None else self.__color_space
 
     def save_to(
         self,
@@ -1287,6 +1317,21 @@ class VideoFromList(VideoInput):
             alpha=alpha,
         )
 
+    def get_display_dimensions(self):
+        dimensions = [video.get_display_dimensions() for video in self.videos]
+        mismatches = [
+            f"chunk {index} is displayed at {width}x{height}"
+            for index, (width, height) in enumerate(dimensions[1:], 1)
+            if (width, height) != dimensions[0]
+        ]
+        if mismatches:
+            width, height = dimensions[0]
+            raise ValueError(
+                f"Accumulated videos have incompatible display dimensions: chunk 0 is displayed at {width}x{height}; "
+                + "; ".join(mismatches)
+            )
+        return dimensions[0]
+
     def get_dimensions(self):
         dimensions = [video.get_dimensions() for video in self.videos]
         mismatches = [
@@ -1401,12 +1446,16 @@ class VideoFromList(VideoInput):
                     or (bit_depth is not None and current_signature[4] != bit_depth)
                     or (output_format == VideoContainer.WEBM and video_stream.codec.canonical_name not in WEBM_STREAM_CODECS["video"])
                     or video.get_active_trim_window() != (0.0, 0.0)
+                    or video.has_pending_frame_edits()
                     or video.get_dimensions() != (video_stream.width, video_stream.height)
                 )
         shared_encode |= any(
             current_signature != source_signatures[0]
             for current_signature in source_signatures[1:]
         )
+        # Every chunk of one shared encode must use the same encoder settings or their
+        # extradata will not match, so an edited chunk decides this for the whole list.
+        preserve_shared_timestamps = any(video.has_pending_frame_edits() for video in self.videos)
         target_codec = requested_codec if requested_codec != VideoCodec.AUTO else output_codec
         target_bit_depth = bit_depth if bit_depth is not None else source_signatures[0][4]
         target_color_space = color_space if color_space is not None else source_signatures[0][5]
@@ -1431,7 +1480,7 @@ class VideoFromList(VideoInput):
                             crf=crf,
                             color_space=target_color_space,
                             preset=preset,
-                            preserve_source_timestamps=False,
+                            preserve_source_timestamps=preserve_shared_timestamps,
                             frame_rate=target_frame_rate,
                             audio_sample_rate=target_audio_rate,
                             audio_layout=target_audio_layout,
@@ -1571,3 +1620,16 @@ class VideoFromList(VideoInput):
             [video.as_cropped(x, y, width, height) for video in self.videos],
             self.complete_audio,
         )
+
+    def as_resized(self, width, height, upscale_method, crop="disabled", post_crop=None):
+        # One target size is applied to every chunk, so chunks that are displayed at
+        # different sizes would be stretched differently. Reject them here rather than
+        # emitting chunks that happen to share a size afterwards.
+        self.get_display_dimensions()
+        return VideoFromList(
+            [video.as_resized(width, height, upscale_method, crop, post_crop) for video in self.videos],
+            self.complete_audio,
+        )
+
+    def has_pending_frame_edits(self):
+        return any(video.has_pending_frame_edits() for video in self.videos)
