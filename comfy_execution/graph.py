@@ -168,7 +168,7 @@ class TopologicalSort:
                     _, _, input_info = self.get_input_info(unique_id, input_name)
                     is_lazy = input_info is not None and "lazy" in input_info and input_info["lazy"]
                     if (include_lazy or not is_lazy):
-                        if not self.is_cached(from_node_id):
+                        if not self.is_cached(from_node_id) and not self.is_unavailable(from_node_id):
                             node_ids.append(from_node_id)
                         links.append((from_node_id, from_socket, unique_id))
 
@@ -184,6 +184,8 @@ class TopologicalSort:
         return unblock
 
     def release_external_block(self, node_id, value=None):
+        if node_id not in self.blockCount:
+            return
         self.externalBlocks -= 1
         self.blockCount[node_id] -= 1
         if value is not None:
@@ -194,6 +196,9 @@ class TopologicalSort:
         return self.externalBlockResults.get(node_id)
 
     def is_cached(self, node_id):
+        return False
+
+    def is_unavailable(self, node_id):
         return False
 
     def get_ready_nodes(self):
@@ -221,9 +226,23 @@ class ExecutionList(TopologicalSort):
         self.staged_node_id = None
         self.execution_cache = {}
         self.execution_cache_listeners = {}
+        self.unavailable = {}
+        self.newly_unavailable = {}
+        self.no_persist = {}
+        self.external_releasers = {}
 
     def is_cached(self, node_id):
         return self.output_cache.get_local(node_id) is not None
+
+    def get_unavailable_cause(self, node_id):
+        if node_id in self.unavailable:
+            return self.unavailable[node_id]
+        if node_id in self.no_persist and node_id not in self.pendingNodes:
+            return self.no_persist[node_id]
+        return None
+
+    def is_unavailable(self, node_id):
+        return self.get_unavailable_cause(node_id) is not None
 
     def cache_link(self, from_node_id, to_node_id, from_socket=None):
         if to_node_id not in self.execution_cache:
@@ -255,8 +274,59 @@ class ExecutionList(TopologicalSort):
                     self.output_link_callback(value.outputs[from_socket])
 
     def add_strong_link(self, from_node_id, from_socket, to_node_id):
+        failed_node_id = self.get_unavailable_cause(from_node_id)
+        if failed_node_id is not None:
+            self.newly_unavailable[to_node_id] = failed_node_id
+            return
         super().add_strong_link(from_node_id, from_socket, to_node_id)
         self.cache_link(from_node_id, to_node_id, from_socket)
+
+    def add_external_block(self, node_id, released_by=None):
+        if released_by is not None:
+            self.external_releasers.setdefault(released_by, []).append(node_id)
+        return super().add_external_block(node_id)
+
+    def drain_newly_unavailable(self):
+        result, self.newly_unavailable = self.newly_unavailable, {}
+        return result
+
+    def make_unavailable(self, node_id, failed_node_id):
+        removed = []
+        stack = [node_id]
+        while stack:
+            current = stack.pop()
+            if current in self.unavailable:
+                continue
+            self.unavailable[current] = failed_node_id
+            removed.append(current)
+            stack.extend(self.blocking.get(current, ()))
+            stack.extend(self.external_releasers.pop(current, ()))
+            parent_id = self.dynprompt.get_parent_node_id(current)
+            while parent_id is not None and parent_id not in self.no_persist:
+                self.no_persist[parent_id] = failed_node_id
+                parent_id = self.dynprompt.get_parent_node_id(parent_id)
+        removed_ids = set(removed)
+        for removed_id in removed:
+            if removed_id in self.pendingNodes:
+                strong_blocks = sum(1 for blocked_nodes in self.blocking.values() if removed_id in blocked_nodes)
+                self.externalBlocks -= self.blockCount[removed_id] - strong_blocks
+        for from_node_id, blocked_nodes in self.blocking.items():
+            if from_node_id not in removed_ids:
+                for removed_id in removed_ids:
+                    blocked_nodes.pop(removed_id, None)
+        for removed_id in removed:
+            if removed_id in self.pendingNodes:
+                del self.pendingNodes[removed_id]
+                del self.blockCount[removed_id]
+                del self.blocking[removed_id]
+            self.execution_cache.pop(removed_id, None)
+            self.execution_cache_listeners.pop(removed_id, None)
+            self.externalBlockResults.pop(removed_id, None)
+        for listeners in self.execution_cache_listeners.values():
+            listeners.difference_update({listener for listener in listeners if listener[0] in removed_ids})
+        if self.staged_node_id in removed_ids:
+            self.staged_node_id = None
+        return removed
 
     def inhibit_nodes(self, node_ids):
         """Remove pending nodes selected by the currently executing control node."""

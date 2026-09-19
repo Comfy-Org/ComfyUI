@@ -226,7 +226,8 @@ class StartLoop(io.ComfyNode):
             if name in ("output_value", "next_iteration_value") or name.startswith("termination"):
                 del close_inputs[name]
         execution_list.add_node(close_id)
-        execution_list.add_external_block(close_id)
+        result_id = next(node_id for node_id, node in graph.items() if node["class_type"] == "LoopResult")
+        execution_list.add_external_block(close_id, released_by=result_id)
         execution_list.inhibit_nodes(body)
         dynprompt.override_node(close_id, {"class_type": close["class_type"], "inputs": close_inputs})
         PromptServer.instance.send_progress_text(f"Iteration 0 / {len(values)}", unique_id)
