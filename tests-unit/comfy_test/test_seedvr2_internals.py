@@ -594,6 +594,19 @@ def test_seedvr2_decode_estimate_tracks_measured_peak(frames, height, width, mea
     )
 
 
+def test_seedvr2_encode_accepts_the_chunked_io_device_kwarg():
+    """``comfy_has_chunked_io`` is one flag for both directions: sd.py leaves the pixels where they
+    are and calls ``encode(x, device=...)``, so encode must take it and move the data itself."""
+    import inspect
+    sig = inspect.signature(vae_mod.VideoAutoencoderKLWrapper.encode)
+    assert "device" in sig.parameters, "encode must accept the chunked-io device kwarg"
+    assert sig.parameters["device"].default is None, "device must be optional"
+    # the wrapper claims the protocol, so both sides of it have to exist
+    assert vae_mod.VideoAutoencoderKLWrapper.comfy_has_chunked_io is True
+    assert hasattr(vae_mod.VideoAutoencoderKLWrapper, "decode_output_shape")
+    assert "output_buffer" in inspect.signature(vae_mod.VideoAutoencoderKLWrapper.decode).parameters
+
+
 def test_seedvr2_decode_output_shape_matches_decode():
     """sd.py preallocates from this; it must equal what decode() returns (frames from the 4n+1
     rule, spatial 8x, cropped to even) for both latent layouts."""

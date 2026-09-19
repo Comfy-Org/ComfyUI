@@ -2045,14 +2045,14 @@ class VideoAutoencoderKL(nn.Module):
                 self.slicing_sample_min_size,
                 getattr(self, "temporal_downsample_factor", 1),
             )
-            x_slices = list(x[:, :, 1:].split(split_size=split_size, dim=2))
+            x_slices = [s.to(self.device) for s in x[:, :, 1:].split(split_size=split_size, dim=2)]
             min_active_len = getattr(self, "temporal_downsample_factor", 1)
             if len(x_slices) > 1 and x_slices[-1].shape[2] < min_active_len:
                 x_slices[-2] = torch.cat((x_slices[-2], x_slices[-1]), dim=2)
                 x_slices.pop()
             encoded_slices = [
                 self._encode(
-                    torch.cat((x[:, :, :1], x_slices[0]), dim=2),
+                    torch.cat((x[:, :, :1].to(self.device), x_slices[0]), dim=2),
                     memory_state=MemoryState.INITIALIZING,
                     memory_cache=memory_cache,
                 )
@@ -2064,7 +2064,7 @@ class VideoAutoencoderKL(nn.Module):
             out = torch.cat(encoded_slices, dim=2)
             return out
         else:
-            return self._encode(x)
+            return self._encode(x.to(self.device))
 
     def _offload_caches(self, z):
         """Offload the temporal caches only when the host has room for several times the pinned set."""
@@ -2139,16 +2139,18 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         x = self.decode(z)
         return x, z, p
 
-    def _encode_with_raw_latent(self, x):
+    def _encode_with_raw_latent(self, x, device=None):
         if x.ndim == 4:
             x = x.unsqueeze(2)
-        self.device = x.device
+        # sd.py leaves the pixels wherever they were when it uses the chunked-io protocol; the
+        # slicing below moves each slice as it encodes, so the whole clip never sits on the GPU.
+        self.device = x.device if device is None else device
         p = super().encode(x)
         z = p.squeeze(2)
         return z, p
 
-    def encode(self, x):
-        z, _ = self._encode_with_raw_latent(x)
+    def encode(self, x, device=None):
+        z, _ = self._encode_with_raw_latent(x, device=device)
         return z
 
     # sd.py preallocates the output on its device/dtype and hands slices of it to decode(); the
