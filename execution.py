@@ -1125,6 +1125,19 @@ def full_type_name(klass):
         return klass.__qualname__
     return module + '.' + klass.__qualname__
 
+def _cached_schema(class_def):
+    """The node's v3 schema, or None for a node that has none.
+
+    GET_SCHEMA is expensive; the SCHEMA the class already holds is cheap.
+    """
+    if not issubclass(class_def, _ComfyNodeInternal):
+        return None
+    schema = class_def.__dict__.get("SCHEMA")
+    if schema is None:
+        schema = class_def.GET_SCHEMA()
+    return schema
+
+
 async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[str], None]):
     outputs = set()
     for x in prompt:
@@ -1176,8 +1189,8 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
     start_nodes = set()
     end_nodes = set()
     for node_id, node in prompt.items():
-        class_def = nodes.NODE_CLASS_MAPPINGS[node["class_type"]]
-        boundary = class_def.GET_SCHEMA().loop_boundary if issubclass(class_def, _ComfyNodeInternal) else None
+        schema = _cached_schema(nodes.NODE_CLASS_MAPPINGS[node["class_type"]])
+        boundary = schema.loop_boundary if schema is not None else None
         if boundary == "start":
             start_nodes.add(node_id)
         elif boundary == "end":
