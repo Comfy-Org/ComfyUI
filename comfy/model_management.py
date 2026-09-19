@@ -592,7 +592,10 @@ if cpu_state != CPUState.GPU:
     vram_state = VRAMState.DISABLED
 
 if cpu_state == CPUState.MPS:
-    vram_state = VRAMState.SHARED
+    if set_vram_to in (VRAMState.LOW_VRAM, VRAMState.NO_VRAM):
+        vram_state = set_vram_to
+    else:
+        vram_state = VRAMState.SHARED
 
 logging.info(f"Set vram state to: {vram_state.name}")
 
