@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.assets import manager as manager_mod
+from app.assets.api import routes
 from app.assets.event_log import TAG
+from app.assets.manager import AssetsEnabled
 
 
 STARTUP_SCRIPT = (
@@ -75,9 +78,6 @@ def test_disable_announces_itself_on_the_event_channel(caplog) -> None:
     fail, so a monitor has already been told assets are up by the time a database
     failure degrades them. Without a contradicting event it keeps believing that.
     """
-    from app.assets.api import routes
-    from app.assets.manager import AssetsEnabled
-
     manager = AssetsEnabled(SimpleNamespace(enable_assets=True, enable_asset_hashing=False))
     routes._ASSETS_ENABLED = True
     try:
@@ -104,10 +104,6 @@ def test_disable_actually_stops_scanning_and_ingest_not_just_http() -> None:
     time setup_database can fail. So flipping it is invisible to every later caller:
     the scanner and the three ingest entry points have to be gated directly.
     """
-    from app.assets import manager as manager_mod
-    from app.assets.api import routes
-    from app.assets.manager import AssetsEnabled
-
     started: list[tuple] = []
     mgr = AssetsEnabled(SimpleNamespace(enable_assets=True, enable_asset_hashing=False))
     routes._ASSETS_ENABLED = True

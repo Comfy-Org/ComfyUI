@@ -30,8 +30,7 @@ def file_database(tmp_path, monkeypatch):
     monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
     monkeypatch.setattr(db_mod, "Session", None)
     monkeypatch.setattr(db_mod, "_db_lock", None)
-    if hasattr(db_mod, "WriteSession"):
-        monkeypatch.setattr(db_mod, "WriteSession", None)
+    monkeypatch.setattr(db_mod, "WriteSession", None)
     db_mod.init_db()
     yield database_path
     _dispose_runtime_engines()
@@ -43,8 +42,7 @@ def memory_database(monkeypatch):
     monkeypatch.setattr(db_mod.args, "enable_assets", True)
     monkeypatch.setattr(db_mod.args, "database_url", "sqlite:///:memory:")
     monkeypatch.setattr(db_mod, "Session", None)
-    if hasattr(db_mod, "WriteSession"):
-        monkeypatch.setattr(db_mod, "WriteSession", None)
+    monkeypatch.setattr(db_mod, "WriteSession", None)
     db_mod.init_db()
     yield
     _dispose_runtime_engines()
@@ -86,8 +84,7 @@ def _migrate_crash_style_database(database_path: str, monkeypatch) -> None:
     monkeypatch.setattr(db_mod.args, "enable_assets", True)
     monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
     monkeypatch.setattr(db_mod, "Session", None)
-    if hasattr(db_mod, "WriteSession"):
-        monkeypatch.setattr(db_mod, "WriteSession", None)
+    monkeypatch.setattr(db_mod, "WriteSession", None)
     db_mod._migrate_and_bind(f"sqlite:///{database_path}", database_path, db_exists=True)
 
 
@@ -554,8 +551,7 @@ def test_failed_migration_restores_crash_style_wal_backup_and_removes_sidecars(
     monkeypatch.setattr(db_mod.args, "enable_assets", True)
     monkeypatch.setattr(db_mod.args, "database_url", f"sqlite:///{database_path}")
     monkeypatch.setattr(db_mod, "Session", None)
-    if hasattr(db_mod, "WriteSession"):
-        monkeypatch.setattr(db_mod, "WriteSession", None)
+    monkeypatch.setattr(db_mod, "WriteSession", None)
 
     with pytest.raises(RuntimeError, match="upgrade failure"):
         db_mod._migrate_and_bind(f"sqlite:///{database_path}", database_path, db_exists=True)

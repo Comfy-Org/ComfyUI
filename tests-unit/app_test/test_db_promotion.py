@@ -5,17 +5,6 @@ import time
 from sqlalchemy import event, text
 
 import app.database.db as db_mod
-from app.database.db import create_session
-
-
-def _invoke_writer(work):
-    def _legacy(legacy_work):
-        with create_session() as session:
-            result = legacy_work(session)
-            session.commit()
-            return result
-
-    return db_mod.run_write_txn(work) if hasattr(db_mod, "run_write_txn") else _legacy(work)
 
 
 def test_write_transaction_waits_for_held_writer_before_select_then_mutate(tmp_path, monkeypatch):
@@ -58,7 +47,7 @@ def test_write_transaction_waits_for_held_writer_before_select_then_mutate(tmp_p
             return "written"
 
         started_at = time.monotonic()
-        result = _invoke_writer(select_then_mutate)
+        result = db_mod.run_write_txn(select_then_mutate)
         elapsed = time.monotonic() - started_at
     finally:
         holder.join(timeout=5)
