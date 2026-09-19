@@ -8,6 +8,10 @@ from comfy_extras.nodes_loop import EndLoop, LoopIteration, LoopProgress, LoopRe
 def test_loop_schema_exposes_cache_policy_and_integrated_carry():
     inputs = StartLoop.INPUT_TYPES()
 
+    assert StartLoop.GET_SCHEMA().loop_boundary == "start"
+    assert EndLoop.GET_SCHEMA().loop_boundary == "end"
+    assert not hasattr(StartLoop, "LOOP_BOUNDARY")
+    assert not hasattr(EndLoop, "LOOP_BOUNDARY")
     assert inputs["required"]["cache_iterations"][1]["default"] is False
     assert inputs["required"]["cache_iterations"][1]["advanced"] is True
     assert list(inputs["optional"]) == ["parent_iteration", "initial_iteration_value"]

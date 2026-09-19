@@ -1,4 +1,4 @@
-from ._helpers import get_fs_object_size
+from ._helpers import get_fs_object_size, get_output_consumers, validate_output_unlinked
 from .client import (
     ApiEndpoint,
     poll_op,
@@ -122,4 +122,7 @@ __all__ = [
     "validate_video_frame_count",
     # Misc functions
     "get_fs_object_size",
+    # Graph helpers
+    "get_output_consumers",
+    "validate_output_unlinked",
 ]
