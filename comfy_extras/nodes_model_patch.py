@@ -243,6 +243,7 @@ class ModelPatchLoader:
     def load_model_patch(self, name):
         model_patch_path = folder_paths.get_full_path_or_raise("model_patches", name)
         sd, metadata = comfy.utils.load_torch_file(model_patch_path, safe_load=True, return_metadata=True)
+        sd, metadata = comfy.utils.convert_old_quants(sd, model_prefix="", metadata=metadata)
         dtype = comfy.utils.weight_dtype(sd)
 
         if 'lllite_conditioning1.conv1.weight' in sd:
