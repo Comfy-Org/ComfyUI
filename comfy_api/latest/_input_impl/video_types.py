@@ -1173,9 +1173,18 @@ class VideoFromComponents(VideoInput):
             frame_rate = Fraction(round(self.__components.frame_rate * 1000), 1000)
             # Create a video stream
             pix_fmt = "yuv420p10le" if is_10bit else "yuv420p"
+            # The encoder needs even dimensions; an odd logical size is only trimmed
+            # here, the same boundary VideoFromFile applies when it transcodes.
+            encoded_width = self.__components.images.shape[2] - self.__components.images.shape[2] % 2
+            encoded_height = self.__components.images.shape[1] - self.__components.images.shape[1] % 2
+            if encoded_width <= 0 or encoded_height <= 0:
+                raise ValueError(
+                    f"{output_codec.value.upper()} output requires even dimensions, got "
+                    f"{self.__components.images.shape[2]}x{self.__components.images.shape[1]}"
+                )
             video_stream = output.add_stream(VIDEO_ENCODERS[output_codec], rate=frame_rate)
-            video_stream.width = self.__components.images.shape[2]
-            video_stream.height = self.__components.images.shape[1]
+            video_stream.width = encoded_width
+            video_stream.height = encoded_height
             video_stream.pix_fmt = pix_fmt
             video_stream.options = video_encoder_options(output_codec, crf, preset)
             if color_space is not None:
@@ -1197,7 +1206,7 @@ class VideoFromComponents(VideoInput):
                     audio_resampler = av.audio.resampler.AudioResampler(format="fltp", layout=layout, rate=audio_sample_rate)
 
             # Encode video
-            for i, frame in enumerate(self.__components.images):
+            for i, frame in enumerate(self.__components.images[:, :encoded_height, :encoded_width]):
                 if is_10bit:
                     # 16-bit RGB keeps float precision through the conversion to 10-bit YUV.
                     img = (frame.float() * 65535).clamp(0, 65535).cpu().numpy().astype(np.uint16)  # shape: (H, W, 3)

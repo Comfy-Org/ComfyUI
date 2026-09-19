@@ -266,6 +266,45 @@ def test_file_resize_keeps_bit_depth_and_color_space(tmp_path):
     assert saved.get_dimensions() == (32, 32)
 
 
+@pytest.mark.parametrize(
+    "codec,container,bit_depth",
+    [(VideoCodec.H264, VideoContainer.MP4, None), (VideoCodec.AV1, VideoContainer.MKV, 10)],
+    ids=["h264-8bit", "av1-10bit"],
+)
+def test_fallback_odd_size_is_trimmed_only_at_the_encoder(codec, container, bit_depth):
+    """The fallback returns a VideoFromComponents, which has to honour the same encoder
+    boundary VideoFromFile does: the odd size stays the logical size and is rounded down
+    only on the way into the encoder."""
+    resized = MinimalVideo(make_components(width=16, height=12)).as_resized(7, 5, "area")
+    assert resized.get_dimensions() == (7, 5)
+    assert resized.get_components().images.shape[1:3] == (5, 7)
+
+    output = io.BytesIO()
+    resized.save_to(output, format=container, codec=codec, bit_depth=bit_depth)
+    output.seek(0)
+    with av.open(output) as opened:
+        stream = opened.streams.video[0]
+        assert (stream.codec_context.width, stream.codec_context.height) == (6, 4)
+
+
+def test_fallback_even_size_is_not_trimmed():
+    """An even size reaches the encoder untouched"""
+    resized = MinimalVideo(make_components(width=16, height=12)).as_resized(8, 6, "area")
+    output = io.BytesIO()
+    resized.save_to(output, format=VideoContainer.MP4, codec=VideoCodec.H264)
+    output.seek(0)
+    with av.open(output) as opened:
+        stream = opened.streams.video[0]
+        assert (stream.codec_context.width, stream.codec_context.height) == (8, 6)
+
+
+def test_fallback_size_with_nothing_left_after_trimming_is_rejected():
+    """Nothing can be encoded once both edges round down to zero"""
+    resized = MinimalVideo(make_components(width=16, height=12)).as_resized(1, 1, "area")
+    with pytest.raises(ValueError, match="even dimensions"):
+        resized.save_to(io.BytesIO(), format=VideoContainer.MP4, codec=VideoCodec.H264)
+
+
 # --- operation ordering --------------------------------------------------
 
 
