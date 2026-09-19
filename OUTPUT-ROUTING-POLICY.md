@@ -93,8 +93,8 @@ is the command for zsh, Git Bash, or another POSIX-style shell on Windows:
 - `folder_path_test.py` is the regression test for ComfyUI's existing save-path
   behavior. It ensures the routing work has not changed legacy save behavior.
 - `system_stats_test.py` is the `/system_stats` response contract test. It checks
-  that the server continues to expose the configured output, temporary, input,
-  user, base, and current-working directories.
+  that configured directory fields are omitted while memory and device statistics
+  remain available. The same response is used by `/api/system_stats`.
 
 The command does not start the ComfyUI web server, run a workflow, download a
 model, or require a GPU. A passing result confirms the policy/save-path contract;
@@ -115,7 +115,7 @@ from `folder_paths.get_save_image_path()`. It verifies:
   are rejected.
 
 The save-path and `/system_stats` tests run alongside it to protect the existing
-save behavior and the output-directory server contract.
+save behavior and the statistics response contract.
 
 ### Manual Save Image execution check
 

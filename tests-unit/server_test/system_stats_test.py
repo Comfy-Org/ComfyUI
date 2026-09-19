@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import server
 
 
-def test_system_stats_reports_effective_path_configuration(monkeypatch):
+def test_system_stats_omits_effective_path_configuration(monkeypatch):
     device = SimpleNamespace(type="cuda", index=0)
     monkeypatch.setattr(server.comfy.model_management, "get_torch_device", lambda: device)
     monkeypatch.setattr(server.comfy.model_management, "get_all_torch_devices", lambda: [device])
@@ -26,15 +26,10 @@ def test_system_stats_reports_effective_path_configuration(monkeypatch):
 
     payload = server.get_system_stats()
 
-    assert {"cwd", "base_path", "input_directory", "output_directory", "temp_directory", "user_directory"} <= payload["system"].keys()
-    assert {key: payload["system"][key] for key in ("cwd", "base_path", "input_directory", "output_directory", "temp_directory", "user_directory")} == {
-        "cwd": "F:/ComfyUI/current",
-        "base_path": "F:/ComfyUI/base",
-        "input_directory": "F:/ComfyUI/input",
-        "output_directory": "F:/ComfyUI/_Output",
-        "temp_directory": "F:/ComfyUI/temp",
-        "user_directory": "F:/ComfyUI/user",
-    }
+    assert {"cwd", "base_path", "input_directory", "output_directory", "temp_directory", "user_directory"}.isdisjoint(payload["system"])
+    assert payload["system"]["ram_total"] == 200
+    assert payload["system"]["ram_free"] == 160
+    assert payload["system"]["pytorch_version"] == "test-torch"
     assert payload["devices"] == [{
         "name": "Test GPU",
         "type": "cuda",

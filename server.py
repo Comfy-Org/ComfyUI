@@ -258,12 +258,6 @@ def get_system_stats() -> dict:
             "embedded_python": os.path.split(os.path.split(sys.executable)[0])[1] == "python_embeded",
             "deploy_environment": get_deploy_environment(),
             "argv": sys.argv,
-            "cwd": os.getcwd(),
-            "base_path": folder_paths.base_path,
-            "input_directory": folder_paths.get_input_directory(),
-            "output_directory": folder_paths.get_output_directory(),
-            "temp_directory": folder_paths.get_temp_directory(),
-            "user_directory": folder_paths.get_user_directory(),
         },
         "devices": device_entries,
     }
