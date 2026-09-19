@@ -3,7 +3,7 @@ from unittest.mock import patch
 from sqlalchemy import select
 
 from app.assets.database.models import AssetContent
-from app.assets.scanner import build_asset_specs, seed_asset_specs
+from app.assets.scanner import build_asset_specs, seed_asset_specs, stat_seed_specs
 
 
 def test_drifting_file_never_reaches_seed(session, temp_dir):
@@ -15,6 +15,6 @@ def test_drifting_file_never_reaches_seed(session, temp_dir):
         patch("app.assets.scanner._two_stat_admit", return_value=([], [str(path)])),
     ):
         specs, _, _ = build_asset_specs([str(path)], set(), enable_metadata_extraction=False)
-        seed_asset_specs(session, specs)
+        seed_asset_specs(session, specs, stat_seed_specs(specs))
 
     assert list(session.scalars(select(AssetContent))) == []

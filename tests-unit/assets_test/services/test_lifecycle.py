@@ -7,8 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
-from sqlalchemy.orm import Session as SASession
+from sqlalchemy.orm import Session, Session as SASession, sessionmaker
 
 from app.assets import lifecycle
 from app.assets.database.models import Asset, AssetContent, Base
@@ -64,7 +63,8 @@ def mock_create_session(session):
             yield sess
 
     with patch("app.assets.lifecycle.create_session", _create_session), \
-         patch("app.database.db.create_session", _create_session):
+         patch("app.database.db.create_session", _create_session), \
+         patch("app.database.db.WriteSession", sessionmaker(bind=engine)):
         yield _create_session
 
 

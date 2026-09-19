@@ -39,11 +39,13 @@ class CallSite(NamedTuple):
 
 
 # The manifest of every tagged event this branch emits: (file, enclosing
-# function, event) triples that must be present in the tree exactly as written.
-EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
-    {
+# function, event) triples that must be present in the tree with their exact
+# multiplicity.
+EXPECTED_CALL_SITES: Counter[CallSite] = Counter(
+    (
         # todo 10 - seeder lifecycle + the single assets.enabled site
         CallSite("server.py", "__init__", "assets.enabled"),
+        CallSite("app/assets/manager.py", "disable", "assets.disabled"),
         CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_started"),
         CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_completed"),
         CallSite("app/assets/seeder.py", "_run_scan", "seeder.scan_failed"),
@@ -57,13 +59,17 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite(
             "app/assets/scanner.py", "mark_missing_outside_prefixes_safely", "scanner.mark_missing_failed"
         ),
-        CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_failed"),
-        CallSite("app/assets/scanner.py", "enrich_asset", "scanner.hash_discarded_modified"),
+        CallSite("app/assets/scanner.py", "_prepare_enrichment", "scanner.hash_failed"),
+        CallSite("app/assets/scanner.py", "_prepare_enrichment", "scanner.hash_discarded_modified"),
+        CallSite("app/assets/scanner.py", "enrich_assets_batch", "scanner.enrich_failed"),
         CallSite("app/assets/scanner.py", "enrich_assets_batch", "scanner.enrich_failed"),
         # todo 16 - discovery/enrich stat failures, emit-once per scan per site
         CallSite("app/assets/scanner.py", "build_asset_specs", "scanner.stat_failed"),
-        CallSite("app/assets/scanner.py", "enrich_asset", "scanner.stat_failed"),
-    }
+        CallSite("app/assets/scanner.py", "_prepare_enrichment", "scanner.stat_failed"),
+        CallSite("app/assets/scanner.py", "_publish_reference_diagnostics", "scanner.stat_failed"),
+        CallSite("app/assets/services/ingest.py", "register_cached_output", "ingest.register_failed"),
+        CallSite("app/assets/services/ingest.py", "register_executed_output", "ingest.register_failed"),
+    )
 )
 
 class Aliases(NamedTuple):

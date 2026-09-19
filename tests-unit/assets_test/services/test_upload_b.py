@@ -1,3 +1,4 @@
+import errno
 import os
 import uuid
 from contextlib import contextmanager
@@ -6,7 +7,7 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import create_engine, func, select, update
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import Session as SASession
+from sqlalchemy.orm import Session as SASession, sessionmaker
 
 import app.assets.mode as mode_module
 import app.assets.services.ingest as ingest_module
@@ -1049,6 +1050,7 @@ def test_two_connections_hash_changed_between_lookup_and_claim_falls_back(
                 "app.assets.services.ingest.create_session",
                 lambda: _session_factory(engine),
             ),
+            patch("app.database.db.WriteSession", sessionmaker(bind=engine)),
             patch(
                 "app.assets.services.ingest.claim_qualified_content",
                 claim_after_a_rehashes,
@@ -1123,6 +1125,7 @@ def test_two_connections_competing_retirement_is_blocked_until_commit(
                 "app.assets.services.ingest.create_session",
                 lambda: _session_factory(engine),
             ),
+            patch("app.database.db.WriteSession", sessionmaker(bind=engine)),
             patch(
                 "app.assets.services.ingest._create_upload_record",
                 create_record_after_a_retires,
@@ -1227,7 +1230,7 @@ def test_upload_normalizes_tags_before_they_reach_the_query_layer(
     real_create_upload_record = ingest_module._create_upload_record
 
     def capturing_create_upload_record(*args, **kwargs):
-        captured.append(list(args[4]))
+        captured.append(list(args[2].preflight.spec.tags))
         return real_create_upload_record(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -1313,9 +1316,7 @@ def test_incumbent_reconciliation_persists_the_stat_hashing_verified(
             _mutating_snapshot_hash(dest_abs, rewritten),
         )
 
-        with mock_create_session() as session:
-            ingest_module._settle_destination_before_write(session, dest_abs)
-            session.commit()
+        ingest_module._settle_destination_before_write(dest_abs)
 
         verified_size, verified_mtime = _stat_pair(dest_abs)
         with mock_create_session() as session:
@@ -1367,16 +1368,11 @@ def test_in_place_registration_persists_the_stat_hashing_verified(
 
 
 def test_multipart_upload_persists_the_stat_hashing_verified(
-    mock_create_session, hashing_on, monkeypatch
+    mock_create_session, hashing_on
 ):
     payload = b"multipart bytes whose destination stat goes stale"
     temp = _write_temp(payload)
     real_digest = snapshot_hash(temp)[0]
-
-    def _stale_stat(_path: str, follow_symlinks: bool = True) -> tuple[int, int]:
-        return 1, 1
-
-    monkeypatch.setattr(ingest_module, "get_size_and_mtime_ns", _stale_stat)
 
     result = upload_from_temp_path(
         temp_path=temp,
@@ -1388,11 +1384,10 @@ def test_multipart_upload_persists_the_stat_hashing_verified(
     with mock_create_session() as session:
         record = session.get(Asset, result.ref.id)
         content = session.get(AssetContent, record.content_id)
-        assert (content.size_bytes, content.mtime_ns) != (1, 1), (
-            "a stat read separately from hashing can be stale; the verified stat that "
-            "hashing proved describes these bytes is the one to persist"
+        assert (content.size_bytes, content.mtime_ns) == _stat_pair(content.path), (
+            "the verified stat that hashing proved describes these bytes is the one "
+            "to persist"
         )
-        assert (content.size_bytes, content.mtime_ns) == _stat_pair(content.path)
         assert content.hash == to_stored_hash(real_digest), (
             "the digest, not the (digest, stat) pair, feeds to_stored_hash"
         )
@@ -1400,3 +1395,57 @@ def test_multipart_upload_persists_the_stat_hashing_verified(
             "the digest, not the pair, feeds hash-mode destination naming"
         )
         assert lookup_for_view(session, content.hash) is not None
+
+
+def test_cross_device_upload_to_a_coarse_mtime_destination_still_lands_a_row(
+    mock_create_session, monkeypatch
+):
+    """A publish onto a filesystem with coarser mtime must not strand the bytes.
+
+    upload_from_temp_path hashes the temp file, then publishes. Same-device
+    os.replace keeps the inode so the temp stat still describes the destination,
+    but a cross-device copy replays mtime at the destination's granularity
+    (exFAT 2s, HFS+/ext3 1s, many NFS/CIFS mounts). The create path re-stats the
+    destination and requires an exact match, so pairing the hash with the temp
+    file's nanoseconds raises UploadUnstableError after the bytes are already
+    published -- a file on disk with no catalogue row, which is the exact failure
+    shape this branch exists to remove.
+    """
+    temp_path = _write_temp(b"cross-device-bytes")
+    output_dir = folder_paths.get_output_directory()
+    os.makedirs(output_dir, exist_ok=True)
+
+    real_replace = ingest_module.os.replace
+    real_copy2 = ingest_module.shutil.copy2
+    coarse = []
+
+    def force_cross_device(source_path, destination_path):
+        if str(source_path) == str(temp_path):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        real_replace(source_path, destination_path)
+
+    def copy_then_coarsen(source_path, destination_path):
+        real_copy2(source_path, destination_path)
+        stat = ingest_module.os.stat(destination_path)
+        floored = (stat.st_mtime_ns // 2_000_000_000) * 2_000_000_000
+        ingest_module.os.utime(destination_path, ns=(floored, floored))
+        coarse.append(floored)
+
+    monkeypatch.setattr(ingest_module.os, "replace", force_cross_device)
+    monkeypatch.setattr(ingest_module.shutil, "copy2", copy_then_coarsen)
+
+    result = upload_from_temp_path(
+        temp_path=temp_path,
+        name="cross.bin",
+        tags=["output"],
+        client_filename="cross.bin",
+    )
+
+    assert coarse, "the cross-device branch must have run for this test to mean anything"
+    with mock_create_session() as session:
+        content = session.get(AssetContent, result.content_id)
+        assert content is not None, "the upload must be catalogued, not stranded on disk"
+        assert content.mtime_ns == coarse[0], (
+            "stored facts must describe the published file, not the temp file"
+        )
+        assert content.mtime_ns == os.stat(content.path).st_mtime_ns

@@ -11,12 +11,16 @@ from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.helpers import to_stored_hash
 from app.assets.scanner import (
     build_asset_specs,
-    enrich_asset,
-    mark_contents_missing_outside_prefixes,
     seed_asset_specs,
-    sync_prefixes_with_filesystem,
+    stat_seed_specs,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
+
+from ..helpers import enrich_via_prepare_apply
+from assets_test.helpers import (
+    mark_contents_missing_outside_prefixes_in_session,
+    sync_prefixes_in_session,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,8 +75,8 @@ def test_enrichment_retains_absent_system_metadata_keys(session: Session, temp_d
             _ExtractedMetadata(None, {"b": 3}),
         ],
     ):
-        enrich_asset(session, str(path), content.id, record.id)
-        enrich_asset(session, str(path), content.id, record.id)
+        enrich_via_prepare_apply(session, file_path=str(path), content_id=content.id, record_id=record.id)
+        enrich_via_prepare_apply(session, file_path=str(path), content_id=content.id, record_id=record.id)
 
     assert record.system_metadata == {"a": 1, "b": 3}
 
@@ -95,7 +99,7 @@ def test_enrichment_retains_dimensions_when_image_extraction_degrades(
         ),
         patch("app.assets.scanner.extract_image_dimensions", return_value=None),
     ):
-        enrich_asset(session, str(path), content.id, record.id)
+        enrich_via_prepare_apply(session, file_path=str(path), content_id=content.id, record_id=record.id)
 
     assert record.system_metadata == {
         "filename": "image.png",
@@ -120,7 +124,7 @@ def test_enrichment_overrides_content_length_with_zero(
         "app.assets.scanner.extract_file_metadata",
         return_value=_ExtractedMetadata(None, {"content_length": 0}),
     ):
-        enrich_asset(session, str(path), content.id, record.id)
+        enrich_via_prepare_apply(session, file_path=str(path), content_id=content.id, record_id=record.id)
 
     assert record.system_metadata == {"content_length": 0}
 
@@ -132,7 +136,8 @@ def test_seed_creates_content_and_record(session, temp_dir: Path):
     (input_root / "second.png").write_bytes(b"second")
 
     with patch("folder_paths.get_input_directory", return_value=str(input_root)):
-        created = seed_asset_specs(session, _build_seed_specs(input_root))
+        specs = _build_seed_specs(input_root)
+        created = seed_asset_specs(session, specs, stat_seed_specs(specs))
     session.commit()
 
     contents = list(session.scalars(select(AssetContent).order_by(AssetContent.path)))
@@ -155,10 +160,11 @@ def test_prune_marks_missing_not_deletes(session, temp_dir: Path):
     file_path.write_bytes(b"content")
 
     with patch("folder_paths.get_input_directory", return_value=str(input_root)):
-        seed_asset_specs(session, _build_seed_specs(input_root))
+        specs = _build_seed_specs(input_root)
+        seed_asset_specs(session, specs, stat_seed_specs(specs))
     session.commit()
 
-    marked = mark_contents_missing_outside_prefixes(session, prefixes=[])
+    marked = mark_contents_missing_outside_prefixes_in_session(session, prefixes=[])
     session.commit()
 
     content = session.scalar(select(AssetContent))
@@ -180,7 +186,7 @@ def test_unhashed_missing_content_gets_tagged(session, temp_dir: Path):
     session.add(record)
     session.commit()
 
-    sync_prefixes_with_filesystem(session, prefixes=[str(temp_dir)])
+    sync_prefixes_in_session(session, prefixes=[str(temp_dir)])
     session.commit()
 
     session.expire_all()
@@ -217,7 +223,7 @@ def test_enrichment_keeps_equal_hash_contents_distinct(session, temp_dir: Path):
     session.add_all((record, existing_record))
     session.commit()
 
-    enriched = enrich_asset(
+    enriched = enrich_via_prepare_apply(
         session,
         file_path=str(path),
         content_id=content.id,

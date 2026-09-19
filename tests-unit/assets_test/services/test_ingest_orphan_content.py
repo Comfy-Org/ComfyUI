@@ -9,7 +9,7 @@ import app.assets.mode as mode_module
 import folder_paths
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries import create_record as create_record_query
-from app.assets.scanner import SeedAssetSpec, seed_asset_specs
+from app.assets.scanner import SeedAssetSpec, seed_asset_specs, stat_seed_specs
 from app.assets.services import ingest
 from app.assets.services.ingest import register_file_in_place, upload_from_temp_path
 
@@ -145,7 +145,7 @@ def test_seed_asset_specs_orphans_nothing_and_keeps_earlier_specs_on_record_fail
     monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
 
     with pytest.raises(RuntimeError, match="forced create_record failure"):
-        seed_asset_specs(session, specs)
+        seed_asset_specs(session, specs, stat_seed_specs(specs))
     session.rollback()
 
     assert _content_at(session, paths[fail_name]) is None, (

@@ -22,7 +22,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, init_db
+from app.database.db import WalUnavailableError, dependencies_available, init_db
 from app.assets.lifecycle import cleanup_temp_filesystem
 from app.assets.manager import AssetManager, default_asset_manager
 import itertools
@@ -457,33 +457,32 @@ def setup_database(asset_manager):
         init_db()
         asset_manager.startup()
     except Exception as e:
-        if "database is locked" in str(e):
+        if isinstance(e, WalUnavailableError):
+            logging.error(
+                f"{e}\n"
+                "To resolve this, keep the database on a local disk; your media can stay "
+                "on the network share:\n"
+                "  --database-url sqlite:///path/on/local/disk.db"
+            )
+        elif "database is locked" in str(e) or "Could not acquire lock on database" in str(e):
             logging.error(
                 "Database is locked. Another ComfyUI process is already using this database.\n"
                 "To resolve this, specify a separate database file for this instance:\n"
                 "  --database-url sqlite:///path/to/another.db"
             )
-            sys.exit(1)
-        if "Could not acquire lock on database" in str(e):
-            logging.error(
-                "Database is locked. Another ComfyUI process is already using this database.\n"
-                "To resolve this, specify a separate database file for this instance:\n"
-                "  --database-url sqlite:///path/to/another.db"
-            )
-            if args.enable_assets:
-                sys.exit(1)
-            return
-        if args.enable_assets:
+        elif args.enable_assets:
             logging.error(
                 f"Failed to initialize database: {e}\n"
-                "The --enable-assets flag requires a working database connection.\n"
                 "To resolve this, try one of the following:\n"
                 "  1. Install the latest requirements: pip install -r requirements.txt\n"
-                "  2. Specify an alternative database URL: --database-url sqlite:///path/to/your.db\n"
-                "  3. Use an in-memory database: --database-url sqlite:///:memory:"
+                "  2. Specify a database on a local disk: --database-url sqlite:///path/to/your.db"
             )
-            sys.exit(1)
-        logging.error(f"Failed to initialize database. Please ensure you have installed the latest requirements. If the error persists, please report this as in future the database will be required: {e}")
+        else:
+            logging.error(f"Failed to initialize database. Please ensure you have installed the latest requirements. If the error persists, please report this as in future the database will be required: {e}")
+
+        if args.enable_assets:
+            asset_manager.disable(e)
+            logging.error("Starting with assets disabled; asset endpoints will answer 503.")
 
 
 def start_comfyui(asyncio_loop=None):

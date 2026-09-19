@@ -1,6 +1,19 @@
+"""SQLite engine wiring for the runtime database.
+
+Readers get a WAL engine with a 30s busy_timeout and query_only; writes go
+through a writer engine that takes the lock up front with BEGIN IMMEDIATE and is
+retried by run_write_txn. Memory and disabled-assets startups share one engine.
+"""
+
 import logging
 import os
+import random
 import shutil
+import sqlite3
+import sys
+import threading
+import time
+from typing import Callable, TypeVar
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
 from filelock import FileLock, Timeout
@@ -8,6 +21,34 @@ from comfy.cli_args import args, database_default_path
 
 _DB_AVAILABLE = False
 Session = None
+WriteSession = None
+_attempt_lock_deadline = threading.local()
+_write_txn_state = threading.local()
+_WRITE_TXN_LOCK_RETRY_DEADLINE_SECONDS = 60
+_WRITE_TXN_BACKOFF_SECONDS = (0.05, 0.1, 0.2, 0.4)
+_SQLITE_BUSY_TIMEOUT_MS = 30000
+_SQLITE_WRITE_LOCK_POLL_SECONDS = 0.01
+_SQLITE_RETRYABLE_LOCK_ERROR_NAMES = frozenset({
+    "SQLITE_BUSY",
+    "SQLITE_BUSY_SNAPSHOT",
+    "SQLITE_BUSY_TIMEOUT",
+    "SQLITE_BUSY_RECOVERY",
+    "SQLITE_LOCKED",
+    "SQLITE_LOCKED_SHAREDCACHE",
+})
+_SQLITE_RETRYABLE_LOCK_ERROR_CODES = frozenset({
+    getattr(sqlite3, "SQLITE_BUSY", 5),
+    getattr(sqlite3, "SQLITE_BUSY_RECOVERY", 261),
+    getattr(sqlite3, "SQLITE_BUSY_SNAPSHOT", 517),
+    getattr(sqlite3, "SQLITE_BUSY_TIMEOUT", 773),
+    getattr(sqlite3, "SQLITE_LOCKED", 6),
+    getattr(sqlite3, "SQLITE_LOCKED_SHAREDCACHE", 262),
+})
+T = TypeVar("T")
+
+
+class WalUnavailableError(RuntimeError):
+    """WAL journal mode was refused, which SQLite does on network filesystems."""
 
 
 try:
@@ -16,7 +57,8 @@ try:
     from alembic.runtime.migration import MigrationContext
     from alembic.script import ScriptDirectory
     from sqlalchemy import create_engine, event
-    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session as SQLAlchemySession, sessionmaker
     from sqlalchemy.pool import StaticPool
 
     from app.database.models import Base
@@ -175,8 +217,10 @@ def _init_memory_db(db_url):
 
     Base.metadata.create_all(engine)
 
-    global Session
+    global Session, WriteSession
     Session = sessionmaker(bind=engine)
+    # A second engine would create a separate memory database; this test path is single-threaded.
+    WriteSession = Session
 
 
 def _init_file_db(db_url):
@@ -207,49 +251,129 @@ def _upgrade_discards_the_catalog(script, target_rev, current_rev):
     )
 
 
-def _migrate_and_bind(db_url, db_path, db_exists):
-    config = get_alembic_config()
+def _assets_writer_enabled():
+    return bool(getattr(args, "enable_assets", False))
 
-    # Check if we need to upgrade
+
+def _bind_single_engine_without_wal(db_url):
+    global Session, WriteSession
     engine = create_engine(db_url)
 
-    # Enable foreign key enforcement for SQLite
     @event.listens_for(engine, "connect")
     def set_sqlite_pragma(dbapi_connection, connection_record):
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
-    conn = engine.connect()
+    with engine.connect():
+        pass
+    Session = sessionmaker(bind=engine)
+    WriteSession = Session
 
-    context = MigrationContext.configure(conn)
-    current_rev = context.get_current_revision()
 
-    script = ScriptDirectory.from_config(config)
-    target_rev = script.get_current_head()
+def _configure_runtime_connection(dbapi_connection, db_path):
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        journal_mode = cursor.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if journal_mode.lower() != "wal":
+            raise WalUnavailableError(
+                f"SQLite WAL could not be enabled for database '{db_path}'. "
+                "SQLite WAL is not supported on network filesystems."
+            )
+        cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+    finally:
+        cursor.close()
 
-    if target_rev is None:
-        logging.warning("No target revision found.")
-    elif current_rev != target_rev:
-        # Backup the database pre upgrade
-        backup_path = db_path + ".bkp"
-        if db_exists:
+
+def _begin_immediate(dbapi_connection):
+    retry_deadline = getattr(_attempt_lock_deadline, "value", None)
+    now = time.monotonic()
+    busy_timeout_deadline = now + _SQLITE_BUSY_TIMEOUT_MS / 1000
+    deadline = min(retry_deadline, busy_timeout_deadline) if retry_deadline is not None else busy_timeout_deadline
+
+    while True:
+        try:
+            cursor = dbapi_connection.execute("BEGIN IMMEDIATE")
+            cursor.close()
+            return
+        except sqlite3.OperationalError as exc:
+            if not _is_retryable_lock_error(exc):
+                raise
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise OperationalError("BEGIN IMMEDIATE", {}, exc) from exc
+            time.sleep(min(_SQLITE_WRITE_LOCK_POLL_SECONDS, remaining_seconds))
+
+
+def build_writer_engine(db_url, db_path):
+    engine = create_engine(db_url, connect_args={"timeout": 0})
+
+    @event.listens_for(engine, "connect")
+    def set_writer_sqlite_pragma(dbapi_connection, connection_record):
+        dbapi_connection.isolation_level = None
+        _configure_runtime_connection(dbapi_connection, db_path)
+        dbapi_connection.execute("PRAGMA busy_timeout=0").close()
+
+    @event.listens_for(engine, "begin")
+    def begin_immediate(connection):
+        _begin_immediate(connection.connection.driver_connection)
+
+    return engine
+
+
+def _migrate_and_bind(db_url, db_path, db_exists):
+    config = get_alembic_config()
+    inspection_engine = create_engine(db_url)
+
+    @event.listens_for(inspection_engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    try:
+        with inspection_engine.connect() as inspection_connection:
+            context = MigrationContext.configure(inspection_connection)
+            current_rev = context.get_current_revision()
+            script = ScriptDirectory.from_config(config)
+            target_rev = script.get_current_head()
+            needs_upgrade = target_rev is not None and current_rev != target_rev
+
+            if target_rev is None:
+                logging.warning("No target revision found.")
+            elif needs_upgrade and db_exists:
+                # WAL persists in the file, so Phase M makes the main-file backup self-contained.
+                inspection_connection.rollback()
+                inspection_connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+                journal_mode = inspection_connection.exec_driver_sql(
+                    "PRAGMA journal_mode=DELETE"
+                ).scalar_one()
+                if journal_mode.lower() != "delete":
+                    raise RuntimeError(
+                        f"SQLite journal mode could not be reset before backing up '{db_path}'."
+                    )
+    finally:
+        inspection_engine.dispose()
+
+    if needs_upgrade:
+        backup_path = db_path + ".bkp" if db_exists else None
+        if backup_path is not None:
             shutil.copy(db_path, backup_path)
-        else:
-            backup_path = None
-
         try:
             command.upgrade(config, target_rev)
             logging.info(f"Database upgraded from {current_rev} to {target_rev}")
-        except Exception as e:
-            if backup_path:
-                # Restore the database from backup if upgrade fails
+        except Exception:
+            if backup_path is not None:
+                for sidecar_path in (db_path + "-wal", db_path + "-shm"):
+                    if os.path.exists(sidecar_path):
+                        os.remove(sidecar_path)
                 shutil.copy(backup_path, db_path)
                 os.remove(backup_path)
             logging.exception("Error upgrading database: ")
-            raise e
+            raise
 
-        if backup_path and _upgrade_discards_the_catalog(script, target_rev, current_rev):
+        if backup_path is not None and _upgrade_discards_the_catalog(script, target_rev, current_rev):
             log_startup_warning(
                 f"The asset catalog was rebuilt from scratch by migration "
                 f"{_DESTRUCTIVE_REVISION}: manual tags, user metadata, previews, renames, "
@@ -257,11 +381,92 @@ def _migrate_and_bind(db_url, db_path, db_exists):
                 f"discarded. The database from before the upgrade was kept at {backup_path}."
             )
 
-    conn.close()
+    global Session, WriteSession
 
-    global Session
-    Session = sessionmaker(bind=engine)
+    if not _assets_writer_enabled():
+        _bind_single_engine_without_wal(db_url)
+        return
+
+    # Redundant with busy_timeout by design: both set pysqlite's 30-second limit.
+    reader_engine = create_engine(db_url, connect_args={"timeout": 30})
+
+    @event.listens_for(reader_engine, "connect")
+    def set_reader_sqlite_pragma(dbapi_connection, connection_record):
+        _configure_runtime_connection(dbapi_connection, db_path)
+        dbapi_connection.execute("PRAGMA query_only=ON").close()
+
+    writer_engine = build_writer_engine(db_url, db_path)
+
+    with reader_engine.connect():
+        pass
+    with writer_engine.connect():
+        pass
+    Session = sessionmaker(bind=reader_engine)
+    WriteSession = sessionmaker(bind=writer_engine)
 
 
 def create_session():
     return Session()
+
+
+def _is_retryable_lock_error(exc: BaseException) -> bool:
+    error_name = getattr(exc, "sqlite_errorname", None)
+    if error_name is not None:
+        return error_name in _SQLITE_RETRYABLE_LOCK_ERROR_NAMES
+
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if error_code is not None:
+        return error_code in _SQLITE_RETRYABLE_LOCK_ERROR_CODES
+
+    return "locked" in str(exc).lower()
+
+
+def run_write_txn(work: Callable[["SQLAlchemySession"], T]) -> T:
+    """Run a write callback with bounded lock retries; its own work is not deadline-limited."""
+    if getattr(_write_txn_state, "active", False):
+        raise RuntimeError("run_write_txn cannot be nested")
+
+    # Nested helpers could commit the outer callback's work.
+    _write_txn_state.active = True
+    retry_deadline = time.monotonic() + _WRITE_TXN_LOCK_RETRY_DEADLINE_SECONDS
+    locked_error = None
+    try:
+        for attempt in range(len(_WRITE_TXN_BACKOFF_SECONDS) + 1):
+            retryable_lock_error = False
+            if attempt > 0:
+                if time.monotonic() >= retry_deadline:
+                    raise locked_error
+                backoff_seconds = _WRITE_TXN_BACKOFF_SECONDS[attempt - 1]
+                time.sleep(random.uniform(backoff_seconds * 0.5, backoff_seconds * 1.5))
+                if time.monotonic() >= retry_deadline:
+                    raise locked_error
+
+            _attempt_lock_deadline.value = retry_deadline
+            session = WriteSession()
+            try:
+                result = work(session)
+                session.commit()
+                return result
+            except OperationalError as exc:
+                if not _is_retryable_lock_error(exc.orig):
+                    raise
+                locked_error = exc
+                retryable_lock_error = True
+            finally:
+                propagating_exception = sys.exc_info()[0] is not None
+                try:
+                    session.rollback()
+                except BaseException:
+                    if retryable_lock_error:
+                        logging.warning("Write transaction rollback failed after locked error; retrying", exc_info=True)
+                    elif not propagating_exception:
+                        raise
+                finally:
+                    session.close()
+                    _attempt_lock_deadline.value = None
+
+            if attempt == len(_WRITE_TXN_BACKOFF_SECONDS) or time.monotonic() >= retry_deadline:
+                raise locked_error
+    finally:
+        _attempt_lock_deadline.value = None
+        _write_txn_state.active = False

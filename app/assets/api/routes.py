@@ -133,6 +133,12 @@ def register_assets_routes(
     app.add_routes(ROUTES)
 
 
+def close_assets_feature_gate() -> None:
+    """Answer 503 from routes that are already registered."""
+    global _ASSETS_ENABLED
+    _ASSETS_ENABLED = False
+
+
 def _build_error_response(
     status: int, code: str, message: str, details: dict | None = None
 ) -> web.Response:

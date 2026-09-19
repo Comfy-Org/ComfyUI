@@ -4,7 +4,10 @@ from pathlib import Path
 import folder_paths
 import pytest
 from blake3 import blake3
+import sqlalchemy as sa
 from sqlalchemy import select
+
+import app.database.db as db_mod
 
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries.records import create_content, create_record
@@ -48,7 +51,8 @@ def test_off_to_on_transition_hashes_null_rows_and_persists_mode(session, temp_d
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
-    drain_transition_queue(session)
+    session.commit()
+    drain_transition_queue()
     session.commit()
 
     contents = list(session.scalars(select(AssetContent)))
@@ -72,7 +76,8 @@ def test_transition_drain_splits_changed_content(session, temp_dir, monkeypatch)
     path.write_bytes(b"new bytes")
 
     enqueue_transition_work(session, "off_to_on")
-    drain_transition_queue(session)
+    session.commit()
+    drain_transition_queue()
     session.commit()
 
     contents = list(session.scalars(select(AssetContent)))
@@ -107,7 +112,8 @@ def test_transition_drain_serves_unchanged_content_whose_stored_stat_went_stale(
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
-    drain_transition_queue(session)
+    session.commit()
+    drain_transition_queue()
     session.commit()
 
     refreshed = session.get(AssetContent, content_id)
@@ -143,8 +149,9 @@ def test_transition_drain_requeues_permission_errors_and_processes_other_paths(
     monkeypatch.setattr(hash_mode_state, "snapshot_hash", hash_or_raise)
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
+    session.commit()
 
-    drain_transition_queue(session)
+    drain_transition_queue()
 
     healthy_content = session.scalar(
         select(AssetContent).where(AssetContent.path == str(healthy_path))
@@ -172,8 +179,10 @@ def test_transition_drain_marks_deleted_path_missing_and_completes_transition(
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
-    drain_transition_queue(session)
     session.commit()
+    drain_transition_queue()
+    session.commit()
+    session.expire_all()
 
     assert session.get(AssetContent, content_id).is_missing is True, (
         "a path deleted while every server was down must be marked missing, not requeued forever"
@@ -210,7 +219,8 @@ def test_transition_drain_requeues_transient_stat_error_without_marking_it_missi
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
-    drain_transition_queue(session)
+    session.commit()
+    drain_transition_queue()
     session.commit()
 
     assert session.get(AssetContent, content_id).is_missing is False, (
@@ -235,7 +245,8 @@ def test_transition_drain_requeues_unstable_present_file_without_marking_it_miss
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
-    drain_transition_queue(session)
+    session.commit()
+    drain_transition_queue()
     session.commit()
 
     assert session.get(AssetContent, content_id).is_missing is False, (
@@ -266,8 +277,10 @@ def test_transition_drain_mixes_a_deleted_path_with_a_healthy_one(session, temp_
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
-    drain_transition_queue(session)
     session.commit()
+    drain_transition_queue()
+    session.commit()
+    session.expire_all()
 
     assert session.get(AssetContent, content_ids[deleted_path]).is_missing is True
     healthy_content = session.get(AssetContent, content_ids[healthy_path])
@@ -298,10 +311,11 @@ def test_transition_drain_skips_out_of_root_path(session, temp_dir, monkeypatch,
         get_name_and_tags_from_asset_path(str(outside_path))
 
     enqueue_transition_work(session, "off_to_on")
+    session.commit()
 
     with caplog.at_level(logging.WARNING):
         try:
-            drain_transition_queue(session)
+            drain_transition_queue()
         except ValueError as error:
             pytest.fail(
                 f"an out-of-root path escaped the drain as {error!r}; setup_database turns that "
@@ -338,13 +352,14 @@ def test_transition_drain_clears_an_unverifiable_hash_only_on_the_third_attempt(
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
+    session.commit()
 
     def warnings_naming_the_path() -> list[str]:
         return [r.getMessage() for r in caplog.records if str(path) in r.getMessage()]
 
     with caplog.at_level(logging.WARNING):
         for attempt in (1, 2):
-            drain_transition_queue(session)
+            drain_transition_queue()
             session.commit()
             session.expire_all()
             assert hash_mode_state.pending_transition_count() == 1, (
@@ -360,7 +375,7 @@ def test_transition_drain_clears_an_unverifiable_hash_only_on_the_third_attempt(
                 f"attempt {attempt} is a retry, not a terminal outcome; it must stay quiet"
             )
 
-        drain_transition_queue(session)
+        drain_transition_queue()
         session.commit()
 
     session.expire_all()
@@ -380,6 +395,9 @@ def test_transition_drain_clears_an_unverifiable_hash_only_on_the_third_attempt(
     assert len(warnings_naming_the_path()) == 1, (
         "the terminal outcome is announced exactly once, naming the path"
     )
+
+
+_MAX_DRAIN_TICKS = 10
 
 
 def test_transition_drain_retires_only_the_unreadable_path_and_hashes_the_healthy_one(
@@ -408,8 +426,9 @@ def test_transition_drain_retires_only_the_unreadable_path_and_hashes_the_health
 
     transition = record_transition_intent(session)
     enqueue_transition_work(session, transition)
+    session.commit()
     for _ in range(3):
-        drain_transition_queue(session)
+        drain_transition_queue()
         session.commit()
 
     session.expire_all()
@@ -419,3 +438,54 @@ def test_transition_drain_retires_only_the_unreadable_path_and_hashes_the_health
     assert session.get(AssetContent, unreadable_id).hash is None
     assert hash_mode_state.pending_transition_count() == 0
     assert read_stored_mode(session) == "on"
+
+
+def test_transition_drain_retires_an_entry_that_keeps_losing_the_row_compare_and_set(
+    session, temp_dir, monkeypatch, caplog
+):
+    """A CAS mismatch must spend the retirement budget, not requeue forever.
+
+    The mode flip is gated on the queue draining, so an entry that always loses the
+    compare-and-set would keep the transition pending for the process lifetime and
+    spend a write transaction on every tick.
+    """
+    path = temp_dir / "always-racing.bin"
+    content_id, _ = _seed_hashed_row(session, path, b"bytes that keep moving")
+    write_stored_mode(session, "off")
+    monkeypatch.setattr(hash_mode_state._mode, "hashing_enabled", lambda: True)
+
+    transition = record_transition_intent(session)
+    enqueue_transition_work(session, transition)
+    session.commit()
+
+    # Lose the CAS on every attempt: bump the row's mtime after the preflight reads it.
+    real_preflight = hash_mode_state._preflight_transition_entry
+
+    def preflight_then_race(entry_path: str):
+        result = real_preflight(entry_path)
+        if result is not None:
+            db_mod.run_write_txn(
+                lambda s: s.execute(
+                    sa.update(AssetContent)
+                    .where(AssetContent.id == content_id)
+                    .values(mtime_ns=AssetContent.mtime_ns + 1000)
+                )
+            )
+        return result
+
+    monkeypatch.setattr(hash_mode_state, "_preflight_transition_entry", preflight_then_race)
+
+    with caplog.at_level(logging.WARNING):
+        for _ in range(_MAX_DRAIN_TICKS):
+            drain_transition_queue()
+            session.commit()
+            session.expire_all()
+            if hash_mode_state.pending_transition_count() == 0:
+                break
+
+    assert hash_mode_state.pending_transition_count() == 0, (
+        "a permanently racing row must be retired by the attempt budget, not requeued forever"
+    )
+    assert read_stored_mode(session) == "on", (
+        "the mode flip is gated on the queue emptying, so a stuck entry wedges it"
+    )

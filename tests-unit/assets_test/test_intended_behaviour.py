@@ -9,7 +9,7 @@ import pytest
 from aiohttp.test_utils import make_mocked_request
 from blake3 import blake3
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.assets import mode
 from app.assets.api import routes
@@ -31,7 +31,7 @@ from app.assets.lifecycle import wipe_temp_db_rows
 from app.assets.scanner import (
     build_asset_specs,
     seed_asset_specs,
-    sync_prefixes_with_filesystem,
+    stat_seed_specs,
 )
 from app.assets.scanner_admission import _should_skip_extension
 from app.assets.scanner_changes import (
@@ -48,16 +48,19 @@ from app.assets.services.asset_management import (
 from app.assets.services.file_utils import list_files_recursively
 from app.assets.services.ingest import register_cached_output, upload_from_temp_path
 from app.assets.services.lookup import (
-    lookup_for_from_hash,
     lookup_for_view,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
+from assets_test.helpers import sync_prefixes_in_session
 
 
 @pytest.fixture
-def session():
+def session(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr("app.database.db.Session", factory)
+    monkeypatch.setattr("app.database.db.WriteSession", factory)
     with Session(engine) as database_session:
         yield database_session
 
@@ -105,13 +108,13 @@ def _seed_content_row(session, path: Path, hash_value: str | None = None):
 
 
 def _scan_pass(session, root: Path) -> int:
-    survivors = sync_prefixes_with_filesystem(
+    survivors = sync_prefixes_in_session(
         session, [str(root)], collect_existing_paths=True
     )
     specs, _tag_pool, _skipped = build_asset_specs(
         list_files_recursively(str(root)), survivors or set()
     )
-    return seed_asset_specs(session, specs)
+    return seed_asset_specs(session, specs, stat_seed_specs(specs))
 
 
 @contextmanager
@@ -209,6 +212,7 @@ def test_scenario_4_delete_no_revival(session, tmp_path):
         assert delete_asset_reference(record_id) is True
         assert delete_asset_reference(record_id) is False
 
+    session.expire_all()
     assert get_record_by_id(session, record_id) is None
     assert session.get(AssetContent, content_id) is not None
 
@@ -229,8 +233,8 @@ def test_scenario_6_upload_reuses_content_never_the_record(session, tmp_path):
     still share one ``AssetContent`` row, in BOTH modes — uploads hash
     unconditionally (``upload_from_temp_path`` calls
     ``_snapshot_hash_with_retry`` before it consults anything) and
-    ``lookup_for_view`` never asks ``mode.hashing_enabled``, unlike
-    ``lookup_for_from_hash``. What changed is record identity: a re-upload is a
+    ``lookup_for_view`` never asks ``mode.hashing_enabled``. What changed is
+    record identity: a re-upload is a
     new delivery, so it gets a new record carrying the attributes THAT request
     supplied, instead of silently handing back an older record that never saw
     them.
@@ -259,6 +263,7 @@ def test_scenario_6_upload_reuses_content_never_the_record(session, tmp_path):
                 "app.assets.services.ingest.create_session",
                 lambda: nullcontext(session),
             ),
+            patch("app.database.db.WriteSession", sessionmaker(bind=session.bind)),
             patch.object(mode, "hashing_enabled", return_value=hashing),
         ):
             return upload_from_temp_path(
@@ -373,6 +378,7 @@ def test_scenario_10_cached_delivery_record(session, tmp_path):
             "app.assets.services.ingest.create_session",
             lambda: nullcontext(session),
         ),
+        patch("app.database.db.WriteSession", sessionmaker(bind=session.bind)),
     ):
         delivered = register_cached_output(str(path), job_id="delivery-job")
 
@@ -402,6 +408,7 @@ def test_scenario_10_cached_delivery_record(session, tmp_path):
             "app.assets.services.ingest.create_session",
             lambda: nullcontext(session),
         ),
+        patch("app.database.db.WriteSession", sessionmaker(bind=session.bind)),
     ):
         assert register_cached_output(str(path), job_id="second-delivery") is None
     assert {row.id for row in session.scalars(select(Asset))} == {
@@ -505,13 +512,14 @@ def test_scenario_18_edit_during_hash_discard(session, tmp_path):
         mtime_ns=seed_stat.st_mtime_ns,
     )
     record = create_record(session, content.id, "unstable.bin")
+    session.commit()
 
     clear_pending_verifications()
     try:
         queue_pending_verification(content.id)
         with _writer_lands_mid_hash(path, b"a-concurrent-writer-was-here"):
             assert snapshot_hash(str(path)) is None
-            assert drain_pending_verifications(session) == 0
+            assert drain_pending_verifications() == 0
 
         assert content.hash == committed_hash
         assert content.is_missing is False
@@ -519,12 +527,14 @@ def test_scenario_18_edit_during_hash_discard(session, tmp_path):
         assert [row.id for row in session.scalars(select(AssetContent))] == [content.id]
 
         path.write_bytes(committed)
-        assert drain_pending_verifications(session) == 1
+        assert drain_pending_verifications() == 1
     finally:
         clear_pending_verifications()
 
-    assert content.hash == committed_hash
-    assert content.mtime_ns == path.stat().st_mtime_ns
+    session.expire_all()
+    refreshed = session.get(AssetContent, content.id)
+    assert refreshed.hash == committed_hash
+    assert refreshed.mtime_ns == path.stat().st_mtime_ns
 
 
 def test_writer_simulation_terminates_and_is_capped(tmp_path):
@@ -677,7 +687,7 @@ def test_scenario_27_fail_closed_previews_fromhash(session, tmp_path):
 
     def from_hash():
         with patch.object(mode, "hashing_enabled", return_value=True):
-            return lookup_for_from_hash(session, digest)
+            return lookup_for_view(session, digest)
 
     def serving() -> tuple[bool, object]:
         with patch(
