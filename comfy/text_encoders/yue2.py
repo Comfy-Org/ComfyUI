@@ -27,36 +27,50 @@ INSTRUCTIONS = {
 
 
 def distribution(logits, history, step, phase, temperature, top_p, top_k, repetition_penalty, penalty_window, min_tokens, legacy_off=False):
-    scores = logits.clone() if legacy_off else logits.float().clone()
+    scores = logits.float() if not legacy_off else logits.clone()
     end = ABC_END if phase == "abc" else MUSIC_END
-    allowed = torch.full_like(scores, -torch.inf)
-    if phase == "abc":
-        allowed[..., :EOD] = 0
-    else:
-        allowed[..., CODEC_OFFSET:CODEC_OFFSET + CODEC_SIZE] = 0
-    allowed[..., end] = 0
-    scores += allowed
+
     if step < min_tokens:
         scores[..., end] = -torch.inf
+
     if repetition_penalty != 1.0 and history:
-        recent = torch.tensor([history[-penalty_window:]], dtype=torch.long, device=scores.device)
-        counts = torch.zeros_like(scores)
-        counts.scatter_add_(-1, recent, torch.ones_like(recent, dtype=scores.dtype))
-        penalty = repetition_penalty ** counts
-        scores = torch.where(scores < 0, scores * penalty, scores / penalty)
+        recent = history[-penalty_window:]
+        counts = {}
+        for t in recent:
+            counts[t] = counts.get(t, 0) + 1
+        tok_indices = torch.tensor(list(counts.keys()), dtype=torch.long, device=scores.device)
+        tok_counts = torch.tensor(list(counts.values()), dtype=scores.dtype, device=scores.device)
+        penalties = repetition_penalty ** tok_counts
+        orig_vals = scores[..., tok_indices]
+        scores[..., tok_indices] = torch.where(orig_vals < 0, orig_vals * penalties, orig_vals / penalties)
+
+    if phase == "abc":
+        scores[..., EOD:] = -torch.inf
+        scores[..., end] = logits[..., end]
+    else:
+        scores[..., :CODEC_OFFSET] = -torch.inf
+        scores[..., CODEC_OFFSET + CODEC_SIZE:] = -torch.inf
+        scores[..., end] = logits[..., end]
+
     if temperature == 0:
-        return scores
-    scores /= temperature
-    threshold = scores.topk(min(top_k, scores.shape[-1])).values[..., -1, None]
-    scores.masked_fill_(scores < threshold, -torch.inf)
-    if top_p < 1:
-        values, indices = scores.sort(descending=True)
-        probabilities = values.softmax(-1)
-        removed = probabilities.cumsum(-1) - probabilities > top_p
-        removed[..., :3 if legacy_off else 1] = False
-        values.masked_fill_(removed, -torch.inf)
-        scores = values.scatter(-1, indices, values)
-    return scores
+        return scores, None
+    scores = scores / temperature
+
+    k_val = min(top_k, scores.shape[-1])
+    top_values, top_indices = scores.topk(k_val, dim=-1)
+
+    if top_p < 1.0:
+        sorted_values, sort_idx = top_values.sort(descending=True)
+        sorted_indices = top_indices.gather(-1, sort_idx)
+
+        probs = sorted_values.softmax(-1)
+        cum_probs = probs.cumsum(-1) - probs
+        mask = cum_probs > top_p
+        mask[..., :3 if legacy_off else 1] = False
+        sorted_values[mask] = -torch.inf
+        return sorted_values, sorted_indices
+    else:
+        return top_values, top_indices
 
 
 def chunk_ranges(frames, prefix_tokens, context=CONTEXT):
@@ -127,13 +141,19 @@ class YuE2TEModel(torch.nn.Module):
 
     def memory_estimation_function(self, tokens, device=None):
         config = self.config
-        abc_length = 0 if tokens["cot"] == "off" else len(tokens["abc_ids"])
-        length = min(config.max_position_embeddings, len(tokens["prefix"]) + abc_length + tokens["max_tokens"] + 2)
-        branches = 1 if tokens["cfg_scale"] == 1.0 else 2
+        abc_length = 0 if tokens.get("cot") == "off" else len(tokens.get("abc_ids", []))
+        prefix_length = len(tokens.get("prefix", [])) + abc_length
+        branches = 1 if tokens.get("cfg_scale", 1.0) == 1.0 else 2
         dtype = torch.bfloat16 if comfy.model_management.should_use_bf16(device) else torch.float32
-        cache = branches * 2 * config.num_hidden_layers * config.num_key_value_heads * config.head_dim * length
-        prefill = branches * (length * length + length * (config.intermediate_size * 3 + config.hidden_size * 8))
-        return (cache + prefill) * comfy.model_management.dtype_size(dtype)
+        dtype_size = comfy.model_management.dtype_size(dtype)
+        req_tokens = prefix_length + tokens.get("max_tokens", 1024) + 2
+        is_abc = (tokens.get("cot") != "off" and len(tokens.get("abc_ids", [])) == 0)
+        max_cap = 4096 if is_abc else 8192
+        total_length = min(config.max_position_embeddings, req_tokens, max_cap)
+        kv_cache = branches * 2 * config.num_hidden_layers * config.num_key_value_heads * config.head_dim * total_length * dtype_size
+        prefill_act = branches * (prefix_length * prefix_length + prefix_length * (config.intermediate_size * 3 + config.hidden_size * 8)) * dtype_size
+        decode_act = branches * (config.intermediate_size * 3 + config.hidden_size * 8) * dtype_size
+        return kv_cache + max(prefill_act, decode_act)
 
     def _prefill(self, prefixes, capacity, dtype):
         length = max(map(len, prefixes))
@@ -157,7 +177,20 @@ class YuE2TEModel(torch.nn.Module):
         generator = torch.Generator(device=rng_device).manual_seed(seed)
         prefixes = [prefix] if cfg_scale == 1.0 else [prefix, negative]
         prefix_length = max(map(len, prefixes))
-        logits, cache, mask = self._prefill(prefixes, prefix_length + max_tokens, dtype)
+        budget_tokens = prefix_length + max_tokens
+        if phase == "abc":
+            capacity = min(budget_tokens, 4096)
+        else:
+            total_vram_mb = comfy.model_management.get_total_memory(device) / (1024**2)
+            # On 4GB GPUs, total context (prefix + generation) must stay <= 6000 tokens to prevent PCIe shared memory paging
+            vram_hard_cap = 6000 if total_vram_mb <= 4500 else self.config.max_position_embeddings
+            free_vram_mb = comfy.model_management.get_free_memory(device) / (1024**2)
+            kv_byte_per_tok = (1 if cfg_scale == 1.0 else 2) * 2 * self.config.num_hidden_layers * self.config.num_key_value_heads * self.config.head_dim * comfy.model_management.dtype_size(dtype)
+            safe_cache_tokens = int(max(0, (free_vram_mb - 200) * (1024**2)) / kv_byte_per_tok)
+            max_allowed_cap = min(vram_hard_cap, max(3072, safe_cache_tokens))
+            capacity = min(budget_tokens, max_allowed_cap)
+        actual_max_tokens = min(max_tokens, capacity - prefix_length)
+        logits, cache, mask = self._prefill(prefixes, capacity, dtype)
         fixed_kv = isinstance(cache[0], FixedKV)
         decode_tokens = torch.empty((len(prefixes), 1), device=device, dtype=torch.long)
         positions = torch.tensor([[len(p)] for p in prefixes], device=device, dtype=torch.long)
@@ -168,24 +201,28 @@ class YuE2TEModel(torch.nn.Module):
                               rope_matrix(self.model.compute_freqs_cis(positions, device)))
         history = []
         end = ABC_END if phase == "abc" else MUSIC_END
-        progress = comfy.utils.ProgressBar(max_tokens)
+        progress = comfy.utils.ProgressBar(actual_max_tokens)
         try:
-            for step in comfy.utils.model_trange(max_tokens, desc="YuE2 ABC sampling" if phase == "abc" else "YuE2 music sampling", unit="token"):
+            for step in comfy.utils.model_trange(actual_max_tokens, desc="YuE2 ABC sampling" if phase == "abc" else "YuE2 music sampling", unit="token"):
                 comfy.model_management.throw_exception_if_processing_interrupted()
                 guided = logits if cfg_scale == 1.0 else logits[1:] + cfg_scale * (logits[:1] - logits[1:])
-                scores = distribution(guided, history, step, phase, legacy_off=legacy_off, **sampling)
+                top_vals, top_idxs = distribution(guided, history, step, phase, legacy_off=legacy_off, **sampling)
                 if sampling["temperature"] == 0:
-                    next_id = scores.argmax(-1, keepdim=True)
+                    if top_idxs is not None:
+                        next_id = top_idxs[..., 0:1]
+                    else:
+                        next_id = top_vals.argmax(-1, keepdim=True)
                 else:
-                    probabilities = scores.softmax(-1).to(rng_device)
-                    next_id = torch.multinomial(probabilities, 1, generator=generator).to(device)
+                    probabilities = top_vals.softmax(-1)
+                    sample_idx = torch.multinomial(probabilities, 1, generator=generator)
+                    next_id = top_idxs.gather(-1, sample_idx)
                 decode_tokens.copy_(next_id)
                 token = next_id.item()
                 progress.update_absolute(step + 1)
                 if token == end:
                     return history, False
                 history.append(token)
-                if step + 1 < max_tokens:
+                if step + 1 < actual_max_tokens:
                     # Keep decode allocations stable; sampling has a changing history window.
                     if fixed_kv:
                         comfy.model_prefetch.malloc_graph_begin(device)

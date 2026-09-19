@@ -363,7 +363,7 @@ class CLIP:
             if show_pbar:
                 pbar = ProgressBar(len(scheduled_keyframes))
 
-            with model_management.cuda_device_context(device):
+            with model_management.cuda_device_context(device), comfy.ops.use_quantized_matmul(self.cond_stage_model, device):
                 for scheduled_opts in scheduled_keyframes:
                     t_range = scheduled_opts[0]
                     # don't bother encoding any conds outside of start_percent and end_percent bounds
@@ -409,7 +409,7 @@ class CLIP:
         device = self.patcher.load_device
         self.cond_stage_model.set_clip_options({"execution_device": device})
 
-        with model_management.cuda_device_context(device):
+        with model_management.cuda_device_context(device), comfy.ops.use_quantized_matmul(self.cond_stage_model, device):
             o = self.cond_stage_model.encode_token_weights(tokens)
 
         cond, pooled = o[:2]
@@ -463,7 +463,9 @@ class CLIP:
         memory_used = 0
         if hasattr(self.cond_stage_model, "memory_estimation_function"):
             memory_used = self.cond_stage_model.memory_estimation_function(tokens, device=self.patcher.load_device)
-        model_management.load_models_gpu([self.patcher], memory_required=memory_used)
+        free_mem = model_management.get_free_memory(self.patcher.load_device)
+        fits_fully = (self.patcher.model_size() + memory_used + model_management.extra_reserved_memory() < free_mem)
+        model_management.load_models_gpu([self.patcher], memory_required=memory_used, force_full_load=fits_fully or getattr(self, "disable_offload", False))
         return self.patcher
 
     def get_key_patches(self):
