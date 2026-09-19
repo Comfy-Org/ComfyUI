@@ -673,6 +673,7 @@ class PromptExecutor:
         self.caches = CacheSet(cache_type=self.cache_type, cache_args=self.cache_args)
         self.status_messages = []
         self.success = True
+        self.history_result = {}
 
     def add_message(self, event, data: dict, broadcast: bool):
         data = {
@@ -724,10 +725,18 @@ class PromptExecutor:
             except Exception as e:
                 _cache_logger.warning(f"Cache provider {provider.__class__.__name__} error on {event}: {e}")
 
-    def execute(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
+    def execute(self, prompt, prompt_id, extra_data=None, execute_outputs=None):
+        if extra_data is None:
+            extra_data = {}
+        if execute_outputs is None:
+            execute_outputs = []
         asyncio.run(self.execute_async(prompt, prompt_id, extra_data, execute_outputs))
 
-    async def execute_async(self, prompt, prompt_id, extra_data={}, execute_outputs=[]):
+    async def execute_async(self, prompt, prompt_id, extra_data=None, execute_outputs=None):
+        if extra_data is None:
+            extra_data = {}
+        if execute_outputs is None:
+            execute_outputs = []
         set_preview_method(extra_data.get("preview_method"))
 
         nodes.interrupt_processing(False)
@@ -739,6 +748,8 @@ class PromptExecutor:
             self.server.client_id = None
 
         self.status_messages = []
+        self.success = True
+        self.history_result = {}
         self.add_message("execution_start", { "prompt_id": prompt_id}, broadcast=False)
 
         self._notify_prompt_lifecycle("start", prompt_id)
