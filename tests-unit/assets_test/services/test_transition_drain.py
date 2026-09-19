@@ -450,7 +450,7 @@ def test_transition_drain_retires_an_entry_that_keeps_losing_the_row_compare_and
     spend a write transaction on every tick.
     """
     path = temp_dir / "always-racing.bin"
-    content_id, _ = _seed_hashed_row(session, path, b"bytes that keep moving")
+    content_id, original_hash = _seed_hashed_row(session, path, b"bytes that keep moving")
     write_stored_mode(session, "off")
     monkeypatch.setattr(hash_mode_state._mode, "hashing_enabled", lambda: True)
 
@@ -488,4 +488,8 @@ def test_transition_drain_retires_an_entry_that_keeps_losing_the_row_compare_and
     )
     assert read_stored_mode(session) == "on", (
         "the mode flip is gated on the queue emptying, so a stuck entry wedges it"
+    )
+    retired = session.get(AssetContent, content_id)
+    assert retired.hash == original_hash, (
+        "losing the compare-and-set means another writer owns this row; its hash must survive"
     )
