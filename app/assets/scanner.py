@@ -34,9 +34,7 @@ from app.assets.scanner_changes import (
     drain_pending_verifications,
     is_path_under_prefixes,
     live_contents_under_prefixes,
-    pending_recovery_count,
     prepare_missing_content_recovery,
-    queue_pending_recovery,
     queue_pending_verification,
     recover_missing_content_from_preparation,
 )
@@ -63,7 +61,6 @@ from app.database.db import create_session, run_write_txn
 __all__ = [
     "clear_pending_verifications",
     "drain_pending_verifications",
-    "pending_recovery_count",
 ]
 
 
@@ -555,7 +552,11 @@ def seed_asset_specs(
                     if prepared_recoveries is not None and mode.hashing_enabled():
                         prepared = prepared_recoveries.get(path)
                         if prepared is None:
-                            logging.warning("Skipping vanished asset during scan: %s", path)
+                            logging.warning(
+                                "Skipping asset whose recovery hash could not be prepared "
+                                "during scan: %s",
+                                path,
+                            )
                             continue
                         recovery = recover_missing_content_from_preparation(
                             session,
@@ -629,9 +630,7 @@ def insert_asset_specs(specs: list[SeedAssetSpec], _tag_pool: set[str]) -> int:
         )
         return created, pending_recovery_paths
 
-    created, pending_recovery_paths = run_write_txn(_work)
-    for path in pending_recovery_paths:
-        queue_pending_recovery(path)
+    created, _ = run_write_txn(_work)
     return created
 
 

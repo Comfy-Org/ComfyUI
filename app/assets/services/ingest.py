@@ -462,7 +462,13 @@ def _preflight_upload_record(
             raise ValueError(
                 f"preview_id {spec.preview_id!r} does not reference an existing asset"
             )
-    signature = _file_signature(path)
+    try:
+        signature = _file_signature(path)
+    except OSError:
+        # No row backs the fallback path, so a missing file there is permanent, not stale.
+        if content_id is None:
+            raise
+        raise _PreflightStale from None
     if content_id is not None and (
         signature.size_bytes,
         signature.mtime_ns if row_mtime_ns is not None else None,
@@ -557,7 +563,10 @@ def _preflight_settle_target(dest_abs: str) -> _SettleTargetPreflight | None:
         ).first()
         if existing is None:
             return None
-        signature = _file_signature(dest_abs)
+        try:
+            signature = _file_signature(dest_abs)
+        except OSError:
+            return None
         if (
             existing.hash is not None
             and existing.size_bytes == signature.size_bytes

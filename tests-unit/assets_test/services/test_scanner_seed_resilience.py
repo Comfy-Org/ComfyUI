@@ -92,8 +92,14 @@ def _delete_during_recovery(monkeypatch: pytest.MonkeyPatch, path: Path) -> None
 
 
 @pytest.mark.parametrize(
-    "delete_path",
-    [_delete_before_restat, _delete_during_recovery],
+    ("delete_path", "expected_message"),
+    [
+        (_delete_before_restat, "Skipping vanished asset during scan: {path}"),
+        (
+            _delete_during_recovery,
+            "Skipping asset whose recovery hash could not be prepared during scan: {path}",
+        ),
+    ],
     ids=["before-restat", "during-recovery"],
 )
 def test_seed_logs_once_for_each_vanished_path(
@@ -102,6 +108,7 @@ def test_seed_logs_once_for_each_vanished_path(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     delete_path: Callable[[pytest.MonkeyPatch, Path], None],
+    expected_message: str,
 ) -> None:
     specs, vanished_path = _specs_with_vanished_path(temp_dir)
     delete_path(monkeypatch, vanished_path)
@@ -115,7 +122,7 @@ def test_seed_logs_once_for_each_vanished_path(
         for record in caplog.records
         if str(vanished_path) in record.getMessage()
     ]
-    assert messages == [f"Skipping vanished asset during scan: {vanished_path}"]
+    assert messages == [expected_message.format(path=vanished_path)]
 
 
 def test_seed_isolates_a_poisoned_spec_and_persists_the_specs_around_it(

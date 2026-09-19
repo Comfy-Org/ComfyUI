@@ -28,7 +28,6 @@ from app.assets.services.snapshot_hash import snapshot_hash
 from app.database.db import create_session, run_write_txn
 
 _pending_verification_ids: list[str] = []
-_pending_recovery_paths: list[str] = []
 
 
 class PreparedRecovery(NamedTuple):
@@ -52,21 +51,11 @@ def prepare_missing_content_recovery(path: str, stat_result: os.stat_result) -> 
 
 def clear_pending_verifications() -> None:
     _pending_verification_ids.clear()
-    _pending_recovery_paths.clear()
 
 
 def queue_pending_verification(content_id: str) -> None:
     if content_id not in _pending_verification_ids:
         _pending_verification_ids.append(content_id)
-
-
-def queue_pending_recovery(path: str) -> None:
-    if path not in _pending_recovery_paths:
-        _pending_recovery_paths.append(path)
-
-
-def pending_recovery_count() -> int:
-    return len(_pending_recovery_paths)
 
 
 def recover_missing_content_from_preparation(
