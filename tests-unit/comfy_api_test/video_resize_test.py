@@ -267,24 +267,29 @@ def test_file_resize_keeps_bit_depth_and_color_space(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "codec,container,bit_depth",
-    [(VideoCodec.H264, VideoContainer.MP4, None), (VideoCodec.AV1, VideoContainer.MKV, 10)],
+    "codec,container,bit_depth,target,encoded",
+    [
+        (VideoCodec.H264, VideoContainer.MP4, None, (7, 5), (6, 4)),
+        # SVT-AV1 fails to allocate for a frame of a few pixels on some platforms, so
+        # use the size the other AV1 tests here encode at
+        (VideoCodec.AV1, VideoContainer.MKV, 10, (65, 65), (64, 64)),
+    ],
     ids=["h264-8bit", "av1-10bit"],
 )
-def test_fallback_odd_size_is_trimmed_only_at_the_encoder(codec, container, bit_depth):
+def test_fallback_odd_size_is_trimmed_only_at_the_encoder(codec, container, bit_depth, target, encoded):
     """The fallback returns a VideoFromComponents, which has to honour the same encoder
     boundary VideoFromFile does: the odd size stays the logical size and is rounded down
     only on the way into the encoder."""
-    resized = MinimalVideo(make_components(width=16, height=12)).as_resized(7, 5, "area")
-    assert resized.get_dimensions() == (7, 5)
-    assert resized.get_components().images.shape[1:3] == (5, 7)
+    resized = MinimalVideo(make_components(width=128, height=128)).as_resized(*target, "area")
+    assert resized.get_dimensions() == target
+    assert resized.get_components().images.shape[1:3] == (target[1], target[0])
 
     output = io.BytesIO()
     resized.save_to(output, format=container, codec=codec, bit_depth=bit_depth)
     output.seek(0)
     with av.open(output) as opened:
         stream = opened.streams.video[0]
-        assert (stream.codec_context.width, stream.codec_context.height) == (6, 4)
+        assert (stream.codec_context.width, stream.codec_context.height) == encoded
 
 
 def test_fallback_even_size_is_not_trimmed():
