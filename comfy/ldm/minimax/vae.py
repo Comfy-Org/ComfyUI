@@ -553,6 +553,49 @@ class MiniMaxH3VideoVAE(nn.Module):
             return torch.cat([blended, b[tuple(slice_b_rest)]], dim=dim)
         return blended
 
+    def _tile_axis_weights(self, starts, lengths, overlaps, axis_length, device):
+        if len(starts) != len(lengths) or len(overlaps) != max(0, len(starts) - 1):
+            raise ValueError("invalid MiniMax H3 VAE tile plan")
+        if not starts or starts[0] != 0 or starts[-1] + lengths[-1] != axis_length:
+            raise ValueError("MiniMax H3 VAE tile plan does not cover the full axis")
+        if any(overlap < 0 for overlap in overlaps):
+            raise ValueError("MiniMax H3 VAE tile plan has a negative overlap")
+
+        for i, (start, length) in enumerate(zip(starts, lengths)):
+            if length <= 0 or start < 0 or start + length > axis_length:
+                raise ValueError("MiniMax H3 VAE tile plan has an invalid tile extent")
+            if i > 0:
+                overlap = overlaps[i - 1]
+                previous_end = starts[i - 1] + lengths[i - 1]
+                if (
+                    start <= starts[i - 1]
+                    or start > previous_end
+                    or overlap > min(lengths[i - 1], length)
+                    or previous_end - start != overlap
+                ):
+                    raise ValueError("MiniMax H3 VAE tile plan has inconsistent overlap geometry")
+
+        raw_weights = []
+        denominator = torch.zeros(axis_length, dtype=torch.float32, device=device)
+        for i, (start, length) in enumerate(zip(starts, lengths)):
+            positions = torch.arange(length, dtype=torch.float32, device=device)
+            weight = torch.ones(length, dtype=torch.float32, device=device)
+
+            if i > 0 and overlaps[i - 1] > 0:
+                weight.mul_(torch.clamp(positions / overlaps[i - 1], max=1.0))
+            if i < len(starts) - 1 and overlaps[i] > 0:
+                weight.mul_(torch.clamp((length - positions) / overlaps[i], max=1.0))
+
+            denominator[start:start + length].add_(weight)
+            raw_weights.append(weight)
+
+        # The geometry checks above plus the native k / overlap ramps guarantee
+        # strictly positive coverage. Do not hide an invalid plan with epsilon.
+        return [
+            weight / denominator[start:start + length]
+            for start, length, weight in zip(starts, lengths, raw_weights)
+        ]
+
     def tiled_encode(self, x):
         height, width = x.shape[-2], x.shape[-1]
         y_idx, y_len, y_overlap = self.split_tiles(height)
@@ -599,39 +642,81 @@ class MiniMaxH3VideoVAE(nn.Module):
         y_idx, y_len, y_overlap = self.split_tiles(height)
         x_idx, x_len, x_overlap = self.split_tiles(width)
 
-        # Blended tiles are written straight into a pre-allocated canvas.
+        # Preserve the native direct route when no spatial composition is needed.
+        if len(y_idx) == 1 and len(x_idx) == 1:
+            return self._decode_pixels(z)
+
+        y_weights = self._tile_axis_weights(y_idx, y_len, y_overlap, height, z.device)
+        x_weights = self._tile_axis_weights(x_idx, x_len, x_overlap, width, z.device)
+
+        # Every spatial contributor is accumulated in a bounded float32 active
+        # Y band. Rows below the next tile-row start cannot receive any later
+        # contribution and are finalized into the raw decoder canvas immediately.
         canvas = None
-        row_tails = []
+        active = None
+        band_height = min(self.tile_size, height)
         out_y = 0
+
+        def add_to_active(contribution, absolute_y, absolute_x):
+            slot = absolute_y % band_height
+            first = min(contribution.shape[-2], band_height - slot)
+            active[..., slot:slot + first, absolute_x:absolute_x + contribution.shape[-1]].add_(
+                contribution[..., :first, :]
+            )
+            if first < contribution.shape[-2]:
+                remaining = contribution.shape[-2] - first
+                active[..., :remaining, absolute_x:absolute_x + contribution.shape[-1]].add_(
+                    contribution[..., first:, :]
+                )
+
+        def flush_active(end_y):
+            nonlocal out_y
+            count = end_y - out_y
+            if count < 0 or count > band_height:
+                raise RuntimeError("MiniMax H3 VAE active tile band exceeded its bounded extent")
+            if count == 0:
+                return
+
+            slot = out_y % band_height
+            first = min(count, band_height - slot)
+            canvas[..., out_y:out_y + first, :].copy_(active[..., slot:slot + first, :])
+            active[..., slot:slot + first, :].zero_()
+            if first < count:
+                remaining = count - first
+                canvas[..., out_y + first:end_y, :].copy_(active[..., :remaining, :])
+                active[..., :remaining, :].zero_()
+            out_y = end_y
+
         for i, (i_pos, i_len) in enumerate(zip(y_idx, y_len)):
             zi, zl = i_pos // self.vae_ratio, i_len // self.vae_ratio
             tiles = self._decode_tile_row(z[..., zi:zi + zl, :], x_idx, x_len)
-            new_tails = []
-            left_tail = None
-            out_x = 0
-            # enumerate would retain the previous tile while the next batch decodes.
+
+            # Indexing by range avoids enumerate retaining the previous decoded
+            # tile while the next decoder batch is produced.
             for j in range(len(x_idx)):
                 tile = next(tiles)
-                if i < len(y_idx) - 1:
-                    new_tails.append(tile[..., -y_overlap[i]:, :].clone())
-                next_left_tail = tile[..., :, -x_overlap[j]:].clone() if j < len(x_idx) - 1 else None
-                if i > 0:
-                    tile = self.blend(row_tails[j], tile, y_overlap[i - 1], dim=-2)
-                if j > 0:
-                    tile = self.blend(left_tail, tile, x_overlap[j - 1], dim=-1)
-                left_tail = next_left_tail
-                if i < len(y_idx) - 1:
-                    tile = tile[..., :-y_overlap[i], :]
-                if j < len(x_idx) - 1:
-                    tile = tile[..., :, :-x_overlap[j]]
+                expected_shape = (i_len, x_len[j])
+                if tile.shape[-2:] != expected_shape:
+                    raise RuntimeError(
+                        f"MiniMax H3 VAE decoded tile has shape {tile.shape[-2:]}, expected {expected_shape}"
+                    )
+
                 if canvas is None:
-                    canvas = torch.empty(*tile.shape[:-2], height, width, dtype=tile.dtype, device=tile.device)
-                canvas[..., out_y:out_y + tile.shape[-2], out_x:out_x + tile.shape[-1]].copy_(tile)
-                tile_height = tile.shape[-2]
-                out_x += tile.shape[-1]
-                del tile
-            row_tails = new_tails
-            out_y += tile_height
+                    canvas = torch.empty(
+                        *tile.shape[:-2], height, width, dtype=tile.dtype, device=tile.device
+                    )
+                    active = torch.zeros(
+                        *tile.shape[:-2], band_height, width, dtype=torch.float32, device=tile.device
+                    )
+
+                contribution = tile.to(dtype=torch.float32, copy=True)
+                contribution.mul_(y_weights[i].view(*([1] * (tile.ndim - 2)), i_len, 1))
+                contribution.mul_(x_weights[j].view(*([1] * (tile.ndim - 2)), 1, x_len[j]))
+                add_to_active(contribution, i_pos, x_idx[j])
+                del contribution, tile
+
+            flush_active(y_idx[i + 1] if i + 1 < len(y_idx) else height)
+
         return canvas
 
     # temporal chunking

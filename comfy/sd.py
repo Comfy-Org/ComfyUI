@@ -1050,8 +1050,26 @@ class VAE:
 
                 def estimate_decode_memory(frames, height, width, dtype):
                     fixed = 110_000_000 if frames <= 22 else 270_000_000
+                    requested_frames = frames
                     frames = min(frames, chunk_frames + 2)
-                    return (9.5 * frames * height * width + fixed) * model_management.dtype_size(dtype) * 1.03
+                    base = (9.5 * frames * height * width + fixed) * model_management.dtype_size(dtype)
+
+                    # Spatial composition keeps the raw decoder canvas in its native
+                    # dtype and adds a bounded float32 Y band plus one float32 tile.
+                    # A single spatial tile takes the direct decoder path and needs
+                    # neither allocation.
+                    tile_size = self.first_stage_model.tile_size
+                    composition_scratch = 0
+                    if height > tile_size or width > tile_size:
+                        raw_frames = self.first_stage_model.vae_ratio_t if requested_frames == 1 else chunk_frames
+                        band_height = min(tile_size, height)
+                        tile_height = min(tile_size, height)
+                        tile_width = min(tile_size, width)
+                        composition_scratch = 3 * raw_frames * (
+                            band_height * width + tile_height * tile_width
+                        ) * model_management.dtype_size(torch.float32)
+
+                    return (base + composition_scratch) * 1.03
 
                 self.memory_used_encode = lambda shape, dtype: estimate_encode_memory(shape[2], shape[3], shape[4], dtype)
                 self.memory_used_decode = lambda shape, dtype: estimate_decode_memory(self.upscale_ratio[0](shape[2]), shape[3] * self.upscale_ratio[1], shape[4] * self.upscale_ratio[2], dtype)
