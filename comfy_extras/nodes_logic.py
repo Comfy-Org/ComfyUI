@@ -95,7 +95,7 @@ class PassOrNoneNode(io.ComfyNode):
         autogrow_template = io.Autogrow.TemplateNames(
             input=input_template,
             names=["anything"] + [f"default{i}" for i in range(99)],
-            min=1,
+            min=0,
         )
         return io.Schema(
             node_id="ComfyPassOrNoneNode",
