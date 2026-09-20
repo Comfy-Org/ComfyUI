@@ -146,6 +146,19 @@ def test_triple_and_higher_overlap_matches_all_contributor_oracle(length, overla
     torch.testing.assert_close(out.double(), expected, rtol=0, atol=_fp32_bound(rows))
 
 
+@pytest.mark.parametrize(
+    ("height", "width", "overlap"),
+    [(464, 464, 64), (896, 1216, 128)],
+)
+def test_two_dimensional_multi_overlap_matches_all_contributor_oracle(height, width, overlap):
+    model = _bare_model(overlap)
+    rows = _constant_rows(model, height, width, lambda i, j: i * 10 + j)
+    out = _run_tile_rows(model, rows, height, width)
+    expected = _compose_oracle(model, rows, height, width)
+
+    torch.testing.assert_close(out.double(), expected, rtol=0, atol=_fp32_bound(rows))
+
+
 def test_float64_weight_oracle_partition_sweep():
     worst = 0.0
     cases = 0
@@ -353,6 +366,20 @@ def test_decode_output_buffer_identity_full_overwrite_and_temporal_shape(latent_
     assert returned.data_ptr() == output.data_ptr()
     assert tuple(returned.shape) == expected_shape
     assert returned.dtype == torch.float32
+    assert bool(torch.isfinite(returned).all())
+    torch.testing.assert_close(returned, torch.full_like(returned, 0.25), rtol=0, atol=0)
+
+
+def test_decode_output_buffer_uses_compositor_and_fully_overwrites():
+    model = _temporal_model()
+    z = torch.zeros((1, 24, 1, 17, 17), dtype=torch.float32)
+    expected_shape = model.decode_output_shape(z.shape)
+    output = torch.full(expected_shape, float("nan"), dtype=torch.float32)
+
+    returned = model.decode(z, output_buffer=output)
+
+    assert returned.data_ptr() == output.data_ptr()
+    assert tuple(returned.shape) == (1, 3, 1, 272, 272)
     assert bool(torch.isfinite(returned).all())
     torch.testing.assert_close(returned, torch.full_like(returned, 0.25), rtol=0, atol=0)
 
