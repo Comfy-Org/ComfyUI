@@ -249,14 +249,17 @@ class QwenImage21Transformer2DModel(nn.Module):
         if cache is None:
             store = options.get("device", "auto")
             if store == "auto":
-                # spare VRAM first, then pinned RAM prefetched behind compute; room for cond and uncond
-                store = next((d for d in (device, torch.device("cpu")) if comfy.model_management.get_free_memory(d) > 4 * cache_bytes), None)
-                if store is None:
+                # spare VRAM first, then reclaim inactive model RAM for a host cache
+                if self.current_patcher.get_free_memory(device) > 4 * cache_bytes:
+                    store = device
+                elif comfy.model_management.ensure_pin_budget(cache_bytes, evict_active=False):
+                    store = torch.device("cpu")
+                else:
                     return None, False
             else:
                 store = device if store == "gpu" else torch.device("cpu")
             cache = self.prefix_cache = PoseBranchCache(store_device=store, dtype=dtype)
-        if comfy.model_management.get_free_memory(cache.store_device) < 2 * cache_bytes:
+        if not (self.current_patcher.get_free_memory(device) > 2 * cache_bytes if cache.store_device == device else comfy.model_management.ensure_pin_budget(cache_bytes, evict_active=False)):
             # no room for this slot: recompute rather than evict the other cond's slot every step
             return None, False
         cache.select(key)
