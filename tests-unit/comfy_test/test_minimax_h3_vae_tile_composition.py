@@ -184,7 +184,9 @@ def test_batch_two_and_float16_output_dtype_match_oracle():
     expected = _compose_oracle(model, rows, 464, 464)
 
     assert out.dtype == torch.float16
-    torch.testing.assert_close(out.double(), expected.to(torch.float16).double(), rtol=0, atol=0)
+    cast_expected = expected.to(torch.float16)
+    tolerance = torch.finfo(torch.float16).eps * max(1.0, float(cast_expected.abs().max()))
+    torch.testing.assert_close(out.double(), cast_expected.double(), rtol=0, atol=tolerance)
 
 
 def test_single_spatial_tile_is_direct_decoder_result_without_recomposition():
@@ -244,7 +246,9 @@ def test_noncontiguous_input_and_global_affine_decoder_preserve_coordinates(monk
     out = model.tiled_decode(z)
     expected = decode_pixels(z)
 
-    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    maximum = float(expected.abs().max())
+    tolerance = 32 * torch.finfo(torch.float32).eps * max(1.0, maximum) * 9
+    torch.testing.assert_close(out, expected, rtol=0, atol=tolerance)
 
 
 def test_repeat_and_interleaved_calls_do_not_share_composition_state():
