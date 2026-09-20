@@ -146,6 +146,22 @@ def test_triple_and_higher_overlap_matches_all_contributor_oracle(length, overla
     torch.testing.assert_close(out.double(), expected, rtol=0, atol=_fp32_bound(rows))
 
 
+def test_float64_weight_oracle_partition_sweep():
+    worst = 0.0
+    cases = 0
+    for overlap in (64, 128, 240):
+        model = _bare_model(overlap)
+        for length in range(16, 2065, 16):
+            starts, lengths, overlaps = model.split_tiles(length)
+            weights = _axis_oracle(starts, lengths, overlaps, length)
+            error = float((weights.sum(dim=0) - 1.0).abs().max())
+            worst = max(worst, error)
+            cases += 1
+
+    assert cases == 387
+    assert worst <= 1e-12
+
+
 @pytest.mark.parametrize("overlap", [0, 64, 128, 240])
 @pytest.mark.parametrize("length", [16, 256, 272, 448, 464, 512, 1216, 2064])
 def test_axis_weights_are_nonnegative_partition_of_unity(length, overlap):
