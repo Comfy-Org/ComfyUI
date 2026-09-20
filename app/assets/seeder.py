@@ -1,4 +1,10 @@
-"""Background asset seeder with thread management and cancellation support."""
+"""Runs the filesystem scan on a background thread so startup never waits for it,
+exposing pause, resume, cancel and progress to the API. A run seeds
+newly-observed files first, then enriches records in batches, and settles any
+pending hash-mode transition at the start of the enrich phase so a server that
+receives no prompts still completes the switch. A pass stops once batches stop
+making progress, bounding a scan over files that cannot be read.
+"""
 
 import logging
 import os
@@ -6,11 +12,10 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable
+from typing import Any, Callable, TypedDict
 
+from app.assets.event_log import emit, error_type
 from app.assets.scanner import (
-    ENRICHMENT_METADATA,
-    ENRICHMENT_STUB,
     RootType,
     build_asset_specs,
     collect_paths_for_roots,
@@ -22,8 +27,11 @@ from app.assets.scanner import (
     mark_missing_outside_prefixes_safely,
     sync_root_safely,
     sync_temp_references_safely,
+    drain_pending_verifications,
+    tick_watch_list,
 )
-from app.database.db import dependencies_available
+from app.assets.services.hash_mode_state import drain_transition_queue, pending_transition_count
+from app.database.db import create_session, dependencies_available
 
 
 class ScanInProgressError(Exception):
@@ -47,14 +55,31 @@ class ScanPhase(Enum):
     FULL = "full"  # Both phases sequentially
 
 
+class PendingScan(TypedDict):
+    roots: tuple[RootType, ...]
+    phase: ScanPhase
+    compute_hashes: bool
+
+
+class _ScanStage(Enum):
+    MARK_MISSING = "mark_missing"
+    PRUNING = "pruning"
+    FAST_SCAN = "fast_scan"
+    ENRICH = "enrich"
+    FINALIZE = "finalize"
+
+
 @dataclass
 class Progress:
-    """Progress information for a scan operation."""
+    """Public snapshot of a scan's progress. Carries counters only."""
 
     scanned: int = 0
     total: int = 0
     created: int = 0
     skipped: int = 0
+    hash_failed: int = 0
+    enrich_failed: int = 0
+    permission_denied: int = 0
 
 
 @dataclass
@@ -67,6 +92,46 @@ class ScanStatus:
 
 
 ProgressCallback = Callable[[Progress], None]
+
+
+@dataclass
+class _ScanState:
+    """Mutable in-flight state for one scan; never exposed outside this module.
+
+    Satisfies scanner.py's `_ScanProgress` Protocol. `cancel_stage` stores the
+    stage's string value (not the `_ScanStage` enum) so scanner.py never needs
+    to import `_ScanStage`. Take a `Progress` snapshot before exposing state.
+    """
+
+    scanned: int = 0
+    total: int = 0
+    created: int = 0
+    skipped: int = 0
+    hash_failed: int = 0
+    enrich_failed: int = 0
+    permission_denied: int = 0
+    cancel_stage: str | None = None
+    _emitted_keys: set[str] = field(default_factory=set)
+
+    def mark_emitted(self, key: str) -> bool:
+        """Return True the first call with `key` this scan, False every call after."""
+        if key in self._emitted_keys:
+            return False
+        self._emitted_keys.add(key)
+        return True
+
+
+def _snapshot_progress(state: _ScanState) -> Progress:
+    """Build the public counters-only `Progress` snapshot from live scan state."""
+    return Progress(
+        scanned=state.scanned,
+        total=state.total,
+        created=state.created,
+        skipped=state.skipped,
+        hash_failed=state.hash_failed,
+        enrich_failed=state.enrich_failed,
+        permission_denied=state.permission_denied,
+    )
 
 
 class _AssetSeeder:
@@ -82,7 +147,7 @@ class _AssetSeeder:
         # holding _lock and re-enters start() which also acquires _lock.
         self._lock = threading.RLock()
         self._state = State.IDLE
-        self._progress: Progress | None = None
+        self._scan_state: _ScanState | None = None
         self._last_progress: Progress | None = None
         self._errors: list[str] = []
         self._thread: threading.Thread | None = None
@@ -94,8 +159,12 @@ class _AssetSeeder:
         self._compute_hashes: bool = False
         self._prune_first: bool = False
         self._progress_callback: ProgressCallback | None = None
+        self._event_sink: Callable[[str, dict[str, Any]], None] | None = None
         self._disabled: bool = False
-        self._pending_enrich: dict | None = None
+        self._pending_scan: PendingScan | None = None
+
+    def set_event_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
+        self._event_sink = sink
 
     def disable(self) -> None:
         """Disable the asset seeder, preventing any scans from starting."""
@@ -113,6 +182,8 @@ class _AssetSeeder:
         progress_callback: ProgressCallback | None = None,
         prune_first: bool = False,
         compute_hashes: bool = False,
+        *,
+        _start_paused: bool = False,
     ) -> bool:
         """Start a background scan for the given roots.
 
@@ -122,6 +193,7 @@ class _AssetSeeder:
             progress_callback: Optional callback called with progress updates
             prune_first: If True, prune orphaned assets before scanning
             compute_hashes: If True, compute blake3 hashes (slow)
+            _start_paused: Start with phase work blocked until resume()
 
         Returns:
             True if scan was started, False if already running
@@ -134,8 +206,8 @@ class _AssetSeeder:
             if self._state != State.IDLE:
                 logging.info("Asset seeder already running, skipping start")
                 return False
-            self._state = State.RUNNING
-            self._progress = Progress()
+            self._state = State.PAUSED if _start_paused else State.RUNNING
+            self._scan_state = _ScanState()
             self._errors = []
             self._roots = roots
             self._phase = phase
@@ -143,7 +215,10 @@ class _AssetSeeder:
             self._compute_hashes = compute_hashes
             self._progress_callback = progress_callback
             self._cancel_event.clear()
-            self._run_gate.set()  # Ensure unpaused when starting
+            if _start_paused:
+                self._run_gate.clear()
+            else:
+                self._run_gate.set()
             self._thread = threading.Thread(
                 target=self._run_scan,
                 name="_AssetSeeder",
@@ -176,64 +251,40 @@ class _AssetSeeder:
             compute_hashes=False,
         )
 
-    def start_enrich(
+    def enqueue_scan(
         self,
-        roots: tuple[RootType, ...] = ("models", "input", "output"),
-        progress_callback: ProgressCallback | None = None,
+        roots: tuple[RootType, ...],
+        phase: ScanPhase,
         compute_hashes: bool = False,
     ) -> bool:
-        """Start an enrichment scan (phase 2 only) - extracts metadata and hashes.
-
-        Args:
-            roots: Tuple of root types to scan
-            progress_callback: Optional callback for progress updates
-            compute_hashes: If True, compute blake3 hashes
-
-        Returns:
-            True if scan was started, False if already running
-        """
-        return self.start(
-            roots=roots,
-            phase=ScanPhase.ENRICH,
-            progress_callback=progress_callback,
-            prune_first=False,
-            compute_hashes=compute_hashes,
-        )
-
-    def enqueue_enrich(
-        self,
-        roots: tuple[RootType, ...] = ("models", "input", "output"),
-        compute_hashes: bool = False,
-    ) -> bool:
-        """Start an enrichment scan now, or queue it for after the current scan.
-
-        If the seeder is idle, starts immediately. Otherwise, the enrich
-        request is stored and will run automatically when the current scan
-        finishes.
-
-        Args:
-            roots: Tuple of root types to scan
-            compute_hashes: If True, compute blake3 hashes
-
-        Returns:
-            True if started immediately, False if queued for later
-        """
         with self._lock:
-            if self.start_enrich(roots=roots, compute_hashes=compute_hashes):
+            if self.start(
+                roots=roots,
+                phase=phase,
+                prune_first=False,
+                compute_hashes=compute_hashes,
+            ):
                 return True
-            if self._pending_enrich is not None:
-                existing_roots = set(self._pending_enrich["roots"])
+            if self._pending_scan is not None:
+                existing_roots = set(self._pending_scan["roots"])
                 existing_roots.update(roots)
-                self._pending_enrich["roots"] = tuple(existing_roots)
-                self._pending_enrich["compute_hashes"] = (
-                    self._pending_enrich["compute_hashes"] or compute_hashes
+                self._pending_scan["roots"] = tuple(existing_roots)
+                self._pending_scan["compute_hashes"] = (
+                    self._pending_scan["compute_hashes"] or compute_hashes
                 )
+                if self._pending_scan["phase"] is not phase:
+                    self._pending_scan["phase"] = ScanPhase.FULL
             else:
-                self._pending_enrich = {
+                self._pending_scan = {
                     "roots": roots,
+                    "phase": phase,
                     "compute_hashes": compute_hashes,
                 }
-            logging.info("Enrich scan queued (roots=%s)", self._pending_enrich["roots"])
+            logging.info(
+                "Scan queued (roots=%s, phase=%s)",
+                self._pending_scan["roots"],
+                self._pending_scan["phase"].value,
+            )
         return False
 
     def cancel(self) -> bool:
@@ -356,30 +407,37 @@ class _AssetSeeder:
     def get_status(self) -> ScanStatus:
         """Get the current status and progress of the seeder."""
         with self._lock:
-            src = self._progress or self._last_progress
+            progress = (
+                _snapshot_progress(self._scan_state)
+                if self._scan_state is not None
+                else self._last_progress
+            )
             return ScanStatus(
                 state=self._state,
-                progress=Progress(
-                    scanned=src.scanned,
-                    total=src.total,
-                    created=src.created,
-                    skipped=src.skipped,
-                )
-                if src
-                else None,
+                progress=progress,
                 errors=list(self._errors),
             )
 
-    def shutdown(self, timeout: float = 5.0) -> None:
+    def shutdown(self, timeout: float = 5.0) -> bool:
         """Gracefully shutdown: cancel any running scan and wait for thread.
 
         Args:
             timeout: Maximum seconds to wait for thread to exit
+
+        Returns:
+            True if the scan thread joined cleanly; False on timeout.
         """
         self.cancel()
-        self.wait(timeout=timeout)
+        joined = self.wait(timeout=timeout)
+        if not joined:
+            logging.warning(
+                "Asset seeder thread did not exit within %ss",
+                timeout,
+            )
         with self._lock:
-            self._thread = None
+            if joined:
+                self._thread = None
+        return joined
 
     def mark_missing_outside_prefixes(self) -> int:
         """Mark references as missing when outside all known root prefixes.
@@ -416,6 +474,11 @@ class _AssetSeeder:
 
             all_prefixes = get_owned_prefixes()
             marked = mark_missing_outside_prefixes_safely(all_prefixes)
+            emit(
+                "seeder.marked_missing",
+                count=marked,
+                stage=_ScanStage.MARK_MISSING.value,
+            )
             if marked > 0:
                 logging.info("Marked %d references as missing", marked)
             return marked
@@ -425,9 +488,10 @@ class _AssetSeeder:
 
     def _reset_to_idle(self) -> None:
         """Reset state to IDLE, preserving last progress. Caller must hold _lock."""
-        self._last_progress = self._progress
+        if self._scan_state is not None:
+            self._last_progress = _snapshot_progress(self._scan_state)
         self._state = State.IDLE
-        self._progress = None
+        self._scan_state = None
 
     def _is_cancelled(self) -> bool:
         """Check if cancellation has been requested."""
@@ -441,9 +505,17 @@ class _AssetSeeder:
         open while blocked. The caller is responsible for blocking on
         _check_pause_and_cancel() afterward.
         """
-        return not self._run_gate.is_set() or self._cancel_event.is_set()
+        cancelled = self._cancel_event.is_set()
+        if cancelled:
+            self._record_cancel_stage(_ScanStage.ENRICH)
+        return not self._run_gate.is_set() or cancelled
 
-    def _check_pause_and_cancel(self) -> bool:
+    def _record_cancel_stage(self, stage: _ScanStage) -> None:
+        with self._lock:
+            if self._scan_state is not None and self._scan_state.cancel_stage is None:
+                self._scan_state.cancel_stage = stage.value
+
+    def _check_pause_and_cancel(self, stage: _ScanStage) -> bool:
         """Block while paused, then check if cancelled.
 
         Call this at checkpoint locations in scan loops. It will:
@@ -456,15 +528,16 @@ class _AssetSeeder:
         if not self._run_gate.is_set():
             self._emit_event("assets.seed.paused", {})
         self._run_gate.wait()  # Blocks if paused
-        return self._is_cancelled()
+        cancelled = self._is_cancelled()
+        if cancelled:
+            self._record_cancel_stage(stage)
+        return cancelled
 
-    def _emit_event(self, event_type: str, data: dict) -> None:
+    def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Emit a WebSocket event if server is available."""
         try:
-            from server import PromptServer
-
-            if hasattr(PromptServer, "instance") and PromptServer.instance:
-                PromptServer.instance.send_sync(event_type, data)
+            if self._event_sink is not None:
+                self._event_sink(event_type, data)
         except Exception:
             pass
 
@@ -480,24 +553,19 @@ class _AssetSeeder:
         progress: Progress | None = None
 
         with self._lock:
-            if self._progress is None:
+            if self._scan_state is None:
                 return
             if scanned is not None:
-                self._progress.scanned = scanned
+                self._scan_state.scanned = scanned
             if total is not None:
-                self._progress.total = total
+                self._scan_state.total = total
             if created is not None:
-                self._progress.created = created
+                self._scan_state.created = created
             if skipped is not None:
-                self._progress.skipped = skipped
+                self._scan_state.skipped = skipped
             if self._progress_callback:
                 callback = self._progress_callback
-                progress = Progress(
-                    scanned=self._progress.scanned,
-                    total=self._progress.total,
-                    created=self._progress.created,
-                    skipped=self._progress.skipped,
-                )
+                progress = _snapshot_progress(self._scan_state)
 
         if callback and progress:
             try:
@@ -533,6 +601,7 @@ class _AssetSeeder:
         t_start = time.perf_counter()
         roots = self._roots
         phase = self._phase
+        root = roots[0] if len(roots) == 1 else None
         cancelled = False
         total_created = 0
         total_enriched = 0
@@ -548,14 +617,23 @@ class _AssetSeeder:
                 )
                 return
 
+            emit("seeder.scan_started", phase=phase.value, root=root)
+            assert self._scan_state is not None
+            scan_state = self._scan_state
+
             if self._prune_first:
                 all_prefixes = get_owned_prefixes()
                 marked = mark_missing_outside_prefixes_safely(all_prefixes)
+                emit(
+                    "seeder.marked_missing",
+                    count=marked,
+                    stage=_ScanStage.PRUNING.value,
+                )
                 if marked > 0:
                     logging.info("Marked %d refs as missing before scan", marked)
-                sync_temp_references_safely()
+                sync_temp_references_safely(scan_state)
 
-            if self._check_pause_and_cancel():
+            if self._check_pause_and_cancel(_ScanStage.PRUNING):
                 logging.info("Asset scan cancelled after pruning phase")
                 cancelled = True
                 return
@@ -567,7 +645,7 @@ class _AssetSeeder:
                 created, skipped, paths = self._run_fast_phase(roots)
                 total_created, skipped_existing, total_paths = created, skipped, paths
 
-                if self._check_pause_and_cancel():
+                if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
                     cancelled = True
                     return
 
@@ -583,7 +661,7 @@ class _AssetSeeder:
 
             # Phase 2: Enrichment scan (metadata + hashes)
             if phase in (ScanPhase.ENRICH, ScanPhase.FULL):
-                if self._check_pause_and_cancel():
+                if self._check_pause_and_cancel(_ScanStage.ENRICH):
                     cancelled = True
                     return
 
@@ -601,6 +679,14 @@ class _AssetSeeder:
                     },
                 )
 
+            # Deliberately non-blocking, unlike every other checkpoint: no work
+            # remains, so pausing here would hold the scan open with nothing to
+            # do until main.py's next resume (a whole gc_collect_interval away).
+            if self._is_cancelled():
+                self._record_cancel_stage(_ScanStage.FINALIZE)
+                cancelled = True
+                return
+
             elapsed = time.perf_counter() - t_start
             logging.info(
                 "Scan(%s, %s) done %.3fs: created=%d enriched=%d skipped=%d",
@@ -610,6 +696,18 @@ class _AssetSeeder:
                 total_created,
                 total_enriched,
                 skipped_existing,
+            )
+            emit(
+                "seeder.scan_completed",
+                phase=phase.value,
+                elapsed_ms=round(elapsed * 1000),
+                created=total_created,
+                enriched=total_enriched,
+                skipped=skipped_existing,
+                hash_failed=scan_state.hash_failed,
+                enrich_failed=scan_state.enrich_failed,
+                permission_denied=scan_state.permission_denied,
+                root=root,
             )
 
             self._emit_event(
@@ -627,30 +725,51 @@ class _AssetSeeder:
         except Exception as e:
             self._add_error(f"Scan failed: {e}")
             logging.exception("Asset scan failed")
+            emit(
+                "seeder.scan_failed",
+                phase=phase.value,
+                error_type=error_type(e),
+                root=root,
+            )
             self._emit_event("assets.seed.error", {"message": str(e)})
         finally:
-            if cancelled:
-                self._emit_event(
-                    "assets.seed.cancelled",
-                    {
-                        "scanned": self._progress.scanned if self._progress else 0,
-                        "total": total_paths,
-                        "created": total_created,
-                    },
-                )
-            with self._lock:
-                self._reset_to_idle()
-                pending = self._pending_enrich
-                if pending is not None:
-                    self._pending_enrich = None
-                    if not self.start_enrich(
-                        roots=pending["roots"],
-                        compute_hashes=pending["compute_hashes"],
-                    ):
-                        logging.warning(
-                            "Pending enrich scan could not start (roots=%s)",
-                            pending["roots"],
+            try:
+                if cancelled:
+                    stage = self._scan_state.cancel_stage if self._scan_state else None
+                    if stage is not None:
+                        emit(
+                            "seeder.scan_cancelled",
+                            phase=phase.value,
+                            stage=stage,
+                            root=root,
                         )
+                        self._emit_event(
+                            "assets.seed.cancelled",
+                            {
+                                "scanned": self._scan_state.scanned if self._scan_state else 0,
+                                "total": total_paths,
+                                "created": total_created,
+                            },
+                        )
+            finally:
+                with self._lock:
+                    start_paused = self._state is State.PAUSED
+                    self._reset_to_idle()
+                    pending = self._pending_scan
+                    if pending is not None:
+                        self._pending_scan = None
+                        if not self.start(
+                            roots=pending["roots"],
+                            phase=pending["phase"],
+                            prune_first=False,
+                            compute_hashes=pending["compute_hashes"],
+                            _start_paused=start_paused,
+                        ):
+                            logging.warning(
+                                "Pending scan could not start (roots=%s, phase=%s)",
+                                pending["roots"],
+                                pending["phase"].value,
+                            )
 
     def _run_fast_phase(self, roots: tuple[RootType, ...]) -> tuple[int, int, int]:
         """Run phase 1: fast scan to create stub records.
@@ -664,17 +783,19 @@ class _AssetSeeder:
 
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()
+        assert self._scan_state is not None
+        scan_state = self._scan_state
         for r in roots:
-            if self._check_pause_and_cancel():
+            if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
                 return total_created, skipped_existing, 0
-            existing_paths.update(sync_root_safely(r))
+            existing_paths.update(sync_root_safely(r, scan_state))
         logging.debug(
             "Fast scan: sync_root phase took %.3fs (%d existing paths)",
             time.perf_counter() - t_sync,
             len(existing_paths),
         )
 
-        if self._check_pause_and_cancel():
+        if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
             return total_created, skipped_existing, 0
 
         t_collect = time.perf_counter()
@@ -698,7 +819,7 @@ class _AssetSeeder:
             paths,
             existing_paths,
             enable_metadata_extraction=False,
-            compute_hashes=False,
+            progress=scan_state,
         )
         logging.debug(
             "Fast scan: build_asset_specs took %.3fs (%d specs, %d skipped)",
@@ -708,7 +829,7 @@ class _AssetSeeder:
         )
         self._update_progress(skipped=skipped_existing)
 
-        if self._check_pause_and_cancel():
+        if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
             return total_created, skipped_existing, total_paths
 
         batch_size = 500
@@ -716,7 +837,7 @@ class _AssetSeeder:
         progress_interval = 1.0
 
         for i in range(0, len(specs), batch_size):
-            if self._check_pause_and_cancel():
+            if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
                 logging.info(
                     "Fast scan cancelled after %d/%d files (created=%d)",
                     i,
@@ -733,6 +854,7 @@ class _AssetSeeder:
             except Exception as e:
                 self._add_error(f"Batch insert failed at offset {i}: {e}")
                 logging.exception("Batch insert failed at offset %d", i)
+                emit("seeder.batch_insert_failed", error_type=error_type(e))
 
             scanned = i + len(batch)
             now = time.perf_counter()
@@ -751,6 +873,9 @@ class _AssetSeeder:
                 last_progress_time = now
 
         self._update_progress(scanned=len(specs), created=total_created)
+        with create_session() as session:
+            tick_watch_list(session)
+            session.commit()
         logging.info(
             "Fast scan complete: %.3fs total (created=%d, skipped=%d, total_paths=%d)",
             time.perf_counter() - t_fast_start,
@@ -767,15 +892,18 @@ class _AssetSeeder:
             Tuple of (cancelled, total_enriched)
         """
         total_enriched = 0
+        scan_state = self._scan_state
+        with create_session() as session:
+            drain_pending_verifications(session)
+            tick_watch_list(session)
+            for _ in range(3):
+                drain_transition_queue(session)
+                session.commit()
+                if pending_transition_count() == 0:
+                    break
         batch_size = 100
         last_progress_time = time.perf_counter()
         progress_interval = 1.0
-
-        # Get the target enrichment level based on compute_hashes
-        if not self._compute_hashes:
-            target_max_level = ENRICHMENT_STUB
-        else:
-            target_max_level = ENRICHMENT_METADATA
 
         self._emit_event(
             "assets.seed.started",
@@ -786,25 +914,21 @@ class _AssetSeeder:
         consecutive_empty = 0
         max_consecutive_empty = 3
 
-        # Hash checkpoints survive across batches so interrupted hashes
-        # can be resumed without re-reading the entire file.
-        hash_checkpoints: dict[str, object] = {}
-
         while True:
-            if self._check_pause_and_cancel():
+            if self._check_pause_and_cancel(_ScanStage.ENRICH):
                 logging.info("Enrich scan cancelled after %d assets", total_enriched)
                 return True, total_enriched
 
             # Fetch next batch of unenriched assets
             unenriched = get_unenriched_assets_for_roots(
                 roots,
-                max_level=target_max_level,
+                compute_hashes=self._compute_hashes,
                 limit=batch_size,
             )
 
             # Filter out previously failed references
             if skip_ids:
-                unenriched = [r for r in unenriched if r.reference_id not in skip_ids]
+                unenriched = [row for row in unenriched if row.record_id not in skip_ids]
 
             if not unenriched:
                 break
@@ -814,7 +938,7 @@ class _AssetSeeder:
                 extract_metadata=True,
                 compute_hash=self._compute_hashes,
                 interrupt_check=self._is_paused_or_cancelled,
-                hash_checkpoints=hash_checkpoints,
+                progress=scan_state,
             )
             total_enriched += enriched
             skip_ids.update(failed_ids)

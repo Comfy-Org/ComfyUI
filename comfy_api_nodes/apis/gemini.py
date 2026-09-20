@@ -68,6 +68,7 @@ class GeminiPart(BaseModel):
     fileData: GeminiFileData | None = Field(None)
     text: str | None = Field(None)
     thought: bool | None = Field(None)
+    mediaProcessing: str | None = Field(None)
 
 
 class GeminiTextPart(BaseModel):

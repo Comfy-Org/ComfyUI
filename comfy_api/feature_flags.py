@@ -30,6 +30,11 @@ CLI_FEATURE_FLAG_REGISTRY: dict[str, FeatureFlagInfo] = {
         "default": False,
         "description": "Signal the frontend that telemetry collection is enabled",
     },
+    "partner_run_gate_enabled": {
+        "type": "bool",
+        "default": True,
+        "description": "Gate the local Run button behind sign-in when the graph contains partner nodes",
+    },
 }
 
 
@@ -104,6 +109,7 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "max_upload_size": args.max_upload_size * 1024 * 1024, # Convert MB to bytes
     "extension": {"manager": {"supports_v4": True}},
     "node_replacements": True,
+    # Mirrors the constructed AssetManager; no degradation path exists, so this always agrees with it.
     "assets": args.enable_assets,
 }
 

@@ -1,11 +1,13 @@
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, event
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, Session as SASession
 
+from app.assets import mode
 from app.assets.database.models import Base
 
 
@@ -13,6 +15,16 @@ from app.assets.database.models import Base
 def autoclean_unit_test_assets():
     """Override parent autouse fixture - service unit tests don't need server cleanup."""
     yield
+
+
+@pytest.fixture(autouse=True)
+def initialised_hash_mode():
+    class _HashingOff:
+        enable_asset_hashing = False
+
+    mode.init(_HashingOff())
+    yield
+    mode.init(None)
 
 
 @pytest.fixture
@@ -48,9 +60,6 @@ def session(db_engine):
 @pytest.fixture
 def mock_create_session(db_engine):
     """Patch create_session to use our in-memory database."""
-    from contextlib import contextmanager
-    from sqlalchemy.orm import Session as SASession
-
     @contextmanager
     def _create_session():
         with SASession(db_engine) as sess:

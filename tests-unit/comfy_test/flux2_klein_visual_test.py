@@ -183,3 +183,49 @@ def test_flux2_qwen3vl_loader_keeps_visual_weights(monkeypatch, width, model_typ
     assert "model.norm.weight" in captured["state_dict"]
     assert "visual.deepstack_merger_list.0.norm.weight" in captured["state_dict"]
     assert not any(key.startswith("model.visual.") for key in captured["state_dict"])
+
+
+@pytest.mark.parametrize(
+    ("clip_type", "width", "module", "factory", "tokenizer", "model_type"),
+    (
+        (comfy.sd.CLIPType.FLUX, 2560, flux, "klein_te", flux.KleinTokenizer, "qwen3_4b"),
+        (comfy.sd.CLIPType.FLUX, 4096, flux, "klein_te", flux.KleinTokenizer8B, "qwen3_8b"),
+        (comfy.sd.CLIPType.QWEN_IMAGE, 4096, comfy.sd.comfy.text_encoders.qwen_image21,
+         "te", comfy.sd.comfy.text_encoders.qwen_image21.QwenImage21Tokenizer, None),
+    ),
+)
+def test_qwen3vl_loader_preserves_other_routes(monkeypatch, clip_type, width, module, factory, tokenizer, model_type):
+    captured = {}
+    sentinel_clip = object()
+
+    def fake_te(**kwargs):
+        captured["factory_kwargs"] = kwargs
+        return sentinel_clip
+
+    class FakeCLIP:
+        def __init__(self, target, **kwargs):
+            captured["target"] = target
+            captured["state_dict"] = kwargs["state_dict"][0]
+
+    monkeypatch.setattr(module, factory, fake_te)
+    monkeypatch.setattr(comfy.sd, "CLIP", FakeCLIP)
+    monkeypatch.setattr(
+        comfy.sd.comfy.text_encoders.long_clipl,
+        "model_options_long_clip",
+        lambda state_dict, tokenizer_data, model_options: (tokenizer_data, model_options),
+    )
+    state_dict = {
+        "model.language_model.norm.weight": torch.empty(width),
+        "model.visual.deepstack_merger_list.0.norm.weight": torch.empty(1),
+        "model.visual.merger.linear_fc2.weight": torch.empty((width, 1)),
+    }
+    comfy.sd.load_text_encoder_state_dicts([state_dict], clip_type=clip_type)
+
+    assert captured["target"].clip is sentinel_clip
+    assert captured["target"].tokenizer is tokenizer
+    assert captured["factory_kwargs"].get("model_type") == model_type
+    if clip_type == comfy.sd.CLIPType.QWEN_IMAGE:
+        assert "model.norm.weight" in captured["state_dict"]
+        assert "visual.merger.linear_fc2.weight" in captured["state_dict"]
+    else:
+        assert "model.language_model.norm.weight" in captured["state_dict"]
