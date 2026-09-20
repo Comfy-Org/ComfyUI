@@ -2661,6 +2661,9 @@ class QwenImage21(QwenImage):
     def __init__(self, model_config, model_type=ModelType.FLUX, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.qwen_image21.model.QwenImage21Transformer2DModel)
 
+    def get_dynamic_vram__units(self):
+        return list(self.diffusion_model.transformer_blocks), []
+
     @property
     def current_patcher(self):
         return self._current_patcher

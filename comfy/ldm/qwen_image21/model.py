@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import comfy.model_management
+import comfy.model_prefetch
 import comfy.ops
 import comfy.patcher_extension
 import comfy.quant_ops
@@ -124,10 +125,10 @@ def _modulated_norm(norm, x, scale, prefix_len, zero):
 
 def _gated_residual(x, y, gate, prefix_len):
     g_prefix, g_target = gate
-    out = torch.addcmul(x, y, g_target)
+    x[:, prefix_len:].addcmul_(y[:, prefix_len:], g_target)
     if prefix_len:
-        out[:, :prefix_len] = torch.addcmul(x[:, :prefix_len], y[:, :prefix_len], g_prefix)
-    return out
+        x[:, :prefix_len].addcmul_(y[:, :prefix_len], g_prefix)
+    return x
 
 
 class QwenImage21TransformerBlock(nn.Module):
@@ -328,14 +329,26 @@ class QwenImage21Transformer2DModel(nn.Module):
             cache, cached = self.select_prefix_cache(key, cache_bytes, x.device, transformer_options.get("qwen_image21_cache", {}))
         if cached:
             hidden_states, pe, prefix_len = hidden_states[:, prefix_len:], pe[:, prefix_len:], 0
+        elif cache is not None:
+            prefix_states, hidden_states = hidden_states[:, :prefix_len], hidden_states[:, prefix_len:]
+            prefix_pe, pe = pe[:, :prefix_len], pe[:, prefix_len:]
+            prefix_len = 0
 
         transformer_options["total_blocks"] = len(self.transformer_blocks)
         transformer_options["block_type"] = "single"
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.transformer_blocks), x.device, transformer_options)
+        comfy.model_prefetch.malloc_graph_begin(x.device)
         for i, block in enumerate(self.transformer_blocks):
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, dtype, malloc_scope="block")
             transformer_options["block_index"] = i
-            if cached:
+            if cache is not None:
+                if not cached:
+                    with comfy.model_prefetch.pause_malloc_graph():
+                        prefix_attn = block_causal_attention(segments[:-1], transformer_options, cache, i, prefix_states.shape[1])
+                        prefix_states = block(prefix_states, mod, prefix_pe, prefix_attn, prefix_states.shape[1], transformer_options)
                 prefix_k, prefix_v = cache.take(i, x.device, dtype, B).unbind(1)
-                cache.prefetch(i + 1, x.device, dtype)  # queue the next block before the compute it should overlap
+                if cached:
+                    cache.prefetch(i + 1, x.device, dtype)  # queue the next block before the compute it should overlap
                 attn_fn = prefix_cached_attention(prefix_k, prefix_v, transformer_options)
             else:
                 attn_fn = block_causal_attention(segments, transformer_options, cache, i, prefix_len)
@@ -348,6 +361,8 @@ class QwenImage21Transformer2DModel(nn.Module):
             for p in patches.get("single_block", []):
                 hidden_states = p({"img": hidden_states, "x": x, "block_index": i, "transformer_options": transformer_options})["img"]
 
+        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None, malloc_scope="block")
+        comfy.model_prefetch.malloc_graph_end()
         hidden_states = self.norm_out(hidden_states[:, prefix_len:], temb[:-1])
         hidden_states = self.proj_out(hidden_states)
         return hidden_states.transpose(1, 2).reshape(B, self.out_channels, H, W)
