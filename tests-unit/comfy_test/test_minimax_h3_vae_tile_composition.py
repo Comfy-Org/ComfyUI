@@ -51,8 +51,10 @@ def _compose_oracle(model, tile_rows, height, width):
         *first.shape[:-2], height, width, dtype=torch.float64, device=first.device
     )
     for i, row in enumerate(tile_rows):
+        local_y = wy[i, y_idx[i]:y_idx[i] + y_len[i]]
         for j, tile in enumerate(row):
-            weight = wy[i].view(-1, 1) * wx[j].view(1, -1)
+            local_x = wx[j, x_idx[j]:x_idx[j] + x_len[j]]
+            weight = local_y.view(-1, 1) * local_x.view(1, -1)
             out[..., y_idx[i]:y_idx[i] + y_len[i], x_idx[j]:x_idx[j] + x_len[j]] += (
                 tile.to(torch.float64) * weight
             )
@@ -69,12 +71,20 @@ def _run_tile_rows(model, tile_rows, height, width, dtype=torch.float32):
         row_index += 1
         return iter(row)
 
-    model._decode_tile_row = decode_row
+    if len(rows) == 1 and len(rows[0]) == 1:
+        model._decode_pixels = MagicMock(return_value=rows[0][0])
+    else:
+        model._decode_tile_row = decode_row
+
     z = torch.zeros((tile_rows[0][0].shape[0], 24, 1, height // 16, width // 16), dtype=dtype)
     before = z.clone()
     out = model.tiled_decode(z)
     torch.testing.assert_close(z, before, rtol=0, atol=0)
-    assert row_index == len(rows)
+
+    if len(rows) == 1 and len(rows[0]) == 1:
+        model._decode_pixels.assert_called_once_with(z)
+    else:
+        assert row_index == len(rows)
     return out
 
 
