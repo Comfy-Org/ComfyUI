@@ -874,6 +874,8 @@ class ModelPatcher:
             bk = self.backup.get(k, None)
             hbk = self.hook_backup.get(k, None)
             weight, set_func, convert_func = get_key_weight(self.model, k)
+            if not isinstance(weight, torch.Tensor):
+                continue
             if bk is not None:
                 weight = bk.weight
             if hbk is not None:
