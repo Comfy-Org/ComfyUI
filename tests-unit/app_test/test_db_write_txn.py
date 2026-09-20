@@ -18,7 +18,7 @@ _WAL_SENTINEL = "wal-resident-sentinel"
 
 
 def _dispose_runtime_engines():
-    for session_factory in (db_mod.Session, getattr(db_mod, "WriteSession", None)):
+    for session_factory in (db_mod.Session, db_mod.WriteSession):
         if session_factory is not None:
             session_factory.kw["bind"].dispose()
 
