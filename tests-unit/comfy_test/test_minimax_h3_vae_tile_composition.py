@@ -106,6 +106,20 @@ def _fp32_bound(tile_rows):
     return 32 * torch.finfo(torch.float32).eps * max(1.0, maximum) * max(1, terms)
 
 
+def test_native_1216x896_plan_is_unchanged():
+    model = _bare_model()
+    y_idx, y_len, y_overlap = model.split_tiles(896)
+    x_idx, x_len, x_overlap = model.split_tiles(1216)
+
+    assert x_idx == [0, 192, 384, 576, 768, 960]
+    assert y_idx == [0, 160, 320, 480, 640]
+    assert x_len == [256] * 6
+    assert y_len == [256] * 5
+    assert x_overlap == [64] * 5
+    assert y_overlap == [96, 96, 96, 96]
+    assert len(x_idx) * len(y_idx) == 30
+
+
 def test_normalized_composition_keeps_x_invariant_across_y_blend():
     model = _bare_model()
     rows = _constant_rows(model, 448, 448, lambda i, _j: i)
