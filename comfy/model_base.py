@@ -2671,6 +2671,7 @@ class QwenImage21(QwenImage):
         self._current_patcher = patcher
         diffusion_model = getattr(self, "diffusion_model", None)
         if diffusion_model is not None:
+            diffusion_model.current_patcher = patcher
             diffusion_model.reset_prefix_cache(patcher is not None and len(patcher.hook_patches) == 0)
 
     def extra_conds(self, **kwargs):
