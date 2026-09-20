@@ -586,8 +586,8 @@ class CausalMemoryCache:
         return value
 
 
-def _offload_caches_for(frame_pixels):
-    """Whether a decode of this output frame area sends its temporal caches to pinned host memory:
+def _offload_caches_for(frame_pixels, device=None):
+    """Whether a pass over this frame area sends its temporal caches to pinned host memory:
     only when the host has several times the set free, since pinned memory is locked RAM."""
     if not CausalMemoryCache.offload_default:
         return False
@@ -2040,7 +2040,9 @@ class VideoAutoencoderKL(nn.Module):
 
     def slicing_encode(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_slicing and (x.shape[2] - 1) > self.slicing_sample_min_size:
-            memory_cache = CausalMemoryCache()
+            # same policy as the decode: the caches only go to the host when that buys headroom
+            memory_cache = CausalMemoryCache(
+                offload=_offload_caches_for(x.shape[-2] * x.shape[-1], self.device))
             split_size = max(
                 self.slicing_sample_min_size,
                 getattr(self, "temporal_downsample_factor", 1),
