@@ -1,4 +1,3 @@
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +23,8 @@ from comfy.ldm.sensenova.interleave import (
     InterleaveResult,
     SenseNovaInterleaveSession,
     build_interleave_result,
+    expand_interleave_metadata,
+    generate_text_event,
     interleave_result_to_markdown,
     prefix_arguments,
 )
@@ -44,7 +45,8 @@ import comfy_extras.nodes_sensenova as sensenova_nodes
 from comfy_extras.nodes_sensenova import (
     SenseNovaGenerate,
     SenseNovaInterleave,
-    SenseNovaInterleavePreview,
+    SenseNovaInterleaveCollector,
+    SenseNovaInterleaveStage,
     SenseNovaSamplingOptions,
     SenseNovaTextEncode,
     interleave_output_samples,
@@ -552,6 +554,45 @@ def test_sensenova_model_base_preprocesses_regular_prefix_only():
     assert len(regular_calls) == 2
     assert positive["prefix_time"].cond.tolist() == [3]
     assert hooked["text_input_ids"].cond.tolist() == input_ids.tolist()
+
+
+def test_sensenova_model_base_does_not_reinsert_expanded_interleave_images():
+    calls = []
+
+    def preprocess_prefix(input_ids, references, indexes, prefix_mask):
+        calls.append((input_ids, references, indexes, prefix_mask))
+        return (
+            [torch.zeros(1, 1, input_ids.shape[1], 1, dtype=torch.bfloat16)],
+            [torch.ones(1, 1, input_ids.shape[1], 1, dtype=torch.bfloat16)],
+            torch.tensor([input_ids.shape[1]]),
+        )
+
+    model = object.__new__(model_base.SenseNovaU15)
+    torch.nn.Module.__init__(model)
+    model.concat_keys = ()
+    model.manual_cast_dtype = None
+    model.diffusion_model = SimpleNamespace(
+        dtype=torch.bfloat16,
+        preprocess_prefix=preprocess_prefix,
+    )
+    metadata = expand_interleave_metadata(
+        {
+            "text_input_ids": torch.tensor([[1, 2, 3]]),
+            "reference_latents": [torch.zeros(1, 33, 65, 3)],
+        },
+        image_only=False,
+    )
+
+    model.extra_conds(
+        text_input_ids=metadata["text_input_ids"],
+        reference_latents=metadata["reference_latents"],
+        sensenova_interleave_expanded=True,
+        device=torch.device("cpu"),
+    )
+
+    assert len(calls) == 1
+    assert calls[0][0].shape == metadata["text_input_ids"].shape
+    assert torch.equal(calls[0][0], metadata["text_input_ids"])
 
 
 def test_sensenova_thinking_decode_appends_stop_and_image_suffix():
@@ -1287,182 +1328,79 @@ def test_sensenova_interleave_without_images_keeps_a_decodable_latent():
     assert output is latent_samples
 
 
-def test_sensenova_interleave_preview_builds_inline_ui_parts(monkeypatch):
-    monkeypatch.setattr(
-        "comfy_extras.nodes_sensenova._save_preview_images",
-        lambda images: [
-            {"filename": "preview.png", "subfolder": "", "type": "temp"}
-        ],
-    )
-    result = {
-        "parts": [
-            {"type": "think", "text": "plan"},
-            {"type": "text", "text": "Hello"},
-            {"type": "image", "index": 0},
-        ]
-    }
+def test_sensenova_interleave_collector_rebuilds_ordered_text_and_images():
+    first_image = torch.zeros(1, 8, 8, 3)
+    second_image = torch.ones(1, 8, 8, 3)
+    first = SenseNovaInterleaveStage.execute(
+        text="before",
+        image_requested=True,
+        image=first_image,
+    ).args[0]
+    second = SenseNovaInterleaveStage.execute(
+        text="between",
+        image_requested=True,
+        image=second_image,
+    ).args[0]
+    final = SenseNovaInterleaveStage.execute(
+        text="after",
+        image_requested=False,
+    ).args[0]
 
-    output = SenseNovaInterleavePreview.execute(
-        interleave_result=result,
-        include_think=False,
-        images=torch.empty(1, 8, 8, 3),
-    )
+    text, images, thinking = SenseNovaInterleaveCollector.execute(
+        stages=[first, second, final],
+    ).args
 
-    assert output.args == ("Hello\n\n[image:0]",)
-    assert output.ui["parts"] == [
-        {"type": "text", "text": "Hello"},
-        {
-            "type": "image",
-            "index": 0,
-            "filename": "preview.png",
-            "subfolder": "",
-            "image_type": "temp",
-        },
+    assert text == "before<image>between<image>after"
+    assert thinking == ""
+    assert images.shape == (2, 8, 8, 3)
+    assert torch.equal(images[0], first_image[0])
+    assert torch.equal(images[1], second_image[0])
+
+
+def test_sensenova_interleave_collector_separates_thinking_across_stages():
+    image = torch.zeros(1, 8, 8, 3)
+    first = SenseNovaInterleaveStage.execute(
+        text="<think>plan",
+        image_requested=True,
+        image=image,
+    ).args[0]
+    final = SenseNovaInterleaveStage.execute(
+        text="inspect</think>answer <image1>",
+        image_requested=False,
+    ).args[0]
+
+    text, images, thinking = SenseNovaInterleaveCollector.execute(
+        stages=[first, final],
+    ).args
+
+    assert text == "answer <image1>"
+    assert thinking == "plan\n\ninspect"
+    assert torch.equal(images, image)
+
+
+def test_sensenova_interleave_collector_accepts_implicit_thinking_start():
+    stage = SenseNovaInterleaveStage.execute(
+        text="plan</think>answer",
+        image_requested=False,
+    ).args[0]
+
+    text, images, thinking = SenseNovaInterleaveCollector.execute(
+        stages=[stage],
+    ).args
+
+    assert text == "answer"
+    assert images is None
+    assert thinking == "plan"
+
+
+def test_sensenova_interleave_collector_consumes_accumulated_loop_output_once():
+    schema = SenseNovaInterleaveCollector.GET_SCHEMA()
+    assert schema.is_input_list is True
+    assert [output.display_name for output in schema.outputs] == [
+        "text",
+        "images",
+        "thinking",
     ]
-
-
-def _mock_interleave_preview_images(monkeypatch, count=1):
-    monkeypatch.setattr(
-        "comfy_extras.nodes_sensenova._save_preview_images",
-        lambda images: [
-            {"filename": f"preview_{index}.png", "subfolder": "", "type": "temp"}
-            for index in range(count)
-        ],
-    )
-
-
-def test_sensenova_interleave_preview_places_thinking_images_at_final_references(
-    monkeypatch,
-):
-    _mock_interleave_preview_images(monkeypatch, count=3)
-    result = {
-        "parts": [
-            {"type": "think", "text": "plan first image"},
-            {"type": "image", "index": 0},
-            {"type": "think", "text": "plan second image"},
-            {"type": "image", "index": 1},
-            {"type": "think", "text": "plan third image"},
-            {"type": "image", "index": 2},
-            {
-                "type": "text",
-                "text": (
-                    "First description\n<image1>\n"
-                    "Second description\n<image2>\n"
-                    "Third description\n<image3>"
-                ),
-            },
-        ]
-    }
-
-    output = SenseNovaInterleavePreview.execute(
-        interleave_result=result,
-        include_think=False,
-        images=torch.empty(3, 8, 8, 3),
-    )
-
-    assert output.args == (
-        "First description\n\n[image:0]\n\n"
-        "Second description\n\n[image:1]\n\n"
-        "Third description\n\n[image:2]",
-    )
-    assert [part["type"] for part in output.ui["parts"]] == [
-        "text",
-        "image",
-        "text",
-        "image",
-        "text",
-        "image",
-    ]
-    assert [
-        part["index"] for part in output.ui["parts"] if part["type"] == "image"
-    ] == [0, 1, 2]
-
-
-def test_sensenova_interleave_preview_removes_unresolved_numbered_references(
-    monkeypatch,
-):
-    _mock_interleave_preview_images(monkeypatch)
-    result = {
-        "parts": [
-            {"type": "image", "index": 0},
-            {"type": "text", "text": "Before<image99>After"},
-        ]
-    }
-
-    output = SenseNovaInterleavePreview.execute(
-        interleave_result=result,
-        include_think=False,
-        images=torch.empty(1, 8, 8, 3),
-    )
-
-    assert output.args == ("[image:0]\n\nBefore\n\nAfter",)
-    assert [part["type"] for part in output.ui["parts"]] == [
-        "image",
-        "text",
-        "text",
-    ]
-
-
-def test_sensenova_interleave_preview_hides_references_when_showing_thinking(
-    monkeypatch,
-):
-    _mock_interleave_preview_images(monkeypatch)
-    result = {
-        "parts": [
-            {"type": "think", "text": "plan"},
-            {"type": "image", "index": 0},
-            {"type": "text", "text": "Answer<image1>Done"},
-        ]
-    }
-
-    output = SenseNovaInterleavePreview.execute(
-        interleave_result=result,
-        include_think=True,
-        images=torch.empty(1, 8, 8, 3),
-    )
-
-    assert "<image1>" not in output.args[0]
-    assert [part["type"] for part in output.ui["parts"]] == [
-        "think",
-        "image",
-        "text",
-        "text",
-    ]
-    assert [
-        part["index"] for part in output.ui["parts"] if part["type"] == "image"
-    ] == [0]
-
-
-def test_sensenova_interleave_preview_removes_non_positive_image_references(
-    monkeypatch,
-):
-    _mock_interleave_preview_images(monkeypatch)
-    result = {
-        "parts": [
-            {"type": "image", "index": 0},
-            {"type": "text", "text": "Before<image0>Middle<image00>After"},
-        ]
-    }
-
-    output = SenseNovaInterleavePreview.execute(
-        interleave_result=result,
-        include_think=False,
-        images=torch.empty(1, 8, 8, 3),
-    )
-
-    assert output.args == ("[image:0]\n\nBefore\n\nMiddle\n\nAfter",)
-    assert [
-        part["index"] for part in output.ui["parts"] if part["type"] == "image"
-    ] == [0]
-
-
-def test_sensenova_frontend_extension_is_packaged_with_preview_nodes():
-    web_directory = Path(sensenova_nodes.__file__).parent / sensenova_nodes.WEB_DIRECTORY
-    script = web_directory / "sensenova_interleave_preview.js"
-
-    assert script.is_file()
-    script_text = script.read_text(encoding="utf-8")
-    assert "SenseNovaInterleavePreview" in script_text
 
 
 def test_sensenova_text_encode_leaves_image_thinking_to_generate():
@@ -1541,8 +1479,10 @@ def test_sensenova_generate_returns_prefix_conditioning_and_text(monkeypatch):
         max_think_tokens=32,
     )
 
-    updated, thinking = output.args
-    assert thinking == "<think>\nplan the composition\n</think>"
+    updated, thinking, negative, image_requested = output.args
+    assert thinking == "plan the composition"
+    assert negative == []
+    assert image_requested is True
     assert updated[0][1]["prefix_keys"] == ["keys"]
     assert updated[0][1]["prefix_values"] == ["values"]
     assert torch.equal(updated[0][1]["prefix_time"], torch.tensor([7]))
@@ -1556,15 +1496,11 @@ def test_sensenova_generate_returns_prefix_conditioning_and_text(monkeypatch):
     assert calls[-1] == "cleanup"
 
 
-def test_sensenova_thinking_text_normalizes_boundaries():
-    assert (
-        sensenova_nodes._format_thinking_text("  plan the composition  ")
-        == "<think>\nplan the composition\n</think>"
+def test_sensenova_thinking_text_strips_boundaries():
+    assert sensenova_nodes._format_thinking_text("  plan the composition  ") == (
+        "plan the composition"
     )
-    assert (
-        sensenova_nodes._format_thinking_text("<think>\nplan\n</think>")
-        == "<think>\nplan\n</think>"
-    )
+    assert sensenova_nodes._format_thinking_text("<think>\nplan\n</think>") == "plan"
     assert sensenova_nodes._format_thinking_text("") == ""
 
 
@@ -1584,7 +1520,140 @@ def test_sensenova_generate_passthrough_without_thinking(monkeypatch):
 
     assert output.args[0] is conditioning
     assert output.args[1] == ""
+    assert output.args[2] == []
+    assert output.args[3] is True
     assert output.ui.as_dict() == {"text": ("",)}
+
+
+def test_sensenova_interleave_history_expands_reference_images_once():
+    metadata = {
+        "text_input_ids": torch.tensor([[1, 2, 3]]),
+        "reference_latents": [torch.zeros(1, 33, 65, 3)],
+    }
+
+    expanded = expand_interleave_metadata(metadata, image_only=False)
+
+    assert expanded["sensenova_interleave_expanded"] is True
+    assert expanded["text_input_ids"].shape[1] == 3 + 6 + 3
+    assert torch.count_nonzero(expanded["text_input_ids"] == 151669) == 6
+
+
+def test_sensenova_interleave_text_event_stops_before_image_sampling():
+    class Model:
+        has_lm_head = True
+
+        def __init__(self):
+            self.tokens = iter((101, 151670))
+
+        def _preprocess_prefix_state(self, *args):
+            return 0, [[]], [[]], torch.tensor([3])
+
+        def _next_text_token(self, hidden):
+            return torch.tensor([next(self.tokens)])
+
+        def _decode_text_token(
+            self, token, keys, values, prefix_time, transformer_options=None
+        ):
+            return 0, keys, values, prefix_time + 1
+
+    event = generate_text_event(
+        Model(),
+        (torch.tensor([[1]]), None, None, None),
+        max_text_tokens=8,
+    )
+
+    assert event.token_ids == [101, 151670]
+    assert event.image_requested is True
+    assert event.stop_reason == "image"
+
+
+def test_sensenova_interleave_generate_can_resume_after_ksampler(monkeypatch):
+    class DiffusionModel:
+        dtype = torch.float32
+        has_lm_head = True
+
+        def __init__(self):
+            self.stages = [iter((101, 151670)), iter((102, 151645))]
+            self.tokens = None
+
+        def _preprocess_prefix_state(self, *args):
+            self.tokens = self.stages.pop(0)
+            return 0, [[]], [[]], torch.tensor([3])
+
+        def _next_text_token(self, hidden):
+            return torch.tensor([next(self.tokens)])
+
+        def _decode_text_token(
+            self, token, keys, values, prefix_time, transformer_options=None
+        ):
+            return 0, keys, values, prefix_time + 1
+
+    diffusion_model = DiffusionModel()
+    calls = []
+
+    class Model:
+        load_device = torch.device("cpu")
+        model_options = {}
+        model = SimpleNamespace(diffusion_model=diffusion_model)
+
+        def pre_run(self):
+            calls.append("pre_run")
+
+        def cleanup(self):
+            calls.append("cleanup")
+
+    class Clip:
+        def decode(self, token_ids, skip_special_tokens=True):
+            return {101: "before", 102: "after"}[token_ids[0]]
+
+    monkeypatch.setattr(
+        comfy.model_management,
+        "load_models_gpu",
+        lambda models: calls.append("load"),
+    )
+    monkeypatch.setattr(
+        comfy.model_management,
+        "throw_exception_if_processing_interrupted",
+        lambda: None,
+    )
+    positive = [[torch.empty(1), {"text_input_ids": torch.tensor([[7, 8]]), "sensenova_interleave": True}]]
+    negative = [[torch.empty(1), {"text_input_ids": torch.tensor([[9]]), "sensenova_interleave": True}]]
+
+    first = SenseNovaGenerate.execute(
+        model=Model(),
+        clip=Clip(),
+        conditioning=positive,
+        negative=negative,
+        max_think_tokens=8,
+    )
+    first_positive, first_text, first_negative, requested = first.args
+
+    assert first_text == "before"
+    assert requested is True
+    assert first_positive[0][1]["text_input_ids"].tolist() == [[7, 8, 101, 151670]]
+    assert first_negative[0][1]["text_input_ids"].tolist() == [[9, 151670]]
+    assert first_positive[0][1]["sensenova_interleave_pending_image"] is True
+
+    second = SenseNovaGenerate.execute(
+        model=Model(),
+        clip=Clip(),
+        conditioning=first_positive,
+        negative=first_negative,
+        samples={"samples": torch.zeros(1, 3, 32, 64)},
+        max_think_tokens=8,
+    )
+    second_positive, second_text, second_negative, requested = second.args
+    positive_ids = second_positive[0][1]["text_input_ids"]
+    negative_ids = second_negative[0][1]["text_input_ids"]
+
+    assert second_text == "after"
+    assert requested is False
+    assert positive_ids[0, -4:].tolist() == [151669, 151669, 151671, 102]
+    assert negative_ids[0, -3:].tolist() == [151669, 151669, 151671]
+    assert len(second_positive[0][1]["reference_latents"]) == 1
+    assert second_positive[0][1]["reference_latents"][0].shape == (1, 32, 64, 3)
+    assert second_positive[0][1]["sensenova_interleave_pending_image"] is False
+    assert calls == ["load", "pre_run", "cleanup", "load", "pre_run", "cleanup"]
 
 
 def test_sensenova_memory_estimate_uses_regular_prefix_length():

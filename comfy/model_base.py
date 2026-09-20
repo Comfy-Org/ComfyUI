@@ -2399,11 +2399,12 @@ class SenseNovaU15(BaseModel):
                     )
                     for image in reference_images
                 ]
-                text_input_ids = comfy.ldm.sensenova.conditioning.condition_input_ids(
-                    text_input_ids,
-                    reference_grids,
-                    image_only=image_only,
-                )
+                if not kwargs.get("sensenova_interleave_expanded", False):
+                    text_input_ids = comfy.ldm.sensenova.conditioning.condition_input_ids(
+                        text_input_ids,
+                        reference_grids,
+                        image_only=image_only,
+                    )
                 indexes = comfy.ldm.sensenova.conditioning.thw_indexes(text_input_ids, reference_grids)
                 prefix_mask = comfy.ldm.sensenova.conditioning.block_causal_mask(
                     indexes, dtype=self.get_dtype_inference()
@@ -2460,7 +2461,9 @@ class SenseNovaU15(BaseModel):
             out["reference_images"] = [1, 3, reference_pixels]
         text_input_ids = kwargs.get("text_input_ids")
         if text_input_ids is not None:
-            if reference_grids:
+            if kwargs.get("sensenova_interleave_expanded", False):
+                length = text_input_ids.shape[1]
+            elif reference_grids:
                 length = comfy.ldm.sensenova.conditioning.conditioned_input_length(
                     text_input_ids.shape[1],
                     reference_grids,

@@ -1,5 +1,3 @@
-import re
-
 import torch
 from typing_extensions import override
 
@@ -9,17 +7,20 @@ import comfy.utils
 import latent_preview
 from comfy.ldm.sensenova.interleave import (
     SenseNovaInterleaveSession,
+    append_interleave_image,
+    append_interleave_tokens,
     build_interleave_result,
-    interleave_result_to_markdown,
+    expand_interleave_metadata,
+    generate_text_event,
     live_conditioning,
     prefix_arguments,
+    split_interleave_text,
 )
 from comfy.ldm.sensenova.sampling import SenseNovaModelSampling
 from comfy_api.latest import ComfyExtension, io, ui
 
 
 InterleaveResultIO = io.Custom("SENSENOVA_INTERLEAVE_RESULT")
-WEB_DIRECTORY = "./web"
 
 
 def interleave_output_samples(result, latent_samples):
@@ -228,37 +229,68 @@ class SenseNovaGenerate(io.ComfyNode):
             category="model/sampling/sensenova",
             description=(
                 "Run SenseNova thinking when enabled; otherwise pass conditioning "
-                "through unchanged. Expose reasoning text for Preview as Text and "
-                "connect the conditioning output to the KSampler positive input."
+                "through unchanged. In interleave mode, stop at the next image "
+                "request or EOS so an external KSampler can produce the image."
             ),
             inputs=[
                 io.Model.Input("model"),
                 io.Clip.Input("clip"),
                 io.Conditioning.Input("conditioning"),
+                io.Conditioning.Input("negative", optional=True),
+                io.Latent.Input(
+                    "samples",
+                    optional=True,
+                    tooltip="Previous KSampler pixel latent, required after an image request.",
+                ),
                 io.Int.Input(
-                    "max_think_tokens", default=1024, min=1, max=8192, advanced=True
+                    "max_think_tokens",
+                    default=1024,
+                    min=1,
+                    max=8192,
+                    advanced=True,
+                    tooltip="Maximum generated tokens for thinking or one interleave text stage.",
                 ),
             ],
             outputs=[
                 io.Conditioning.Output(display_name="conditioning"),
-                io.String.Output(display_name="thinking"),
+                io.String.Output(
+                    display_name="thinking",
+                    tooltip="Thinking text for image mode, or the current text stage for interleave mode.",
+                ),
+                io.Conditioning.Output(display_name="negative"),
+                io.Boolean.Output(display_name="image_requested"),
             ],
         )
 
     @classmethod
     def execute(
-        cls, *, model, clip, conditioning, max_think_tokens
+        cls,
+        *,
+        model,
+        clip,
+        conditioning,
+        max_think_tokens,
+        negative=None,
+        samples=None,
     ) -> io.NodeOutput:
         if not conditioning:
-            return io.NodeOutput(conditioning, "", ui=ui.PreviewText(""))
+            return io.NodeOutput(
+                conditioning, "", negative or [], False, ui=ui.PreviewText("")
+            )
         metadata = conditioning[0][1]
         if metadata.get("sensenova_interleave"):
-            raise ValueError(
-                "SenseNova Generate is for T2I/Edit thinking; use SenseNova Interleave "
-                "for interleaved text and image generation."
+            return cls._execute_interleave(
+                model=model,
+                clip=clip,
+                positive=conditioning,
+                negative=negative,
+                samples=samples,
+                max_text_tokens=max_think_tokens,
             )
         if not metadata.get("sensenova_thinking", False):
-            return io.NodeOutput(conditioning, "", ui=ui.PreviewText(""))
+            return io.NodeOutput(
+                conditioning, "", negative or [], True, ui=ui.PreviewText("")
+            )
         if len(conditioning) != 1:
             raise ValueError(
                 "SenseNova Generate requires one positive conditioning entry "
@@ -325,26 +357,112 @@ class SenseNovaGenerate(io.ComfyNode):
         return io.NodeOutput(
             updated_conditioning,
             thinking,
+            negative or [],
+            True,
             ui=ui.PreviewText(thinking),
+        )
+
+    @classmethod
+    def _execute_interleave(
+        cls,
+        *,
+        model,
+        clip,
+        positive,
+        negative,
+        samples,
+        max_text_tokens,
+    ) -> io.NodeOutput:
+        """Generate one interleave text stage for external KSampler orchestration."""
+
+        if negative is None or len(positive) != 1 or len(negative) != 1:
+            raise ValueError(
+                "SenseNova interleave requires one positive and one negative conditioning entry."
+            )
+        positive_metadata = expand_interleave_metadata(positive[0][1], image_only=False)
+        negative_metadata = expand_interleave_metadata(negative[0][1], image_only=True)
+        pending_image = bool(
+            positive_metadata.get("sensenova_interleave_pending_image")
+        )
+        if pending_image != bool(
+            negative_metadata.get("sensenova_interleave_pending_image")
+        ):
+            raise ValueError("SenseNova interleave conditioning histories are out of sync.")
+        latent_samples = samples.get("samples") if isinstance(samples, dict) else None
+        if pending_image:
+            if latent_samples is None:
+                raise ValueError(
+                    "SenseNova interleave is waiting for samples from the preceding KSampler."
+                )
+            positive_metadata = append_interleave_image(
+                positive_metadata, latent_samples
+            )
+            negative_metadata = append_interleave_image(
+                negative_metadata, latent_samples
+            )
+        elif latent_samples is not None:
+            raise ValueError(
+                "SenseNova interleave received samples before requesting an image."
+            )
+
+        diffusion_model = model.model.diffusion_model
+        device = model.load_device
+        transformer_options = model.model_options.get(
+            "transformer_options", {}
+        ).copy()
+        comfy.model_management.load_models_gpu([model])
+        model.pre_run()
+        try:
+            progress = comfy.utils.ProgressBar(max_text_tokens)
+            event = generate_text_event(
+                diffusion_model,
+                prefix_arguments(
+                    positive_metadata,
+                    device,
+                    diffusion_model.dtype,
+                    image_only=False,
+                ),
+                max_text_tokens=max_text_tokens,
+                transformer_options=transformer_options,
+                progress=progress.update_absolute,
+                interrupt=comfy.model_management.throw_exception_if_processing_interrupted,
+            )
+        finally:
+            model.cleanup()
+
+        positive_metadata = append_interleave_tokens(
+            positive_metadata, event.token_ids, event.image_requested
+        )
+        if event.image_requested:
+            negative_metadata = append_interleave_tokens(
+                negative_metadata, [151670], True
+            )
+        text_token_ids = [value for value in event.token_ids if value != 151670]
+        text = (
+            clip.decode(text_token_ids, skip_special_tokens=True).strip()
+            if text_token_ids
+            else ""
+        )
+        updated_positive = [[positive[0][0], positive_metadata]]
+        updated_negative = [[negative[0][0], negative_metadata]]
+        return io.NodeOutput(
+            updated_positive,
+            text,
+            updated_negative,
+            event.image_requested,
+            ui=ui.PreviewText(text),
         )
 
 
 def _format_thinking_text(text: str) -> str:
-    """Return a complete SenseNova thinking block for text previews.
-
-    The opening marker is part of the input prompt, while the decoder returns
-    the generated body and the closing marker. Normalize both boundaries here
-    so downstream text previews do not need to infer token-level framing.
-    """
+    """Return only the visible body of a SenseNova thinking result."""
 
     text = text.strip()
-    if not text:
-        return ""
-    if not text.startswith("<think>"):
-        text = f"<think>\n{text}"
-    if not text.endswith("</think>"):
-        text = f"{text}\n</think>"
-    return text
+    if text.startswith("<think>"):
+        text = text[len("<think>") :].lstrip()
+    if "</think>" in text:
+        text = text.split("</think>", 1)[0]
+    return text.strip()
 
 
 class SenseNovaInterleave(io.ComfyNode):
@@ -419,118 +537,123 @@ class SenseNovaInterleave(io.ComfyNode):
         )
 
 
-def _save_preview_images(images):
-    if images is None or images.shape[0] == 0:
-        return []
-    return [dict(value) for value in ui.PreviewImage(images).as_dict()["images"]]
-
-
-_IMAGE_REFERENCE_PATTERN = re.compile(r"<image(\d+)>")
-
-
-def _interleave_preview_parts(interleave_result, include_think):
-    """Resolve or hide final-answer image references for preview rendering."""
-
-    parts = interleave_result.get("parts", [])
-    image_parts = {
-        int(part.get("index", 0)): part
-        for part in parts
-        if part.get("type") == "image"
-    }
-    referenced_images = set()
-    resolved_text_parts = {}
-    for part_index, part in enumerate(parts):
-        if part.get("type") != "text":
-            continue
-        text = str(part.get("text", ""))
-        cursor = 0
-        resolved_parts = []
-        for match in _IMAGE_REFERENCE_PATTERN.finditer(text):
-            text_before_reference = text[cursor : match.start()].strip()
-            if text_before_reference:
-                resolved_parts.append(
-                    {"type": "text", "text": text_before_reference}
-                )
-            image_index = int(match.group(1)) - 1
-            if not include_think and image_index in image_parts:
-                resolved_parts.append(image_parts[image_index])
-                referenced_images.add(image_index)
-            cursor = match.end()
-        remaining_text = text[cursor:].strip()
-        if remaining_text:
-            resolved_parts.append({"type": "text", "text": remaining_text})
-        resolved_text_parts[part_index] = resolved_parts
-
-    display_parts = []
-    for part_index, part in enumerate(parts):
-        part_type = part.get("type")
-        if part_type == "think":
-            if include_think:
-                display_parts.append(part)
-            continue
-        if part_type == "image":
-            if int(part.get("index", 0)) not in referenced_images:
-                display_parts.append(part)
-            continue
-        if part_type != "text":
-            continue
-        display_parts.extend(resolved_text_parts[part_index])
-    return display_parts
-
-
-class SenseNovaInterleavePreview(io.ComfyNode):
-    """Display interleaved text and images with optional thinking details."""
+class SenseNovaInterleaveStage(io.ComfyNode):
+    """Capture one externally sampled interleave stage for later collection."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
-            node_id="SenseNovaInterleavePreview",
-            display_name="SenseNova Interleave Preview",
+            node_id="SenseNovaInterleaveStage",
+            display_name="SenseNova Interleave Stage",
             category="model/sampling/sensenova",
-            is_output_node=True,
+            description=(
+                "Bundle one SenseNova text stage, its image-request flag, and "
+                "the image sampled for that stage. Feed accumulated stages to "
+                "SenseNova Interleave Collector."
+            ),
             inputs=[
-                InterleaveResultIO.Input("interleave_result"),
-                io.Boolean.Input("include_think", default=False),
-                io.Image.Input("images", optional=True),
+                io.String.Input("text", optional=True),
+                io.Boolean.Input("image_requested", default=False),
+                io.Image.Input("image", optional=True),
+                io.Conditioning.Input("conditioning", optional=True),
+                io.Conditioning.Input("negative", optional=True),
+                io.Latent.Input("samples", optional=True),
             ],
-            outputs=[io.String.Output(display_name="markdown")],
+            outputs=[io.AnyType.Output(display_name="stage")],
         )
 
     @classmethod
-    def execute(cls, *, interleave_result, include_think, images=None) -> io.NodeOutput:
-        display_parts = _interleave_preview_parts(interleave_result, include_think)
-        markdown = interleave_result_to_markdown(
-            {"parts": display_parts}, include_think=include_think
-        )
-        saved_images = _save_preview_images(images)
-        parts_payload = []
-        for part in display_parts:
-            part_type = part.get("type")
-            if part_type in ("text", "think"):
-                text = str(part.get("text", "")).strip()
-                if text:
-                    parts_payload.append({"type": part_type, "text": text})
-            elif part_type == "image":
-                index = int(part.get("index", 0))
-                image = saved_images[index] if index < len(saved_images) else None
-                if image is None:
-                    parts_payload.append(
-                        {"type": "image", "index": index, "missing": True}
-                    )
-                else:
-                    parts_payload.append(
-                        {
-                            "type": "image",
-                            "index": index,
-                            "filename": image.get("filename", ""),
-                            "subfolder": image.get("subfolder", ""),
-                            "image_type": image.get("type", "temp"),
-                        }
-                    )
+    def execute(
+        cls,
+        text="",
+        image_requested=False,
+        image=None,
+        conditioning=None,
+        negative=None,
+        samples=None,
+    ) -> io.NodeOutput:
         return io.NodeOutput(
-            markdown,
-            ui={"text": [markdown], "parts": parts_payload},
+            {
+                "text": str(text or ""),
+                "image_requested": bool(image_requested),
+                "image": image,
+                "conditioning": conditioning,
+                "negative": negative,
+                "samples": samples,
+            }
         )
+
+
+def _interleave_stage_images(stages):
+    images = []
+    for stage in stages:
+        if not stage.get("image_requested") or stage.get("image") is None:
+            continue
+        image = stage["image"]
+        if not isinstance(image, torch.Tensor) or image.ndim != 4:
+            raise ValueError(
+                "SenseNova Interleave Collector expects stage images in BHWC format."
+            )
+        images.extend(image[index : index + 1] for index in range(image.shape[0]))
+    if not images:
+        return None
+    return torch.cat(images, dim=0)
+
+
+class SenseNovaInterleaveCollector(io.ComfyNode):
+    """Collect externally sampled stages into ordered text and images."""
+
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="SenseNovaInterleaveCollector",
+            display_name="SenseNova Interleave Collector",
+            category="model/sampling/sensenova",
+            is_input_list=True,
+            description=(
+                "Collect accumulated SenseNova interleave stages into ordered text "
+                "with image placeholders, an image batch, and separate thinking text."
+            ),
+            inputs=[
+                io.AnyType.Input(
+                    "stages",
+                    tooltip="A list of SenseNova Interleave Stage records.",
+                ),
+            ],
+            outputs=[
+                io.String.Output(display_name="text"),
+                io.Image.Output(display_name="images"),
+                io.String.Output(display_name="thinking"),
+            ],
+        )
+
+    @classmethod
+    def execute(
+        cls,
+        stages,
+    ) -> io.NodeOutput:
+        if isinstance(stages, dict):
+            stages = [stages]
+        if not isinstance(stages, (list, tuple)):
+            raise ValueError(
+                "SenseNova Interleave Collector expects a list of stage records."
+            )
+        if any(not isinstance(stage, dict) for stage in stages):
+            raise ValueError(
+                "SenseNova Interleave Collector received an invalid stage record."
+            )
+        if not stages:
+            raise ValueError("SenseNova Interleave Collector received no stages.")
+
+        text_parts = []
+        for stage in stages:
+            text_parts.append(str(stage.get("text") or ""))
+            if stage.get("image_requested"):
+                text_parts.append("<image>")
+
+        text, thinking = split_interleave_text("".join(text_parts))
+        images = _interleave_stage_images(stages)
+        return io.NodeOutput(text, images, thinking)
 
 
 class SenseNovaExtension(ComfyExtension):
@@ -543,7 +666,8 @@ class SenseNovaExtension(ComfyExtension):
             SenseNovaGenerate,
             SenseNovaSamplingOptions,
             SenseNovaInterleave,
-            SenseNovaInterleavePreview,
+            SenseNovaInterleaveStage,
+            SenseNovaInterleaveCollector,
         ]
 
 
