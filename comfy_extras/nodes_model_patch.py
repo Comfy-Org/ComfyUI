@@ -6,6 +6,7 @@ import folder_paths
 import comfy.utils
 import comfy.ops
 import comfy.model_management
+import comfy.storage
 import comfy.ldm.common_dit
 import comfy.latent_formats
 import comfy.ldm.lumina.controlnet
@@ -376,7 +377,7 @@ class ModelPatchLoader:
             if denoise_encoder_sd:
                 model.denoise_encoder_sd = denoise_encoder_sd
 
-        model_patcher = comfy.model_patcher.CoreModelPatcher(model, load_device=comfy.model_management.get_torch_device(), offload_device=comfy.model_management.unet_offload_device())
+        model_patcher = comfy.model_patcher.CoreModelPatcher(model, load_device=comfy.model_management.get_torch_device(), offload_device=comfy.model_management.unet_offload_device(), fast_disk=comfy.storage.state_dict_fast_disk(sd))
         model.load_state_dict(sd, assign=model_patcher.is_dynamic())
         return (model_patcher,)
 
