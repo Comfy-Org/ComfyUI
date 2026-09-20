@@ -100,7 +100,7 @@ class PassOrNoneNode(io.ComfyNode):
                 ),
                 io.AnyType.Input(
                     "default",
-                    tooltip="Fallback value to use when the input is None/provided.",
+                    tooltip="Fallback value to use when the input is None/not provided.",
                     optional=True,
                 ),
             ],
