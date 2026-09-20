@@ -83,6 +83,47 @@ class OrNode(io.ComfyNode):
         return io.NodeOutput(any(values.values()))
 
 
+class PassOrNoneNode(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ComfyPassOrNoneNode",
+            display_name="Pass or None",
+            category="utilities/logic",
+            description="Passes the input through, or a default value when input is None/not provided, or outputs None when both inputs are None/not provided.",
+            search_aliases=["fallback", "null", "nothing", "empty", "blank"],
+            inputs=[
+                io.AnyType.Input(
+                    "anything",
+                    tooltip="Passes the input through, or a default value when input is None/not provided, or outputs None when both inputs are None/not provided.",
+                    optional=True,
+                ),
+                io.AnyType.Input(
+                    "default",
+                    tooltip="Fallback value to use when the input is None/provided.",
+                    optional=True,
+                ),
+            ],
+            outputs=[
+                io.AnyType.Output("output"),
+                io.Boolean.Output("is_none"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, anything=None, default=None):
+        if anything is None:
+            return io.NodeOutput(
+                default,
+                default is None,
+            )
+
+        return io.NodeOutput(
+            anything,
+            False,
+        )
+
+
 class SwitchNode(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -341,6 +382,7 @@ class LogicExtension(ComfyExtension):
             NotNode,
             AndNode,
             OrNode,
+            PassOrNoneNode,
             # SoftSwitchNode,
             # ConvertStringToComboNode,
             # DCTestNode,
