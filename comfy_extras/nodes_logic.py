@@ -86,6 +86,7 @@ class OrNode(io.ComfyNode):
 class PassOrNoneNode(io.ComfyNode):
     @classmethod
     def define_schema(cls):
+        matchtype_template = io.MatchType.Template("value")
         return io.Schema(
             node_id="ComfyPassOrNoneNode",
             display_name="Pass or None",
@@ -93,19 +94,21 @@ class PassOrNoneNode(io.ComfyNode):
             description="Passes the input through, or a default value when input is None/not provided, or outputs None when both inputs are None/not provided.",
             search_aliases=["fallback", "null", "nothing", "empty", "blank"],
             inputs=[
-                io.AnyType.Input(
+                io.MatchType.Input(
                     "anything",
+                    template=matchtype_template,
                     tooltip="Passes the input through, or a default value when input is None/not provided, or outputs None when both inputs are None/not provided.",
                     optional=True,
                 ),
-                io.AnyType.Input(
+                io.MatchType.Input(
                     "default",
+                    template=matchtype_template,
                     tooltip="Fallback value to use when the input is None/not provided.",
                     optional=True,
                 ),
             ],
             outputs=[
-                io.AnyType.Output("output"),
+                io.MatchType.Output(template=matchtype_template, id="output"),
                 io.Boolean.Output("is_none"),
             ],
         )
