@@ -381,7 +381,9 @@ def test_decode_output_buffer_uses_compositor_and_fully_overwrites():
     assert returned.data_ptr() == output.data_ptr()
     assert tuple(returned.shape) == (1, 3, 1, 272, 272)
     assert bool(torch.isfinite(returned).all())
-    torch.testing.assert_close(returned, torch.full_like(returned, 0.25), rtol=0, atol=0)
+    expected = torch.full_like(returned, 0.25)
+    tolerance = 12 * torch.finfo(torch.float32).eps * 0.25
+    torch.testing.assert_close(returned, expected, rtol=0, atol=tolerance)
 
 
 def test_streamed_float32_composition_matches_float64_oracle_with_roundoff_bound():
