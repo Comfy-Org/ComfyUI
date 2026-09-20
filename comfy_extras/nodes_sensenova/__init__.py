@@ -161,7 +161,7 @@ class SenseNovaSamplingOptions(io.ComfyNode):
 
 
 class SenseNovaTextEncode(io.ComfyNode):
-    """Encode SenseNova image or interleave prompts with optional thinking."""
+    """Encode a SenseNova image or interleave prompt."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -169,7 +169,10 @@ class SenseNovaTextEncode(io.ComfyNode):
             node_id="SenseNovaTextEncode",
             display_name="SenseNova Text Encode",
             category="model/conditioning/sensenova",
-            description="Encode a SenseNova prompt with optional image-generation reasoning.",
+            description=(
+                "Encode a SenseNova prompt. Use SenseNova Generate before the "
+                "KSampler when image-generation thinking is required."
+            ),
             inputs=[
                 io.Clip.Input(id="clip"),
                 io.String.Input(id="text", multiline=True, dynamic_prompts=True),
@@ -178,12 +181,14 @@ class SenseNovaTextEncode(io.ComfyNode):
                     options=["image", "interleave"],
                     default="image",
                 ),
-                io.Boolean.Input(id="thinking", default=False),
-                io.Int.Input(
-                    id="max_think_tokens",
-                    default=1024,
-                    min=1,
+                io.Boolean.Input(
+                    id="thinking",
+                    default=False,
                     advanced=True,
+                    tooltip=(
+                        "Set true for T2I/Edit before SenseNova Generate; it also "
+                        "controls interleave thinking."
+                    ),
                 ),
             ],
             outputs=[io.Conditioning.Output()],
@@ -196,21 +201,13 @@ class SenseNovaTextEncode(io.ComfyNode):
         clip,
         text: str,
         thinking: bool,
-        max_think_tokens: int,
         mode: str = "image",
     ) -> io.NodeOutput:
         tokenize_options = {"thinking": thinking}
         if mode == "interleave":
             tokenize_options["mode"] = mode
         tokens = clip.tokenize(text, **tokenize_options)
-        metadata = {
-            "sensenova_thinking": thinking,
-            "sensenova_max_think_tokens": max_think_tokens,
-            "sensenova_thinking_result": {
-                "enabled": thinking,
-                "token_ids": None,
-            },
-        }
+        metadata = {"sensenova_thinking": thinking}
         if mode == "interleave":
             metadata["sensenova_interleave"] = True
         conditioning = clip.encode_from_tokens_scheduled(
@@ -220,55 +217,134 @@ class SenseNovaTextEncode(io.ComfyNode):
         return io.NodeOutput(conditioning)
 
 
-class SenseNovaThinkingPreview(io.ComfyNode):
-    """Display the reasoning tokens produced by SenseNova image sampling."""
+class SenseNovaGenerate(io.ComfyNode):
+    """Generate SenseNova image reasoning before standard image sampling."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
         return io.Schema(
-            node_id="SenseNovaThinkingPreview",
-            display_name="SenseNova Thinking Preview",
+            node_id="SenseNovaGenerate",
+            display_name="SenseNova Generate",
             category="model/sampling/sensenova",
             description=(
-                "Decode the thinking tokens generated while sampling. Connect the "
-                "samples output from the KSampler that uses this conditioning."
+                "Run SenseNova thinking when enabled; otherwise pass conditioning "
+                "through unchanged. Expose reasoning text for Preview as Text and "
+                "connect the conditioning output to the KSampler positive input."
             ),
-            is_output_node=True,
             inputs=[
+                io.Model.Input("model"),
                 io.Clip.Input("clip"),
                 io.Conditioning.Input("conditioning"),
-                io.Latent.Input(
-                    "samples",
-                    tooltip="Ensures this preview runs after the connected KSampler.",
+                io.Int.Input(
+                    "max_think_tokens", default=1024, min=1, max=8192, advanced=True
                 ),
             ],
-            outputs=[io.String.Output(display_name="thinking")],
+            outputs=[
+                io.Conditioning.Output(display_name="conditioning"),
+                io.String.Output(display_name="thinking"),
+            ],
         )
 
     @classmethod
-    def execute(cls, *, clip, conditioning, samples) -> io.NodeOutput:
-        sampled_latent = samples.get("samples") if isinstance(samples, dict) else None
-        thinking_result = None
-        for conditioning_entry in conditioning:
-            metadata = conditioning_entry[1]
-            thinking_result = metadata.get("sensenova_thinking_result")
-            if thinking_result is not None:
-                break
-
-        if thinking_result is None or not thinking_result.get("enabled", False):
-            text = "SenseNova thinking is disabled for this conditioning."
-        elif sampled_latent is None or thinking_result.get("token_ids") is None:
-            text = (
-                "SenseNova thinking has not run. Connect samples from the KSampler "
-                "that uses this conditioning."
+    def execute(
+        cls, *, model, clip, conditioning, max_think_tokens
+    ) -> io.NodeOutput:
+        if not conditioning:
+            return io.NodeOutput(conditioning, "", ui=ui.PreviewText(""))
+        metadata = conditioning[0][1]
+        if metadata.get("sensenova_interleave"):
+            raise ValueError(
+                "SenseNova Generate is for T2I/Edit thinking; use SenseNova Interleave "
+                "for interleaved text and image generation."
             )
-        else:
-            text = clip.decode(
-                thinking_result["token_ids"], skip_special_tokens=True
-            ).strip()
-            if not text:
-                text = "SenseNova thinking completed without visible text."
-        return io.NodeOutput(text, ui=ui.PreviewText(text))
+        if not metadata.get("sensenova_thinking", False):
+            return io.NodeOutput(conditioning, "", ui=ui.PreviewText(""))
+        if len(conditioning) != 1:
+            raise ValueError(
+                "SenseNova Generate requires one positive conditioning entry "
+                "when thinking is enabled."
+            )
+        if metadata.get("text_input_ids") is None:
+            raise ValueError("SenseNova Generate requires SenseNova text conditioning.")
+
+        diffusion_model = model.model.diffusion_model
+        device = model.load_device
+        dtype = diffusion_model.dtype
+        transformer_options = model.model_options.get(
+            "transformer_options", {}
+        ).copy()
+        comfy.model_management.load_models_gpu([model])
+        model.pre_run()
+        try:
+            prefix_args = prefix_arguments(
+                metadata, device, dtype, image_only=False
+            )
+            progress = comfy.utils.ProgressBar(max_think_tokens)
+            prefix_keys, prefix_values, prefix_time, token_ids = (
+                diffusion_model.preprocess_thinking_prefix_with_tokens(
+                    *prefix_args,
+                    max_think_tokens=max_think_tokens,
+                    transformer_options=transformer_options,
+                    progress=progress.update_absolute,
+                    interrupt=comfy.model_management.throw_exception_if_processing_interrupted,
+                )
+            )
+        finally:
+            model.cleanup()
+
+        thinking = _format_thinking_text(
+            clip.decode(token_ids, skip_special_tokens=True)
+        )
+        if not thinking:
+            thinking = "SenseNova thinking completed without visible text."
+
+        updated_conditioning = []
+        for value, original_metadata in conditioning:
+            updated_metadata = dict(original_metadata)
+            # The KV prefix is now complete. Do not let KSampler fall back to
+            # rebuilding the text/reference prefix or run thinking again.
+            for key in (
+                "text_input_ids",
+                "reference_latents",
+                "prefix_indexes",
+                "prefix_mask",
+                "sensenova_thinking",
+                "sensenova_max_think_tokens",
+                "sensenova_thinking_result",
+            ):
+                updated_metadata.pop(key, None)
+            updated_metadata.update(
+                {
+                    "prefix_keys": prefix_keys,
+                    "prefix_values": prefix_values,
+                    "prefix_time": prefix_time,
+                }
+            )
+            updated_conditioning.append([value, updated_metadata])
+
+        return io.NodeOutput(
+            updated_conditioning,
+            thinking,
+            ui=ui.PreviewText(thinking),
+        )
+
+
+def _format_thinking_text(text: str) -> str:
+    """Return a complete SenseNova thinking block for text previews.
+
+    The opening marker is part of the input prompt, while the decoder returns
+    the generated body and the closing marker. Normalize both boundaries here
+    so downstream text previews do not need to infer token-level framing.
+    """
+
+    text = text.strip()
+    if not text:
+        return ""
+    if not text.startswith("<think>"):
+        text = f"<think>\n{text}"
+    if not text.endswith("</think>"):
+        text = f"{text}\n</think>"
+    return text
 
 
 class SenseNovaInterleave(io.ComfyNode):
@@ -456,6 +532,7 @@ class SenseNovaInterleavePreview(io.ComfyNode):
             ui={"text": [markdown], "parts": parts_payload},
         )
 
+
 class SenseNovaExtension(ComfyExtension):
     """Register the native SenseNova node collection."""
 
@@ -463,7 +540,7 @@ class SenseNovaExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
             SenseNovaTextEncode,
-            SenseNovaThinkingPreview,
+            SenseNovaGenerate,
             SenseNovaSamplingOptions,
             SenseNovaInterleave,
             SenseNovaInterleavePreview,

@@ -2388,8 +2388,6 @@ class SenseNovaU15(BaseModel):
             if reference_images is not None:
                 reference_images = comfy.ldm.sensenova.conditioning.preprocess_references(reference_images)
             image_only = kwargs.get("prompt_type") == "negative"
-            thinking = bool(kwargs.get("sensenova_thinking", False)) and not image_only
-            thinking_result = kwargs.get("sensenova_thinking_result")
             indexes = None
             prefix_mask = None
             if reference_images:
@@ -2427,36 +2425,11 @@ class SenseNovaU15(BaseModel):
                     if prefix_mask is not None
                     else None,
                 )
-                if thinking:
-                    max_think_tokens = int(
-                        kwargs.get("sensenova_max_think_tokens", 1024)
+                prefix_keys, prefix_values, prefix_time = (
+                    self.diffusion_model.preprocess_prefix(
+                        *prefix_args,
                     )
-                    progress = comfy.utils.ProgressBar(max_think_tokens)
-                    if isinstance(thinking_result, dict):
-                        prefix_keys, prefix_values, prefix_time, token_ids = (
-                            self.diffusion_model.preprocess_thinking_prefix_with_tokens(
-                                *prefix_args,
-                                max_think_tokens=max_think_tokens,
-                                progress=progress.update_absolute,
-                                interrupt=comfy.model_management.throw_exception_if_processing_interrupted,
-                            )
-                        )
-                        thinking_result["token_ids"] = token_ids
-                    else:
-                        prefix_keys, prefix_values, prefix_time = (
-                            self.diffusion_model.preprocess_thinking_prefix(
-                                *prefix_args,
-                                max_think_tokens=max_think_tokens,
-                                progress=progress.update_absolute,
-                                interrupt=comfy.model_management.throw_exception_if_processing_interrupted,
-                            )
-                        )
-                else:
-                    prefix_keys, prefix_values, prefix_time = (
-                        self.diffusion_model.preprocess_prefix(
-                            *prefix_args,
-                        )
-                    )
+                )
                 out["prefix_keys"] = SenseNovaSharedList(prefix_keys)
                 out["prefix_values"] = SenseNovaSharedList(prefix_values)
                 out["prefix_time"] = SenseNovaSharedRegular(prefix_time)
@@ -2466,18 +2439,6 @@ class SenseNovaU15(BaseModel):
                     out["prefix_mask"] = SenseNovaSharedRegular(prefix_mask)
                     out["reference_images"] = SenseNovaSharedList(reference_images)
                 out["text_input_ids"] = SenseNovaSharedRegular(text_input_ids)
-                if thinking:
-                    out["sensenova_thinking"] = comfy.conds.CONDConstant(True)
-                    out["sensenova_max_think_tokens"] = comfy.conds.CONDConstant(
-                        int(kwargs.get("sensenova_max_think_tokens", 1024))
-                    )
-                    out["sensenova_thinking_interrupt"] = comfy.conds.CONDConstant(
-                        comfy.model_management.throw_exception_if_processing_interrupted
-                    )
-                    if isinstance(thinking_result, dict):
-                        out["sensenova_thinking_result"] = comfy.conds.CONDConstant(
-                            thinking_result
-                        )
         return out
 
     def extra_conds_shapes(self, **kwargs):
@@ -2508,13 +2469,7 @@ class SenseNovaU15(BaseModel):
             else:
                 length = text_input_ids.shape[1]
             out["prefix_mask"] = [1, 1, length, length]
-            image_only = kwargs.get("prompt_type") == "negative"
-            thinking = bool(kwargs.get("sensenova_thinking", False)) and not image_only
-            if kwargs.get("hooks") is None or thinking:
-                if thinking:
-                    length += int(kwargs.get("sensenova_max_think_tokens", 1024))
-                    length += 1
-                    length += len(comfy.ldm.sensenova.model.THINK_SUFFIX_TOKEN_IDS)
+            if kwargs.get("hooks") is None:
                 prefix_shape = [
                     1,
                     comfy.ldm.sensenova.model.NUM_KV_HEADS,

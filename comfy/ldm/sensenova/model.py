@@ -838,10 +838,6 @@ class SenseNovaU15(nn.Module):
         prefix_keys=None,
         prefix_values=None,
         prefix_time=None,
-        sensenova_thinking=False,
-        sensenova_max_think_tokens=1024,
-        sensenova_thinking_result=None,
-        sensenova_thinking_interrupt=None,
         **kwargs,
     ):
         if text_input_ids is None and prefix_keys is None:
@@ -850,6 +846,8 @@ class SenseNovaU15(nn.Module):
         original_height, original_width = x.shape[-2:]
         x = _pad_to_merged_patch_size(x)
         batch, _, height, width = x.shape
+        # Text thinking is completed by SenseNovaGenerate before sampling.
+        # KSampler only consumes a regular or precomputed KV prefix here.
         if prefix_keys is None:
             text_input_ids, prefix_indexes, prefix_mask = _match_prefix_batch(
                 batch, text_input_ids, prefix_indexes, prefix_mask
@@ -890,33 +888,7 @@ class SenseNovaU15(nn.Module):
         image = image + time_embedding[:, None, :]
 
         if prefix_keys is None:
-            if sensenova_thinking:
-                if isinstance(sensenova_thinking_result, dict):
-                    prefix_keys, prefix_values, prefix_time, token_ids = (
-                        self.preprocess_thinking_prefix_with_tokens(
-                            text_input_ids,
-                            reference_images,
-                            prefix_indexes,
-                            prefix_mask,
-                            max_think_tokens=sensenova_max_think_tokens,
-                            transformer_options=transformer_options,
-                            interrupt=sensenova_thinking_interrupt,
-                        )
-                    )
-                    sensenova_thinking_result["token_ids"] = token_ids
-                else:
-                    prefix_keys, prefix_values, prefix_time = (
-                        self.preprocess_thinking_prefix(
-                            text_input_ids,
-                            reference_images,
-                            prefix_indexes,
-                            prefix_mask,
-                            max_think_tokens=sensenova_max_think_tokens,
-                            transformer_options=transformer_options,
-                            interrupt=sensenova_thinking_interrupt,
-                        )
-                    )
-            else:
+            if text_input_ids is not None:
                 prefix, prefix_indexes, prefix_mask, prefix_time = self._prepare_prefix(
                     text_input_ids, reference_images, prefix_indexes, prefix_mask
                 )

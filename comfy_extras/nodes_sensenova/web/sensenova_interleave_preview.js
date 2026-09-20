@@ -44,21 +44,6 @@ const STYLE_CSS = `
     color: var(--descrip-text, #888);
     font-style: italic;
 }
-.sn-thinking-preview {
-    min-height: 96px;
-    padding: 10px;
-    box-sizing: border-box;
-    overflow: auto;
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    font-size: 13px;
-    line-height: 1.6;
-    color: var(--input-text, #ddd);
-    background: var(--comfy-input-bg, #1e1e1e);
-    border: 1px solid var(--border-color, #333);
-    border-radius: 6px;
-    white-space: pre-wrap;
-    word-break: break-word;
-}
 `;
 
 function ensureStyles() {
@@ -131,49 +116,9 @@ function renderParts(container, parts) {
     }
 }
 
-function previewText(message) {
-    if (Array.isArray(message?.text)) return message.text.join("\n");
-    if (typeof message?.text === "string") return message.text;
-    return "";
-}
-
-function registerThinkingPreview(nodeType) {
-    const onNodeCreated = nodeType.prototype.onNodeCreated;
-    nodeType.prototype.onNodeCreated = function () {
-        const result = onNodeCreated?.apply(this, arguments);
-        const container = document.createElement("div");
-        container.className = "sn-thinking-preview sn-interleave-placeholder";
-        container.textContent = "Thinking preview will appear here after execution.";
-        this.addDOMWidget?.("preview", "thinking_preview", container, {
-            serialize: false,
-            hideOnZoom: false,
-        });
-        this._snThinkingContainer = container;
-        return result;
-    };
-
-    const onExecuted = nodeType.prototype.onExecuted;
-    nodeType.prototype.onExecuted = function (message) {
-        onExecuted?.apply(this, arguments);
-        if (!this._snThinkingContainer) return;
-        const text = previewText(message);
-        this._snThinkingContainer.textContent = text || "(no thinking output)";
-        this._snThinkingContainer.classList.toggle(
-            "sn-interleave-placeholder",
-            !text,
-        );
-        this.setDirtyCanvas?.(true, true);
-    };
-}
-
 app.registerExtension({
     name: "sensenova.interleave_preview",
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData?.name === "SenseNovaThinkingPreview") {
-            ensureStyles();
-            registerThinkingPreview(nodeType);
-            return;
-        }
         if (nodeData?.name !== "SenseNovaInterleavePreview") return;
         ensureStyles();
 
