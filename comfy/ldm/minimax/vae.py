@@ -564,8 +564,8 @@ class MiniMaxH3VideoVAE(nn.Module):
                 raise ValueError("MiniMax H3 VAE tile plan has an invalid tile extent")
             if i > 0:
                 previous_end = starts[i - 1] + lengths[i - 1]
-                if start <= starts[i - 1] or start > previous_end:
-                    raise ValueError("MiniMax H3 VAE tile plan must advance without gaps")
+                if start <= starts[i - 1] or previous_end - start != overlaps[i - 1]:
+                    raise ValueError("MiniMax H3 VAE tile plan has inconsistent overlap geometry")
 
         raw_weights = []
         denominator = torch.zeros(axis_length, dtype=torch.float32, device=device)
