@@ -106,6 +106,7 @@ class PassOrNoneNode(io.ComfyNode):
             inputs=[
                 io.Autogrow.Input(
                     "values",
+                    optional=True,
                     template=autogrow_template,
                 ),
             ],
