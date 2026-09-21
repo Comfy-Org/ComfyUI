@@ -566,7 +566,8 @@ def _preflight_settle_target(dest_abs: str) -> _SettleTargetPreflight | None:
         try:
             signature = _file_signature(dest_abs)
         except OSError:
-            return None
+            # isfile already saw the file, so a failed stat is stale, not absent.
+            raise _PreflightStale from None
         if (
             existing.hash is not None
             and existing.size_bytes == signature.size_bytes

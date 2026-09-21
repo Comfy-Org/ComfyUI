@@ -656,6 +656,111 @@ def test_upload_unhashed_row_at_destination_is_not_retired(
                 os.unlink(path)
 
 
+_SETTLE_ATTEMPTS = 4
+
+
+def _stat_failing_signature(path: str, failures: int):
+    """Fail the first ``failures`` stats of ``path``, leaving every other call alone."""
+    real_file_signature = ingest_module._file_signature
+    stats = 0
+
+    def _signature(candidate: str):
+        nonlocal stats
+        if candidate == path:
+            stats += 1
+            if stats <= failures:
+                raise OSError(errno.EIO, "injected stat failure")
+        return real_file_signature(candidate)
+
+    return _signature
+
+
+def test_upload_retries_a_failed_destination_stat_and_adopts_the_incumbent(
+    mock_create_session, hashing_on, monkeypatch
+):
+    payload = b"upload-transient-stat-bytes"
+    probe = _write_temp(payload)
+    digest = _digest_of(probe)
+    os.unlink(probe)
+    stored_hash = to_stored_hash(digest)
+    output_dir = folder_paths.get_output_directory()
+    os.makedirs(output_dir, exist_ok=True)
+    dest = os.path.join(output_dir, f"{digest}.bin")
+    temp = _write_temp(payload)
+    try:
+        with open(dest, "wb") as file:
+            file.write(payload)
+        with mock_create_session() as session:
+            content_id, record_id = _seed_live_content(session, dest, None)
+        monkeypatch.setattr(
+            ingest_module, "_file_signature", _stat_failing_signature(dest, failures=1)
+        )
+
+        result = upload_from_temp_path(
+            temp_path=temp, name="up.bin", tags=["output"], client_filename="up.bin"
+        )
+
+        assert result.asset.hash == stored_hash
+        assert result.content_id == content_id, (
+            "the retried stat settles the destination, so the incumbent row carries "
+            "the hash this upload looks up and is reused rather than replaced"
+        )
+        with mock_create_session() as session:
+            content = session.get(AssetContent, content_id)
+            assert content is not None
+            assert content.is_missing is False
+            assert content.hash == stored_hash
+            assert _is_missing_tagged(session, record_id) is False
+    finally:
+        for path in (temp, dest):
+            if os.path.exists(path):
+                os.unlink(path)
+
+
+def test_upload_refuses_publication_when_the_destination_stat_never_recovers(
+    mock_create_session, hashing_on, monkeypatch
+):
+    payload = b"upload-unreadable-destination"
+    probe = _write_temp(payload)
+    digest = _digest_of(probe)
+    os.unlink(probe)
+    output_dir = folder_paths.get_output_directory()
+    os.makedirs(output_dir, exist_ok=True)
+    dest = os.path.join(output_dir, f"{digest}.bin")
+    incumbent = b"Y" * len(payload)
+    temp = _write_temp(payload)
+    try:
+        with open(dest, "wb") as file:
+            file.write(incumbent)
+        with mock_create_session() as session:
+            content_id, record_id = _seed_live_content(session, dest, None)
+        monkeypatch.setattr(
+            ingest_module,
+            "_file_signature",
+            _stat_failing_signature(dest, failures=_SETTLE_ATTEMPTS),
+        )
+
+        with pytest.raises(UploadUnstableError):
+            upload_from_temp_path(
+                temp_path=temp, name="up.bin", tags=["output"], client_filename="up.bin"
+            )
+
+        assert open(dest, "rb").read() == incumbent, (
+            "publication is refused before the move, so the bytes the incumbent row "
+            "describes are still on disk"
+        )
+        with mock_create_session() as session:
+            content = session.get(AssetContent, content_id)
+            assert content is not None
+            assert content.is_missing is False
+            assert content.hash is None
+            assert _is_missing_tagged(session, record_id) is False
+    finally:
+        for path in (temp, dest):
+            if os.path.exists(path):
+                os.unlink(path)
+
+
 def test_upload_unhashed_destination_holding_other_bytes_is_retired(
     mock_create_session, hashing_on
 ):
