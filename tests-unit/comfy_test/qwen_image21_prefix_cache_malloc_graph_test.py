@@ -1,8 +1,13 @@
 import torch
 
-import comfy.model_prefetch
-import comfy.ops
-from comfy.ldm.qwen_image21.model import PoseBranchCache, QwenImage21Transformer2DModel
+from comfy.cli_args import args
+
+if not torch.cuda.is_available():
+    args.cpu = True
+
+import comfy.model_prefetch  # noqa: E402
+import comfy.ops  # noqa: E402
+from comfy.ldm.qwen_image21.model import PoseBranchCache, QwenImage21Transformer2DModel  # noqa: E402
 
 
 class _RecordingPause:
