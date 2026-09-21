@@ -20,7 +20,7 @@ jobs:
       git_tag: ${{ inputs.git_tag }}
       cache_tag: "cu130"
       python_minor: "13"
-      python_patch: "12"
+      python_patch: "14"
       rel_name: "nvidia"
       rel_extra_name: ""
       test_release: true
@@ -71,7 +71,7 @@ jobs:
       git_tag: ${{ inputs.git_tag }}
       cache_tag: "xpu"
       python_minor: "13"
-      python_patch: "12"
+      python_patch: "14"
       rel_name: "intel"
       rel_extra_name: ""
       test_release: true

@@ -9,6 +9,7 @@ from typing import Any
 import folder_paths
 
 logger = logging.getLogger(__name__)
+_SENSITIVE_HEADERS = {"authorization", "x-api-key"}
 
 
 def get_log_directory():
@@ -73,6 +74,10 @@ def _format_data_for_logging(data: Any) -> str:
     return str(data)
 
 
+def _redact_headers(headers: dict) -> dict:
+    return {k: ("***" if k.lower() in _SENSITIVE_HEADERS else v) for k, v in headers.items()}
+
+
 def log_request_response(
     operation_id: str,
     request_method: str,
@@ -101,7 +106,7 @@ def log_request_response(
         log_content.append(f"Method: {request_method}")
         log_content.append(f"URL: {request_url}")
         if request_headers:
-            log_content.append(f"Headers:\n{_format_data_for_logging(request_headers)}")
+            log_content.append(f"Headers:\n{_format_data_for_logging(_redact_headers(request_headers))}")
         if request_params:
             log_content.append(f"Params:\n{_format_data_for_logging(request_params)}")
         if request_data is not None:

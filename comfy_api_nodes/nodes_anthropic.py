@@ -28,6 +28,11 @@ ANTHROPIC_IMAGE_MAX_PIXELS = 1568 * 1568
 CLAUDE_MAX_IMAGES = 20
 
 CLAUDE_MODELS: dict[str, str] = {
+    "Opus 5": "claude-opus-5",
+    "Opus 4.8": "claude-opus-4-8",
+    "Fable 5.1": "claude-fable-5-1",
+    "Fable 5": "claude-fable-5",
+    "Sonnet 5": "claude-sonnet-5",
     "Opus 4.7": "claude-opus-4-7",
     "Opus 4.6": "claude-opus-4-6",
     "Sonnet 4.6": "claude-sonnet-4-6",
@@ -36,9 +41,14 @@ CLAUDE_MODELS: dict[str, str] = {
 }
 
 _THINKING_UNSUPPORTED = {"Haiku 4.5"}
-# Models that use the newer "adaptive" thinking mode (Opus 4.7 requires it; older models keep the explicit budget API).
+# Models that use the newer "adaptive" thinking mode (Opus 4.7+ require it; older models keep the explicit budget API).
 # Anthropic decides the actual budget when adaptive is used, based on the `output_config.effort` hint.
-_ADAPTIVE_THINKING_MODELS = {"Opus 4.7", "Opus 4.6", "Sonnet 4.6"}
+_ADAPTIVE_THINKING_MODELS = {"Opus 4.8", "Sonnet 5", "Opus 4.7", "Opus 4.6", "Sonnet 4.6"}
+_ALWAYS_THINKING_MODELS = {"Opus 5", "Fable 5.1", "Fable 5"}
+_XHIGH_EFFORT_MODELS = {"Opus 5", "Opus 4.8", "Fable 5.1", "Fable 5", "Sonnet 5", "Opus 4.7"}
+_MAX_EFFORT_MODELS = _XHIGH_EFFORT_MODELS | {"Opus 4.6", "Sonnet 4.6"}
+_EXPLICIT_THINKING_OFF_MODELS = {"Sonnet 5"}
+_NO_TEMPERATURE_MODELS = {"Opus 5", "Opus 4.8", "Fable 5.1", "Fable 5", "Sonnet 5"}
 
 # Budget mode (Sonnet 4.5): effort -> reasoning budget in tokens. Must be < max_tokens.
 # Sized so even the "high" budget fits comfortably under the default max_tokens=32768.
@@ -48,6 +58,17 @@ _REASONING_BUDGET: dict[str, int] = {
     "high": 16384,
 }
 _REASONING_EFFORTS = ["off", "low", "medium", "high"]
+
+
+def _reasoning_effort_options(model_label: str) -> list[str]:
+    options = list(_REASONING_EFFORTS)
+    if model_label in _ALWAYS_THINKING_MODELS:
+        options.remove("off")
+    if model_label in _XHIGH_EFFORT_MODELS:
+        options.append("xhigh")
+    if model_label in _MAX_EFFORT_MODELS:
+        options.append("max")
+    return options
 
 
 def _claude_model_inputs(model_label: str):
@@ -60,67 +81,43 @@ def _claude_model_inputs(model_label: str):
             tooltip="Maximum number of tokens to generate (includes reasoning tokens when enabled).",
             advanced=True,
         ),
-        IO.Float.Input(
-            "temperature",
-            default=1.0,
-            min=0.0,
-            max=1.0,
-            step=0.01,
-            tooltip=(
-                "Controls randomness. 0.0 is deterministic, 1.0 is most random. "
-                "Ignored for Opus 4.7 and any model when reasoning_effort is set."
-            ),
-            advanced=True,
-        ),
     ]
-    if model_label not in _THINKING_UNSUPPORTED:
+    if model_label not in _NO_TEMPERATURE_MODELS:
+        inputs.append(
+            IO.Float.Input(
+                "temperature",
+                default=1.0,
+                min=0.0,
+                max=1.0,
+                step=0.01,
+                tooltip=(
+                    "Controls randomness. 0.0 is deterministic, 1.0 is most random. "
+                    "Ignored for Opus 4.7 and any model when reasoning_effort is set."
+                ),
+                advanced=True,
+            )
+        )
+    if model_label in _ALWAYS_THINKING_MODELS:
         inputs.append(
             IO.Combo.Input(
                 "reasoning_effort",
-                options=_REASONING_EFFORTS,
+                options=_reasoning_effort_options(model_label),
+                default="high",
+                tooltip="Extended thinking effort. Reasoning is always enabled for this model.",
+                advanced=True,
+            )
+        )
+    elif model_label not in _THINKING_UNSUPPORTED:
+        inputs.append(
+            IO.Combo.Input(
+                "reasoning_effort",
+                options=_reasoning_effort_options(model_label),
                 default="off",
                 tooltip="Extended thinking effort. 'off' disables reasoning.",
                 advanced=True,
             )
         )
     return inputs
-
-
-def _model_price_per_million(model: str) -> tuple[float, float] | None:
-    """Return (input_per_1M, output_per_1M) USD for a Claude model, or None if unknown."""
-    if "opus-4-7" in model or "opus-4-6" in model or "opus-4-5" in model:
-        return 5.0, 25.0
-    if "sonnet-4" in model:
-        return 3.0, 15.0
-    if "haiku-4-5" in model:
-        return 1.0, 5.0
-    return None
-
-
-def calculate_tokens_price(response: AnthropicMessagesResponse) -> float | None:
-    """Compute approximate USD price from response usage. Server-side billing is authoritative."""
-    if not response.usage or not response.model:
-        return None
-    rates = _model_price_per_million(response.model)
-    if rates is None:
-        return None
-    input_rate, output_rate = rates
-    input_tokens = response.usage.input_tokens or 0
-    output_tokens = response.usage.output_tokens or 0
-    cache_read = response.usage.cache_read_input_tokens or 0
-    cache_5m = 0
-    cache_1h = 0
-    if response.usage.cache_creation:
-        cache_5m = response.usage.cache_creation.ephemeral_5m_input_tokens or 0
-        cache_1h = response.usage.cache_creation.ephemeral_1h_input_tokens or 0
-    total = (
-        input_tokens * input_rate
-        + output_tokens * output_rate
-        + cache_read * input_rate * 0.1
-        + cache_5m * input_rate * 1.25
-        + cache_1h * input_rate * 2.0
-    )
-    return total / 1_000_000.0
 
 
 def _get_text_from_response(response: AnthropicMessagesResponse) -> str:
@@ -213,7 +210,27 @@ class ClaudeNode(IO.ComfyNode):
                 expr="""
                 (
                   $m := widgets.model;
-                  $contains($m, "opus") ? {
+                  $contains($m, "fable") ? {
+                    "type": "list_usd",
+                    "usd": [0.0143, 0.0715],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                  : $contains($m, "opus 4.8") ? {
+                    "type": "list_usd",
+                    "usd": [0.00715, 0.03575],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                  : $contains($m, "sonnet 5") ? {
+                    "type": "list_usd",
+                    "usd": [0.00286, 0.0143],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                  : $contains($m, "opus 5") ? {
+                    "type": "list_usd",
+                    "usd": [0.00715, 0.03575],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                  : $contains($m, "opus") ? {
                     "type": "list_usd",
                     "usd": [0.005, 0.025],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
@@ -247,18 +264,23 @@ class ClaudeNode(IO.ComfyNode):
         model_label = model["model"]
         max_tokens = model.get("max_tokens", 32768)
         reasoning_effort = model.get("reasoning_effort", "off")
-        thinking_enabled = reasoning_effort not in ("off", None) and model_label not in _THINKING_UNSUPPORTED
+        always_thinking = model_label in _ALWAYS_THINKING_MODELS
+        thinking_enabled = always_thinking or (
+            reasoning_effort not in ("off", None) and model_label not in _THINKING_UNSUPPORTED
+        )
 
         # Anthropic requires temperature to be unset (defaults to 1.0) when thinking is enabled.
         # Opus 4.7 also rejects user-supplied temperature.
-        if thinking_enabled or model_label == "Opus 4.7":
+        if model_label in _NO_TEMPERATURE_MODELS or thinking_enabled or model_label == "Opus 4.7":
             temperature = None
         else:
             temperature = model.get("temperature", 1.0)
 
         thinking_cfg: AnthropicThinkingConfig | None = None
         output_cfg: AnthropicOutputConfig | None = None
-        if thinking_enabled:
+        if always_thinking:
+            output_cfg = AnthropicOutputConfig(effort=reasoning_effort)
+        elif thinking_enabled:
             if model_label in _ADAPTIVE_THINKING_MODELS:
                 # Adaptive mode - Anthropic chooses the budget based on effort hint
                 thinking_cfg = AnthropicThinkingConfig(type="adaptive")
@@ -268,6 +290,8 @@ class ClaudeNode(IO.ComfyNode):
                 budget = _REASONING_BUDGET[reasoning_effort]
                 budget = min(budget, max(1024, max_tokens - 1024))
                 thinking_cfg = AnthropicThinkingConfig(type="enabled", budget_tokens=budget)
+        elif model_label in _EXPLICIT_THINKING_OFF_MODELS:
+            thinking_cfg = AnthropicThinkingConfig(type="disabled")
 
         image_tensors: list[Input.Image] = [t for t in (images or {}).values() if t is not None]
         if sum(get_number_of_images(t) for t in image_tensors) > CLAUDE_MAX_IMAGES:
@@ -291,8 +315,12 @@ class ClaudeNode(IO.ComfyNode):
                 thinking=thinking_cfg,
                 output_config=output_cfg,
             ),
-            price_extractor=calculate_tokens_price,
         )
+        if response.stop_reason == "refusal":
+            raise ValueError(
+                "Claude declined to answer this request for safety reasons. "
+                "Rephrase the prompt or try a different model."
+            )
         return IO.NodeOutput(_get_text_from_response(response) or "Empty response from Claude model.")
 
 

@@ -197,6 +197,9 @@ class PixDiT_T2I(nn.Module):
         """Hook for subclasses to inject per-block state into the patch stream (e.g. PiD's LQ gate)."""
         return s
 
+    def _pre_pixel_blocks(self, s, **kwargs):
+        return s
+
     def _forward(self, x, timesteps, context=None, attention_mask=None, transformer_options={}, **kwargs):
         H_orig, W_orig = x.shape[2], x.shape[3]
         x = comfy.ldm.common_dit.pad_to_patch_size(x, (self.patch_size, self.patch_size))
@@ -226,6 +229,7 @@ class PixDiT_T2I(nn.Module):
             s, y_emb = blk(s, y_emb, condition, pos_img, pos_txt, None, transformer_options=transformer_options)
         s = F.silu(t_emb + s)
 
+        s = self._pre_pixel_blocks(s, **kwargs)
         s_cond = s.view(B * L, self.hidden_size)
         x_pixels = self.pixel_embedder(x, patch_size=self.patch_size)
         for blk in self.pixel_blocks:

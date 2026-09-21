@@ -1,3 +1,10 @@
+"""Parses and validates everything the asset API accepts from a client, so
+handlers receive typed values instead of raw JSON. Query strings, JSON bodies
+and multipart upload specs each get a model that rejects malformed input at the
+boundary, normalizes tags and hashes, and raises errors already carrying the
+HTTP status and code the handler should return.
+"""
+
 import json
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -50,12 +57,13 @@ class ParsedUpload:
 
 
 class ListAssetsQuery(BaseModel):
-    include_tags: list[str] = Field(default_factory=list)
-    exclude_tags: list[str] = Field(default_factory=list)
+    # Deprecated spellings: include_tags ≡ tags_all, exclude_tags ≡ tags_none.
+    include_tags: list[str] = Field(default_factory=list, deprecated=True)
+    exclude_tags: list[str] = Field(default_factory=list, deprecated=True)
+    tags_all: list[str] = Field(default_factory=list)
+    tags_any: list[str] = Field(default_factory=list)
+    tags_none: list[str] = Field(default_factory=list)
     name_contains: str | None = None
-
-    # Accept either a JSON string (query param) or a dict
-    metadata_filter: dict[str, Any] | None = None
 
     limit: conint(ge=1, le=500) = 20
     offset: conint(ge=0) = 0
@@ -70,7 +78,10 @@ class ListAssetsQuery(BaseModel):
     )
     order: Literal["asc", "desc"] = "desc"
 
-    @field_validator("include_tags", "exclude_tags", mode="before")
+    @field_validator(
+        "include_tags", "exclude_tags", "tags_all", "tags_any", "tags_none",
+        mode="before",
+    )
     @classmethod
     def _split_csv_tags(cls, v):
         # Accept "a,b,c" or ["a","b"] (we are liberal in what we accept)
@@ -85,22 +96,6 @@ class ListAssetsQuery(BaseModel):
                     out.extend([t.strip() for t in item.split(",") if t.strip()])
             return out
         return v
-
-    @field_validator("metadata_filter", mode="before")
-    @classmethod
-    def _parse_metadata_json(cls, v):
-        if v is None or isinstance(v, dict):
-            return v
-        if isinstance(v, str) and v.strip():
-            try:
-                parsed = json.loads(v)
-            except Exception as e:
-                raise ValueError(f"metadata_filter must be JSON: {e}") from e
-            if not isinstance(parsed, dict):
-                raise ValueError("metadata_filter must be a JSON object")
-            return parsed
-        return None
-
 
 class UpdateAssetBody(BaseModel):
     name: str | None = None
@@ -140,7 +135,7 @@ class CreateFromHashBody(BaseModel):
         if v is None:
             return []
         if isinstance(v, list):
-            out = [str(t).strip().lower() for t in v if str(t).strip()]
+            out = [str(t).strip() for t in v if str(t).strip()]
             seen = set()
             dedup = []
             for t in out:
@@ -149,18 +144,24 @@ class CreateFromHashBody(BaseModel):
                     dedup.append(t)
             return dedup
         if isinstance(v, str):
-            return [t.strip().lower() for t in v.split(",") if t.strip()]
+            return list(dict.fromkeys(t.strip() for t in v.split(",") if t.strip()))
         return []
 
 
 class TagsRefineQuery(BaseModel):
-    include_tags: list[str] = Field(default_factory=list)
-    exclude_tags: list[str] = Field(default_factory=list)
+    # Deprecated spellings: include_tags ≡ tags_all, exclude_tags ≡ tags_none.
+    include_tags: list[str] = Field(default_factory=list, deprecated=True)
+    exclude_tags: list[str] = Field(default_factory=list, deprecated=True)
+    tags_all: list[str] = Field(default_factory=list)
+    tags_any: list[str] = Field(default_factory=list)
+    tags_none: list[str] = Field(default_factory=list)
     name_contains: str | None = None
-    metadata_filter: dict[str, Any] | None = None
     limit: conint(ge=1, le=1000) = 100
 
-    @field_validator("include_tags", "exclude_tags", mode="before")
+    @field_validator(
+        "include_tags", "exclude_tags", "tags_all", "tags_any", "tags_none",
+        mode="before",
+    )
     @classmethod
     def _split_csv_tags(cls, v):
         if v is None:
@@ -174,22 +175,6 @@ class TagsRefineQuery(BaseModel):
                     out.extend([t.strip() for t in item.split(",") if t.strip()])
             return out
         return v
-
-    @field_validator("metadata_filter", mode="before")
-    @classmethod
-    def _parse_metadata_json(cls, v):
-        if v is None or isinstance(v, dict):
-            return v
-        if isinstance(v, str) and v.strip():
-            try:
-                parsed = json.loads(v)
-            except Exception as e:
-                raise ValueError(f"metadata_filter must be JSON: {e}") from e
-            if not isinstance(parsed, dict):
-                raise ValueError("metadata_filter must be a JSON object")
-            return parsed
-        return None
-
 
 class TagsListQuery(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
@@ -206,7 +191,7 @@ class TagsListQuery(BaseModel):
         if v is None:
             return v
         v = v.strip()
-        return v.lower() or None
+        return v or None
 
 
 class TagsAdd(BaseModel):
@@ -220,7 +205,7 @@ class TagsAdd(BaseModel):
         for t in v:
             if not isinstance(t, str):
                 raise TypeError("tags must be strings")
-            tnorm = t.strip().lower()
+            tnorm = t.strip()
             if tnorm:
                 out.append(tnorm)
         seen = set()
@@ -239,8 +224,8 @@ class TagsRemove(TagsAdd):
 class UploadAssetSpec(BaseModel):
     """Upload Asset operation.
 
-    - tags: optional list; if provided, first is root ('models'|'input'|'output');
-            if root == 'models', second must be a valid category
+    - tags: labels plus one destination role ('models'|'input'|'output') for new bytes;
+            if role == 'models', exactly one model_type:<folder_name> tag is required
     - name: display name
     - user_metadata: arbitrary JSON object (optional)
     - hash: optional canonical 'blake3:<hex>' for validation / fast-path
@@ -309,7 +294,7 @@ class UploadAssetSpec(BaseModel):
         norm = []
         seen = set()
         for t in items:
-            tnorm = str(t).strip().lower()
+            tnorm = str(t).strip()
             if tnorm and tnorm not in seen:
                 seen.add(tnorm)
                 norm.append(tnorm)
@@ -335,14 +320,4 @@ class UploadAssetSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_order(self):
-        if not self.tags:
-            raise ValueError("at least one tag is required for uploads")
-        root = self.tags[0]
-        if root not in {"models", "input", "output"}:
-            raise ValueError("first tag must be one of: models, input, output")
-        if root == "models":
-            if len(self.tags) < 2:
-                raise ValueError(
-                    "models uploads require a category tag as the second tag"
-                )
         return self

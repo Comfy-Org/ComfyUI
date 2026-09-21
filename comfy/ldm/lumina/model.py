@@ -6,6 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import comfy.ldm.common_dit
+import comfy.model_management
+import comfy.ops
+import comfy.quant_ops
 
 from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder
 from comfy.ldm.modules.attention import optimized_attention_masked
@@ -97,6 +100,7 @@ class JointAttention(nn.Module):
         self.n_local_kv_heads = self.n_kv_heads
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = dim // n_heads
+        self.qk_norm = qk_norm
 
         self.qkv = operation_settings.get("operations").Linear(
             dim,
@@ -151,10 +155,21 @@ class JointAttention(nn.Module):
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
-        xq = self.q_norm(xq)
-        xk = self.k_norm(xk)
-
-        xq, xk = apply_rope(xq, xk, freqs_cis)
+        if self.qk_norm and not comfy.model_management.in_training:
+            q_scale, _, q_offload_stream = comfy.ops.cast_bias_weight(self.q_norm, xq, offloadable=True)
+            k_scale, _, k_offload_stream = comfy.ops.cast_bias_weight(self.k_norm, xk, offloadable=True)
+            epsilon = self.q_norm.eps if self.q_norm.eps is not None else torch.finfo(torch.float32).eps
+            if self.n_local_heads == self.n_local_kv_heads:
+                xq, xk = comfy.quant_ops.ck.rms_rope(xq, xk, freqs_cis, q_scale, k_scale, epsilon)
+            else:
+                xq = comfy.quant_ops.ck.rms_rope1(xq, freqs_cis, q_scale, epsilon)
+                xk = comfy.quant_ops.ck.rms_rope1(xk, freqs_cis, k_scale, epsilon)
+            comfy.ops.uncast_bias_weight(self.q_norm, q_scale, None, q_offload_stream)
+            comfy.ops.uncast_bias_weight(self.k_norm, k_scale, None, k_offload_stream)
+        else:
+            xq = self.q_norm(xq)
+            xk = self.k_norm(xk)
+            xq, xk = apply_rope(xq, xk, freqs_cis)
 
         n_rep = self.n_local_heads // self.n_local_kv_heads
         if n_rep >= 1:

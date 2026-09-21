@@ -416,20 +416,21 @@ class MaskPreview(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="MaskPreview",
-            search_aliases=["show mask", "view mask", "inspect mask", "debug mask"],
+            search_aliases=["preview", "preview mask", "show mask", "view mask", "inspect mask", "debug mask"],
             display_name="Preview Mask",
             category="image/mask",
-            description="Saves the input images to your ComfyUI output directory.",
+            description="Preview the masks without saving them to the ComfyUI output directory.",
             inputs=[
                 IO.Mask.Input("mask"),
             ],
             hidden=[IO.Hidden.prompt, IO.Hidden.extra_pnginfo],
             is_output_node=True,
+            outputs=[IO.Mask.Output(display_name="mask")]
         )
 
     @classmethod
     def execute(cls, mask, filename_prefix="ComfyUI") -> IO.NodeOutput:
-        return IO.NodeOutput(ui=UI.PreviewMask(mask))
+        return IO.NodeOutput(mask, ui=UI.PreviewMask(mask))
 
 
 class MaskExtension(ComfyExtension):

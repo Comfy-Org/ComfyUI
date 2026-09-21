@@ -9,14 +9,14 @@ import torch
 
 from comfy.cli_args import args
 
-def _add_to_bucket(module, buckets, size, priority):
+def _add_to_bucket(module, module_pin, buckets, size, priority):
     bucket = buckets.setdefault(size, [])
     entry = [-priority, 0, module]
     entry[1] = id(entry)
     bisect.insort(bucket, entry)
-    module._pin_balancer_entry = entry
+    module_pin["balancer_entry"] = entry
 
-def _steal_pin(module, stack, buckets, size, priority):
+def _steal_pin(module, stack, buckets, size, priority, subset):
     bucket = buckets.get(size)
     if bucket is None:
         return False
@@ -31,22 +31,27 @@ def _steal_pin(module, stack, buckets, size, priority):
         return False
 
     *_, victim = bucket.pop()
-    module._pin = victim._pin
-    module._pin_registered = victim._pin_registered
-    module._pin_stack_index = victim._pin_stack_index
-    stack[module._pin_stack_index] = (module, stack[module._pin_stack_index][1])
+    module_pin = module._pins[subset]
+    victim_pin = victim._pins[subset]
+    module_pin["pin"] = victim_pin["pin"]
+    module_pin["registered"] = victim_pin["registered"]
+    module_pin["stack_index"] = victim_pin["stack_index"]
+    stack_index = module_pin["stack_index"]
+    stack[stack_index] = (module, stack[stack_index][1])
 
-    victim._pin_registered = False
-    del victim._pin
-    del victim._pin_stack_index
-    del victim._pin_balancer_entry
+    victim_pin["registered"] = False
+    del victim_pin["pin"]
+    del victim_pin["stack_index"]
+    del victim_pin["balancer_entry"]
 
-    _add_to_bucket(module, buckets, size, priority)
+    _add_to_bucket(module, module_pin, buckets, size, priority)
     return True
 
 def get_pin(module, subset="weights"):
-    pin = getattr(module, "_pin", None)
-    if pin is None or module._pin_registered or args.disable_pinned_memory:
+    pins = module.__dict__.get("_pins")
+    module_pin = None if pins is None else pins.get(subset)
+    pin = None if module_pin is None else module_pin.get("pin")
+    if pin is None or module_pin["registered"] or args.disable_pinned_memory:
         return pin
 
     _, _, stack_split, pinned_size, *_ = module._pin_state[subset]
@@ -57,8 +62,8 @@ def get_pin(module, subset="weights"):
         comfy.model_management.discard_cuda_async_error()
         return pin
 
-    module._pin_registered = True
-    stack_split[0] = max(stack_split[0], module._pin_stack_index)
+    module_pin["registered"] = True
+    stack_split[0] = max(stack_split[0], module_pin["stack_index"])
     comfy.model_management.TOTAL_PINNED_MEMORY += size
     pinned_size[0] += size
     return pin
@@ -72,23 +77,27 @@ def pin_memory(module, subset="weights", size=None):
     if pin is not None:
         return
 
+    pins = module.__dict__.setdefault("_pins", {})
+    module_pin = pins.setdefault(subset, {})
     hostbuf, stack, stack_split, pinned_size, counter, buckets = pin_state[subset]
     if size is None:
         size = comfy.memory_management.vram_aligned_size([ module.weight, module.bias ])
-    offset = hostbuf.size
     registerable_size = size
-    priority = getattr(module, "_pin_balancer_priority", None)
+    loaded = subset.endswith("-loaded")
+    fast = subset.endswith("-fast")
+    priority = module_pin.get("balancer_priority")
 
     if priority is None:
         priority = comfy.utils.bit_reverse_range(counter[0], 16)
         counter[0] += 1
-        module._pin_balancer_priority = priority
+        module_pin["balancer_priority"] = priority
 
     comfy.memory_management.extra_ram_release(comfy.memory_management.RAM_CACHE_HEADROOM)
-    if (not comfy.model_management.ensure_pin_budget(size) or
-        not comfy.model_management.ensure_pin_registerable(registerable_size)):
-        return _steal_pin(module, stack, buckets, size, priority)
+    if (not comfy.model_management.ensure_pin_budget(size, loaded=loaded) or
+        not comfy.model_management.ensure_pin_registerable(registerable_size, evict_active=not fast)):
+        return _steal_pin(module, stack, buckets, size, priority, subset)
 
+    offset = hostbuf.size
     extended = False
     try:
         hostbuf.extend(size=size, register=False)
@@ -97,23 +106,23 @@ def pin_memory(module, subset="weights", size=None):
         pin.untyped_storage()._comfy_hostbuf = hostbuf
         if torch.cuda.cudart().cudaHostRegister(pin.data_ptr(), size, 1) != 0:
             comfy.model_management.discard_cuda_async_error()
-            comfy.model_management.free_registrations(size)
+            comfy.model_management.free_registrations(size, evict_active=not fast)
             if torch.cuda.cudart().cudaHostRegister(pin.data_ptr(), size, 1) != 0:
                 comfy.model_management.discard_cuda_async_error()
                 del pin
                 hostbuf.truncate(offset, do_unregister=False)
-                return _steal_pin(module, stack, buckets, size, priority)
+                return _steal_pin(module, stack, buckets, size, priority, subset)
     except RuntimeError:
         if extended:
             hostbuf.truncate(offset, do_unregister=False)
-        return _steal_pin(module, stack, buckets, size, priority)
+        return _steal_pin(module, stack, buckets, size, priority, subset)
 
-    module._pin = pin
+    module_pin["pin"] = pin
     stack.append((module, offset))
-    module._pin_registered = True
-    module._pin_stack_index = len(stack) - 1
-    stack_split[0] = max(stack_split[0], module._pin_stack_index)
+    module_pin["registered"] = True
+    module_pin["stack_index"] = len(stack) - 1
+    stack_split[0] = max(stack_split[0], module_pin["stack_index"])
     comfy.model_management.TOTAL_PINNED_MEMORY += size
     pinned_size[0] += size
-    _add_to_bucket(module, buckets, size, priority)
+    _add_to_bucket(module, module_pin, buckets, size, priority)
     return True

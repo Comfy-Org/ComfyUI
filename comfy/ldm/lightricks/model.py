@@ -12,6 +12,9 @@ from torch import nn
 import comfy.patcher_extension
 import comfy.ldm.modules.attention
 import comfy.ldm.common_dit
+import comfy.model_management
+import comfy.ops
+import comfy.quant_ops
 
 from .symmetric_patchifier import SymmetricPatchifier, latent_to_pixel_coords
 
@@ -300,62 +303,68 @@ class NormSingleLinearTextProjection(nn.Module):
 
 
 class GELU_approx(nn.Module):
-    def __init__(self, dim_in, dim_out, dtype=None, device=None, operations=None):
+    def __init__(self, dim_in, dim_out, bias=True, dtype=None, device=None, operations=None):
         super().__init__()
-        self.proj = operations.Linear(dim_in, dim_out, dtype=dtype, device=device)
+        self.proj = operations.Linear(dim_in, dim_out, bias=bias, dtype=dtype, device=device)
 
     def forward(self, x):
         return torch.nn.functional.gelu(self.proj(x), approximate="tanh")
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, dim_out, mult=4, glu=False, dropout=0.0, dtype=None, device=None, operations=None):
+    def __init__(self, dim, dim_out, mult=4, glu=False, dropout=0.0, ff_bias=True, dtype=None, device=None, operations=None):
         super().__init__()
         inner_dim = int(dim * mult)
-        project_in = GELU_approx(dim, inner_dim, dtype=dtype, device=device, operations=operations)
+        project_in = GELU_approx(dim, inner_dim, bias=ff_bias, dtype=dtype, device=device, operations=operations)
 
         self.net = nn.Sequential(
-            project_in, nn.Dropout(dropout), operations.Linear(inner_dim, dim_out, dtype=dtype, device=device)
+            project_in, nn.Dropout(dropout), operations.Linear(inner_dim, dim_out, bias=ff_bias, dtype=dtype, device=device)
         )
 
     def forward(self, x):
-        return self.net(x)
+        # net = [GELU_approx(proj), Dropout, Linear]; the fused path skips the
+        # Dropout, so leave it to the stock path whenever it could be active.
+        if comfy.model_management.in_training:
+            return self.net(x)
+        return comfy.ops.linear_input_act(self.net[2], self.net[0].proj(x), "gelu_tanh")
 
 def apply_rotary_emb(input_tensor, freqs_cis):
-    cos_freqs, sin_freqs = freqs_cis[0], freqs_cis[1]
-    split_pe = freqs_cis[2] if len(freqs_cis) > 2 else False
-    return (
-        apply_split_rotary_emb(input_tensor, cos_freqs, sin_freqs)
-        if split_pe else
-        apply_interleaved_rotary_emb(input_tensor, cos_freqs, sin_freqs)
+    rotation_matrix, split_pe = freqs_cis
+    original_shape = input_tensor.shape
+    input_tensor = input_tensor.reshape(
+        input_tensor.shape[0], input_tensor.shape[1], rotation_matrix.shape[2], -1
     )
 
-def apply_interleaved_rotary_emb(input_tensor, cos_freqs, sin_freqs):  # TODO: remove duplicate funcs and pick the best/fastest one
-    t_dup = rearrange(input_tensor, "... (d r) -> ... d r", r=2)
-    t1, t2 = t_dup.unbind(dim=-1)
-    t_dup = torch.stack((-t2, t1), dim=-1)
-    input_tensor_rot = rearrange(t_dup, "... d r -> ... (d r)")
+    if comfy.model_management.in_training:
+        if split_pe:
+            t = input_tensor.reshape(*input_tensor.shape[:-1], 2, -1).movedim(-2, -1).unsqueeze(-2)
+        else:
+            t = input_tensor.reshape(*input_tensor.shape[:-1], -1, 1, 2)
+        t = t.to(rotation_matrix.dtype)
+        output = rotation_matrix[..., 0] * t[..., 0] + rotation_matrix[..., 1] * t[..., 1]
+        if split_pe:
+            output = output.movedim(-1, -2)
+        output = output.reshape(input_tensor.shape).type_as(input_tensor)
+    elif split_pe:
+        output = comfy.quant_ops.ck.apply_rope_split_half1(input_tensor, rotation_matrix)
+    else:
+        output = comfy.quant_ops.ck.apply_rope1(input_tensor, rotation_matrix)
+    return output.reshape(original_shape)
 
-    out = input_tensor * cos_freqs + input_tensor_rot * sin_freqs
+def apply_rotary_emb_qk(q, k, freqs_cis):
+    if comfy.model_management.in_training:
+        return apply_rotary_emb(q, freqs_cis), apply_rotary_emb(k, freqs_cis)
 
-    return out
-
-def apply_split_rotary_emb(input_tensor, cos, sin):
-    needs_reshape = False
-    if input_tensor.ndim != 4 and cos.ndim == 4:
-        B, H, T, _ = cos.shape
-        input_tensor = input_tensor.reshape(B, T, H, -1).swapaxes(1, 2)
-        needs_reshape = True
-    split_input = rearrange(input_tensor, "... (d r) -> ... d r", d=2)
-    first_half_input = split_input[..., :1, :]
-    second_half_input = split_input[..., 1:, :]
-    output = split_input * cos.unsqueeze(-2)
-    first_half_output = output[..., :1, :]
-    second_half_output = output[..., 1:, :]
-    first_half_output.addcmul_(-sin.unsqueeze(-2), second_half_input)
-    second_half_output.addcmul_(sin.unsqueeze(-2), first_half_input)
-    output = rearrange(output, "... d r -> ... (d r)")
-    return output.swapaxes(1, 2).reshape(B, T, -1) if needs_reshape else output
+    rotation_matrix, split_pe = freqs_cis
+    q_shape = q.shape
+    k_shape = k.shape
+    q = q.reshape(q.shape[0], q.shape[1], rotation_matrix.shape[2], -1)
+    k = k.reshape(k.shape[0], k.shape[1], rotation_matrix.shape[2], -1)
+    if split_pe:
+        q, k = comfy.quant_ops.ck.apply_rope_split_half(q, k, rotation_matrix)
+    else:
+        q, k = comfy.quant_ops.ck.apply_rope(q, k, rotation_matrix)
+    return q.reshape(q_shape), k.reshape(k_shape)
 
 
 class GuideAttentionMask:
@@ -453,24 +462,34 @@ class CrossAttention(nn.Module):
         )
 
     def forward(self, x, context=None, mask=None, pe=None, k_pe=None, transformer_options={}):
+        self_attn = context is None
         q = self.to_q(x)
         context = x if context is None else context
         k = self.to_k(context)
         v = self.to_v(context)
 
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-
-        if pe is not None:
-            q = apply_rotary_emb(q, pe)
-            k = apply_rotary_emb(k, pe if k_pe is None else k_pe)
-
-        if mask is None:
-            out = comfy.ldm.modules.attention.optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision, transformer_options=transformer_options)
-        elif isinstance(mask, GuideAttentionMask):
-            out = _attention_with_guide_mask(q, k, v, self.heads, mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
+        # Spatio-Temporal Guidance (STG) perturbation: for the flagged self-attention
+        # layers, the attention degrades to a passthrough of the value projection (out = V).
+        if self_attn and transformer_options.get("stg_skip_self_attn", False):
+            out = v
         else:
-            out = comfy.ldm.modules.attention.optimized_attention(q, k, v, self.heads, mask=mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
+            # These norms span all heads, so the per-head RMS+RoPE kernel is not equivalent.
+            if pe is not None:
+                if k_pe is None and q.shape == k.shape:
+                    q, k = apply_rotary_emb_qk(q, k, pe)
+                else:
+                    q = apply_rotary_emb(q, pe)
+                    k = apply_rotary_emb(k, pe if k_pe is None else k_pe)
+
+            if mask is None:
+                out = comfy.ldm.modules.attention.optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            elif isinstance(mask, GuideAttentionMask):
+                out = _attention_with_guide_mask(q, k, v, self.heads, mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            else:
+                out = comfy.ldm.modules.attention.optimized_attention(q, k, v, self.heads, mask=mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
 
         # Apply per-head gating if enabled
         if self.to_gate_logits is not None:
@@ -489,7 +508,7 @@ ADALN_CROSS_ATTN_PARAMS_COUNT = 9
 
 class BasicTransformerBlock(nn.Module):
     def __init__(
-        self, dim, n_heads, d_head, context_dim=None, attn_precision=None, cross_attention_adaln=False, dtype=None, device=None, operations=None
+        self, dim, n_heads, d_head, context_dim=None, attn_precision=None, cross_attention_adaln=False, ff_bias=True, dtype=None, device=None, operations=None
     ):
         super().__init__()
 
@@ -505,7 +524,7 @@ class BasicTransformerBlock(nn.Module):
             device=device,
             operations=operations,
         )
-        self.ff = FeedForward(dim, dim_out=dim, glu=True, dtype=dtype, device=device, operations=operations)
+        self.ff = FeedForward(dim, dim_out=dim, glu=True, ff_bias=ff_bias, dtype=dtype, device=device, operations=operations)
 
         self.attn2 = CrossAttention(
             query_dim=dim,
@@ -527,7 +546,12 @@ class BasicTransformerBlock(nn.Module):
     def forward(self, x, context=None, attention_mask=None, timestep=None, pe=None, transformer_options={}, self_attention_mask=None, prompt_timestep=None):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (self.scale_shift_table[None, None, :6].to(device=x.device, dtype=x.dtype) + timestep.reshape(x.shape[0], timestep.shape[1], self.scale_shift_table.shape[0], -1)[:, :, :6, :]).unbind(dim=2)
 
-        x += self.attn1(comfy.ldm.common_dit.rms_norm(x) * (1 + scale_msa) + shift_msa, pe=pe, mask=self_attention_mask, transformer_options=transformer_options) * gate_msa
+        if comfy.model_management.in_training:
+            norm_x = comfy.ldm.common_dit.rms_norm(x) * (1 + scale_msa) + shift_msa
+        else:
+            norm_x = comfy.quant_ops.ck.rms_adaln(x, scale_msa, shift_msa)
+
+        x += self.attn1(norm_x, pe=pe, mask=self_attention_mask, transformer_options=transformer_options) * gate_msa
 
         if self.cross_attention_adaln:
             shift_q_mca, scale_q_mca, gate_mca = (self.scale_shift_table[None, None, 6:9].to(device=x.device, dtype=x.dtype) + timestep.reshape(x.shape[0], timestep.shape[1], self.scale_shift_table.shape[0], -1)[:, :, 6:9, :]).unbind(dim=2)
@@ -581,7 +605,10 @@ def apply_cross_attention_adaln(
         prompt_scale_shift_table[None, None].to(device=x.device, dtype=x.dtype)
         + prompt_timestep.reshape(batch_size, prompt_timestep.shape[1], 2, -1)
     ).unbind(dim=2)
-    attn_input = comfy.ldm.common_dit.rms_norm(x) * (1 + q_scale) + q_shift
+    if comfy.model_management.in_training:
+        attn_input = comfy.ldm.common_dit.rms_norm(x) * (1 + q_scale) + q_shift
+    else:
+        attn_input = comfy.quant_ops.ck.rms_adaln(x, q_scale, q_shift)
     encoder_hidden_states = context * (1 + scale_kv) + shift_kv
     return attn(attn_input, context=encoder_hidden_states, mask=attention_mask, transformer_options=transformer_options) * q_gate
 
@@ -653,36 +680,23 @@ def generate_freqs(indices, indices_grid, max_pos, use_middle_indices_grid):
     )
     return freqs
 
-def interleaved_freqs_cis(freqs, pad_size):
-    cos_freq = freqs.cos().repeat_interleave(2, dim=-1)
-    sin_freq = freqs.sin().repeat_interleave(2, dim=-1)
-    if pad_size != 0:
-        cos_padding = torch.ones_like(cos_freq[:, :, : pad_size])
-        sin_padding = torch.zeros_like(cos_freq[:, :, : pad_size])
-        cos_freq = torch.cat([cos_padding, cos_freq], dim=-1)
-        sin_freq = torch.cat([sin_padding, sin_freq], dim=-1)
-    return cos_freq, sin_freq
+def freqs_cis_matrix(freqs, pad_size, split_mode, num_attention_heads, out_dtype):
+    cos_freq = freqs.cos().to(out_dtype)
+    sin_freq = freqs.sin().to(out_dtype)
+    if pad_size:
+        matrix_pad_size = pad_size if split_mode else pad_size // 2
+        cos_padding = torch.ones_like(cos_freq[:, :, :matrix_pad_size])
+        sin_padding = torch.zeros_like(sin_freq[:, :, :matrix_pad_size])
+        cos_freq = torch.cat((cos_padding, cos_freq), dim=-1)
+        sin_freq = torch.cat((sin_padding, sin_freq), dim=-1)
 
-def split_freqs_cis(freqs, pad_size, num_attention_heads):
-    cos_freq = freqs.cos()
-    sin_freq = freqs.sin()
-
-    if pad_size != 0:
-        cos_padding = torch.ones_like(cos_freq[:, :, :pad_size])
-        sin_padding = torch.zeros_like(sin_freq[:, :, :pad_size])
-
-        cos_freq = torch.concatenate([cos_padding, cos_freq], axis=-1)
-        sin_freq = torch.concatenate([sin_padding, sin_freq], axis=-1)
-
-    # Reshape freqs to be compatible with multi-head attention
-    B , T, half_HD = cos_freq.shape
-
+    B, T, half_HD = cos_freq.shape
     cos_freq = cos_freq.reshape(B, T, num_attention_heads, half_HD // num_attention_heads)
     sin_freq = sin_freq.reshape(B, T, num_attention_heads, half_HD // num_attention_heads)
-
-    cos_freq = torch.swapaxes(cos_freq, 1, 2)  # (B,H,T,D//2)
-    sin_freq = torch.swapaxes(sin_freq, 1, 2)  # (B,H,T,D//2)
-    return cos_freq, sin_freq
+    rotation_matrix = torch.stack(
+        (cos_freq, -sin_freq, sin_freq, cos_freq), dim=-1
+    )
+    return rotation_matrix.reshape(*rotation_matrix.shape[:-1], 2, 2), split_mode
 
 class LTXBaseModel(torch.nn.Module, ABC):
     """
@@ -709,6 +723,9 @@ class LTXBaseModel(torch.nn.Module, ABC):
         caption_proj_before_connector=False,
         cross_attention_adaln=False,
         caption_projection_first_linear=True,
+        ff_bias=True,
+        use_prompt_adaln_single=True,
+        use_keyframes_abs_pos_embedding=False,
         dtype=None,
         device=None,
         operations=None,
@@ -738,6 +755,9 @@ class LTXBaseModel(torch.nn.Module, ABC):
         self.caption_proj_before_connector = caption_proj_before_connector
         self.cross_attention_adaln = cross_attention_adaln
         self.caption_projection_first_linear = caption_projection_first_linear
+        self.ff_bias = ff_bias
+        self.use_prompt_adaln_single = use_prompt_adaln_single
+        self.use_keyframes_abs_pos_embedding = use_keyframes_abs_pos_embedding
 
         # Common dimensions
         self.inner_dim = num_attention_heads * attention_head_dim
@@ -765,12 +785,17 @@ class LTXBaseModel(torch.nn.Module, ABC):
             self.in_channels, self.inner_dim, bias=True, dtype=dtype, device=device
         )
 
+        if self.use_keyframes_abs_pos_embedding:
+            self.keyframes_abs_pos_embedding = nn.Parameter(torch.zeros(1, self.inner_dim, dtype=dtype, device=device))
+        else:
+            self.keyframes_abs_pos_embedding = None
+
         embedding_coefficient = ADALN_CROSS_ATTN_PARAMS_COUNT if self.cross_attention_adaln else ADALN_BASE_PARAMS_COUNT
         self.adaln_single = AdaLayerNormSingle(
             self.inner_dim, embedding_coefficient=embedding_coefficient, use_additional_conditions=False, dtype=dtype, device=device, operations=self.operations
         )
 
-        if self.cross_attention_adaln:
+        if self.cross_attention_adaln and self.use_prompt_adaln_single:
             self.prompt_adaln_single = AdaLayerNormSingle(
                 self.inner_dim, embedding_coefficient=2, use_additional_conditions=False, dtype=dtype, device=device, operations=self.operations
             )
@@ -885,12 +910,17 @@ class LTXBaseModel(torch.nn.Module, ABC):
             expected_freqs = dim // 2
             current_freqs = freqs.shape[-1]
             pad_size = expected_freqs - current_freqs
-            cos_freq, sin_freq = split_freqs_cis(freqs, pad_size, num_attention_heads)
         else:
             # 2 because of cos and sin by 3 for (t, x, y), 1 for temporal only
             n_elem = 2 * indices_grid.shape[1]
-            cos_freq, sin_freq = interleaved_freqs_cis(freqs, dim % n_elem)
-        return cos_freq.to(out_dtype), sin_freq.to(out_dtype), split_mode
+            pad_size = dim % n_elem
+        return freqs_cis_matrix(
+            freqs,
+            pad_size,
+            split_mode,
+            num_attention_heads,
+            out_dtype,
+        )
 
     def _prepare_positional_embeddings(self, pixel_coords, frame_rate, x_dtype):
         """Prepare positional embeddings."""
@@ -1057,6 +1087,7 @@ class LTXVModel(LTXBaseModel):
                     self.attention_head_dim,
                     context_dim=self.cross_attention_dim,
                     cross_attention_adaln=self.cross_attention_adaln,
+                    ff_bias=self.ff_bias,
                     dtype=dtype,
                     device=device,
                     operations=self.operations,
@@ -1086,6 +1117,15 @@ class LTXVModel(LTXBaseModel):
 
         grid_mask = None
         if keyframe_idxs is not None and keyframe_idxs.shape[2] > 0:
+            tokens_per_frame = self.tokens_per_latent_frame(additional_args["orig_shape"])
+            if keyframe_idxs.shape[2] % tokens_per_frame != 0:
+                raise ValueError(
+                    f"keyframe_idxs holds {keyframe_idxs.shape[2]} tokens, which is not a whole number of "
+                    f"{tokens_per_frame}-token latent frames. The appended frames were recorded against a "
+                    "different spatial resolution than the latent being sampled, so their positions would land "
+                    "on the wrong tokens. Crop the guides and separate the generated keyframes before "
+                    "upscaling the latent."
+                )
             additional_args.update({ "orig_patchified_shape": list(x.shape)})
             denoise_mask = self.patchifier.patchify(denoise_mask)[0]
             grid_mask = ~torch.any(denoise_mask < 0, dim=-1)[0]
@@ -1128,7 +1168,63 @@ class LTXVModel(LTXBaseModel):
             additional_args["num_guide_tokens"] = keyframe_idxs.shape[2]
 
         x = self.patchify_proj(x)
+        x = self.apply_keyframes_abs_pos_embedding(
+            x,
+            pixel_coords,
+            orig_shape=additional_args["orig_shape"],
+            grid_mask=grid_mask,
+            num_guide_tokens=additional_args.get("num_guide_tokens", 0),
+            generated_keyframes=kwargs.get("generated_keyframes", None),
+        )
         return x, pixel_coords, additional_args
+
+    def tokens_per_latent_frame(self, orig_shape):
+        """Token count of a single latent frame at the given latent shape."""
+        patch_size = self.patchifier.patch_size
+        return (orig_shape[3] // patch_size[1]) * (orig_shape[4] // patch_size[2])
+
+    def keyframes_abs_pos_mask(self, pixel_coords, orig_shape, grid_mask, num_guide_tokens, generated_keyframes):
+        """Per-token mask selecting the latents that encode a single standalone pixel frame.
+
+        Returns a (batch, tokens) boolean mask over the already grid-filtered token sequence.
+        """
+        temporal_start = pixel_coords[:, 0]
+        if temporal_start.ndim == 3:  # (batch, tokens, [start, end])
+            temporal_start = temporal_start[..., 0]
+        mask = temporal_start == 0
+        if num_guide_tokens > 0:
+            mask[:, -num_guide_tokens:] = False
+
+        if generated_keyframes is not None:
+            # The temporal patch size is always 1, so one latent frame is one row of tokens.
+            tokens_per_frame = self.tokens_per_latent_frame(orig_shape)
+            if generated_keyframes["tokens_per_frame"] != tokens_per_frame:
+                raise ValueError(
+                    f"The generated keyframes were recorded at {generated_keyframes['tokens_per_frame']} tokens "
+                    f"per latent frame but this latent has {tokens_per_frame}. Separate the generated keyframes "
+                    "before upscaling the latent."
+                )
+            first_token = generated_keyframes["first_latent_frame"] * tokens_per_frame
+            num_slot_tokens = generated_keyframes["num_keyframes"] * tokens_per_frame
+            slots = torch.zeros(orig_shape[2] * tokens_per_frame, dtype=torch.bool, device=mask.device)
+            slots[first_token:first_token + num_slot_tokens] = True
+            if grid_mask is not None:
+                slots = slots[grid_mask]
+            mask = mask | slots
+
+        return mask
+
+    def apply_keyframes_abs_pos_embedding(self, x, pixel_coords, orig_shape, grid_mask, num_guide_tokens, generated_keyframes):
+        """Add the learned keyframe marker to the single-pixel-frame tokens.
+
+        A no-op for every checkpoint built without the parameter.
+        """
+        if self.keyframes_abs_pos_embedding is None:
+            return x
+
+        mask = self.keyframes_abs_pos_mask(pixel_coords, orig_shape, grid_mask, num_guide_tokens, generated_keyframes)
+        embedding = self.keyframes_abs_pos_embedding.to(device=x.device, dtype=x.dtype)
+        return x + mask.unsqueeze(-1).to(x.dtype) * embedding
 
     def _build_guide_self_attention_mask(self, x, transformer_options, merged_args):
         """Build self-attention mask for per-guide attention attenuation.

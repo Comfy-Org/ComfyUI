@@ -8,17 +8,18 @@ from transformers import Qwen2Tokenizer
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
 from .qwen35 import Qwen35VisionModel
-from .llama import BaseLlama, BaseQwen3, BaseGenerate, Llama2_, Qwen3VL_4BConfig, Qwen3VL_8BConfig
+from .llama import BaseLlama, BaseQwen3, BaseGenerate, Llama2_, Qwen3VL_4BConfig, Qwen3VL_8BConfig, Qwen3VL_32BConfig
 
 
 QWEN3VL_VISION = {
     "qwen3vl_4b": dict(hidden_size=1024, intermediate_size=4096, depth=24, deepstack_visual_indexes=[5, 11, 17]),
     "qwen3vl_8b": dict(hidden_size=1152, intermediate_size=4304, depth=27, deepstack_visual_indexes=[8, 16, 24]),
+    "qwen3vl_32b": dict(hidden_size=1152, intermediate_size=4304, depth=27, deepstack_visual_indexes=[8, 16, 24]),
 }
 QWEN3VL_VISION_COMMON = dict(num_heads=16, patch_size=16, temporal_patch_size=2, in_channels=3,
                              spatial_merge_size=2, num_position_embeddings=2304)
 
-QWEN3VL_CONFIGS = {"qwen3vl_4b": Qwen3VL_4BConfig, "qwen3vl_8b": Qwen3VL_8BConfig}
+QWEN3VL_CONFIGS = {"qwen3vl_4b": Qwen3VL_4BConfig, "qwen3vl_8b": Qwen3VL_8BConfig, "qwen3vl_32b": Qwen3VL_32BConfig}
 
 
 class Qwen3VLDeepstackMerger(nn.Module):
@@ -90,6 +91,27 @@ class Qwen3VL(BaseLlama, BaseQwen3, BaseGenerate, torch.nn.Module):
                 deepstack = [torch.cat([deepstack[i], ds[i]], dim=0) for i in range(len(ds))]
         return position_ids, visual_pos_masks, deepstack
 
+    def forward(self, input_ids, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=None, embeds_info=[], **kwargs):
+        position_ids = kwargs.pop("position_ids", None)
+        visual_pos_masks = kwargs.pop("visual_pos_masks", None)
+        deepstack_embeds = kwargs.pop("deepstack_embeds", None)
+        if embeds is not None and position_ids is None:
+            position_ids, visual_pos_masks, deepstack_embeds = self.build_image_inputs(embeds, embeds_info)
+        return self.model(
+            input_ids,
+            attention_mask=attention_mask,
+            embeds=embeds,
+            num_tokens=num_tokens,
+            intermediate_output=intermediate_output,
+            final_layer_norm_intermediate=final_layer_norm_intermediate,
+            dtype=dtype,
+            position_ids=position_ids,
+            embeds_info=embeds_info,
+            visual_pos_masks=visual_pos_masks,
+            deepstack_embeds=deepstack_embeds,
+            **kwargs,
+        )
+
 
 def _make_qwen3vl_model(model_type):
     class Qwen3VL_(Qwen3VL):
@@ -105,7 +127,7 @@ class Qwen3VLClipModel(sd1_clip.SDClipModel):
                          model_class=_make_qwen3vl_model(model_type), enable_attention_masks=attention_mask,
                          return_attention_masks=attention_mask, model_options=model_options)
 
-    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0):
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, mtp=True):
         if isinstance(tokens, dict):
             tokens = next(iter(tokens.values()))
         tokens_only = [[t[0] for t in b] for b in tokens]
@@ -137,12 +159,12 @@ class Qwen3VLTokenizer(sd1_clip.SD1Tokenizer):
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
         self.llama_template_images = "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=False, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=False, skip_template=False, **kwargs):
         image = kwargs.get("image", None)
         if image is not None and len(images) == 0:
             images = [image[i:i + 1] for i in range(image.shape[0])]
 
-        skip_template = text.startswith('<|im_start|>')
+        skip_template = skip_template or text.startswith('<|im_start|>')
         if prevent_empty_text and text == '':
             text = ' '
 
@@ -167,7 +189,7 @@ class Qwen3VLTokenizer(sd1_clip.SD1Tokenizer):
         embed_count = 0
         for r in tokens[key_name]:
             for i in range(len(r)):
-                if r[i][0] == 151655:  # <|image_pad|>
+                if isinstance(r[i][0], (int, float)) and r[i][0] == 151655:  # <|image_pad|>
                     if len(images) > embed_count:
                         r[i] = ({"type": "image", "data": images[embed_count], "original_type": "image"},) + r[i][1:]
                         embed_count += 1

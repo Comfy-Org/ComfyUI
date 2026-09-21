@@ -35,7 +35,11 @@ class ModelFileManager:
             for folder in model_types:
                 if folder in folder_black_list:
                     continue
-                output_folders.append({"name": folder, "folders": folder_paths.get_folder_paths(folder)})
+                output_folders.append({
+                    "name": folder,
+                    "folders": folder_paths.get_folder_paths(folder),
+                    "extensions": sorted(folder_paths.folder_names_and_paths[folder][1]),
+                })
             return web.json_response(output_folders)
 
         # NOTE: This is an experiment to replace `/models/{folder}`
@@ -50,20 +54,44 @@ class ModelFileManager:
         @routes.get("/experiment/models/preview/{folder}/{path_index}/{filename:.*}")
         async def get_model_preview(request):
             folder_name = request.match_info.get("folder", None)
-            path_index = int(request.match_info.get("path_index", None))
             filename = request.match_info.get("filename", None)
 
             if folder_name not in folder_paths.folder_names_and_paths:
                 return web.Response(status=404)
 
+            # The "{filename:.*}" capture also matches the empty string, which
+            # would resolve to the folder itself; reject it explicitly.
+            if not filename:
+                return web.Response(status=400)
+
+            try:
+                path_index = int(request.match_info.get("path_index", None))
+            except (TypeError, ValueError):
+                return web.Response(status=400)
+
             folders = folder_paths.folder_names_and_paths[folder_name]
+            if path_index < 0 or path_index >= len(folders[0]):
+                return web.Response(status=404)
             folder = folders[0][path_index]
-            full_filename = os.path.join(folder, filename)
+            full_filename = os.path.normpath(os.path.join(folder, filename))
+
+            # Prevent path traversal: the requested file must stay within the
+            # configured model folder. `filename` is an unrestricted ".*" capture,
+            # so values like "../../../../etc/passwd" would otherwise escape it.
+            if not folder_paths.is_within_directory(folder, full_filename):
+                return web.Response(status=403)
 
             previews = self.get_model_previews(full_filename)
             default_preview = previews[0] if len(previews) > 0 else None
             if default_preview is None or (isinstance(default_preview, str) and not os.path.isfile(default_preview)):
                 return web.Response(status=404)
+
+            # The preview is selected by a glob inside get_model_previews, so a
+            # companion file (e.g. "model.preview.png") could itself be a symlink
+            # resolving outside the model folder. Re-validate the file actually
+            # opened: is_within_directory realpaths it, catching symlink escape.
+            if isinstance(default_preview, str) and not folder_paths.is_within_directory(folder, default_preview):
+                return web.Response(status=403)
 
             try:
                 with Image.open(default_preview) as img:

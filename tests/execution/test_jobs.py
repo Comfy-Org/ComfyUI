@@ -10,6 +10,7 @@ from comfy_execution.jobs import (
     normalize_output_item,
     normalize_outputs,
     get_outputs_summary,
+    count_previewable_outputs,
     apply_sorting,
     has_3d_extension,
     validate_job_id,
@@ -280,6 +281,159 @@ class TestGetOutputsSummary:
         assert preview['filename'] == 'model.glb'
         assert preview['mediaType'] == '3d'
 
+    def test_media_preview_preferred_over_text(self):
+        """A visual output wins the preview even when a text node is iterated
+        first (regression: text could mask a later temp/preview image)."""
+        outputs = {
+            'text_node': {'text': ['a caption']},
+            'image_node': {'images': [{'filename': 'preview.png', 'type': 'temp'}]},
+        }
+        count, preview = get_outputs_summary(outputs)
+        # Text is preview-only metadata and not counted; only the image counts.
+        assert count == 1
+        assert preview['filename'] == 'preview.png'
+        assert preview['mediaType'] == 'images'
+
+    def test_text_used_as_preview_when_no_media(self):
+        """Text is the preview only when the job produced no media output."""
+        outputs = {
+            'text_node': {'text': ['hello world']},
+        }
+        count, preview = get_outputs_summary(outputs)
+        assert count == 0  # text entries are not counted as outputs
+        assert preview['mediaType'] == 'text'
+        assert preview['content'] == 'hello world'
+
+    def test_media_preview_preferred_over_saved_text_file(self):
+        """A visual output wins the preview over a saved text file (SaveText),
+        even a temp/preview image iterated after the text node."""
+        outputs = {
+            'save_text': {
+                'text': ['the text'],
+                'files': [{'filename': 'ComfyUI_00001.txt', 'subfolder': '', 'type': 'output'}],
+            },
+            'preview_image': {'images': [{'filename': 'preview.png', 'type': 'temp'}]},
+        }
+        count, preview = get_outputs_summary(outputs)
+        assert count == 2  # the .txt file and the image; raw text is metadata
+        assert preview['filename'] == 'preview.png'
+        assert preview['mediaType'] == 'images'
+
+    def test_saved_media_preferred_over_saved_text_file(self):
+        outputs = {
+            'save_text': {
+                'text': ['the text'],
+                'files': [{'filename': 'ComfyUI_00001.txt', 'subfolder': '', 'type': 'output'}],
+            },
+            'save_image': {'images': [{'filename': 'result.png', 'type': 'output'}]},
+        }
+        count, preview = get_outputs_summary(outputs)
+        assert count == 2
+        assert preview['filename'] == 'result.png'
+
+    def test_mime_format_file_preferred_over_saved_text_file(self):
+        """Custom-node outputs previewable via MIME format (e.g. VHS videos
+        under arbitrary keys) rank as visual media, above saved text files."""
+        outputs = {
+            'save_text': {
+                'files': [{'filename': 'notes.md', 'subfolder': '', 'type': 'output'}],
+            },
+            'video_node': {
+                'files': [{'filename': 'clip.webm', 'format': 'video/webm', 'type': 'output'}],
+            },
+        }
+        count, preview = get_outputs_summary(outputs)
+        assert count == 2
+        assert preview['filename'] == 'clip.webm'
+
+
+    def test_saved_text_file_preferred_over_raw_text(self):
+        """With no media in the job, the saved text file (a real, counted
+        output) is the preview rather than the raw text metadata."""
+        outputs = {
+            'save_text': {
+                'text': ['the text'],
+                'files': [{'filename': 'ComfyUI_00001.txt', 'subfolder': '', 'type': 'output'}],
+            },
+        }
+        count, preview = get_outputs_summary(outputs)
+        assert count == 1
+        assert preview['filename'] == 'ComfyUI_00001.txt'
+        assert preview['mediaType'] == 'files'
+
+
+class TestCountPreviewableOutputs:
+    """Unit tests for count_previewable_outputs()
+
+    Kept separate from get_outputs_summary()'s outputs_count: the Media Assets
+    badge should reflect only what the expanded asset view actually renders
+    (previewable outputs), while outputs_count keeps counting every output
+    item for other consumers.
+    """
+
+    def test_empty_outputs(self):
+        assert count_previewable_outputs({}) == 0
+
+    def test_previewable_outputs_all_counted(self):
+        """When every output is previewable, the two counts should match."""
+        outputs = {
+            'node1': {'images': [{'filename': 'a.png', 'type': 'output'}]},
+            'node2': {'images': [{'filename': 'b.png', 'type': 'output'}]},
+        }
+        outputs_count, _ = get_outputs_summary(outputs)
+        assert count_previewable_outputs(outputs) == outputs_count == 2
+
+    def test_save_latent_counted_but_not_previewable(self):
+        """SaveLatent (nodes.py) emits a real saved file under the 'latents'
+        media type: {'latents': [{'filename': '..._00001_.latent',
+        'subfolder': '', 'type': 'output'}]}. It has no previewable media
+        type, format, or extension, so it inflates outputs_count without
+        ever rendering in the expanded asset view."""
+        outputs = {
+            'node1': {
+                'images': [{'filename': 'ComfyUI_00001_.png', 'subfolder': '', 'type': 'output'}]
+            },
+            'node2': {
+                'latents': [{'filename': 'ComfyUI_00001_.latent', 'subfolder': '', 'type': 'output'}]
+            },
+        }
+        outputs_count, _ = get_outputs_summary(outputs)
+        assert outputs_count == 2
+        assert count_previewable_outputs(outputs) == 1
+
+    def test_save_text_file_output_is_previewable_by_extension(self):
+        """SaveText (comfy_extras/nodes_text.py) emits its saved file under a
+        'files' media type via ui.SavedResult: {'files': [{'filename':
+        '..._00001.txt', 'subfolder': ..., 'type': 'output'}]}. The .txt
+        extension makes it previewable even though 'files' itself isn't a
+        previewable media type."""
+        outputs = {
+            'node1': {
+                'files': [{'filename': 'ComfyUI_00001.txt', 'subfolder': '', 'type': 'output'}]
+            }
+        }
+        assert count_previewable_outputs(outputs) == 1
+
+    def test_preview_any_text_tuple_not_counted(self):
+        """PreviewAny (comfy_extras/nodes_preview_any.py) emits only
+        {'text': (value,)} with no saved file. Since the value is a tuple,
+        not a list, it is excluded from both outputs_count and
+        previewable_outputs_count — matching get_outputs_summary()."""
+        outputs = {
+            'node1': {'text': ('some previewed value',)}
+        }
+        outputs_count, _ = get_outputs_summary(outputs)
+        assert outputs_count == 0
+        assert count_previewable_outputs(outputs) == 0
+
+    def test_string_3d_filename_previewable(self):
+        """String 3D filenames (e.g. Preview3D) normalize into a previewable
+        item just like they do for outputs_count."""
+        outputs = {
+            'node1': {'result': ['preview3d_abc123.glb', None]}
+        }
+        assert count_previewable_outputs(outputs) == 1
+
 
 class TestHas3DExtension:
     """Unit tests for has_3d_extension()"""
@@ -367,6 +521,7 @@ class TestNormalizeQueueItem:
         assert 'execution_error' not in job
         assert 'preview_output' not in job
         assert job['outputs_count'] == 0
+        assert job['previewable_outputs_count'] == 0
         assert job['workflow_id'] == 'workflow-abc'
 
 
@@ -554,6 +709,54 @@ class TestNormalizeHistoryItem:
         assert job['outputs']['node1']['images'] == [
             {'filename': 'photo.png', 'type': 'output', 'subfolder': ''},
         ]
+
+    def test_previewable_outputs_count_excludes_non_previewable_outputs(self):
+        """Regression test for the Media Assets badge overcount: a job with an
+        image (SaveImage) and a SaveLatent output should report previewable_
+        outputs_count == 1 while outputs_count == 2, so the frontend badge
+        (once switched to previewable_outputs_count) matches what the
+        expanded asset view actually renders."""
+        history_item = {
+            'prompt': (
+                5,
+                'prompt-mixed',
+                {'nodes': {}},
+                {'create_time': 1234567890},
+                ['node1', 'node2'],
+            ),
+            'status': {'status_str': 'success', 'completed': True, 'messages': []},
+            'outputs': {
+                'node1': {
+                    'images': [{'filename': 'ComfyUI_00001_.png', 'subfolder': '', 'type': 'output'}]
+                },
+                'node2': {
+                    'latents': [{'filename': 'ComfyUI_00001_.latent', 'subfolder': '', 'type': 'output'}]
+                },
+            },
+        }
+        job = normalize_history_item('prompt-mixed', history_item)
+
+        assert job['outputs_count'] == 2
+        assert job['previewable_outputs_count'] == 1
+
+    def test_previewable_outputs_count_zero_pruned_by_prune_dict(self):
+        """A job with no outputs at all should still report both counts as 0,
+        not omit the field (prune_dict only strips None, not 0)."""
+        history_item = {
+            'prompt': (
+                5,
+                'prompt-empty',
+                {'nodes': {}},
+                {'create_time': 1234567890},
+                ['node1'],
+            ),
+            'status': {'status_str': 'success', 'completed': True, 'messages': []},
+            'outputs': {},
+        }
+        job = normalize_history_item('prompt-empty', history_item)
+
+        assert job['outputs_count'] == 0
+        assert job['previewable_outputs_count'] == 0
 
 
 class TestNormalizeOutputItem:

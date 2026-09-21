@@ -6,11 +6,12 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_attention
 from comfy.ldm.flux.layers import EmbedND
 from comfy.ldm.flux.math import apply_rope1, rope
 import comfy.ldm.common_dit
 import comfy.model_management
+import comfy.ops
 import comfy.patcher_extension
 
 
@@ -80,17 +81,21 @@ class WanSelfAttention(nn.Module):
         q = qkv_fn_q(x)
         k = qkv_fn_k(x)
 
+        if patches.get("attn1_patch"):
+            q_patch, k_patch = q, k
+        q = AttentionTensorContainer(q.view(b, s, n * d))
+        k = AttentionTensorContainer(k.view(b, s, n * d))
+        v = AttentionTensorContainer(self.v(x).view(b, s, n * d))
+
         x = optimized_attention(
-            q.view(b, s, n * d),
-            k.view(b, s, n * d),
-            self.v(x).view(b, s, n * d),
+            q, k, v,
             heads=self.num_heads,
             transformer_options=transformer_options,
         )
 
         if "attn1_patch" in patches:
             for p in patches["attn1_patch"]:
-                x = p({"x": x, "q": q, "k": k, "transformer_options": transformer_options})
+                x = p({"x": x, "q": q_patch, "k": k_patch, "transformer_options": transformer_options})
 
         x = self.o(x)
         return x
@@ -105,9 +110,9 @@ class WanT2VCrossAttention(WanSelfAttention):
             context(Tensor): Shape [B, L2, C]
         """
         # compute query, key, value
-        q = self.norm_q(self.q(x))
-        k = self.norm_k(self.k(context))
-        v = self.v(context)
+        q = AttentionTensorContainer(self.norm_q(self.q(x)))
+        k = AttentionTensorContainer(self.norm_k(self.k(context)))
+        v = AttentionTensorContainer(self.v(context))
 
         # compute attention
         x = optimized_attention(q, k, v, heads=self.num_heads, transformer_options=transformer_options)
@@ -142,12 +147,15 @@ class WanI2VCrossAttention(WanSelfAttention):
 
         # compute query, key, value
         q = self.norm_q(self.q(x))
-        k = self.norm_k(self.k(context))
-        v = self.v(context)
         k_img = self.norm_k_img(self.k_img(context_img))
         v_img = self.v_img(context_img)
-        img_x = optimized_attention(q, k_img, v_img, heads=self.num_heads, transformer_options=transformer_options)
+        # Sageattn can cause Nans here, don't allow it as there is no speed difference anyway as img attention is tiny.
+        img_x = optimized_attention(q, k_img, v_img, heads=self.num_heads, transformer_options=transformer_options, low_precision_attention=False)
+        del k_img, v_img
         # compute attention
+        q = AttentionTensorContainer(q)
+        k = AttentionTensorContainer(self.norm_k(self.k(context)))
+        v = AttentionTensorContainer(self.v(context))
         x = optimized_attention(q, k, v, heads=self.num_heads, transformer_options=transformer_options)
 
         # output
@@ -172,6 +180,13 @@ def repeat_e(e, x):
         return torch.repeat_interleave(e, repeats, dim=1)
     else:
         return torch.repeat_interleave(e, repeats + 1, dim=1)[:, :x.size(1)]
+
+
+class WanFeedForward(nn.Sequential):
+    """[Linear, GELU(tanh), Linear], with the GELU folded into the down-projection."""
+
+    def forward(self, x):
+        return comfy.ops.linear_input_act(self[2], self[0](x), "gelu_tanh")
 
 
 class WanAttentionBlock(nn.Module):
@@ -207,7 +222,7 @@ class WanAttentionBlock(nn.Module):
                                                                       qk_norm,
                                                                       eps, operation_settings=operation_settings)
         self.norm2 = operation_settings.get("operations").LayerNorm(dim, eps, elementwise_affine=False, device=operation_settings.get("device"), dtype=operation_settings.get("dtype"))
-        self.ffn = nn.Sequential(
+        self.ffn = WanFeedForward(
             operation_settings.get("operations").Linear(dim, ffn_dim, device=operation_settings.get("device"), dtype=operation_settings.get("dtype")), nn.GELU(approximate='tanh'),
             operation_settings.get("operations").Linear(ffn_dim, dim, device=operation_settings.get("device"), dtype=operation_settings.get("dtype")))
 
@@ -552,6 +567,7 @@ class WanModel(torch.nn.Module):
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         grid_sizes = x.shape[2:]
         transformer_options["grid_sizes"] = grid_sizes
@@ -564,11 +580,13 @@ class WanModel(torch.nn.Module):
         e0 = self.time_projection(e).unflatten(2, (6, self.dim))
 
         full_ref = None
+        img_offset = 0
         if self.ref_conv is not None:
             full_ref = kwargs.get("reference_latent", None)
             if full_ref is not None:
                 full_ref = self.ref_conv(full_ref).flatten(2).transpose(1, 2)
                 x = torch.concat((full_ref, x), dim=1)
+                img_offset = full_ref.shape[1]
 
         # In-context reference (Bernini)
         context_latents = kwargs.get("context_latents", None)
@@ -589,6 +607,7 @@ class WanModel(torch.nn.Module):
             context_img_len = clip_fea.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -603,6 +622,11 @@ class WanModel(torch.nn.Module):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": img_offset, "transformer_options": transformer_options})
+                    x = out["img"]
 
         # head
         x = self.head(x, e)
@@ -777,6 +801,7 @@ class VaceWanModel(WanModel):
         **kwargs,
     ):
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         grid_sizes = x.shape[2:]
         transformer_options["grid_sizes"] = grid_sizes
@@ -807,6 +832,7 @@ class VaceWanModel(WanModel):
         x_orig = x
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -821,6 +847,11 @@ class VaceWanModel(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": 0, "transformer_options": transformer_options})
+                    x = out["img"]
 
             ii = self.vace_layers_mapping.get(i, None)
             if ii is not None:
@@ -887,6 +918,7 @@ class CameraWanModel(WanModel):
         **kwargs,
     ):
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         if self.control_adapter is not None and camera_conditions is not None:
             x = x + self.control_adapter(camera_conditions).to(x.dtype)
@@ -909,6 +941,7 @@ class CameraWanModel(WanModel):
             context_img_len = clip_fea.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -923,6 +956,11 @@ class CameraWanModel(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": 0, "transformer_options": transformer_options})
+                    x = out["img"]
 
         # head
         x = self.head(x, e)
@@ -1335,6 +1373,7 @@ class WanModel_S2V(WanModel):
 
         # embeddings
         bs, _, time, height, width = x.shape
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         if control_video is not None:
             x = x + self.cond_encoder(control_video)
@@ -1379,6 +1418,7 @@ class WanModel_S2V(WanModel):
         context = self.text_embedding(context)
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -1393,6 +1433,12 @@ class WanModel_S2V(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": 0, "transformer_options": transformer_options})
+                    x = out["img"]
+
             if audio_emb is not None:
                 x = self.audio_injector(x, i, audio_emb, audio_emb_global, seq_len)
         # head
@@ -1599,6 +1645,7 @@ class HumoWanModel(WanModel):
         bs, _, time, height, width = x.shape
 
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         grid_sizes = x.shape[2:]
         x = x.flatten(2).transpose(1, 2)
@@ -1630,6 +1677,7 @@ class HumoWanModel(WanModel):
             audio = None
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -1644,6 +1692,11 @@ class HumoWanModel(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, audio=audio, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": 0, "transformer_options": transformer_options})
+                    x = out["img"]
 
         # head
         x = self.head(x, e)
@@ -1660,8 +1713,14 @@ class SCAILWanModel(WanModel):
 
     def forward_orig(self, x, t, context, clip_fea=None, freqs=None, transformer_options={}, pose_latents=None, reference_latent=None, ref_mask_latents=None, sam_latents=None, **kwargs):
 
+        x_input = x
+
+        img_offset = 0
         if reference_latent is not None:
             x = torch.cat((reference_latent, x), dim=2)
+            img_offset = (reference_latent.shape[2] // self.patch_size[0]) * \
+                         (reference_latent.shape[3] // self.patch_size[1]) * \
+                         (reference_latent.shape[4] // self.patch_size[2])
 
         # embeddings
         x = self.patch_embedding(x.float()).to(x.dtype)
@@ -1697,6 +1756,7 @@ class SCAILWanModel(WanModel):
             context_img_len = clip_fea.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -1711,6 +1771,11 @@ class SCAILWanModel(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": img_offset, "transformer_options": transformer_options})
+                    x = out["img"]
 
         # head
         x = self.head(x, e)

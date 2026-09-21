@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class BFLFluxExpandImageRequest(BaseModel):
@@ -121,6 +121,8 @@ class BFLFluxProGenerateResponse(BaseModel):
 class BFLStatus(str, Enum):
     task_not_found = "Task not found"
     pending = "Pending"
+    reasoning = "Reasoning"
+    generating = "Generating"
     request_moderated = "Request Moderated"
     content_moderated = "Content Moderated"
     ready = "Ready"
@@ -132,3 +134,53 @@ class BFLFluxStatusResponse(BaseModel):
     status: BFLStatus = Field(...)
     result: dict[str, Any] | None = Field(None)
     progress: float | None = Field(None, ge=0.0, le=1.0)
+
+
+class Flux3VideoRequest(BaseModel):
+    """Fields shared by every generation mode of /v1/flux-3-video."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str = Field(...)
+    aspect_ratio: str = Field("auto")
+    duration: int | str = Field("auto", description="Whole seconds, or 'auto'.")
+    resolution: str = Field("hd", description="'hd' is the 720p class, 'fhd' the 1080p class.")
+    generate_audio: bool = Field(True)
+    safety_tolerance: int = Field(2, description="0 is the strictest; conditioned modes cap at 2.")
+
+
+class Flux3TextToVideoRequest(Flux3VideoRequest):
+    mode: str = Field("t2v")
+
+
+class Flux3ImageToVideoRequest(Flux3VideoRequest):
+    mode: str = Field("i2v")
+    keyframes: list[str] | list[tuple[float, str]] = Field(
+        ...,
+        description="Images (URL or base64), or [seconds, image] pairs pinning each to a time.",
+    )
+
+
+class Flux3VideoContinuationRequest(Flux3VideoRequest):
+    mode: str = Field("v2v")
+    start_video: str = Field(
+        ..., description="MP4 (URL or base64); the new clip carries on from its final frames."
+    )
+
+
+class BFLFluxVideoUpscaleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_video: str = Field(..., description="MP4 (URL or base64), 1 to 20 seconds.")
+    upscale_factor: float = Field(2.0, ge=1.5, le=3.0)
+    creativity: int = Field(1, description="0 preserves the source precisely, 1 enhances detail.")
+    prompt: str | None = Field(None)
+    safety_tolerance: int = Field(2, ge=0, le=4)
+
+
+class BFLFluxVideoEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    video: str = Field(..., description="MP4 (URL or base64), at most 15 seconds and 50 MiB.")
+    prompt: str = Field(..., description="Edit instruction, 1 to 4096 characters once trimmed.")
+    safety_tolerance: int = Field(4, ge=0, le=4)

@@ -1,4 +1,4 @@
-from ._helpers import get_fs_object_size
+from ._helpers import get_fs_object_size, get_output_consumers, validate_output_unlinked
 from .client import (
     ApiEndpoint,
     poll_op,
@@ -16,8 +16,10 @@ from .conversions import (
     convert_mask_to_image,
     downscale_image_tensor,
     downscale_image_tensor_by_max_side,
+    downscale_image_tensor_by_max_sides,
     downscale_video_to_max_pixels,
     image_tensor_pair_to_batch,
+    pad_images_to_common_channels,
     pil_to_bytesio,
     resize_mask_to_image,
     tensor_to_base64_string,
@@ -26,6 +28,7 @@ from .conversions import (
     text_filepath_to_base64_string,
     text_filepath_to_data_uri,
     trim_video,
+    upscale_image_tensor_to_min_pixels,
     upscale_video_to_min_pixels,
     video_to_base64_string,
 )
@@ -89,8 +92,10 @@ __all__ = [
     "convert_mask_to_image",
     "downscale_image_tensor",
     "downscale_image_tensor_by_max_side",
+    "downscale_image_tensor_by_max_sides",
     "downscale_video_to_max_pixels",
     "image_tensor_pair_to_batch",
+    "pad_images_to_common_channels",
     "pil_to_bytesio",
     "resize_mask_to_image",
     "tensor_to_base64_string",
@@ -99,6 +104,7 @@ __all__ = [
     "text_filepath_to_base64_string",
     "text_filepath_to_data_uri",
     "trim_video",
+    "upscale_image_tensor_to_min_pixels",
     "upscale_video_to_min_pixels",
     "video_to_base64_string",
     # Validation utilities
@@ -116,4 +122,7 @@ __all__ = [
     "validate_video_frame_count",
     # Misc functions
     "get_fs_object_size",
+    # Graph helpers
+    "get_output_consumers",
+    "validate_output_unlinked",
 ]

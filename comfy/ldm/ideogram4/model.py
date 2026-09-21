@@ -12,10 +12,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import comfy.model_management
+import comfy.ops
 import comfy.patcher_extension
+import comfy.quant_ops
 from comfy.ldm.lumina.model import FeedForward
 from comfy.ldm.modules.attention import optimized_attention_masked
-from comfy.text_encoders.llama import apply_rope, precompute_freqs_cis
+from comfy.text_encoders.llama import precompute_freqs_cis
 
 # Per-token role indicators
 SEQUENCE_PADDING_INDICATOR = -1
@@ -23,6 +26,22 @@ OUTPUT_IMAGE_INDICATOR = 2
 LLM_TOKEN_INDICATOR = 3
 # Image grid coordinates are offset so they never collide with text positions
 IMAGE_POSITION_OFFSET = 65536
+
+
+def _split_half_rope_matrix(freqs_cis):
+    cos, sin, neg_sin = freqs_cis
+    half_dim = sin.shape[-1]
+    matrix = torch.stack(
+        (cos[..., :half_dim], neg_sin, sin, cos[..., half_dim:]), dim=-1
+    )
+    return matrix.reshape(*matrix.shape[:-1], 2, 2).unsqueeze(2)
+
+
+def _apply_rope_split_half1(x, freqs_cis):
+    x_dtype = x.dtype
+    x = x.reshape(*x.shape[:-1], 2, -1).movedim(-2, -1).unsqueeze(-2).to(freqs_cis.dtype)
+    output = freqs_cis[..., 0] * x[..., 0] + freqs_cis[..., 1] * x[..., 1]
+    return output.movedim(-1, -2).reshape(*x.shape[:-3], -1).to(x_dtype)
 
 
 class Ideogram4Attention(nn.Module):
@@ -42,15 +61,22 @@ class Ideogram4Attention(nn.Module):
         qkv = self.qkv(x).view(batch_size, seq_len, 3, self.num_heads, self.head_dim)
         q, k, v = qkv.unbind(dim=2)
 
-        q = self.norm_q(q)
-        k = self.norm_k(k)
+        if comfy.model_management.in_training:
+            q = _apply_rope_split_half1(self.norm_q(q), freqs_cis)
+            k = _apply_rope_split_half1(self.norm_k(k), freqs_cis)
+        else:
+            q_scale, _, q_offload_stream = comfy.ops.cast_bias_weight(self.norm_q, q, offloadable=True)
+            k_scale, _, k_offload_stream = comfy.ops.cast_bias_weight(self.norm_k, k, offloadable=True)
+            q, k = comfy.quant_ops.ck.rms_rope_split_half(
+                q, k, freqs_cis, q_scale, k_scale, self.norm_q.eps
+            )
+            comfy.ops.uncast_bias_weight(self.norm_q, q_scale, None, q_offload_stream)
+            comfy.ops.uncast_bias_weight(self.norm_k, k_scale, None, k_offload_stream)
 
         # (B, heads, L, head_dim)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
-
-        q, k = apply_rope(q, k, freqs_cis)
 
         out = optimized_attention_masked(q, k, v, self.num_heads, attn_mask, skip_reshape=True, transformer_options=transformer_options)
         return self.o(out)
@@ -181,6 +207,7 @@ class Ideogram4Transformer(nn.Module):
             self.head_dim, position_ids[0].transpose(0, 1), self.rope_theta,
             rope_dims=self.mrope_section, interleaved_mrope=True, device=position_ids.device,
         )
+        freqs_cis = _split_half_rope_matrix(freqs_cis)
 
         if attn_mask is not None and attn_mask.dtype == torch.bool:
             attn_mask = torch.zeros_like(attn_mask, dtype=h.dtype).masked_fill_(~attn_mask, -torch.finfo(h.dtype).max)

@@ -33,53 +33,6 @@ class IdeogramColorPalette(
     )
 
 
-class ImageRequest(BaseModel):
-    aspect_ratio: Optional[str] = Field(
-        None,
-        description="Optional. The aspect ratio (e.g., 'ASPECT_16_9', 'ASPECT_1_1'). Cannot be used with resolution. Defaults to 'ASPECT_1_1' if unspecified.",
-    )
-    color_palette: Optional[Dict[str, Any]] = Field(
-        None, description='Optional. Color palette object. Only for V_2, V_2_TURBO.'
-    )
-    magic_prompt_option: Optional[str] = Field(
-        None, description="Optional. MagicPrompt usage ('AUTO', 'ON', 'OFF')."
-    )
-    model: str = Field(..., description="The model used (e.g., 'V_2', 'V_2A_TURBO')")
-    negative_prompt: Optional[str] = Field(
-        None,
-        description='Optional. Description of what to exclude. Only for V_1, V_1_TURBO, V_2, V_2_TURBO.',
-    )
-    num_images: Optional[int] = Field(
-        1,
-        description='Optional. Number of images to generate (1-8). Defaults to 1.',
-        ge=1,
-        le=8,
-    )
-    prompt: str = Field(
-        ..., description='Required. The prompt to use to generate the image.'
-    )
-    resolution: Optional[str] = Field(
-        None,
-        description="Optional. Resolution (e.g., 'RESOLUTION_1024_1024'). Only for model V_2. Cannot be used with aspect_ratio.",
-    )
-    seed: Optional[int] = Field(
-        None,
-        description='Optional. A number between 0 and 2147483647.',
-        ge=0,
-        le=2147483647,
-    )
-    style_type: Optional[str] = Field(
-        None,
-        description="Optional. Style type ('AUTO', 'GENERAL', 'REALISTIC', 'DESIGN', 'RENDER_3D', 'ANIME'). Only for models V_2 and above.",
-    )
-
-
-class IdeogramGenerateRequest(BaseModel):
-    image_request: ImageRequest = Field(
-        ..., description='The image generation request parameters.'
-    )
-
-
 class Datum(BaseModel):
     is_image_safe: Optional[bool] = Field(
         None, description='Indicates whether the image is considered safe.'
@@ -111,20 +64,6 @@ class IdeogramGenerateResponse(BaseModel):
 
 class StyleCode(RootModel[str]):
     root: str = Field(..., pattern='^[0-9A-Fa-f]{8}$')
-
-
-class Datum1(BaseModel):
-    is_image_safe: Optional[bool] = None
-    prompt: Optional[str] = None
-    resolution: Optional[str] = None
-    seed: Optional[int] = None
-    style_type: Optional[str] = None
-    url: Optional[str] = None
-
-
-class IdeogramV3IdeogramResponse(BaseModel):
-    created: Optional[datetime] = None
-    data: Optional[List[Datum1]] = None
 
 
 class RenderingSpeed1(str, Enum):
@@ -290,6 +229,25 @@ class IdeogramV3Request(BaseModel):
         None,
         description='Optional masks for character reference images. When provided, must match the number of character_reference_images. Each mask should be a grayscale image of the same dimensions as the corresponding character reference image. The images should be in JPEG, PNG or WebP format.'
     )
+
+
+class IdeogramPImageRequest(BaseModel):
+    prompt: str = Field(
+        ...,
+        description="The text prompt, or an Ideogram 4.0 structured JSON caption "
+        "(used verbatim when prompt_upsampling is 'OFF').",
+    )
+    quality: str | None = Field(
+        None, description="Generation tier: 'VERY_LOW', 'LOW', 'MEDIUM' or 'HIGH'."
+    )
+    resolution: str | None = Field(None, description="Output size class: '1K' or '2K'.")
+    aspect_ratio: str | None = Field(
+        None, description="Aspect ratio in WxH format", examples=['16x9']
+    )
+    prompt_upsampling: str | None = Field(
+        None, description="Prompt expansion: 'AUTO', 'ON' or 'OFF'."
+    )
+    seed: int | None = Field(None, ge=0, le=2147483647)
 
 
 class IdeogramV4Request(BaseModel):

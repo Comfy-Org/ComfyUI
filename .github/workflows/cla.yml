@@ -1,0 +1,120 @@
+name: CLA Assistant
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, synchronize, closed]
+
+permissions:
+  actions: write
+  contents: read # 'read' is enough because signatures live in a REMOTE repo
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla-assistant:
+    runs-on: ubuntu-latest
+    steps:
+      # The CLA action normally requires every commit author in a PR to sign.
+      # We only want the PR author to sign, so we allowlist all other committers
+      # by computing them from the PR's commits and excluding the PR author.
+      - name: Build author-only allowlist
+        id: allowlist
+        if: >
+          (github.event_name == 'pull_request_target' && github.event.action != 'closed') ||
+          (github.event_name == 'issue_comment' && github.event.issue.pull_request && (
+            github.event.comment.body == 'recheck' ||
+            github.event.comment.body == 'I have read and agree to the Contributor License Agreement'
+          ))
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login || github.event.issue.user.login }}
+          BASE_ALLOWLIST: action@github.com,actions-user,ampagent,claude,comfy-pr-bot,GitHub Action,github-actions,github-actions[bot],Glary Bot,Glary-Bot,*[bot]
+        # For each commit emit the GitHub login when the author/committer email resolves to a GitHub account
+        # otherwise fall back to the raw git name.
+        run: |
+          if ! commit_authors=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" --paginate \
+            --jq '.[] | (.author.login // .commit.author.name // empty), (.committer.login // .commit.committer.name // empty)'); then
+            echo "Failed to fetch pull request commits" >&2
+            exit 1
+          fi
+          others=$(printf '%s\n' "$commit_authors" | sort -u | grep -vix "${PR_AUTHOR}" | paste -sd, -)
+          if [ -n "$others" ]; then
+            echo "allowlist=${BASE_ALLOWLIST},${others}" >> "$GITHUB_OUTPUT"
+          else
+            echo "allowlist=${BASE_ALLOWLIST}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: CLA Assistant
+        # Run on open/update PR events, on "recheck", or when someone posts the signing phrase.
+        # IMPORTANT: this phrase must match `custom-pr-sign-comment` below.
+        if: >
+          (github.event_name == 'pull_request_target' && github.event.action != 'closed') ||
+          (github.event_name == 'issue_comment' && github.event.issue.pull_request && (
+            github.event.comment.body == 'recheck' ||
+            github.event.comment.body == 'I have read and agree to the Contributor License Agreement'
+          ))
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT required to write to the centralized signatures repo.
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        with:
+          lock-pullrequest-aftermerge: false
+
+          # Where the CLA document lives (shown to contributors)
+          path-to-document: https://github.com/Comfy-Org/comfy-cla/blob/main/comfyui_icla.md
+
+          # Centralized signature storage
+          remote-organization-name: comfy-org
+          remote-repository-name: comfy-cla
+          path-to-signatures: signatures/cla.json
+          branch: main
+
+          # Only the PR author must sign: bots plus every non-author committer
+          # are allowlisted via the "Build author-only allowlist" step above.
+          # *[bot] is a catch-all for any GitHub App bot account.
+          allowlist: ${{ steps.allowlist.outputs.allowlist }}
+
+          # Custom PR comment messages
+          custom-notsigned-prcomment: |
+            🎉 Thank you for your contribution, we really appreciate it! 🎉
+
+            Like many open source projects, we require contributors to sign our [Contributor License Agreement (CLA)](https://github.com/Comfy-Org/comfy-cla/blob/main/comfyui_icla.md). A CLA makes the ownership of contributions explicit, so contributors and the project share a clear understanding of how the code can be used. By signing, you:
+
+            - Confirm that you own your contribution.
+            - Keep the right to reuse your own code.
+            - Grant us a copyright license to include and share it within our projects.
+
+            CLAs are standard practice across major open source projects including those under the Apache Software Foundation and the Linux Foundation. Ours is based on the Apache Software Foundation's CLA. Most importantly, it would enable us to relicense the project under a more permissive license in the future, giving the project and its community greater flexibility.
+
+            ✍ **To sign, please post a new comment on this PR with exactly the following text:** ✍
+
+          custom-pr-sign-comment: I have read and agree to the Contributor License Agreement
+
+          custom-allsigned-prcomment: |
+            ✅ All contributors have signed the CLA. Thank you! This PR is ready to be merged.
+
+      - name: Lock PR containing a CLA signature or bot approval
+        if: github.event_name == 'pull_request_target' && github.event.action == 'closed' && github.event.pull_request.merged == true
+        uses: actions/github-script@v7
+        with:
+          retries: 3
+          script: |
+            const pr = context.payload.pull_request;
+            const issue = { ...context.repo, issue_number: pr.number };
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...issue,
+              per_page: 100,
+            });
+            const signed = comments.some(comment =>
+              (comment.user?.id === pr.user.id &&
+                comment.body?.trim().toLowerCase() === 'i have read and agree to the contributor license agreement') ||
+              (comment.user?.login === 'github-actions[bot]' &&
+                comment.body?.startsWith('✅ All contributors have signed the CLA. Thank you! This PR is ready to be merged.'))
+            );
+            if (signed) {
+              await github.rest.issues.lock(issue);
+            }

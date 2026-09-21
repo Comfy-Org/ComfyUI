@@ -97,11 +97,11 @@ class SpatialRationalResampler(nn.Module):
     For dims==3, work per-frame for spatial scaling (temporal axis untouched).
     """
 
-    def __init__(self, mid_channels: int, scale: float):
+    def __init__(self, mid_channels: int, scale: float, operations):
         super().__init__()
         self.scale = float(scale)
         self.num, self.den = _rational_for_scale(self.scale)
-        self.conv = nn.Conv2d(
+        self.conv = operations.Conv2d(
             mid_channels, (self.num**2) * mid_channels, kernel_size=3, padding=1
         )
         self.pixel_shuffle = PixelShuffleND(2, upscale_factors=(self.num, self.num))
@@ -119,18 +119,18 @@ class SpatialRationalResampler(nn.Module):
 
 class ResBlock(nn.Module):
     def __init__(
-        self, channels: int, mid_channels: Optional[int] = None, dims: int = 3
+        self, channels: int, operations, mid_channels: Optional[int] = None, dims: int = 3
     ):
         super().__init__()
         if mid_channels is None:
             mid_channels = channels
 
-        Conv = nn.Conv2d if dims == 2 else nn.Conv3d
+        Conv = operations.Conv2d if dims == 2 else operations.Conv3d
 
         self.conv1 = Conv(channels, mid_channels, kernel_size=3, padding=1)
-        self.norm1 = nn.GroupNorm(32, mid_channels)
+        self.norm1 = operations.GroupNorm(32, mid_channels)
         self.conv2 = Conv(mid_channels, channels, kernel_size=3, padding=1)
-        self.norm2 = nn.GroupNorm(32, channels)
+        self.norm2 = operations.GroupNorm(32, channels)
         self.activation = nn.SiLU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -159,6 +159,7 @@ class LatentUpsampler(nn.Module):
 
     def __init__(
         self,
+        operations,
         in_channels: int = 128,
         mid_channels: int = 512,
         num_blocks_per_stage: int = 4,
@@ -179,34 +180,34 @@ class LatentUpsampler(nn.Module):
         self.spatial_scale = float(spatial_scale)
         self.rational_resampler = rational_resampler
 
-        Conv = nn.Conv2d if dims == 2 else nn.Conv3d
+        Conv = operations.Conv2d if dims == 2 else operations.Conv3d
 
         self.initial_conv = Conv(in_channels, mid_channels, kernel_size=3, padding=1)
-        self.initial_norm = nn.GroupNorm(32, mid_channels)
+        self.initial_norm = operations.GroupNorm(32, mid_channels)
         self.initial_activation = nn.SiLU()
 
         self.res_blocks = nn.ModuleList(
-            [ResBlock(mid_channels, dims=dims) for _ in range(num_blocks_per_stage)]
+            [ResBlock(mid_channels, dims=dims, operations=operations) for _ in range(num_blocks_per_stage)]
         )
 
         if spatial_upsample and temporal_upsample:
             self.upsampler = nn.Sequential(
-                nn.Conv3d(mid_channels, 8 * mid_channels, kernel_size=3, padding=1),
+                operations.Conv3d(mid_channels, 8 * mid_channels, kernel_size=3, padding=1),
                 PixelShuffleND(3),
             )
         elif spatial_upsample:
             if rational_resampler:
                 self.upsampler = SpatialRationalResampler(
-                    mid_channels=mid_channels, scale=self.spatial_scale
+                    mid_channels=mid_channels, scale=self.spatial_scale, operations=operations
                 )
             else:
                 self.upsampler = nn.Sequential(
-                    nn.Conv2d(mid_channels, 4 * mid_channels, kernel_size=3, padding=1),
+                    operations.Conv2d(mid_channels, 4 * mid_channels, kernel_size=3, padding=1),
                     PixelShuffleND(2),
                 )
         elif temporal_upsample:
             self.upsampler = nn.Sequential(
-                nn.Conv3d(mid_channels, 2 * mid_channels, kernel_size=3, padding=1),
+                operations.Conv3d(mid_channels, 2 * mid_channels, kernel_size=3, padding=1),
                 PixelShuffleND(1),
             )
         else:
@@ -215,10 +216,13 @@ class LatentUpsampler(nn.Module):
             )
 
         self.post_upsample_res_blocks = nn.ModuleList(
-            [ResBlock(mid_channels, dims=dims) for _ in range(num_blocks_per_stage)]
+            [ResBlock(mid_channels, dims=dims, operations=operations) for _ in range(num_blocks_per_stage)]
         )
 
         self.final_conv = Conv(mid_channels, in_channels, kernel_size=3, padding=1)
+
+    def get_dtype(self):
+        return getattr(self.initial_conv, "weight_comfy_model_dtype", self.initial_conv.weight.dtype)
 
     def forward(self, latent: torch.Tensor) -> torch.Tensor:
         b, c, f, h, w = latent.shape
@@ -266,7 +270,7 @@ class LatentUpsampler(nn.Module):
         return x
 
     @classmethod
-    def from_config(cls, config):
+    def from_config(cls, config, operations):
         return cls(
             in_channels=config.get("in_channels", 4),
             mid_channels=config.get("mid_channels", 128),
@@ -276,6 +280,7 @@ class LatentUpsampler(nn.Module):
             temporal_upsample=config.get("temporal_upsample", False),
             spatial_scale=config.get("spatial_scale", 2.0),
             rational_resampler=config.get("rational_resampler", False),
+            operations=operations,
         )
 
     def config(self):

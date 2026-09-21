@@ -95,7 +95,7 @@ class LTXVEmptyLatentAudio(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="LTXVEmptyLatentAudio",
-            display_name="LTXV Empty Latent Audio",
+            display_name="Empty LTXV Latent Audio",
             category="model/latent/ltxv",
             inputs=[
                 io.Int.Input(
@@ -107,14 +107,17 @@ class LTXVEmptyLatentAudio(io.ComfyNode):
                     display_mode=io.NumberDisplay.number,
                     tooltip="Number of frames.",
                 ),
-                io.Int.Input(
-                    "frame_rate",
-                    default=25,
-                    min=1,
-                    max=1000,
-                    step=1,
-                    display_mode=io.NumberDisplay.number,
-                    tooltip="Number of frames per second.",
+                io.MultiType.Input(
+                    io.Float.Input(
+                        "frame_rate",
+                        default=25.0,
+                        min=1.0,
+                        max=1000.0,
+                        step=0.01,
+                        display_mode=io.NumberDisplay.number,
+                        tooltip="Number of frames per second.",
+                    ),
+                    [io.Int],
                 ),
                 io.Int.Input(
                     "batch_size",
@@ -137,7 +140,7 @@ class LTXVEmptyLatentAudio(io.ComfyNode):
     def execute(
         cls,
         frames_number: int,
-        frame_rate: int,
+        frame_rate: float,
         batch_size: int,
         audio_vae,
     ) -> io.NodeOutput:
@@ -170,7 +173,7 @@ class LTXAVTextEncoderLoader(io.ComfyNode):
             node_id="LTXAVTextEncoderLoader",
             display_name="Load LTXV Audio Text Encoder",
             category="model/loaders",
-            description="Recipes:\nltxav: gemma 3 12B",
+            description="Recipes:\nltxav: gemma 3 12B or matching gemma 4 model",
             inputs=[
                 io.Combo.Input(
                     "text_encoder",

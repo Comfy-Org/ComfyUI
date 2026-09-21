@@ -1,6 +1,5 @@
 import json
 from dataclasses import dataclass
-import math
 import torch
 import torchaudio
 
@@ -185,8 +184,8 @@ class AudioVAE(torch.nn.Module):
             self.autoencoder.mel_bins,
         )
 
-    def num_of_latents_from_frames(self, frames_number: int, frame_rate: int) -> int:
-        return math.ceil((float(frames_number) / frame_rate) * self.latents_per_second)
+    def num_of_latents_from_frames(self, frames_number: int, frame_rate: float) -> int:
+        return round((float(frames_number) / frame_rate) * self.latents_per_second)
 
     def run_vocoder(self, mel_spec: torch.Tensor) -> torch.Tensor:
         audio_channels = self.autoencoder.decoder.out_ch

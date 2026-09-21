@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont
@@ -166,6 +168,111 @@ def boxes_to_regions(boxes, width: int, height: int) -> list:
     return regions
 
 
+def normalize_incoming_boxes(bboxes) -> list:
+    if isinstance(bboxes, dict):
+        frame = [bboxes]
+    elif not isinstance(bboxes, list) or not bboxes:
+        frame = []
+    elif isinstance(bboxes[0], dict):
+        frame = bboxes
+    else:
+        frame = bboxes[0] if isinstance(bboxes[0], list) else []
+    boxes = []
+    for box in frame:
+        if not isinstance(box, dict):
+            continue
+        norm = {
+            "x": box.get("x", 0),
+            "y": box.get("y", 0),
+            "width": box.get("width", 0),
+            "height": box.get("height", 0),
+        }
+        meta = box.get("metadata")
+        if isinstance(meta, dict):
+            norm["metadata"] = meta
+        boxes.append(norm)
+    return boxes
+
+
+def _looks_like_element(box: dict) -> bool:
+    bbox = box.get("bbox")
+    return isinstance(bbox, (list, tuple)) and len(bbox) == 4
+
+
+def _looks_like_bbox(box: dict) -> bool:
+    return all(key in box for key in ("x", "y", "width", "height"))
+
+
+def elements_to_boxes(elements: list, width: int, height: int) -> list:
+    boxes = []
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        bbox = element.get("bbox")
+        if not (isinstance(bbox, (list, tuple)) and len(bbox) == 4):
+            raise ValueError("bboxes element is missing a valid 'bbox' [ymin, xmin, ymax, xmax]")
+        try:
+            ymin, xmin, ymax, xmax = (float(v) / 1000.0 for v in bbox)
+        except (TypeError, ValueError):
+            raise ValueError("bboxes element 'bbox' must contain four numbers")
+        etype = "text" if element.get("type") == "text" else "obj"
+        boxes.append({
+            "x": round(min(xmin, xmax) * width),
+            "y": round(min(ymin, ymax) * height),
+            "width": round(abs(xmax - xmin) * width),
+            "height": round(abs(ymax - ymin) * height),
+            "metadata": {
+                "type": etype,
+                "text": element.get("text", "") if etype == "text" else "",
+                "desc": element.get("desc", ""),
+                "palette": element.get("color_palette", []) or [],
+            },
+        })
+    return boxes
+
+
+def boxes_from_input(data, width: int, height: int) -> list:
+    if data is None:
+        return []
+    if isinstance(data, str):
+        text = data.strip()
+        if not text:
+            return []
+        try:
+            data = json.loads(text)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"bboxes string input is not valid JSON: {exc}") from exc
+    if isinstance(data, dict):
+        if _looks_like_element(data):
+            return elements_to_boxes([data], width, height)
+        if _looks_like_bbox(data):
+            return normalize_incoming_boxes(data)
+        raise ValueError(
+            "bboxes dict must be a bounding box (x, y, width, height) or an element (with a 'bbox')"
+        )
+    if not isinstance(data, list):
+        raise ValueError(
+            "bboxes input must be bounding boxes, elements, or a JSON string, "
+            f"got {type(data).__name__}"
+        )
+    if not data:
+        return []
+    first = data[0]
+    if isinstance(first, list):
+        return normalize_incoming_boxes(data)
+    if isinstance(first, dict):
+        if _looks_like_element(first):
+            return elements_to_boxes(data, width, height)
+        if _looks_like_bbox(first):
+            return normalize_incoming_boxes(data)
+        raise ValueError(
+            "bboxes items must be bounding boxes (x, y, width, height) or elements (with a 'bbox')"
+        )
+    raise ValueError(
+        f"bboxes list must contain bounding boxes or elements, got {type(first).__name__}"
+    )
+
+
 def _norm_bbox(region: dict) -> list[int]:
     def grid(value: float) -> int:
         return max(0, min(1000, round(value * 1000)))
@@ -217,29 +324,48 @@ class CreateBoundingBoxes(io.ComfyNode):
                     optional=True,
                     tooltip="Optional image used as background in the canvas and preview.",
                 ),
+                io.MultiType.Input(
+                    "bboxes",
+                    [io.BoundingBox, io.Array, io.String],
+                    optional=True,
+                    tooltip="Bounding boxes, elements, or a JSON string to initialize the canvas. A new upstream value initializes the canvas; edits made on the canvas take priority and are kept until the upstream value changes again.",
+                ),
                 io.Int.Input("width", default=1024, min=64, max=16384, step=16,
                              tooltip="Width of the canvas and the pixel grid for the bounding boxes."),
                 io.Int.Input("height", default=1024, min=64, max=16384, step=16,
                              tooltip="Height of the canvas and the pixel grid for the bounding boxes."),
                 editor_state,
+                io.BoundingBoxes.Input(
+                    "last_incoming",
+                    optional=True,
+                    tooltip="Internal state managed by the canvas: the upstream bboxes value that last initialized it. Leave empty to re-initialize the canvas from the bboxes input on the next run.",
+                ),
             ],
             outputs=[
                 io.Image.Output(display_name="preview"),
                 io.BoundingBox.Output(display_name="bboxes"),
                 io.Array.Output(display_name="elements"),
             ],
+            is_output_node=True,
             is_experimental=True,
         )
 
     @classmethod
-    def execute(cls, width, height, editor_state=None, background=None) -> io.NodeOutput:
-        regions = boxes_to_regions(editor_state, width, height)
+    def execute(cls, width, height, editor_state=None, last_incoming=None, background=None, bboxes=None) -> io.NodeOutput:
+        incoming = boxes_from_input(bboxes, width, height)
+        applied = last_incoming if isinstance(last_incoming, list) else []
+        upstream_changed = bool(incoming) and incoming != applied
+        source = incoming if upstream_changed else (editor_state or [])
+        regions = boxes_to_regions(source, width, height)
         preview = render_preview(regions, width, height, _bg_from_image(background))
+        ui = {"dims": [width, height]}
+        if incoming:
+            ui["input_bboxes"] = incoming
         return io.NodeOutput(
             preview,
             fractions_to_bbox_frame(regions, width, height),
             build_elements(regions),
-            ui={"dims": [width, height]},
+            ui=ui,
         )
 
 

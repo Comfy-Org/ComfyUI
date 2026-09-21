@@ -7,13 +7,20 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from io import BytesIO
+from urllib.parse import urlparse
 
+import aiohttp
+from aiohttp.client_exceptions import ClientError
 from yarl import URL
 
 from comfy.cli_args import args
+from comfy.comfy_api_env import normalize_comfy_api_base
 from comfy.deploy_environment import get_deploy_environment
 from comfy.model_management import processing_interrupted
 from comfy_api.latest import IO
+from comfy_execution.graph_utils import is_link
+from comfy_execution.utils import get_executing_context
+from comfyui_version import __version__ as comfyui_version
 
 from .common_exceptions import ProcessingInterrupted
 
@@ -75,15 +82,62 @@ def get_comfy_api_headers(node_cls: type[IO.ComfyNode]) -> dict[str, str]:
     relative/cloud URLs resolved against ``default_base_url()``; because the result
     includes auth, callers must not attach it to arbitrary absolute/presigned URLs.
     """
-    return {
+    headers = {
         **get_auth_header(node_cls),
         "Comfy-Env": get_deploy_environment(),
         "Comfy-Usage-Source": get_usage_source(node_cls),
+        "Comfy-Core-Version": comfyui_version,
     }
+    ctx = get_executing_context()
+    if ctx is not None:
+        headers["Comfy-Job-Id"] = ctx.prompt_id
+    return headers
 
 
 def default_base_url() -> str:
-    return getattr(args, "comfy_api_base", "https://api.comfy.org")
+    return normalize_comfy_api_base(getattr(args, "comfy_api_base", "https://api.comfy.org"))
+
+
+async def diagnose_connectivity() -> dict[str, bool]:
+    """Best-effort connectivity diagnostics to distinguish local vs. server issues."""
+    results = {
+        "internet_accessible": False,
+        "api_accessible": False,
+    }
+    timeout = aiohttp.ClientTimeout(total=5.0)
+
+    # Probe Google and Baidu in parallel: Google is blocked by the GFW in mainland China, so a Baidu probe is required
+    # to correctly detect that Chinese users with working internet do have working internet.
+    internet_probe_urls = ("https://www.google.com", "https://www.baidu.com")
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async def _probe(url: str) -> bool:
+            try:
+                async with session.get(url) as resp:
+                    return resp.status < 500
+            except (ClientError, OSError, asyncio.TimeoutError):
+                return False
+
+        probe_tasks = [asyncio.create_task(_probe(u)) for u in internet_probe_urls]
+        try:
+            for fut in asyncio.as_completed(probe_tasks):
+                if await fut:
+                    results["internet_accessible"] = True
+                    break
+        finally:
+            for t in probe_tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*probe_tasks, return_exceptions=True)
+        if not results["internet_accessible"]:
+            return results
+
+        parsed = urlparse(default_base_url())
+        health_url = f"{parsed.scheme}://{parsed.netloc}/health"
+        with contextlib.suppress(ClientError, OSError):
+            async with session.get(health_url) as resp:
+                results["api_accessible"] = resp.status < 500
+    return results
 
 
 async def sleep_with_interrupt(
@@ -91,9 +145,8 @@ async def sleep_with_interrupt(
     node_cls: type[IO.ComfyNode] | None,
     label: str | None = None,
     start_ts: float | None = None,
-    estimated_total: int | None = None,
     *,
-    display_callback: Callable[[type[IO.ComfyNode], str, int, int | None], None] | None = None,
+    display_callback: Callable[[type[IO.ComfyNode], str, int], None] | None = None,
 ):
     """
     Sleep in 1s slices while:
@@ -107,7 +160,7 @@ async def sleep_with_interrupt(
         now = time.monotonic()
         if start_ts is not None and label and display_callback:
             with contextlib.suppress(Exception):
-                display_callback(node_cls, label, int(now - start_ts), estimated_total)
+                display_callback(node_cls, label, int(now - start_ts))
         if now >= end:
             break
         await asyncio.sleep(min(1.0, end - now))
@@ -148,6 +201,27 @@ def get_fs_object_size(path_or_object: str | BytesIO) -> int:
     if isinstance(path_or_object, str):
         return os.path.getsize(path_or_object)
     return len(path_or_object.getvalue())
+
+
+def get_output_consumers(node_cls: type[IO.ComfyNode], output_index: int) -> list[str]:
+    dynprompt = node_cls.hidden.dynprompt
+    if dynprompt is None:
+        return []
+    node_id = str(node_cls.hidden.unique_id)
+    consumers = []
+    for consumer_id in dynprompt.all_node_ids():
+        consumer = dynprompt.get_node(consumer_id)
+        for value in (consumer.get("inputs") or {}).values():
+            if is_link(value) and value[0] == node_id and value[1] == output_index:
+                title = (consumer.get("_meta") or {}).get("title") or consumer.get("class_type")
+                consumers.append(f"{title} #{dynprompt.get_display_node_id(consumer_id)}")
+    return sorted(consumers)
+
+
+def validate_output_unlinked(node_cls: type[IO.ComfyNode], output_index: int, reason: str) -> None:
+    consumers = get_output_consumers(node_cls, output_index)
+    if consumers:
+        raise ValueError(f"{reason} (currently linked: {', '.join(consumers)}).")
 
 
 def to_aiohttp_url(url: str) -> URL:

@@ -217,10 +217,7 @@ class AceStepAttention(nn.Module):
                 cos, sin = position_embeddings
                 query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        n_rep = self.num_heads // self.num_kv_heads
-        if n_rep > 1:
-            key_states = key_states.repeat_interleave(n_rep, dim=1)
-            value_states = value_states.repeat_interleave(n_rep, dim=1)
+        gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
 
         attn_bias = None
         if self.sliding_window is not None and not self.is_cross_attention:
@@ -244,7 +241,7 @@ class AceStepAttention(nn.Module):
             else:
                 attn_bias = window_bias
 
-        attn_output = optimized_attention(query_states, key_states, value_states, self.num_heads, attn_bias, skip_reshape=True, low_precision_attention=False)
+        attn_output = optimized_attention(query_states, key_states, value_states, self.num_heads, attn_bias, skip_reshape=True, low_precision_attention=False, **gqa_kwargs)
         attn_output = self.o_proj(attn_output)
 
         return attn_output

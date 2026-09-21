@@ -7,6 +7,7 @@ import folder_paths
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 import comfy.model_management
+import comfy.model_patcher
 
 try:
     from spandrel_extra_arches import EXTRA_REGISTRY
@@ -42,6 +43,7 @@ class UpscaleModelLoader(io.ComfyNode):
         if not isinstance(out, ImageModelDescriptor):
             raise Exception("Upscale model must be a single-image model.")
 
+        out.patcher = comfy.model_patcher.CoreModelPatcher(out.model, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device())
         return io.NodeOutput(out)
 
     load_model = execute  # TODO: remove
@@ -66,14 +68,12 @@ class ImageUpscaleWithModel(io.ComfyNode):
 
     @classmethod
     def execute(cls, upscale_model, image) -> io.NodeOutput:
-        device = model_management.get_torch_device()
+        device = upscale_model.patcher.load_device
 
-        memory_required = model_management.module_size(upscale_model.model)
-        memory_required += (512 * 512 * 3) * image.element_size() * max(upscale_model.scale, 1.0) * 384.0 #The 384.0 is an estimate of how much some of these models take, TODO: make it more accurate
+        memory_required = (512 * 512 * 3) * image.element_size() * max(upscale_model.scale, 1.0) * 384.0 #The 384.0 is an estimate of how much some of these models take, TODO: make it more accurate
         memory_required += image.nelement() * image.element_size()
-        model_management.free_memory(memory_required, device)
+        model_management.load_models_gpu([upscale_model.patcher], memory_required=memory_required, force_full_load=True)
 
-        upscale_model.to(device)
         in_img = image.movedim(-1,-3).to(device)
 
         tile = 512
@@ -82,20 +82,17 @@ class ImageUpscaleWithModel(io.ComfyNode):
         output_device = comfy.model_management.intermediate_device()
 
         oom = True
-        try:
-            while oom:
-                try:
-                    steps = in_img.shape[0] * comfy.utils.get_tiled_scale_steps(in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=overlap)
-                    pbar = comfy.utils.ProgressBar(steps)
-                    s = comfy.utils.tiled_scale(in_img, lambda a: upscale_model(a.float()), tile_x=tile, tile_y=tile, overlap=overlap, upscale_amount=upscale_model.scale, pbar=pbar, output_device=output_device)
-                    oom = False
-                except Exception as e:
-                    model_management.raise_non_oom(e)
-                    tile //= 2
-                    if tile < 128:
-                        raise e
-        finally:
-            upscale_model.to("cpu")
+        while oom:
+            try:
+                steps = in_img.shape[0] * comfy.utils.get_tiled_scale_steps(in_img.shape[3], in_img.shape[2], tile_x=tile, tile_y=tile, overlap=overlap)
+                pbar = comfy.utils.ProgressBar(steps)
+                s = comfy.utils.tiled_scale(in_img, lambda a: upscale_model(a.float()), tile_x=tile, tile_y=tile, overlap=overlap, upscale_amount=upscale_model.scale, pbar=pbar, output_device=output_device)
+                oom = False
+            except Exception as e:
+                model_management.raise_non_oom(e)
+                tile //= 2
+                if tile < 128:
+                    raise e
 
         s = torch.clamp(s.movedim(-3,-1), min=0, max=1.0).to(comfy.model_management.intermediate_dtype())
         return io.NodeOutput(s)

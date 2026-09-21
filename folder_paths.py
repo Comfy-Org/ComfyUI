@@ -17,7 +17,11 @@ if args.base_directory:
 else:
     base_path = os.path.dirname(os.path.realpath(__file__))
 
-models_dir = os.path.join(base_path, "models")
+if args.models_directory:
+    models_dir = os.path.abspath(args.models_directory)
+else:
+    models_dir = os.path.join(base_path, "models")
+
 folder_names_and_paths["checkpoints"] = ([os.path.join(models_dir, "checkpoints")], supported_pt_extensions)
 folder_names_and_paths["configs"] = ([os.path.join(models_dir, "configs")], [".yaml"])
 
@@ -39,6 +43,8 @@ folder_names_and_paths["upscale_models"] = ([os.path.join(models_dir, "upscale_m
 folder_names_and_paths["latent_upscale_models"] = ([os.path.join(models_dir, "latent_upscale_models")], supported_pt_extensions)
 
 folder_names_and_paths["custom_nodes"] = ([os.path.join(base_path, "custom_nodes")], set())
+
+folder_names_and_paths["datasets"] = ([os.path.join(base_path, "datasets")], set())
 
 folder_names_and_paths["hypernetworks"] = ([os.path.join(models_dir, "hypernetworks")], supported_pt_extensions)
 
@@ -264,6 +270,76 @@ def annotated_filepath(name: str) -> tuple[str, str | None]:
     return name, base_dir
 
 
+# Content types a browser may execute or render inline. File endpoints that
+# serve user-controlled content must force these to download (and ideally set
+# Content-Disposition: attachment) to avoid stored XSS. Centralised here so the
+# /view and /userdata handlers can't drift apart. mimetypes.guess_type may
+# return either the text/* or application/* spelling depending on platform, so
+# both are listed.
+DANGEROUS_CONTENT_TYPES = {
+    'text/html', 'text/html-sandboxed', 'application/xhtml+xml',
+    'text/javascript', 'application/javascript', 'application/x-javascript',
+    'application/ecmascript', 'text/css',
+    'image/svg+xml', 'application/xml', 'text/xml',
+    # message/rfc822 (.mht/.mhtml) can carry script in some browsers.
+    'message/rfc822',
+}
+
+
+def is_dangerous_content_type(content_type: str | None) -> bool:
+    """Return True if a browser may execute or render `content_type` inline.
+
+    Normalises before matching so the check can't be slipped past with a
+    charset/boundary parameter (``text/html; charset=utf-8``) or casing
+    (``TEXT/HTML``). Any XML dialect (``*+xml`` or ``*/xml``) is treated as
+    dangerous because XML can carry inline script via stylesheet/entity tricks,
+    which also covers the ``application/{xslt,rss,atom,rdf}+xml`` family without
+    enumerating each one. Endpoints serving user-controlled content should route
+    a dangerous type to ``application/octet-stream`` + ``Content-Disposition:
+    attachment`` + ``X-Content-Type-Options: nosniff``.
+    """
+    if not content_type:
+        return False
+    normalized = content_type.split(';', 1)[0].strip().lower()
+    if normalized in DANGEROUS_CONTENT_TYPES:
+        return True
+    return normalized.endswith('+xml') or normalized.endswith('/xml')
+
+
+def renders_safely_as_image(content_type: str | None, sec_fetch_dest: str | None) -> bool:
+    """Return True if a dangerous `content_type` is safe to serve inline anyway.
+
+    An SVG referenced by an ``<img>`` is loaded in secure static mode: scripts
+    and external references are disabled, so the stored XSS that
+    ``is_dangerous_content_type`` guards against cannot fire. The attack needs
+    the SVG to become a document, which is a separate ``Sec-Fetch-Dest``.
+    Browsers set that header themselves and script cannot override it (the
+    ``Sec-`` prefix makes it a forbidden header name), so it is trustworthy for
+    this decision. Anything else, including a missing header from a non-browser
+    client or a proxy that strips it, fails closed.
+    """
+    if sec_fetch_dest != 'image':
+        return False
+    return (content_type or '').split(';', 1)[0].strip().lower() == 'image/svg+xml'
+
+
+def is_within_directory(directory: str, target: str) -> bool:
+    """Return True if `target` resolves to a path inside `directory`.
+
+    Uses realpath on both operands so that a symlink placed inside `directory`
+    that points elsewhere cannot escape the containment check at open time.
+    """
+    try:
+        directory = os.path.realpath(directory)
+        target = os.path.realpath(target)
+        return os.path.commonpath((directory, target)) == directory
+    except ValueError:
+        # ValueError is raised by realpath() on a path with an embedded null
+        # byte, and by commonpath() on Windows when the paths are on different
+        # drives. In either case the target is not safely within the directory.
+        return False
+
+
 def get_annotated_filepath(name: str, default_dir: str | None=None) -> str:
     name, base_dir = annotated_filepath(name)
 
@@ -273,7 +349,12 @@ def get_annotated_filepath(name: str, default_dir: str | None=None) -> str:
         else:
             base_dir = get_input_directory()  # fallback path
 
-    return os.path.join(base_dir, name)
+    filepath = os.path.abspath(os.path.join(base_dir, name))
+    # Prevent path traversal: the resolved path must stay within base_dir.
+    # repr() the name in the message so a crafted value can't inject log lines.
+    if not is_within_directory(base_dir, filepath):
+        raise ValueError("Invalid file path: {!r}".format(name))
+    return filepath
 
 
 def exists_annotated_filepath(name) -> bool:
@@ -282,7 +363,10 @@ def exists_annotated_filepath(name) -> bool:
     if base_dir is None:
         base_dir = get_input_directory()  # fallback path
 
-    filepath = os.path.join(base_dir, name)
+    filepath = os.path.abspath(os.path.join(base_dir, name))
+    # Treat traversal attempts as non-existent rather than probing the filesystem.
+    if not is_within_directory(base_dir, filepath):
+        return False
     return os.path.exists(filepath)
 
 
@@ -465,11 +549,10 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
 
     full_output_folder = os.path.join(output_dir, subfolder)
 
-    if os.path.commonpath((output_dir, os.path.abspath(full_output_folder))) != output_dir:
+    if not is_within_directory(output_dir, full_output_folder):
         err = "**** ERROR: Saving image outside the output folder is not allowed." + \
               "\n full_output_folder: " + os.path.abspath(full_output_folder) + \
-              "\n         output_dir: " + output_dir + \
-              "\n         commonpath: " + os.path.commonpath((output_dir, os.path.abspath(full_output_folder)))
+              "\n         output_dir: " + output_dir
         logging.error(err)
         raise Exception(err)
 

@@ -1,3 +1,11 @@
+"""Reads a multipart upload off the wire and lands its bytes in a temporary file
+the ingest service can hash and move. The body is consumed in chunks so a large
+model never has to fit in memory, and the temporary file is removed on every
+failure path so an abandoned upload leaves nothing behind. Field values are
+validated as they arrive, letting a bad request fail before its bytes are
+written.
+"""
+
 import logging
 import os
 import uuid
@@ -91,20 +99,6 @@ async def parse_multipart_upload(
             file_present = True
             file_client_name = (field.filename or "").strip()
 
-            if provided_hash and provided_hash_exists is True:
-                # Hash exists - drain file but don't write to disk
-                try:
-                    while True:
-                        chunk = await field.read_chunk(8 * 1024 * 1024)
-                        if not chunk:
-                            break
-                        file_written += len(chunk)
-                except Exception:
-                    raise UploadError(
-                        500, "UPLOAD_IO_ERROR", "Failed to receive uploaded file."
-                    )
-                continue
-
             uploads_root = os.path.join(folder_paths.get_temp_directory(), "uploads")
             unique_dir = os.path.join(uploads_root, uuid.uuid4().hex)
             os.makedirs(unique_dir, exist_ok=True)
@@ -140,7 +134,6 @@ async def parse_multipart_upload(
             provided_mime_type = ((await field.text()) or "").strip() or None
         elif fname == "preview_id":
             provided_preview_id = ((await field.text()) or "").strip() or None
-
     if not file_present and not (provided_hash and provided_hash_exists):
         raise UploadError(
             400, "MISSING_FILE", "Form must include a 'file' part or a known 'hash'."

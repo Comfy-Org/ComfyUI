@@ -12,6 +12,7 @@ class CurveEditor(io.ComfyNode):
             node_id="CurveEditor",
             display_name="Curve Editor",
             category="utilities",
+            has_intermediate_output=True,
             inputs=[
                 io.Curve.Input("curve"),
                 io.Histogram.Input("histogram", optional=True),

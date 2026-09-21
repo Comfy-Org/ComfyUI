@@ -642,6 +642,7 @@ class Tencent3DPartNode(IO.ComfyNode):
             response_model=To3DProTaskCreateResponse,
             data=To3DPartTaskRequest(
                 File=TaskFile3DInput(Type=file_format.upper(), Url=model_url),
+                EnableStagedGeneration=True,
             ),
             is_rate_limited=_is_tencent_rate_limited,
         )

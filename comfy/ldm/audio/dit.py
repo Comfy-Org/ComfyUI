@@ -425,19 +425,16 @@ class Attention(nn.Module):
         if n == 1 and causal:
             causal = False
 
-        if h != kv_h:
-            # Repeat interleave kv_heads to match q_heads
-            heads_per_kv_head = h // kv_h
-            k, v = map(lambda t: t.repeat_interleave(heads_per_kv_head, dim = 1), (k, v))
+        gqa_kwargs = {"enable_gqa": True} if h != kv_h else {}
 
         if self.differential:
             q, q_diff = q.unbind(dim=1)
             k, k_diff = k.unbind(dim=1)
-            out      = optimized_attention(q,      k,      v, h, skip_reshape=True, low_precision_attention=False, transformer_options=transformer_options)
-            out_diff = optimized_attention(q_diff, k_diff, v, h, skip_reshape=True, low_precision_attention=False, transformer_options=transformer_options)
+            out      = optimized_attention(q,      k,      v, h, skip_reshape=True, low_precision_attention=False, transformer_options=transformer_options, **gqa_kwargs)
+            out_diff = optimized_attention(q_diff, k_diff, v, h, skip_reshape=True, low_precision_attention=False, transformer_options=transformer_options, **gqa_kwargs)
             out = out - out_diff
         else:
-            out = optimized_attention(q, k, v, h, skip_reshape=True, low_precision_attention=False, transformer_options=transformer_options)
+            out = optimized_attention(q, k, v, h, skip_reshape=True, low_precision_attention=False, transformer_options=transformer_options, **gqa_kwargs)
 
         out = self.to_out(out)
 

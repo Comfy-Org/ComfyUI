@@ -12,6 +12,7 @@ from comfy_api_nodes.apis.topaz import (
     ImageAsyncTaskResponse,
     ImageDownloadResponse,
     ImageEnhanceRequest,
+    ImageEnhanceRequestV2,
     ImageStatusResponse,
     OutputInformationVideo,
     Resolution,
@@ -51,7 +52,7 @@ class TopazImageEnhance(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="TopazImageEnhance",
-            display_name="Topaz Image Enhance",
+            display_name="Topaz Image Enhance (Legacy)",
             category="partner/image/Topaz",
             description="Industry-standard upscaling and image enhancement.",
             inputs=[
@@ -162,6 +163,7 @@ class TopazImageEnhance(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            is_deprecated=True,
         )
 
     @classmethod
@@ -215,11 +217,358 @@ class TopazImageEnhance(IO.ComfyNode):
             response_model=ImageStatusResponse,
             status_extractor=lambda x: x.status,
             progress_extractor=lambda x: getattr(x, "progress", 0),
-            price_extractor=lambda x: x.credits * 0.08,
             poll_interval=8.0,
             estimated_duration=60,
         )
 
+        results = await sync_op(
+            cls,
+            ApiEndpoint(path=f"/proxy/topaz/image/v1/download/{initial_response.process_id}"),
+            response_model=ImageDownloadResponse,
+            monitor_progress=False,
+        )
+        return IO.NodeOutput(await download_url_to_image_tensor(results.download_url))
+
+
+class TopazImageEnhanceV2(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="TopazImageEnhanceV2",
+            display_name="Topaz Image Enhance",
+            category="partner/image/Topaz",
+            description="Industry-standard upscaling and image enhancement.",
+            inputs=[
+                IO.Image.Input("image"),
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "Reimagine",
+                            [
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Optional text prompt for creative upscaling guidance.",
+                                ),
+                                IO.Int.Input(
+                                    "creativity",
+                                    default=3,
+                                    min=1,
+                                    max=9,
+                                    step=1,
+                                    display_mode=IO.NumberDisplay.slider,
+                                ),
+                                IO.Combo.Input(
+                                    "subject_detection",
+                                    options=["All", "Foreground", "Background"],
+                                    advanced=True,
+                                ),
+                                IO.Boolean.Input(
+                                    "face_enhancement",
+                                    default=True,
+                                    tooltip="Enhance faces (if present) during processing.",
+                                    advanced=True,
+                                ),
+                                IO.Float.Input(
+                                    "face_enhancement_creativity",
+                                    default=0.0,
+                                    min=0.0,
+                                    max=1.0,
+                                    step=0.01,
+                                    display_mode=IO.NumberDisplay.number,
+                                    tooltip="Set the creativity level for face enhancement.",
+                                    advanced=True,
+                                ),
+                                IO.Float.Input(
+                                    "face_enhancement_strength",
+                                    default=1.0,
+                                    min=0.0,
+                                    max=1.0,
+                                    step=0.01,
+                                    display_mode=IO.NumberDisplay.number,
+                                    tooltip="Controls how sharp enhanced faces are relative to the background.",
+                                    advanced=True,
+                                ),
+                                IO.Boolean.Input(
+                                    "face_preservation",
+                                    default=True,
+                                    tooltip="Preserve subjects' facial identity.",
+                                    advanced=True,
+                                ),
+                                IO.Boolean.Input(
+                                    "color_preservation",
+                                    default=True,
+                                    tooltip="Preserve the original colors.",
+                                    advanced=True,
+                                ),
+                                IO.Boolean.Input(
+                                    "crop_to_fill",
+                                    default=False,
+                                    tooltip="By default, the image is letterboxed when the output aspect "
+                                    "ratio differs. Enable to crop the image to fill the output dimensions.",
+                                    advanced=True,
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Bloom 2",
+                            [
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Optional text prompt for generation. "
+                                    "Leave empty to auto-generate a prompt from the input image.",
+                                ),
+                                IO.Int.Input(
+                                    "creativity",
+                                    default=3,
+                                    min=1,
+                                    max=9,
+                                    step=1,
+                                    display_mode=IO.NumberDisplay.slider,
+                                    tooltip="1 is restrained enhancement, 9 is pronounced reinterpretation "
+                                    "with newly generated detail.",
+                                ),
+                                IO.Int.Input(
+                                    "seed",
+                                    default=2,
+                                    min=1,
+                                    max=2000,
+                                    control_after_generate=True,
+                                    tooltip="Seed for reproducible generation.",
+                                ),
+                                IO.Boolean.Input(
+                                    "color_preservation",
+                                    default=True,
+                                    tooltip="Preserve the original colors.",
+                                    advanced=True,
+                                ),
+                                IO.Boolean.Input(
+                                    "grain",
+                                    default=False,
+                                    tooltip="Add grain to the output image.",
+                                    advanced=True,
+                                ),
+                                IO.Combo.Input(
+                                    "grain_model",
+                                    options=["silver", "gaussian", "grey"],
+                                    tooltip="Is ignored if grain is disabled.",
+                                    advanced=True,
+                                ),
+                                IO.Float.Input(
+                                    "grain_strength",
+                                    default=0.5,
+                                    min=0.0,
+                                    max=1.0,
+                                    step=0.01,
+                                    display_mode=IO.NumberDisplay.number,
+                                    tooltip="Strength of the grain effect. Is ignored if grain is disabled.",
+                                    advanced=True,
+                                ),
+                                IO.Float.Input(
+                                    "grain_size",
+                                    default=1.0,
+                                    min=1.0,
+                                    max=5.0,
+                                    step=0.1,
+                                    display_mode=IO.NumberDisplay.number,
+                                    tooltip="Size of the grain particles. Is ignored if grain is disabled.",
+                                    advanced=True,
+                                ),
+                                IO.Float.Input(
+                                    "grain_density",
+                                    default=0.5,
+                                    min=0.0,
+                                    max=1.0,
+                                    step=0.01,
+                                    display_mode=IO.NumberDisplay.number,
+                                    tooltip="Intensity of the grain effect. Is ignored if grain is disabled.",
+                                    advanced=True,
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "Wonder 3.5",
+                            [
+                                IO.Combo.Input(
+                                    "enhancement_strength",
+                                    options=["low", "medium", "high"],
+                                    default="high",
+                                    tooltip="Enhancement level for varying input conditions.",
+                                ),
+                                IO.Boolean.Input(
+                                    "grain",
+                                    default=False,
+                                    tooltip="Add grain to the output image.",
+                                    advanced=True,
+                                ),
+                                IO.Combo.Input(
+                                    "grain_model",
+                                    options=["silver", "gaussian", "grey"],
+                                    tooltip="Is ignored if grain is disabled.",
+                                    advanced=True,
+                                ),
+                                IO.Float.Input(
+                                    "grain_strength",
+                                    default=0.5,
+                                    min=0.0,
+                                    max=1.0,
+                                    step=0.01,
+                                    display_mode=IO.NumberDisplay.number,
+                                    tooltip="Strength of the grain effect. Is ignored if grain is disabled.",
+                                    advanced=True,
+                                ),
+                                IO.Float.Input(
+                                    "grain_size",
+                                    default=1.0,
+                                    min=1.0,
+                                    max=5.0,
+                                    step=0.1,
+                                    display_mode=IO.NumberDisplay.number,
+                                    tooltip="Size of the grain particles. Is ignored if grain is disabled.",
+                                    advanced=True,
+                                ),
+                                IO.Float.Input(
+                                    "grain_density",
+                                    default=0.5,
+                                    min=0.0,
+                                    max=1.0,
+                                    step=0.01,
+                                    display_mode=IO.NumberDisplay.number,
+                                    tooltip="Intensity of the grain effect. Is ignored if grain is disabled.",
+                                    advanced=True,
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+                IO.Int.Input(
+                    "output_width",
+                    default=0,
+                    min=0,
+                    max=32000,
+                    step=1,
+                    display_mode=IO.NumberDisplay.number,
+                    optional=True,
+                    tooltip="Zero value means to calculate automatically (usually it will be original size "
+                    "or scaled proportionally to output_height if specified). "
+                    "Wonder 3.5 supports upscale factors from 1x to 6x only. "
+                    "Bloom 2 and Wonder 3.5 preserve the input aspect ratio and treat the "
+                    "requested size as a target.",
+                    advanced=True,
+                ),
+                IO.Int.Input(
+                    "output_height",
+                    default=0,
+                    min=0,
+                    max=32000,
+                    step=1,
+                    display_mode=IO.NumberDisplay.number,
+                    optional=True,
+                    tooltip="Zero value means to output in the same height as original or scaled "
+                    "proportionally to output_width if specified. "
+                    "Wonder 3.5 supports upscale factors from 1x to 6x only. "
+                    "Bloom 2 and Wonder 3.5 preserve the input aspect ratio and treat the "
+                    "requested size as a target.",
+                    advanced=True,
+                ),
+            ],
+            outputs=[
+                IO.Image.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["model"]),
+                expr="""
+                (
+                  $usdPer8Mp := $lookup(
+                    {"reimagine": 0.32, "bloom 2": 0.4576, "wonder 3.5": 0.1144},
+                    $lookup(widgets, "model")
+                  );
+                  {"type":"usd","usd": $usdPer8Mp, "format": {"suffix": "/8MP", "approximate": true}}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        image: Input.Image,
+        model: dict,
+        output_width: int = 0,
+        output_height: int = 0,
+    ) -> IO.NodeOutput:
+        if get_number_of_images(image) != 1:
+            raise ValueError("Only one input image is supported.")
+        model_choice = model["model"]
+        download_url = await upload_images_to_comfyapi(
+            cls, image, max_images=1, mime_type="image/png", total_pixels=4096 * 4096
+        )
+        request = ImageEnhanceRequestV2(
+            model=model_choice,
+            source_url=download_url[0],
+            output_width=output_width if output_width else None,
+            output_height=output_height if output_height else None,
+        )
+        if model_choice == "Reimagine":
+            request.prompt = model["prompt"]
+            request.creativity = model["creativity"]
+            request.subject_detection = model["subject_detection"]
+            request.face_enhancement = model["face_enhancement"]
+            request.face_enhancement_creativity = model["face_enhancement_creativity"]
+            request.face_enhancement_strength = model["face_enhancement_strength"]
+            request.face_preservation = str(model["face_preservation"]).lower()
+            request.color_preservation = str(model["color_preservation"]).lower()
+            request.crop_to_fill = model["crop_to_fill"]
+        elif model_choice == "Bloom 2":
+            prompt = model["prompt"].strip()
+            if prompt:
+                request.prompt = prompt
+                request.autoprompt = "false"
+            else:
+                request.autoprompt = "true"
+            request.creativity = model["creativity"]
+            request.seed = model["seed"]
+            request.color_preservation = str(model["color_preservation"]).lower()
+            if model["grain"]:
+                request.grain = "true"
+                request.grain_model = model["grain_model"]
+                request.grain_strength = model["grain_strength"]
+                request.grain_size = model["grain_size"]
+                request.grain_density = model["grain_density"]
+        else:
+            request.enhancement_strength = model["enhancement_strength"]
+            if model["grain"]:
+                request.grain = "true"
+                request.grain_model = model["grain_model"]
+                request.grain_strength = model["grain_strength"]
+                request.grain_size = model["grain_size"]
+                request.grain_density = model["grain_density"]
+        initial_response = await sync_op(
+            cls,
+            ApiEndpoint(path="/proxy/topaz/image/v1/enhance-gen/async", method="POST"),
+            response_model=ImageAsyncTaskResponse,
+            data=request,
+            content_type="multipart/form-data",
+        )
+        await poll_op(
+            cls,
+            poll_endpoint=ApiEndpoint(path=f"/proxy/topaz/image/v1/status/{initial_response.process_id}"),
+            response_model=ImageStatusResponse,
+            status_extractor=lambda x: x.status,
+            progress_extractor=lambda x: getattr(x, "progress", 0),
+            poll_interval=8.0,
+            estimated_duration=60,
+        )
         results = await sync_op(
             cls,
             ApiEndpoint(path=f"/proxy/topaz/image/v1/download/{initial_response.process_id}"),
@@ -463,7 +812,6 @@ class TopazVideoEnhance(IO.ComfyNode):
             response_model=VideoStatusResponse,
             status_extractor=lambda x: x.status,
             progress_extractor=lambda x: getattr(x, "progress", 0),
-            price_extractor=lambda x: (x.estimates.cost[0] * 0.08 if x.estimates and x.estimates.cost[0] else None),
             poll_interval=10.0,
         )
         return IO.NodeOutput(await download_url_to_video_output(final_response.download.url))
@@ -807,7 +1155,6 @@ class TopazVideoEnhanceV2(IO.ComfyNode):
             response_model=VideoStatusResponse,
             status_extractor=lambda x: x.status,
             progress_extractor=lambda x: getattr(x, "progress", 0),
-            price_extractor=lambda x: (x.estimates.cost[0] * 0.08 if x.estimates and x.estimates.cost[0] else None),
             poll_interval=10.0,
         )
         return IO.NodeOutput(await download_url_to_video_output(final_response.download.url))
@@ -818,6 +1165,7 @@ class TopazExtension(ComfyExtension):
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
         return [
             TopazImageEnhance,
+            TopazImageEnhanceV2,
             TopazVideoEnhance,
             TopazVideoEnhanceV2,
         ]

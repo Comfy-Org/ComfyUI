@@ -29,6 +29,7 @@
 #     upscale_models: models/upscale_models/
 #     latent_upscale_models: models/latent_upscale_models/
 #     custom_nodes: custom_nodes/
+#     datasets: datasets/
 #     hypernetworks: models/hypernetworks/
 #     photomaker: models/photomaker/
 #     classifiers: models/classifiers/

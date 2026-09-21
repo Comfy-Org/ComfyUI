@@ -10,11 +10,10 @@ class String(io.ComfyNode):
         return io.Schema(
             node_id="PrimitiveString",
             search_aliases=["text", "string", "text box", "prompt"],
-            display_name="Text String (DEPRECATED)",
+            display_name="Text",
             category="utilities/primitive",
             inputs=[io.String.Input("value")],
-            outputs=[io.String.Output()],
-            is_deprecated=True
+            outputs=[io.String.Output()]
         )
 
     @classmethod
@@ -27,8 +26,8 @@ class StringMultiline(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="PrimitiveStringMultiline",
-            search_aliases=["text", "string", "text multiline", "string multiline", "text box", "prompt"],
-            display_name="Input Text",
+            search_aliases=["text", "string", "text box", "prompt"],
+            display_name="Text (Multiline)",
             category="utilities/primitive",
             essentials_category="Basics",
             inputs=[io.String.Input("value", multiline=True)],

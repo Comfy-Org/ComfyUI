@@ -5,14 +5,98 @@ from typing import Optional, Any, Tuple
 import math
 from tqdm import tqdm
 import comfy.utils
+import comfy_kitchen
 
 from comfy.ldm.modules.attention import optimized_attention_for_device
 import comfy.model_management
+import comfy.model_prefetch
 import comfy.ops
 import comfy.ldm.common_dit
 import comfy.clip_model
 
 from . import qwen_vl
+
+
+@dataclass
+class FixedKV:
+    key: torch.Tensor
+    value: torch.Tensor
+    index: int
+    position: torch.Tensor
+    seqlen: torch.Tensor
+
+    def prepare(self, num_tokens):
+        self.position.copy_(self.seqlen)
+        self.seqlen.add_(num_tokens)
+
+    def advance(self, num_tokens):
+        self.index += num_tokens
+
+    def rollback(self, discard=1):
+        # drop the rejected verify tail; stale slots and bias are overwritten by the next write/prepare
+        self.index -= discard
+
+@dataclass
+class FixedKVBias(FixedKV):
+    # full-capacity decode bias [1, 1, rows, capacity], last `seq` rows serve the queries; shared across layers
+    bias: torch.Tensor = None
+    tracker: dict = None
+
+    def prepare(self, num_tokens):
+        if self.tracker["step"] == (self.index, num_tokens):
+            return
+        self.tracker["step"] = (self.index, num_tokens)
+        i = self.index
+        rows = self.bias.shape[-2]
+        if num_tokens <= rows:
+            torch.arange(i, i + rows, out=self.position)
+            window = self.tracker[num_tokens]
+            start = i - rows + 1
+            skip = max(-start, 0)
+            end = min(i + rows, self.bias.shape[-1])
+            self.bias[..., :, start + skip:end] = window[:, skip:end - start]
+        else:
+            self.bias[..., :, i:i + num_tokens] = 0
+
+    @staticmethod
+    def shared(capacity, device, dtype):
+        # all layers advance in lockstep, so the bias caches share one position/bias/tracker
+        rows = 6
+        position = torch.empty((rows,), device=device, dtype=torch.int64)
+        bias = torch.full((1, 1, rows, capacity), torch.finfo(dtype).min, device=device, dtype=dtype)
+        tracker = {"step": -1}
+        # window templates per decode width: row r serves query j = r - (rows - n) and may see slots <= index + j
+        for n in range(1, rows + 1):
+            window = torch.full((rows, 2 * rows - 1), torch.finfo(dtype).min, device=device, dtype=dtype)
+            for r in range(rows):
+                window[r, :rows + max(r - (rows - n), 0)] = 0
+            tracker[n] = window
+        return position, bias, tracker
+
+    @classmethod
+    def zeros(cls, batch, kv_heads, capacity, head_dim, device, dtype, shared):
+        # zero-init: decode attends full capacity with masked tails, 0*0 stays finite
+        key = torch.zeros((batch, kv_heads, capacity, head_dim), device=device, dtype=dtype)
+        return cls(key, torch.zeros_like(key), 0, shared[0], None, shared[1], shared[2])
+
+    def append(self, xk, xv):
+        seq = xk.shape[2]
+        self.key[:, :, self.index:self.index + seq] = xk
+        self.value[:, :, self.index:self.index + seq] = xv
+        return self.key[:, :, :self.index + seq], self.value[:, :, :self.index + seq]
+
+    def decode(self, xq, xk, xv, num_kv_heads):
+        # CUDA-graphable: device-side write position, masked attention over the full capacity
+        batch_size, num_heads, seq, head_dim = xq.shape
+        self.key.index_copy_(2, self.position[:seq], xk)
+        self.value.index_copy_(2, self.position[:seq], xv)
+        groups = num_heads // num_kv_heads
+        q = xq.reshape(batch_size, num_kv_heads, groups, seq, head_dim) * head_dim ** -0.5
+        bias = self.bias[..., self.bias.shape[-2] - seq:, :].unsqueeze(1)
+        scores = (q @ self.key.transpose(-1, -2).unsqueeze(2)).add_(bias)
+        probs = torch.softmax(scores, dim=-1, dtype=torch.float32).to(xq.dtype)
+        out = probs @ self.value.unsqueeze(2)
+        return out.permute(0, 3, 1, 2, 4).reshape(batch_size, seq, num_heads * head_dim)
 
 @dataclass
 class Llama2Config:
@@ -249,6 +333,9 @@ class Qwen3_8BConfig:
     rope_scale = None
     final_norm: bool = True
     lm_head: bool = True
+    fixed_kv: bool = False
+    merged_qkv: bool = False
+    merged_mlp: bool = False
     stop_tokens = [151643, 151645]
 
 @dataclass
@@ -257,12 +344,26 @@ class Qwen3VL_8BConfig(Qwen3_8BConfig):
     rope_theta: float = 5000000.0
     rope_dims = [24, 20, 20]
     interleaved_mrope = True
+    fixed_kv: bool = True
+    graph_dynamic_vbar_blocks = True
+    prefetch_dynamic_vbars = True
 
 @dataclass
 class Qwen3VL_4BConfig(Qwen3VL_8BConfig):
     hidden_size: int = 2560
     intermediate_size: int = 9728
     lm_head: bool = False  # 4B ties word embeddings
+
+@dataclass
+class Qwen3VL_32BConfig(Qwen3VL_8BConfig):
+    # MiniMax H3 conditioning checkpoint: truncated to the first 50 of 64 layers,
+    # consumed as the unnormalized hidden state after layer 50 (no final norm, no lm_head)
+    hidden_size: int = 5120
+    intermediate_size: int = 25600
+    num_hidden_layers: int = 50
+    num_attention_heads: int = 64
+    lm_head: bool = False
+    final_norm: bool = False
 
 @dataclass
 class Ovis25_2BConfig:
@@ -457,23 +558,32 @@ def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_di
 
     return out
 
+def rope_matrix(freqs_cis):
+    if torch.is_tensor(freqs_cis):
+        return freqs_cis
+    cos, sin, neg_sin = freqs_cis
+    half = sin.shape[-1]
+    matrix = torch.stack((cos[..., :half], neg_sin, sin, cos[..., half:]), dim=-1)
+    return matrix.reshape(*matrix.shape[:-1], 2, 2)
+
+
 def apply_rope(xq, xk, freqs_cis):
-    org_dtype = xq.dtype
-    cos = freqs_cis[0]
-    sin = freqs_cis[1]
-    nsin = freqs_cis[2]
+    matrix = rope_matrix(freqs_cis)
+    if matrix.ndim == 5:
+        matrix = matrix.unsqueeze(0)
 
-    q_embed = (xq * cos)
-    q_split = q_embed.shape[-1] // 2
-    q_embed[..., : q_split].addcmul_(xq[..., q_split :], nsin)
-    q_embed[..., q_split :].addcmul_(xq[..., : q_split], sin)
+    q_ndim, k_ndim = xq.ndim, xk.ndim
+    if q_ndim == 3:
+        xq = xq.unsqueeze(0)
+    if k_ndim == 3:
+        xk = xk.unsqueeze(0)
 
-    k_embed = (xk * cos)
-    k_split = k_embed.shape[-1] // 2
-    k_embed[..., : k_split].addcmul_(xk[..., k_split :], nsin)
-    k_embed[..., k_split :].addcmul_(xk[..., : k_split], sin)
-
-    return q_embed.to(org_dtype), k_embed.to(org_dtype)
+    xq, xk = comfy_kitchen.apply_rope_split_half(xq, xk, matrix)
+    if q_ndim == 3:
+        xq = xq.squeeze(0)
+    if k_ndim == 3:
+        xk = xk.squeeze(0)
+    return xq, xk
 
 
 class Attention(nn.Module):
@@ -487,9 +597,14 @@ class Attention(nn.Module):
         self.inner_size = self.num_heads * self.head_dim
 
         ops = ops or nn
-        self.q_proj = ops.Linear(config.hidden_size, self.inner_size, bias=config.qkv_bias, device=device, dtype=dtype)
-        self.k_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
-        self.v_proj = ops.Linear(config.hidden_size, self.num_kv_heads * self.head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.merged_qkv = getattr(config, "merged_qkv", False)
+        if self.merged_qkv:
+            self.qkv_proj = ops.Linear(config.hidden_size, self.inner_size + self.kv_size * 2, bias=config.qkv_bias, device=device, dtype=dtype)
+        else:
+            self.q_proj = ops.Linear(config.hidden_size, self.inner_size, bias=config.qkv_bias, device=device, dtype=dtype)
+            self.k_proj = ops.Linear(config.hidden_size, self.kv_size, bias=config.qkv_bias, device=device, dtype=dtype)
+            self.v_proj = ops.Linear(config.hidden_size, self.kv_size, bias=config.qkv_bias, device=device, dtype=dtype)
         self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
 
         self.q_norm = None
@@ -511,9 +626,12 @@ class Attention(nn.Module):
     ):
         batch_size, seq_length, _ = hidden_states.shape
 
-        xq = self.q_proj(hidden_states)
-        xk = self.k_proj(hidden_states)
-        xv = self.v_proj(hidden_states)
+        if self.merged_qkv:
+            xq, xk, xv = self.qkv_proj(hidden_states).split((self.inner_size, self.kv_size, self.kv_size), dim=-1)
+        else:
+            xq = self.q_proj(hidden_states)
+            xk = self.k_proj(hidden_states)
+            xv = self.v_proj(hidden_states)
 
         xq = xq.view(batch_size, seq_length, self.num_heads, self.head_dim).transpose(1, 2)
         xk = xk.view(batch_size, seq_length, self.num_kv_heads, self.head_dim).transpose(1, 2)
@@ -526,8 +644,37 @@ class Attention(nn.Module):
 
         xq, xk = apply_rope(xq, xk, freqs_cis=freqs_cis)
 
-        present_key_value = None
-        if past_key_value is not None:
+        fixed_cache = past_key_value if isinstance(past_key_value, FixedKV) else None
+        if fixed_cache is not None:
+            xq = xq.transpose(1, 2)
+            xk = xk.transpose(1, 2)
+            xv = xv.transpose(1, 2)
+            if seq_length == 1 and fixed_cache.index > 0:
+                # CUDA-graphable decode path.
+                position = fixed_cache.position.view(batch_size, 1, 1, 1).expand_as(xk)
+                fixed_cache.key.scatter_(1, position, xk)
+                fixed_cache.value.scatter_(1, position, xv)
+                output = comfy_kitchen.flash_attention_decode(xq, fixed_cache.key, fixed_cache.value, fixed_cache.seqlen)
+                return self.o_proj(output.view(batch_size, seq_length, self.inner_size)), fixed_cache
+
+            if attention_mask is None or attention_mask.ndim < 4:
+                fixed_cache.key[:, :seq_length].copy_(xk)
+                fixed_cache.value[:, :seq_length].copy_(xv)
+            else:
+                valid = attention_mask[:, 0, -1, -seq_length:] == 0
+                indices = torch.arange(seq_length, device=xk.device).expand(batch_size, -1)
+                indices = indices.masked_fill(~valid, seq_length).sort(dim=1).values.clamp_max_(seq_length - 1)
+                indices = indices.view(batch_size, seq_length, 1, 1).expand_as(xk)
+                fixed_cache.key[:, :seq_length].copy_(xk.gather(1, indices))
+                fixed_cache.value[:, :seq_length].copy_(xv.gather(1, indices))
+                fixed_cache.seqlen.copy_(valid.sum(dim=1))
+
+            xq = xq.transpose(1, 2)
+            xk = xk.transpose(1, 2)
+            xv = xv.transpose(1, 2)
+
+        present_key_value = fixed_cache
+        if fixed_cache is None and past_key_value is not None:
             index = 0
             num_tokens = xk.shape[2]
             if len(past_key_value) > 0:
@@ -550,25 +697,35 @@ class Attention(nn.Module):
                 xv = xv[:, :, -sliding_window:]
                 attention_mask = attention_mask[..., -sliding_window:] if attention_mask is not None else None
 
-        xk = xk.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
-        xv = xv.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
-
-        output = optimized_attention(xq, xk, xv, self.num_heads, mask=attention_mask, skip_reshape=True)
+        gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
+        output = optimized_attention(xq, xk, xv, self.num_heads, mask=attention_mask, skip_reshape=True, **gqa_kwargs)
         return self.o_proj(output), present_key_value
 
 class MLP(nn.Module):
     def __init__(self, config: Llama2Config, device=None, dtype=None, ops: Any = None, intermediate_size=None):
         super().__init__()
         intermediate_size = intermediate_size or config.intermediate_size
-        self.gate_proj = ops.Linear(config.hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
-        self.up_proj = ops.Linear(config.hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
+        self.merged_mlp = getattr(config, "merged_mlp", False)
+        if self.merged_mlp:
+            self.gate_up_proj = ops.Linear(config.hidden_size, intermediate_size * 2, bias=False, device=device, dtype=dtype)
+        else:
+            self.gate_proj = ops.Linear(config.hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
+            self.up_proj = ops.Linear(config.hidden_size, intermediate_size, bias=False, device=device, dtype=dtype)
         self.down_proj = ops.Linear(intermediate_size, config.hidden_size, bias=False, device=device, dtype=dtype)
         if config.mlp_activation == "silu":
             self.activation = torch.nn.functional.silu
+            self.merged_input_act = "swiglu"
         elif config.mlp_activation == "gelu_pytorch_tanh":
             self.activation = lambda a: torch.nn.functional.gelu(a, approximate="tanh")
+            self.merged_input_act = None
 
     def forward(self, x):
+        if self.merged_mlp:
+            x = self.gate_up_proj(x)
+            if self.merged_input_act is not None:
+                return comfy.ops.linear_input_act(self.down_proj, x, self.merged_input_act)
+            gate, up = x.chunk(2, dim=-1)
+            return self.down_proj(self.activation(gate) * up)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))
 
 class TransformerBlock(nn.Module):
@@ -587,6 +744,7 @@ class TransformerBlock(nn.Module):
         optimized_attention=None,
         past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
+        output = x
         # Self Attention
         residual = x
         x = self.input_layernorm(x)
@@ -603,7 +761,7 @@ class TransformerBlock(nn.Module):
         residual = x
         x = self.post_attention_layernorm(x)
         x = self.mlp(x)
-        x = residual + x
+        x = torch.add(residual, x, out=output)
 
         return x, present_key_value
 
@@ -632,6 +790,7 @@ class TransformerBlockGemma2(nn.Module):
         optimized_attention=None,
         past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
+        output = x
         sliding_window = None
         if self.transformer_type == 'gemma3':
             if self.sliding_attention:
@@ -667,7 +826,7 @@ class TransformerBlockGemma2(nn.Module):
         x = self.pre_feedforward_layernorm(x)
         x = self.mlp(x)
         x = self.post_feedforward_layernorm(x)
-        x = residual + x
+        x = torch.add(residual, x, out=output)
 
         return x, present_key_value
 
@@ -679,9 +838,15 @@ def _make_scaled_embedding(ops, vocab_size, hidden_size, scale, device, dtype):
 
 
 class Llama2_(nn.Module):
+    fixed_kv = False
+    graph_dynamic_vbar_blocks = False
+
     def __init__(self, config, device=None, dtype=None, ops=None):
         super().__init__()
         self.config = config
+        self.fixed_kv = getattr(config, "fixed_kv", False)
+        self.graph_dynamic_vbar_blocks = getattr(config, "graph_dynamic_vbar_blocks", False)
+        self.prefetch_dynamic_vbars = getattr(config, "prefetch_dynamic_vbars", False)
         self.vocab_size = config.vocab_size
 
         if self.config.transformer_type == "gemma2" or self.config.transformer_type == "gemma3":
@@ -704,8 +869,33 @@ class Llama2_(nn.Module):
         if config.lm_head:
             self.lm_head = ops.Linear(config.hidden_size, config.vocab_size, bias=False, device=device, dtype=dtype)
 
+    def get_dynamic_vram__units(self):
+        return (list(self.layers), []) if self.graph_dynamic_vbar_blocks else ([], [])
+
     def get_past_len(self, past_key_values):
-        return past_key_values[0][2]
+        first = past_key_values[0]
+        return first.index if isinstance(first, FixedKV) else first[2]
+
+    def init_kv_cache(self, batch, capacity, device, dtype):
+        caches = []
+        flash = getattr(comfy_kitchen, "flash_attention_decode_is_available", None)
+        flash_kv = self.fixed_kv and flash is not None and flash(device)
+        for _ in range(self.config.num_hidden_layers):
+            if flash_kv:
+                key = torch.empty((batch, capacity, self.config.num_key_value_heads, self.config.head_dim), device=device, dtype=dtype)
+                value = torch.empty_like(key)
+                pos = torch.empty((batch,), device=device, dtype=torch.int64)
+                seqlen = torch.zeros((batch,), device=device, dtype=torch.int32)
+                caches.append(FixedKV(key, value, 0, pos, seqlen))
+            else:
+                key = torch.empty((batch, self.config.num_key_value_heads, capacity, self.config.head_dim), device=device, dtype=dtype)
+                caches.append((key, torch.empty_like(key), 0))
+        return caches
+
+    def init_decode_buffers(self, batch, device, dtype):
+        hidden = torch.empty((batch, 1, self.config.hidden_size), device=device, dtype=dtype)
+        positions = torch.zeros((1, 1), device=device, dtype=torch.int64)
+        return hidden, rope_matrix(self.compute_freqs_cis(positions, device))
 
     def compute_freqs_cis(self, position_ids, device):
         return precompute_freqs_cis(self.config.head_dim,
@@ -717,7 +907,7 @@ class Llama2_(nn.Module):
                                     device=device)
 
     def forward(self, x, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True,
-                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None):
+                dtype=None, position_ids=None, embeds_info=[], past_key_values=None, input_ids=None,deepstack_embeds=None, visual_pos_masks=None, decode_buffers=None):
         if embeds is not None:
             x = embeds
         else:
@@ -727,6 +917,10 @@ class Llama2_(nn.Module):
         past_len = 0
         if past_key_values is not None and len(past_key_values) > 0:
             past_len = self.get_past_len(past_key_values)
+        fixed_kv = past_key_values is not None and len(past_key_values) > 0 and isinstance(past_key_values[0], FixedKV)
+        fixed_kv_decode = fixed_kv and past_len > 0 and seq_len == 1
+        if fixed_kv_decode:
+            attention_mask = None
 
         if position_ids is None:
             position_ids = torch.arange(past_len, past_len + seq_len, device=x.device).unsqueeze(0)
@@ -738,7 +932,8 @@ class Llama2_(nn.Module):
             mask = 1.0 - attention_mask.to(x.dtype).reshape((attention_mask.shape[0], 1, -1, attention_mask.shape[-1])).expand(attention_mask.shape[0], 1, seq_len, attention_mask.shape[-1])
             mask = mask.masked_fill(mask.to(torch.bool), torch.finfo(x.dtype).min / 4)
 
-        if seq_len > 1:
+        spec_decode = fixed_kv and any(isinstance(kv, FixedKVBias) for kv in past_key_values) and 2 <= seq_len <= 6 and past_len > 0 and attention_mask is None
+        if seq_len > 1 and not spec_decode:  # spec verify: the staircase decode bias is causal
             causal_mask = torch.empty(past_len + seq_len, past_len + seq_len, dtype=x.dtype, device=x.device).fill_(torch.finfo(x.dtype).min / 4).triu_(1)
             if mask is not None:
                 mask += causal_mask
@@ -746,6 +941,17 @@ class Llama2_(nn.Module):
                 mask = causal_mask
 
         optimized_attention = optimized_attention_for_device(x.device, mask=mask is not None, small_input=True)
+
+        enable_graph = self.graph_dynamic_vbar_blocks and (fixed_kv_decode or spec_decode)
+        if enable_graph:
+            if decode_buffers is None:
+                x = x.clone()
+            else:
+                hidden_buffer, rotary_buffer = decode_buffers
+                hidden_buffer.copy_(x)
+                x = hidden_buffer
+                rotary_buffer.copy_(rope_matrix(freqs_cis))
+                freqs_cis = rotary_buffer
 
         intermediate = None
         all_intermediate = None
@@ -760,7 +966,8 @@ class Llama2_(nn.Module):
             elif intermediate_output < 0:
                 intermediate_output = len(self.layers) + intermediate_output
 
-        next_key_values = []
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.layers), x.device, {"prefetch_dynamic_vbars": self.prefetch_dynamic_vbars and past_key_values is not None})
+        next_key_values = list(past_key_values) if past_key_values is not None else []
         for i, layer in enumerate(self.layers):
             if all_intermediate is not None:
                 if only_layers is None or (i in only_layers):
@@ -770,16 +977,31 @@ class Llama2_(nn.Module):
             if past_key_values is not None:
                 past_kv = past_key_values[i] if len(past_key_values) > 0 else []
 
-            x, current_kv = layer(
-                x=x,
-                attention_mask=mask,
-                freqs_cis=freqs_cis,
-                optimized_attention=optimized_attention,
-                past_key_value=past_kv,
-            )
+            if fixed_kv:
+                past_kv.prepare(seq_len)
 
-            if current_kv is not None:
-                next_key_values.append(current_kv)
+            def core():
+                nonlocal x
+                output, current_kv = layer(
+                    x=x,
+                    attention_mask=mask,
+                    freqs_cis=freqs_cis,
+                    optimized_attention=optimized_attention,
+                    past_key_value=past_kv,
+                )
+                if enable_graph:
+                    x.copy_(output)
+                else:
+                    x = output
+                if next_key_values:
+                    next_key_values[i] = current_kv
+
+            comfy.model_prefetch.prefetch_queue_pop(
+                prefetch_queue, x.device, layer, x.dtype, core=core, enable_graph=enable_graph,
+                malloc_scope="block"
+            )
+            if fixed_kv:
+                next_key_values[i].advance(seq_len)
 
             # DeepStack: add per-layer visual features into the first len() decoder layers at image positions (Qwen3-VL)
             if deepstack_embeds is not None and i < len(deepstack_embeds):
@@ -787,6 +1009,11 @@ class Llama2_(nn.Module):
 
             if i == intermediate_output:
                 intermediate = x.clone()
+
+        comfy.model_prefetch.prefetch_queue_pop(
+            prefetch_queue, x.device, None,
+            malloc_scope="block"
+        )
 
         if self.norm is not None:
             x = self.norm(x)
@@ -801,7 +1028,7 @@ class Llama2_(nn.Module):
         if intermediate is not None and final_layer_norm_intermediate and self.norm is not None:
             intermediate = self.norm(intermediate)
 
-        if len(next_key_values) > 0:
+        if next_key_values:
             return x, intermediate, next_key_values
         else:
             return x, intermediate
@@ -851,6 +1078,18 @@ class BaseLlama:
     def forward(self, input_ids, *args, **kwargs):
         return self.model(input_ids, *args, **kwargs)
 
+def penalty_active(repetition_penalty, presence_penalty):
+    return repetition_penalty != 1.0 or (presence_penalty is not None and presence_penalty != 0.0)
+
+
+def apply_penalty(logits, repetition_penalty, presence_penalty):
+    if repetition_penalty != 1.0:
+        logits = torch.where(logits < 0, logits * repetition_penalty, logits / repetition_penalty)
+    if presence_penalty is not None and presence_penalty != 0.0:
+        logits = logits - presence_penalty
+    return logits
+
+
 class BaseGenerate:
     def logits(self, x):
         input = x[:, -1:]
@@ -859,26 +1098,15 @@ class BaseGenerate:
         else:
             module = self.model.embed_tokens
 
-        offload_stream = None
-        if module.comfy_cast_weights:
-            weight, _, offload_stream = comfy.ops.cast_bias_weight(module, input, offloadable=True)
-        else:
-            weight = self.model.embed_tokens.weight.to(x)
-
-        x = torch.nn.functional.linear(input, weight, None)
-
-        comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
-        return x
+        if not module.comfy_cast_weights:
+            return torch.nn.functional.linear(input, module.weight.to(x), None)
+        with comfy.ops.CastBiasWeightContext(module, input, offloadable=True) as (weight, _bias):
+            return torch.nn.functional.linear(input, weight, None)
 
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
-        model_config = self.model.config
-        past_key_values = []
-        for x in range(model_config.num_hidden_layers):
-            past_key_values.append((torch.empty([batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype),
-                                    torch.empty([batch, model_config.num_key_value_heads, max_cache_len, model_config.head_dim], device=device, dtype=execution_dtype), 0))
-        return past_key_values
+        return self.model.init_kv_cache(batch, max_cache_len, device, execution_dtype)
 
-    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None):
+    def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None, embeds_info=None):
         device = embeds.device
 
         if stop_tokens is None:
@@ -905,24 +1133,53 @@ class BaseGenerate:
         # MRoPE: prefill uses explicit 3D position_ids, decode continues from the last position
         next_pos = int(position_ids[:, -1].max()) + 1 if position_ids is not None else None
 
+        compile_allocations = self.model.graph_dynamic_vbar_blocks and comfy.model_prefetch.malloc_graph_enabled(device)
+        decode_buffers = None
+        if compile_allocations and not comfy.model_management.args.disable_cuda_graphs:
+            init_decode_buffers = getattr(self.model, "init_decode_buffers", None)
+            if init_decode_buffers is not None:
+                decode_buffers = init_decode_buffers(embeds.shape[0], device, execution_dtype)
+        decode_tokens = torch.empty((embeds.shape[0], 1), dtype=torch.long, device=device)
+        penalize = penalty_active(repetition_penalty, presence_penalty)
+        penalty_mask = None
+
         # Generation loop
         current_input_ids = initial_input_ids
         for step in tqdm(range(max_length), desc="Generating tokens"):
+            if step > 0:
+                if compile_allocations:
+                    comfy.model_prefetch.malloc_graph_begin(device)
+                embeds = self.model.embed_tokens(decode_tokens).to(execution_dtype)
+                current_input_ids = decode_tokens if initial_input_ids is not None else None
+                position_ids = torch.tensor([[next_pos]], device=device) if next_pos is not None else None
+
             # DeepStack visual features are injected on the prefill only; gemma4's forward lacks these kwargs.
             extra = {}
+            if decode_buffers is not None:
+                extra["decode_buffers"] = decode_buffers
             if step == 0 and deepstack_embeds is not None:
                 extra["deepstack_embeds"] = deepstack_embeds
                 extra["visual_pos_masks"] = visual_pos_masks
-            x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra)
+            x, _, past_key_values = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=past_key_values, input_ids=current_input_ids, position_ids=position_ids, **extra, embeds_info=(embeds_info if step == 0 else None))
             logits = self.logits(x)[:, -1]
-            next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, initial_tokens + generated_token_ids, generator, do_sample=do_sample, presence_penalty=presence_penalty)
-            token_id = next_token[0].item()
+            if penalty_mask is None and do_sample and penalize:
+                # allocated on the (unbracketed) first step; later steps only index_fill_ it
+                penalty_mask = torch.zeros((logits.shape[-1],), dtype=torch.bool, device=device)
+                if len(initial_tokens) > 0:
+                    penalty_mask.index_fill_(0, torch.tensor(initial_tokens, device=device), True)
+            next_token = self.sample_token(logits, temperature, top_k, top_p, min_p, repetition_penalty, [], generator, do_sample=do_sample, presence_penalty=presence_penalty, penalty_mask=penalty_mask)
+
+            decode_tokens.copy_(next_token)
+            if penalty_mask is not None:
+                penalty_mask.index_fill_(0, decode_tokens[0], True)
+            del next_token, logits, x, embeds, position_ids
+            if step > 0 and compile_allocations:
+                comfy.model_prefetch.malloc_graph_end()
+
+            token_id = decode_tokens[0].item()
             generated_token_ids.append(token_id)
 
-            embeds = self.model.embed_tokens(next_token).to(execution_dtype)
-            current_input_ids = next_token if initial_input_ids is not None else None
-            if next_pos is not None:  # advance MRoPE position for the next (decode) step
-                position_ids = torch.tensor([[next_pos]], device=device)
+            if step > 0 and next_pos is not None:
                 next_pos += 1
             pbar.update(1)
 
@@ -931,28 +1188,22 @@ class BaseGenerate:
 
         return generated_token_ids
 
-    def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0):
-
-        if not do_sample or temperature == 0.0:
-            return torch.argmax(logits, dim=-1, keepdim=True)
-
-        # Sampling mode
-        if repetition_penalty != 1.0:
-            for i in range(logits.shape[0]):
-                for token_id in set(token_history):
-                    logits[i, token_id] *= repetition_penalty if logits[i, token_id] < 0 else 1/repetition_penalty
-
-        if presence_penalty is not None and presence_penalty != 0.0:
-            for i in range(logits.shape[0]):
-                for token_id in set(token_history):
-                    logits[i, token_id] -= presence_penalty
+    def processed_probs(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, presence_penalty=0.0, penalty_mask=None):
+        # returns (probs, indices); penalty_mask [vocab] bool stands in for token_history
+        if penalty_active(repetition_penalty, presence_penalty):
+            if penalty_mask is not None:
+                logits = torch.where(penalty_mask.unsqueeze(0), apply_penalty(logits, repetition_penalty, presence_penalty), logits)
+            elif len(token_history) > 0:
+                token_ids = torch.tensor(list(set(token_history)), device=logits.device)
+                logits[:, token_ids] = apply_penalty(logits[:, token_ids], repetition_penalty, presence_penalty)
 
         if temperature != 1.0:
             logits = logits / temperature
 
+        top_indices = None
         if top_k > 0:
-            indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
-            logits[indices_to_remove] = torch.finfo(logits.dtype).min
+            top_k = min(top_k, logits.shape[-1])
+            logits, top_indices = torch.topk(logits, top_k)
 
         if min_p > 0.0:
             probs_before_filter = torch.nn.functional.softmax(logits, dim=-1)
@@ -970,9 +1221,18 @@ class BaseGenerate:
             indices_to_remove.scatter_(1, sorted_indices, sorted_indices_to_remove)
             logits[indices_to_remove] = torch.finfo(logits.dtype).min
 
-        probs = torch.nn.functional.softmax(logits, dim=-1)
+        return torch.nn.functional.softmax(logits, dim=-1), top_indices
 
-        return torch.multinomial(probs, num_samples=1, generator=generator)
+    def sample_token(self, logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, generator, do_sample=True, presence_penalty=0.0, penalty_mask=None):
+
+        if not do_sample or temperature == 0.0:
+            return torch.argmax(logits, dim=-1, keepdim=True)
+
+        probs, top_indices = self.processed_probs(logits, temperature, top_k, top_p, min_p, repetition_penalty, token_history, presence_penalty=presence_penalty, penalty_mask=penalty_mask)
+        next_token = torch.multinomial(probs, num_samples=1, generator=generator)
+        if top_indices is not None:
+            return top_indices.gather(1, next_token)
+        return next_token
 
 class BaseQwen3:
     def logits(self, x):

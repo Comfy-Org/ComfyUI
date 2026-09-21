@@ -15,6 +15,7 @@ def process_qwen2vl_images(
     merge_size: int = 2,
     image_mean: list = None,
     image_std: list = None,
+    interpolation: str = "bilinear",
 ):
     if image_mean is None:
         image_mean = [0.48145466, 0.4578275, 0.40821073]
@@ -47,10 +48,9 @@ def process_qwen2vl_images(
     img_resized = F.interpolate(
         img.unsqueeze(0),
         size=(h_bar, w_bar),
-        mode='bilinear',
+        mode=interpolation,
         align_corners=False
     ).squeeze(0)
-
     normalized = img_resized.clone()
     for c in range(3):
         normalized[c] = (img_resized[c] - image_mean[c]) / image_std[c]

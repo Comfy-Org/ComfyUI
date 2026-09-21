@@ -2,8 +2,11 @@ from collections import deque
 from datetime import datetime
 import io
 import logging
+import os
 import sys
 import threading
+
+import comfy.internal_logging
 
 ANSI_NAMED_COLORS = {
     'black':   '\033[30m',
@@ -18,6 +21,7 @@ ANSI_NAMED_COLORS = {
 
 ANSI_LEVEL_COLORS = {
     'DEBUG':    ANSI_NAMED_COLORS['cyan'],
+    'DETAIL':   ANSI_NAMED_COLORS['blue'],
     'INFO':     ANSI_NAMED_COLORS['green'],
     'WARNING':  ANSI_NAMED_COLORS['yellow'],
     'ERROR':    ANSI_NAMED_COLORS['red'],
@@ -85,7 +89,12 @@ def on_flush(callback):
     if stderr_interceptor is not None:
         stderr_interceptor.on_flush(callback)
 
-def setup_logger(log_level: str = 'INFO', capacity: int = 300, use_stdout: bool = False):
+
+def get_log_level(level):
+    return comfy.internal_logging.DETAIL if level == "DETAIL" else logging.getLevelName(level)
+
+
+def setup_logger(log_level: str = 'INFO', file_outputs=None, capacity: int = 300, use_stdout: bool = False):
     global logs
     if logs:
         return
@@ -99,13 +108,18 @@ def setup_logger(log_level: str = 'INFO', capacity: int = 300, use_stdout: bool 
     stderr_interceptor = sys.stderr = LogInterceptor(sys.stderr)
 
     # Setup default global logger
+    if file_outputs is None:
+        file_outputs = [('DETAIL', 'comfyui_detail.log')]
     logger = logging.getLogger()
-    logger.setLevel(log_level)
+    console_level = get_log_level(log_level)
+    file_levels = [get_log_level(level) for level, _ in file_outputs]
+    logger.setLevel(min([console_level, *file_levels]))
 
     formatter = ColoredFormatter("%(message)s")
 
     stream_handler = logging.StreamHandler()
     stream_handler.setFormatter(formatter)
+    stream_handler.setLevel(console_level)
 
     if use_stdout:
         # Only errors and critical to stderr
@@ -114,10 +128,23 @@ def setup_logger(log_level: str = 'INFO', capacity: int = 300, use_stdout: bool 
         # Lesser to stdout
         stdout_handler = logging.StreamHandler(sys.stdout)
         stdout_handler.setFormatter(formatter)
+        stdout_handler.setLevel(console_level)
         stdout_handler.addFilter(lambda record: record.levelno < logging.ERROR)
         logger.addHandler(stdout_handler)
 
     logger.addHandler(stream_handler)
+
+    for output_level, output_path in file_outputs:
+        output_path = os.path.abspath(output_path)
+        try:
+            output_handler = logging.FileHandler(output_path, encoding="utf-8")
+        except OSError as e:
+            logging.warning("Could not open %s log %s: %s", output_level, output_path, e)
+            continue
+        output_handler.setLevel(get_log_level(output_level))
+        output_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s"))
+        logger.addHandler(output_handler)
+        logging.info("%s log: %s", output_level.title(), output_path)
 
 
 STARTUP_WARNINGS = []

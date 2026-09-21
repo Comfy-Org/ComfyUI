@@ -2,6 +2,8 @@ import nodes
 import node_helpers
 import torch
 import comfy.model_management
+import comfy.model_patcher
+import comfy.ops
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 from comfy.ldm.hunyuan_video.upsampler import HunyuanVideo15SRModel
@@ -41,7 +43,7 @@ class EmptyHunyuanLatentVideo(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="EmptyHunyuanLatentVideo",
-            display_name="Empty HunyuanVideo 1.0 Latent",
+            display_name="Empty Hunyuan Video 1.0 Latent",
             category="model/latent/hunyuan video",
             inputs=[
                 io.Int.Input("width", default=848, min=16, max=nodes.MAX_RESOLUTION, step=16),
@@ -67,7 +69,7 @@ class EmptyHunyuanVideo15Latent(EmptyHunyuanLatentVideo):
     def define_schema(cls):
         schema = super().define_schema()
         schema.node_id = "EmptyHunyuanVideo15Latent"
-        schema.display_name = "Empty HunyuanVideo 1.5 Latent"
+        schema.display_name = "Empty Hunyuan Video 1.5 Latent"
         schema.category = "model/latent/hunyuan video"
         return schema
 
@@ -217,8 +219,11 @@ class LatentUpscaleModelLoader(io.ComfyNode):
             model.load_sd(sd)
         elif "post_upsample_res_blocks.0.conv2.bias" in sd:
             config = json.loads(metadata["config"])
-            model = LatentUpsampler.from_config(config).to(dtype=comfy.model_management.vae_dtype(allowed_dtypes=[torch.bfloat16, torch.float32]))
-            model.load_state_dict(sd)
+            model = LatentUpsampler.from_config(config, operations=comfy.ops.disable_weight_init).to(dtype=comfy.model_management.vae_dtype(allowed_dtypes=[torch.bfloat16, torch.float32]))
+            comfy.model_management.archive_model_dtypes(model)
+            model_patcher = comfy.model_patcher.CoreModelPatcher(model, load_device=comfy.model_management.get_torch_device(), offload_device=comfy.model_management.unet_offload_device())
+            model.load_state_dict(sd, assign=model_patcher.is_dynamic())
+            model = model_patcher
 
         return io.NodeOutput(model)
 
@@ -228,8 +233,8 @@ class HunyuanVideo15LatentUpscaleWithModel(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="HunyuanVideo15LatentUpscaleWithModel",
-            display_name="Hunyuan Video 15 Latent Upscale With Model",
-            category="model/latent/hunyhuan video",
+            display_name="Hunyuan Video 1.5 Latent Upscale With Model",
+            category="model/latent/hunyuan video",
             inputs=[
                 io.LatentUpscaleModel.Input("model"),
                 io.Latent.Input("samples"),
@@ -361,6 +366,7 @@ class EmptyHunyuanImageLatent(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="EmptyHunyuanImageLatent",
+            display_name="Empty Hunyuan Image Latent",
             category="model/latent/hunyuan image",
             inputs=[
                 io.Int.Input("width", default=2048, min=64, max=nodes.MAX_RESOLUTION, step=32),

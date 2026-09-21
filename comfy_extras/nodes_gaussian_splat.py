@@ -471,6 +471,12 @@ def _mat_to_quat(m):
 
 
 class SplatToFile3D(IO.ComfyNode):
+    FORMAT_WRITERS = {
+        "ply": _gaussian_ply_bytes,
+        "ksplat": _gaussian_ksplat_bytes,
+        "spz": _gaussian_spz_bytes,
+    }
+
     @classmethod
     def define_schema(cls):
         return IO.Schema(
@@ -482,7 +488,7 @@ class SplatToFile3D(IO.ComfyNode):
                         "Supports one item per batch only.",
             inputs=[
                 IO.Splat.Input("splat"),
-                IO.Combo.Input("format", options=["ply", "ksplat", "spz"],  # TODO: add "splat" when we have a writer for it
+                IO.Combo.Input("format", options=list(cls.FORMAT_WRITERS),  # TODO: add "splat" when we have a writer for it
                                tooltip="ply: standard 3D Gaussian Splat with full spherical harmonics. "
                                        "ksplat: mkkellogg SplatBuffer (level 0, uncompressed), base color only "
                                        "spz: Niantic gzip-compressed (~10x smaller), base color only "
@@ -493,10 +499,13 @@ class SplatToFile3D(IO.ComfyNode):
 
     @classmethod
     def execute(cls, splat, format="ply") -> IO.NodeOutput:
+        writer = cls.FORMAT_WRITERS.get(format)
+        if writer is None:
+            raise ValueError(f"Unsupported splat format: {format!r}")
+
         if splat.positions.shape[0] > 1:
             logging.warning("SplatToFile3D supports one item per batch only. Got %d; using first.", splat.positions.shape[0])
         end = _real_len(splat, 0)
-        writer = {"ksplat": _gaussian_ksplat_bytes, "spz": _gaussian_spz_bytes}.get(format, _gaussian_ply_bytes)
         data = writer(splat.positions[0, :end], splat.scales[0, :end],
                       splat.rotations[0, :end], splat.opacities[0, :end], splat.sh[0, :end])
         return IO.NodeOutput(Types.File3D(BytesIO(data), file_format=format))

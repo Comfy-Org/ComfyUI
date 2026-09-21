@@ -141,11 +141,8 @@ class Attention(nn.Module):
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
-        if self.kv_heads < self.heads:
-            key = key.repeat_interleave(self.heads // self.kv_heads, dim=1)
-            value = value.repeat_interleave(self.heads // self.kv_heads, dim=1)
-
-        hidden_states = optimized_attention_masked(query, key, value, self.heads, attention_mask, skip_reshape=True, transformer_options=transformer_options)
+        gqa_kwargs = {"enable_gqa": True} if self.kv_heads < self.heads else {}
+        hidden_states = optimized_attention_masked(query, key, value, self.heads, attention_mask, skip_reshape=True, transformer_options=transformer_options, **gqa_kwargs)
         hidden_states = self.to_out[0](hidden_states)
         return hidden_states
 

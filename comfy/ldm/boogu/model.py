@@ -74,11 +74,8 @@ class BooguDoubleStreamProcessor(nn.Module):
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
-        if attn.kv_heads < attn.heads:
-            key = key.repeat_interleave(attn.heads // attn.kv_heads, dim=1)
-            value = value.repeat_interleave(attn.heads // attn.kv_heads, dim=1)
-
-        hidden_states = optimized_attention_masked(query, key, value, attn.heads, attention_mask, skip_reshape=True, transformer_options=transformer_options)
+        gqa_kwargs = {"enable_gqa": True} if attn.kv_heads < attn.heads else {}
+        hidden_states = optimized_attention_masked(query, key, value, attn.heads, attention_mask, skip_reshape=True, transformer_options=transformer_options, **gqa_kwargs)
 
         # Split back to instruction/image, apply per-stream output projections, recombine.
         instruct_hidden_states = self.instruct_out(hidden_states[:, :L_instruct])

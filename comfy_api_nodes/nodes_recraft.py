@@ -1,3 +1,5 @@
+import base64
+import uuid
 from io import BytesIO
 
 import aiohttp
@@ -8,8 +10,13 @@ from typing_extensions import override
 from comfy.utils import ProgressBar
 from comfy_api.latest import IO, ComfyExtension
 from comfy_api_nodes.apis.recraft import (
+    RECRAFT_STYLE_MATCH_OPTIONS,
+    RECRAFT_STYLE_REFERENCES_MAX,
+    RECRAFT_STYLE_REFERENCES_MAX_BYTES,
     RECRAFT_V4_PRO_SIZES,
     RECRAFT_V4_SIZES,
+    RECRAFT_V4_STYLES_MODELS,
+    RECRAFT_V4_VECTOR_MODEL_FOR_STYLE,
     RecraftColor,
     RecraftColorChain,
     RecraftControls,
@@ -27,6 +34,7 @@ from comfy_api_nodes.util import (
     ApiEndpoint,
     bytesio_to_image_tensor,
     download_url_as_bytesio,
+    pad_images_to_common_channels,
     resize_mask_to_image,
     sync_op,
     tensor_to_bytesio,
@@ -58,7 +66,6 @@ async def handle_recraft_file_request(
         files=files,
         content_type="multipart/form-data",
         multipart_parser=recraft_multipart_parser,
-        max_retries=1,
     )
     all_bytesio = []
     if response.image is not None:
@@ -172,6 +179,60 @@ class handle_recraft_image_output:
             )
 
 
+def style_reference_images(images: IO.Autogrow.Type | None) -> list[torch.Tensor]:
+    references = []
+    for batch in (images or {}).values():
+        if batch is None:
+            continue
+        if batch.ndim == 3:
+            batch = batch.unsqueeze(0)
+        references.extend(batch[i] for i in range(batch.shape[0]))
+    return references
+
+
+def encode_style_references(references: list[torch.Tensor]) -> list[bytes]:
+    if not references:
+        raise ValueError("At least one style reference image is required.")
+    if len(references) > RECRAFT_STYLE_REFERENCES_MAX:
+        raise ValueError(
+            f"At most {RECRAFT_STYLE_REFERENCES_MAX} style reference images are allowed; got {len(references)}."
+        )
+    encoded = []
+    total_size = 0
+    for reference in references:
+        data = tensor_to_bytesio(reference, total_pixels=2048 * 2048, mime_type="image/webp").read()
+        total_size += len(data)
+        if total_size > RECRAFT_STYLE_REFERENCES_MAX_BYTES:
+            raise ValueError("Total size of style reference images exceeds the 10 MB limit.")
+        encoded.append(data)
+    return encoded
+
+
+def resolve_v4_style(
+    model: str, style_id: str, style_references: IO.Autogrow.Type | None
+) -> tuple[str | None, list[str] | None]:
+    style_id = style_id.strip()
+    references = style_reference_images(style_references)
+    if style_id and references:
+        raise ValueError("Provide either a style_id or style reference images, not both.")
+    if style_id:
+        try:
+            uuid.UUID(style_id)
+        except ValueError:
+            raise ValueError(f"style_id must be a UUID; got '{style_id}'.") from None
+        return style_id, None
+    if references:
+        return None, [
+            f"data:image/webp;base64,{base64.b64encode(data).decode()}"
+            for data in encode_style_references(references)
+        ]
+    if model in RECRAFT_V4_STYLES_MODELS:
+        raise ValueError(
+            f"Model '{model}' always requires a style: connect style reference images or provide a style_id."
+        )
+    return None, None
+
+
 class RecraftColorRGBNode(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -271,9 +332,9 @@ class RecraftStyleV3VectorIllustrationNode(RecraftStyleV3RealisticImageNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="RecraftStyleV3VectorIllustrationNode",
-            display_name="Recraft Style - Realistic Image",
+            display_name="Recraft Style - Vector Illustration",
             category="partner/image/Recraft",
-            description="Select realistic_image style and optional substyle.",
+            description="Select vector_illustration style and optional substyle.",
             inputs=[
                 IO.Combo.Input("substyle", options=get_v3_substyles(cls.RECRAFT_STYLE)),
             ],
@@ -292,7 +353,7 @@ class RecraftStyleV3LogoRasterNode(RecraftStyleV3RealisticImageNode):
             node_id="RecraftStyleV3LogoRaster",
             display_name="Recraft Style - Logo Raster",
             category="partner/image/Recraft",
-            description="Select realistic_image style and optional substyle.",
+            description="Select logo_raster style and substyle.",
             inputs=[
                 IO.Combo.Input("substyle", options=get_v3_substyles(cls.RECRAFT_STYLE, include_none=False)),
             ],
@@ -388,9 +449,81 @@ class RecraftCreateStyleNode(IO.ComfyNode):
             files=files,
             data=RecraftCreateStyleRequest(style=style),
             content_type="multipart/form-data",
-            max_retries=1,
         )
 
+        return IO.NodeOutput(response.id)
+
+
+class RecraftV4CreateStyleNode(IO.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="RecraftV4CreateStyleNode",
+            display_name="Recraft V4 Create Style",
+            category="partner/image/Recraft",
+            description="Create a reusable Recraft V4 style from 1-10 reference images. "
+            "The returned style_id works with every Recraft V4 and V4.1 model of the same output type. "
+            "Total size of all images is limited to 10 MB.",
+            inputs=[
+                IO.Combo.Input(
+                    "model",
+                    options=[
+                        "recraftv4_styles",
+                        "recraftv4_styles_vector",
+                        "recraftv4_styles_pro",
+                        "recraftv4_styles_pro_vector",
+                    ],
+                    tooltip="Model the style is created for. Standard and Pro share one style pool: raster styles "
+                    "work with every Recraft V4 and V4.1 raster model, vector styles (*_vector) with every "
+                    "V4 and V4.1 vector model.",
+                ),
+                IO.Autogrow.Input(
+                    "images",
+                    template=IO.Autogrow.TemplatePrefix(
+                        IO.Image.Input("image"),
+                        prefix="image",
+                        min=1,
+                        max=RECRAFT_STYLE_REFERENCES_MAX,
+                    ),
+                    tooltip="Reference images defining the style. Similar references sharpen the match, "
+                    "varied references widen it.",
+                ),
+            ],
+            outputs=[
+                IO.String.Output(display_name="style_id"),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr="""{"type":"usd","usd": 0.005}""",
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        model: str,
+        images: IO.Autogrow.Type,
+    ) -> IO.NodeOutput:
+        files = [
+            (f"file{i + 1}", data)
+            for i, data in enumerate(encode_style_references(style_reference_images(images)))
+        ]
+        response = await sync_op(
+            cls,
+            endpoint=ApiEndpoint(path="/proxy/recraft/styles", method="POST"),
+            response_model=RecraftCreateStyleResponse,
+            files=files,
+            data=RecraftCreateStyleRequest(
+                style="vector_illustration" if model.endswith("_vector") else "any",
+                model=model,
+            ),
+            content_type="multipart/form-data",
+        )
         return IO.NodeOutput(response.id)
 
 
@@ -399,7 +532,7 @@ class RecraftTextToImageNode(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="RecraftTextToImageNode",
-            display_name="Recraft Text to Image",
+            display_name="Recraft V3 Text to Image",
             category="partner/image/Recraft",
             description="Generates images synchronously based on prompt and resolution.",
             inputs=[
@@ -493,7 +626,6 @@ class RecraftTextToImageNode(IO.ComfyNode):
                 style_id=recraft_style.style_id,
                 controls=controls_api,
             ),
-            max_retries=1,
         )
         images = []
         for data in response.data:
@@ -511,7 +643,7 @@ class RecraftImageToImageNode(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="RecraftImageToImageNode",
-            display_name="Recraft Image to Image",
+            display_name="Recraft V3 Image to Image",
             category="partner/image/Recraft",
             description="Modify image based on prompt and strength.",
             inputs=[
@@ -621,7 +753,7 @@ class RecraftImageToImageNode(IO.ComfyNode):
                 images.append(torch.cat([bytesio_to_image_tensor(x) for x in sub_bytes], dim=0))
             pbar.update(1)
 
-        return IO.NodeOutput(torch.cat(images, dim=0))
+        return IO.NodeOutput(torch.cat(pad_images_to_common_channels(images), dim=0))
 
 
 class RecraftImageInpaintingNode(IO.ComfyNode):
@@ -723,7 +855,7 @@ class RecraftImageInpaintingNode(IO.ComfyNode):
                 images.append(torch.cat([bytesio_to_image_tensor(x) for x in sub_bytes], dim=0))
             pbar.update(1)
 
-        return IO.NodeOutput(torch.cat(images, dim=0))
+        return IO.NodeOutput(torch.cat(pad_images_to_common_channels(images), dim=0))
 
 
 class RecraftTextToVectorNode(IO.ComfyNode):
@@ -731,7 +863,7 @@ class RecraftTextToVectorNode(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="RecraftTextToVectorNode",
-            display_name="Recraft Text to Vector",
+            display_name="Recraft V3 Text to Vector",
             category="partner/image/Recraft",
             description="Generates SVG synchronously based on prompt and resolution.",
             inputs=[
@@ -817,7 +949,6 @@ class RecraftTextToVectorNode(IO.ComfyNode):
                 substyle=recraft_style.substyle,
                 controls=controls_api,
             ),
-            max_retries=1,
         )
         svg_data = []
         for data in response.data:
@@ -954,7 +1085,7 @@ class RecraftReplaceBackgroundNode(IO.ComfyNode):
             images.append(torch.cat([bytesio_to_image_tensor(x) for x in sub_bytes], dim=0))
             pbar.update(1)
 
-        return IO.NodeOutput(torch.cat(images, dim=0))
+        return IO.NodeOutput(torch.cat(pad_images_to_common_channels(images), dim=0))
 
 
 class RecraftRemoveBackgroundNode(IO.ComfyNode):
@@ -995,7 +1126,7 @@ class RecraftRemoveBackgroundNode(IO.ComfyNode):
                 image=image[i],
                 path="/proxy/recraft/images/removeBackground",
             )
-            images.append(torch.cat([bytesio_to_image_tensor(x) for x in sub_bytes], dim=0))
+            images.append(torch.cat([bytesio_to_image_tensor(x, mode="RGBA") for x in sub_bytes], dim=0))
             pbar.update(1)
 
         images_tensor = torch.cat(images, dim=0)
@@ -1047,7 +1178,7 @@ class RecraftCrispUpscaleNode(IO.ComfyNode):
             images.append(torch.cat([bytesio_to_image_tensor(x) for x in sub_bytes], dim=0))
             pbar.update(1)
 
-        return IO.NodeOutput(torch.cat(images, dim=0))
+        return IO.NodeOutput(torch.cat(pad_images_to_common_channels(images), dim=0))
 
 
 class RecraftCreativeUpscaleNode(RecraftCrispUpscaleNode):
@@ -1087,7 +1218,7 @@ class RecraftV4TextToImageNode(IO.ComfyNode):
             node_id="RecraftV4TextToImageNode",
             display_name="Recraft V4 Text to Image",
             category="partner/image/Recraft",
-            description="Generates images using Recraft V4 or V4 Pro models.",
+            description="Generates images using Recraft V4 and V4.1 models.",
             inputs=[
                 IO.String.Input(
                     "prompt",
@@ -1097,11 +1228,56 @@ class RecraftV4TextToImageNode(IO.ComfyNode):
                 IO.String.Input(
                     "negative_prompt",
                     multiline=True,
-                    tooltip="An optional text description of undesired elements on an image.",
+                    tooltip="This input is ignored: negative prompt is not supported by "
+                    "Recraft V4 and V4.1 models.",
                 ),
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
+                        IO.DynamicCombo.Option(
+                            "recraftv4_1",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_SIZES,
+                                    default="1024x1024",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "recraftv4_1_utility",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_SIZES,
+                                    default="1024x1024",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "recraftv4_1_pro",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_PRO_SIZES,
+                                    default="2048x2048",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "recraftv4_1_utility_pro",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_PRO_SIZES,
+                                    default="2048x2048",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
                         IO.DynamicCombo.Option(
                             "recraftv4",
                             [
@@ -1124,8 +1300,31 @@ class RecraftV4TextToImageNode(IO.ComfyNode):
                                 ),
                             ],
                         ),
+                        IO.DynamicCombo.Option(
+                            "recraftv4_styles",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_SIZES,
+                                    default="1024x1024",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "recraftv4_styles_pro",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_PRO_SIZES,
+                                    default="2048x2048",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
                     ],
-                    tooltip="The model to use for generation.",
+                    tooltip="The model to use for generation. The recraftv4_styles models are built for "
+                    "style-consistent generation and always require a style_id or style_references.",
                 ),
                 IO.Int.Input(
                     "n",
@@ -1148,9 +1347,36 @@ class RecraftV4TextToImageNode(IO.ComfyNode):
                     tooltip="Optional additional controls over the generation via the Recraft Controls node.",
                     optional=True,
                 ),
+                IO.String.Input(
+                    "style_id",
+                    default="",
+                    optional=True,
+                    tooltip="UUID of a Recraft V4 style to apply, e.g. from the Recraft V4 Create Style node "
+                    "or the style_id output of a previous run. Cannot be combined with style_references.",
+                ),
+                IO.Combo.Input(
+                    "style_match",
+                    options=RECRAFT_STYLE_MATCH_OPTIONS,
+                    optional=True,
+                    tooltip="How closely to follow the style: precise reproduces it in detail, "
+                    "flexible matches the general look. Only used when a style is provided.",
+                ),
+                IO.Autogrow.Input(
+                    "style_references",
+                    template=IO.Autogrow.TemplatePrefix(
+                        IO.Image.Input("style_reference"),
+                        prefix="style_reference",
+                        min=0,
+                        max=RECRAFT_STYLE_REFERENCES_MAX,
+                    ),
+                    optional=True,
+                    tooltip="Reference images to create a style from on the fly, billed on top of the generation. "
+                    "The created style is returned as style_id for reuse. Cannot be combined with style_id.",
+                ),
             ],
             outputs=[
                 IO.Image.Output(),
+                IO.String.Output(id="style_id", display_name="style_id"),
             ],
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
@@ -1159,11 +1385,22 @@ class RecraftV4TextToImageNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["model", "n"]),
+                depends_on=IO.PriceBadgeDepends(widgets=["model", "n"], input_groups=["style_references"]),
                 expr="""
                 (
-                    $prices := {"recraftv4": 0.04, "recraftv4_pro": 0.25};
-                    {"type":"usd","usd": $lookup($prices, widgets.model) * widgets.n}
+                    $prices := {
+                        "recraftv4_1": 0.035,
+                        "recraftv4_1_utility": 0.035,
+                        "recraftv4_1_pro": 0.21,
+                        "recraftv4_1_utility_pro": 0.21,
+                        "recraftv4": 0.04,
+                        "recraftv4_pro": 0.25,
+                        "recraftv4_styles": 0.035,
+                        "recraftv4_styles_pro": 0.10
+                    };
+                    $references := $lookup(inputGroups, "style_references");
+                    $style := ($references ? $references : 0) > 0 ? 0.005 : 0;
+                    {"type":"usd","usd": $lookup($prices, widgets.model) * widgets.n + $style}
                 )
                 """,
             ),
@@ -1178,21 +1415,26 @@ class RecraftV4TextToImageNode(IO.ComfyNode):
         n: int,
         seed: int,
         recraft_controls: RecraftControls | None = None,
+        style_id: str = "",
+        style_match: str = "precise",
+        style_references: IO.Autogrow.Type | None = None,
     ) -> IO.NodeOutput:
-        validate_string(prompt, strip_whitespace=False, min_length=1, max_length=10000)
+        validate_string(prompt, strip_whitespace=True, min_length=1, max_length=10000)
+        style_id, style_reference_urls = resolve_v4_style(model["model"], style_id, style_references)
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/recraft/image_generation", method="POST"),
             response_model=RecraftImageGenerationResponse,
             data=RecraftImageGenerationRequest(
                 prompt=prompt,
-                negative_prompt=negative_prompt if negative_prompt else None,
                 model=model["model"],
                 size=model["size"],
                 n=n,
+                style_id=style_id,
+                style_match=style_match if style_id or style_reference_urls else None,
+                style_reference_urls=style_reference_urls,
                 controls=recraft_controls.create_api_model() if recraft_controls else None,
             ),
-            max_retries=1,
         )
         images = []
         for data in response.data:
@@ -1201,7 +1443,7 @@ class RecraftV4TextToImageNode(IO.ComfyNode):
             if len(image.shape) < 4:
                 image = image.unsqueeze(0)
             images.append(image)
-        return IO.NodeOutput(torch.cat(images, dim=0))
+        return IO.NodeOutput(torch.cat(images, dim=0), response.style_id or "")
 
 
 class RecraftV4TextToVectorNode(IO.ComfyNode):
@@ -1211,7 +1453,7 @@ class RecraftV4TextToVectorNode(IO.ComfyNode):
             node_id="RecraftV4TextToVectorNode",
             display_name="Recraft V4 Text to Vector",
             category="partner/image/Recraft",
-            description="Generates SVG using Recraft V4 or V4 Pro models.",
+            description="Generates SVG using Recraft V4 and V4.1 models.",
             inputs=[
                 IO.String.Input(
                     "prompt",
@@ -1221,11 +1463,56 @@ class RecraftV4TextToVectorNode(IO.ComfyNode):
                 IO.String.Input(
                     "negative_prompt",
                     multiline=True,
-                    tooltip="An optional text description of undesired elements on an image.",
+                    tooltip="This input is ignored: negative prompt is not supported by "
+                    "Recraft V4 and V4.1 models.",
                 ),
                 IO.DynamicCombo.Input(
                     "model",
                     options=[
+                        IO.DynamicCombo.Option(
+                            "recraftv4_1_vector",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_SIZES,
+                                    default="1024x1024",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "recraftv4_1_utility_vector",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_SIZES,
+                                    default="1024x1024",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "recraftv4_1_pro_vector",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_PRO_SIZES,
+                                    default="2048x2048",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "recraftv4_1_utility_pro_vector",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_PRO_SIZES,
+                                    default="2048x2048",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
                         IO.DynamicCombo.Option(
                             "recraftv4",
                             [
@@ -1248,8 +1535,31 @@ class RecraftV4TextToVectorNode(IO.ComfyNode):
                                 ),
                             ],
                         ),
+                        IO.DynamicCombo.Option(
+                            "recraftv4_styles_vector",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_SIZES,
+                                    default="1024x1024",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "recraftv4_styles_pro_vector",
+                            [
+                                IO.Combo.Input(
+                                    "size",
+                                    options=RECRAFT_V4_PRO_SIZES,
+                                    default="2048x2048",
+                                    tooltip="The size of the generated image.",
+                                ),
+                            ],
+                        ),
                     ],
-                    tooltip="The model to use for generation.",
+                    tooltip="The model to use for generation. The recraftv4_styles models are built for "
+                    "style-consistent generation and always require a style_id or style_references.",
                 ),
                 IO.Int.Input(
                     "n",
@@ -1272,9 +1582,36 @@ class RecraftV4TextToVectorNode(IO.ComfyNode):
                     tooltip="Optional additional controls over the generation via the Recraft Controls node.",
                     optional=True,
                 ),
+                IO.String.Input(
+                    "style_id",
+                    default="",
+                    optional=True,
+                    tooltip="UUID of a Recraft V4 vector style to apply, e.g. from the Recraft V4 Create Style node "
+                    "or the style_id output of a previous run. Cannot be combined with style_references.",
+                ),
+                IO.Combo.Input(
+                    "style_match",
+                    options=RECRAFT_STYLE_MATCH_OPTIONS,
+                    optional=True,
+                    tooltip="How closely to follow the style: precise reproduces it in detail, "
+                    "flexible matches the general look. Only used when a style is provided.",
+                ),
+                IO.Autogrow.Input(
+                    "style_references",
+                    template=IO.Autogrow.TemplatePrefix(
+                        IO.Image.Input("style_reference"),
+                        prefix="style_reference",
+                        min=0,
+                        max=RECRAFT_STYLE_REFERENCES_MAX,
+                    ),
+                    optional=True,
+                    tooltip="Reference images to create a vector style from on the fly, billed on top of the generation. "
+                    "The created style is returned as style_id for reuse. Cannot be combined with style_id.",
+                ),
             ],
             outputs=[
                 IO.SVG.Output(),
+                IO.String.Output(id="style_id", display_name="style_id"),
             ],
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
@@ -1283,11 +1620,22 @@ class RecraftV4TextToVectorNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["model", "n"]),
+                depends_on=IO.PriceBadgeDepends(widgets=["model", "n"], input_groups=["style_references"]),
                 expr="""
                 (
-                    $prices := {"recraftv4": 0.08, "recraftv4_pro": 0.30};
-                    {"type":"usd","usd": $lookup($prices, widgets.model) * widgets.n}
+                    $prices := {
+                        "recraftv4_1_vector": 0.08,
+                        "recraftv4_1_utility_vector": 0.08,
+                        "recraftv4_1_pro_vector": 0.30,
+                        "recraftv4_1_utility_pro_vector": 0.30,
+                        "recraftv4": 0.08,
+                        "recraftv4_pro": 0.30,
+                        "recraftv4_styles_vector": 0.05,
+                        "recraftv4_styles_pro_vector": 0.12
+                    };
+                    $references := $lookup(inputGroups, "style_references");
+                    $style := ($references ? $references : 0) > 0 ? 0.005 : 0;
+                    {"type":"usd","usd": $lookup($prices, widgets.model) * widgets.n + $style}
                 )
                 """,
             ),
@@ -1302,28 +1650,37 @@ class RecraftV4TextToVectorNode(IO.ComfyNode):
         n: int,
         seed: int,
         recraft_controls: RecraftControls | None = None,
+        style_id: str = "",
+        style_match: str = "precise",
+        style_references: IO.Autogrow.Type | None = None,
     ) -> IO.NodeOutput:
-        validate_string(prompt, strip_whitespace=False, min_length=1, max_length=10000)
+        validate_string(prompt, strip_whitespace=True, min_length=1, max_length=10000)
+        model_id = model["model"]
+        style_id, style_reference_urls = resolve_v4_style(model_id, style_id, style_references)
+        has_style = bool(style_id or style_reference_urls)
+        if has_style:
+            model_id = RECRAFT_V4_VECTOR_MODEL_FOR_STYLE.get(model_id, model_id)
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/recraft/image_generation", method="POST"),
             response_model=RecraftImageGenerationResponse,
             data=RecraftImageGenerationRequest(
                 prompt=prompt,
-                negative_prompt=negative_prompt if negative_prompt else None,
-                model=model["model"],
+                model=model_id,
                 size=model["size"],
                 n=n,
-                style="vector_illustration",
+                style=None if has_style or model_id.endswith("_vector") else "vector_illustration",
                 substyle=None,
+                style_id=style_id,
+                style_match=style_match if has_style else None,
+                style_reference_urls=style_reference_urls,
                 controls=recraft_controls.create_api_model() if recraft_controls else None,
             ),
-            max_retries=1,
         )
         svg_data = []
         for data in response.data:
             svg_data.append(await download_url_as_bytesio(data.url, timeout=1024))
-        return IO.NodeOutput(SVG(svg_data))
+        return IO.NodeOutput(SVG(svg_data), response.style_id or "")
 
 
 class RecraftExtension(ComfyExtension):
@@ -1348,6 +1705,7 @@ class RecraftExtension(ComfyExtension):
             RecraftControlsNode,
             RecraftV4TextToImageNode,
             RecraftV4TextToVectorNode,
+            RecraftV4CreateStyleNode,
         ]
 
 

@@ -2138,7 +2138,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Edit image",
+        "category": "Image editing/Edit image",
         "description": "Edits images via text instructions using FireRed Image Edit 1.1, a diffusion-based instruction-following editing model."
       }
     ]

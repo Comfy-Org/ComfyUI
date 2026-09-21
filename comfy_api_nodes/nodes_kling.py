@@ -5,17 +5,13 @@ For source of truth on the allowed permutations of request fields, please refere
 """
 
 import logging
-import math
 import re
 
 import torch
 from typing_extensions import override
 
-from comfy_api.latest import IO, ComfyExtension, Input, InputImpl
+from comfy_api.latest import IO, ComfyExtension, Input
 from comfy_api_nodes.apis import (
-    KlingCameraControl,
-    KlingCameraConfig,
-    KlingCameraControlType,
     KlingVideoGenDuration,
     KlingVideoGenMode,
     KlingVideoGenAspectRatio,
@@ -24,29 +20,16 @@ from comfy_api_nodes.apis import (
     KlingText2VideoResponse,
     KlingImage2VideoRequest,
     KlingImage2VideoResponse,
-    KlingVideoExtendRequest,
-    KlingVideoExtendResponse,
     KlingLipSyncVoiceLanguage,
     KlingLipSyncInputObject,
     KlingLipSyncRequest,
     KlingLipSyncResponse,
-    KlingVirtualTryOnModelName,
-    KlingVirtualTryOnRequest,
-    KlingVirtualTryOnResponse,
     KlingVideoResult,
     KlingImageResult,
     KlingImageGenerationsRequest,
     KlingImageGenerationsResponse,
     KlingImageGenImageReferenceType,
     KlingImageGenAspectRatio,
-    KlingVideoEffectsRequest,
-    KlingVideoEffectsResponse,
-    KlingDualCharacterEffectsScene,
-    KlingSingleImageEffectsScene,
-    KlingDualCharacterEffectInput,
-    KlingSingleImageEffectInput,
-    KlingCharacterEffectModelName,
-    KlingSingleImageEffectModelName,
 )
 from comfy_api_nodes.apis.kling import (
     ImageToVideoWithAudioRequest,
@@ -117,11 +100,7 @@ def _generate_storyboard_inputs(count: int) -> list:
 KLING_API_VERSION = "v1"
 PATH_TEXT_TO_VIDEO = f"/proxy/kling/{KLING_API_VERSION}/videos/text2video"
 PATH_IMAGE_TO_VIDEO = f"/proxy/kling/{KLING_API_VERSION}/videos/image2video"
-PATH_VIDEO_EXTEND = f"/proxy/kling/{KLING_API_VERSION}/videos/video-extend"
 PATH_LIP_SYNC = f"/proxy/kling/{KLING_API_VERSION}/videos/lip-sync"
-PATH_VIDEO_EFFECTS = f"/proxy/kling/{KLING_API_VERSION}/videos/effects"
-PATH_CHARACTER_IMAGE = f"/proxy/kling/{KLING_API_VERSION}/images/generations"
-PATH_VIRTUAL_TRY_ON = f"/proxy/kling/{KLING_API_VERSION}/images/kolors-virtual-try-on"
 PATH_IMAGE_GENERATIONS = f"/proxy/kling/{KLING_API_VERSION}/images/generations"
 
 MAX_PROMPT_LENGTH_T2V = 2500
@@ -133,21 +112,10 @@ MAX_PROMPT_LENGTH_LIP_SYNC = 120
 AVERAGE_DURATION_T2V = 319
 AVERAGE_DURATION_I2V = 164
 AVERAGE_DURATION_LIP_SYNC = 455
-AVERAGE_DURATION_VIRTUAL_TRY_ON = 19
 AVERAGE_DURATION_IMAGE_GEN = 32
-AVERAGE_DURATION_VIDEO_EFFECTS = 320
-AVERAGE_DURATION_VIDEO_EXTEND = 320
 
 
 MODE_TEXT2VIDEO = {
-    "standard mode / 5s duration / kling-v1-6": ("std", "5", "kling-v1-6"),
-    "standard mode / 10s duration / kling-v1-6": ("std", "10", "kling-v1-6"),
-    "pro mode / 5s duration / kling-v2-master": ("pro", "5", "kling-v2-master"),
-    "pro mode / 10s duration / kling-v2-master": ("pro", "10", "kling-v2-master"),
-    "standard mode / 5s duration / kling-v2-master": ("std", "5", "kling-v2-master"),
-    "standard mode / 10s duration / kling-v2-master": ("std", "10", "kling-v2-master"),
-    "pro mode / 5s duration / kling-v2-1-master": ("pro", "5", "kling-v2-1-master"),
-    "pro mode / 10s duration / kling-v2-1-master": ("pro", "10", "kling-v2-1-master"),
     "pro mode / 5s duration / kling-v2-5-turbo": ("pro", "5", "kling-v2-5-turbo"),
     "pro mode / 10s duration / kling-v2-5-turbo": ("pro", "10", "kling-v2-5-turbo"),
 }
@@ -160,12 +128,6 @@ See: [Kling API Docs Capability Map](https://app.klingai.com/global/dev/document
 
 
 MODE_START_END_FRAME = {
-    "pro mode / 5s duration / kling-v1-5": ("pro", "5", "kling-v1-5"),
-    "pro mode / 10s duration / kling-v1-5": ("pro", "10", "kling-v1-5"),
-    "pro mode / 5s duration / kling-v1-6": ("pro", "5", "kling-v1-6"),
-    "pro mode / 10s duration / kling-v1-6": ("pro", "10", "kling-v1-6"),
-    "pro mode / 5s duration / kling-v2-1": ("pro", "5", "kling-v2-1"),
-    "pro mode / 10s duration / kling-v2-1": ("pro", "10", "kling-v2-1"),
     "pro mode / 5s duration / kling-v2-5-turbo": ("pro", "5", "kling-v2-5-turbo"),
     "pro mode / 10s duration / kling-v2-5-turbo": ("pro", "10", "kling-v2-5-turbo"),
 }
@@ -287,11 +249,6 @@ async def finish_omni_video_task(cls: type[IO.ComfyNode], response: TaskStatusRe
     return IO.NodeOutput(await download_url_to_video_output(final_response.data.task_result.videos[0].url))
 
 
-def is_valid_camera_control_configs(configs: list[float]) -> bool:
-    """Verifies that at least one camera control configuration is non-zero."""
-    return any(not math.isclose(value, 0.0) for value in configs)
-
-
 def is_valid_task_creation_response(response: KlingText2VideoResponse) -> bool:
     """Verifies that the initial response contains a task ID."""
     return bool(response.data.task_id)
@@ -307,7 +264,7 @@ def is_valid_video_response(response: KlingText2VideoResponse) -> bool:
     )
 
 
-def is_valid_image_response(response: KlingVirtualTryOnResponse) -> bool:
+def is_valid_image_response(response: KlingImageGenerationsResponse) -> bool:
     """Verifies that the response contains a task result with at least one image."""
     return (
         response.data is not None
@@ -430,7 +387,6 @@ async def execute_text2video(
     model_mode: str,
     duration: str,
     aspect_ratio: str,
-    camera_control: KlingCameraControl | None = None,
 ) -> IO.NodeOutput:
     validate_prompts(prompt, negative_prompt, MAX_PROMPT_LENGTH_T2V)
     task_creation_response = await sync_op(
@@ -445,7 +401,6 @@ async def execute_text2video(
             model_name=model_name,
             cfg_scale=cfg_scale,
             aspect_ratio=KlingVideoGenAspectRatio(aspect_ratio),
-            camera_control=camera_control,
         ),
     )
 
@@ -475,18 +430,10 @@ async def execute_image2video(
     model_mode: str,
     aspect_ratio: str,
     duration: str,
-    camera_control: KlingCameraControl | None = None,
     end_frame: torch.Tensor | None = None,
 ) -> IO.NodeOutput:
     validate_prompts(prompt, negative_prompt, MAX_PROMPT_LENGTH_I2V)
     validate_input_image(start_frame)
-
-    if camera_control is not None:
-        # Camera control type for image 2 video is always `simple`
-        camera_control.type = KlingCameraControlType.simple
-
-    if model_mode == "std" and model_name == KlingVideoGenModelName.kling_v2_5_turbo.value:
-        model_mode = "pro"  # October 5: currently "std" mode is not supported for this model
 
     task_creation_response = await sync_op(
         cls,
@@ -505,7 +452,6 @@ async def execute_image2video(
             cfg_scale=cfg_scale,
             mode=KlingVideoGenMode(model_mode),
             duration=KlingVideoGenDuration(duration),
-            camera_control=camera_control,
         ),
     )
 
@@ -523,59 +469,6 @@ async def execute_image2video(
 
     video = get_video_from_response(final_response)
     return IO.NodeOutput(await download_url_to_video_output(str(video.url)), str(video.id), str(video.duration))
-
-
-async def execute_video_effect(
-    cls: type[IO.ComfyNode],
-    dual_character: bool,
-    effect_scene: KlingDualCharacterEffectsScene | KlingSingleImageEffectsScene,
-    model_name: str,
-    duration: KlingVideoGenDuration,
-    image_1: torch.Tensor,
-    image_2: torch.Tensor | None = None,
-    model_mode: KlingVideoGenMode | None = None,
-) -> tuple[InputImpl.VideoFromFile, str, str]:
-    if dual_character:
-        request_input_field = KlingDualCharacterEffectInput(
-            model_name=model_name,
-            mode=model_mode,
-            images=[
-                tensor_to_base64_string(image_1),
-                tensor_to_base64_string(image_2),
-            ],
-            duration=duration,
-        )
-    else:
-        request_input_field = KlingSingleImageEffectInput(
-            model_name=model_name,
-            image=tensor_to_base64_string(image_1),
-            duration=duration,
-        )
-
-    task_creation_response = await sync_op(
-        cls,
-        endpoint=ApiEndpoint(path=PATH_VIDEO_EFFECTS, method="POST"),
-        response_model=KlingVideoEffectsResponse,
-        data=KlingVideoEffectsRequest(
-            effect_scene=effect_scene,
-            input=request_input_field,
-        ),
-    )
-
-    validate_task_creation_response(task_creation_response)
-    task_id = task_creation_response.data.task_id
-
-    final_response = await poll_op(
-        cls,
-        ApiEndpoint(path=f"{PATH_VIDEO_EFFECTS}/{task_id}"),
-        response_model=KlingVideoEffectsResponse,
-        estimated_duration=AVERAGE_DURATION_VIDEO_EFFECTS,
-        status_extractor=lambda r: (r.data.task_status.value if r.data and r.data.task_status else None),
-    )
-    validate_video_result_response(final_response)
-
-    video = get_video_from_response(final_response)
-    return await download_url_to_video_output(str(video.url)), str(video.id), str(video.duration)
 
 
 async def execute_lipsync(
@@ -640,125 +533,6 @@ async def execute_lipsync(
     return IO.NodeOutput(await download_url_to_video_output(str(video.url)), str(video.id), str(video.duration))
 
 
-class KlingCameraControls(IO.ComfyNode):
-    """Kling Camera Controls Node"""
-
-    @classmethod
-    def define_schema(cls) -> IO.Schema:
-        return IO.Schema(
-            node_id="KlingCameraControls",
-            display_name="Kling Camera Controls",
-            category="partner/video/Kling",
-            description="Allows specifying configuration options for Kling Camera Controls and motion control effects.",
-            inputs=[
-                IO.Combo.Input("camera_control_type", options=KlingCameraControlType),
-                IO.Float.Input(
-                    "horizontal_movement",
-                    default=0.0,
-                    min=-10.0,
-                    max=10.0,
-                    step=0.25,
-                    display_mode=IO.NumberDisplay.slider,
-                    tooltip="Controls camera's movement along horizontal axis (x-axis). Negative indicates left, positive indicates right",
-                ),
-                IO.Float.Input(
-                    "vertical_movement",
-                    default=0.0,
-                    min=-10.0,
-                    max=10.0,
-                    step=0.25,
-                    display_mode=IO.NumberDisplay.slider,
-                    tooltip="Controls camera's movement along vertical axis (y-axis). Negative indicates downward, positive indicates upward.",
-                ),
-                IO.Float.Input(
-                    "pan",
-                    default=0.5,
-                    min=-10.0,
-                    max=10.0,
-                    step=0.25,
-                    display_mode=IO.NumberDisplay.slider,
-                    tooltip="Controls camera's rotation in vertical plane (x-axis). Negative indicates downward rotation, positive indicates upward rotation.",
-                ),
-                IO.Float.Input(
-                    "tilt",
-                    default=0.0,
-                    min=-10.0,
-                    max=10.0,
-                    step=0.25,
-                    display_mode=IO.NumberDisplay.slider,
-                    tooltip="Controls camera's rotation in horizontal plane (y-axis). Negative indicates left rotation, positive indicates right rotation.",
-                ),
-                IO.Float.Input(
-                    "roll",
-                    default=0.0,
-                    min=-10.0,
-                    max=10.0,
-                    step=0.25,
-                    display_mode=IO.NumberDisplay.slider,
-                    tooltip="Controls camera's rolling amount (z-axis). Negative indicates counterclockwise, positive indicates clockwise.",
-                ),
-                IO.Float.Input(
-                    "zoom",
-                    default=0.0,
-                    min=-10.0,
-                    max=10.0,
-                    step=0.25,
-                    display_mode=IO.NumberDisplay.slider,
-                    tooltip="Controls change in camera's focal length. Negative indicates narrower field of view, positive indicates wider field of view.",
-                ),
-            ],
-            outputs=[IO.Custom("CAMERA_CONTROL").Output(display_name="camera_control")],
-        )
-
-    @classmethod
-    def validate_inputs(
-        cls,
-        horizontal_movement: float,
-        vertical_movement: float,
-        pan: float,
-        tilt: float,
-        roll: float,
-        zoom: float,
-    ) -> bool | str:
-        if not is_valid_camera_control_configs(
-            [
-                horizontal_movement,
-                vertical_movement,
-                pan,
-                tilt,
-                roll,
-                zoom,
-            ]
-        ):
-            return "Invalid camera control configs: at least one of the values must be non-zero"
-        return True
-
-    @classmethod
-    def execute(
-        cls,
-        camera_control_type: str,
-        horizontal_movement: float,
-        vertical_movement: float,
-        pan: float,
-        tilt: float,
-        roll: float,
-        zoom: float,
-    ) -> IO.NodeOutput:
-        return IO.NodeOutput(
-            KlingCameraControl(
-                type=KlingCameraControlType(camera_control_type),
-                config=KlingCameraConfig(
-                    horizontal=horizontal_movement,
-                    vertical=vertical_movement,
-                    pan=pan,
-                    roll=roll,
-                    tilt=tilt,
-                    zoom=zoom,
-                ),
-            )
-        )
-
-
 class KlingTextToVideoNode(IO.ComfyNode):
     """Kling Text to Video Node"""
 
@@ -782,7 +556,7 @@ class KlingTextToVideoNode(IO.ComfyNode):
                 IO.Combo.Input(
                     "mode",
                     options=modes,
-                    default=modes[8],
+                    default=modes[0],
                     tooltip="The configuration to use for the video generation following the format: mode / duration / model_name.",
                 ),
             ],
@@ -802,25 +576,7 @@ class KlingTextToVideoNode(IO.ComfyNode):
                 expr="""
                 (
                   $m := widgets.mode;
-                  $contains($m,"v2-5-turbo")
-                    ? ($contains($m,"10") ? {"type":"usd","usd":0.7} : {"type":"usd","usd":0.35})
-                    : $contains($m,"v2-1-master")
-                      ? ($contains($m,"10s") ? {"type":"usd","usd":2.8} : {"type":"usd","usd":1.4})
-                      : $contains($m,"v2-master")
-                        ? ($contains($m,"10s") ? {"type":"usd","usd":2.8} : {"type":"usd","usd":1.4})
-                        : $contains($m,"v1-6")
-                          ? (
-                              $contains($m,"pro")
-                                ? ($contains($m,"10s") ? {"type":"usd","usd":0.98} : {"type":"usd","usd":0.49})
-                                : ($contains($m,"10s") ? {"type":"usd","usd":0.56} : {"type":"usd","usd":0.28})
-                            )
-                          : $contains($m,"v1")
-                            ? (
-                                $contains($m,"pro")
-                                  ? ($contains($m,"10s") ? {"type":"usd","usd":0.98} : {"type":"usd","usd":0.49})
-                                  : ($contains($m,"10s") ? {"type":"usd","usd":0.28} : {"type":"usd","usd":0.14})
-                              )
-                            : {"type":"usd","usd":0.14}
+                  $contains($m,"10") ? {"type":"usd","usd":0.7} : {"type":"usd","usd":0.35}
                 )
                 """,
             ),
@@ -1716,71 +1472,6 @@ class OmniProImageNode(IO.ComfyNode):
         return IO.NodeOutput(torch.cat(tensors, dim=0))
 
 
-class KlingCameraControlT2VNode(IO.ComfyNode):
-    """
-    Kling Text to Video Camera Control Node. This node is a text to video node, but it supports controlling the camera.
-    Duration, mode, and model_name request fields are hard-coded because camera control is only supported in pro mode with the kling-v1-5 model at 5s duration as of 2025-05-02.
-    """
-
-    @classmethod
-    def define_schema(cls) -> IO.Schema:
-        return IO.Schema(
-            node_id="KlingCameraControlT2VNode",
-            display_name="Kling Text to Video (Camera Control)",
-            category="partner/video/Kling",
-            description="Transform text into cinematic videos with professional camera movements that simulate real-world cinematography. Control virtual camera actions including zoom, rotation, pan, tilt, and first-person view, while maintaining focus on your original text.",
-            inputs=[
-                IO.String.Input("prompt", multiline=True, tooltip="Positive text prompt"),
-                IO.String.Input("negative_prompt", multiline=True, tooltip="Negative text prompt"),
-                IO.Float.Input("cfg_scale", default=0.75, min=0.0, max=1.0),
-                IO.Combo.Input(
-                    "aspect_ratio",
-                    options=KlingVideoGenAspectRatio,
-                    default="16:9",
-                ),
-                IO.Custom("CAMERA_CONTROL").Input(
-                    "camera_control",
-                    tooltip="Can be created using the Kling Camera Controls node. Controls the camera movement and motion during the video generation.",
-                ),
-            ],
-            outputs=[
-                IO.Video.Output(),
-                IO.String.Output(display_name="video_id"),
-                IO.String.Output(display_name="duration"),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
-            is_api_node=True,
-            price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.14}""",
-            ),
-        )
-
-    @classmethod
-    async def execute(
-        cls,
-        prompt: str,
-        negative_prompt: str,
-        cfg_scale: float,
-        aspect_ratio: str,
-        camera_control: KlingCameraControl | None = None,
-    ) -> IO.NodeOutput:
-        return await execute_text2video(
-            cls,
-            model_name=KlingVideoGenModelName.kling_v1,
-            cfg_scale=cfg_scale,
-            model_mode=KlingVideoGenMode.std,
-            aspect_ratio=KlingVideoGenAspectRatio(aspect_ratio),
-            duration=KlingVideoGenDuration.field_5,
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            camera_control=camera_control,
-        )
-
-
 class KlingImage2VideoNode(IO.ComfyNode):
     """Kling Image to Video Node"""
 
@@ -1796,11 +1487,10 @@ class KlingImage2VideoNode(IO.ComfyNode):
                 IO.String.Input("negative_prompt", multiline=True, tooltip="Negative text prompt"),
                 IO.Combo.Input(
                     "model_name",
-                    options=KlingVideoGenModelName,
-                    default="kling-v2-master",
+                    options=["kling-v2-5-turbo"],
                 ),
                 IO.Float.Input("cfg_scale", default=0.8, min=0.0, max=1.0),
-                IO.Combo.Input("mode", options=KlingVideoGenMode, default=KlingVideoGenMode.std),
+                IO.Combo.Input("mode", options=["pro"]),
                 IO.Combo.Input(
                     "aspect_ratio",
                     options=KlingVideoGenAspectRatio,
@@ -1820,29 +1510,10 @@ class KlingImage2VideoNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["mode", "model_name", "duration"]),
+                depends_on=IO.PriceBadgeDepends(widgets=["duration"]),
                 expr="""
                 (
-                  $mode := widgets.mode;
-                  $model := widgets.model_name;
-                  $dur := widgets.duration;
-                  $contains($model,"v2-5-turbo")
-                    ? ($contains($dur,"10") ? {"type":"usd","usd":0.7} : {"type":"usd","usd":0.35})
-                    : ($contains($model,"v2-1-master") or $contains($model,"v2-master"))
-                      ? ($contains($dur,"10") ? {"type":"usd","usd":2.8} : {"type":"usd","usd":1.4})
-                      : ($contains($model,"v2-1") or $contains($model,"v1-6") or $contains($model,"v1-5"))
-                        ? (
-                            $contains($mode,"pro")
-                              ? ($contains($dur,"10") ? {"type":"usd","usd":0.98} : {"type":"usd","usd":0.49})
-                              : ($contains($dur,"10") ? {"type":"usd","usd":0.56} : {"type":"usd","usd":0.28})
-                          )
-                        : $contains($model,"v1")
-                          ? (
-                              $contains($mode,"pro")
-                                ? ($contains($dur,"10") ? {"type":"usd","usd":0.98} : {"type":"usd","usd":0.49})
-                                : ($contains($dur,"10") ? {"type":"usd","usd":0.28} : {"type":"usd","usd":0.14})
-                            )
-                          : {"type":"usd","usd":0.14}
+                  $contains(widgets.duration,"10") ? {"type":"usd","usd":0.7} : {"type":"usd","usd":0.35}
                 )
                 """,
             ),
@@ -1859,8 +1530,6 @@ class KlingImage2VideoNode(IO.ComfyNode):
         mode: str,
         aspect_ratio: str,
         duration: str,
-        camera_control: KlingCameraControl | None = None,
-        end_frame: torch.Tensor | None = None,
     ) -> IO.NodeOutput:
         return await execute_image2video(
             cls,
@@ -1872,79 +1541,6 @@ class KlingImage2VideoNode(IO.ComfyNode):
             aspect_ratio=aspect_ratio,
             model_mode=mode,
             duration=duration,
-            camera_control=camera_control,
-            end_frame=end_frame,
-        )
-
-
-class KlingCameraControlI2VNode(IO.ComfyNode):
-    """
-    Kling Image to Video Camera Control Node. This node is a image to video node, but it supports controlling the camera.
-    Duration, mode, and model_name request fields are hard-coded because camera control is only supported in pro mode with the kling-v1-5 model at 5s duration as of 2025-05-02.
-    """
-
-    @classmethod
-    def define_schema(cls) -> IO.Schema:
-        return IO.Schema(
-            node_id="KlingCameraControlI2VNode",
-            display_name="Kling Image to Video (Camera Control)",
-            category="partner/video/Kling",
-            description="Transform still images into cinematic videos with professional camera movements that simulate real-world cinematography. Control virtual camera actions including zoom, rotation, pan, tilt, and first-person view, while maintaining focus on your original image.",
-            inputs=[
-                IO.Image.Input(
-                    "start_frame",
-                    tooltip="Reference Image - URL or Base64 encoded string, cannot exceed 10MB, resolution not less than 300*300px, aspect ratio between 1:2.5 ~ 2.5:1. Base64 should not include data:image prefix.",
-                ),
-                IO.String.Input("prompt", multiline=True, tooltip="Positive text prompt"),
-                IO.String.Input("negative_prompt", multiline=True, tooltip="Negative text prompt"),
-                IO.Float.Input("cfg_scale", default=0.75, min=0.0, max=1.0),
-                IO.Combo.Input(
-                    "aspect_ratio",
-                    options=KlingVideoGenAspectRatio,
-                    default=KlingVideoGenAspectRatio.field_16_9,
-                ),
-                IO.Custom("CAMERA_CONTROL").Input(
-                    "camera_control",
-                    tooltip="Can be created using the Kling Camera Controls node. Controls the camera movement and motion during the video generation.",
-                ),
-            ],
-            outputs=[
-                IO.Video.Output(),
-                IO.String.Output(display_name="video_id"),
-                IO.String.Output(display_name="duration"),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
-            is_api_node=True,
-            price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.49}""",
-            ),
-        )
-
-    @classmethod
-    async def execute(
-        cls,
-        start_frame: torch.Tensor,
-        prompt: str,
-        negative_prompt: str,
-        cfg_scale: float,
-        aspect_ratio: str,
-        camera_control: KlingCameraControl,
-    ) -> IO.NodeOutput:
-        return await execute_image2video(
-            cls,
-            model_name=KlingVideoGenModelName.kling_v1_5,
-            start_frame=start_frame,
-            cfg_scale=cfg_scale,
-            model_mode=KlingVideoGenMode.pro,
-            aspect_ratio=KlingVideoGenAspectRatio(aspect_ratio),
-            duration=KlingVideoGenDuration.field_5,
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            camera_control=camera_control,
         )
 
 
@@ -1977,7 +1573,7 @@ class KlingStartEndFrameNode(IO.ComfyNode):
                 IO.Combo.Input(
                     "mode",
                     options=modes,
-                    default=modes[6],
+                    default=modes[0],
                     tooltip="The configuration to use for the video generation following the format: mode / duration / model_name.",
                 ),
             ],
@@ -1997,25 +1593,7 @@ class KlingStartEndFrameNode(IO.ComfyNode):
                 expr="""
                 (
                   $m := widgets.mode;
-                  $contains($m,"v2-5-turbo")
-                    ? ($contains($m,"10") ? {"type":"usd","usd":0.7} : {"type":"usd","usd":0.35})
-                    : $contains($m,"v2-1")
-                      ? ($contains($m,"10s") ? {"type":"usd","usd":0.98} : {"type":"usd","usd":0.49})
-                      : $contains($m,"v2-master")
-                        ? ($contains($m,"10s") ? {"type":"usd","usd":2.8} : {"type":"usd","usd":1.4})
-                        : $contains($m,"v1-6")
-                          ? (
-                              $contains($m,"pro")
-                                ? ($contains($m,"10s") ? {"type":"usd","usd":0.98} : {"type":"usd","usd":0.49})
-                                : ($contains($m,"10s") ? {"type":"usd","usd":0.56} : {"type":"usd","usd":0.28})
-                            )
-                          : $contains($m,"v1")
-                            ? (
-                                $contains($m,"pro")
-                                  ? ($contains($m,"10s") ? {"type":"usd","usd":0.98} : {"type":"usd","usd":0.49})
-                                  : ($contains($m,"10s") ? {"type":"usd","usd":0.28} : {"type":"usd","usd":0.14})
-                              )
-                            : {"type":"usd","usd":0.14}
+                  $contains($m,"10") ? {"type":"usd","usd":0.7} : {"type":"usd","usd":0.35}
                 )
                 """,
             ),
@@ -2044,248 +1622,6 @@ class KlingStartEndFrameNode(IO.ComfyNode):
             aspect_ratio=aspect_ratio,
             duration=duration,
             end_frame=end_frame,
-        )
-
-
-class KlingVideoExtendNode(IO.ComfyNode):
-    @classmethod
-    def define_schema(cls) -> IO.Schema:
-        return IO.Schema(
-            node_id="KlingVideoExtendNode",
-            display_name="Kling Video Extend",
-            category="partner/video/Kling",
-            description="Kling Video Extend Node. Extend videos made by other Kling nodes. The video_id is created by using other Kling Nodes.",
-            inputs=[
-                IO.String.Input(
-                    "prompt",
-                    multiline=True,
-                    tooltip="Positive text prompt for guiding the video extension",
-                ),
-                IO.String.Input(
-                    "negative_prompt",
-                    multiline=True,
-                    tooltip="Negative text prompt for elements to avoid in the extended video",
-                ),
-                IO.Float.Input("cfg_scale", default=0.5, min=0.0, max=1.0),
-                IO.String.Input(
-                    "video_id",
-                    force_input=True,
-                    tooltip="The ID of the video to be extended. Supports videos generated by text-to-video, image-to-video, and previous video extension operations. Cannot exceed 3 minutes total duration after extension.",
-                ),
-            ],
-            outputs=[
-                IO.Video.Output(),
-                IO.String.Output(display_name="video_id"),
-                IO.String.Output(display_name="duration"),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
-            is_api_node=True,
-            price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.28}""",
-            ),
-        )
-
-    @classmethod
-    async def execute(
-        cls,
-        prompt: str,
-        negative_prompt: str,
-        cfg_scale: float,
-        video_id: str,
-    ) -> IO.NodeOutput:
-        validate_prompts(prompt, negative_prompt, MAX_PROMPT_LENGTH_T2V)
-        task_creation_response = await sync_op(
-            cls,
-            ApiEndpoint(path=PATH_VIDEO_EXTEND, method="POST"),
-            response_model=KlingVideoExtendResponse,
-            data=KlingVideoExtendRequest(
-                prompt=prompt if prompt else None,
-                negative_prompt=negative_prompt if negative_prompt else None,
-                cfg_scale=cfg_scale,
-                video_id=video_id,
-            ),
-        )
-
-        validate_task_creation_response(task_creation_response)
-        task_id = task_creation_response.data.task_id
-
-        final_response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"{PATH_VIDEO_EXTEND}/{task_id}"),
-            response_model=KlingVideoExtendResponse,
-            estimated_duration=AVERAGE_DURATION_VIDEO_EXTEND,
-            status_extractor=lambda r: (r.data.task_status.value if r.data and r.data.task_status else None),
-        )
-        validate_video_result_response(final_response)
-
-        video = get_video_from_response(final_response)
-        return IO.NodeOutput(await download_url_to_video_output(str(video.url)), str(video.id), str(video.duration))
-
-
-class KlingDualCharacterVideoEffectNode(IO.ComfyNode):
-    """Kling Dual Character Video Effect Node"""
-
-    @classmethod
-    def define_schema(cls) -> IO.Schema:
-        return IO.Schema(
-            node_id="KlingDualCharacterVideoEffectNode",
-            display_name="Kling Dual Character Video Effects",
-            category="partner/video/Kling",
-            description="Achieve different special effects when generating a video based on the effect_scene. First image will be positioned on left side, second on right side of the composite.",
-            inputs=[
-                IO.Image.Input("image_left", tooltip="Left side image"),
-                IO.Image.Input("image_right", tooltip="Right side image"),
-                IO.Combo.Input(
-                    "effect_scene",
-                    options=[i.value for i in KlingDualCharacterEffectsScene],
-                ),
-                IO.Combo.Input(
-                    "model_name",
-                    options=[i.value for i in KlingCharacterEffectModelName],
-                    default="kling-v1",
-                ),
-                IO.Combo.Input(
-                    "mode",
-                    options=[i.value for i in KlingVideoGenMode],
-                    default="std",
-                ),
-                IO.Combo.Input(
-                    "duration",
-                    options=[i.value for i in KlingVideoGenDuration],
-                ),
-            ],
-            outputs=[
-                IO.Video.Output(),
-                IO.String.Output(display_name="duration"),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
-            is_api_node=True,
-            price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["mode", "model_name", "duration"]),
-                expr="""
-                (
-                  $mode := widgets.mode;
-                  $model := widgets.model_name;
-                  $dur := widgets.duration;
-                  ($contains($model,"v1-6") or $contains($model,"v1-5"))
-                    ? (
-                        $contains($mode,"pro")
-                          ? ($contains($dur,"10") ? {"type":"usd","usd":0.98} : {"type":"usd","usd":0.49})
-                          : ($contains($dur,"10") ? {"type":"usd","usd":0.56} : {"type":"usd","usd":0.28})
-                      )
-                    : $contains($model,"v1")
-                      ? (
-                          $contains($mode,"pro")
-                            ? ($contains($dur,"10") ? {"type":"usd","usd":0.98} : {"type":"usd","usd":0.49})
-                            : ($contains($dur,"10") ? {"type":"usd","usd":0.28} : {"type":"usd","usd":0.14})
-                        )
-                      : {"type":"usd","usd":0.14}
-                )
-                """,
-            ),
-        )
-
-    @classmethod
-    async def execute(
-        cls,
-        image_left: torch.Tensor,
-        image_right: torch.Tensor,
-        effect_scene: KlingDualCharacterEffectsScene,
-        model_name: KlingCharacterEffectModelName,
-        mode: KlingVideoGenMode,
-        duration: KlingVideoGenDuration,
-    ) -> IO.NodeOutput:
-        video, _, duration = await execute_video_effect(
-            cls,
-            dual_character=True,
-            effect_scene=effect_scene,
-            model_name=model_name,
-            model_mode=mode,
-            duration=duration,
-            image_1=image_left,
-            image_2=image_right,
-        )
-        return IO.NodeOutput(video, duration)
-
-
-class KlingSingleImageVideoEffectNode(IO.ComfyNode):
-    """Kling Single Image Video Effect Node"""
-
-    @classmethod
-    def define_schema(cls) -> IO.Schema:
-        return IO.Schema(
-            node_id="KlingSingleImageVideoEffectNode",
-            display_name="Kling Video Effects",
-            category="partner/video/Kling",
-            description="Achieve different special effects when generating a video based on the effect_scene.",
-            inputs=[
-                IO.Image.Input(
-                    "image",
-                    tooltip=" Reference Image. URL or Base64 encoded string (without data:image prefix). File size cannot exceed 10MB, resolution not less than 300*300px, aspect ratio between 1:2.5 ~ 2.5:1",
-                ),
-                IO.Combo.Input(
-                    "effect_scene",
-                    options=[i.value for i in KlingSingleImageEffectsScene],
-                ),
-                IO.Combo.Input(
-                    "model_name",
-                    options=[i.value for i in KlingSingleImageEffectModelName],
-                ),
-                IO.Combo.Input(
-                    "duration",
-                    options=[i.value for i in KlingVideoGenDuration],
-                ),
-            ],
-            outputs=[
-                IO.Video.Output(),
-                IO.String.Output(display_name="video_id"),
-                IO.String.Output(display_name="duration"),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
-            is_api_node=True,
-            price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["effect_scene"]),
-                expr="""
-                (
-                  ($contains(widgets.effect_scene,"dizzydizzy") or $contains(widgets.effect_scene,"bloombloom"))
-                    ? {"type":"usd","usd":0.49}
-                    : {"type":"usd","usd":0.28}
-                )
-                """,
-            ),
-        )
-
-    @classmethod
-    async def execute(
-        cls,
-        image: torch.Tensor,
-        effect_scene: KlingSingleImageEffectsScene,
-        model_name: KlingSingleImageEffectModelName,
-        duration: KlingVideoGenDuration,
-    ) -> IO.NodeOutput:
-        return IO.NodeOutput(
-            *(
-                await execute_video_effect(
-                    cls,
-                    dual_character=False,
-                    effect_scene=effect_scene,
-                    model_name=model_name,
-                    duration=duration,
-                    image_1=image,
-                )
-            )
         )
 
 
@@ -2409,73 +1745,6 @@ class KlingLipSyncTextToVideoNode(IO.ComfyNode):
         )
 
 
-class KlingVirtualTryOnNode(IO.ComfyNode):
-    """Kling Virtual Try On Node."""
-
-    @classmethod
-    def define_schema(cls) -> IO.Schema:
-        return IO.Schema(
-            node_id="KlingVirtualTryOnNode",
-            display_name="Kling Virtual Try On",
-            category="partner/image/Kling",
-            description="Kling Virtual Try On Node. Input a human image and a cloth image to try on the cloth on the human. You can merge multiple clothing item pictures into one image with a white background.",
-            inputs=[
-                IO.Image.Input("human_image"),
-                IO.Image.Input("cloth_image"),
-                IO.Combo.Input(
-                    "model_name",
-                    options=[i.value for i in KlingVirtualTryOnModelName],
-                    default="kolors-virtual-try-on-v1",
-                ),
-            ],
-            outputs=[
-                IO.Image.Output(),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
-            is_api_node=True,
-            price_badge=IO.PriceBadge(
-                expr="""{"type":"usd","usd":0.7}""",
-            ),
-        )
-
-    @classmethod
-    async def execute(
-        cls,
-        human_image: torch.Tensor,
-        cloth_image: torch.Tensor,
-        model_name: KlingVirtualTryOnModelName,
-    ) -> IO.NodeOutput:
-        task_creation_response = await sync_op(
-            cls,
-            ApiEndpoint(path=PATH_VIRTUAL_TRY_ON, method="POST"),
-            response_model=KlingVirtualTryOnResponse,
-            data=KlingVirtualTryOnRequest(
-                human_image=tensor_to_base64_string(human_image),
-                cloth_image=tensor_to_base64_string(cloth_image),
-                model_name=model_name,
-            ),
-        )
-
-        validate_task_creation_response(task_creation_response)
-        task_id = task_creation_response.data.task_id
-
-        final_response = await poll_op(
-            cls,
-            ApiEndpoint(path=f"{PATH_VIRTUAL_TRY_ON}/{task_id}"),
-            response_model=KlingVirtualTryOnResponse,
-            estimated_duration=AVERAGE_DURATION_VIRTUAL_TRY_ON,
-            status_extractor=lambda r: (r.data.task_status.value if r.data and r.data.task_status else None),
-        )
-        validate_image_result_response(final_response)
-
-        images = get_images_from_response(final_response)
-        return IO.NodeOutput(await image_result_to_node_output(images))
-
-
 class KlingImageGenerationNode(IO.ComfyNode):
     """Kling Image Generation Node. Generate an image from a text prompt with an optional reference image."""
 
@@ -2514,7 +1783,7 @@ class KlingImageGenerationNode(IO.ComfyNode):
                     tooltip="Subject reference similarity",
                     advanced=True,
                 ),
-                IO.Combo.Input("model_name", options=["kling-v3", "kling-v2", "kling-v1-5"]),
+                IO.Combo.Input("model_name", options=["kling-v3"]),
                 IO.Combo.Input(
                     "aspect_ratio",
                     options=[i.value for i in KlingImageGenAspectRatio],
@@ -2550,17 +1819,8 @@ class KlingImageGenerationNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["model_name", "n"], inputs=["image"]),
-                expr="""
-                (
-                  $m := widgets.model_name;
-                  $base :=
-                    $contains($m,"kling-v1-5")
-                      ? (inputs.image.connected ? 0.028 : 0.014)
-                      : $contains($m,"kling-v3") ? 0.028 : 0.014;
-                  {"type":"usd","usd": $base * widgets.n}
-                )
-                """,
+                depends_on=IO.PriceBadgeDepends(widgets=["n"]),
+                expr="""{"type":"usd","usd": 0.028 * widgets.n}""",
             ),
         )
 
@@ -3394,19 +2654,12 @@ class KlingExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
         return [
-            KlingCameraControls,
             KlingTextToVideoNode,
             KlingImage2VideoNode,
-            KlingCameraControlI2VNode,
-            KlingCameraControlT2VNode,
             KlingStartEndFrameNode,
-            KlingVideoExtendNode,
             KlingLipSyncAudioToVideoNode,
             KlingLipSyncTextToVideoNode,
-            KlingVirtualTryOnNode,
             KlingImageGenerationNode,
-            KlingSingleImageVideoEffectNode,
-            KlingDualCharacterVideoEffectNode,
             OmniProTextToVideoNode,
             OmniProFirstLastFrameNode,
             OmniProImageToVideoNode,

@@ -1,14 +1,21 @@
 import torch
 import torch.nn as nn
+import torchaudio.functional as AF
+import torchvision.transforms.functional as TVF
 import numpy as np
+from tokenizers import Tokenizer
 from dataclasses import dataclass
 import math
+import re
 
 from comfy import sd1_clip
 import comfy.model_management
+import comfy.model_prefetch
+import comfy.ops
+import comfy.quant_ops
 from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy.rmsnorm import rms_norm
-from comfy.text_encoders.llama import RMSNorm, MLP, BaseLlama, BaseGenerate, _make_scaled_embedding
+from comfy.text_encoders.llama import RMSNorm, MLP, BaseLlama, BaseGenerate, FixedKV, _make_scaled_embedding
 
 
 # Intentional minor divergences from transformers -reference implementation:
@@ -20,6 +27,10 @@ from comfy.text_encoders.llama import RMSNorm, MLP, BaseLlama, BaseGenerate, _ma
 GEMMA4_VISION_CONFIG = {"hidden_size": 768, "image_size": 896, "intermediate_size": 3072, "num_attention_heads": 12, "num_hidden_layers": 16, "patch_size": 16, "head_dim": 64, "rms_norm_eps": 1e-6, "position_embedding_size": 10240, "pooling_kernel_size": 3}
 GEMMA4_VISION_31B_CONFIG = {"hidden_size": 1152, "image_size": 896, "intermediate_size": 4304, "num_attention_heads": 16, "num_hidden_layers": 27, "patch_size": 16, "head_dim": 72, "rms_norm_eps": 1e-6, "position_embedding_size": 10240, "pooling_kernel_size": 3}
 GEMMA4_AUDIO_CONFIG = {"hidden_size": 1024, "num_hidden_layers": 12, "num_attention_heads": 8, "intermediate_size": 4096, "conv_kernel_size": 5, "attention_chunk_size": 12, "attention_context_left": 13, "attention_context_right": 0, "attention_logit_cap": 50.0, "output_proj_dims": 1536, "rms_norm_eps": 1e-6, "residual_weight": 0.5}
+
+# Encoder-free (gemma4_unified) multimodal embedders: raw patches/waveform projected directly into LM space.
+GEMMA4_UNIFIED_VISION_CONFIG = {"model_patch_size": 48, "patch_size": 16, "pooling_kernel_size": 3, "mm_embed_dim": 3840, "mm_posemb_size": 1120, "output_proj_dims": 3840, "rms_norm_eps": 1e-6}
+GEMMA4_UNIFIED_AUDIO_CONFIG = {"audio_samples_per_token": 640, "output_proj_dims": 640, "rms_norm_eps": 1e-6}
 
 @dataclass
 class Gemma4Config:
@@ -35,6 +46,9 @@ class Gemma4Config:
     transformer_type: str = "gemma4"
     head_dim = 256
     global_head_dim = 512
+    num_global_key_value_heads = None
+    attention_k_eq_v = False
+    vision_bidirectional = False
     rms_norm_add = False
     mlp_activation = "gelu_pytorch_tanh"
     qkv_bias = False
@@ -51,6 +65,7 @@ class Gemma4Config:
     num_kv_shared_layers: int = 18
     use_double_wide_mlp: bool = False
     stop_tokens = [1, 50, 106]
+    suppress_tokens = []
     vision_config = GEMMA4_VISION_CONFIG
     audio_config = GEMMA4_AUDIO_CONFIG
     mm_tokens_per_image = 280
@@ -72,14 +87,53 @@ class Gemma4_31B_Config(Gemma4Config):
     num_hidden_layers: int = 60
     num_attention_heads: int = 32
     num_key_value_heads: int = 16
+    vision_bidirectional = True
     sliding_attention = [1024, 1024, 1024, 1024, 1024, False]
     hidden_size_per_layer_input: int = 0
     num_kv_shared_layers: int = 0
     audio_config = None
     vision_config = GEMMA4_VISION_31B_CONFIG
 
+@dataclass
+class Gemma4_12B_Config(Gemma4Config):
+    hidden_size: int = 3840
+    intermediate_size: int = 15360
+    num_hidden_layers: int = 48
+    num_attention_heads: int = 16
+    num_key_value_heads: int = 8
+    num_global_key_value_heads = 1
+    attention_k_eq_v = True
+    vision_bidirectional = True
+    sliding_attention = [1024, 1024, 1024, 1024, 1024, False]
+    hidden_size_per_layer_input: int = 0
+    num_kv_shared_layers: int = 0
+    audio_config = GEMMA4_UNIFIED_AUDIO_CONFIG
+    vision_config = GEMMA4_UNIFIED_VISION_CONFIG
+    suppress_tokens = [258883, 258882]
 
-# unfused RoPE as addcmul_ RoPE diverges from reference code
+
+class RingKV(FixedKV):
+    # sliding-window ring: writes wrap at capacity, validity saturates
+    def prepare(self, num_tokens):
+        capacity = self.key.shape[2]
+        self.position.fill_(self.index % capacity)
+        self.seqlen.fill_(min(self.index + num_tokens, capacity))
+
+
+def _fixed_kv_decode_mask(mask, cache, min_val):
+    capacity = cache.key.shape[2]
+    valid = min(cache.index + 1, capacity)
+    output = mask.new_full((*mask.shape[:-1], capacity), min_val)
+    if isinstance(cache, RingKV):
+        positions = torch.arange(cache.index + 1 - valid, cache.index + 1, device=mask.device) % capacity
+        output.index_copy_(-1, positions, mask[..., -valid:])
+    else:
+        output[..., :valid] = mask[..., :valid]
+    return output
+
+
+# unfused RoPE as addcmul_ RoPE diverges from reference code (vision only; text
+# layers use the kitchen split-half kernel, bitwise-equal to this with bf16 freqs)
 def _apply_rotary_pos_emb(x, freqs_cis):
     cos, sin = freqs_cis[0], freqs_cis[1]
     half = x.shape[-1] // 2
@@ -89,17 +143,18 @@ def _apply_rotary_pos_emb(x, freqs_cis):
     return out
 
 class Gemma4Attention(nn.Module):
-    def __init__(self, config, head_dim, device=None, dtype=None, ops=None):
+    def __init__(self, config, head_dim, num_kv_heads=None, k_eq_v=False, device=None, dtype=None, ops=None):
         super().__init__()
         self.num_heads = config.num_attention_heads
-        self.num_kv_heads = config.num_key_value_heads
+        self.num_kv_heads = num_kv_heads if num_kv_heads is not None else config.num_key_value_heads
         self.hidden_size = config.hidden_size
         self.head_dim = head_dim
         self.inner_size = self.num_heads * head_dim
 
         self.q_proj = ops.Linear(config.hidden_size, self.inner_size, bias=config.qkv_bias, device=device, dtype=dtype)
         self.k_proj = ops.Linear(config.hidden_size, self.num_kv_heads * head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
-        self.v_proj = ops.Linear(config.hidden_size, self.num_kv_heads * head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
+        # k_eq_v: V reuses the K projection (no separate v_proj weight)
+        self.v_proj = None if k_eq_v else ops.Linear(config.hidden_size, self.num_kv_heads * head_dim, bias=config.qkv_bias, device=device, dtype=dtype)
         self.o_proj = ops.Linear(self.inner_size, config.hidden_size, bias=False, device=device, dtype=dtype)
 
         self.q_norm = None
@@ -108,6 +163,23 @@ class Gemma4Attention(nn.Module):
             self.q_norm = RMSNorm(head_dim, eps=config.rms_norm_eps, device=device, dtype=dtype)
         if config.k_norm == "gemma3":
             self.k_norm = RMSNorm(head_dim, eps=config.rms_norm_eps, device=device, dtype=dtype)
+
+    def _decode_attention(self, xq, cache, bias):
+        if bias is None:
+            # eager decode: slice the cache to the valid length (python-side index,
+            # no mask needed; a full ring is order-invariant under softmax)
+            n = min(cache.index + 1, cache.key.shape[2])
+            gqa_kwargs = {"enable_gqa": True} if self.num_heads != self.num_kv_heads else {}
+            attention = optimized_attention_for_device(xq.device, mask=False, small_input=True)
+            return attention(xq, cache.key[:, :, :n], cache.value[:, :, :n], self.num_heads, skip_reshape=True, scale=1.0, **gqa_kwargs)
+        # graph capture: fixed-length masked attention over the full capacity, explicit
+        # math (SDPA leaves its fast path on broadcast-bias + GQA and costs ~0.5ms/layer)
+        batch_size = xq.shape[0]
+        groups = self.num_heads // self.num_kv_heads
+        q = xq.reshape(batch_size, self.num_kv_heads, groups, self.head_dim)
+        scores = q @ cache.key.transpose(-1, -2) + bias
+        probs = torch.softmax(scores.float(), dim=-1).to(xq.dtype)
+        return (probs @ cache.value).reshape(batch_size, 1, self.inner_size)
 
     def forward(
         self,
@@ -125,25 +197,62 @@ class Gemma4Attention(nn.Module):
         if self.q_norm is not None:
             xq = self.q_norm(xq)
 
+        if isinstance(shared_kv, FixedKV):
+            # decode on a KV-shared layer: attend the source layer's fixed cache
+            xq = comfy.quant_ops.ck.apply_rope_split_half1(xq, freqs_cis)
+            output = self._decode_attention(xq, shared_kv, attention_mask)
+            return self.o_proj(output), None, None
+
         if shared_kv is not None:
             xk, xv = shared_kv
             # Apply RoPE to Q only (K already has RoPE from source layer)
-            xq = _apply_rotary_pos_emb(xq, freqs_cis)
+            xq = comfy.quant_ops.ck.apply_rope_split_half1(xq, freqs_cis)
             present_key_value = None
             shareable_kv = None
         else:
             xk = self.k_proj(hidden_states).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
-            xv = self.v_proj(hidden_states).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
+            if self.v_proj is not None:
+                xv = self.v_proj(hidden_states).view(batch_size, seq_length, self.num_kv_heads, self.head_dim)
+            else:
+                xv = xk  # k_eq_v: V is the raw K projection (before k_norm/RoPE)
             if self.k_norm is not None:
                 xk = self.k_norm(xk)
             xv = rms_norm(xv)
             xk = xk.transpose(1, 2)
             xv = xv.transpose(1, 2)
-            xq = _apply_rotary_pos_emb(xq, freqs_cis)
-            xk = _apply_rotary_pos_emb(xk, freqs_cis)
+            xq = comfy.quant_ops.ck.apply_rope_split_half1(xq, freqs_cis)
+            xk = comfy.quant_ops.ck.apply_rope_split_half1(xk, freqs_cis)
 
             present_key_value = None
-            if past_key_value is not None:
+            fixed_cache = past_key_value if isinstance(past_key_value, FixedKV) else None
+            if fixed_cache is not None:
+                if seq_length == 1 and fixed_cache.index > 0:
+                    # CUDA-graphable decode: write at the device-side ring/linear position
+                    fixed_cache.key.index_copy_(2, fixed_cache.position, xk)
+                    fixed_cache.value.index_copy_(2, fixed_cache.position, xv)
+                    output = self._decode_attention(xq, fixed_cache, attention_mask)
+                    return self.o_proj(output), fixed_cache, None
+
+                # prefill: attend the local sequence, persist the tail into the cache
+                capacity = fixed_cache.key.shape[2]
+                index = fixed_cache.index
+                if index + seq_length <= capacity:
+                    fixed_cache.key[:, :, index:index + seq_length] = xk
+                    fixed_cache.value[:, :, index:index + seq_length] = xv
+                    if index > 0:
+                        xk = fixed_cache.key[:, :, :index + seq_length]
+                        xv = fixed_cache.value[:, :, :index + seq_length]
+                elif index == 0:
+                    # prefill longer than the sliding ring: attend the full local K/V
+                    # (per-query windows come from the prefill sliding mask), cache only
+                    # the last `capacity` keys at their wrapped slots (position % capacity)
+                    slots = torch.arange(seq_length - capacity, seq_length, device=xk.device) % capacity
+                    fixed_cache.key.index_copy_(2, slots, xk[:, :, -capacity:])
+                    fixed_cache.value.index_copy_(2, slots, xv[:, :, -capacity:])
+                else:
+                    raise RuntimeError("gemma4: chunked prefill past the sliding window is not supported")
+                present_key_value = fixed_cache
+            elif past_key_value is not None:
                 cumulative_len = 0
                 if len(past_key_value) > 0:
                     past_key, past_value, cumulative_len = past_key_value
@@ -186,7 +295,10 @@ class TransformerBlockGemma4(nn.Module):
 
         head_dim = config.head_dim if self.sliding_attention else config.global_head_dim
 
-        self.self_attn = Gemma4Attention(config, head_dim=head_dim, device=device, dtype=dtype, ops=ops)
+        # k_eq_v only on global layers, which then use num_global_key_value_heads
+        k_eq_v = config.attention_k_eq_v and not self.sliding_attention
+        num_kv_heads = config.num_global_key_value_heads if k_eq_v else config.num_key_value_heads
+        self.self_attn = Gemma4Attention(config, head_dim=head_dim, num_kv_heads=num_kv_heads, k_eq_v=k_eq_v, device=device, dtype=dtype, ops=ops)
 
         num_kv_shared = config.num_kv_shared_layers
         first_kv_shared = config.num_hidden_layers - num_kv_shared
@@ -203,11 +315,12 @@ class TransformerBlockGemma4(nn.Module):
             self.per_layer_input_gate = ops.Linear(config.hidden_size, self.hidden_size_per_layer_input, bias=False, device=device, dtype=dtype)
             self.per_layer_projection = ops.Linear(self.hidden_size_per_layer_input, config.hidden_size, bias=False, device=device, dtype=dtype)
             self.post_per_layer_input_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, device=device, dtype=dtype)
-            self.register_buffer("layer_scalar", torch.ones(1, device=device, dtype=dtype))
-        else:
-            self.layer_scalar = None
+
+        # layer_scalar exists on every gemma4 variant, independent of per-layer input
+        self.register_buffer("layer_scalar", torch.empty(1, device=device, dtype=dtype))
 
     def forward(self, x, attention_mask=None, freqs_cis=None, past_key_value=None, per_layer_input=None, shared_kv=None):
+        output = x
         sliding_window = None
         if self.sliding_attention:
             sliding_window = self.sliding_attention
@@ -244,8 +357,8 @@ class TransformerBlockGemma4(nn.Module):
             x = self.post_per_layer_input_norm(x)
             x = residual + x
 
-        if self.layer_scalar is not None:
-            x = x * self.layer_scalar
+        # in-place into the input buffer so CUDA-graph replays land in the static x
+        x = torch.mul(x, comfy.ops.cast_to_input(self.layer_scalar, x), out=output)
 
         return x, present_key_value, shareable_kv
 
@@ -254,6 +367,9 @@ class Gemma4Transformer(nn.Module):
     def __init__(self, config, device=None, dtype=None, ops=None):
         super().__init__()
         self.config = config
+        self.fixed_kv = True
+        self.prefetch_dynamic_vbars = True
+        self.graph_dynamic_vbar_blocks = True
 
         self.embed_tokens = _make_scaled_embedding(ops, config.vocab_size, config.hidden_size, config.hidden_size ** 0.5, device, dtype)
 
@@ -261,6 +377,19 @@ class Gemma4Transformer(nn.Module):
             TransformerBlockGemma4(config, index=i, device=device, dtype=dtype, ops=ops)
             for i in range(config.num_hidden_layers)
         ])
+
+        # KV-shared layers never run k_proj/v_proj/k_norm: their never-resolved vbar
+        # signatures would block layer graph capture, so prefetch only what executes
+        first_kv_shared = config.num_hidden_layers - config.num_kv_shared_layers if config.num_kv_shared_layers > 0 else config.num_hidden_layers
+        self._prefetch_units = []
+        for i, layer in enumerate(self.layers):
+            if i >= first_kv_shared:
+                dead = {layer.self_attn.k_proj, layer.self_attn.v_proj, layer.self_attn.k_norm}
+                self._prefetch_units.append([
+                    m for m in layer.modules() if next(m.children(), None) is None and m not in dead
+                ])
+            else:
+                self._prefetch_units.append(layer)
 
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, device=device, dtype=dtype) if config.final_norm else None
 
@@ -275,6 +404,9 @@ class Gemma4Transformer(nn.Module):
         sliding_inv = 1.0 / (config.rope_theta[1] ** (torch.arange(0, config.head_dim, 2).float() / config.head_dim))
         self.register_buffer("_sliding_inv_freq", sliding_inv, persistent=False)
 
+        if config.suppress_tokens:
+            self.register_buffer("_suppress_tokens", torch.tensor(config.suppress_tokens, dtype=torch.long), persistent=False)
+
         # Per-layer input mechanism
         self.hidden_size_per_layer_input = config.hidden_size_per_layer_input
         if self.hidden_size_per_layer_input:
@@ -286,19 +418,26 @@ class Gemma4Transformer(nn.Module):
                 self.hidden_size_per_layer_input, eps=config.rms_norm_eps,
                 device=device, dtype=dtype)
 
+    def get_dynamic_vram__units(self):
+        return (list(self.layers), []) if self.graph_dynamic_vbar_blocks else ([], [])
+
     def get_past_len(self, past_key_values):
         for kv in past_key_values:
+            if isinstance(kv, FixedKV):
+                return kv.index
             if len(kv) >= 3:
                 return kv[2]
         return 0
 
     def _freqs_from_inv(self, inv_freq, position_ids, device, dtype):
-        """Compute cos/sin from stored inv_freq"""
+        """Compute per-pair 2x2 rotation matrices [B, 1, S, d/2, 2, 2] from stored inv_freq"""
         inv_exp = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(device)
         pos_exp = position_ids[:, None, :].float()
         freqs = (inv_exp @ pos_exp).transpose(1, 2)
-        emb = torch.cat((freqs, freqs), dim=-1)
-        return emb.cos().unsqueeze(1).to(dtype), emb.sin().unsqueeze(1).to(dtype)
+        cos, sin = freqs.cos(), freqs.sin()
+        mat = torch.stack((torch.stack((cos, -sin), dim=-1),
+                           torch.stack((sin, cos), dim=-1)), dim=-2)
+        return mat.unsqueeze(1).to(dtype)
 
     def compute_freqs_cis(self, position_ids, device, dtype=None):
         global_freqs = self._freqs_from_inv(self._global_inv_freq, position_ids, device, dtype)
@@ -334,6 +473,19 @@ class Gemma4Transformer(nn.Module):
             causal_mask.masked_fill_(torch.ones_like(causal_mask, dtype=torch.bool).triu_(1), min_val)
             mask = mask + causal_mask if mask is not None else causal_mask
 
+            # Bidirectional attention within each image soft-token block (prefill only; text/audio stay causal).
+            if self.config.vision_bidirectional and past_len == 0 and embeds_info:
+                block_ids = torch.full((seq_len,), -1, dtype=torch.long, device=x.device)
+                group = 0
+                for info in embeds_info:
+                    if info.get("type") == "image":
+                        start = info["index"]
+                        block_ids[start:start + info["size"]] = group
+                        group += 1
+                if group > 0:
+                    same_block = (block_ids[:, None] == block_ids[None, :]) & (block_ids[:, None] >= 0)
+                    mask = mask.masked_fill(same_block, 0.0)
+
         # Per-layer inputs
         per_layer_inputs = None
         if self.hidden_size_per_layer_input:
@@ -352,10 +504,68 @@ class Gemma4Transformer(nn.Module):
         first_kv_shared = self.config.num_hidden_layers - num_kv_shared if num_kv_shared > 0 else self.config.num_hidden_layers
         shared_sliding_kv = None  # KV from last non-shared sliding layer
         shared_global_kv = None   # KV from last non-shared global layer
+        share_source = {}
+        if num_kv_shared > 0:
+            for i in range(first_kv_shared):
+                share_source[bool(self.layers[i].sliding_attention)] = i
+
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(
+            list(self._prefetch_units), x.device,
+            {"prefetch_dynamic_vbars": self.prefetch_dynamic_vbars and past_key_values is not None})
+
+        fixed_kv = (past_key_values is not None and len(past_key_values) > 0
+                    and isinstance(past_key_values[0], FixedKV))
+        decode = fixed_kv and seq_len == 1
+        # Compiled decode needs fixed-capacity attention for a stable allocation trace;
+        # CUDA graph capture has additional prefetch and device requirements.
+        compiled_decode = decode and past_len > 0 and mask is None and self.graph_dynamic_vbar_blocks
+        if compiled_decode:
+            x = x.clone()
+        enable_graph = (compiled_decode
+                        and prefetch_queue is not None
+                        and hasattr(self.layers[0], "_v_block")
+                        and not comfy.model_management.args.disable_cuda_graphs
+                        and comfy.model_management.is_device_cuda(x.device))
+        decode_bias = None
+        decode_masks = None
+        if fixed_kv:
+            # prefill must advance the device-side write position of the global caches too
+            prepared = set()
+            for kv in past_key_values:
+                if isinstance(kv, FixedKV) and id(kv.position) not in prepared:
+                    kv.prepare(seq_len)
+                    prepared.add(id(kv.position))
+        if decode and mask is not None:
+            decode_masks = {}
+            for kv in past_key_values:
+                if isinstance(kv, FixedKV) and id(kv.position) not in decode_masks:
+                    decode_masks[id(kv.position)] = _fixed_kv_decode_mask(mask, kv, min_val)
+        if compiled_decode:
+            capacities = tuple(sorted({kv.key.shape[2] for kv in past_key_values if isinstance(kv, FixedKV)}))
+            valid = past_len + 1
+            decode_bias = {capacity: torch.full((1, 1, 1, capacity), min_val, dtype=x.dtype, device=x.device) for capacity in capacities}
+            for capacity, bias in decode_bias.items():
+                bias[..., :min(valid, capacity)] = 0
 
         intermediate = None
+        all_intermediate = None
+        only_layers = None
+        if intermediate_output is not None:
+            if isinstance(intermediate_output, list):
+                all_intermediate = []
+                only_layers = {len(self.layers) + layer if layer < 0 else layer for layer in intermediate_output}
+            elif intermediate_output == "all":
+                all_intermediate = []
+                intermediate_output = None
+            elif intermediate_output < 0:
+                intermediate_output = len(self.layers) + intermediate_output
+
         next_key_values = []
         for i, layer in enumerate(self.layers):
+            if all_intermediate is not None:
+                if only_layers is None or (i in only_layers):
+                    all_intermediate.append(x.unsqueeze(1).clone())
+
             past_kv = past_key_values[i] if past_key_values is not None and len(past_key_values) > 0 else None
 
             layer_kwargs = {}
@@ -364,12 +574,43 @@ class Gemma4Transformer(nn.Module):
 
             is_sliding = hasattr(layer, 'sliding_attention') and layer.sliding_attention
             if i >= first_kv_shared and num_kv_shared > 0:
-                shared = shared_sliding_kv if is_sliding else shared_global_kv
-                if shared is not None:
-                    layer_kwargs['shared_kv'] = shared
+                if decode:
+                    layer_kwargs['shared_kv'] = past_key_values[share_source[bool(is_sliding)]]
+                else:
+                    shared = shared_sliding_kv if is_sliding else shared_global_kv
+                    if shared is not None:
+                        layer_kwargs['shared_kv'] = shared
 
-            x, current_kv, shareable_kv = layer(x=x, attention_mask=mask, freqs_cis=freqs_cis, past_key_value=past_kv, **layer_kwargs)
+            if compiled_decode:
+                bias_cache = layer_kwargs.get('shared_kv', past_kv)
+                layer_mask = decode_bias[bias_cache.key.shape[2]]
+            elif decode:
+                bias_cache = layer_kwargs.get('shared_kv', past_kv)
+                layer_mask = None if decode_masks is None else decode_masks[id(bias_cache.position)]
+            else:
+                layer_mask = mask
 
+            result = []
+
+            def core():
+                nonlocal x
+                output, current_kv, shareable_kv = layer(x=x, attention_mask=layer_mask, freqs_cis=freqs_cis, past_key_value=past_kv, **layer_kwargs)
+                if compiled_decode:
+                    x.copy_(output)
+                else:
+                    x = output
+                result.append((current_kv, shareable_kv))
+
+            comfy.model_prefetch.prefetch_queue_pop(
+                prefetch_queue, x.device, layer, x.dtype, core=core, enable_graph=enable_graph,
+                malloc_scope="block"
+            )
+
+            if result:
+                current_kv, shareable_kv = result[0]
+            else:
+                # graph replay: the cache already holds this step's write
+                current_kv, shareable_kv = past_kv, None
             next_key_values.append(current_kv if current_kv is not None else ())
 
             # Only track the last sliding/global before the sharing boundary
@@ -382,10 +623,31 @@ class Gemma4Transformer(nn.Module):
             if i == intermediate_output:
                 intermediate = x.clone()
 
+        comfy.model_prefetch.prefetch_queue_pop(
+            prefetch_queue, x.device, None,
+            malloc_scope="block"
+        )
+
+        if fixed_kv:
+            for kv in past_key_values:
+                if isinstance(kv, FixedKV):
+                    kv.advance(seq_len)
+
         if self.norm is not None:
             x = self.norm(x)
 
-        if len(next_key_values) > 0:
+        if all_intermediate is not None:
+            if only_layers is None or (len(self.layers) in only_layers):
+                all_intermediate.append(x.unsqueeze(1).clone())
+            if len(all_intermediate) > 0:
+                intermediate = torch.cat(all_intermediate, dim=1)
+
+        if intermediate is not None and final_layer_norm_intermediate and self.norm is not None:
+            intermediate = self.norm(intermediate)
+
+        # Only hand back the KV cache when caching was actually requested; SDClipModel reads
+        # outputs[2] as the pooled output.
+        if past_key_values is not None and len(next_key_values) > 0:
             return x, intermediate, next_key_values
         return x, intermediate
 
@@ -404,13 +666,38 @@ class Gemma4Base(BaseLlama, BaseGenerate, torch.nn.Module):
         cap = self.model.config.final_logit_softcapping
         if cap:
             logits = cap * torch.tanh(logits / cap)
+        if self.model.config.suppress_tokens:
+            logits.index_fill_(-1, self.model._suppress_tokens, torch.finfo(logits.dtype).min)
         return logits
 
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
-        past_key_values = []
-        for _ in range(self.model.config.num_hidden_layers):
-            past_key_values.append(())
-        return past_key_values
+        cfg = self.model.config
+        num_layers = cfg.num_hidden_layers
+        if not self.model.fixed_kv:
+            return [() for _ in range(num_layers)]
+        first_shared = num_layers - cfg.num_kv_shared_layers if cfg.num_kv_shared_layers > 0 else num_layers
+        # position/seqlen device tensors are shared per cache geometry and filled once per step
+        trackers = {}
+        caches = []
+        for i in range(num_layers):
+            if i >= first_shared:
+                caches.append(())
+                continue
+            sliding = cfg.sliding_attention[i % len(cfg.sliding_attention)] if cfg.sliding_attention else False
+            head_dim = cfg.head_dim if sliding else cfg.global_head_dim
+            k_eq_v = cfg.attention_k_eq_v and not sliding
+            kv_heads = cfg.num_global_key_value_heads if k_eq_v else cfg.num_key_value_heads
+            length = min(sliding, max_cache_len) if sliding else max_cache_len
+            cache_cls = RingKV if sliding else FixedKV
+            tracker = trackers.get((cache_cls, length))
+            if tracker is None:
+                tracker = (torch.empty((1,), device=device, dtype=torch.int64),
+                           torch.zeros((batch,), device=device, dtype=torch.int32))
+                trackers[(cache_cls, length)] = tracker
+            # zero-init: decode attends full capacity with masked tails, 0*0 stays finite
+            key = torch.zeros((batch, kv_heads, length, head_dim), device=device, dtype=execution_dtype)
+            caches.append(cache_cls(key, torch.zeros_like(key), 0, tracker[0], tracker[1]))
+        return caches
 
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
@@ -438,6 +725,28 @@ class Gemma4AudioMixin:
                 audio_mask = audio_mask.to(device)
             audio_out = self.audio_model(audio, audio_mask=audio_mask)
             return self.audio_projector(audio_out), None
+        return None, None
+
+
+class Gemma4UnifiedBase(Gemma4Base):
+    """Encoder-free multimodal Gemma4 (gemma4_unified, e.g. 12B): raw image patches and audio frames projected directly into LM space."""
+    def _init_model(self, config, dtype, device, operations):
+        self.num_layers = config.num_hidden_layers
+        self.model = Gemma4Transformer(config, device=device, dtype=dtype, ops=operations)
+        self.dtype = dtype
+        self.vision_model = Gemma4UnifiedVisionEmbedder(config.vision_config, device=device, dtype=dtype, ops=operations)
+        self.multi_modal_projector = Gemma4RMSNormProjector(config.vision_config["output_proj_dims"], config.hidden_size, dtype=dtype, device=device, ops=operations)
+        self.audio_projector = Gemma4RMSNormProjector(config.audio_config["output_proj_dims"], config.hidden_size, dtype=dtype, device=device, ops=operations)
+
+    def preprocess_embed(self, embed, device):
+        if embed["type"] == "image":
+            pixels = embed.pop("data").movedim(-1, 1).to(device, dtype=self.dtype)  # [B, H, W, C] -> [B, C, H, W], [0,1]
+            patches, positions = self.vision_model.patchify(pixels)
+            vision_out = self.vision_model(patches, positions)
+            return self.multi_modal_projector(vision_out), None
+        if embed["type"] == "audio":
+            audio = embed.pop("data").to(device, dtype=self.dtype)  # [1, T, audio_samples_per_token]
+            return self.audio_projector(audio), None
         return None, None
 
 
@@ -711,6 +1020,73 @@ class Gemma4RMSNormProjector(nn.Module):
 class Gemma4MultiModalProjector(Gemma4RMSNormProjector):
     def __init__(self, config, dtype=None, device=None, ops=None):
         super().__init__(config.vision_config["hidden_size"], config.hidden_size, dtype=dtype, device=device, ops=ops)
+
+
+# Encoder-free vision (gemma4_unified): raw merged pixel patches projected directly into LM space.
+
+def _patches_merge(patches, positions_xy, length):
+    patch_size = math.isqrt(patches.shape[-1] // 3)
+    k = math.isqrt(patches.shape[-2] // length)
+    batch = patches.shape[:-2]
+
+    max_x = positions_xy[..., 0].max(dim=-1, keepdim=True)[0] + 1
+    kidx = torch.div(positions_xy, k, rounding_mode="floor")
+    rem = torch.remainder(positions_xy, k)
+    order = rem[..., 0] + rem[..., 1] * k + k * k * kidx[..., 0] + k * max_x * kidx[..., 1]
+    perm = order.long().argsort(dim=-1)
+
+    merged = patches.gather(-2, perm.unsqueeze(-1).expand_as(patches))
+    merged = merged.reshape(*batch, length, k, k, patch_size, patch_size, 3)
+    merged = merged.permute(*range(len(batch)), -6, -5, -3, -4, -2, -1).reshape(*batch, length, (k * patch_size) ** 2 * 3)
+
+    pos = positions_xy.gather(-2, perm.unsqueeze(-1).expand_as(positions_xy))
+    pad = (positions_xy == -1).all(dim=-1, keepdim=True)
+    pos = torch.where(pad, positions_xy, pos).reshape(*batch, length, k * k, 2)
+    pos = torch.div(pos, k, rounding_mode="floor").min(dim=-2)[0]
+    return merged, pos
+
+
+class Gemma4UnifiedVisionEmbedder(nn.Module):
+    """Encoder-free patch embedder (LN -> Dense -> LN -> +2D posemb -> LN); projection to text space is the separate multi_modal_projector."""
+    def __init__(self, config, device=None, dtype=None, ops=None):
+        super().__init__()
+        self.patch_size = config["patch_size"]
+        self.pooling_kernel_size = config["pooling_kernel_size"]
+        patch_dim = config["model_patch_size"] ** 2 * 3
+        mm_embed_dim = config["mm_embed_dim"]
+        self.patch_ln1 = ops.LayerNorm(patch_dim, device=device, dtype=dtype)
+        self.patch_dense = ops.Linear(patch_dim, mm_embed_dim, device=device, dtype=dtype)
+        self.patch_ln2 = ops.LayerNorm(mm_embed_dim, device=device, dtype=dtype)
+        self.pos_embedding = nn.Parameter(torch.empty(config["mm_posemb_size"], 2, mm_embed_dim, device=device, dtype=dtype))
+        self.pos_norm = ops.LayerNorm(mm_embed_dim, device=device, dtype=dtype)
+
+    def patchify(self, pixels):
+        """pixels: [B, C, H, W] in [0,1] -> merged patches [B, N, 6912], positions [B, N, 2]."""
+        ps, k = self.patch_size, self.pooling_kernel_size
+        out_patches, out_positions = [], []
+        for img in pixels:
+            ph, pw = img.shape[-2] // ps, img.shape[-1] // ps
+            teacher = img.reshape(img.shape[0], ph, ps, pw, ps).permute(1, 3, 2, 4, 0).reshape(ph * pw, -1)
+            grid = torch.meshgrid(torch.arange(pw, device=img.device), torch.arange(ph, device=img.device), indexing="xy")
+            tpos = torch.stack(grid, dim=-1).reshape(teacher.shape[0], 2)
+            n_model = teacher.shape[0] // (k * k)
+            mp, mpos = _patches_merge(teacher.unsqueeze(0), tpos.unsqueeze(0), n_model)
+            out_patches.append(mp.squeeze(0))
+            out_positions.append(mpos.squeeze(0))
+        return torch.stack(out_patches), torch.stack(out_positions)
+
+    def forward(self, pixel_values, image_position_ids):
+        x = self.patch_ln1(pixel_values)
+        x = self.patch_dense(x)
+        x = self.patch_ln2(x)
+
+        clamped = image_position_ids.clamp(min=0).long()
+        valid = (image_position_ids != -1).to(x.dtype).unsqueeze(-1)
+        axes = torch.arange(2, device=image_position_ids.device)
+        pos = comfy.model_management.cast_to_device(self.pos_embedding, x.device, x.dtype)
+        pos_embs = (pos[clamped, axes] * valid).sum(-2)
+        x = x + pos_embs
+        return self.pos_norm(x)
 
 
 # Audio Encoder
@@ -990,33 +1366,68 @@ class Gemma4AudioProjector(Gemma4RMSNormProjector):
 
 # Tokenizer and Wrappers
 
+def _get_aspect_ratio_preserving_size(height, width, patch_size, max_patches, pooling_kernel_size):
+    target_px = max_patches * patch_size ** 2
+    factor = math.sqrt(target_px / (height * width))
+    side_mult = pooling_kernel_size * patch_size
+    target_height = math.floor(factor * height / side_mult) * side_mult
+    target_width = math.floor(factor * width / side_mult) * side_mult
+
+    if target_height == 0 and target_width == 0:
+        raise ValueError(f"Attempting to resize to a 0 x 0 image. Resized height should be divisible by {side_mult}.")
+
+    max_side_length = (max_patches // pooling_kernel_size ** 2) * side_mult
+    if target_height == 0:
+        target_height = side_mult
+        target_width = min(math.floor(width / height) * side_mult, max_side_length)
+    elif target_width == 0:
+        target_width = side_mult
+        target_height = min(math.floor(height / width) * side_mult, max_side_length)
+
+    if target_height * target_width > target_px:
+        raise ValueError(f"Resizing [{height}x{width}] to [{target_height}x{target_width}] exceeds the patch budget.")
+
+    return target_height, target_width
+
+
 class Gemma4_Tokenizer():
     tokenizer_json_data = None
+    prime_empty_thought = False
 
     def state_dict(self):
         if self.tokenizer_json_data is not None:
             return {"tokenizer_json": self.tokenizer_json_data}
         return {}
 
-    def _extract_mel_spectrogram(self, waveform, sample_rate):
-        """Extract 128-bin log mel spectrogram.
-        Uses numpy for FFT/matmul/log to produce bit-identical results with reference code.
-        """
-        # Mix to mono first, then resample to 16kHz
+    def _audio_token_count(self, num_samples):
+        # Default (E2B/E4B): mel frames after two stride-2 conv subsamples.
+        _fl = 320  # int(round(16000 * 20.0 / 1000.0))
+        _hl = 160  # int(round(16000 * 10.0 / 1000.0))
+        _nmel = (num_samples + _fl // 2 - (_fl + 1)) // _hl + 1
+        _t = _nmel
+        for _ in range(2):
+            _t = (_t + 2 - 3) // 2 + 1
+        return min(_t, 750)
+
+    @staticmethod
+    def _resample_16k(waveform, sample_rate):
+        """Mix to mono and resample to 16kHz. Kaiser params reproduce the reference (transformers
+        load_audio -> librosa/soxr_hq) to ~1e-12 MSE using only torchaudio."""
         if waveform.dim() > 1 and waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0)
-        audio = waveform.squeeze(0).float().numpy()
+        audio = waveform.float()
         if sample_rate != 16000:
-            # Use scipy's resample_poly with a high-quality FIR filter to get as close as possible to librosa's resampling (while still not full match)
-            from scipy.signal import resample_poly, firwin
-            from math import gcd
-            g = gcd(sample_rate, 16000)
-            up, down = 16000 // g, sample_rate // g
-            L = max(up, down)
-            h = firwin(160 * L + 1, 0.96 / L, window=('kaiser', 6.5))
-            audio = resample_poly(audio, up, down, window=h).astype(np.float32)
+            audio = AF.resample(audio, sample_rate, 16000, resampling_method="sinc_interp_kaiser",
+                                lowpass_filter_width=121, rolloff=0.9568384289091556, beta=21.01531462440614)
+        return audio.squeeze(0).contiguous()
+
+    def _extract_audio_features(self, waveform, sample_rate):
+        """Default (E2B/E4B): 128-bin log mel spectrogram for the conformer audio encoder.
+        Uses numpy for FFT/matmul/log to produce bit-identical results with reference code.
+        """
+        audio = self._resample_16k(waveform, sample_rate).numpy()
         n = len(audio)
 
         # Pad to multiple of 128, build sample-level mask
@@ -1064,8 +1475,8 @@ class Gemma4_Tokenizer():
         if audio is not None:
             waveform = audio["waveform"].squeeze(0) if hasattr(audio, "__getitem__") else audio
             sample_rate = audio.get("sample_rate", 16000) if hasattr(audio, "get") else 16000
-            mel, mel_mask = self._extract_mel_spectrogram(waveform, sample_rate)
-            audio_features = [(mel.unsqueeze(0), mel_mask.unsqueeze(0))]  # ([1, T, 128], [1, T])
+            feat, feat_mask = self._extract_audio_features(waveform, sample_rate)
+            audio_features = [(feat.unsqueeze(0), feat_mask.unsqueeze(0))]  # ([1, T, D], [1, T])
 
         # Process image/video frames
         is_video = video is not None
@@ -1088,15 +1499,10 @@ class Gemma4_Tokenizer():
             h, w = samples.shape[2], samples.shape[3]
             patch_size = 16
             pooling_k = 3
-            max_soft_tokens = 70 if is_video else 280  # video uses smaller token budget per frame
+            max_soft_tokens = kwargs.get("max_soft_tokens", 70 if is_video else 280)
             max_patches = max_soft_tokens * pooling_k * pooling_k
-            target_px = max_patches * patch_size * patch_size
-            factor = (target_px / (h * w)) ** 0.5
-            side_mult = pooling_k * patch_size
-            target_h = max(int(factor * h // side_mult) * side_mult, side_mult)
-            target_w = max(int(factor * w // side_mult) * side_mult, side_mult)
+            target_h, target_w = _get_aspect_ratio_preserving_size(h, w, patch_size, max_patches, pooling_k)
 
-            import torchvision.transforms.functional as TVF
             for i in range(num_frames):
                 # rescaling to match reference code
                 s = (samples[i].clamp(0, 1) * 255).to(torch.uint8)  # [C, H, W] uint8
@@ -1115,7 +1521,7 @@ class Gemma4_Tokenizer():
                 llama_text = llama_template.format(text)
             else:
                 # Build template from modalities present
-                system = "<|turn>system\n<|think|><turn|>\n" if thinking else ""
+                system = "<|turn>system\n<|think|>\n<turn|>\n" if thinking else ""
                 media = ""
                 if len(images) > 0:
                     if is_video:
@@ -1135,15 +1541,11 @@ class Gemma4_Tokenizer():
                 if len(audio_features) > 0:
                     # Compute audio token count (always at 16kHz)
                     num_samples = int(waveform.shape[-1] * 16000 / sample_rate) if sample_rate != 16000 else waveform.shape[-1]
-                    _fl = 320  # int(round(16000 * 20.0 / 1000.0))
-                    _hl = 160  # int(round(16000 * 10.0 / 1000.0))
-                    _nmel = (num_samples + _fl // 2 - (_fl + 1)) // _hl + 1
-                    _t = _nmel
-                    for _ in range(2):
-                        _t = (_t + 2 - 3) // 2 + 1
-                    n_audio_tokens = min(_t, 750)
+                    n_audio_tokens = self._audio_token_count(num_samples)
                     media += "<|audio>" + "<|audio|>" * n_audio_tokens + "<audio|>"
-                llama_text = f"{system}<|turn>user\n{media}{text}<turn|>\n<|turn>model\n"
+                # 12B/31B prime a closed thought block for non-thinking mode, E2B/E4B must not: it cues them into reasoning inline.
+                model_open = "<|channel>thought\n<channel|>" if self.prime_empty_thought and not thinking else ""
+                llama_text = f"{system}<|turn>user\n{text}{media}<turn|>\n<|turn>model\n{model_open}"
 
         text_tokens = super().tokenize_with_weights(llama_text, return_word_ids)
 
@@ -1178,7 +1580,6 @@ class Gemma4_Tokenizer():
 class _Gemma4Tokenizer:
     """Tokenizer using the tokenizers (Gemma4 doesn't come with sentencepiece model)"""
     def __init__(self, tokenizer_json_bytes=None, **kwargs):
-        from tokenizers import Tokenizer
         if isinstance(tokenizer_json_bytes, torch.Tensor):
             tokenizer_json_bytes = bytes(tokenizer_json_bytes.tolist())
         self.tokenizer = Tokenizer.from_str(tokenizer_json_bytes.decode("utf-8"))
@@ -1210,11 +1611,13 @@ class Gemma4SDTokenizer(Gemma4_Tokenizer, sd1_clip.SDTokenizer):
 
     def decode(self, token_ids, **kwargs):
         text = super().decode(token_ids, skip_special_tokens=False)
-        # Translate thinking channel markers to standard <think>/</think> tags
+        # Only a close that ends a thought channel becomes </think>: generation primed with
+        # another channel leaves its opener in the prompt, so its close is not reasoning.
+        text = re.sub(r"<\|channel>thought\n(.*?)<channel\|>", r"<think>\n\1</think>", text, flags=re.DOTALL)
         text = text.replace("<|channel>thought\n", "<think>\n")
-        text = text.replace("<channel|>", "</think>")
         # Strip remaining special tokens
-        text = text.replace("<turn|>", "").replace("<eos>", "").strip()
+        text = re.sub(r"<\|channel>\w*\n?|<channel\|>|<\|turn>\w*\n?|<turn\|>", "", text)
+        text = text.replace("<eos>", "").strip()
         return text
 
 
@@ -1224,19 +1627,44 @@ class Gemma4Tokenizer(sd1_clip.SD1Tokenizer):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name="gemma4", tokenizer=self.tokenizer_class)
 
 
+class Gemma4UnifiedSDTokenizer(Gemma4SDTokenizer):
+    """Encoder-free (gemma4_unified) audio: raw 16kHz waveform frames instead of mel spectrogram."""
+    embedding_size = 3840
+    prime_empty_thought = True
+
+    def _extract_audio_features(self, waveform, sample_rate):
+        audio = self._resample_16k(waveform, sample_rate)
+        spt = 640  # audio_samples_per_token (40ms at 16kHz)
+        pad = (-audio.shape[0]) % spt
+        if pad:
+            audio = torch.nn.functional.pad(audio, (0, pad))
+        num_tokens = audio.shape[0] // spt
+        feats = audio[:num_tokens * spt].reshape(num_tokens, spt)
+        feats = feats[:750]  # audio_seq_length cap (matches reference truncation, ~30s)
+        mask = torch.ones(feats.shape[0], dtype=torch.bool)
+        return feats, mask
+
+    def _audio_token_count(self, num_samples):
+        return min((num_samples + 639) // 640, 750)
+
+
+class Gemma4UnifiedTokenizer(Gemma4Tokenizer):
+    tokenizer_class = Gemma4UnifiedSDTokenizer
+
+
 # Model wrappers
 class Gemma4Model(sd1_clip.SDClipModel):
     model_class = None
     def __init__(self, device="cpu", layer="all", layer_idx=None, dtype=None, attention_mask=True, model_options={}):
+        llama_quantization_metadata = model_options.get("llama_quantization_metadata", None)
+        if llama_quantization_metadata is not None:
+            model_options = model_options.copy()
+            model_options["quantization_metadata"] = llama_quantization_metadata
         self.dtypes = set()
         self.dtypes.add(dtype)
         super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config={}, dtype=dtype, special_tokens={"start": 2, "pad": 0}, layer_norm_hidden_state=False, model_class=self.model_class, enable_attention_masks=attention_mask, return_attention_masks=attention_mask, model_options=model_options)
 
-    def process_tokens(self, tokens, device):
-        embeds, _, _, _ = super().process_tokens(tokens, device)
-        return embeds
-
-    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0):
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, mtp=True):
         if isinstance(tokens, dict):
             tokens = next(iter(tokens.values()))
         tokens_only = [[t[0] for t in b] for b in tokens]
@@ -1256,11 +1684,22 @@ class Gemma4Model(sd1_clip.SDClipModel):
                 expanded_idx += 1
         initial_token_ids = [ids]
         input_ids = torch.tensor(initial_token_ids, device=self.execution_device)
-        return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, initial_tokens=initial_token_ids[0], presence_penalty=presence_penalty, initial_input_ids=input_ids)
+        return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, initial_tokens=initial_token_ids[0], presence_penalty=presence_penalty, initial_input_ids=input_ids, embeds_info=embeds_info)
+
+
+def gemma4_clip_model(model_class):
+    return type('Gemma4Model_', (Gemma4Model,), {'model_class': model_class})
+
+
+def gemma4_text_encoder_model(model_class):
+    return type('Gemma4TextEncoderModel_', (Gemma4Model,), {
+        'model_class': model_class,
+        'process_tokens': sd1_clip.SDClipModel.process_tokens,
+    })
 
 
 def gemma4_te(dtype_llama=None, llama_quantization_metadata=None, model_class=None):
-    clip_model = type('Gemma4Model_', (Gemma4Model,), {'model_class': model_class})
+    clip_model = gemma4_clip_model(model_class)
     class Gemma4TEModel_(sd1_clip.SD1ClipModel):
         def __init__(self, device="cpu", dtype=None, model_options={}):
             if llama_quantization_metadata is not None:
@@ -1274,7 +1713,7 @@ def gemma4_te(dtype_llama=None, llama_quantization_metadata=None, model_class=No
 
 # Variants
 
-def _make_variant(config_cls):
+def _make_variant(config_cls, prime_empty_thought=False):
     audio = config_cls.audio_config is not None
     bases = (Gemma4AudioMixin, Gemma4Base) if audio else (Gemma4Base,)
     class Variant(*bases):
@@ -1284,8 +1723,8 @@ def _make_variant(config_cls):
             if audio:
                 self._init_audio(self.model.config, dtype, device, operations)
     embedding_size = config_cls.hidden_size
-    if embedding_size != Gemma4SDTokenizer.embedding_size:
-        tok_cls = type('T', (Gemma4SDTokenizer,), {'embedding_size': embedding_size})
+    if embedding_size != Gemma4SDTokenizer.embedding_size or prime_empty_thought:
+        tok_cls = type('T', (Gemma4SDTokenizer,), {'embedding_size': embedding_size, 'prime_empty_thought': prime_empty_thought})
         class Tokenizer(Gemma4Tokenizer):
             tokenizer_class = tok_cls
         Variant.tokenizer = Tokenizer
@@ -1295,4 +1734,12 @@ def _make_variant(config_cls):
 
 Gemma4_E4B = _make_variant(Gemma4Config)
 Gemma4_E2B = _make_variant(Gemma4_E2B_Config)
-Gemma4_31B = _make_variant(Gemma4_31B_Config)
+Gemma4_31B = _make_variant(Gemma4_31B_Config, prime_empty_thought=True)
+
+
+# Gemma4 12B Unified: encoder-free multimodal, distinct base/tokenizer (not via _make_variant).
+class Gemma4_12B(Gemma4UnifiedBase):
+    def __init__(self, config_dict, dtype, device, operations):
+        super().__init__()
+        self._init_model(Gemma4_12B_Config(**config_dict), dtype, device, operations)
+Gemma4_12B.tokenizer = Gemma4UnifiedTokenizer

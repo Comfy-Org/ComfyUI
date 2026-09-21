@@ -8,6 +8,7 @@ upgrade/downgrade for 0003+.
 """
 
 import os
+import sqlite3
 
 import pytest
 from alembic import command
@@ -28,6 +29,12 @@ def _make_config(db_path: str) -> Config:
     cfg.set_main_option("script_location", scripts_path)
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
     return cfg
+
+
+def _sqlite_path(cfg: Config) -> str:
+    url = cfg.get_main_option("sqlalchemy.url")
+    assert url is not None and url.startswith("sqlite:///")
+    return url.removeprefix("sqlite:///")
 
 
 @pytest.fixture
@@ -55,3 +62,26 @@ def test_upgrade_downgrade_cycle(migration_db):
     command.upgrade(migration_db, "head")
     command.downgrade(migration_db, _BASELINE)
     command.upgrade(migration_db, "head")
+
+
+def test_case_sensitive_tags_downgrade_normalizes_existing_tags(migration_db):
+    """Downgrading 0005 folds mixed-case tag vocabulary before restoring CHECK."""
+    command.upgrade(migration_db, "0005_allow_case_sensitive_tags")
+
+    db_path = _sqlite_path(migration_db)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("INSERT INTO tags(name) VALUES (?)", ("NewTag",))
+        conn.execute("INSERT INTO tags(name) VALUES (?)", ("newtag",))
+        conn.execute("INSERT INTO tags(name) VALUES (?)", ("model_type:LLM",))
+
+    command.downgrade(migration_db, "0004_drop_tag_type")
+
+    with sqlite3.connect(db_path) as conn:
+        tags = {row[0] for row in conn.execute("SELECT name FROM tags")}
+        assert "newtag" in tags
+        assert "model_type:llm" in tags
+        assert "NewTag" not in tags
+        assert "model_type:LLM" not in tags
+
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute("INSERT INTO tags(name) VALUES (?)", ("Upper",))

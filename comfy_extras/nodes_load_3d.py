@@ -61,14 +61,10 @@ class Load3D(IO.ComfyNode):
 
     @classmethod
     def execute(cls, model_file, image, **kwargs) -> IO.NodeOutput:
-        image_path = folder_paths.get_annotated_filepath(image['image'])
-        mask_path = folder_paths.get_annotated_filepath(image['mask'])
-        normal_path = folder_paths.get_annotated_filepath(image['normal'])
-
         load_image_node = nodes.LoadImage()
-        output_image, ignore_mask = load_image_node.load_image(image=image_path)
-        ignore_image, output_mask = load_image_node.load_image(image=mask_path)
-        normal_image, ignore_mask2 = load_image_node.load_image(image=normal_path)
+        output_image, ignore_mask = load_image_node.load_image(image=image['image'])
+        ignore_image, output_mask = load_image_node.load_image(image=image['mask'])
+        normal_image, ignore_mask2 = load_image_node.load_image(image=image['normal'])
 
         video = None
 
@@ -93,11 +89,12 @@ class Preview3D(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="Preview3D",
-            search_aliases=["view mesh", "3d viewer"],
-            display_name="Preview 3D & Animation",
+            display_name="Preview 3D & Animation (DEPRECATED)",
             category="3d",
+            description="Preview a 3D model file without saving it to the ComfyUI output directory.",
             is_experimental=True,
             is_output_node=True,
+            is_deprecated=True, # This node is superseded by the Preview 3D (Advanced) node
             inputs=[
                 IO.MultiType.Input(
                     IO.String.Input("model_file", default="", multiline=False),
@@ -138,8 +135,9 @@ class Preview3DAdvanced(IO.ComfyNode):
         return IO.Schema(
             node_id="Preview3DAdvanced",
             display_name="Preview 3D (Advanced)",
-            search_aliases=["preview 3d", "3d viewer", "view mesh", "frame 3d", "3d camera output"],
+            search_aliases=["preview", "preview 3d", "3d viewer", "view mesh", "frame 3d", "3d camera output"],
             category="3d",
+            description="Preview a 3D model file without saving it to the ComfyUI output directory.",
             is_experimental=True,
             is_output_node=True,
             inputs=[
@@ -158,16 +156,16 @@ class Preview3DAdvanced(IO.ComfyNode):
                 ),
                 IO.Load3DModelInfo.Input("model_3d_info", optional=True, advanced=True),
                 IO.Load3D.Input("viewport_state"),
-                IO.Load3DCamera.Input("camera_info", optional=True, advanced=True),
-                IO.Int.Input("width", default=1024, min=1, max=4096, step=1),
-                IO.Int.Input("height", default=1024, min=1, max=4096, step=1),
+                IO.Load3DCamera.Input("camera_info", optional=True, advanced=True, tooltip="Viewport camera information: position, look-at target, zoom, and type."),
+                IO.Int.Input("width", default=1024, min=1, max=4096, step=1, tooltip="Render width of the viewport in pixels."),
+                IO.Int.Input("height", default=1024, min=1, max=4096, step=1, tooltip="Render height of the viewport in pixels."),
             ],
             outputs=[
-                IO.File3DAny.Output(display_name="model_3d"),
-                IO.Load3DModelInfo.Output(display_name="model_3d_info"),
-                IO.Load3DCamera.Output(display_name="camera_info"),
-                IO.Int.Output(display_name="width"),
-                IO.Int.Output(display_name="height"),
+                IO.File3DAny.Output(display_name="model_3d", tooltip="3D model file (glb/obj/stl/etc.) from an upstream 3D node."),
+                IO.Load3DModelInfo.Output(display_name="model_3d_info", tooltip="Placement of each model in the scene: position, rotation, and scale (Y-up world space)."),
+                IO.Load3DCamera.Output(display_name="camera_info", tooltip="Viewport camera information: position, look-at target, zoom, and type."),
+                IO.Int.Output(display_name="width", tooltip="Render width of the viewport in pixels."),
+                IO.Int.Output(display_name="height", tooltip="Render height of the viewport in pixels."),
             ],
         )
 
@@ -176,8 +174,9 @@ class Preview3DAdvanced(IO.ComfyNode):
         filename = f"preview3d_advanced_{uuid.uuid4().hex}.{model_3d.format}"
         model_3d.save_to(os.path.join(folder_paths.get_temp_directory(), filename))
 
+        viewport_state = viewport_state if isinstance(viewport_state, dict) else {}
         camera_info_input = kwargs.get("camera_info", None)
-        camera_info = camera_info_input if camera_info_input is not None else viewport_state['camera_info']
+        camera_info = camera_info_input if camera_info_input is not None else viewport_state.get('camera_info')
         model_3d_info_input = kwargs.get("model_3d_info", None)
         model_3d_info = model_3d_info_input if model_3d_info_input is not None else viewport_state.get('model_3d_info', [])
         return IO.NodeOutput(
@@ -186,7 +185,7 @@ class Preview3DAdvanced(IO.ComfyNode):
             camera_info,
             width,
             height,
-            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info),
+            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info, folder_type=IO.FolderType.temp),
         )
 
 
@@ -197,20 +196,22 @@ class PreviewGaussianSplat(IO.ComfyNode):
             node_id="PreviewGaussianSplat",
             display_name="Preview Splat",
             category="3d",
+            description="Preview a gaussian splat 3D file without saving it to the ComfyUI output directory.",
             is_experimental=True,
             is_output_node=True,
             search_aliases=[
-                "view splat",
-                "view gaussian",
-                "view gaussian splat",
+                "preview",
+                "preview splat",
                 "preview gaussian",
                 "preview gaussian splat",
-                "view 3dgs",
                 "preview 3dgs",
                 "preview ply",
                 "preview spz",
-                "preview splat",
                 "preview ksplat",
+                "view splat",
+                "view gaussian",
+                "view gaussian splat",
+                "view 3dgs",
             ],
             inputs=[
                 IO.MultiType.Input(
@@ -244,8 +245,9 @@ class PreviewGaussianSplat(IO.ComfyNode):
         filename = f"preview_splat_{uuid.uuid4().hex}.{model_3d.format}"
         model_3d.save_to(os.path.join(folder_paths.get_temp_directory(), filename))
 
+        viewport_state = viewport_state if isinstance(viewport_state, dict) else {}
         camera_info_input = kwargs.get("camera_info", None)
-        camera_info = camera_info_input if camera_info_input is not None else viewport_state['camera_info']
+        camera_info = camera_info_input if camera_info_input is not None else viewport_state.get('camera_info')
         model_3d_info_input = kwargs.get("model_3d_info", None)
         model_3d_info = model_3d_info_input if model_3d_info_input is not None else viewport_state.get('model_3d_info', [])
         return IO.NodeOutput(
@@ -254,7 +256,7 @@ class PreviewGaussianSplat(IO.ComfyNode):
             camera_info,
             width,
             height,
-            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info),
+            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info, folder_type=IO.FolderType.temp),
         )
 
 
@@ -265,14 +267,16 @@ class PreviewPointCloud(IO.ComfyNode):
             node_id="PreviewPointCloud",
             display_name="Preview Point Cloud",
             category="3d",
+            description="Preview a point cloud 3D file without saving it to the ComfyUI output directory.",
             is_experimental=True,
             is_output_node=True,
             search_aliases=[
-                "view point cloud",
-                "view pointcloud",
+                "preview",
                 "preview point cloud",
                 "preview pointcloud",
                 "preview ply",
+                "view point cloud",
+                "view pointcloud",
             ],
             inputs=[
                 IO.MultiType.Input(
@@ -303,8 +307,9 @@ class PreviewPointCloud(IO.ComfyNode):
         filename = f"preview_pointcloud_{uuid.uuid4().hex}.{model_3d.format}"
         model_3d.save_to(os.path.join(folder_paths.get_temp_directory(), filename))
 
+        viewport_state = viewport_state if isinstance(viewport_state, dict) else {}
         camera_info_input = kwargs.get("camera_info", None)
-        camera_info = camera_info_input if camera_info_input is not None else viewport_state['camera_info']
+        camera_info = camera_info_input if camera_info_input is not None else viewport_state.get('camera_info')
         model_3d_info_input = kwargs.get("model_3d_info", None)
         model_3d_info = model_3d_info_input if model_3d_info_input is not None else viewport_state.get('model_3d_info', [])
         return IO.NodeOutput(
@@ -313,7 +318,7 @@ class PreviewPointCloud(IO.ComfyNode):
             camera_info,
             width,
             height,
-            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info),
+            ui=UI.PreviewUI3DAdvanced(filename, camera_info, model_3d_info, folder_type=IO.FolderType.temp),
         )
 
 
@@ -350,15 +355,15 @@ class Load3DAdvanced(IO.ComfyNode):
             inputs=[
                 IO.Combo.Input("model_file", options=["none"] + sorted(files), upload=IO.UploadType.model),
                 IO.Load3D.Input("viewport_state"),
-                IO.Int.Input("width", default=1024, min=1, max=4096, step=1),
-                IO.Int.Input("height", default=1024, min=1, max=4096, step=1),
+                IO.Int.Input("width", default=1024, min=1, max=4096, step=1, tooltip="Render width of the viewport in pixels."),
+                IO.Int.Input("height", default=1024, min=1, max=4096, step=1, tooltip="Render height of the viewport in pixels."),
             ],
             outputs=[
-                IO.File3DAny.Output(display_name="model_3d"),
-                IO.Load3DModelInfo.Output(display_name="model_3d_info"),
-                IO.Load3DCamera.Output(display_name="camera_info"),
-                IO.Int.Output(display_name="width"),
-                IO.Int.Output(display_name="height"),
+                IO.File3DAny.Output(display_name="model_3d", tooltip="Loaded 3D model file (glb/obj/stl/etc.)."),
+                IO.Load3DModelInfo.Output(display_name="model_3d_info", tooltip="Placement of each model in the scene: position, rotation, and scale (Y-up world space)."),
+                IO.Load3DCamera.Output(display_name="camera_info", tooltip="Viewport camera information: position, look-at target, zoom, and type."),
+                IO.Int.Output(display_name="width", tooltip="Render width of the viewport in pixels."),
+                IO.Int.Output(display_name="height", tooltip="Render height of the viewport in pixels."),
             ],
         )
 
@@ -375,8 +380,9 @@ class Load3DAdvanced(IO.ComfyNode):
         file_3d = None
         if model_file and model_file != "none":
             file_3d = Types.File3D(folder_paths.get_annotated_filepath(model_file))
+        viewport_state = viewport_state if isinstance(viewport_state, dict) else {}
         model_3d_info = viewport_state.get('model_3d_info', [])
-        return IO.NodeOutput(file_3d, model_3d_info, viewport_state['camera_info'], width, height)
+        return IO.NodeOutput(file_3d, model_3d_info, viewport_state.get('camera_info'), width, height)
 
 
 class Load3DExtension(ComfyExtension):

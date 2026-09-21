@@ -1,339 +1,334 @@
-import time
-import uuid
+from __future__ import annotations
+
+import urllib.parse
+from datetime import datetime
 
 import pytest
-import requests
-from helpers import assert_hash_fields_consistent
+from sqlalchemy import event
+
+from . import helpers
+from .helpers import (
+    RouteDatabase,
+    RecordSeed,
+    error_body as _error_body,
+    asset_list_body as _asset_list_body,
+    seed_record as _seed_record,
+    request_assets as _request_assets,
+)
+from app.assets.database.queries.records import (
+    create_content,
+    create_record,
+    mark_content_missing,
+)
+from app.assets.services.cursor import encode_cursor
+
+autoclean_unit_test_assets = helpers.autoclean_unit_test_assets
+route_database = helpers.route_database
+sortable_record_ids = helpers.sortable_record_ids
 
 
-def test_list_assets_paging_and_sort(http: requests.Session, api_base: str, asset_factory, make_asset_bytes):
-    names = ["a1_u.safetensors", "a2_u.safetensors", "a3_u.safetensors"]
-    for n in names:
-        asset_factory(
-            n,
-            ["models", "checkpoints", "unit-tests", "paging"],
-            {"epoch": 1},
-            make_asset_bytes(n, size=2048),
-        )
+def test_record_list_filters_record_tags(http, api_base, asset_factory, make_asset_bytes):
+    record = asset_factory("filtered.png", ["output", "unit-tests", "chosen"], {}, make_asset_bytes("filtered"))
 
-    # name ascending for stable order
-    r1 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,paging", "sort": "name", "order": "asc", "limit": "2", "offset": "0"},
-        timeout=120,
+    response = http.get(f"{api_base}/api/assets", params={"include_tags": "chosen"})
+
+    assert response.status_code == 200
+    assert [asset["id"] for asset in response.json()["assets"]] == [record["id"]]
+
+
+def test_record_list_rejects_metadata_filter(http, api_base):
+    response = http.get(
+        f"{api_base}/api/assets", params={"metadata_filter": '{"k":"v"}'}
     )
-    b1 = r1.json()
-    assert r1.status_code == 200
-    got1 = [a["name"] for a in b1["assets"]]
-    assert got1 == sorted(names)[:2]
-    assert b1["has_more"] is True
-    # Populated assets in list responses must carry both `hash` and `asset_hash` consistently
-    for asset in b1["assets"]:
-        assert_hash_fields_consistent(asset)
-        assert "hash" in asset, "populated asset must emit hash on list endpoint"
 
-    r2 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,paging", "sort": "name", "order": "asc", "limit": "2", "offset": "2"},
-        timeout=120,
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": {
+            "code": "UNSUPPORTED_PARAM",
+            "message": "metadata_filter is no longer supported",
+            "details": {},
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_tags_any_is_accepted(route_database: RouteDatabase) -> None:
+    _, session = route_database
+    _seed_record(session, RecordSeed("any.png", ("a",)))
+    session.commit()
+
+    response = await _request_assets("tags_any=a")
+
+    assert response.status == 200
+
+
+@pytest.mark.asyncio
+async def test_tags_any_matches_any_requested_tag(route_database: RouteDatabase) -> None:
+    _, session = route_database
+    a_record = _seed_record(session, RecordSeed("a.png", ("a",)))
+    b_record = _seed_record(session, RecordSeed("b.png", ("b",)))
+    _seed_record(session, RecordSeed("neither.png", ("c",)))
+    session.commit()
+
+    response = await _request_assets("tags_any=a,b")
+
+    body = _asset_list_body(response)
+    assert {asset["id"] for asset in body["assets"]} == {a_record.id, b_record.id}
+
+
+@pytest.mark.parametrize(("tag_count", "expected_status"), ((100, 200), (101, 400)))
+@pytest.mark.asyncio
+async def test_tags_any_enforces_the_shared_tag_cap(
+    route_database: RouteDatabase,
+    tag_count: int,
+    expected_status: int,
+) -> None:
+    del route_database
+    tags = ",".join(f"tag-{index}" for index in range(tag_count))
+
+    response = await _request_assets(urllib.parse.urlencode({"tags_any": tags}))
+
+    assert response.status == expected_status
+    if expected_status == 400:
+        assert _error_body(response)["error"]["code"] == "INVALID_TAG_FILTER"
+
+
+@pytest.mark.asyncio
+async def test_name_contains_filters_records(route_database: RouteDatabase) -> None:
+    _, session = route_database
+    match = _seed_record(session, RecordSeed("alpha.png"))
+    _seed_record(session, RecordSeed("beta.png"))
+    session.commit()
+
+    response = await _request_assets("name_contains=lph")
+
+    body = _asset_list_body(response)
+    assert [asset["id"] for asset in body["assets"]] == [match.id]
+
+
+@pytest.mark.asyncio
+async def test_offset_skips_records(route_database: RouteDatabase) -> None:
+    _, session = route_database
+    _seed_record(session, RecordSeed("a.png", ("offset-case",)))
+    second = _seed_record(session, RecordSeed("b.png", ("offset-case",)))
+    session.commit()
+
+    response = await _request_assets(
+        "tags_all=offset-case&sort=name&order=asc&offset=1&limit=1"
     )
-    b2 = r2.json()
-    assert r2.status_code == 200
-    got2 = [a["name"] for a in b2["assets"]]
-    assert got2 == sorted(names)[2:]
-    assert b2["has_more"] is False
+
+    body = _asset_list_body(response)
+    assert [asset["id"] for asset in body["assets"]] == [second.id]
 
 
-def test_list_assets_include_exclude_and_name_contains(http: requests.Session, api_base: str, asset_factory):
-    a = asset_factory("inc_a.safetensors", ["models", "checkpoints", "unit-tests", "alpha"], {}, b"X" * 1024)
-    b = asset_factory("inc_b.safetensors", ["models", "checkpoints", "unit-tests", "beta"], {}, b"Y" * 1024)
+@pytest.mark.asyncio
+async def test_default_order_is_newest_first(route_database: RouteDatabase) -> None:
+    _, session = route_database
+    older = _seed_record(session, RecordSeed("older.png"))
+    newer = _seed_record(session, RecordSeed("newer.png"))
+    older.created_at = datetime(2026, 1, 1)
+    newer.created_at = datetime(2026, 1, 2)
+    session.commit()
 
-    r = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,alpha", "exclude_tags": "beta", "limit": "50"},
-        timeout=120,
-    )
-    body = r.json()
-    assert r.status_code == 200
-    names = [x["name"] for x in body["assets"]]
-    assert a["name"] in names
-    assert b["name"] not in names
+    response = await _request_assets()
 
-    r2 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests", "name_contains": "inc_"},
-        timeout=120,
-    )
-    body2 = r2.json()
-    assert r2.status_code == 200
-    names2 = [x["name"] for x in body2["assets"]]
-    assert a["name"] in names2
-    assert b["name"] in names2
-
-    r2 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "non-existing-tag"},
-        timeout=120,
-    )
-    body3 = r2.json()
-    assert r2.status_code == 200
-    assert not body3["assets"]
-
-
-def test_list_assets_sort_by_size_both_orders(http, api_base, asset_factory, make_asset_bytes):
-    t = ["models", "checkpoints", "unit-tests", "lf-size"]
-    n1, n2, n3 = "sz1.safetensors", "sz2.safetensors", "sz3.safetensors"
-    asset_factory(n1, t, {}, make_asset_bytes(n1, 1024))
-    asset_factory(n2, t, {}, make_asset_bytes(n2, 2048))
-    asset_factory(n3, t, {}, make_asset_bytes(n3, 3072))
-
-    r1 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,lf-size", "sort": "size", "order": "asc"},
-        timeout=120,
-    )
-    b1 = r1.json()
-    names = [a["name"] for a in b1["assets"]]
-    assert names[:3] == [n1, n2, n3]
-
-    r2 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,lf-size", "sort": "size", "order": "desc"},
-        timeout=120,
-    )
-    b2 = r2.json()
-    names2 = [a["name"] for a in b2["assets"]]
-    assert names2[:3] == [n3, n2, n1]
-
-
-
-def test_list_assets_sort_by_updated_at_desc(http, api_base, asset_factory, make_asset_bytes):
-    t = ["models", "checkpoints", "unit-tests", "lf-upd"]
-    a1 = asset_factory("upd_a.safetensors", t, {}, make_asset_bytes("upd_a", 1200))
-    a2 = asset_factory("upd_b.safetensors", t, {}, make_asset_bytes("upd_b", 1200))
-
-    # Rename the second asset to bump updated_at
-    rp = http.put(f"{api_base}/api/assets/{a2['id']}", json={"name": "upd_b_renamed.safetensors"}, timeout=120)
-    upd = rp.json()
-    assert rp.status_code == 200, upd
-
-    r = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,lf-upd", "sort": "updated_at", "order": "desc"},
-        timeout=120,
-    )
-    body = r.json()
-    assert r.status_code == 200
-    names = [x["name"] for x in body["assets"]]
-    assert names[0] == "upd_b_renamed.safetensors"
-    assert a1["name"] in names
-
-
-
-def test_list_assets_sort_by_last_access_time_desc(http, api_base, asset_factory, make_asset_bytes):
-    t = ["models", "checkpoints", "unit-tests", "lf-access"]
-    asset_factory("acc_a.safetensors", t, {}, make_asset_bytes("acc_a", 1100))
-    time.sleep(0.02)
-    a2 = asset_factory("acc_b.safetensors", t, {}, make_asset_bytes("acc_b", 1100))
-
-    # Touch last_access_time of b by downloading its content
-    time.sleep(0.02)
-    dl = http.get(f"{api_base}/api/assets/{a2['id']}/content", timeout=120)
-    assert dl.status_code == 200
-    dl.content
-
-    r = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,lf-access", "sort": "last_access_time", "order": "desc"},
-        timeout=120,
-    )
-    body = r.json()
-    assert r.status_code == 200
-    names = [x["name"] for x in body["assets"]]
-    assert names[0] == a2["name"]
-
-
-def test_list_assets_include_tags_variants_and_case(http, api_base, asset_factory, make_asset_bytes):
-    t = ["models", "checkpoints", "unit-tests", "lf-include"]
-    a = asset_factory("incvar_alpha.safetensors", [*t, "alpha"], {}, make_asset_bytes("iva"))
-    asset_factory("incvar_beta.safetensors", [*t, "beta"], {}, make_asset_bytes("ivb"))
-
-    # CSV + case-insensitive
-    r1 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "UNIT-TESTS,LF-INCLUDE,alpha"},
-        timeout=120,
-    )
-    b1 = r1.json()
-    assert r1.status_code == 200
-    names1 = [x["name"] for x in b1["assets"]]
-    assert a["name"] in names1
-    assert not any("beta" in x for x in names1)
-
-    # Repeated query params for include_tags
-    params_multi = [
-        ("include_tags", "unit-tests"),
-        ("include_tags", "lf-include"),
-        ("include_tags", "alpha"),
-    ]
-    r2 = http.get(api_base + "/api/assets", params=params_multi, timeout=120)
-    b2 = r2.json()
-    assert r2.status_code == 200
-    names2 = [x["name"] for x in b2["assets"]]
-    assert a["name"] in names2
-    assert not any("beta" in x for x in names2)
-
-    # Duplicates and spaces in CSV
-    r3 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": " unit-tests , lf-include , alpha , alpha "},
-        timeout=120,
-    )
-    b3 = r3.json()
-    assert r3.status_code == 200
-    names3 = [x["name"] for x in b3["assets"]]
-    assert a["name"] in names3
-
-
-def test_list_assets_exclude_tags_dedup_and_case(http, api_base, asset_factory, make_asset_bytes):
-    t = ["models", "checkpoints", "unit-tests", "lf-exclude"]
-    a = asset_factory("ex_a_alpha.safetensors", [*t, "alpha"], {}, make_asset_bytes("exa", 900))
-    asset_factory("ex_b_beta.safetensors", [*t, "beta"], {}, make_asset_bytes("exb", 900))
-
-    # Exclude uppercase should work
-    r1 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,lf-exclude", "exclude_tags": "BETA"},
-        timeout=120,
-    )
-    b1 = r1.json()
-    assert r1.status_code == 200
-    names1 = [x["name"] for x in b1["assets"]]
-    assert a["name"] in names1
-    # Repeated excludes with duplicates
-    params_multi = [
-        ("include_tags", "unit-tests"),
-        ("include_tags", "lf-exclude"),
-        ("exclude_tags", "beta"),
-        ("exclude_tags", "beta"),
-    ]
-    r2 = http.get(api_base + "/api/assets", params=params_multi, timeout=120)
-    b2 = r2.json()
-    assert r2.status_code == 200
-    names2 = [x["name"] for x in b2["assets"]]
-    assert all("beta" not in x for x in names2)
-
-
-def test_list_assets_name_contains_case_and_specials(http, api_base, asset_factory, make_asset_bytes):
-    t = ["models", "checkpoints", "unit-tests", "lf-name"]
-    a1 = asset_factory("CaseMix.SAFE", t, {}, make_asset_bytes("cm", 800))
-    a2 = asset_factory("case-other.safetensors", t, {}, make_asset_bytes("co", 800))
-
-    r1 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,lf-name", "name_contains": "casemix"},
-        timeout=120,
-    )
-    b1 = r1.json()
-    assert r1.status_code == 200
-    names1 = [x["name"] for x in b1["assets"]]
-    assert a1["name"] in names1
-
-    r2 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,lf-name", "name_contains": ".SAFE"},
-        timeout=120,
-    )
-    b2 = r2.json()
-    assert r2.status_code == 200
-    names2 = [x["name"] for x in b2["assets"]]
-    assert a1["name"] in names2
-
-    r3 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,lf-name", "name_contains": "case-"},
-        timeout=120,
-    )
-    b3 = r3.json()
-    assert r3.status_code == 200
-    names3 = [x["name"] for x in b3["assets"]]
-    assert a2["name"] in names3
-
-
-def test_list_assets_offset_beyond_total_and_limit_boundary(http, api_base, asset_factory, make_asset_bytes):
-    t = ["models", "checkpoints", "unit-tests", "lf-pagelimits"]
-    asset_factory("pl1.safetensors", t, {}, make_asset_bytes("pl1", 600))
-    asset_factory("pl2.safetensors", t, {}, make_asset_bytes("pl2", 600))
-    asset_factory("pl3.safetensors", t, {}, make_asset_bytes("pl3", 600))
-
-    # Offset far beyond total
-    r1 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,lf-pagelimits", "limit": "2", "offset": "10"},
-        timeout=120,
-    )
-    b1 = r1.json()
-    assert r1.status_code == 200
-    assert not b1["assets"]
-    assert b1["has_more"] is False
-
-    # Boundary large limit (<=500 is valid)
-    r2 = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": "unit-tests,lf-pagelimits", "limit": "500"},
-        timeout=120,
-    )
-    b2 = r2.json()
-    assert r2.status_code == 200
-    assert len(b2["assets"]) == 3
-    assert b2["has_more"] is False
+    body = _asset_list_body(response)
+    assert [asset["id"] for asset in body["assets"]] == [newer.id, older.id]
 
 
 @pytest.mark.parametrize(
-    "params,error_code",
-    [
-        ({"offset": "-1"}, "INVALID_QUERY"),
-        ({"limit": "abc"}, "INVALID_QUERY"),
-        ({"limit": "0"}, "INVALID_QUERY"),
-        ({"metadata_filter": "{not json"}, "INVALID_QUERY"),
-    ],
-    ids=["negative_offset", "non_int_limit", "zero_limit", "invalid_metadata_json"],
+    ("sort", "order"),
+    (
+        ("name", "asc"),
+        ("created_at", "desc"),
+        ("updated_at", "asc"),
+        ("size", "desc"),
+        ("last_access_time", "desc"),
+    ),
 )
-def test_list_assets_invalid_query_rejected(http: requests.Session, api_base: str, params, error_code):
-    r = http.get(api_base + "/api/assets", params=params, timeout=120)
-    body = r.json()
-    assert r.status_code == 400
-    assert body["error"]["code"] == error_code
-
-
-def test_list_assets_name_contains_literal_underscore(
-    http,
-    api_base,
-    asset_factory,
-    make_asset_bytes,
-):
-    """'name_contains' must treat '_' literally, not as a SQL wildcard.
-    We create:
-      - foo_bar.safetensors      (should match)
-      - fooxbar.safetensors      (must NOT match if '_' is escaped)
-      - foobar.safetensors       (must NOT match)
-    """
-    scope = f"lf-underscore-{uuid.uuid4().hex[:6]}"
-    tags = ["models", "checkpoints", "unit-tests", scope]
-
-    a = asset_factory("foo_bar.safetensors", tags, {}, make_asset_bytes("a", 700))
-    b = asset_factory("fooxbar.safetensors", tags, {}, make_asset_bytes("b", 700))
-    c = asset_factory("foobar.safetensors", tags, {}, make_asset_bytes("c", 700))
-
-    r = http.get(
-        api_base + "/api/assets",
-        params={"include_tags": f"unit-tests,{scope}", "name_contains": "foo_bar"},
-        timeout=120,
+@pytest.mark.asyncio
+async def test_each_sort_field_orders_records(
+    route_database: RouteDatabase,
+    sortable_record_ids: tuple[str, str],
+    sort: str,
+    order: str,
+) -> None:
+    del route_database
+    query = urllib.parse.urlencode(
+        {"tags_all": "sort-case", "sort": sort, "order": order}
     )
-    body = r.json()
-    assert r.status_code == 200, body
-    names = [x["name"] for x in body["assets"]]
-    assert a["name"] in names, f"Expected literal underscore match to include {a['name']}"
-    assert b["name"] not in names, "Underscore must be escaped — should not match 'fooxbar'"
-    assert c["name"] not in names, "Underscore must be escaped — should not match 'foobar'"
+
+    response = await _request_assets(query)
+
+    body = _asset_list_body(response)
+    assert response.status == 200
+    assert [asset["id"] for asset in body["assets"]] == list(sortable_record_ids)
+
+
+@pytest.mark.asyncio
+async def test_total_counts_all_filtered_records(route_database: RouteDatabase) -> None:
+    _, session = route_database
+    for index in range(5):
+        _seed_record(session, RecordSeed(f"total-{index}.png", ("total-case",)))
+    session.commit()
+
+    response = await _request_assets("tags_all=total-case&limit=2")
+
+    body = _asset_list_body(response)
+    assert len(body["assets"]) == 2
+    assert body["total"] == 5
+
+
+@pytest.mark.parametrize(("offset", "expected"), ((0, True), (4, False)))
+@pytest.mark.asyncio
+async def test_offset_mode_has_more_uses_total(
+    route_database: RouteDatabase,
+    offset: int,
+    expected: bool,
+) -> None:
+    _, session = route_database
+    for index in range(5):
+        _seed_record(session, RecordSeed(f"more-{index}.png", ("more-case",)))
+    session.commit()
+
+    response = await _request_assets(
+        f"tags_all=more-case&sort=name&order=asc&offset={offset}&limit=1"
+    )
+
+    body = _asset_list_body(response)
+    assert body["has_more"] is expected
+
+
+@pytest.mark.asyncio
+async def test_bad_cursor_returns_400(route_database: RouteDatabase) -> None:
+    del route_database
+
+    response = await _request_assets("after=not-a-cursor")
+
+    assert response.status == 400
+    assert _error_body(response)["error"]["code"] == "INVALID_CURSOR"
+
+
+@pytest.mark.asyncio
+async def test_cursor_rejects_last_access_time_sort(route_database: RouteDatabase) -> None:
+    del route_database
+
+    response = await _request_assets("after=not-a-cursor&sort=last_access_time")
+
+    assert response.status == 400
+    assert _error_body(response)["error"]["code"] == "INVALID_CURSOR"
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "sort=created_at&order=asc",
+        "sort=name&order=desc",
+    ),
+)
+@pytest.mark.asyncio
+async def test_cursor_rejects_sort_or_order_mismatch(
+    route_database: RouteDatabase,
+    query: str,
+) -> None:
+    del route_database
+    cursor = encode_cursor("name", "a.png", "cursor-id", order="asc")
+
+    response = await _request_assets(f"{query}&after={cursor}")
+
+    assert response.status == 400
+    assert _error_body(response)["error"]["code"] == "INVALID_CURSOR"
+
+
+@pytest.mark.asyncio
+async def test_terminal_page_has_no_cursor(route_database: RouteDatabase) -> None:
+    _, session = route_database
+    only_record = _seed_record(session, RecordSeed("only.png", ("terminal-case",)))
+    session.commit()
+
+    response = await _request_assets(
+        "tags_all=terminal-case&sort=name&order=asc&limit=1"
+    )
+
+    body = _asset_list_body(response)
+    assert [asset["id"] for asset in body["assets"]] == [only_record.id]
+    assert body["has_more"] is False
+    assert "next_cursor" not in body
+
+
+@pytest.mark.asyncio
+async def test_page_query_budget_is_four_statements(
+    route_database: RouteDatabase,
+) -> None:
+    engine, session = route_database
+    preview = _seed_record(session, RecordSeed("preview.png", ("preview",)))
+    for index in range(3):
+        record = _seed_record(
+            session,
+            RecordSeed(f"page-{index}.png", ("budget-case",)),
+        )
+        record.preview_id = preview.id
+    session.commit()
+    statements: list[str] = []
+
+    def count_statements(_, __, statement, ___, ____, _____) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", count_statements)
+    try:
+        response = await _request_assets("tags_all=budget-case&limit=3")
+    finally:
+        event.remove(engine, "before_cursor_execute", count_statements)
+
+    body = _asset_list_body(response)
+    assert len(body["assets"]) == 3
+    assert {asset.get("preview_id") for asset in body["assets"]} == {preview.id}
+    assert len(statements) == 4
+
+
+@pytest.mark.asyncio
+async def test_missing_content_is_listed_with_missing_tag(
+    route_database: RouteDatabase,
+) -> None:
+    _, session = route_database
+    live = _seed_record(session, RecordSeed("live.png", ("live-case",)))
+    missing_content = create_content(session, "/output/missing.png")
+    missing = create_record(
+        session,
+        content_id=missing_content.id,
+        name="missing.png",
+        tags=("live-case",),
+    )
+    mark_content_missing(session, missing_content.id)
+    session.commit()
+
+    response = await _request_assets("tags_all=live-case&sort=name&order=asc")
+
+    body = _asset_list_body(response)
+    assert {asset["id"] for asset in body["assets"]} == {live.id, missing.id}
+    assert body["total"] == 2
+    missing_asset = next(a for a in body["assets"] if a["id"] == missing.id)
+    assert "missing" in missing_asset["tags"]
+
+
+@pytest.mark.asyncio
+async def test_missing_content_is_reachable_via_tags_all_missing(
+    route_database: RouteDatabase,
+) -> None:
+    _, session = route_database
+    _seed_record(session, RecordSeed("live.png", ("live-case",)))
+    missing_content = create_content(session, "/output/missing.png")
+    missing = create_record(
+        session,
+        content_id=missing_content.id,
+        name="missing.png",
+        tags=("live-case",),
+    )
+    mark_content_missing(session, missing_content.id)
+    session.commit()
+
+    response = await _request_assets("tags_all=missing")
+
+    body = _asset_list_body(response)
+    assert {asset["id"] for asset in body["assets"]} == {missing.id}
     assert body["total"] == 1

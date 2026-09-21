@@ -4,13 +4,17 @@ early_access: false
 tone_instructions: "Only comment on issues introduced by this PR's changes. Do not flag pre-existing problems in moved, re-indented, or reformatted code."
 
 reviews:
-  profile: "chill"
-  request_changes_workflow: false
+  profile: "assertive"
+  request_changes_workflow: true
   high_level_summary: false
   poem: false
   review_status: false
-  review_details: false
+  review_details: true
   commit_status: true
+  # Without this, a review that never happened (rate limit, internal error)
+  # still posts a green "CodeRabbit" commit status, so a throttled review is
+  # indistinguishable from a clean one.
+  fail_commit_status: true
   collapse_walkthrough: true
   changed_files_summary: false
   sequence_diagrams: false
@@ -39,6 +43,14 @@ reviews:
     - path: "**"
       instructions: |
         IMPORTANT: Only comment on issues directly introduced by this PR's code changes.
+        Treat AGENTS.md as mandatory repository policy, not optional style guidance.
+        Flag PR changes that violate AGENTS.md even when the code is otherwise functional.
+        In particular, enforce architecture boundaries, dtype/device/memory rules,
+        interface contracts, import style, no unnecessary try/except blocks, no inline
+        imports, no outbound internet paths in core ComfyUI, and narrow scoped fixes.
+        Prefer direct findings over suggestions when a rule is violated. Only ignore
+        AGENTS.md when it clearly conflicts with a newer explicit maintainer instruction
+        in the PR.
         Do NOT flag pre-existing issues in code that was merely moved, re-indented,
         de-indented, or reformatted without logic changes. If code appears in the diff
         only due to whitespace or structural reformatting (e.g., removing a `with:` block),
@@ -123,5 +135,10 @@ chat:
 
 knowledge_base:
   opt_out: false
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - files: "AGENTS.md"
+        applyTo: "**"
   learnings:
     scope: "auto"

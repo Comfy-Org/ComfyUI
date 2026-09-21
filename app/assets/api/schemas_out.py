@@ -1,3 +1,9 @@
+"""Defines the response bodies the asset API returns, fixing the field names,
+types and serialization its HTTP contract promises. Routes dump these models
+with null fields omitted, so whether a field is absent and whether it is empty
+stay distinguishable to a client.
+"""
+
 from datetime import datetime
 from typing import Any
 
@@ -5,20 +11,27 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 
 class Asset(BaseModel):
-    """API view of an asset. Maps to DB ``AssetReference`` joined with its ``Asset`` blob;
-    ``id`` here is the AssetReference id, not the content-addressed Asset id."""
-
     id: str
-    name: str
+    name: str = Field(
+        ...,
+        description="Record label, usually derived from the source filename.",
+    )
     hash: str | None = None
-    asset_hash: str | None = None
+    loader_path: str | None = Field(
+        default=None,
+        description="The value a loader consumes to load this asset. `None` when no loader can resolve the file.",
+    )
+    display_name: str | None = Field(
+        default=None,
+        description="Human-facing label for the asset. Not unique.",
+    )
+    is_immutable: bool = False
     size: int | None = None
     mime_type: str | None = None
     tags: list[str] = Field(default_factory=list)
     preview_url: str | None = None
     preview_id: str | None = None  # references an asset_reference id, not an asset id
     user_metadata: dict[str, Any] = Field(default_factory=dict)
-    is_immutable: bool = False
     metadata: dict[str, Any] | None = None
     job_id: str | None = None
     prompt_id: str | None = None  # deprecated: use job_id
@@ -68,6 +81,7 @@ class TagsRemove(BaseModel):
     removed: list[str] = Field(default_factory=list)
     not_present: list[str] = Field(default_factory=list)
     total_tags: list[str] = Field(default_factory=list)
+    protected: list[str] = Field(default_factory=list)
 
 
 class TagHistogram(BaseModel):

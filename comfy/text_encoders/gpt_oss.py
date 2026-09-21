@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 import comfy.ops
 from comfy import sd1_clip
-from comfy.ldm.modules.attention import TORCH_HAS_GQA, optimized_attention_for_device
+from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy.text_encoders.llama import RMSNorm, apply_rope
 
 
@@ -109,10 +109,6 @@ def _attention_with_sinks(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, sin
     nothing to the output. We fake this by appending one zero k/v position and
     putting the sink logit in the mask at that column.
     """
-
-    if num_kv_groups > 1 and not TORCH_HAS_GQA:
-        k = k.repeat_interleave(num_kv_groups, dim=1)
-        v = v.repeat_interleave(num_kv_groups, dim=1)
 
     B, _, S_q, D = q.shape
     H_kv = k.shape[1]

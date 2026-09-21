@@ -77,6 +77,7 @@ class To3DUVTaskRequest(BaseModel):
 
 class To3DPartTaskRequest(BaseModel):
     File: TaskFile3DInput = Field(...)
+    EnableStagedGeneration: bool | None = Field(None)
 
 
 class TextureEditImageInfo(BaseModel):

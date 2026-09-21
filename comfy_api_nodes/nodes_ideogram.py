@@ -5,9 +5,8 @@ from PIL import Image
 import numpy as np
 import torch
 from comfy_api_nodes.apis.ideogram import (
-    IdeogramGenerateRequest,
     IdeogramGenerateResponse,
-    ImageRequest,
+    IdeogramPImageRequest,
     IdeogramV3Request,
     IdeogramV3EditRequest,
     IdeogramV4Request,
@@ -21,101 +20,6 @@ from comfy_api_nodes.util import (
     validate_string,
 )
 
-V1_V1_RES_MAP = {
-  "Auto":"AUTO",
-  "512 x 1536":"RESOLUTION_512_1536",
-  "576 x 1408":"RESOLUTION_576_1408",
-  "576 x 1472":"RESOLUTION_576_1472",
-  "576 x 1536":"RESOLUTION_576_1536",
-  "640 x 1024":"RESOLUTION_640_1024",
-  "640 x 1344":"RESOLUTION_640_1344",
-  "640 x 1408":"RESOLUTION_640_1408",
-  "640 x 1472":"RESOLUTION_640_1472",
-  "640 x 1536":"RESOLUTION_640_1536",
-  "704 x 1152":"RESOLUTION_704_1152",
-  "704 x 1216":"RESOLUTION_704_1216",
-  "704 x 1280":"RESOLUTION_704_1280",
-  "704 x 1344":"RESOLUTION_704_1344",
-  "704 x 1408":"RESOLUTION_704_1408",
-  "704 x 1472":"RESOLUTION_704_1472",
-  "720 x 1280":"RESOLUTION_720_1280",
-  "736 x 1312":"RESOLUTION_736_1312",
-  "768 x 1024":"RESOLUTION_768_1024",
-  "768 x 1088":"RESOLUTION_768_1088",
-  "768 x 1152":"RESOLUTION_768_1152",
-  "768 x 1216":"RESOLUTION_768_1216",
-  "768 x 1232":"RESOLUTION_768_1232",
-  "768 x 1280":"RESOLUTION_768_1280",
-  "768 x 1344":"RESOLUTION_768_1344",
-  "832 x 960":"RESOLUTION_832_960",
-  "832 x 1024":"RESOLUTION_832_1024",
-  "832 x 1088":"RESOLUTION_832_1088",
-  "832 x 1152":"RESOLUTION_832_1152",
-  "832 x 1216":"RESOLUTION_832_1216",
-  "832 x 1248":"RESOLUTION_832_1248",
-  "864 x 1152":"RESOLUTION_864_1152",
-  "896 x 960":"RESOLUTION_896_960",
-  "896 x 1024":"RESOLUTION_896_1024",
-  "896 x 1088":"RESOLUTION_896_1088",
-  "896 x 1120":"RESOLUTION_896_1120",
-  "896 x 1152":"RESOLUTION_896_1152",
-  "960 x 832":"RESOLUTION_960_832",
-  "960 x 896":"RESOLUTION_960_896",
-  "960 x 1024":"RESOLUTION_960_1024",
-  "960 x 1088":"RESOLUTION_960_1088",
-  "1024 x 640":"RESOLUTION_1024_640",
-  "1024 x 768":"RESOLUTION_1024_768",
-  "1024 x 832":"RESOLUTION_1024_832",
-  "1024 x 896":"RESOLUTION_1024_896",
-  "1024 x 960":"RESOLUTION_1024_960",
-  "1024 x 1024":"RESOLUTION_1024_1024",
-  "1088 x 768":"RESOLUTION_1088_768",
-  "1088 x 832":"RESOLUTION_1088_832",
-  "1088 x 896":"RESOLUTION_1088_896",
-  "1088 x 960":"RESOLUTION_1088_960",
-  "1120 x 896":"RESOLUTION_1120_896",
-  "1152 x 704":"RESOLUTION_1152_704",
-  "1152 x 768":"RESOLUTION_1152_768",
-  "1152 x 832":"RESOLUTION_1152_832",
-  "1152 x 864":"RESOLUTION_1152_864",
-  "1152 x 896":"RESOLUTION_1152_896",
-  "1216 x 704":"RESOLUTION_1216_704",
-  "1216 x 768":"RESOLUTION_1216_768",
-  "1216 x 832":"RESOLUTION_1216_832",
-  "1232 x 768":"RESOLUTION_1232_768",
-  "1248 x 832":"RESOLUTION_1248_832",
-  "1280 x 704":"RESOLUTION_1280_704",
-  "1280 x 720":"RESOLUTION_1280_720",
-  "1280 x 768":"RESOLUTION_1280_768",
-  "1280 x 800":"RESOLUTION_1280_800",
-  "1312 x 736":"RESOLUTION_1312_736",
-  "1344 x 640":"RESOLUTION_1344_640",
-  "1344 x 704":"RESOLUTION_1344_704",
-  "1344 x 768":"RESOLUTION_1344_768",
-  "1408 x 576":"RESOLUTION_1408_576",
-  "1408 x 640":"RESOLUTION_1408_640",
-  "1408 x 704":"RESOLUTION_1408_704",
-  "1472 x 576":"RESOLUTION_1472_576",
-  "1472 x 640":"RESOLUTION_1472_640",
-  "1472 x 704":"RESOLUTION_1472_704",
-  "1536 x 512":"RESOLUTION_1536_512",
-  "1536 x 576":"RESOLUTION_1536_576",
-  "1536 x 640":"RESOLUTION_1536_640",
-}
-
-V1_V2_RATIO_MAP = {
-  "1:1":"ASPECT_1_1",
-  "4:3":"ASPECT_4_3",
-  "3:4":"ASPECT_3_4",
-  "16:9":"ASPECT_16_9",
-  "9:16":"ASPECT_9_16",
-  "2:1":"ASPECT_2_1",
-  "1:2":"ASPECT_1_2",
-  "3:2":"ASPECT_3_2",
-  "2:3":"ASPECT_2_3",
-  "4:5":"ASPECT_4_5",
-  "5:4":"ASPECT_5_4",
-}
 
 V3_RATIO_MAP = {
     "1:3":"1x3",
@@ -227,298 +131,6 @@ async def download_and_process_images(image_urls):
         raise Exception("No valid images were processed")
 
     return stacked_tensors
-
-
-class IdeogramV1(IO.ComfyNode):
-
-    @classmethod
-    def define_schema(cls):
-        return IO.Schema(
-            node_id="IdeogramV1",
-            display_name="Ideogram V1",
-            category="partner/image/Ideogram",
-            description="Generates images using the Ideogram V1 model.",
-            inputs=[
-                IO.String.Input(
-                    "prompt",
-                    multiline=True,
-                    default="",
-                    tooltip="Prompt for the image generation",
-                ),
-                IO.Boolean.Input(
-                    "turbo",
-                    default=False,
-                    tooltip="Whether to use turbo mode (faster generation, potentially lower quality)",
-                ),
-                IO.Combo.Input(
-                    "aspect_ratio",
-                    options=list(V1_V2_RATIO_MAP.keys()),
-                    default="1:1",
-                    tooltip="The aspect ratio for image generation.",
-                    optional=True,
-                ),
-                IO.Combo.Input(
-                    "magic_prompt_option",
-                    options=["AUTO", "ON", "OFF"],
-                    default="AUTO",
-                    tooltip="Determine if MagicPrompt should be used in generation",
-                    optional=True,
-                    advanced=True,
-                ),
-                IO.Int.Input(
-                    "seed",
-                    default=0,
-                    min=0,
-                    max=2147483647,
-                    step=1,
-                    control_after_generate=True,
-                    display_mode=IO.NumberDisplay.number,
-                    optional=True,
-                ),
-                IO.String.Input(
-                    "negative_prompt",
-                    multiline=True,
-                    default="",
-                    tooltip="Description of what to exclude from the image",
-                    optional=True,
-                ),
-                IO.Int.Input(
-                    "num_images",
-                    default=1,
-                    min=1,
-                    max=8,
-                    step=1,
-                    display_mode=IO.NumberDisplay.number,
-                    optional=True,
-                ),
-            ],
-            outputs=[
-                IO.Image.Output(),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
-            is_api_node=True,
-            price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["num_images", "turbo"]),
-                expr="""
-                (
-                  $n := widgets.num_images;
-                  $base := (widgets.turbo = true) ? 0.0286 : 0.0858;
-                  {"type":"usd","usd": $round($base * $n, 2)}
-                )
-                """,
-            ),
-        )
-
-    @classmethod
-    async def execute(
-        cls,
-        prompt,
-        turbo=False,
-        aspect_ratio="1:1",
-        magic_prompt_option="AUTO",
-        seed=0,
-        negative_prompt="",
-        num_images=1,
-    ):
-        # Determine the model based on turbo setting
-        aspect_ratio = V1_V2_RATIO_MAP.get(aspect_ratio, None)
-        model = "V_1_TURBO" if turbo else "V_1"
-
-        response = await sync_op(
-            cls,
-            ApiEndpoint(path="/proxy/ideogram/generate", method="POST"),
-            response_model=IdeogramGenerateResponse,
-            data=IdeogramGenerateRequest(
-                image_request=ImageRequest(
-                    prompt=prompt,
-                    model=model,
-                    num_images=num_images,
-                    seed=seed,
-                    aspect_ratio=aspect_ratio if aspect_ratio != "ASPECT_1_1" else None,
-                    magic_prompt_option=(magic_prompt_option if magic_prompt_option != "AUTO" else None),
-                    negative_prompt=negative_prompt if negative_prompt else None,
-                )
-            ),
-            max_retries=1,
-        )
-
-        if not response.data or len(response.data) == 0:
-            raise Exception("No images were generated in the response")
-
-        image_urls = [image_data.url for image_data in response.data if image_data.url]
-        if not image_urls:
-            raise Exception("No image URLs were generated in the response")
-        return IO.NodeOutput(await download_and_process_images(image_urls))
-
-
-class IdeogramV2(IO.ComfyNode):
-
-    @classmethod
-    def define_schema(cls):
-        return IO.Schema(
-            node_id="IdeogramV2",
-            display_name="Ideogram V2",
-            category="partner/image/Ideogram",
-            description="Generates images using the Ideogram V2 model.",
-            inputs=[
-                IO.String.Input(
-                    "prompt",
-                    multiline=True,
-                    default="",
-                    tooltip="Prompt for the image generation",
-                ),
-                IO.Boolean.Input(
-                    "turbo",
-                    default=False,
-                    tooltip="Whether to use turbo mode (faster generation, potentially lower quality)",
-                ),
-                IO.Combo.Input(
-                    "aspect_ratio",
-                    options=list(V1_V2_RATIO_MAP.keys()),
-                    default="1:1",
-                    tooltip="The aspect ratio for image generation. Ignored if resolution is not set to AUTO.",
-                    optional=True,
-                ),
-                IO.Combo.Input(
-                    "resolution",
-                    options=list(V1_V1_RES_MAP.keys()),
-                    default="Auto",
-                    tooltip="The resolution for image generation. "
-                            "If not set to AUTO, this overrides the aspect_ratio setting.",
-                    optional=True,
-                ),
-                IO.Combo.Input(
-                    "magic_prompt_option",
-                    options=["AUTO", "ON", "OFF"],
-                    default="AUTO",
-                    tooltip="Determine if MagicPrompt should be used in generation",
-                    optional=True,
-                    advanced=True,
-                ),
-                IO.Int.Input(
-                    "seed",
-                    default=0,
-                    min=0,
-                    max=2147483647,
-                    step=1,
-                    control_after_generate=True,
-                    display_mode=IO.NumberDisplay.number,
-                    optional=True,
-                ),
-                IO.Combo.Input(
-                    "style_type",
-                    options=["AUTO", "GENERAL", "REALISTIC", "DESIGN", "RENDER_3D", "ANIME"],
-                    default="NONE",
-                    tooltip="Style type for generation (V2 only)",
-                    optional=True,
-                    advanced=True,
-                ),
-                IO.String.Input(
-                    "negative_prompt",
-                    multiline=True,
-                    default="",
-                    tooltip="Description of what to exclude from the image",
-                    optional=True,
-                ),
-                IO.Int.Input(
-                    "num_images",
-                    default=1,
-                    min=1,
-                    max=8,
-                    step=1,
-                    display_mode=IO.NumberDisplay.number,
-                    optional=True,
-                ),
-                #"color_palette": (
-                #    IO.STRING,
-                #    {
-                #        "multiline": False,
-                #        "default": "",
-                #        "tooltip": "Color palette preset name or hex colors with weights",
-                #    },
-                #),
-            ],
-            outputs=[
-                IO.Image.Output(),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
-            is_api_node=True,
-            price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["num_images", "turbo"]),
-                expr="""
-                (
-                  $n := widgets.num_images;
-                  $base := (widgets.turbo = true) ? 0.0715 : 0.1144;
-                  {"type":"usd","usd": $round($base * $n, 2)}
-                )
-                """,
-            ),
-        )
-
-    @classmethod
-    async def execute(
-        cls,
-        prompt,
-        turbo=False,
-        aspect_ratio="1:1",
-        resolution="Auto",
-        magic_prompt_option="AUTO",
-        seed=0,
-        style_type="NONE",
-        negative_prompt="",
-        num_images=1,
-        color_palette="",
-    ):
-        aspect_ratio = V1_V2_RATIO_MAP.get(aspect_ratio, None)
-        resolution = V1_V1_RES_MAP.get(resolution, None)
-        # Determine the model based on turbo setting
-        model = "V_2_TURBO" if turbo else "V_2"
-
-        # Handle resolution vs aspect_ratio logic
-        # If resolution is not AUTO, it overrides aspect_ratio
-        final_resolution = None
-        final_aspect_ratio = None
-
-        if resolution != "AUTO":
-            final_resolution = resolution
-        else:
-            final_aspect_ratio = aspect_ratio if aspect_ratio != "ASPECT_1_1" else None
-
-        response = await sync_op(
-            cls,
-            endpoint=ApiEndpoint(path="/proxy/ideogram/generate", method="POST"),
-            response_model=IdeogramGenerateResponse,
-            data=IdeogramGenerateRequest(
-                image_request=ImageRequest(
-                    prompt=prompt,
-                    model=model,
-                    num_images=num_images,
-                    seed=seed,
-                    aspect_ratio=final_aspect_ratio,
-                    resolution=final_resolution,
-                    magic_prompt_option=(magic_prompt_option if magic_prompt_option != "AUTO" else None),
-                    style_type=style_type if style_type != "NONE" else None,
-                    negative_prompt=negative_prompt if negative_prompt else None,
-                    color_palette=color_palette if color_palette else None,
-                )
-            ),
-            max_retries=1,
-        )
-        if not response.data or len(response.data) == 0:
-            raise Exception("No images were generated in the response")
-
-        image_urls = [image_data.url for image_data in response.data if image_data.url]
-        if not image_urls:
-            raise Exception("No image URLs were generated in the response")
-        return IO.NodeOutput(await download_and_process_images(image_urls))
 
 
 class IdeogramV3(IO.ComfyNode):
@@ -744,7 +356,6 @@ class IdeogramV3(IO.ComfyNode):
                 data=edit_request,
                 files=files,
                 content_type="multipart/form-data",
-                max_retries=1,
             )
 
         elif image is not None or mask is not None:
@@ -788,7 +399,6 @@ class IdeogramV3(IO.ComfyNode):
                 data=gen_request,
                 files=files if files else None,
                 content_type="multipart/form-data",
-                max_retries=1,
             )
 
         if not response.data or len(response.data) == 0:
@@ -902,7 +512,6 @@ class IdeogramV4(IO.ComfyNode):
                 resolution=resolution.split(" ")[0] if resolution != "Auto" else None,
                 rendering_speed=rendering_speed,
             ),
-            max_retries=1,
         )
 
         if not response.data or len(response.data) == 0:
@@ -913,14 +522,154 @@ class IdeogramV4(IO.ComfyNode):
         return IO.NodeOutput(await download_and_process_images(image_urls))
 
 
+class IdeogramPImage(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="IdeogramPImage",
+            display_name="Ideogram & Pruna P-Image",
+            category="partner/image/Ideogram",
+            description="Generates images using P-Image, Ideogram's fast text-to-image model. "
+                        "Strong typography and photorealism; "
+                        "supports Ideogram 4.0 structured JSON captions for exact text, "
+                        "colors and layout.",
+            inputs=[
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="Text prompt. Also accepts an Ideogram 4.0 structured JSON caption "
+                            "(exact colors as #RRGGBB hexes, exact text strings, bounding-box "
+                            "layout) — set prompt_upsampling to OFF to use it verbatim.",
+                ),
+                IO.Combo.Input(
+                    "quality",
+                    options=["VERY_LOW", "LOW", "MEDIUM", "HIGH"],
+                    default="MEDIUM",
+                    tooltip="Speed/price/quality tier. MEDIUM is the everyday default; HIGH for "
+                            "complex prompts, fine detail and difficult text; VERY_LOW/LOW for "
+                            "drafts at scale. Difficult text renders poorly below MEDIUM.",
+                ),
+                IO.Combo.Input(
+                    "resolution",
+                    options=["1K", "2K"],
+                    default="1K",
+                    tooltip="Output size class (exact pixels follow the aspect ratio, e.g. "
+                            "16:9 gives 1280x720 at 1K and 2560x1440 at 2K). "
+                            "Prefer HIGH + 2K for crisp typography.",
+                ),
+                IO.Combo.Input(
+                    "aspect_ratio",
+                    options=list(V3_RATIO_MAP.keys()),
+                    default="1:1",
+                    tooltip="The aspect ratio for image generation.",
+                ),
+                IO.Combo.Input(
+                    "prompt_upsampling",
+                    options=["AUTO", "ON", "OFF"],
+                    default="AUTO",
+                    tooltip="Expands short prompts into a detailed structured caption before "
+                            "generation (the rewritten prompt is returned as final_prompt). "
+                            "Set OFF when supplying your own JSON caption or exact wording.",
+                ),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=2147483647,
+                    step=1,
+                    control_after_generate=True,
+                    display_mode=IO.NumberDisplay.number,
+                    optional=True,
+                    tooltip="Seed for reproducible generation. With prompt_upsampling OFF, "
+                            "the same seed and settings return the same image; with ON/AUTO "
+                            "the prompt rewrite varies per run — reproduce a result by reusing "
+                            "its final_prompt output with prompt_upsampling OFF and the same "
+                            "seed.",
+                ),
+            ],
+            outputs=[
+                IO.Image.Output(),
+                IO.String.Output(
+                    "final_prompt",
+                    tooltip="The prompt the image was actually generated from (the rewritten "
+                            "structured caption when prompt_upsampling ran, else your prompt). "
+                            "Feed it back with prompt_upsampling OFF and the same seed to "
+                            "reproduce this image.",
+                ),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["quality", "resolution"]),
+                expr="""
+                (
+                  $q := widgets.quality;
+                  $is2k := $contains(widgets.resolution, "2k");
+                  $usd :=
+                    $contains($q, "very_low") ? ($is2k ? 0.00858 : 0.00429) :
+                    $contains($q, "high")     ? ($is2k ? 0.0429  : 0.02145) :
+                    $contains($q, "medium")   ? ($is2k ? 0.0286  : 0.0143)  :
+                                                ($is2k ? 0.02145 : 0.010725);
+                  {"type": "usd", "usd": $usd}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        prompt: str,
+        quality: str = "MEDIUM",
+        resolution: str = "1K",
+        aspect_ratio: str = "1:1",
+        prompt_upsampling: str = "AUTO",
+        seed: int = 42,
+    ):
+        validate_string(prompt, strip_whitespace=True, min_length=1)
+        request = IdeogramPImageRequest(
+            prompt=prompt,
+            quality=quality,
+            resolution=resolution,
+            aspect_ratio=V3_RATIO_MAP[aspect_ratio],
+            prompt_upsampling=prompt_upsampling,
+            seed=seed,
+        )
+        response = await sync_op(
+            cls,
+            ApiEndpoint(path="/proxy/ideogram/text-to-image/p-image-ideogram", method="POST"),
+            response_model=IdeogramGenerateResponse,
+            data=request,
+        )
+        if not response.data:
+            raise Exception("No images were generated in the response")
+        image_urls = [image_data.url for image_data in response.data if image_data.url]
+        if not image_urls:
+            if any(image_data.is_image_safe is False for image_data in response.data):
+                raise Exception(
+                    "The generation was blocked by Ideogram's content safety filter. "
+                    "Adjust the prompt and try again."
+                )
+            raise Exception("No image URLs were generated in the response")
+        return IO.NodeOutput(
+            await download_and_process_images(image_urls),
+            response.data[0].prompt or prompt,
+        )
+
+
 class IdeogramExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
         return [
-            IdeogramV1,
-            IdeogramV2,
             IdeogramV3,
             IdeogramV4,
+            IdeogramPImage,
         ]
 
 
