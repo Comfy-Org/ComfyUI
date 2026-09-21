@@ -27,6 +27,7 @@
 
 import math
 
+import numpy as np
 import scipy.signal
 import torch
 import torch.nn.functional as F
@@ -70,8 +71,10 @@ def resample(waveform, orig_freq, new_freq, lowpass_filter_width=6, rolloff=0.99
     waveform = F.pad(waveform, (width, width + orig_freq))
     output = F.conv1d(waveform[:, None], kernel, stride=orig_freq)
     output = output.transpose(1, 2).reshape(waveform.shape[0], -1)
-    target_length = (new_freq * length + orig_freq - 1) // orig_freq
-    return output[..., :target_length].reshape(*shape[:-1], target_length)
+    # Preserve the original float32 length rounding at audio/frame boundaries.
+    target_length = math.ceil(np.float32(new_freq * length / orig_freq))
+    output = output[..., :target_length]
+    return output.reshape(*shape[:-1], output.shape[-1])
 
 
 def _hz_to_mel(freq):
