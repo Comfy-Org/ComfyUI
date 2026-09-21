@@ -53,7 +53,7 @@ class TextGenerate(io.ComfyNode):
 
         mtp = False if mtp == "off" else (True if mtp == "auto" else int(mtp))
 
-        tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio, system_prompt=system_prompt)
+        tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio, system_prompt=system_prompt if use_default_template else "")
 
         # Get sampling parameters from dynamic combo
         do_sample = sampling_mode.get("sampling_mode") == "on"
@@ -81,10 +81,10 @@ class TextGenerate(io.ComfyNode):
 
         generated_text = clip.decode(generated_ids)
 
-        # The open tag is missing when the prompt ended with it, the close when max_length cut the reasoning short.
-        reasoning, close, text = generated_text.partition("</think>")
-        if not close and not reasoning.lstrip().startswith("<think>"):
-            reasoning, text = "", reasoning
+        # Reasoning opens in the generated text or at the end of a raw prompt, and has no close when max_length cut it short.
+        reasoning, _, text = generated_text.partition("</think>")
+        if not reasoning.lstrip().startswith("<think>") and not prompt.rstrip().endswith("<think>"):
+            reasoning, text = "", generated_text
 
         return io.NodeOutput(text.strip(), reasoning.replace("<think>", "", 1).strip())
 
