@@ -1316,6 +1316,12 @@ class DynamicSlot(ComfyTypeI):
             out_dict[input_type][finalized_id] = value
             out_dict["dynamic_paths"][finalized_id] = finalize_prefix(curr_prefix, curr_prefix[-1])
 
+class DynamicInputError(ValueError):
+    def __init__(self, input_name: str, message: str):
+        super().__init__(message)
+        self.input_name = input_name
+
+
 @comfytype(io_type="COMFY_DYNAMICGROUP_V3")
 class DynamicGroup(ComfyTypeI):
     """Repeat a widget template and pass its values to execute as a list of row dicts.
@@ -1328,10 +1334,12 @@ class DynamicGroup(ComfyTypeI):
     Each submitted row follows the template's required/optional field declarations.
 
     Missing positions are dicts whose fields are None. Missing optional fields are
-    also None; widget defaults are not injected.
+    also None; widget defaults are not injected. With INPUT_IS_LIST, missing fields
+    are [None], matching the lists supplied for submitted fields.
 
     Empty groups are [] in execute and check_lazy_status. Nonempty lazy groups
     contain (value, original_key) tuples at each field.
+    PriceBadge widget dependencies use the same indexed field names as prompt keys.
     """
 
     Type = list[dict[str, Any]]
@@ -1404,14 +1412,14 @@ class DynamicGroup(ComfyTypeI):
             index, separator, field_id = key[len(prefix):].partition(".")
             if (not separator or not index.isascii() or not index.isdecimal()
                     or (len(index) > 1 and index.startswith("0")) or field_id not in field_specs):
-                raise ValueError(f"Invalid DynamicGroup input key '{key}'; expected '{finalized_prefix}.<index>.<template field>'.")
+                raise DynamicInputError(key, f"Invalid DynamicGroup input key '{key}'; expected '{finalized_prefix}.<index>.<template field>'.")
             row = int(index)
             if row >= max_rows:
-                raise ValueError(f"DynamicGroup input '{key}' exceeds the index limit of {max_rows - 1} (max={max_rows}).")
+                raise DynamicInputError(key, f"DynamicGroup input '{key}' exceeds the index limit of {max_rows - 1} (max={max_rows}).")
             present_rows.add(row)
 
         if not min_rows <= len(present_rows) <= max_rows:
-            raise ValueError(f"DynamicGroup input '{finalized_prefix}' received {len(present_rows)} rows; expected between {min_rows} and {max_rows}.")
+            raise DynamicInputError(finalized_prefix, f"DynamicGroup input '{finalized_prefix}' received {len(present_rows)} rows; expected between {min_rows} and {max_rows}.")
 
         for row in range(max(present_rows, default=-1) + 1):
             for field_id, (field_value, category) in field_specs.items():
@@ -1766,16 +1774,19 @@ class PriceBadgeDepends:
             raise ValueError("PriceBadgeDepends.input_groups must be a list[str].")
 
     def as_dict(self, schema_inputs: list["Input"]) -> dict[str, Any]:
-        # Build lookup: widget_id -> io_type
         input_types: dict[str, str] = {}
-        for inp in schema_inputs:
-            all_inputs = inp.get_all()
-            input_types[inp.id] = inp.get_io_type()  # First input is always the parent itself
-            for nested_inp in all_inputs[1:]:
-                # For DynamicCombo/DynamicSlot, nested inputs are prefixed with parent ID
-                # to match frontend naming convention (e.g., "should_texture.enable_pbr")
-                prefixed_id = f"{inp.id}.{nested_inp.id}"
-                input_types[prefixed_id] = nested_inp.get_io_type()
+
+        def collect_inputs(inputs: list[Input], prefix: str = "") -> None:
+            for inp in inputs:
+                name = prefix + inp.id
+                input_types[name] = inp.get_io_type()
+                if isinstance(inp, DynamicGroup.Input):
+                    for row in range(inp.max):
+                        collect_inputs(inp.template, f"{name}.{row}.")
+                else:
+                    collect_inputs(inp.get_all()[1:], name + ".")
+
+        collect_inputs(schema_inputs)
 
         # Enrich widgets with type information, raising error for unknown widgets
         widgets_data: list[dict[str, str]] = []
@@ -2039,11 +2050,20 @@ def parse_class_inputs(out_dict: dict[str, Any], live_inputs: dict[str, Any], cu
                 if curr_prefix:
                     out_dict["dynamic_paths"][finalized_id] = finalized_id
 
+def _dynamic_group_prefixes(inputs: list[Input]) -> Iterable[str]:
+    for inp in inputs:
+        if isinstance(inp, DynamicGroup.Input):
+            yield inp.id + "."
+        elif isinstance(inp, DynamicInput):
+            for prefix in _dynamic_group_prefixes(inp.get_all()[1:]):
+                yield f"{inp.id}.{prefix}"
+
+
 def create_input_dict_v1(inputs: list[Input]) -> dict:
     input = {
         "required": {}
     }
-    group_prefixes = tuple(f"{i.id}." for i in inputs if isinstance(i, DynamicGroup.Input))
+    group_prefixes = tuple(_dynamic_group_prefixes(inputs))
     for i in inputs:
         if group_prefixes and i.id.startswith(group_prefixes):
             raise ValueError(f"Input '{i.id}' conflicts with a DynamicGroup field prefix.")
@@ -2061,7 +2081,7 @@ class DynamicPathsDefaultValue:
     EMPTY_DICT = "empty_dict"
     EMPTY_LIST = "empty_list"
 
-def build_nested_inputs(values: dict[str, Any], v3_data: V3Data):
+def build_nested_inputs(values: dict[str, Any], v3_data: V3Data, *, input_is_list: bool = False):
     paths = v3_data.get("dynamic_paths", None)
     default_value_dict = v3_data.get("dynamic_paths_default_value", {})
     if paths is None:
@@ -2080,6 +2100,7 @@ def build_nested_inputs(values: dict[str, Any], v3_data: V3Data):
             is_last = (i == len(parts) - 1)
 
             if is_last:
+                missing = key not in values
                 value = values.pop(key, None)
                 default_option = default_value_dict.get(key, None)
                 if default_option == DynamicPathsDefaultValue.EMPTY_LIST:
@@ -2087,6 +2108,8 @@ def build_nested_inputs(values: dict[str, Any], v3_data: V3Data):
                     value = []
                 elif value is None and default_option == DynamicPathsDefaultValue.EMPTY_DICT:
                     value = {}
+                elif missing and input_is_list:
+                    value = [None]
                 if create_tuple and default_option != DynamicPathsDefaultValue.EMPTY_LIST:
                     value = (value, key)
                 current[p] = value

@@ -83,6 +83,51 @@ def test_other_dotted_input_ids_are_unchanged():
     assert schema["required"]["rows_summary.value"] == ("FLOAT", {})
 
 
+@pytest.mark.parametrize("sibling_id", ["mode.rows.summary", "mode.rows.0.x"])
+@pytest.mark.parametrize("sibling_first", [False, True])
+def test_rejects_outer_input_in_nested_group_namespace(sibling_id, sibling_first):
+    inputs = [
+        io.DynamicCombo.Input("mode", options=[io.DynamicCombo.Option("on", [
+            io.DynamicGroup.Input("rows", template=[io.Float.Input("x")]),
+        ])]),
+        io.Float.Input(sibling_id),
+    ]
+    if sibling_first:
+        inputs.reverse()
+    with pytest.raises(ValueError, match="conflicts with a DynamicGroup field prefix"):
+        create_input_dict_v1(inputs)
+
+
+def test_group_namespace_is_scoped_to_its_combo_option():
+    combo = io.DynamicCombo.Input("mode", options=[
+        io.DynamicCombo.Option("on", [io.DynamicGroup.Input("rows", template=[io.Float.Input("x")])]),
+        io.DynamicCombo.Option("off", [io.Float.Input("rows.summary")]),
+    ])
+    assert _reconstruct(combo, {"mode": "off", "mode.rows.summary": 0.5}) == {
+        "mode": {"mode": "off", "rows": {"summary": 0.5}},
+    }
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_price_badge_resolves_indexed_group_fields(nested):
+    group = io.DynamicGroup.Input("rows", template=[io.Float.Input("weight"), io.String.Input("name")], max=2)
+    inputs = [group, io.Float.Input("fixed")]
+    prefix = "rows"
+    if nested:
+        inputs = [io.DynamicCombo.Input("mode", options=[io.DynamicCombo.Option("on", inputs)])]
+        prefix = "mode.rows"
+    outer = "mode." if nested else ""
+    badge = io.PriceBadgeDepends(widgets=[f"{prefix}.0.weight", f"{prefix}.1.name", outer + "fixed"])
+    assert badge.as_dict(inputs)["widgets"] == [
+        {"name": f"{prefix}.0.weight", "type": "FLOAT"},
+        {"name": f"{prefix}.1.name", "type": "STRING"},
+        {"name": outer + "fixed", "type": "FLOAT"},
+    ]
+    for invalid in (f"{prefix}.weight", f"{prefix}.2.weight"):
+        with pytest.raises(ValueError, match="unknown widget"):
+            io.PriceBadgeDepends(widgets=[invalid]).as_dict(inputs)
+
+
 @pytest.mark.parametrize("minimum", [0, 1, 2])
 @pytest.mark.parametrize("optional_group", [False, True])
 def test_every_submitted_row_keeps_template_requirements(minimum, optional_group):
