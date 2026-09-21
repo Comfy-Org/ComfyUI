@@ -628,7 +628,7 @@ class _AssetSeeder:
                 all_prefixes = get_owned_prefixes()
                 marked = mark_missing_outside_prefixes_safely(
                     all_prefixes,
-                    interrupt_check=lambda: self._is_paused_or_cancelled(
+                    interrupt_check=lambda: self._check_pause_and_cancel(
                         _ScanStage.PRUNING
                     ),
                 )
@@ -641,7 +641,7 @@ class _AssetSeeder:
                     logging.info("Marked %d refs as missing before scan", marked)
                 sync_temp_references_safely(
                     scan_state,
-                    interrupt_check=lambda: self._is_paused_or_cancelled(
+                    interrupt_check=lambda: self._check_pause_and_cancel(
                         _ScanStage.PRUNING
                     ),
                 )
@@ -805,7 +805,7 @@ class _AssetSeeder:
                 sync_root_safely(
                     r,
                     scan_state,
-                    interrupt_check=lambda: self._is_paused_or_cancelled(
+                    interrupt_check=lambda: self._check_pause_and_cancel(
                         _ScanStage.FAST_SCAN
                     ),
                 )
