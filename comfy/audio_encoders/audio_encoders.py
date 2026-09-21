@@ -6,7 +6,7 @@ import comfy.model_management
 import comfy.ops
 import comfy.utils
 import logging
-import torchaudio
+import comfy.audio
 import torch
 
 
@@ -44,7 +44,7 @@ class AudioEncoderModel():
 
     def encode_audio(self, audio, sample_rate):
         comfy.model_management.load_model_gpu(self.patcher)
-        audio = torchaudio.functional.resample(audio, sample_rate, self.model_sample_rate)
+        audio = comfy.audio.resample(audio, sample_rate, self.model_sample_rate)
         out, all_layers = self.model(audio.to(self.load_device))
         outputs = {}
         outputs["encoded_audio"] = out
@@ -55,7 +55,7 @@ class AudioEncoderModel():
 
 class SheetSage2AudioEncoder(AudioEncoderModel):
     def generate_abc(self, audio, sample_rate, melody_only=True):
-        audio = torchaudio.functional.resample(audio.float().mean(dim=1), sample_rate, self.model_sample_rate)
+        audio = comfy.audio.resample(audio.float().mean(dim=1), sample_rate, self.model_sample_rate)
         comfy.model_management.load_model_gpu(self.patcher)
         scores = []
         for waveform in audio:

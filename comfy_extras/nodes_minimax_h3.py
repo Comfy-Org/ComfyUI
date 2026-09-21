@@ -13,7 +13,7 @@ import math
 
 import torch
 import torch.nn.functional as F
-import torchaudio
+import comfy.audio
 
 import nodes
 import comfy.model_management
@@ -76,7 +76,7 @@ def _encode_ref_audio(audio_vae, audio):
     sr = audio["sample_rate"]
     vae_sr = getattr(audio_vae, "audio_sample_rate", 32000)
     if sr != vae_sr:
-        waveform = torchaudio.functional.resample(waveform, sr, vae_sr)
+        waveform = comfy.audio.resample(waveform, sr, vae_sr)
     z = audio_vae.encode(waveform[:1].movedim(1, -1))  # [1, 32, 2, T]
     return z, z.shape[-1]
 

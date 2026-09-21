@@ -92,7 +92,7 @@ class UpSample1d(nn.Module):
         self.stride = ratio
 
         if window_type == "hann":
-            # Hann-windowed sinc filter — identical to torchaudio.functional.resample
+            # Hann-windowed sinc filter — identical to comfy.audio.resample
             # with its default parameters (rolloff=0.99, lowpass_filter_width=6).
             # Uses replicate boundary padding, matching the reference resampler exactly.
             rolloff = 0.99
