@@ -3,9 +3,10 @@ from pathlib import Path
 import sqlalchemy as sa
 
 import app.database.db as db_mod
-from app.assets import scanner
+from app.assets import scanner, seeder as seeder_module
 from app.assets.database.models import AssetContent
 from app.assets.database.queries import create_content, create_record, mark_content_missing
+from app.assets.seeder import State, _AssetSeeder, _ScanState
 
 
 def _seed_reference_observations(
@@ -154,6 +155,44 @@ def test_root_sync_interrupts_between_chunks_and_publishes_committed_ids(
     assert txn_count == 1
     assert result == survivors
     assert published == content_ids[: scanner.MAX_WRITE_BATCH]
+
+
+def test_seeder_resumes_root_sync_chunks_after_pause(
+    tmp_path: Path, monkeypatch, session
+) -> None:
+    content_ids, observations, survivors = _seed_reference_observations(tmp_path, 60)
+    monkeypatch.setattr(
+        scanner,
+        "observe_references_on_filesystem",
+        lambda *_args, **_kwargs: (observations, survivors),
+    )
+    seeder = _AssetSeeder()
+    seeder._state = State.RUNNING
+    seeder._scan_state = _ScanState()
+    events: list[str] = []
+    seeder.set_event_sink(lambda event_type, _data: events.append(event_type))
+
+    def pause_before_root_sync(root, progress, interrupt_check=None):
+        assert seeder.pause()
+        return scanner.sync_root_safely(root, progress, interrupt_check)
+
+    def resume_on_wait(timeout=None):
+        if not seeder._run_gate.is_set():
+            assert seeder.resume()
+        return True
+
+    monkeypatch.setattr(seeder_module, "sync_root_safely", pause_before_root_sync)
+    monkeypatch.setattr(seeder._run_gate, "wait", resume_on_wait)
+    monkeypatch.setattr(seeder_module, "collect_paths_for_roots", lambda _roots: [])
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda **_kwargs: None)
+
+    seeder._run_fast_phase(("input",))
+
+    assert _content_states(content_ids) == [
+        (None, observation.stat_result.st_mtime_ns, False)
+        for observation in observations
+    ]
+    assert events.count("assets.seed.paused") == 1
 
 
 def test_root_sync_later_chunk_failure_publishes_only_prior_commits(
