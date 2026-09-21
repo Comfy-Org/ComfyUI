@@ -1,9 +1,11 @@
 import torch
 from types import SimpleNamespace
+import pytest
 
-# Some Comfy modules assume a CUDA-capable runtime during import. Patch the CUDA
-# entry points for CPU-only test environments so the Qwen LoRA regression can be
-# exercised without taking a GPU dependency.
+orig_current_device = torch.cuda.current_device
+orig_is_available = torch.cuda.is_available
+orig_get_device_capability = getattr(torch.cuda, 'get_device_capability', None)
+
 torch.cuda.current_device = lambda: torch.device("cpu")
 torch.cuda.is_available = lambda: True
 torch.cuda.get_device_capability = lambda device=None: (8, 0)
@@ -11,6 +13,14 @@ torch.cuda.get_device_capability = lambda device=None: (8, 0)
 import comfy.lora
 import comfy.model_base
 from comfy.weight_adapter.lora import LoRAAdapter
+
+# Restore original CUDA functions after imports to avoid affecting other tests
+torch.cuda.current_device = orig_current_device
+torch.cuda.is_available = orig_is_available
+if orig_get_device_capability is not None:
+    torch.cuda.get_device_capability = orig_get_device_capability
+elif hasattr(torch.cuda, 'get_device_capability'):
+    delattr(torch.cuda, 'get_device_capability')
 
 
 def test_qwen_image_default_lora_format_loads():
