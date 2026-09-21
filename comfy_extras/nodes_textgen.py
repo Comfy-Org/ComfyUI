@@ -1,4 +1,3 @@
-import re
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
@@ -45,6 +44,7 @@ class TextGenerate(io.ComfyNode):
             ],
             outputs=[
                 io.String.Output(display_name="generated_text"),
+                io.String.Output(display_name="thinking"),
             ],
         )
 
@@ -81,7 +81,12 @@ class TextGenerate(io.ComfyNode):
 
         generated_text = clip.decode(generated_ids)
 
-        return io.NodeOutput(generated_text)
+        # The open tag is missing when the prompt ended with it, the close when max_length cut the reasoning short.
+        reasoning, close, text = generated_text.partition("</think>")
+        if not close and not reasoning.lstrip().startswith("<think>"):
+            reasoning, text = "", reasoning
+
+        return io.NodeOutput(text.strip(), reasoning.replace("<think>", "", 1).strip())
 
 
 LTX2_T2V_SYSTEM_PROMPT = """You are a Creative Assistant. Given a user's raw input prompt describing a scene or concept, expand it into a detailed video generation prompt with specific visuals and integrated audio to guide a text-to-video model.
@@ -261,10 +266,8 @@ class TextGenerateLTX2Prompt(TextGenerate):
 
         out = super().execute(clip, formatted_prompt, max_length, sampling_mode, image=image, thinking=thinking, use_default_template=use_default_template, video=video, audio=audio, mtp=mtp)
 
-        # Drop reasoning, including a block left unclosed by max_length. Both system prompts ask
-        # for the original prompt back when there is nothing to give; empty conditions on nothing.
-        text = re.sub(r"<think>.*?(?:</think>|$)", "", out.args[0], flags=re.DOTALL).strip()
-        return io.NodeOutput(text or prompt)
+        # Both system prompts ask for the original prompt back when there is nothing to give; empty conditions on nothing.
+        return io.NodeOutput(out.args[0] or prompt, out.args[1])
 
 
 class TextgenExtension(ComfyExtension):
