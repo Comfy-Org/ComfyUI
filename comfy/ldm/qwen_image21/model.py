@@ -346,13 +346,14 @@ class QwenImage21Transformer2DModel(nn.Module):
             comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, block, dtype, malloc_scope="block")
             transformer_options["block_index"] = i
             if cache is not None:
-                if not cached:
-                    with comfy.model_prefetch.pause_malloc_graph():
+                # the cache's own staging buffers and stream syncs are not safe for the block-weight malloc graph to observe
+                with comfy.model_prefetch.pause_malloc_graph():
+                    if not cached:
                         prefix_attn = block_causal_attention(segments[:-1], transformer_options, cache, i, prefix_states.shape[1])
                         prefix_states = block(prefix_states, mod, prefix_pe, prefix_attn, prefix_states.shape[1], transformer_options)
-                prefix_k, prefix_v = cache.take(i, x.device, dtype, B).unbind(1)
-                if cached:
-                    cache.prefetch(i + 1, x.device, dtype)  # queue the next block before the compute it should overlap
+                    prefix_k, prefix_v = cache.take(i, x.device, dtype, B).unbind(1)
+                    if cached:
+                        cache.prefetch(i + 1, x.device, dtype)  # queue the next block before the compute it should overlap
                 attn_fn = prefix_cached_attention(prefix_k, prefix_v, transformer_options)
             else:
                 attn_fn = block_causal_attention(segments, transformer_options, cache, i, prefix_len)
