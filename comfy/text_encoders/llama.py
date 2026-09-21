@@ -879,7 +879,8 @@ class Llama2_(nn.Module):
     def init_kv_cache(self, batch, capacity, device, dtype):
         caches = []
         flash = getattr(comfy_kitchen, "flash_attention_decode_is_available", None)
-        flash_kv = self.fixed_kv and flash is not None and flash(device)
+        flash_kv = (self.fixed_kv and flash is not None and flash(device)
+                    and torch.version.cuda is not None and int(str(torch.version.cuda).split(".")[0]) >= 13)
         for _ in range(self.config.num_hidden_layers):
             if flash_kv:
                 key = torch.empty((batch, capacity, self.config.num_key_value_heads, self.config.head_dim), device=device, dtype=dtype)
