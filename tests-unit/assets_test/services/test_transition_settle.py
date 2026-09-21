@@ -181,7 +181,6 @@ def test_enrich_phase_reaches_healthy_candidates_after_a_full_failed_batch(
     asset_seeder._cancel_event.clear()
 
     with (
-        patch("app.assets.seeder.create_session", _create_session),
         patch("app.assets.scanner.create_session", _create_session),
         patch("app.assets.seeder.enrich_assets_batch", enrich_batch),
     ):
@@ -224,8 +223,7 @@ def test_enrich_phase_reaches_healthy_candidates_after_four_failed_batches(
     )
     monkeypatch.setattr(seeder_module, "enrich_assets_batch", enrich_batch)
 
-    with patch("app.assets.seeder.create_session", _create_session):
-        cancelled, enriched = asset_seeder._run_enrich_phase(("input",))
+    cancelled, enriched = asset_seeder._run_enrich_phase(("input",))
 
     assert cancelled is False
     assert enriched == 1
@@ -289,13 +287,13 @@ def test_enrich_phase_reoffers_rows_not_attempted_before_pause(
             asset_seeder._run_gate.clear()
         return candidates
 
-    def enrich_asset(*_args, **kwargs) -> bool:
+    def prepare_enrichment(row, *_args, **_kwargs):
         nonlocal interruption_triggered
-        attempted.append(kwargs["record_id"])
+        attempted.append(row.record_id)
         if len(attempted) == interrupt_after and not interruption_triggered:
             interruption_triggered = True
             asset_seeder._run_gate.clear()
-        return True
+        return scanner._PreparedEnrichment(row, None, None, None, None, False)
 
     result: list[tuple[bool, int]] = []
     errors: list[BaseException] = []
@@ -309,12 +307,17 @@ def test_enrich_phase_reoffers_rows_not_attempted_before_pause(
     monkeypatch.setattr(
         seeder_module, "get_unenriched_assets_for_roots", get_candidates
     )
-    monkeypatch.setattr(scanner, "enrich_asset", enrich_asset)
+    monkeypatch.setattr(scanner, "_prepare_enrichment", prepare_enrichment)
+    # These rows are synthetic, so the batch apply is stubbed and its write
+    # transaction short-circuited rather than bound to a real writer engine.
+    monkeypatch.setattr(
+        scanner,
+        "_apply_enrichments",
+        lambda _session, prepared: [item.row.record_id for item in prepared],
+    )
+    monkeypatch.setattr(scanner, "run_write_txn", lambda work: work(None))
 
-    with (
-        patch("app.assets.seeder.create_session", _create_session),
-        patch("app.assets.scanner.create_session", _create_session),
-    ):
+    with patch("app.assets.scanner.create_session", _create_session):
         worker = threading.Thread(target=run_enrich_phase, daemon=True)
         worker.start()
         try:

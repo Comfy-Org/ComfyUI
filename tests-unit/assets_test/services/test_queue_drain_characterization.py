@@ -59,7 +59,13 @@ def test_pending_verification_requeues_after_hash_oserror(session, temp_dir, mon
     assert scanner_changes._pending_verification_ids == [content.id]
 
 
-def test_watch_list_keeps_entries_when_stat_raises(session, temp_dir, monkeypatch):
+def test_watch_list_drops_entries_when_stat_raises(session, temp_dir, monkeypatch):
+    """#16393 replaced this path's characterized behaviour.
+
+    A stat error used to propagate out of the tick and leave the entry queued,
+    which re-attempted the same unreadable file on every tick forever. It is now
+    absorbed: the entry is dropped and the failure is reported as telemetry.
+    """
     path = temp_dir / "watched.bin"
     path.write_bytes(b"watched")
     entry = _WatchEntry(str(path), path.stat())
@@ -70,10 +76,9 @@ def test_watch_list_keeps_entries_when_stat_raises(session, temp_dir, monkeypatc
         lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("denied")),
     )
 
-    with pytest.raises(PermissionError):
-        tick_watch_list()
+    tick_watch_list()
 
-    assert _WATCH_LIST == [entry]
+    assert _WATCH_LIST == []
 
 
 def test_transition_queue_retries_without_losing_companion_path(

@@ -108,7 +108,14 @@ def tick_watch_list(
                 )
                 emit("scanner.watch_spec_failed", error_type=error_type(exc))
                 continue
-            _created, seed_error = insert_asset_specs([spec], set(spec["tags"]))
+            try:
+                _created, seed_error = insert_asset_specs([spec], set(spec["tags"]))
+            except BaseException:
+                # A fault that escapes the write transaction is the database's,
+                # not this file's: the seed never happened, so the entry goes
+                # back rather than being retired by a lock the next tick may get.
+                _WATCH_LIST.insert(0, entry)
+                raise
             if seed_error is not None:
                 logging.warning(
                     "Dropping watched asset after seeding failed: %s", entry.path

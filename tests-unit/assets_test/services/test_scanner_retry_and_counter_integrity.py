@@ -139,7 +139,7 @@ def test_enrichment_batch_failure_rolls_back_every_row_and_counts_each_failure(
     )
     progress = _ScanState()
 
-    enriched, failed_ids = scanner.enrich_assets_batch(
+    enriched, failed_ids, _consumed = scanner.enrich_assets_batch(
         rows,
         extract_metadata=False,
         compute_hash=True,
@@ -166,7 +166,7 @@ def test_enrichment_later_batch_failure_preserves_first_batch(
     )
     monkeypatch.setattr(scanner, "run_write_txn", failing_run_write_txn)
 
-    enriched, failed_ids = scanner.enrich_assets_batch(
+    enriched, failed_ids, _consumed = scanner.enrich_assets_batch(
         rows, extract_metadata=False, compute_hash=True
     )
 

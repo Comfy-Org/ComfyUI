@@ -50,7 +50,7 @@ def test_enrichment_applies_when_unchanged_row_is_behind_disk(
         stored_mtime_ns=disk_stat.st_mtime_ns - 5_000_000_000,
     )
 
-    enriched, failed_ids = scanner.enrich_assets_batch(
+    enriched, failed_ids, _consumed = scanner.enrich_assets_batch(
         [row], extract_metadata=True, compute_hash=False
     )
 
@@ -87,7 +87,7 @@ def test_enrichment_skips_row_changed_after_prepare(
     db_mod.run_write_txn(change_row)
     monkeypatch.setattr(scanner, "_prepare_enrichment", lambda *_args: prepared)
 
-    enriched, failed_ids = scanner.enrich_assets_batch(
+    enriched, failed_ids, _consumed = scanner.enrich_assets_batch(
         [row], extract_metadata=True, compute_hash=False
     )
 

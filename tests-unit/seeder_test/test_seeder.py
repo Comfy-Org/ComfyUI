@@ -1,7 +1,6 @@
 import logging
 import re
 import threading
-from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -92,7 +91,9 @@ def _configure_fast_phase(
     specs: list[SeedAssetSpec],
 ) -> None:
     monkeypatch.setattr(
-        seeder_module, "sync_root_safely", lambda _root, _progress: set()
+        seeder_module,
+        "sync_root_safely",
+        lambda _root, _progress, interrupt_check=None: set(),
     )
     monkeypatch.setattr(
         seeder_module, "collect_paths_for_roots", lambda _roots: [str(path) for path in paths]
@@ -102,9 +103,7 @@ def _configure_fast_phase(
         "build_asset_specs",
         lambda *_args, **_kwargs: (specs, set(), 0),
     )
-    watch_session = Mock()
-    monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(watch_session))
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _session: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda **_kwargs: None)
 
 
 def _run_faulting_fast_phase(
@@ -121,15 +120,15 @@ def _run_faulting_fast_phase(
         path.write_bytes(path.name.encode())
     specs = [_seed_spec(path) for path in paths]
 
-    @contextmanager
-    def database_session():
-        with Session(engine) as session:
-            if commit_failure is not None:
-                session.connection().exec_driver_sql("BEGIN")
-                monkeypatch.setattr(
-                    session, "commit", Mock(side_effect=commit_failure)
-                )
-            yield session
+    def write_session() -> Session:
+        session = Session(engine)
+        if commit_failure is not None:
+            # A real transaction, so the rollback run_write_txn does after the
+            # failed commit actually discards the batch; pysqlite would otherwise
+            # leave the savepoint inserts behind.
+            session.connection().exec_driver_sql("BEGIN")
+            monkeypatch.setattr(session, "commit", Mock(side_effect=commit_failure))
+        return session
 
     def create_record_or_raise(
         session: Session,
@@ -153,7 +152,7 @@ def _run_faulting_fast_phase(
             tags=tags,
         )
 
-    monkeypatch.setattr(scanner_module, "create_session", database_session)
+    monkeypatch.setattr("app.database.db.WriteSession", write_session)
     monkeypatch.setattr(scanner_module, "create_record", create_record_or_raise)
     monkeypatch.setattr(scanner_module.mode, "hashing_enabled", lambda: False)
     _configure_fast_phase(monkeypatch, paths, specs)
@@ -727,10 +726,14 @@ def test_scan_prune_failure_completes_without_type_error(
     scan_seeder._phase = ScanPhase.FAST
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda _prefixes: None
+        seeder_module,
+        "mark_missing_outside_prefixes_safely",
+        lambda _prefixes, interrupt_check=None: None,
     )
     monkeypatch.setattr(
-        seeder_module, "sync_temp_references_safely", lambda _progress: None
+        seeder_module,
+        "sync_temp_references_safely",
+        lambda _progress, interrupt_check=None: None,
     )
     monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda _roots: (0, 0, 0))
 

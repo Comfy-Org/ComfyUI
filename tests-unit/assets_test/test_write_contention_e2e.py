@@ -118,7 +118,7 @@ def test_register_executed_output_keeps_job_id_during_scanner_write_train(
         monkeypatch.setattr(scanner, "_apply_enrichments", block_first_scanner_write)
         monkeypatch.setattr(scanner, "run_write_txn", count_scanner_writes)
         monkeypatch.setattr(db_mod, "_is_retryable_lock_error", observe_registration_lock)
-        scanner_result: dict[str, tuple[int, list[str]]] = {}
+        scanner_result: dict[str, tuple[int, list[str], int]] = {}
         registration_result: dict[str, RegisteredAsset | None] = {}
 
         def enrich_scanner_rows() -> None:
@@ -154,7 +154,7 @@ def test_register_executed_output_keeps_job_id_during_scanner_write_train(
 
         assert not scanner_worker.is_alive()
         assert not registration_worker.is_alive()
-        assert scanner_result["value"] == (len(scanner_rows), [])
+        assert scanner_result["value"] == (len(scanner_rows), [], len(scanner_rows))
         assert scanner_writes == 2
         result = registration_result["value"]
         assert isinstance(result, RegisteredAsset)

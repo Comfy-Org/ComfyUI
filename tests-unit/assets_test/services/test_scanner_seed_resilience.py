@@ -184,7 +184,7 @@ def test_seed_absorbs_live_path_conflict_and_persists_the_specs_around_it(
         _create_content_or_conflict,
     )
 
-    created, error = seed_asset_specs(session, specs)
+    created, error = seed_asset_specs(session, specs, stat_seed_specs(specs))
     session.commit()
 
     assert error is None
@@ -221,7 +221,8 @@ def test_seed_propagates_unrelated_integrity_error(
 
     monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
 
-    _created, error = seed_asset_specs(session, [_spec(path)])
+    specs = [_spec(path)]
+    _created, error = seed_asset_specs(session, specs, stat_seed_specs(specs))
 
     assert error is unrelated_error
 
@@ -251,8 +252,9 @@ def test_seed_raises_memory_error_instead_of_attempting_later_specs(
 
     monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_exhaust)
 
+    specs = [_spec(path) for path in paths]
     with pytest.raises(MemoryError):
-        seed_asset_specs(session, [_spec(path) for path in paths])
+        seed_asset_specs(session, specs, stat_seed_specs(specs))
 
     assert attempted == ["first.bin"]
 
@@ -363,8 +365,9 @@ def test_seed_skips_negative_fresh_mtime_with_warning_and_telemetry(
     pre_epoch_ns = -315_547_200_000_000_000
     os.utime(paths[1], ns=(pre_epoch_ns, pre_epoch_ns))
 
+    specs = [_spec(path) for path in paths]
     with caplog.at_level(logging.INFO):
-        created, error = seed_asset_specs(session, [_spec(path) for path in paths])
+        created, error = seed_asset_specs(session, specs, stat_seed_specs(specs))
     session.commit()
 
     assert error is None
@@ -395,8 +398,9 @@ def test_seed_emits_one_invalid_mtime_event_for_a_whole_batch_of_pre_epoch_files
         _ = path.write_bytes(path.name.encode())
         os.utime(path, ns=(pre_epoch_ns, pre_epoch_ns))
 
+    specs = [_spec(path) for path in paths]
     with caplog.at_level(logging.INFO):
-        created, error = seed_asset_specs(session, [_spec(path) for path in paths])
+        created, error = seed_asset_specs(session, specs, stat_seed_specs(specs))
     session.commit()
 
     assert error is None

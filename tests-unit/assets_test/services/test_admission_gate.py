@@ -121,7 +121,7 @@ def test_stat_error_drops_entry_and_allows_other_watch_entries_to_commit(
     monkeypatch.setattr(scanner_admission, "os", SimpleNamespace(stat=_stat))
 
     with caplog.at_level(logging.INFO):
-        tick_watch_list(session)
+        tick_watch_list()
     session.commit()
 
     persisted_paths = set(session.scalars(select(AssetContent.path)).all())
@@ -151,7 +151,7 @@ def test_seed_failure_does_not_stop_watch_list_drain(
     _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
     attempted: list[str] = []
 
-    def seed_or_return_error(_session, specs) -> tuple[int, Exception | None]:
+    def seed_or_return_error(_session, specs, *_args, **_kwargs) -> tuple[int, Exception | None]:
         path = specs[0]["abs_path"]
         attempted.append(path)
         if path == str(paths[0]):
@@ -162,7 +162,7 @@ def test_seed_failure_does_not_stop_watch_list_drain(
     monkeypatch.setattr("app.assets.scanner.seed_asset_specs", seed_or_return_error)
 
     with caplog.at_level(logging.INFO):
-        tick_watch_list(session)
+        tick_watch_list()
 
     assert attempted == [str(path) for path in paths]
     assert _WATCH_LIST == []
@@ -212,7 +212,7 @@ def test_spec_construction_failure_drops_the_entry_without_wedging_the_watch_lis
     )
 
     with caplog.at_level(logging.INFO):
-        tick_watch_list(session)
+        tick_watch_list()
     session.commit()
 
     assert set(session.scalars(select(AssetContent.path)).all()) == {str(stable_path)}
@@ -239,7 +239,7 @@ def test_unexpected_fault_mid_drain_leaves_unvisited_entries_on_the_watch_list(
         path.write_bytes(path.name.encode())
     _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
 
-    def seed_or_explode(_session, specs) -> tuple[int, Exception | None]:
+    def seed_or_explode(_session, specs, *_args, **_kwargs) -> tuple[int, Exception | None]:
         if specs[0]["abs_path"] == str(paths[1]):
             raise MemoryError("forced unrecoverable fault")
         return 1, None
@@ -248,9 +248,9 @@ def test_unexpected_fault_mid_drain_leaves_unvisited_entries_on_the_watch_list(
     monkeypatch.setattr("app.assets.scanner.seed_asset_specs", seed_or_explode)
 
     with pytest.raises(MemoryError, match="^forced unrecoverable fault$"):
-        tick_watch_list(session)
+        tick_watch_list()
 
-    assert [entry.path for entry in _WATCH_LIST] == [str(paths[2])]
+    assert [entry.path for entry in _WATCH_LIST] == [str(paths[1]), str(paths[2])]
 
 
 def test_stable_scan_admission_removes_watch_entry_before_next_tick(session, temp_dir: Path, monkeypatch):
@@ -337,10 +337,10 @@ def test_watch_list_interrupts_between_entries(temp_dir: Path, monkeypatch):
     interrupted = threading.Event()
     inserted: list[str] = []
 
-    def record_insert(specs, _tags) -> int:
+    def record_insert(specs, _tags) -> tuple[int, Exception | None]:
         inserted.append(specs[0]["abs_path"])
         interrupted.set()
-        return 1
+        return 1, None
 
     monkeypatch.setattr("app.assets.scanner.insert_asset_specs", record_insert)
     monkeypatch.setattr(
