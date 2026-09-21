@@ -336,6 +336,8 @@ class ImageAddNoise(IO.ComfyNode):
     def execute(cls, image, seed, strength) -> IO.NodeOutput:
         generator = torch.manual_seed(seed)
         s = torch.clip((image + strength * torch.randn(image.size(), generator=generator, device="cpu").to(image)), min=0.0, max=1.0)
+        if image.shape[-1] == 4:  # alpha stores transparency, not color
+            s[..., 3] = image[..., 3]
         return IO.NodeOutput(s)
 
     repeat = execute  # TODO: remove
