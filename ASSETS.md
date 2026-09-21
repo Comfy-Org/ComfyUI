@@ -4,6 +4,15 @@ Docker Compose 会挂载仓库根目录下的 `custom_nodes/` 和 `models/`，�
 
 ## 自定义节点
 
+### 2026-09-21 更新记录
+
+- 本次仅更新自定义节点，未更新 ComfyUI 主程序；16 个扩展应用了更新，另外 21 个 Git 仓库已与上游一致。
+- `ComfyUI-LTXVideo` 更新到兼容提交 `15d09ab`。最新提交 `dfb2786` 依赖当前核心尚未提供的 `LTXVAddLatentGuide`，暂不采用；升级核心后再检查该扩展。
+- `sd-ppp-2.0` 从官方 v2.0 安装包更新到 `d965457`，目录现保留 Git 元数据，可直接检查后续更新。
+- `ComfyUI-SOS-RigTools`、`ComfyUI-anima-pose-control`、`anima_control_lora` 没有明确的独立 GitHub 来源，保留本地版本。
+- 本地补丁和配置已保留。重启后节点数量从 3,220 增至 3,268，原节点无缺失；CPU 图像缩放工作流和 64×64 PNG 输出验证通过。
+- 原提交、源码备份、依赖版本及详细报告位于 `/tmp/comfy-nodes-update-20260921/`；这是临时回退资料，清理该目录前应另行保存。
+
 ### 可独立安装的扩展
 
 | 扩展 | 来源 |
