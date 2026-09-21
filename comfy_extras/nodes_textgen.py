@@ -41,6 +41,7 @@ class TextGenerate(io.ComfyNode):
                 io.Boolean.Input("thinking", optional=True, default=False, tooltip="Operate in thinking mode if the model supports it."),
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
                 io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth; 2-5 pins it. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
+                io.String.Input("system_prompt", force_input=True, optional=True, tooltip="Replaces the system prompt in the model's chat template. Ignored when the default template is not used."),
             ],
             outputs=[
                 io.String.Output(display_name="generated_text"),
@@ -48,11 +49,11 @@ class TextGenerate(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto") -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="") -> io.NodeOutput:
 
         mtp = False if mtp == "off" else (True if mtp == "auto" else int(mtp))
 
-        tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio)
+        tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio, system_prompt=system_prompt)
 
         # Get sampling parameters from dynamic combo
         do_sample = sampling_mode.get("sampling_mode") == "on"
@@ -229,17 +230,17 @@ class TextGenerateLTX2Prompt(TextGenerate):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto") -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="") -> io.NodeOutput:
         # Gemma 3 and Gemma 4 use different chat-turn markers and image tokens.
         # The Gemma 4 text encoder is the LTX 2.4 path; Gemma 3 is LTX 2.0.
         is_gemma4 = "gemma4" in getattr(clip.tokenizer, "clip_name", "")
 
         if is_gemma4:
             if image is not None:
-                system = LTX24_I2V_SYSTEM_PROMPT.strip()
+                system = system_prompt.strip() or LTX24_I2V_SYSTEM_PROMPT.strip()
                 user_text = f"User Raw Input Prompt: {prompt}."
             else:
-                system = LTX24_T2V_SYSTEM_PROMPT.strip()
+                system = system_prompt.strip() or LTX24_T2V_SYSTEM_PROMPT.strip()
                 user_text = f"user prompt: {prompt}"
             think_prefix = "<|think|>\n" if thinking else ""
             model_open = "" if thinking else "<|channel>final\n"
@@ -250,7 +251,7 @@ class TextGenerateLTX2Prompt(TextGenerate):
                 f"<|turn>model\n{model_open}"
             )
         else:
-            system = (LTX2_I2V_SYSTEM_PROMPT if image is not None else LTX2_T2V_SYSTEM_PROMPT).strip()
+            system = system_prompt.strip() or (LTX2_I2V_SYSTEM_PROMPT if image is not None else LTX2_T2V_SYSTEM_PROMPT).strip()
             media = "\n<image_soft_token>\n" if image is not None else ""
             formatted_prompt = (
                 f"<start_of_turn>system\n{system}<end_of_turn>\n"
