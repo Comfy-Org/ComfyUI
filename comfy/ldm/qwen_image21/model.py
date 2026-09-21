@@ -169,8 +169,22 @@ def block_causal_attention(segments, transformer_options={}, cache=None, block_i
         if cache is not None:
             # K and V stacked on dim 1 so batch stays first and quantized rows are per token and head
             cache.put(block_index, torch.stack([k[:, :prefix_len], v[:, :prefix_len]], dim=1))
-        outs = [optimized_attention(q[:, start:end].flatten(2), k[:, :end].flatten(2), v[:, :end].flatten(2), heads, mask=mask, transformer_options=transformer_options, preferred_attention=preferred_attention)
-                for start, end, mask in segments]
+        outs = []
+        for start, end, mask in segments:
+            # Avoid the 4096-token query path, which produces corrupted output for 64x64 reference grids.
+            for query_start in range(start, end, 2048):
+                query_end = min(query_start + 2048, end)
+                query_mask = None if mask is None else mask[query_start - start:query_end - start, :query_end]
+                key_end = end if mask is None else query_end
+                outs.append(optimized_attention(
+                    q[:, query_start:query_end].flatten(2),
+                    k[:, :key_end].flatten(2),
+                    v[:, :key_end].flatten(2),
+                    heads,
+                    mask=query_mask,
+                    transformer_options=transformer_options,
+                    preferred_attention=preferred_attention,
+                ))
         return torch.cat(outs, dim=1) if len(outs) > 1 else outs[0]
     return attn
 
