@@ -1,12 +1,13 @@
-from contextlib import contextmanager
 from datetime import datetime
+import sqlite3
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session as SASession
 
+import app.database.db as db_mod
 import app.assets.database.queries.records as records_module
 import app.assets.services.asset_management as asset_management_module
 import app.assets.services.tagging as tagging_module
@@ -69,21 +70,20 @@ def test_apply_tags_loses_a_tag_race_without_raising_and_reports_it_honestly(tmp
 
     fired: list[bool] = []
 
-    @contextmanager
-    def racing_session_factory():
-        with SASession(engine) as session_b:
-            real_add = session_b.add
+    def racing_write_session():
+        session_b = SASession(engine)
+        real_add = session_b.add
 
-            def add_racing_the_winner(instance, *args, **kwargs):
-                if isinstance(instance, Tag) and instance.name == RACED and not fired:
-                    fired.append(True)
-                    connection_a_commits_the_raced_tag()
-                return real_add(instance, *args, **kwargs)
+        def add_racing_the_winner(instance, *args, **kwargs):
+            if isinstance(instance, Tag) and instance.name == RACED and not fired:
+                fired.append(True)
+                connection_a_commits_the_raced_tag()
+            return real_add(instance, *args, **kwargs)
 
-            session_b.add = add_racing_the_winner
-            yield session_b
+        session_b.add = add_racing_the_winner
+        return session_b
 
-    with patch("app.assets.services.tagging.create_session", racing_session_factory):
+    with patch("app.database.db.WriteSession", racing_write_session):
         result = apply_tags(record_id, [RACED])
 
     assert fired, "the interleave never fired; the test proves nothing"
@@ -101,6 +101,35 @@ def test_apply_tags_loses_a_tag_race_without_raising_and_reports_it_honestly(tmp
         assert _updated_at(check, record_id) == STALE, (
             "a race loser changed no link, so it is not an edit and must not move updated_at"
         )
+
+
+def test_apply_tags_retries_a_transient_locked_write(session, mock_create_session, monkeypatch):
+    record_id = _seed_record(session, "/tmp/tag-retry-fixture")
+    attempts = 0
+    real_run_write_txn = db_mod.run_write_txn
+
+    def retry_after_first_attempt(work):
+        def flaky_work(writer_session):
+            nonlocal attempts
+
+            attempts += 1
+            if attempts == 1:
+                raise OperationalError(
+                    "INSERT", {}, sqlite3.OperationalError("database is locked")
+                )
+            return work(writer_session)
+
+        return real_run_write_txn(flaky_work)
+
+    monkeypatch.setattr(tagging_module, "run_write_txn", retry_after_first_attempt)
+    monkeypatch.setattr(db_mod.time, "sleep", lambda _seconds: None)
+
+    result = apply_tags(record_id, ["retriable"])
+
+    assert attempts == 2
+    assert result.added == ["retriable"]
+    assert result.total_tags == ["retriable"]
+    assert _tag_names(session, record_id) == ["retriable"]
 
 
 def test_ensure_tag_link_reraises_when_the_parent_asset_is_missing(db_engine_fk):

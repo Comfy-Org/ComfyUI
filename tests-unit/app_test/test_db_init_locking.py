@@ -118,7 +118,20 @@ def test_setup_database_routes_file_lock_to_lock_guidance(monkeypatch, caplog):
     assert "Failed to initialize database." not in caplog.text
 
 
-def test_setup_database_exits_for_file_lock_when_assets_are_enabled(monkeypatch, caplog):
+class _RecordingManager:
+    """Stands in for AssetsEnabled so a degrade can be observed without a database."""
+
+    def __init__(self) -> None:
+        self.disabled_with: BaseException | None = None
+
+    def startup(self) -> None:
+        return
+
+    def disable(self, exc: BaseException) -> None:
+        self.disabled_with = exc
+
+
+def test_setup_database_disables_assets_for_file_lock_instead_of_exiting(monkeypatch, caplog):
     monkeypatch.setattr(main, "dependencies_available", lambda: True)
 
     def _raise_file_lock():
@@ -130,16 +143,19 @@ def test_setup_database_exits_for_file_lock_when_assets_are_enabled(monkeypatch,
 
     monkeypatch.setattr(main, "init_db", _raise_file_lock)
     monkeypatch.setattr(main.args, "enable_assets", True)
+    manager = _RecordingManager()
 
-    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as error:
-        main.setup_database(None)
+    with caplog.at_level(logging.ERROR):
+        main.setup_database(manager)
 
-    assert error.value.code == 1
+    assert isinstance(manager.disabled_with, RuntimeError), (
+        "a locked database must degrade to assets-off, not stop ComfyUI booting"
+    )
     assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
-    assert "The --enable-assets flag requires a working database connection." not in caplog.text
+    assert "Starting with assets disabled" in caplog.text
 
 
-def test_setup_database_exits_for_driver_lock_when_assets_are_disabled(monkeypatch, caplog):
+def test_setup_database_continues_for_driver_lock_when_assets_are_disabled(monkeypatch, caplog):
     monkeypatch.setattr(main, "dependencies_available", lambda: True)
 
     def _raise_driver_lock():
@@ -148,8 +164,32 @@ def test_setup_database_exits_for_driver_lock_when_assets_are_disabled(monkeypat
     monkeypatch.setattr(main, "init_db", _raise_driver_lock)
     monkeypatch.setattr(main.args, "enable_assets", False)
 
-    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as error:
+    with caplog.at_level(logging.ERROR):
         main.setup_database(None)
 
-    assert error.value.code == 1
     assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
+
+
+def test_setup_database_gives_wal_its_own_guidance_and_never_suggests_memory(monkeypatch, caplog):
+    monkeypatch.setattr(main, "dependencies_available", lambda: True)
+
+    def _raise_wal():
+        raise main.WalUnavailableError(
+            "SQLite WAL could not be enabled for database '/mnt/nas/comfy.db'. "
+            "SQLite WAL is not supported on network filesystems."
+        )
+
+    monkeypatch.setattr(main, "init_db", _raise_wal)
+    monkeypatch.setattr(main.args, "enable_assets", True)
+    manager = _RecordingManager()
+
+    with caplog.at_level(logging.ERROR):
+        main.setup_database(manager)
+
+    assert ":memory:" not in caplog.text, (
+        "an in-memory database silently discards the whole asset catalogue on restart; "
+        "it must never be offered as a remedy for a network filesystem"
+    )
+    assert "keep the database on a local disk" in caplog.text
+    assert "pip install -r requirements.txt" not in caplog.text
+    assert isinstance(manager.disabled_with, main.WalUnavailableError)

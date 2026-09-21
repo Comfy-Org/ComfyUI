@@ -21,7 +21,7 @@ def test_absent_row_off_mode_no_transition(session):
 def test_empty_drain_keeps_off_mode_ready_for_a_later_on_transition(session):
     write_stored_mode(session, "off")
 
-    drain_transition_queue(session)
+    drain_transition_queue()
 
     with patch("app.assets.services.hash_mode_state._mode.hashing_enabled", return_value=True):
         assert record_transition_intent(session) == "off_to_on"

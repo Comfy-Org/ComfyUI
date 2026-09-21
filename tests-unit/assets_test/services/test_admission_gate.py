@@ -1,4 +1,5 @@
 import os
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
@@ -88,7 +89,7 @@ def test_never_stabilizes_dropped_after_cap(session, temp_dir: Path):
         target_ns = max(path.stat().st_mtime_ns, previous_target_ns) + 1_000_000
         os.utime(path, ns=(target_ns, target_ns))
         previous_target_ns = target_ns
-        tick_watch_list(session)
+        tick_watch_list()
 
     assert _WATCH_LIST == []
     assert session.scalars(select(AssetContent)).all() == []
@@ -111,7 +112,7 @@ def test_stable_scan_admission_removes_watch_entry_before_next_tick(session, tem
         ),
         patch("app.assets.scanner.seed_asset_specs") as seed_asset_specs,
     ):
-        tick_watch_list(session)
+        tick_watch_list()
 
     assert admitted == [str(path)]
     assert watched == []
@@ -168,3 +169,34 @@ def test_nonempty_candidate_batch_still_pays_stability_gap(temp_dir: Path, monke
     assert sleeps == [0.1]
     assert admitted == [str(path)]
     assert watched == []
+
+
+def test_watch_list_interrupts_between_entries(temp_dir: Path, monkeypatch):
+    paths = [temp_dir / f"watched-{index}.bin" for index in range(3)]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
+    interrupted = threading.Event()
+    inserted: list[str] = []
+
+    def record_insert(specs, _tags) -> int:
+        inserted.append(specs[0]["abs_path"])
+        interrupted.set()
+        return 1
+
+    monkeypatch.setattr("app.assets.scanner.insert_asset_specs", record_insert)
+    monkeypatch.setattr(
+        scanner_admission,
+        "get_name_and_tags_from_asset_path",
+        lambda path: (Path(path).name, []),
+    )
+    monkeypatch.setattr(
+        scanner_admission,
+        "compute_loader_path",
+        lambda path: Path(path).name,
+    )
+
+    tick_watch_list(interrupt_check=interrupted.is_set)
+
+    assert inserted == [str(paths[0])]
+    assert [entry.path for entry in _WATCH_LIST] == [str(path) for path in paths[1:]]

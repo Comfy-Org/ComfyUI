@@ -8,10 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.assets import scanner
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries import create_content, create_record, delete_record
-from app.assets.scanner import SeedAssetSpec, seed_asset_specs
+from app.assets.scanner import SeedAssetSpec, seed_asset_specs, stat_seed_specs
 from app.assets.services.snapshot_hash import snapshot_hash
+
+from .conftest import seed_with_recovery
 
 
 def _spec(path: Path) -> SeedAssetSpec:
@@ -46,7 +49,7 @@ def test_seed_persists_remaining_specs_when_path_vanishes_before_restat(
     specs, vanished_path = _specs_with_vanished_path(temp_dir)
     vanished_path.unlink()
 
-    created = seed_asset_specs(session, specs)
+    created = seed_asset_specs(session, specs, stat_seed_specs(specs))
     session.commit()
 
     assert created == 2
@@ -67,7 +70,7 @@ def test_seed_persists_remaining_specs_when_path_vanishes_during_recovery_hash(
     monkeypatch.setattr("app.assets.scanner_changes.snapshot_hash", _hash_or_raise)
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, specs)
+        created, _ = seed_with_recovery(session, specs)
     session.commit()
 
     assert created == 2
@@ -89,8 +92,14 @@ def _delete_during_recovery(monkeypatch: pytest.MonkeyPatch, path: Path) -> None
 
 
 @pytest.mark.parametrize(
-    "delete_path",
-    [_delete_before_restat, _delete_during_recovery],
+    ("delete_path", "expected_message"),
+    [
+        (_delete_before_restat, "Skipping vanished asset during scan: {path}"),
+        (
+            _delete_during_recovery,
+            "Skipping asset whose recovery hash could not be prepared during scan: {path}",
+        ),
+    ],
     ids=["before-restat", "during-recovery"],
 )
 def test_seed_logs_once_for_each_vanished_path(
@@ -99,12 +108,13 @@ def test_seed_logs_once_for_each_vanished_path(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     delete_path: Callable[[pytest.MonkeyPatch, Path], None],
+    expected_message: str,
 ) -> None:
     specs, vanished_path = _specs_with_vanished_path(temp_dir)
     delete_path(monkeypatch, vanished_path)
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        _ = seed_asset_specs(session, specs)
+        _ = seed_with_recovery(session, specs)
     session.commit()
 
     messages = [
@@ -112,7 +122,7 @@ def test_seed_logs_once_for_each_vanished_path(
         for record in caplog.records
         if str(vanished_path) in record.getMessage()
     ]
-    assert messages == [f"Skipping vanished asset during scan: {vanished_path}"]
+    assert messages == [expected_message.format(path=vanished_path)]
 
 
 def test_seed_isolates_a_poisoned_spec_and_persists_the_specs_around_it(
@@ -144,7 +154,7 @@ def test_seed_isolates_a_poisoned_spec_and_persists_the_specs_around_it(
 
     monkeypatch.setattr("app.assets.scanner.create_record", _create_record_or_raise)
 
-    created = seed_asset_specs(session, specs)
+    created = seed_asset_specs(session, specs, stat_seed_specs(specs))
     session.commit()
 
     assert created == 2
@@ -170,7 +180,7 @@ def test_seed_persists_fresh_stat_after_spec_was_built(
     os.utime(path, ns=(fresh_mtime_ns, fresh_mtime_ns))
     fresh_stat = path.stat()
 
-    created = seed_asset_specs(session, [spec])
+    created = seed_asset_specs(session, [spec], stat_seed_specs([spec]))
     session.commit()
 
     persisted = session.scalar(
@@ -208,7 +218,43 @@ def test_seed_record_failure_preserves_retained_live_content(
     monkeypatch.setattr("app.assets.scanner.create_record", _raise_record_creation)
 
     with pytest.raises(RuntimeError, match="forced record creation failure"):
-        seed_asset_specs(session, [spec])
+        seed_asset_specs(session, [spec], stat_seed_specs([spec]))
     session.rollback()
 
     assert session.get(AssetContent, retained_content_id) is not None
+
+
+def test_seed_takes_every_stat_before_the_write_transaction(
+    session: Session, temp_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    specs, _ = _specs_with_vanished_path(temp_dir)
+
+    inside_write_txn = False
+    stats_under_the_lock: list[str] = []
+    real_stat = scanner.os.stat
+    real_run_write_txn = scanner.run_write_txn
+
+    def _recording_stat(target, *args, **kwargs):
+        if inside_write_txn:
+            stats_under_the_lock.append(str(target))
+        return real_stat(target, *args, **kwargs)
+
+    def _flagged_run_write_txn(work):
+        nonlocal inside_write_txn
+        inside_write_txn = True
+        try:
+            return real_run_write_txn(work)
+        finally:
+            inside_write_txn = False
+
+    monkeypatch.setattr(scanner, "run_write_txn", _flagged_run_write_txn)
+    monkeypatch.setattr(scanner.os, "stat", _recording_stat)
+
+    with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
+        created = scanner.insert_asset_specs(specs, set())
+
+    assert created == 3
+    assert stats_under_the_lock == [], (
+        "seeding must run on stats taken before the writer lock; a stat under the lock "
+        "lets one slow filesystem hold every other writer out of the database"
+    )

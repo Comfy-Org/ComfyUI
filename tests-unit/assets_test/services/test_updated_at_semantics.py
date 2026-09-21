@@ -15,7 +15,6 @@ from app.assets.database.queries.records import (
     unset_content_missing,
 )
 from app.assets.helpers import to_stored_hash
-from app.assets.scanner import enrich_asset
 from app.assets.scanner_changes import split_content
 from app.assets.services.asset_management import (
     resolve_asset_for_download,
@@ -23,6 +22,8 @@ from app.assets.services.asset_management import (
     update_asset_metadata,
 )
 from app.assets.services.tagging import apply_tags, remove_tags
+
+from ..helpers import enrich_via_prepare_apply
 
 STALE = datetime(2020, 1, 1, 0, 0, 0)
 
@@ -206,8 +207,12 @@ def test_scanner_enrichment_does_not_move_updated_at(session, temp_dir):
     path = _write_file(temp_dir, "enrich.png", payload=b"\x89PNG\r\n\x1a\n" + b"0" * 64)
     record = _seed_scannable_record(session, path, name="enrich.png")
 
-    assert enrich_asset(
-        session, path, record.content_id, record.id, extract_metadata=True
+    assert enrich_via_prepare_apply(
+        session,
+        file_path=path,
+        content_id=record.content_id,
+        record_id=record.id,
+        extract_metadata=True,
     ), "fixture must actually enrich"
 
     assert session.get(Asset, record.id).mime_type is not None, (
