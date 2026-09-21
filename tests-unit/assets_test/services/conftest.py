@@ -15,7 +15,7 @@ from app.assets.scanner_changes import PreparedRecovery, prepare_missing_content
 
 def seed_with_recovery(
     session: Session, specs: list[SeedAssetSpec]
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[str], Exception | None]:
     """Seed the way insert_asset_specs does, minus its write transaction.
 
     Recovery reads the stat and the hash taken before the transaction opened, so a
@@ -33,8 +33,8 @@ def seed_with_recovery(
             except OSError:
                 prepared[path] = None
     pending: list[str] = []
-    created = seed_asset_specs(session, specs, stats, prepared, pending)
-    return created, pending
+    created, error = seed_asset_specs(session, specs, stats, prepared, pending)
+    return created, pending, error
 
 
 @pytest.fixture(autouse=True)

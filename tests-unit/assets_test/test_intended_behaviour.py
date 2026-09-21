@@ -114,7 +114,10 @@ def _scan_pass(session, root: Path) -> int:
     specs, _tag_pool, _skipped = build_asset_specs(
         list_files_recursively(str(root)), survivors or set()
     )
-    return seed_asset_specs(session, specs, stat_seed_specs(specs))
+    created, error = seed_asset_specs(session, specs, stat_seed_specs(specs))
+    if error is not None:
+        raise error
+    return created
 
 
 @contextmanager

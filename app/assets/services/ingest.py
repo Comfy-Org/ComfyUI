@@ -136,10 +136,11 @@ _UPLOAD_HASH_ATTEMPTS = 3
 
 
 def _remove_temp_path(temp_path: str | None) -> None:
-    if not temp_path or not os.path.exists(temp_path):
+    if not temp_path:
         return
     with contextlib.suppress(OSError):
-        os.remove(temp_path)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
     parent = os.path.dirname(temp_path)
     with contextlib.suppress(OSError):
         if parent and os.path.isdir(parent):
@@ -750,11 +751,18 @@ def upload_from_temp_path(
         _remove_temp_path(temp_path)
         raise ValueError("tags are required for new asset uploads")
 
-    dest_abs = _hash_mode_dest_path(tags, digest, client_filename, name)
-    content_type = _guess_upload_mime_type(
-        mime_type, client_filename, name, os.path.basename(dest_abs)
-    )
-    published_stat = _move_temp_to_dest(temp_path, dest_abs)
+    try:
+        dest_abs = _hash_mode_dest_path(tags, digest, client_filename, name)
+        content_type = _guess_upload_mime_type(
+            mime_type, client_filename, name, os.path.basename(dest_abs)
+        )
+        published_stat = _move_temp_to_dest(temp_path, dest_abs)
+    finally:
+        # Every other exit above removes the temp explicitly; this covers the
+        # destination-path, mime and publish steps, which can fail after the
+        # last of those. A successful publish already consumed the temp, and
+        # _remove_temp_path is a no-op on a path that is gone.
+        _remove_temp_path(temp_path)
     return _create_content_and_upload_record(
         stored_hash,
         dest_abs,

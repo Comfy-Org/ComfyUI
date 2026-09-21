@@ -2,9 +2,10 @@
 paths, building specs, seeding new content and records, then enriching them
 with metadata and hashes. Each spec is seeded inside its own savepoint, so one
 file whose row conflicts cannot discard the work done for the files around it.
-Enrichment counts as progress only when it produced what was asked of it — a
-requested hash that could not be computed is no progress, which is what bounds
-a pass over a file the server cannot read.
+Enrichment candidates use ordered ID pagination, so each row is attempted at
+most once per pass while failed rows remain eligible for the next pass. A pause
+can end a batch early, and the cursor holds at the last row the batch attempted,
+so the rows it never reached are selected again when the scan resumes.
 """
 
 import logging
@@ -21,6 +22,7 @@ from app.assets import mode
 from app.assets.event_log import emit, error_type
 from app.assets.database.queries import (
     create_content_reporting_insert,
+    is_live_path_conflict,
     mark_content_missing,
     create_record,
 )
@@ -54,7 +56,6 @@ from app.assets.services.path_utils import (
     get_comfy_models_folders,
     get_name_and_tags_from_asset_path,
 )
-from app.assets.services.ingest import _discard_unreferenced_content
 from app.assets.services.snapshot_hash import snapshot_hash
 from app.database.db import create_session, run_write_txn
 
@@ -384,11 +385,12 @@ def sync_temp_references_safely(
 
 def mark_missing_outside_prefixes_safely(
     prefixes: list[str], interrupt_check: Callable[[], bool] | None = None
-) -> int:
+) -> int | None:
     """Mark references as missing when outside the given prefixes.
 
-    This is a non-destructive soft-delete. Returns the count committed before completion,
-    interruption, or failure.
+    This is a non-destructive soft-delete. Returns the count committed before
+    completion or interruption, or None when the prune failed having committed
+    nothing — so a caller can tell a failure apart from a prune with no work.
     """
     marked_so_far = 0
     try:
@@ -427,7 +429,9 @@ def mark_missing_outside_prefixes_safely(
             "scanner.mark_missing_failed",
             error_type=error_type(exc),
         )
-        return marked_so_far
+        # A partial count is real committed work; only a prune that landed
+        # nothing reports None, so the caller never claims count=0 for a failure.
+        return marked_so_far if marked_so_far else None
 
 
 def collect_paths_for_roots(roots: tuple[RootType, ...]) -> list[str]:
@@ -537,9 +541,14 @@ def seed_asset_specs(
     stats: dict[str, os.stat_result | None],
     prepared_recoveries: dict[str, PreparedRecovery | None] | None = None,
     pending_recovery_paths: list[str] | None = None,
-) -> int:
+) -> tuple[int, Exception | None]:
     created = 0
     created_content_ids: list[str] = []
+    first_error: Exception | None = None
+    # Counted, not gated through _ScanProgress.mark_emitted like its neighbours, because this
+    # function takes no progress object. Ungated, a restored archive of pre-epoch mtimes puts
+    # one event per file into the closed-vocabulary stream.
+    invalid_mtimes = 0
     try:
         for spec in specs:
             path = os.path.abspath(spec["abs_path"])
@@ -548,6 +557,12 @@ def seed_asset_specs(
                     stat_result = stats.get(path)
                     if stat_result is None:
                         logging.warning("Skipping vanished asset during scan: %s", path)
+                        continue
+                    if get_mtime_ns(stat_result) < 0:
+                        logging.warning(
+                            "Skipping asset with invalid mtime during scan: %s", path
+                        )
+                        invalid_mtimes += 1
                         continue
                     if prepared_recoveries is not None and mode.hashing_enabled():
                         prepared = prepared_recoveries.get(path)
@@ -593,20 +608,39 @@ def seed_asset_specs(
                         tags=spec["tags"],
                     )
                     created += 1
-            except IntegrityError:
-                logging.warning("Skipping asset whose row conflicts during scan: %s", path)
-                continue
+            except IntegrityError as error:
+                if is_live_path_conflict(error):
+                    logging.warning(
+                        "Skipping asset whose row conflicts during scan: %s", path
+                    )
+                    continue
+                if first_error is None:
+                    first_error = error
+            except MemoryError:
+                # Deferring this one would keep allocating for every remaining spec
+                # while the process is already out of memory.
+                raise
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
     except Exception:
+        # Only a fault the per-spec handlers refuse to absorb reaches here, and it
+        # takes the enclosing write transaction with it, so the content rows this
+        # batch inserted are compensated before it propagates.
         session.rollback()
         for content_id in created_content_ids:
             _discard_unreferenced_content(session, content_id)
         raise
-    return created
+    if invalid_mtimes:
+        emit("scanner.invalid_mtime", count=invalid_mtimes)
+    return created, first_error
 
 
-def insert_asset_specs(specs: list[SeedAssetSpec], _tag_pool: set[str]) -> int:
+def insert_asset_specs(
+    specs: list[SeedAssetSpec], _tag_pool: set[str]
+) -> tuple[int, Exception | None]:
     if not specs:
-        return 0
+        return 0, None
     stats = stat_seed_specs(specs)
     prepared_recoveries: dict[str, PreparedRecovery | None] = {}
     if mode.hashing_enabled():
@@ -619,25 +653,79 @@ def insert_asset_specs(specs: list[SeedAssetSpec], _tag_pool: set[str]) -> int:
             except OSError:
                 prepared_recoveries[path] = None
 
+    # run_write_txn owns the commit, so the batch fault has to leave the callback
+    # out of band for the commit-failure path below to still be able to report it.
+    batch_fault: Exception | None = None
+
     def _work(sess: Session) -> tuple[int, list[str]]:
+        nonlocal batch_fault
         pending_recovery_paths: list[str] = []
-        created = seed_asset_specs(
+        created, first_error = seed_asset_specs(
             sess,
             specs,
             stats,
             prepared_recoveries,
             pending_recovery_paths,
         )
+        # A locked write is retried on a fresh session, so a fault recorded by an
+        # attempt whose work was discarded must not outlive that attempt.
+        batch_fault = first_error
         return created, pending_recovery_paths
 
-    created, _ = run_write_txn(_work)
-    return created
+    try:
+        created, _ = run_write_txn(_work)
+    except Exception:
+        if batch_fault is None:
+            raise
+        logging.exception("Failed to commit successful specs from failed asset batch")
+        return 0, batch_fault
+    return created, batch_fault
+
+
+def build_unenriched_candidates_statement(
+    prefixes: list[str],
+    compute_hashes: bool,
+    last_seen_id: str | None,
+    limit: int = 1000,
+) -> sa.Select[tuple[str, str, str, bool, int, int | None]]:
+    query = (
+        sa.select(
+            AssetContent.id,
+            Asset.id,
+            AssetContent.path,
+            AssetContent.hash.is_(None).label("needs_hash"),
+            AssetContent.size_bytes,
+            AssetContent.mtime_ns,
+        )
+        .join(Asset, Asset.content_id == AssetContent.id)
+        .where(AssetContent.is_missing.is_(False))
+    )
+    if compute_hashes:
+        query = query.where(
+            sa.or_(
+                AssetContent.hash.is_(None),
+                Asset.system_metadata.is_(None),
+            )
+        )
+    else:
+        query = query.where(Asset.system_metadata.is_(None))
+    if last_seen_id is not None:
+        query = query.where(Asset.id > last_seen_id)
+    return (
+        query.where(
+            sa.or_(*(sql_path_under_prefix(AssetContent.path, p) for p in prefixes))
+        )
+        .order_by(Asset.id.asc())
+        .limit(limit)
+    )
+
 
 
 def get_unenriched_assets_for_roots(
     roots: tuple[RootType, ...],
     compute_hashes: bool,
     limit: int = 1000,
+    last_seen_id: str | None = None,
 ) -> list[UnenrichedContent]:
     prefixes: list[str] = []
     for root in roots:
@@ -646,34 +734,14 @@ def get_unenriched_assets_for_roots(
     if not prefixes:
         return []
 
+    query = build_unenriched_candidates_statement(
+        prefixes,
+        compute_hashes,
+        last_seen_id,
+        limit,
+    )
     with create_session() as sess:
-        query = (
-            sa.select(
-                AssetContent.id,
-                Asset.id,
-                AssetContent.path,
-                AssetContent.hash.is_(None).label("needs_hash"),
-                AssetContent.size_bytes,
-                AssetContent.mtime_ns,
-            )
-            .join(Asset, Asset.content_id == AssetContent.id)
-            .where(AssetContent.is_missing.is_(False))
-        )
-        if compute_hashes:
-            query = query.where(
-                sa.or_(
-                    AssetContent.hash.is_(None),
-                    Asset.system_metadata.is_(None),
-                )
-            )
-        else:
-            query = query.where(Asset.system_metadata.is_(None))
-        query = query.where(
-            sa.or_(
-                *(sql_path_under_prefix(AssetContent.path, p) for p in prefixes)
-            )
-        )
-        rows = sess.execute(query.order_by(Asset.id).limit(limit)).all()
+        rows = sess.execute(query).all()
 
     return [
         UnenrichedContent(
@@ -755,7 +823,9 @@ def _prepare_enrichment(
             if isinstance(exc, OSError):
                 _log_scan_error("hashing", exc)
             else:
-                logging.warning("Failed to hash %s: %s", row.file_path, exc)
+                logging.warning(
+                    "Failed to hash %s: %s", row.file_path, exc, exc_info=True
+                )
     return _PreparedEnrichment(
         row,
         stat_result,
@@ -811,14 +881,20 @@ def enrich_assets_batch(
     compute_hash: bool = False,
     interrupt_check: Callable[[], bool] | None = None,
     progress: _ScanProgress | None = None,
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[str], int]:
     """Prepares up to MAX_WRITE_BATCH rows on the scanner thread (stat, metadata,
     optional hash), then applies them in one write transaction with a per-row
     compare-and-set on the stored size/mtime; stale rows are skipped and left for
     the next sync.
+
+    Returns:
+        Tuple of (enriched_count, failed_reference_ids, consumed_count) — the
+        consumed count is what the caller advances its id cursor by, so a batch
+        that ends early never strands the rows it did not reach.
     """
     enriched = 0
     failed_ids: list[str] = []
+    consumed = 0
 
     for index in range(0, len(rows), MAX_WRITE_BATCH):
         prepared_list: list[_PreparedEnrichment] = []
@@ -827,6 +903,8 @@ def enrich_assets_batch(
             if interrupt_check is not None and interrupt_check():
                 interrupted = True
                 break
+            consumed += 1
+
             try:
                 prepared = _prepare_enrichment(
                     row, extract_metadata, compute_hash, progress
@@ -872,4 +950,4 @@ def enrich_assets_batch(
         if interrupted:
             break
 
-    return enriched, failed_ids
+    return enriched, failed_ids, consumed
