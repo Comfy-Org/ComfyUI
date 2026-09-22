@@ -341,7 +341,7 @@ class ModelPatcher:
     def __init__(self, model, load_device, offload_device, size=0, weight_inplace_update=False, fast_disk=False):
         self.size = size
         self.model = model
-        self.fast_disk = not comfy.model_management.args.disable_fast_disk and bool(comfy.model_management.args.fast_disk or fast_disk)
+        self.fast_disk = fast_disk
         if not hasattr(self.model, 'device'):
             logging.debug("Model doesn't have a device attribute.")
             self.model.device = offload_device
