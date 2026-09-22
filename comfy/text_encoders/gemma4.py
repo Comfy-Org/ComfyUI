@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-import torchaudio.functional as AF
+import comfy.audio
 import torchvision.transforms.functional as TVF
 import numpy as np
 from tokenizers import Tokenizer
@@ -1412,14 +1412,14 @@ class Gemma4_Tokenizer():
     @staticmethod
     def _resample_16k(waveform, sample_rate):
         """Mix to mono and resample to 16kHz. Kaiser params reproduce the reference (transformers
-        load_audio -> librosa/soxr_hq) to ~1e-12 MSE using only torchaudio."""
+        load_audio -> librosa/soxr_hq) to ~1e-12 MSE using sinc resampling."""
         if waveform.dim() > 1 and waveform.shape[0] > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
         if waveform.dim() == 1:
             waveform = waveform.unsqueeze(0)
         audio = waveform.float()
         if sample_rate != 16000:
-            audio = AF.resample(audio, sample_rate, 16000, resampling_method="sinc_interp_kaiser",
+            audio = comfy.audio.resample(audio, sample_rate, 16000, resampling_method="sinc_interp_kaiser",
                                 lowpass_filter_width=121, rolloff=0.9568384289091556, beta=21.01531462440614)
         return audio.squeeze(0).contiguous()
 
