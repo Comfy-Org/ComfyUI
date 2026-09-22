@@ -1,9 +1,8 @@
-"""Windows C API for charlie12345/ROCmFPX c49ebdbd5c9f.
+"""Windows C API for charlie12345/ROCmFPX 3fca7f4bb.
 
-These ctypes layouts require DLLs from one build of that revision or its
-headless extension (902fcc4d6). GGML's
-commit is not an ABI version for llama; do not mix DLLs from other builds. MiniMax also
-requires the qwen3vl.hidden_states_only graph extension.
+This revision preserves the C ABI and includes Qwen3VL hidden-state output and
+the softmax reduction race fix. Older builds are unsupported. Use DLLs from
+one build: GGML's commit is not an ABI version for llama.
 """
 
 import ctypes as ct
@@ -120,8 +119,8 @@ class FpxSession:
             self.ggml = ct.CDLL(str(dll_directory / "ggml-base.dll"))
             bind(self.ggml, "ggml_version", ct.c_char_p)
             bind(self.ggml, "ggml_commit", ct.c_char_p)
-            if self.ggml.ggml_version() != b"0.11.1" or self.ggml.ggml_commit() not in (b"c49ebdbd5", b"902fcc4d6"):
-                raise RuntimeError("Use DLLs from one ROCmFPX c49ebdbd5 or 902fcc4d6 build")
+            if self.ggml.ggml_version() != b"0.11.1" or self.ggml.ggml_commit() != b"3fca7f4bb":
+                raise RuntimeError("Use ROCmFPX 3fca7f4bb DLLs with the softmax reduction fix")
             self.llama = ct.CDLL(str(dll_directory / "llama.dll"))
             self._bind_functions()
             self.llama.llama_backend_init()
