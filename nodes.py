@@ -2413,6 +2413,7 @@ async def init_builtin_extra_nodes():
         "nodes_model_merging.py",
         "nodes_tomesd.py",
         "nodes_clip_sdxl.py",
+        "nodes_rocmfpx.py",
         "nodes_canny.py",
         "nodes_freelunch.py",
         "nodes_custom_sampler.py",
