@@ -319,5 +319,7 @@ def create_session():
 
 def create_write_session():
     """A session whose transactions open with BEGIN IMMEDIATE. Do filesystem work before
-    using it: the write lock is held from the first statement until commit."""
+    using it: the write lock is held from the first statement until commit. Do not open
+    one inside another: the inner one waits out busy_timeout for the outer's lock, then
+    fails with "database is locked"."""
     return WriteSession()
