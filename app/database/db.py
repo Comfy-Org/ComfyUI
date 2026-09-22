@@ -109,8 +109,17 @@ def copy_legacy_default_db(db_path):
 
     if os.path.exists(legacy_db_path + "-wal"):
         # Fold committed WAL pages back into the file before it is renamed and copied.
-        with closing(sqlite3.connect(legacy_db_path)) as legacy:
-            legacy.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        try:
+            with closing(sqlite3.connect(legacy_db_path)) as legacy:
+                busy, _, _ = legacy.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except sqlite3.Error:
+            busy = 1
+        if busy:
+            logging.warning(
+                f"Not relocating legacy database '{legacy_db_path}': its WAL could not be "
+                f"checkpointed, so it may still be in use."
+            )
+            return
     os.replace(legacy_db_path, backup_path)
     shutil.copy(backup_path, db_path)
     logging.info(
@@ -131,6 +140,7 @@ def _backup_database(source_path, destination_path):
     with closing(sqlite3.connect(source_path)) as source:
         with closing(sqlite3.connect(destination_path)) as destination:
             source.backup(destination)
+    shutil.copymode(source_path, destination_path)
 
 
 _db_lock = None
