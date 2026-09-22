@@ -249,6 +249,20 @@ class TestMixedPrecisionOps(unittest.TestCase):
 
         self.assertNotIsInstance(model.layer1.weight, QuantizedTensor)
 
+    def test_empty_comfy_quant_marker_on_embedding_treated_as_unquantized(self):
+        """Same as above but for MixedPrecisionOps.Embedding._load_from_state_dict,
+        the actual path in the #16472 traceback (the token embedding table of an
+        int8_convrot text encoder stores an empty comfy_quant marker)."""
+        state_dict = {
+            "weight": torch.randn(50, 10, dtype=torch.bfloat16),
+            "comfy_quant": torch.tensor([], dtype=torch.uint8),
+        }
+
+        embedding = ops.mixed_precision_ops({}).Embedding(50, 10, device="cpu", dtype=torch.bfloat16)
+        embedding.load_state_dict(state_dict, strict=False)
+
+        self.assertNotIsInstance(embedding.weight, QuantizedTensor)
+
     def test_int8_convrot_metadata_loads_into_params(self):
         """ConvRot metadata must reach TensorWiseINT8Layout params."""
         torch.manual_seed(123)
