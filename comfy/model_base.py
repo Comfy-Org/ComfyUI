@@ -2139,8 +2139,67 @@ class Hunyuan3Dv2_1(BaseModel):
         return out
 
 class MiniMaxH3(BaseModel):
+    # Rounded-up one-block peak-allocation slope measured across changes in H3's
+    # packed target/reference sequence length.
+    PACKED_ROW_MEMORY_BYTES = 151_000
+    PACKED_COND_ROWS_KEY = "minimax_h3_packed_cond_rows"
+
     def __init__(self, model_config, model_type=ModelType.FLOW_AV, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.minimax.model.MiniMaxH3Model)
+
+    def _target_packed_rows(self):
+        if self.latent_shapes is None or len(self.latent_shapes) < 2:
+            return None
+        video_shape, audio_shape = self.latent_shapes[:2]
+        if len(video_shape) < 5 or len(audio_shape) < 4:
+            return None
+        frame_rows = ((video_shape[-2] + 1) // 2) * ((video_shape[-1] + 1) // 2)
+        return video_shape[-3] * frame_rows + audio_shape[-1] * 2
+
+    def _conditioning_packed_rows(self, **kwargs):
+        target_rows = self._target_packed_rows()
+        if target_rows is None:
+            return None
+
+        rows = 0
+        cross_attn = kwargs.get("cross_attn")
+        if cross_attn is not None:
+            rows += cross_attn.shape[1]
+
+        frame_rows = ((self.latent_shapes[0][-2] + 1) // 2) * ((self.latent_shapes[0][-1] + 1) // 2)
+        for keyframe in kwargs.get("minimax_keyframes") or ():
+            latent = keyframe.get("latent")
+            if latent is not None:
+                rows += latent.shape[-3] * frame_rows
+            audio_latent = keyframe.get("audio_latent")
+            if audio_latent is not None:
+                rows += audio_latent.shape[-1] * 2
+
+        for ref in kwargs.get("minimax_refs") or ():
+            kind = ref.get("kind")
+            if kind in ("audio", "video", "video_audio"):
+                rows += int(ref.get("ref_audio_t", 0)) * 2
+            if kind == "image":
+                rows += (int(ref["latent_h"]) // 2) * (int(ref["latent_w"]) // 2)
+            elif kind in ("video", "video_audio"):
+                rows += int(ref["latent_t"]) * (int(ref["latent_h"]) // 2) * (int(ref["latent_w"]) // 2)
+        return rows
+
+    def extra_conds_shapes(self, **kwargs):
+        rows = self._conditioning_packed_rows(**kwargs)
+        if rows is None:
+            return {}
+        return {self.PACKED_COND_ROWS_KEY: [1, 1, rows]}
+
+    def memory_required(self, input_shape, cond_shapes={}):
+        target_rows = self._target_packed_rows()
+        if target_rows is None:
+            return super().memory_required(input_shape, cond_shapes)
+
+        rows = input_shape[0] * target_rows
+        for shape in cond_shapes.get(self.PACKED_COND_ROWS_KEY, ()):
+            rows += shape[0] * math.prod(shape[2:])
+        return rows * self.PACKED_ROW_MEMORY_BYTES
 
     def audio_scale(self):
         """Scale the sampler carries the audio stream at, 1.0 when not sampling the packed latent."""
