@@ -873,9 +873,7 @@ class _AssetSeeder:
                 last_progress_time = now
 
         self._update_progress(scanned=len(specs), created=total_created)
-        with create_session() as session:
-            tick_watch_list(session)
-            session.commit()
+        tick_watch_list()
         logging.info(
             "Fast scan complete: %.3fs total (created=%d, skipped=%d, total_paths=%d)",
             time.perf_counter() - t_fast_start,
@@ -895,7 +893,8 @@ class _AssetSeeder:
         scan_state = self._scan_state
         with create_session() as session:
             drain_pending_verifications(session)
-            tick_watch_list(session)
+            session.commit()
+            tick_watch_list()
             for _ in range(3):
                 drain_transition_queue(session)
                 session.commit()
