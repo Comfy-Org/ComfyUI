@@ -230,6 +230,25 @@ class TestMixedPrecisionOps(unittest.TestCase):
         with self.assertRaises(KeyError):
             model.load_state_dict(state_dict, strict=False)
 
+    def test_empty_comfy_quant_marker_treated_as_unquantized(self):
+        """A checkpoint may store an empty comfy_quant marker for an
+        unquantized layer instead of omitting the key. This must load the
+        layer as plain full-precision weight, not raise a JSONDecodeError."""
+        state_dict = {
+            "layer1.weight": torch.randn(20, 10, dtype=torch.bfloat16),
+            "layer1.bias": torch.randn(20, dtype=torch.bfloat16),
+            "layer1.comfy_quant": torch.tensor([], dtype=torch.uint8),
+            "layer2.weight": torch.randn(30, 20, dtype=torch.bfloat16),
+            "layer2.bias": torch.randn(30, dtype=torch.bfloat16),
+            "layer3.weight": torch.randn(40, 30, dtype=torch.bfloat16),
+            "layer3.bias": torch.randn(40, dtype=torch.bfloat16),
+        }
+
+        model = SimpleModel(operations=ops.mixed_precision_ops({}))
+        model.load_state_dict(state_dict, strict=False)
+
+        self.assertNotIsInstance(model.layer1.weight, QuantizedTensor)
+
     def test_int8_convrot_metadata_loads_into_params(self):
         """ConvRot metadata must reach TensorWiseINT8Layout params."""
         torch.manual_seed(123)
