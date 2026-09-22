@@ -230,7 +230,7 @@ def parse_ltx2_prompt(generated_text, prompt):
     user prompt, mirroring both system prompts' "return the original prompt
     when there is nothing to give" rule.
     """
-    text = re.sub(r"<think>.*?</think>", "", generated_text, flags=re.DOTALL)
+    text = re.sub(r"<think>.*?(?:</think>|$)", "", generated_text, flags=re.DOTALL)
     if "</think>" in text:  # orphan / truncated reasoning: keep what follows the last close
         head, _, tail = text.rpartition("</think>")
         text = tail if LTX2_MARKERS.sub("", tail).strip() else head

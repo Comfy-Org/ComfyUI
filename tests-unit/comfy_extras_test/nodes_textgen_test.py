@@ -62,3 +62,11 @@ class TestParseLTX2Prompt:
             "   ",
         ]:
             assert self._parse(generated_text) != ""
+
+    def test_unclosed_think_falls_back_to_prompt(self):
+        # Generation truncated by max_length between the opening <think> tag
+        # and any close marker. The first pass must strip the entire unclosed
+        # block (matched against end-of-input via `(?:</think>|$)`), not leave
+        # the reasoning body in the returned text. The tail check then sees
+        # no </think>, so the final fallback returns the user prompt.
+        assert self._parse("<think>reasoning with no close") == USER_PROMPT
