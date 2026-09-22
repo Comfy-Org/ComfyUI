@@ -119,7 +119,7 @@ def test_permission_error_in_reference_sync_increments_scan_counter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     secret_path = "/private/assets/unreadable.safetensors"
-    content = SimpleNamespace(id="content", path=secret_path)
+    content = SimpleNamespace(id="content", path=secret_path, size_bytes=1, mtime_ns=1)
     progress = _ScanState()
 
     def deny_stat(*_args, **_kwargs):
@@ -128,7 +128,7 @@ def test_permission_error_in_reference_sync_increments_scan_counter(
     monkeypatch.setattr(scanner, "os", SimpleNamespace(stat=deny_stat, path=scanner.os.path))
     monkeypatch.setattr(scanner, "live_contents_under_prefixes", lambda _session, _prefixes: [content])
 
-    scanner.sync_prefixes_with_filesystem(Mock(), ["/private/assets"], progress=progress)
+    scanner.observe_references_on_filesystem(Mock(), ["/private/assets"], progress=progress)
 
     assert progress.permission_denied == 1
 

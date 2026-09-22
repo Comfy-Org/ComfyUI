@@ -47,7 +47,7 @@ from app.assets.services.schemas import (
     UserMetadata,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
-from app.database.db import create_session
+from app.database.db import create_session, run_write_txn
 
 
 def _normalize_hash_input(hash_str: str) -> str:
@@ -710,6 +710,7 @@ def register_executed_output(
     abs_path: str, job_id: str | None = None
 ) -> RegisteredAsset | None:
     locator = os.path.abspath(abs_path)
+    created_content_id: str | None = None
     try:
         stat_result = os.stat(locator, follow_symlinks=True)
         size_bytes = stat_result.st_size
@@ -719,49 +720,42 @@ def register_executed_output(
         system_metadata = _extract_system_metadata_sync(
             locator, mime_type, stat_result
         )
-        with create_session() as session:
-            created_content_id: str | None = None
-            try:
-                existing = session.scalars(
-                    select(AssetContent).where(
-                        AssetContent.path == locator,
-                        AssetContent.is_missing.is_(False),
-                    )
-                ).first()
-                if existing is not None:
-                    mark_content_missing(session, existing.id)
-                content, inserted = create_content_reporting_insert(
-                    session, locator, None, size_bytes, mtime_ns
+        def register(session: Session) -> RegisteredAsset:
+            nonlocal created_content_id
+            existing = session.scalars(
+                select(AssetContent).where(
+                    AssetContent.path == locator,
+                    AssetContent.is_missing.is_(False),
                 )
-                if inserted:
-                    created_content_id = content.id
-                record = create_record(
-                    session,
-                    content.id,
-                    name,
-                    mime_type=mime_type,
-                    job_id=job_id,
-                    loader_path=compute_loader_path(locator),
-                    tags=path_tags,
-                    system_metadata=system_metadata,
-                )
-                session.commit()
-            except Exception:
-                session.rollback()
-                if created_content_id is not None:
-                    _discard_unreferenced_content(session, created_content_id)
-                raise
-            record_id = record.id
-            record_content_id = record.content_id
-            record_job_id = record.job_id
-            record_name = record.name
+            ).first()
+            if existing is not None:
+                mark_content_missing(session, existing.id)
+            content, inserted = create_content_reporting_insert(
+                session, locator, None, size_bytes, mtime_ns
+            )
+            if inserted:
+                created_content_id = content.id
+            record = create_record(
+                session,
+                content.id,
+                name,
+                mime_type=mime_type,
+                job_id=job_id,
+                loader_path=compute_loader_path(locator),
+                tags=path_tags,
+                system_metadata=system_metadata,
+            )
+            return RegisteredAsset(
+                id=record.id,
+                content_id=record.content_id,
+                job_id=record.job_id,
+                name=record.name,
+            )
+
+        return run_write_txn(register)
     except Exception:
+        if created_content_id is not None:
+            with create_session() as session:
+                _discard_unreferenced_content(session, created_content_id)
         logging.exception("Failed to register executed output: %s", locator)
         return None
-
-    return RegisteredAsset(
-        id=record_id,
-        content_id=record_content_id,
-        job_id=record_job_id,
-        name=record_name,
-    )

@@ -64,7 +64,7 @@ def test_seed_persists_remaining_specs_when_path_vanishes_during_recovery_hash(
             raise OSError("file vanished during recovery")
         return snapshot_hash(path)
 
-    monkeypatch.setattr("app.assets.scanner_changes.snapshot_hash", _hash_or_raise)
+    monkeypatch.setattr("app.assets.scanner.snapshot_hash", _hash_or_raise)
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
         created = seed_asset_specs(session, specs)
@@ -85,7 +85,7 @@ def _delete_during_recovery(monkeypatch: pytest.MonkeyPatch, path: Path) -> None
             raise OSError("file vanished during recovery")
         return snapshot_hash(candidate_path)
 
-    monkeypatch.setattr("app.assets.scanner_changes.snapshot_hash", _hash_or_raise)
+    monkeypatch.setattr("app.assets.scanner.snapshot_hash", _hash_or_raise)
 
 
 @pytest.mark.parametrize(

@@ -111,7 +111,7 @@ def test_off_mode_no_recovery(session, temp_dir: Path):
 
     with (
         patch("app.assets.scanner.mode.hashing_enabled", return_value=False),
-        patch("app.assets.scanner_changes.snapshot_hash") as hash_mock,
+        patch("app.assets.scanner.snapshot_hash") as hash_mock,
     ):
         created = seed_asset_specs(session, [_spec(path)])
     session.commit()
@@ -128,7 +128,7 @@ def test_unstable_hash_requeues(session, temp_dir: Path):
 
     with (
         patch("app.assets.scanner.mode.hashing_enabled", return_value=True),
-        patch("app.assets.scanner_changes.snapshot_hash", return_value=None),
+        patch("app.assets.scanner.snapshot_hash", return_value=None),
     ):
         created = seed_asset_specs(session, [_spec(path)])
     session.commit()
@@ -156,7 +156,7 @@ def test_recovery_skips_a_path_a_live_row_already_occupies(session, temp_dir: Pa
     live_b_id = live_b.id
 
     result = recover_missing_content(
-        session, str(path), stat_result, hashing_is_enabled=True
+        session, str(path), snapshot_hash(str(path)), hashing_is_enabled=True
     )
     session.commit()
 
