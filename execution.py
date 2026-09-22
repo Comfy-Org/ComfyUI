@@ -1176,7 +1176,8 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
     start_nodes = set()
     end_nodes = set()
     for node_id, node in prompt.items():
-        boundary = getattr(nodes.NODE_CLASS_MAPPINGS[node["class_type"]], "LOOP_BOUNDARY", None)
+        class_def = nodes.NODE_CLASS_MAPPINGS[node["class_type"]]
+        boundary = class_def.GET_SCHEMA().loop_boundary if issubclass(class_def, _ComfyNodeInternal) else None
         if boundary == "start":
             start_nodes.add(node_id)
         elif boundary == "end":

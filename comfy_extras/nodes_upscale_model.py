@@ -8,6 +8,7 @@ from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 import comfy.model_management
 import comfy.model_patcher
+import comfy.storage
 
 try:
     from spandrel_extra_arches import EXTRA_REGISTRY
@@ -43,7 +44,7 @@ class UpscaleModelLoader(io.ComfyNode):
         if not isinstance(out, ImageModelDescriptor):
             raise Exception("Upscale model must be a single-image model.")
 
-        out.patcher = comfy.model_patcher.CoreModelPatcher(out.model, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device())
+        out.patcher = comfy.model_patcher.CoreModelPatcher(out.model, load_device=model_management.get_torch_device(), offload_device=model_management.unet_offload_device(), fast_disk=comfy.storage.state_dict_fast_disk(sd))
         return io.NodeOutput(out)
 
     load_model = execute  # TODO: remove

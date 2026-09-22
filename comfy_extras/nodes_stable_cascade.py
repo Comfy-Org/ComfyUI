@@ -29,6 +29,7 @@ class StableCascade_EmptyLatentImage(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StableCascade_EmptyLatentImage",
+            display_name="Empty Stable Cascade Latent Image",
             category="model/latent/stable cascade",
             inputs=[
                 io.Int.Input("width", default=1024, min=256, max=nodes.MAX_RESOLUTION, step=8),
@@ -58,6 +59,7 @@ class StableCascade_StageC_VAEEncode(io.ComfyNode):
     def define_schema(cls):
         return io.Schema(
             node_id="StableCascade_StageC_VAEEncode",
+            display_name="Stable Cascade Stage C VAE Encode",
             category="model/latent/stable cascade",
             inputs=[
                 io.Image.Input("image"),

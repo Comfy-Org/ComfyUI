@@ -13,10 +13,9 @@ from pydantic import BaseModel, Field
 from comfy_api.latest import IO, Input, Types
 
 from . import request_logger
-from ._helpers import is_processing_interrupted, sleep_with_interrupt
+from ._helpers import diagnose_connectivity, is_processing_interrupted, sleep_with_interrupt
 from .client import (
     ApiEndpoint,
-    _diagnose_connectivity,
     _display_time_progress,
     sync_op,
 )
@@ -366,7 +365,7 @@ async def upload_file(
                 delay *= retry_backoff
                 continue
 
-            diag = await _diagnose_connectivity()
+            diag = await diagnose_connectivity()
             if not diag["internet_accessible"]:
                 raise LocalNetworkError(
                     "Unable to connect to the network. Please check your internet connection and try again."
