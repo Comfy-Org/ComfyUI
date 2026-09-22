@@ -153,3 +153,25 @@ def test_setup_database_exits_for_driver_lock_when_assets_are_disabled(monkeypat
 
     assert error.value.code == 1
     assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
+
+
+def test_failed_restore_does_not_mask_the_upgrade_error(stale_db, monkeypatch, caplog):
+    real_backup = db_module._backup_database
+
+    def _upgrade_explodes(*_args, **_kwargs):
+        raise RuntimeError("upgrade exploded")
+
+    def _restore_explodes(source_path, destination_path):
+        if destination_path == stale_db:
+            raise OSError("restore exploded")
+        real_backup(source_path, destination_path)
+
+    monkeypatch.setattr(db_module.command, "upgrade", _upgrade_explodes)
+    monkeypatch.setattr(db_module, "_backup_database", _restore_explodes)
+
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="upgrade exploded"):
+        db_module._init_file_db(db_module.args.database_url)
+
+    backup_path = stale_db + ".bkp"
+    assert os.path.exists(backup_path)
+    assert any(backup_path in record.getMessage() for record in caplog.records)

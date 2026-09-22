@@ -304,11 +304,17 @@ def _migrate_and_bind(db_url, db_path, db_exists):
             command.upgrade(config, target_rev)
             logging.info(f"Database upgraded from {current_rev} to {target_rev}")
         except Exception as e:
+            logging.exception("Error upgrading database: ")
             if backup_path:
                 # Restore the database from backup if upgrade fails
-                _backup_database(backup_path, db_path)
-                os.remove(backup_path)
-            logging.exception("Error upgrading database: ")
+                try:
+                    _backup_database(backup_path, db_path)
+                    os.remove(backup_path)
+                except Exception:
+                    logging.exception(
+                        f"Restoring the database after the failed upgrade did not complete; "
+                        f"the pre-upgrade copy is kept at {backup_path}"
+                    )
             raise e
 
         if backup_path and _upgrade_discards_the_catalog(script, target_rev, current_rev):
