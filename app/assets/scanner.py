@@ -97,6 +97,13 @@ class UnenrichedContent:
 
 
 class _ReferenceObservation(NamedTuple):
+    """One live row's file, stat'ed outside the write transaction.
+
+    ``size_bytes`` and ``mtime_ns`` are the row's values when observed, not the file's:
+    the write skips a row that no longer matches them. ``stat_result`` is None when the
+    file is gone.
+    """
+
     content_id: str
     size_bytes: int | None
     mtime_ns: int | None
@@ -163,7 +170,8 @@ def observe_references_on_filesystem(
     session: Session, prefixes: list[str], progress: _ScanProgress | None = None
 ) -> tuple[list[_ReferenceObservation], set[str]]:
     """Stat every live row under ``prefixes`` without writing, so the caller can
-    apply the result in a short write transaction."""
+    apply the result in a short write transaction. Also returns the paths whose
+    file still exists."""
     contents = [
         (content.id, content.path, content.size_bytes, content.mtime_ns)
         for content in live_contents_under_prefixes(session, prefixes)
@@ -391,6 +399,11 @@ def build_asset_specs(
 
 
 class _SpecObservation(NamedTuple):
+    """A spec's file as seen before the write transaction opens.
+
+    ``snapshot`` is None when hashing is off, or when the file changed while being hashed.
+    """
+
     stat_result: os.stat_result
     snapshot: tuple[str, os.stat_result] | None
 
