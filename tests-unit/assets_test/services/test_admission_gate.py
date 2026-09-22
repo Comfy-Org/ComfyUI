@@ -109,14 +109,14 @@ def test_stable_scan_admission_removes_watch_entry_before_next_tick(session, tem
             "app.assets.scanner_admission.get_name_and_tags_from_asset_path",
             return_value=("stable.bin", []),
         ),
-        patch("app.assets.scanner.seed_asset_specs") as seed_asset_specs,
+        patch("app.assets.scanner.insert_asset_specs") as insert_asset_specs,
     ):
         tick_watch_list()
 
     assert admitted == [str(path)]
     assert watched == []
     assert entries_after_admission == 0
-    seed_asset_specs.assert_not_called()
+    assert insert_asset_specs.call_args.args[0] == []
 
 
 def test_evicted_path_is_admitted_by_later_stable_scan(temp_dir: Path, monkeypatch):

@@ -162,6 +162,7 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
     processed = 0
     for _ in range(queued_count):
         # Commit the previous entry's writes so this entry's hash runs with no transaction open.
+        # That needs a create_session() session: on a write session the next read takes the lock.
         session.commit()
         content_id = _pending_verification_ids.pop(0)
         content = session.get(AssetContent, content_id)
