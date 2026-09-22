@@ -215,6 +215,28 @@ AESTHETIC QUALITY (in addition to the above, without breaking the objective capt
 """
 
 
+LTX2_MARKERS = re.compile(r"</?think>|<\|channel>\w*\n?|<channel\|>|<\|turn>\w*\n?")
+
+
+def parse_ltx2_prompt(generated_text, prompt):
+    """Strip reasoning blocks and channel markers from the generated LTX2 prompt.
+
+    Handles three cases:
+    1. Complete ``<think>...</think>`` blocks (gemma / Qwen standard format).
+    2. Orphan ``</think>`` with no opening tag (Qwen3.5 only emits the close marker).
+    3. Unclosed ``<think>`` truncated by ``max_length``.
+
+    Falls back to the text before the unmatched ``</think>`` and finally to the
+    user prompt, mirroring both system prompts' "return the original prompt
+    when there is nothing to give" rule.
+    """
+    text = re.sub(r"<think>.*?</think>", "", generated_text, flags=re.DOTALL)
+    if "</think>" in text:  # orphan / truncated reasoning: keep what follows the last close
+        head, _, tail = text.rpartition("</think>")
+        text = tail if LTX2_MARKERS.sub("", tail).strip() else head
+    return LTX2_MARKERS.sub("", text).strip() or prompt
+
+
 class TextGenerateLTX2Prompt(TextGenerate):
     @classmethod
     def define_schema(cls):
@@ -262,8 +284,7 @@ class TextGenerateLTX2Prompt(TextGenerate):
 
         # Drop reasoning, including a block left unclosed by max_length. Both system prompts ask
         # for the original prompt back when there is nothing to give; empty conditions on nothing.
-        text = re.sub(r"<think>.*?(?:</think>|$)", "", out.args[0], flags=re.DOTALL).strip()
-        return io.NodeOutput(text or prompt)
+        return io.NodeOutput(parse_ltx2_prompt(out.args[0], prompt))
 
 
 class TextgenExtension(ComfyExtension):
