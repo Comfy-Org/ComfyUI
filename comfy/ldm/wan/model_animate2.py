@@ -158,6 +158,10 @@ class PoseBranchCache:
             if stream is not None:
                 stream.synchronize()  # an aborted forward can leave a copy in flight, still reading memory we are about to unpin
         self._pending = {}
+        # Copies issued outside self._pending can still be reading these pages, and
+        # cudaHostUnregister on host memory with a transfer in flight aborts the process
+        # rather than raising, so drain the device before unpinning.
+        comfy.model_management.synchronize()
         for t in s["pinned"]:
             comfy.model_management.unpin_memory(t)
 
