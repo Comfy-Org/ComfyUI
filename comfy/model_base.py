@@ -1550,6 +1550,10 @@ class Lumina2(BaseModel):
         if ref_contexts is not None:
             out['ref_contexts'] = comfy.conds.CONDList(ref_contexts)
 
+        direct_context = kwargs.get("direct_context", None)  # Ming-Image
+        if direct_context is not None:
+            out['direct_context'] = comfy.conds.CONDRegular(direct_context)
+
         return out
 
     def extra_conds_shapes(self, **kwargs):

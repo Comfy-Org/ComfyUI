@@ -611,6 +611,9 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
                 pass
             if '{}cap_pad_token'.format(key_prefix) in state_dict_keys:
                 dit_config["pad_tokens_multiple"] = 32
+            else:  # Ming-Image ships the Z-Image DiT without the learned pad tokens
+                dit_config["image_model"] = "ming_image"
+                dit_config["masked_pad_multiple"] = 32
             sig_weight = state_dict.get('{}siglip_embedder.0.weight'.format(key_prefix), None)
             if sig_weight is not None:
                 dit_config["siglip_feat_dim"] = sig_weight.shape[0]

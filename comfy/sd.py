@@ -67,6 +67,7 @@ import comfy.text_encoders.qwen_image
 import comfy.text_encoders.qwen_image21
 import comfy.text_encoders.hunyuan_image
 import comfy.text_encoders.z_image
+import comfy.text_encoders.ming_image
 import comfy.text_encoders.krea2
 import comfy.text_encoders.mage_flow
 import comfy.text_encoders.ideogram4
@@ -856,11 +857,6 @@ class VAE:
                     self.memory_used_decode = lambda shape, dtype: 8000 * shape[3] * shape[4] * (16 * 16) * model_management.dtype_size(dtype)
                 else:  # Wan 2.1 VAE
                     dim = sd["decoder.head.0.gamma"].shape[0]
-                    self.upscale_ratio = (lambda a: max(0, a * 4 - 3), 8, 8)
-                    self.upscale_index_formula = (4, 8, 8)
-                    self.downscale_ratio = (lambda a: max(0, math.floor((a + 3) / 4)), 8, 8)
-                    self.downscale_index_formula = (4, 8, 8)
-                    self.latent_dim = 3
                     self.latent_channels = 16
                     self.output_channels = sd["encoder.conv1.weight"].shape[1]
                     self.conv_out_channels = sd["decoder.head.2.weight"].shape[0]
@@ -868,8 +864,19 @@ class VAE:
                     ddconfig = {"dim": dim, "z_dim": self.latent_channels, "dim_mult": [1, 2, 4, 4], "num_res_blocks": 2, "attn_scales": [], "temperal_downsample": [False, True, True], "image_channels": self.output_channels, "conv_out_channels": self.conv_out_channels, "dropout": 0.0}
                     self.first_stage_model = comfy.ldm.wan.vae.WanVAE(**ddconfig)
                     self.working_dtypes = [torch.bfloat16, torch.float16, torch.float32]
-                    self.memory_used_encode = lambda shape, dtype: (1500 if shape[2]<=4 else 6000) * shape[3] * shape[4] * model_management.dtype_size(dtype)
-                    self.memory_used_decode = lambda shape, dtype: (2200 if shape[2]<=4 else 7000) * shape[3] * shape[4] * (8*8) * model_management.dtype_size(dtype)
+                    if self.output_channels == 4:  # Ming-Image RGBA VAE: single images, 4-D latents
+                        self.upscale_ratio = 8
+                        self.downscale_ratio = 8
+                        self.memory_used_encode = lambda shape, dtype: 1500 * shape[2] * shape[3] * model_management.dtype_size(dtype)
+                        self.memory_used_decode = lambda shape, dtype: 2200 * shape[2] * shape[3] * (8*8) * model_management.dtype_size(dtype)
+                    else:
+                        self.upscale_ratio = (lambda a: max(0, a * 4 - 3), 8, 8)
+                        self.upscale_index_formula = (4, 8, 8)
+                        self.downscale_ratio = (lambda a: max(0, math.floor((a + 3) / 4)), 8, 8)
+                        self.downscale_index_formula = (4, 8, 8)
+                        self.latent_dim = 3
+                        self.memory_used_encode = lambda shape, dtype: (1500 if shape[2]<=4 else 6000) * shape[3] * shape[4] * model_management.dtype_size(dtype)
+                        self.memory_used_decode = lambda shape, dtype: (2200 if shape[2]<=4 else 7000) * shape[3] * shape[4] * (8*8) * model_management.dtype_size(dtype)
 
 
             # Hunyuan 3d v2 2.0 & 2.1
@@ -1640,9 +1647,12 @@ class TEModel(Enum):
     QWEN3VL_8B = 35
     GEMMA_4_12B = 36
     QWEN3VL_32B = 37
+    MING_IMAGE = 38
 
 
 def detect_te_model(sd):
+    if "thinker.layers.1.mlp.image_gate.proj.weight" in sd:
+        return TEModel.MING_IMAGE
     if "text_model.encoder.layers.30.mlp.fc1.weight" in sd:
         return TEModel.CLIP_G
     if "text_model.encoder.layers.22.mlp.fc1.weight" in sd:
@@ -1902,6 +1912,11 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
             clip_target.clip = comfy.text_encoders.flux.flux2_te(**llama_detect(clip_data), pruned=te_model == TEModel.MISTRAL3_24B_PRUNED_FLUX2)
             clip_target.tokenizer = comfy.text_encoders.flux.Flux2Tokenizer
             tokenizer_data["tekken_model"] = clip_data[0].get("tekken_model", None)
+        elif te_model == TEModel.MING_IMAGE:
+            tokenizer_data["tokenizer_json"] = clip_data[0].get("tokenizer_json", None)
+            quant = comfy.utils.detect_layer_quantization(clip_data[0], "")
+            clip_target.clip = comfy.text_encoders.ming_image.te(dtype_llama=clip_data[0]["thinker.norm.weight"].dtype, llama_quantization_metadata=quant)
+            clip_target.tokenizer = comfy.text_encoders.ming_image.MingImageTokenizer
         elif te_model == TEModel.GPT_OSS_20B:
             clip_target.clip = comfy.text_encoders.gpt_oss.lens_te(**llama_detect(clip_data))
             clip_target.tokenizer = comfy.text_encoders.gpt_oss.LensTokenizer

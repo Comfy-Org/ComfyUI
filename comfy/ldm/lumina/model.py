@@ -460,6 +460,7 @@ class NextDiT(nn.Module):
         z_image_modulation=False,
         time_scale=1.0,
         pad_tokens_multiple=None,
+        masked_pad_multiple=None,
         clip_text_dim=None,
         siglip_feat_dim=None,
         image_model=None,
@@ -476,6 +477,7 @@ class NextDiT(nn.Module):
         self.patch_size = patch_size
         self.time_scale = time_scale
         self.pad_tokens_multiple = pad_tokens_multiple
+        self.masked_pad_multiple = masked_pad_multiple
 
         self.x_embedder = operation_settings.get("operations").Linear(
             in_features=patch_size * patch_size * in_channels,
@@ -651,9 +653,11 @@ class NextDiT(nn.Module):
             imgs = torch.stack(imgs, dim=0)
         return imgs
 
-    def embed_cap(self, cap_feats=None, offset=0, bsz=1, device=None, dtype=None):
+    def embed_cap(self, cap_feats=None, offset=0, bsz=1, device=None, dtype=None, cap_extra=None):
         if cap_feats is not None:
             cap_feats = self.cap_embedder(cap_feats)
+            if cap_extra is not None:
+                cap_feats = torch.cat((cap_feats, cap_extra), dim=1)
             cap_feats_len = cap_feats.shape[1]
             if self.pad_tokens_multiple is not None:
                 cap_feats, _ = pad_zimage(cap_feats, self.cap_pad_token, self.pad_tokens_multiple)
@@ -667,14 +671,17 @@ class NextDiT(nn.Module):
         freqs_cis = (self.rope_embedder(cap_pos_ids).movedim(1, 2),)
         return embeds, freqs_cis, cap_feats_len
 
-    def embed_all(self, x, cap_feats=None, siglip_feats=None, offset=0, omni=False, transformer_options={}):
+    def embed_all(self, x, cap_feats=None, siglip_feats=None, offset=0, omni=False, transformer_options={}, cap_extra=None):
         bsz = 1
         pH = pW = self.patch_size
         device = x.device
-        embeds, freqs_cis, cap_feats_len = self.embed_cap(cap_feats, offset=offset, bsz=bsz, device=device, dtype=x.dtype)
+        embeds, freqs_cis, cap_feats_len = self.embed_cap(cap_feats, offset=offset, bsz=bsz, device=device, dtype=x.dtype, cap_extra=cap_extra)
 
         if (not omni) or self.siglip_embedder is None:
-            cap_feats_len = embeds[0].shape[1] + offset
+            cap_feats_len = embeds[0].shape[1]
+            if self.masked_pad_multiple is not None:  # zero-masked context padding only shifts the image positions
+                cap_feats_len = -(-cap_feats_len // self.masked_pad_multiple) * self.masked_pad_multiple
+            cap_feats_len += offset
             embeds += (None,)
             freqs_cis += (None,)
         else:
@@ -715,7 +722,7 @@ class NextDiT(nn.Module):
 
 
     def patchify_and_embed(
-        self, x: torch.Tensor, cap_feats: torch.Tensor, cap_mask: torch.Tensor, t: torch.Tensor, num_tokens, ref_latents=[], ref_contexts=[], siglip_feats=[], transformer_options={}
+        self, x: torch.Tensor, cap_feats: torch.Tensor, cap_mask: torch.Tensor, t: torch.Tensor, num_tokens, ref_latents=[], ref_contexts=[], siglip_feats=[], direct_context=None, transformer_options={}
     ) -> Tuple[torch.Tensor, torch.Tensor, List[Tuple[int, int]], List[int], torch.Tensor]:
         bsz = x.shape[0]
         cap_mask = None  # TODO?
@@ -749,7 +756,7 @@ class NextDiT(nn.Module):
 
         H, W = x.shape[-2], x.shape[-1]
         img_sizes = [(H, W)] * bsz
-        out = self.embed_all(x, cap_feats, main_siglip, offset=start_t, omni=omni, transformer_options=transformer_options)
+        out = self.embed_all(x, cap_feats, main_siglip, offset=start_t, omni=omni, transformer_options=transformer_options, cap_extra=direct_context)
         img_len = out[0][-1].shape[1]
         cap_len = out[0][0].shape[1]
         for i, e in enumerate(out[0]):
@@ -822,7 +829,7 @@ class NextDiT(nn.Module):
         ).execute(x, timesteps, context, num_tokens, attention_mask, **kwargs)
 
     # def forward(self, x, t, cap_feats, cap_mask):
-    def _forward(self, x, timesteps, context, num_tokens, attention_mask=None, ref_latents=[], ref_contexts=[], siglip_feats=[], transformer_options={}, **kwargs):
+    def _forward(self, x, timesteps, context, num_tokens, attention_mask=None, ref_latents=[], ref_contexts=[], siglip_feats=[], direct_context=None, transformer_options={}, **kwargs):
         omni = len(ref_latents) > 0
         if omni:
             timesteps = torch.cat([timesteps * 0, timesteps], dim=0)
@@ -852,7 +859,7 @@ class NextDiT(nn.Module):
 
         patches = transformer_options.get("patches", {})
         x_is_tensor = isinstance(x, torch.Tensor)
-        img, mask, img_size, cap_size, freqs_cis, timestep_zero_index = self.patchify_and_embed(x, cap_feats, cap_mask, adaln_input, num_tokens, ref_latents=ref_latents, ref_contexts=ref_contexts, siglip_feats=siglip_feats, transformer_options=transformer_options)
+        img, mask, img_size, cap_size, freqs_cis, timestep_zero_index = self.patchify_and_embed(x, cap_feats, cap_mask, adaln_input, num_tokens, ref_latents=ref_latents, ref_contexts=ref_contexts, siglip_feats=siglip_feats, direct_context=direct_context, transformer_options=transformer_options)
         freqs_cis = freqs_cis.to(img.device)
 
         transformer_options["total_blocks"] = len(self.layers)
