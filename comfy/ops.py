@@ -1038,6 +1038,11 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
         uncast_bias_weight(linear, weight, bias, offload_stream)
 
 
+# Grouped-scale integer weights that run through the shared INT8 GEMM (comfy_kitchen
+# AsymW4A8Int8Layout): format -> code width, which also fixes the packed weight width K*bits/8.
+_GROUPED_INT8_FORMATS = {"asym_w4a8_int8": 4, "w6a8_int8": 6}
+
+
 class QuantLinearFunc(torch.autograd.Function):
     """Custom autograd function for quantized linear: quantized forward, optionally FP8 backward.
 
@@ -1248,12 +1253,19 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
                 "quant_group_size": 64,
                 "linear_dtype": layer_conf.get("linear_dtype", params_conf.get("linear_dtype", "int4")),
             }
-        elif module.quant_format == "asym_w4a8_int8":
-            # int4 weight (packed int8 [N,K/2]) + fp8 per-group scale (weight_s_rel),
-            # fp32 per-channel scale (weight_s_channel) + optional Lloyd-Max codebook.
+        elif module.quant_format in _GROUPED_INT8_FORMATS:
+            # asym_w4a8_int8: int4 weight (packed int8 [N,K/2]) + optional Lloyd-Max codebook;
+            # w6a8_int8: uniform int6 weight (packed int8 [N,3K/4]). Both carry an fp8 per-group
+            # scale (weight_s_rel) and an fp32 per-channel scale (weight_s_channel).
+            bits = _GROUPED_INT8_FORMATS[module.quant_format]
+            if weight.shape[1] * 8 != module._orig_shape[1] * bits:
+                raise ValueError(
+                    f"{module.quant_format} layer {layer_name}: packed weight width {weight.shape[1]} "
+                    f"does not match K={module._orig_shape[1]} at {bits} bits"
+                )
             scale = pop_scale("weight_s_rel")
             if scale is None:
-                raise ValueError(f"Missing W4A8 group scale (weight_s_rel) for layer {layer_name}")
+                raise ValueError(f"Missing {module.quant_format} group scale (weight_s_rel) for layer {layer_name}")
             if scale.dtype == torch.uint8:
                 scale = scale.view(torch.float8_e4m3fn)
             params_conf = layer_conf.get("params", {})
@@ -1319,7 +1331,7 @@ def _quantized_weight_state_dict(module, sd, prefix, extra_quant_conf=None, extr
             linear_dtype = getattr(params, "linear_dtype", "int4")
             if linear_dtype != "int4":
                 quant_conf["linear_dtype"] = linear_dtype
-        elif module.quant_format == "asym_w4a8_int8":
+        elif module.quant_format in _GROUPED_INT8_FORMATS:
             quant_conf["group_size"] = getattr(params, "group_size", 16)
             quant_conf["convrot_groupsize"] = getattr(params, "convrot_groupsize", 256)
         if extra_quant_conf:
@@ -1719,7 +1731,7 @@ def get_disabled_quant_formats(device=None):
     if not comfy.model_management.supports_int8_compute(device):
         disabled.add("int8_tensorwise")
         disabled.add("convrot_w4a4")
-        disabled.add("asym_w4a8_int8")
+        disabled.update(_GROUPED_INT8_FORMATS)
     return disabled
 
 
