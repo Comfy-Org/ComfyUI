@@ -312,8 +312,8 @@ def _migrate_and_bind(db_url, db_path, db_exists):
                     os.remove(backup_path)
                 except Exception:
                     logging.exception(
-                        f"Restoring the database after the failed upgrade did not complete; "
-                        f"the pre-upgrade copy is kept at {backup_path}"
+                        f"Restoring the database from its pre-upgrade backup, or removing the "
+                        f"backup afterwards, failed; the pre-upgrade copy is kept at {backup_path}"
                     )
             raise e
 
