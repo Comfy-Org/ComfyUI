@@ -233,3 +233,25 @@ def test_observation_is_skipped_when_the_row_changed_before_it_was_applied(
     assert len(contents) == 1
     assert contents[0].is_missing is False
     assert contents[0].size_bytes == len(b"v3 is longer still")
+
+
+def test_drain_commits_each_entry_before_hashing_the_next(session, temp_dir: Path, monkeypatch):
+    gone = temp_dir / "gone.bin"
+    kept = temp_dir / "kept.bin"
+    gone.write_bytes(b"gone")
+    kept.write_bytes(b"kept")
+    gone_content, _ = _seed_content(session, gone, None)
+    kept_content, _ = _seed_content(session, kept, None)
+    gone.unlink()
+    queue_pending_verification(gone_content.id)
+    queue_pending_verification(kept_content.id)
+    in_transaction_while_hashing = []
+
+    def recording_snapshot_hash(path: str):
+        in_transaction_while_hashing.append(session.connection().connection.driver_connection.in_transaction)
+        return snapshot_hash(path)
+
+    monkeypatch.setattr("app.assets.scanner_changes.snapshot_hash", recording_snapshot_hash)
+
+    assert drain_pending_verifications(session) == 2
+    assert in_transaction_while_hashing == [False]
