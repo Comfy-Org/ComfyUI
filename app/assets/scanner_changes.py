@@ -161,6 +161,8 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
     queued_count = min(len(_pending_verification_ids), limit or len(_pending_verification_ids))
     processed = 0
     for _ in range(queued_count):
+        # Commit the previous entry's writes so this entry's hash runs with no transaction open.
+        session.commit()
         content_id = _pending_verification_ids.pop(0)
         content = session.get(AssetContent, content_id)
         if content is None or content.is_missing:
