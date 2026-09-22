@@ -37,12 +37,10 @@ def test_file_db_uses_wal(file_db):
         assert session.execute(text("PRAGMA journal_mode")).scalar_one() == "wal"
 
 
-def test_write_txn_takes_the_write_lock_before_its_first_write(file_db):
-    def read_only(session):
+def test_write_session_takes_the_write_lock_before_its_first_write(file_db):
+    with db_module.create_write_session() as session:
         session.execute(text("SELECT 1")).scalar_one()
-        return _other_writer_can_begin(file_db)
-
-    assert db_module.run_write_txn(read_only) is False
+        assert _other_writer_can_begin(file_db) is False
 
 
 def test_read_session_does_not_take_the_write_lock(file_db):

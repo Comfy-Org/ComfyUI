@@ -317,12 +317,7 @@ def create_session():
     return Session()
 
 
-def run_write_txn(work):
-    """Run ``work(session)`` in one BEGIN IMMEDIATE transaction and commit it.
-
-    Do filesystem work before calling this: the write lock is held for the whole call.
-    """
-    with WriteSession() as session:
-        result = work(session)
-        session.commit()
-        return result
+def create_write_session():
+    """A session whose transactions open with BEGIN IMMEDIATE. Do filesystem work before
+    using it: the write lock is held from the first statement until commit."""
+    return WriteSession()

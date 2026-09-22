@@ -54,7 +54,7 @@ from app.assets.services.path_utils import (
 )
 from app.assets.services.ingest import _discard_unreferenced_content
 from app.assets.services.snapshot_hash import snapshot_hash
-from app.database.db import create_session, run_write_txn
+from app.database.db import create_session, create_write_session
 
 __all__ = [
     "clear_pending_verifications",
@@ -225,9 +225,9 @@ def _sync_prefixes_in_write_txn(
             session, prefixes, progress
         )
     if observations:
-        run_write_txn(
-            lambda session: apply_reference_observations(session, observations)
-        )
+        with create_write_session() as session:
+            apply_reference_observations(session, observations)
+            session.commit()
     return survivors
 
 
@@ -480,7 +480,10 @@ def insert_asset_specs(specs: list[SeedAssetSpec], _tag_pool: set[str]) -> int:
     if not specs:
         return 0
     observed = observe_asset_specs(specs)
-    return run_write_txn(lambda session: seed_asset_specs(session, specs, observed))
+    with create_write_session() as session:
+        created = seed_asset_specs(session, specs, observed)
+        session.commit()
+        return created
 
 
 def get_unenriched_assets_for_roots(
