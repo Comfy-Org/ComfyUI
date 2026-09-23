@@ -649,7 +649,10 @@ def module_size(module):
     sd = module.state_dict()
     for k in sd:
         t = sd[k]
-        module_mem += t.nbytes
+        if isinstance(t, comfy.quant_ops.QuantizedTensor):
+            module_mem += comfy.memory_management.vram_aligned_size(t)
+        else:
+            module_mem += t.nbytes
     return module_mem
 
 def mark_mmap_dirty(storage):

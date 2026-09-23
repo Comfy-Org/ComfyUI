@@ -97,7 +97,7 @@
         "euler",
         "0.5, 0",
         "normals",
-        "qwen_image_edit_2509_int8_convrot.safetensors",
+        "qwen_image_edit_2509_nf4.safetensors",
         "marigold_v2_normals.safetensors",
         "marigold_v2_normals_vae.safetensors",
         "marigold_v2_normals_conditioning.safetensors"
@@ -106,7 +106,7 @@
         "sampler_name": "euler",
         "sigmas": "0.5, 0",
         "prediction": "normals",
-        "unet_name": "qwen_image_edit_2509_int8_convrot.safetensors",
+        "unet_name": "qwen_image_edit_2509_nf4.safetensors",
         "lora_name": "marigold_v2_normals.safetensors",
         "vae_name": "marigold_v2_normals_vae.safetensors",
         "conditioning_name": "marigold_v2_normals_conditioning.safetensors"
@@ -265,7 +265,7 @@
         "nodes": [
           {
             "id": 26,
-            "type": "UNETLoader",
+            "type": "MarigoldV2NF4Loader",
             "pos": [
               -1730,
               4080
@@ -288,68 +288,6 @@
                 "link": 38
               },
               {
-                "localized_name": "weight_dtype",
-                "name": "weight_dtype",
-                "type": "COMBO",
-                "widget": {
-                  "name": "weight_dtype"
-                },
-                "link": null
-              }
-            ],
-            "outputs": [
-              {
-                "localized_name": "MODEL",
-                "name": "MODEL",
-                "type": "MODEL",
-                "links": [
-                  5
-                ]
-              }
-            ],
-            "properties": {
-              "Node name for S&R": "UNETLoader",
-              "models": [
-                {
-                  "name": "qwen_image_edit_2509_int8_convrot.safetensors",
-                  "url": "https://huggingface.co/Comfy-Org/marigold-v2-0/resolve/main/diffusion_models/qwen_image_edit_2509_int8_convrot.safetensors",
-                  "directory": "diffusion_models"
-                }
-              ]
-            },
-            "widgets_values": [
-              "qwen_image_edit_2509_int8_convrot.safetensors",
-              "default"
-            ],
-            "widgets_values_named": {
-              "unet_name": "qwen_image_edit_2509_int8_convrot.safetensors",
-              "weight_dtype": "default"
-            },
-            "color": "#223",
-            "bgcolor": "#335"
-          },
-          {
-            "id": 27,
-            "type": "LoraLoaderModelOnly",
-            "pos": [
-              -1730,
-              4240
-            ],
-            "size": [
-              610,
-              120
-            ],
-            "flags": {},
-            "order": 2,
-            "mode": 0,
-            "inputs": [
-              {
-                "localized_name": "model",
-                "name": "model",
-                "type": "MODEL",
-                "link": 5
-              },
-              {
                 "localized_name": "lora_name",
                 "name": "lora_name",
                 "type": "COMBO",
@@ -357,15 +295,6 @@
                   "name": "lora_name"
                 },
                 "link": 39
-              },
-              {
-                "localized_name": "strength_model",
-                "name": "strength_model",
-                "type": "FLOAT",
-                "widget": {
-                  "name": "strength_model"
-                },
-                "link": null
               }
             ],
             "outputs": [
@@ -379,8 +308,13 @@
               }
             ],
             "properties": {
-              "Node name for S&R": "LoraLoaderModelOnly",
+              "Node name for S&R": "MarigoldV2NF4Loader",
               "models": [
+                {
+                  "name": "qwen_image_edit_2509_nf4.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/marigold-v2-0/resolve/main/diffusion_models/qwen_image_edit_2509_nf4.safetensors",
+                  "directory": "diffusion_models"
+                },
                 {
                   "name": "marigold_v2_normals.safetensors",
                   "url": "https://huggingface.co/Comfy-Org/marigold-v2-0/resolve/main/loras/marigold_v2_normals.safetensors",
@@ -389,12 +323,12 @@
               ]
             },
             "widgets_values": [
-              "marigold_v2_normals.safetensors",
-              1
+              "qwen_image_edit_2509_nf4.safetensors",
+              "marigold_v2_normals.safetensors"
             ],
             "widgets_values_named": {
-              "lora_name": "marigold_v2_normals.safetensors",
-              "strength_model": 1
+              "unet_name": "qwen_image_edit_2509_nf4.safetensors",
+              "lora_name": "marigold_v2_normals.safetensors"
             },
             "color": "#223",
             "bgcolor": "#335"
@@ -455,11 +389,11 @@
             },
             "widgets_values": [
               1.73,
-              "flow"
+              "img_to_img_velocity"
             ],
             "widgets_values_named": {
               "shift": 1.73,
-              "sampling": "flow"
+              "sampling": "img_to_img_velocity"
             },
             "color": "#223",
             "bgcolor": "#335"
@@ -992,16 +926,8 @@
         ],
         "links": [
           {
-            "id": 5,
-            "origin_id": 26,
-            "origin_slot": 0,
-            "target_id": 27,
-            "target_slot": 0,
-            "type": "MODEL"
-          },
-          {
             "id": 8,
-            "origin_id": 27,
+            "origin_id": 26,
             "origin_slot": 0,
             "target_id": 28,
             "target_slot": 0,
@@ -1147,7 +1073,7 @@
             "id": 39,
             "origin_id": -10,
             "origin_slot": 5,
-            "target_id": 27,
+            "target_id": 26,
             "target_slot": 1,
             "type": "COMBO"
           },
@@ -1170,7 +1096,7 @@
         ],
         "extra": {},
         "category": "Preprocessors/Normal",
-        "description": "Estimates surface normals from an input image using Marigold V2, producing a normal map of surface orientation for relighting and geometry-aware processing."
+        "description": "Estimates surface normals from an input image using Marigold V2, producing a normal map of surface orientation for relighting and geometry-aware processing. Examples: https://huggingface.co/Comfy-Org/marigold-v2-0#workflows"
       }
     ]
   },

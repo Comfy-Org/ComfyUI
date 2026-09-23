@@ -680,12 +680,14 @@ class disable_weight_init:
                 return super().forward(*args, **kwargs)
 
     class RMSNorm(torch.nn.RMSNorm, CastWeightBiasOp):
+        weight_compute_dtype = None
+
         def reset_parameters(self):
             self.bias = None
             return None
 
         def forward_comfy_cast_weights(self, input):
-            with CastBiasWeightContext(self if self.weight is not None else None, input, offloadable=True) as (weight, bias):
+            with CastBiasWeightContext(self if self.weight is not None else None, input, dtype=self.weight_compute_dtype, offloadable=True) as (weight, bias):
                 return torch.nn.functional.rms_norm(input, self.normalized_shape, weight, self.eps)
 
         def forward(self, *args, **kwargs):

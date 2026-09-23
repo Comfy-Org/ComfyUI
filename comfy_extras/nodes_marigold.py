@@ -3,7 +3,31 @@ from typing_extensions import override
 import torch
 import torch.nn.functional as F
 
+import comfy.marigold
+import folder_paths
 from comfy_api.latest import ComfyExtension, io
+
+
+class MarigoldV2NF4Loader(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="MarigoldV2NF4Loader",
+            display_name="Load Marigold V2 (NF4)",
+            category="model/loaders",
+            description="Loads the prequantized Marigold V2 NF4 backbone and applies the modality LoRA separately. Requires CUDA and bitsandbytes.",
+            inputs=[
+                io.Combo.Input("unet_name", options=folder_paths.get_filename_list("diffusion_models")),
+                io.Combo.Input("lora_name", options=folder_paths.get_filename_list("loras")),
+            ],
+            outputs=[io.Model.Output()],
+        )
+
+    @classmethod
+    def execute(cls, unet_name, lora_name) -> io.NodeOutput:
+        unet_path = folder_paths.get_full_path_or_raise("diffusion_models", unet_name)
+        lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
+        return io.NodeOutput(comfy.marigold.load_model(unet_path, lora_path))
 
 
 class MarigoldV2PostProcess(io.ComfyNode):
@@ -37,6 +61,7 @@ class MarigoldExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
         return [
+            MarigoldV2NF4Loader,
             MarigoldV2PostProcess,
         ]
 

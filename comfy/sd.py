@@ -2,6 +2,7 @@ import json
 import torch
 from enum import Enum
 import logging
+from comfy.patcher_extension import CallbacksMP
 
 from comfy import model_management
 from comfy.utils import ProgressBar
@@ -200,6 +201,7 @@ def load_bypass_lora_for_models(model, clip, lora, strength_model, strength_clip
 
         if manager.get_hook_count() > 0:
             new_modelpatcher.set_injections("bypass_lora", injections)
+            new_modelpatcher.add_callback(CallbacksMP.ON_DETACH, manager.offload)
     else:
         new_modelpatcher = None
 

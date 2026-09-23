@@ -394,6 +394,10 @@ class BypassInjectionManager:
 
         return [PatcherInjection(inject=inject_all, eject=eject_all)]
 
+    def offload(self, model_patcher, unpatch_all):
+        for hook in self.hooks:
+            hook._move_adapter_weights_to_device(model_patcher.offload_device)
+
     def get_hook_count(self) -> int:
         """Return number of hooks that will be/are injected."""
         return len(self.hooks)
