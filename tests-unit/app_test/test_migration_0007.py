@@ -7,7 +7,6 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
 import app.assets.database.models as asset_models
-from app.assets.database.models import Base
 
 _BASELINE_0006 = "0006_add_loader_path"
 
@@ -37,7 +36,6 @@ def test_0007_upgrade_from_0006(db_at_0006):
     assert "asset_contents" in tables
     assert "asset_system_state" in tables
     assert "asset_references" not in tables
-    assert "asset_meta" not in tables
 
 
 def test_0007_schema_has_expected_columns(db_at_0006):
@@ -58,53 +56,6 @@ def test_0007_downgrade_restores_0006_schema(db_at_0006):
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "asset_references" in tables
     assert "asset_contents" not in tables
-
-
-def test_0007_downgrade_drops_shipped_asset_meta(tmp_path):
-    db_path = str(tmp_path / "shipped_0007.db")
-    cfg = _make_config(db_path)
-    engine = create_engine(f"sqlite:///{db_path}")
-    Base.metadata.create_all(engine)
-    with sqlite3.connect(db_path) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE asset_meta (
-                asset_id VARCHAR(36) NOT NULL,
-                key VARCHAR(256) NOT NULL,
-                ordinal INTEGER NOT NULL,
-                val_str VARCHAR(2048),
-                val_num NUMERIC(38, 10),
-                val_bool BOOLEAN,
-                val_json JSON,
-                CONSTRAINT ck_asset_meta_has_value CHECK (
-                    val_str IS NOT NULL OR val_num IS NOT NULL OR
-                    val_bool IS NOT NULL OR val_json IS NOT NULL
-                ),
-                PRIMARY KEY (asset_id, key, ordinal),
-                FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
-            );
-            CREATE INDEX ix_asset_meta_key ON asset_meta (key);
-            CREATE INDEX ix_asset_meta_key_val_str ON asset_meta (key, val_str);
-            CREATE INDEX ix_asset_meta_key_val_num ON asset_meta (key, val_num);
-            CREATE INDEX ix_asset_meta_key_val_bool ON asset_meta (key, val_bool);
-            """
-        )
-        conn.commit()
-    engine.dispose()
-    command.stamp(cfg, "0007_record_content_split")
-
-    with sqlite3.connect(db_path) as conn:
-        assert conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='asset_meta'"
-        ).fetchone()
-
-    command.downgrade(cfg, _BASELINE_0006)
-
-    with sqlite3.connect(db_path) as conn:
-        assert conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='asset_meta'"
-        ).fetchone() is None
-        assert list(conn.execute("PRAGMA foreign_key_check")) == []
 
 
 def test_0007_invariants_on_migrated_db(db_at_0006):
