@@ -202,9 +202,23 @@ def test_server_features_match_manager_when_asset_dependencies_are_unavailable(
     monkeypatch.setitem(feature_flags.SERVER_FEATURE_FLAGS, "assets", True)
 
     asset_manager = manager.default_asset_manager()
+    monkeypatch.setitem(feature_flags.SERVER_FEATURE_FLAGS, "assets", asset_manager.enabled)
 
     assert asset_manager.enabled is False
-    assert feature_flags.get_server_features(asset_manager.enabled)["assets"] is False
+    assert feature_flags.get_server_features()["assets"] is False
+
+
+def test_server_features_report_assets_when_manager_is_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager.args, "enable_assets", True)
+    monkeypatch.setattr(manager, "dependencies_available", lambda: True)
+
+    asset_manager = manager.default_asset_manager()
+    monkeypatch.setitem(feature_flags.SERVER_FEATURE_FLAGS, "assets", asset_manager.enabled)
+
+    assert asset_manager.enabled is True
+    assert feature_flags.get_server_features()["assets"] is True
 
 
 def test_default_asset_manager_enables_assets_when_dependencies_are_available(

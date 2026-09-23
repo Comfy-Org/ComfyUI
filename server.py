@@ -307,9 +307,7 @@ class PromptServer():
                                 # Send server feature flags in response
                                 await self.send(
                                     "feature_flags",
-                                    feature_flags.get_server_features(
-                                        self.asset_manager.enabled
-                                    ),
+                                    feature_flags.get_server_features(),
                                     sid,
                                 )
 
@@ -743,7 +741,7 @@ class PromptServer():
 
         @routes.get("/features")
         async def get_features(request):
-            features = feature_flags.get_server_features(self.asset_manager.enabled)
+            features = feature_flags.get_server_features()
             overrides = get_environment_overrides()
             if overrides:
                 features.update(overrides)

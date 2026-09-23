@@ -508,6 +508,7 @@ def start_comfyui(asyncio_loop=None):
         folder_paths.set_temp_directory(temp_dir)
 
     asset_manager: AssetManager = default_asset_manager()
+    feature_flags.SERVER_FEATURE_FLAGS["assets"] = asset_manager.enabled
     if not asset_manager.enabled:
         cleanup_temp_filesystem()
 
