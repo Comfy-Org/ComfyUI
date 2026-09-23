@@ -31,15 +31,20 @@ def test_restore_loaded_backups_restores_buffer_to_its_own_module():
     patcher = object.__new__(comfy.model_patcher.ModelPatcherDynamic)
     patcher.model = model
     patcher.backup = {}
-    patcher.backup_buffers = {"model_sampling.sigmas": (old_sampling, old_sampling.sigmas.clone())}
+    original_sigmas = old_sampling.sigmas
+    patcher.backup_buffers = {"model_sampling.sigmas": (old_sampling, original_sigmas)}
 
     # Simulate an object patch swapping in a different module at the same path
     # (e.g. ModelSamplingDiscrete replacing the checkpoint's own model_sampling).
     new_sampling = Sampling(torch.tensor([4.0, 5.0, 6.0]))
     model.model_sampling = new_sampling
 
+    # Overwrite old_sampling's buffer so restoring it back is observable.
+    old_sampling.register_buffer("sigmas", torch.tensor([7.0, 8.0, 9.0]))
+
     patcher.restore_loaded_backups()
 
     assert model.model_sampling is new_sampling
     assert torch.equal(model.model_sampling.sigmas, torch.tensor([4.0, 5.0, 6.0]))
+    assert old_sampling.sigmas is original_sigmas
     assert torch.equal(old_sampling.sigmas, torch.tensor([1.0, 2.0, 3.0]))
