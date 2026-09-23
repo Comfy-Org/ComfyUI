@@ -629,25 +629,20 @@ class NextDiT(nn.Module):
         self.n_heads = n_heads
 
     def unpatchify(
-        self, x: torch.Tensor, img_size: List[Tuple[int, int]], cap_size: List[int], return_tensor=False
+        self, x: torch.Tensor, img_size: List[Tuple[int, int]], cap_size: List[int], return_tensor=False, frames=None
     ) -> List[torch.Tensor]:
         """
         x: (N, T, patch_size**2 * C)
-        imgs: (N, H, W, C)
+        imgs: (N, H, W, C), or (N, C, F, H, W) with frames
         """
         pH = pW = self.patch_size
         imgs = []
         for i in range(x.size(0)):
             H, W = img_size[i]
             begin = cap_size[i]
-            end = begin + (H // pH) * (W // pW)
-            imgs.append(
-                x[i][begin:end]
-                .view(H // pH, W // pW, pH, pW, self.out_channels)
-                .permute(4, 0, 2, 1, 3)
-                .flatten(3, 4)
-                .flatten(1, 2)
-            )
+            end = begin + (frames or 1) * (H // pH) * (W // pW)
+            img = x[i][begin:end].view(frames or 1, H // pH, W // pW, pH, pW, self.out_channels).permute(5, 0, 1, 3, 2, 4).flatten(4, 5).flatten(2, 3)
+            imgs.append(img if frames else img.squeeze(1))
 
         if return_tensor:
             imgs = torch.stack(imgs, dim=0)
@@ -709,15 +704,17 @@ class NextDiT(nn.Module):
                 embeds += (siglip_feats,)
                 freqs_cis += (self.rope_embedder(siglip_pos_ids).movedim(1, 2),)
 
-        B, C, H, W = x.shape
-        x = self.x_embedder(x.view(B, C, H // pH, pH, W // pW, pW).permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2))
-        x_pos_ids = pos_ids_x(cap_feats_len + 1, H // pH, W // pW, bsz, device, transformer_options=transformer_options)
-        for f, ref in enumerate(ref_frames):  # Ming-Image: clean reference frames follow the target frame on the t axis
+        if x.ndim == 4:
+            x = x.unsqueeze(2)
+        B, C, F, H, W = x.shape
+        x = self.x_embedder(x.view(B, C, F, H // pH, pH, W // pW, pW).permute(0, 2, 3, 5, 4, 6, 1).flatten(4).flatten(1, 3))
+        x_pos_ids = torch.cat([pos_ids_x(cap_feats_len + 1 + f, H // pH, W // pW, bsz, device, transformer_options=transformer_options) for f in range(F)], dim=1)
+        for f, ref in enumerate(ref_frames):  # Ming-Image: clean reference frames follow the target frames on the t axis
             ref = comfy.ldm.common_dit.pad_to_patch_size(ref, (pH, pW))
             rH, rW = ref.shape[-2], ref.shape[-1]
             ref = self.x_embedder(ref.view(ref.shape[0], C, rH // pH, pH, rW // pW, pW).permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2))
             x = torch.cat((x, comfy.utils.repeat_to_batch_size(ref, B)), dim=1)
-            x_pos_ids = torch.cat((x_pos_ids, pos_ids_x(cap_feats_len + 2 + f, rH // pH, rW // pW, bsz, device, transformer_options=transformer_options)), dim=1)
+            x_pos_ids = torch.cat((x_pos_ids, pos_ids_x(cap_feats_len + 1 + F + f, rH // pH, rW // pW, bsz, device, transformer_options=transformer_options)), dim=1)
         if self.pad_tokens_multiple is not None:
             x, pad_extra = pad_zimage(x, self.x_pad_token, self.pad_tokens_multiple)
             x_pos_ids = torch.nn.functional.pad(x_pos_ids, (0, 0, 0, pad_extra))
@@ -843,11 +840,9 @@ class NextDiT(nn.Module):
         t = 1.0 - timesteps
         cap_feats = context
         cap_mask = attention_mask
-        frames = x.ndim == 5  # Ming-Image latents carry a frame axis
-        if frames:
-            x = x.squeeze(2)
-        bs, c, h, w = x.shape
-        x = comfy.ldm.common_dit.pad_to_patch_size(x, (self.patch_size, self.patch_size))
+        frames = x.shape[2] if x.ndim == 5 else None  # Ming-Image latents carry a frame axis: the target, or composite + layers for Ming-Image-Layer
+        h, w = x.shape[-2], x.shape[-1]
+        x = comfy.ldm.common_dit.pad_to_patch_size(x, (1, self.patch_size, self.patch_size) if frames else (self.patch_size, self.patch_size))
         """
         Forward pass of NextDiT.
         t: (N,) tensor of diffusion timesteps
@@ -886,9 +881,7 @@ class NextDiT(nn.Module):
                         img[:, :cap_size[0]] = out["txt"]
 
         img = self.final_layer(img, adaln_input, timestep_zero_index=timestep_zero_index)
-        img = self.unpatchify(img, img_size, cap_size, return_tensor=x_is_tensor)[:, :, :h, :w]
-        if frames:
-            img = img.unsqueeze(2)
+        img = self.unpatchify(img, img_size, cap_size, return_tensor=x_is_tensor, frames=frames)[..., :h, :w]
         return -img
 
 

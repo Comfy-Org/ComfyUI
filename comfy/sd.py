@@ -2355,7 +2355,7 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
     else:
         new_sd = model_detection.convert_diffusers_mmdit(sd, "")
         if new_sd is not None: #diffusers mmdit
-            model_config = model_detection.model_config_from_unet(new_sd, "")
+            model_config = model_detection.model_config_from_unet(new_sd, "", metadata=metadata)
             if model_config is None:
                 return None
         else: #diffusers unet

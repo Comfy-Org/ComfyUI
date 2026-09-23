@@ -615,6 +615,8 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             elif dec_cond_key not in state_dict_keys:  # Ming-Image ships the Z-Image DiT without the learned pad tokens
                 dit_config["image_model"] = "ming_image"
                 dit_config["masked_pad_multiple"] = 32
+            if metadata is not None and "config" in metadata:  # Ming-Image-Layer has the Z-Image keys and pad tokens
+                dit_config.update(json.loads(metadata["config"]).get("transformer", {}))
             sig_weight = state_dict.get('{}siglip_embedder.0.weight'.format(key_prefix), None)
             if sig_weight is not None:
                 dit_config["siglip_feat_dim"] = sig_weight.shape[0]
