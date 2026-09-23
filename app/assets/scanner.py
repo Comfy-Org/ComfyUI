@@ -420,7 +420,11 @@ def observe_asset_specs(specs: list[SeedAssetSpec]) -> dict[str, _SpecObservatio
         try:
             stat_result = os.stat(path, follow_symlinks=True)
             snapshot = snapshot_hash(path) if hashing_is_enabled else None
-        except OSError:
+        except FileNotFoundError:
+            observed[path] = None
+            continue
+        except OSError as e:
+            _log_scan_error("seed_observation", e)
             observed[path] = None
             continue
         if snapshot is not None:
