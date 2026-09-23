@@ -9,7 +9,7 @@ _original_cpu = args.cpu
 if not torch.cuda.is_available():
     args.cpu = True
 try:
-    import app.prompt_worker as prompt_worker_module
+    import main
 finally:
     args.cpu = _original_cpu
 
@@ -71,21 +71,21 @@ class ExecuteFailureExecutor(Executor):
 
 
 def test_prompt_worker_resumes_background_scan_when_execute_raises(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_worker_module.execution, "PromptExecutor", ExecuteFailureExecutor)
+    monkeypatch.setattr(main.execution, "PromptExecutor", ExecuteFailureExecutor)
     asset_manager = AssetManager()
 
     with pytest.raises(RuntimeError, match="^forced execute failure$"):
-        prompt_worker_module.prompt_worker(Queue(), Server(), asset_manager)
+        main.prompt_worker(Queue(), Server(), asset_manager)
 
     assert asset_manager.paused is False
 
 
 def test_prompt_worker_resumes_background_scan_when_completion_raises(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_worker_module.execution, "PromptExecutor", Executor)
+    monkeypatch.setattr(main.execution, "PromptExecutor", Executor)
     asset_manager = AssetManager()
 
     with pytest.raises(RuntimeError, match="^forced completion failure$"):
-        prompt_worker_module.prompt_worker(
+        main.prompt_worker(
             Queue(completion_error=RuntimeError("forced completion failure")),
             Server(),
             asset_manager,
@@ -95,24 +95,24 @@ def test_prompt_worker_resumes_background_scan_when_completion_raises(monkeypatc
 
 
 def test_prompt_worker_preserves_execute_error_when_resume_raises(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_worker_module.execution, "PromptExecutor", ExecuteFailureExecutor)
+    monkeypatch.setattr(main.execution, "PromptExecutor", ExecuteFailureExecutor)
     asset_manager = AssetManager(resume_error=RuntimeError("forced resume failure"))
 
     with pytest.raises(RuntimeError, match="^forced execute failure$"):
-        prompt_worker_module.prompt_worker(Queue(), Server(), asset_manager)
+        main.prompt_worker(Queue(), Server(), asset_manager)
 
     assert asset_manager.paused is False
 
 
 def test_prompt_worker_resumes_scan_when_later_iteration_raises_before_gc(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_worker_module.execution, "PromptExecutor", Executor)
+    monkeypatch.setattr(main.execution, "PromptExecutor", Executor)
     clock = iter((1.0, 2.0, 2.0))
-    monkeypatch.setattr(prompt_worker_module.time, "perf_counter", lambda: next(clock))
+    monkeypatch.setattr(main.time, "perf_counter", lambda: next(clock))
     asset_manager = AssetManager()
     queue = Queue()
 
     with pytest.raises(LoopEscape, match="^prompt worker requested a second item$"):
-        prompt_worker_module.prompt_worker(queue, Server(), asset_manager)
+        main.prompt_worker(queue, Server(), asset_manager)
 
     assert queue.get_calls == 2
     assert asset_manager.paused is False
