@@ -260,8 +260,7 @@ class MingImageEncoder(nn.Module):
         start, size = query["index"], query["size"]
         hidden, captured = self.thinker(embeds, attention_mask, start, size, self.capture_layers)
 
-        cap_feats = self.connector(self.proj_in(hidden[:, start:start + size]))
-        cap_feats = F.normalize(self.proj_out(cap_feats), dim=-1)
+        cap_feats = self.proj_out(self.connector(self.proj_in(hidden[:, start:start + size])))
 
         direct = torch.cat([c[:, :start - 1] for c in captured], dim=-1)
         return cap_feats, self.proj_directvlm(direct)
@@ -303,7 +302,7 @@ class MingTokenizer(sd1_clip.SDTokenizer):
 class MingImageTokenizer(sd1_clip.SD1Tokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name="ming_image", tokenizer=MingTokenizer)
-        self.llama_template = "<role>SYSTEM</role>detailed thinking off<|role_end|><role>HUMAN</role>{}<|role_end|><role>ASSISTANT</role><image><imagePatch></image>"
+        self.llama_template = "<role>SYSTEM</role>你是一个友好的AI助手。\n\ndetailed thinking off<|role_end|><role>HUMAN</role>{}<|role_end|><role>ASSISTANT</role><image><imagePatch></image>"
 
     def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, **kwargs):
         if llama_template is None:

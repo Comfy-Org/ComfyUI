@@ -1610,6 +1610,8 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     kwargs["block_scale"] = params.block_scale[i]
                 if hasattr(params, "quant_group_size"):
                     kwargs["quant_group_size"] = params.quant_group_size
+                if hasattr(params, "convrot"):
+                    kwargs["convrot"] = params.convrot
                 if hasattr(params, "convrot_groupsize"):
                     kwargs["convrot_groupsize"] = params.convrot_groupsize
                 if hasattr(params, "linear_dtype"):
