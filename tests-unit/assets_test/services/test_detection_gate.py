@@ -4,8 +4,10 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.assets.database.models import Asset, AssetContent
+from app.assets.database.queries.records import mark_content_missing
 from app.assets.helpers import to_stored_hash
 from app.assets.scanner import (
     clear_pending_verifications,
@@ -255,3 +257,42 @@ def test_drain_commits_each_entry_before_hashing_the_next(session, temp_dir: Pat
 
     assert drain_pending_verifications(session) == 2
     assert in_transaction_while_hashing == [False]
+
+
+def _retire_during_hash(monkeypatch, session, content_id: str, replace: bool) -> None:
+    def competing_write_then_hash(path: str):
+        with Session(session.get_bind()) as other:
+            mark_content_missing(other, content_id)
+            if replace:
+                other.add(AssetContent(path=path, hash="blake3:" + "f" * 64, size_bytes=1, mtime_ns=1))
+            other.commit()
+        return snapshot_hash(path)
+
+    monkeypatch.setattr("app.assets.scanner_changes.snapshot_hash", competing_write_then_hash)
+
+
+@pytest.mark.parametrize(
+    ("replace", "seeded_hash"),
+    [(False, None), (True, "blake3:" + "0" * 64)],
+    ids=["retired", "replaced"],
+)
+def test_drain_skips_a_row_retired_while_hashing(
+    session, temp_dir: Path, monkeypatch, replace: bool, seeded_hash: str | None
+):
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
+    path = temp_dir / "raced.bin"
+    path.write_bytes(b"raced bytes")
+    content, _ = _seed_content(session, path, seeded_hash)
+    content_id = content.id
+    queue_pending_verification(content_id)
+    _retire_during_hash(monkeypatch, session, content_id, replace)
+
+    processed = drain_pending_verifications(session)
+    session.commit()
+
+    session.expire_all()
+    assert session.get(AssetContent, content_id).hash == seeded_hash
+    live = session.scalars(select(AssetContent).where(AssetContent.is_missing.is_(False))).all()
+    assert len(live) == (1 if replace else 0)
+    assert len(session.scalars(select(Asset)).all()) == 1
+    assert processed == 0

@@ -168,6 +168,7 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
         content = session.get(AssetContent, content_id)
         if content is None or content.is_missing:
             continue
+        loaded = (content.hash, content.size_bytes, content.mtime_ns)
         try:
             os.stat(content.path, follow_symlinks=True)
         except FileNotFoundError:
@@ -188,6 +189,10 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
             continue
         digest, verified_stat = snapshot
         stored_hash = to_stored_hash(digest)
+        # Skip a row another writer retired or changed while the file was hashed.
+        content = session.get(AssetContent, content_id, populate_existing=True)
+        if content is None or content.is_missing or (content.hash, content.size_bytes, content.mtime_ns) != loaded:
+            continue
 
         if content.hash == stored_hash or content.hash is None:
             content.hash = stored_hash
