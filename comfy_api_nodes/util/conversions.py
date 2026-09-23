@@ -16,12 +16,14 @@ from comfy_api.latest import Input, InputImpl, Types
 from ._helpers import mimetype_to_extension
 
 
-def bytesio_to_image_tensor(image_bytesio: BytesIO, mode: str = "RGBA") -> torch.Tensor:
+def bytesio_to_image_tensor(image_bytesio: BytesIO, mode: str | None = None) -> torch.Tensor:
     """Converts image data from BytesIO to a torch.Tensor.
 
     Args:
         image_bytesio: BytesIO object containing the image data.
-        mode: The PIL mode to convert the image to (e.g., "RGB", "RGBA").
+        mode: The PIL mode to convert the image to (e.g., "RGB", "RGBA"). Defaults
+            to RGBA when the decoded image carries transparency and RGB when it
+            does not, so an API that returns no alpha does not get an opaque one.
 
     Returns:
         A torch.Tensor representing the image (1, H, W, C).
@@ -31,6 +33,8 @@ def bytesio_to_image_tensor(image_bytesio: BytesIO, mode: str = "RGBA") -> torch
         ValueError: If the specified mode is invalid.
     """
     image = Image.open(image_bytesio)
+    if mode is None:
+        mode = "RGBA" if "A" in image.getbands() or "transparency" in image.info else "RGB"
     image = image.convert(mode)
     image_array = np.array(image).astype(np.float32) / 255.0
     return torch.from_numpy(image_array).unsqueeze(0)
@@ -51,6 +55,17 @@ def image_tensor_pair_to_batch(image1: torch.Tensor, image2: torch.Tensor) -> to
             "center",
         ).movedim(1, -1)
     return torch.cat((image1, image2), dim=0)
+
+
+def pad_images_to_common_channels(images: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Pads [B, H, W, C] image tensors with opaque alpha so they all share the largest channel count."""
+    channels = max(image.shape[-1] for image in images)
+    return [
+        torch.nn.functional.pad(image, (0, channels - image.shape[-1]), value=1.0)
+        if image.shape[-1] < channels
+        else image
+        for image in images
+    ]
 
 
 def tensor_to_bytesio(
@@ -132,25 +147,26 @@ def pil_to_bytesio(img: Image.Image, mime_type: str = "image/png") -> BytesIO:
 def _compute_downscale_dims(src_w: int, src_h: int, total_pixels: int) -> tuple[int, int] | None:
     """Return downscaled (w, h) with even dims fitting ``total_pixels``, or None if already fits.
 
-    Source aspect ratio is preserved; output may drift by a fraction of a percent because both dimensions
-    are rounded down to even values (many  codecs require divisible-by-2).
+    Both dimensions are rounded to even values (many codecs require divisible-by-2).
     """
     pixels = src_w * src_h
     if pixels <= total_pixels:
         return None
     scale = math.sqrt(total_pixels / pixels)
-    new_w = max(2, int(src_w * scale))
-    new_h = max(2, int(src_h * scale))
-    new_w -= new_w % 2
-    new_h -= new_h % 2
-    return new_w, new_h
+    long_src, short_src = max(src_w, src_h), min(src_w, src_h)
+    long_new = max(2, int(long_src * scale) // 2 * 2)
+    short_new = max(2, math.ceil(long_new * short_src / long_src / 2) * 2)
+    if long_new * short_new > total_pixels:
+        long_new = max(2, total_pixels // short_new // 2 * 2)
+        short_new = max(2, math.ceil(long_new * short_src / long_src / 2) * 2)
+    return (long_new, short_new) if src_w >= src_h else (short_new, long_new)
 
 
 def downscale_image_tensor(image: torch.Tensor, total_pixels: int = 1536 * 1024) -> torch.Tensor:
     """Downscale input image tensor to roughly the specified total pixels.
 
-    Output dimensions are rounded down to even values so that the result is guaranteed to fit within ``total_pixels``
-    and is compatible with codecs that require even dimensions (e.g. yuv420p).
+    Resized output has even dimensions and always fits within ``total_pixels``;
+    an image that already fits is returned unchanged.
     """
     samples = image.movedim(-1, 1)
     dims = _compute_downscale_dims(samples.shape[3], samples.shape[2], int(total_pixels))
@@ -158,6 +174,23 @@ def downscale_image_tensor(image: torch.Tensor, total_pixels: int = 1536 * 1024)
         return image
     new_w, new_h = dims
     return common_upscale(samples, new_w, new_h, "lanczos", "disabled").movedim(1, -1)
+
+
+def downscale_image_tensor_by_max_sides(
+    image: torch.Tensor, *, max_long_side: int, max_short_side: int
+) -> torch.Tensor:
+    """Downscale input image tensor so the long side is at most max_long_side and the short side at most max_short_side."""
+    samples = image.movedim(-1, 1)
+    height, width = samples.shape[2], samples.shape[3]
+    long_side, short_side = max(width, height), min(width, height)
+    scale_by = min(1.0, max_long_side / long_side, max_short_side / short_side)
+    if scale_by >= 1.0:
+        return image
+    long_new = max(1, math.floor(long_side * scale_by))
+    short_new = max(1, min(long_new, math.ceil(short_side * scale_by)))
+    new_width, new_height = (long_new, short_new) if width >= height else (short_new, long_new)
+    s = common_upscale(samples, new_width, new_height, "lanczos", "disabled")
+    return s.movedim(1, -1)
 
 
 def downscale_image_tensor_by_max_side(image: torch.Tensor, *, max_side: int) -> torch.Tensor:

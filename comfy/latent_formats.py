@@ -1,4 +1,5 @@
 import torch
+import comfy.nested_tensor
 
 class LatentFormat:
     scale_factor = 1.0
@@ -8,6 +9,7 @@ class LatentFormat:
     latent_rgb_factors_bias = None
     latent_rgb_factors_reshape = None
     taesd_decoder_name = None
+    compile_preview = False
     spacial_downscale_ratio = 8
     temporal_downscale_ratio = 1
 
@@ -16,6 +18,9 @@ class LatentFormat:
 
     def process_out(self, latent):
         return latent / self.scale_factor
+
+    def fix_empty_latent(self, latent):
+        return latent
 
 class SD15(LatentFormat):
     def __init__(self, scale_factor=0.18215):
@@ -248,6 +253,53 @@ class TripoSplat(LatentFormat):
 
     def process_out(self, latent):
         return latent
+
+class Trellis2(LatentFormat):
+    latent_channels = 32
+
+class Trellis2SLAT(Trellis2):
+    # Sparse structured latent: per-token feats [N, 32]. process_out denormalizes
+    # the decoded feats (latent * std + mean); subclasses carry each space's stats.
+    latents_mean = None
+    latents_std = None
+
+    def process_in(self, latent):
+        mean = self.latents_mean.to(latent.device, latent.dtype)
+        std = self.latents_std.to(latent.device, latent.dtype)
+        return (latent - mean) / std
+
+    def process_out(self, latent):
+        mean = self.latents_mean.to(latent.device, latent.dtype)
+        std = self.latents_std.to(latent.device, latent.dtype)
+        return latent * std + mean
+
+class Trellis2ShapeSLAT(Trellis2SLAT):
+    latents_mean = torch.tensor([
+        0.781296, 0.018091, -0.495192, -0.558457, 1.060530, 0.093252, 1.518149, -0.933218,
+        -0.732996, 2.604095, -0.118341, -2.143904, 0.495076, -2.179512, -2.130751, -0.996944,
+        0.261421, -2.217463, 1.260067, -0.150213, 3.790713, 1.481266, -1.046058, -1.523667,
+        -0.059621, 2.220780, 1.621212, 0.877230, 0.567247, -3.175944, -3.186688, 1.578665
+    ])[None]
+    latents_std = torch.tensor([
+        5.972266, 4.706852, 5.445010, 5.209927, 5.320220, 4.547237, 5.020802, 5.444004,
+        5.226681, 5.683095, 4.831436, 5.286469, 5.652043, 5.367606, 5.525084, 4.730578,
+        4.805265, 5.124013, 5.530808, 5.619001, 5.103930, 5.417670, 5.269677, 5.547194,
+        5.634698, 5.235274, 6.110351, 5.511298, 6.237273, 4.879207, 5.347008, 5.405691
+    ])[None]
+
+class Trellis2TexSLAT(Trellis2SLAT):
+    latents_mean = torch.tensor([
+        3.501659, 2.212398, 2.226094, 0.251093, -0.026248, -0.687364, 0.439898, -0.928075,
+        0.029398, -0.339596, -0.869527, 1.038479, -0.972385, 0.126042, -1.129303, 0.455149,
+        -1.209521, 2.069067, 0.544735, 2.569128, -0.323407, 2.293000, -1.925608, -1.217717,
+        1.213905, 0.971588, -0.023631, 0.106750, 2.021786, 0.250524, -0.662387, -0.768862
+    ])[None]
+    latents_std = torch.tensor([
+        2.665652, 2.743913, 2.765121, 2.595319, 3.037293, 2.291316, 2.144656, 2.911822,
+        2.969419, 2.501689, 2.154811, 3.163343, 2.621215, 2.381943, 3.186697, 3.021588,
+        2.295916, 3.234985, 3.233086, 2.260140, 2.874801, 2.810596, 3.292720, 2.674999,
+        2.680878, 2.372054, 2.451546, 2.353556, 2.995195, 2.379849, 2.786195, 2.775190
+    ])[None]
 
 class Mochi(LatentFormat):
     latent_channels = 12
@@ -573,6 +625,8 @@ class MiniMaxH3Video(LatentFormat):
     spacial_downscale_ratio = 16
     temporal_downscale_ratio = 4
     scale_factor = 1.0
+    taesd_decoder_name = "taeh3"
+    compile_preview = True
 
     latent_rgb_factors = [
         [-0.018555,  0.024344, -0.017536],
@@ -605,6 +659,19 @@ class MiniMaxH3Video(LatentFormat):
 class MiniMaxH3AV(MiniMaxH3Video):
     # max channels across the two streams (video 24, audio 32) so per-stream slices keep both streams whole
     latent_channels = 32
+
+    def fix_empty_latent(self, latent):
+        video_latent_channels = MiniMaxH3Video.latent_channels
+        audio_latent_channels = 32
+        audio_channels = 2
+        frames_per_token = (1, 4, 4, 4, 4)
+        audio_frame_rescale = 5.0 / 3.0
+
+        video = latent[:, :video_latent_channels].clone()
+        frame_count = sum(frames_per_token[i % len(frames_per_token)] for i in range(video.shape[2]))
+        audio_t = round(frame_count * audio_frame_rescale)
+        audio = latent.new_zeros((latent.shape[0], audio_latent_channels, audio_channels, audio_t))
+        return comfy.nested_tensor.NestedTensor((video, audio))
 
 class HunyuanVideo(LatentFormat):
     latent_channels = 16
@@ -861,6 +928,59 @@ class HunyuanImage21(LatentFormat):
 
     latent_rgb_factors_bias = [0.0007, -0.0256, -0.0206]
 
+class QwenImage21(LatentFormat):
+    latent_channels = 64
+    latent_dimensions = 2
+    spacial_downscale_ratio = 16
+
+    latent_rgb_factors = [
+        [-0.0158, -0.0115, -0.0174], [ 0.0030,  0.0120,  0.0027], [ 0.0637,  0.0470, -0.0127], [ 0.0360,  0.0661, -0.0030],
+        [ 0.0159,  0.0181,  0.0082], [ 0.0132,  0.0326,  0.0169], [ 0.0191,  0.0261,  0.0136], [-0.0146, -0.0276, -0.0361],
+        [ 0.0187, -0.0024, -0.0072], [-0.1059, -0.0090,  0.0350], [-0.0195, -0.0226, -0.0138], [-0.0295,  0.0024, -0.0215],
+        [ 0.0191, -0.0393, -0.0001], [-0.0144, -0.0166, -0.0272], [ 0.0389,  0.0430,  0.0445], [-0.0153, -0.0336,  0.0031],
+        [ 0.0339,  0.0122,  0.0220], [-0.0136, -0.0078, -0.0120], [-0.0340, -0.0282, -0.0245], [-0.0133, -0.0176, -0.0133],
+        [ 0.0109, -0.0087,  0.0096], [-0.0010,  0.0044,  0.0016], [ 0.0301,  0.0053,  0.0361], [-0.0281, -0.0205, -0.0032],
+        [-0.0725,  0.0002,  0.0160], [-0.0036,  0.0158,  0.0807], [ 0.0087,  0.0040, -0.0053], [-0.0260,  0.0183, -0.0077],
+        [-0.0039, -0.0035, -0.0107], [-0.0026,  0.0172,  0.0237], [ 0.0088,  0.0078,  0.0078], [-0.0087, -0.0310, -0.0122],
+        [-0.0027,  0.0018,  0.0094], [-0.0064,  0.0292, -0.0256], [ 0.0594,  0.1049,  0.1180], [ 0.0103, -0.0103, -0.0026],
+        [-0.0091,  0.0025, -0.0015], [ 0.0178,  0.0243,  0.0292], [-0.0063, -0.0012,  0.0202], [ 0.0452,  0.0246,  0.0143],
+        [ 0.0149,  0.0270,  0.0052], [ 0.1484,  0.0801,  0.0804], [-0.0120,  0.0040,  0.0010], [ 0.0181,  0.0051, -0.0021],
+        [ 0.0132,  0.0050,  0.0019], [ 0.0291,  0.0020,  0.0092], [ 0.0066, -0.0410, -0.1314], [-0.1153, -0.0629, -0.0802],
+        [ 0.0258,  0.0378,  0.0298], [ 0.0375,  0.1139,  0.0468], [-0.0142, -0.0126, -0.0276], [ 0.0339,  0.0153,  0.0138],
+        [ 0.0346,  0.0211,  0.0267], [ 0.0369, -0.0431, -0.0993], [-0.0052, -0.0092,  0.0056], [-0.0279,  0.0410, -0.0357],
+        [ 0.0036,  0.0017, -0.0083], [-0.0441, -0.0367, -0.0454], [-0.0001, -0.0092, -0.0001], [-0.0222, -0.0183, -0.0051],
+        [ 0.0039,  0.0053, -0.0184], [-0.0094, -0.0075, -0.0143], [-0.0066, -0.0088, -0.0063], [ 0.0220,  0.0074,  0.0100],
+    ]
+    latent_rgb_factors_bias = [-0.1228, -0.1869, -0.3083]
+
+    def __init__(self):
+        self.latents_mean = torch.tensor([
+            0.5126, 0.7721, -0.0631, 1.3506, -0.7855, -2.1025, -0.3458, 1.3722,
+            1.8873, -1.7177, -0.6510, 0.2732, 0.7562, -0.6163, -1.0277, 3.8363,
+            2.0210, 0.0472, 0.9320, 2.0087, 2.4954, -0.1391, -1.4249, 1.8464,
+            -0.5236, 1.2826, 3.7046, -1.3035, 2.7286, -1.4518, -1.9036, -1.9955,
+            -0.0342, -1.0265, -0.7636, 3.0555, 0.0746, -3.0751, -0.1076, 1.7376,
+            -1.0914, -1.9435, -0.2784, -1.3680, 0.4809, -0.4433, 0.3764, 0.5729,
+            -2.0595, 1.0960, -1.3260, -2.0211, -5.0179, 0.5275, 4.0162, 1.8505,
+            0.3026, 1.9373, 1.4937, 0.2632, 0.5547, -1.7121, -0.1562, 0.0304,
+        ]).view(1, self.latent_channels, 1, 1)
+        self.latents_std = torch.tensor([
+            3.2001, 3.2936, 3.4321, 3.0091, 3.1061, 4.0379, 4.0705, 3.7910,
+            3.0785, 3.6500, 3.9308, 3.0904, 2.8778, 3.7675, 3.7320, 5.0756,
+            3.2864, 4.0397, 3.1317, 4.0443, 2.9249, 3.9454, 3.0988, 4.2489,
+            3.4896, 3.8513, 3.9323, 3.4719, 3.7498, 4.2830, 3.5694, 4.2467,
+            3.9037, 3.2947, 5.0770, 3.5075, 3.2700, 3.4767, 2.8063, 5.1125,
+            3.5327, 4.7833, 3.1286, 4.1819, 3.8527, 3.8312, 3.5605, 4.3875,
+            3.9624, 4.0168, 3.5643, 4.0550, 5.5614, 4.2963, 4.4080, 3.4959,
+            3.8747, 3.7608, 3.5735, 3.1490, 3.7662, 3.6746, 3.4563, 3.8161,
+        ]).view(1, self.latent_channels, 1, 1)
+
+    def process_in(self, latent):
+        return (latent - self.latents_mean.to(latent.device, latent.dtype)) / self.latents_std.to(latent.device, latent.dtype)
+
+    def process_out(self, latent):
+        return latent * self.latents_std.to(latent.device, latent.dtype) + self.latents_mean.to(latent.device, latent.dtype)
+
 class HunyuanImage21Refiner(LatentFormat):
     latent_channels = 64
     latent_dimensions = 3
@@ -956,6 +1076,12 @@ class ACEAudio15(LatentFormat):
     latent_channels = 64
     latent_dimensions = 1
     temporal_downscale_ratio = 1764
+
+class YuE2(LatentFormat):
+    latent_channels = 64
+    latent_dimensions = 1
+    temporal_downscale_ratio = 1920
+
 
 class MiniMaxMusic3(LatentFormat):
     latent_channels = 128

@@ -23,6 +23,7 @@ from comfy_api_nodes.apis.openai import (
     OpenAIImageGenerationResponse,
     OpenAIResponse,
     OutputContent,
+    Reasoning,
 )
 from comfy_api_nodes.util import (
     ApiEndpoint,
@@ -41,6 +42,7 @@ STARTING_POINT_ID_PATTERN = r"<starting_point_id:(.*)>"
 
 
 class SupportedOpenAIModel(str, Enum):
+    gpt_6_astra = "gpt-6-astra"
     gpt_5_6_sol = "gpt-5.6-sol"
     gpt_5_6_terra = "gpt-5.6-terra"
     gpt_5_6_luna = "gpt-5.6-luna"
@@ -58,12 +60,39 @@ class SupportedOpenAIModel(str, Enum):
     o1 = "o1"
 
 
-async def validate_and_cast_response(response, timeout: int = None) -> torch.Tensor:
+REASONING_EFFORT_OPTIONS = ["default", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
+_O_SERIES_EFFORTS = ("low", "medium", "high")
+_GPT_5_EFFORTS = ("minimal", "low", "medium", "high")
+_GPT_5_6_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
+    SupportedOpenAIModel.gpt_6_astra: ("low", "medium", "high", "xhigh", "max"),
+    SupportedOpenAIModel.gpt_5_6_sol: _GPT_5_6_EFFORTS,
+    SupportedOpenAIModel.gpt_5_6_terra: _GPT_5_6_EFFORTS,
+    SupportedOpenAIModel.gpt_5_6_luna: _GPT_5_6_EFFORTS,
+    SupportedOpenAIModel.gpt_5_5_pro: ("medium", "high", "xhigh"),
+    SupportedOpenAIModel.gpt_5_5: ("none", "low", "medium", "high", "xhigh"),
+    SupportedOpenAIModel.gpt_5: _GPT_5_EFFORTS,
+    SupportedOpenAIModel.gpt_5_mini: _GPT_5_EFFORTS,
+    SupportedOpenAIModel.gpt_5_nano: _GPT_5_EFFORTS,
+    SupportedOpenAIModel.gpt_4_1: (),
+    SupportedOpenAIModel.gpt_4_1_mini: (),
+    SupportedOpenAIModel.gpt_4_1_nano: (),
+    SupportedOpenAIModel.o4_mini: _O_SERIES_EFFORTS,
+    SupportedOpenAIModel.o3: _O_SERIES_EFFORTS,
+    SupportedOpenAIModel.o1_pro: _O_SERIES_EFFORTS,
+    SupportedOpenAIModel.o1: _O_SERIES_EFFORTS,
+}
+
+
+async def validate_and_cast_response(
+    response, timeout: int = None, cls: type[IO.ComfyNode] = None
+) -> torch.Tensor:
     """Validates and casts a response to a torch.Tensor.
 
     Args:
         response: The response to validate and cast.
         timeout: Request timeout in seconds. Defaults to None (no timeout).
+        cls: The calling node class; required for relative `/proxy/` URLs so they can be expanded and authenticated.
 
     Returns:
         A torch.Tensor of shape (N, H, W, C) with all returned images; images whose
@@ -86,7 +115,7 @@ async def validate_and_cast_response(response, timeout: int = None) -> torch.Ten
             img_io = BytesIO(base64.b64decode(img_data.b64_json))
         elif img_data.url:
             img_io = BytesIO()
-            await download_url_to_bytesio(img_data.url, img_io, timeout=timeout)
+            await download_url_to_bytesio(img_data.url, img_io, timeout=timeout, cls=cls)
         else:
             raise ValueError("Invalid image payload – neither URL nor base64 data present.")
 
@@ -103,265 +132,6 @@ async def validate_and_cast_response(response, timeout: int = None) -> torch.Ten
             samples = common_upscale(samples, ref_w, ref_h, "bilinear", "center")
             image_tensors[i] = samples.movedim(1, -1).squeeze(0)
     return torch.stack(image_tensors, dim=0)
-
-
-class OpenAIDalle2(IO.ComfyNode):
-
-    @classmethod
-    def define_schema(cls):
-        return IO.Schema(
-            node_id="OpenAIDalle2",
-            display_name="OpenAI DALL·E 2",
-            category="partner/image/OpenAI",
-            description="Generates images synchronously via OpenAI's DALL·E 2 endpoint.",
-            inputs=[
-                IO.String.Input(
-                    "prompt",
-                    default="",
-                    multiline=True,
-                    tooltip="Text prompt for DALL·E",
-                ),
-                IO.Int.Input(
-                    "seed",
-                    default=0,
-                    min=0,
-                    max=2**31 - 1,
-                    step=1,
-                    display_mode=IO.NumberDisplay.number,
-                    control_after_generate=True,
-                    tooltip="not implemented yet in backend",
-                    optional=True,
-                ),
-                IO.Combo.Input(
-                    "size",
-                    default="1024x1024",
-                    options=["256x256", "512x512", "1024x1024"],
-                    tooltip="Image size",
-                    optional=True,
-                ),
-                IO.Int.Input(
-                    "n",
-                    default=1,
-                    min=1,
-                    max=8,
-                    step=1,
-                    tooltip="How many images to generate",
-                    display_mode=IO.NumberDisplay.number,
-                    optional=True,
-                ),
-                IO.Image.Input(
-                    "image",
-                    tooltip="Optional reference image for image editing.",
-                    optional=True,
-                ),
-                IO.Mask.Input(
-                    "mask",
-                    tooltip="Optional mask for inpainting (white areas will be replaced)",
-                    optional=True,
-                ),
-            ],
-            outputs=[
-                IO.Image.Output(),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
-            is_api_node=True,
-            price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["size", "n"]),
-                expr="""
-                (
-                  $size := widgets.size;
-                  $nRaw := widgets.n;
-                  $n := ($nRaw != null and $nRaw != 0) ? $nRaw : 1;
-
-                  $base :=
-                    $contains($size, "256x256") ? 0.016 :
-                    $contains($size, "512x512") ? 0.018 :
-                    0.02;
-
-                  {"type":"usd","usd": $round($base * $n, 3)}
-                )
-                """,
-            ),
-        )
-
-    @classmethod
-    async def execute(
-        cls,
-        prompt,
-        seed=0,
-        image=None,
-        mask=None,
-        n=1,
-        size="1024x1024",
-    ) -> IO.NodeOutput:
-        validate_string(prompt, strip_whitespace=False)
-        model = "dall-e-2"
-        path = "/proxy/openai/images/generations"
-        content_type = "application/json"
-        request_class = OpenAIImageGenerationRequest
-        img_binary = None
-
-        if image is not None and mask is not None:
-            path = "/proxy/openai/images/edits"
-            content_type = "multipart/form-data"
-            request_class = OpenAIImageEditRequest
-
-            input_tensor = image.squeeze().cpu()
-            height, width, channels = input_tensor.shape
-            rgba_tensor = torch.ones(height, width, 4, device="cpu")
-            rgba_tensor[:, :, :channels] = input_tensor
-
-            if mask.shape[1:] != image.shape[1:-1]:
-                raise Exception("Mask and Image must be the same size")
-            rgba_tensor[:, :, 3] = 1 - mask.squeeze().cpu()
-
-            rgba_tensor = downscale_image_tensor(rgba_tensor.unsqueeze(0)).squeeze()
-
-            image_np = (rgba_tensor.numpy() * 255).astype(np.uint8)
-            img = Image.fromarray(image_np)
-            img_byte_arr = BytesIO()
-            img.save(img_byte_arr, format="PNG")
-            img_byte_arr.seek(0)
-            img_binary = img_byte_arr  # .getvalue()
-            img_binary.name = "image.png"
-        elif image is not None or mask is not None:
-            raise Exception("Dall-E 2 image editing requires an image AND a mask")
-
-        response = await sync_op(
-            cls,
-            ApiEndpoint(path=path, method="POST"),
-            response_model=OpenAIImageGenerationResponse,
-            data=request_class(
-                model=model,
-                prompt=prompt,
-                n=n,
-                size=size,
-                seed=seed,
-            ),
-            files=(
-                {
-                    "image": ("image.png", img_binary, "image/png"),
-                }
-                if img_binary
-                else None
-            ),
-            content_type=content_type,
-        )
-
-        return IO.NodeOutput(await validate_and_cast_response(response))
-
-
-class OpenAIDalle3(IO.ComfyNode):
-
-    @classmethod
-    def define_schema(cls):
-        return IO.Schema(
-            node_id="OpenAIDalle3",
-            display_name="OpenAI DALL·E 3",
-            category="partner/image/OpenAI",
-            description="Generates images synchronously via OpenAI's DALL·E 3 endpoint.",
-            inputs=[
-                IO.String.Input(
-                    "prompt",
-                    default="",
-                    multiline=True,
-                    tooltip="Text prompt for DALL·E",
-                ),
-                IO.Int.Input(
-                    "seed",
-                    default=0,
-                    min=0,
-                    max=2**31 - 1,
-                    step=1,
-                    display_mode=IO.NumberDisplay.number,
-                    control_after_generate=True,
-                    tooltip="not implemented yet in backend",
-                    optional=True,
-                ),
-                IO.Combo.Input(
-                    "quality",
-                    default="standard",
-                    options=["standard", "hd"],
-                    tooltip="Image quality",
-                    optional=True,
-                ),
-                IO.Combo.Input(
-                    "style",
-                    default="natural",
-                    options=["natural", "vivid"],
-                    tooltip="Vivid causes the model to lean towards generating hyper-real and dramatic images. Natural causes the model to produce more natural, less hyper-real looking images.",
-                    optional=True,
-                ),
-                IO.Combo.Input(
-                    "size",
-                    default="1024x1024",
-                    options=["1024x1024", "1024x1792", "1792x1024"],
-                    tooltip="Image size",
-                    optional=True,
-                ),
-            ],
-            outputs=[
-                IO.Image.Output(),
-            ],
-            hidden=[
-                IO.Hidden.auth_token_comfy_org,
-                IO.Hidden.api_key_comfy_org,
-                IO.Hidden.unique_id,
-            ],
-            is_api_node=True,
-            price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["size", "quality"]),
-                expr="""
-                (
-                  $size := widgets.size;
-                  $q := widgets.quality;
-                  $hd := $contains($q, "hd");
-
-                  $price :=
-                    $contains($size, "1024x1024")
-                      ? ($hd ? 0.08 : 0.04)
-                      : (($contains($size, "1792x1024") or $contains($size, "1024x1792"))
-                          ? ($hd ? 0.12 : 0.08)
-                          : 0.04);
-
-                  {"type":"usd","usd": $price}
-                )
-                """,
-            ),
-        )
-
-    @classmethod
-    async def execute(
-        cls,
-        prompt,
-        seed=0,
-        style="natural",
-        quality="standard",
-        size="1024x1024",
-    ) -> IO.NodeOutput:
-        validate_string(prompt, strip_whitespace=False)
-        model = "dall-e-3"
-
-        # build the operation
-        response = await sync_op(
-            cls,
-            ApiEndpoint(path="/proxy/openai/images/generations", method="POST"),
-            response_model=OpenAIImageGenerationResponse,
-            data=OpenAIImageGenerationRequest(
-                model=model,
-                prompt=prompt,
-                quality=quality,
-                size=size,
-                style=style,
-                seed=seed,
-            ),
-        )
-
-        return IO.NodeOutput(await validate_and_cast_response(response))
 
 
 class OpenAIGPTImage1(IO.ComfyNode):
@@ -557,10 +327,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
             if size not in ("auto", "1024x1024", "1024x1536", "1536x1024"):
                 raise ValueError(f"Resolution {size} is only supported by GPT Image 2 model")
 
-        if model == "gpt-image-2":
-            if background == "transparent":
-                raise ValueError("Transparent background is not supported for GPT Image 2 model")
-        elif model not in ("gpt-image-1", "gpt-image-1.5"):
+        if model not in ("gpt-image-1", "gpt-image-1.5", "gpt-image-2"):
             raise ValueError(f"Unknown model: {model}")
 
         if image is not None:
@@ -603,6 +370,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 cls,
                 ApiEndpoint(path="/proxy/openai/images/edits", method="POST"),
                 response_model=OpenAIImageGenerationResponse,
+                asset_urls=True,
                 data=OpenAIImageEditRequest(
                     model=model,
                     prompt=prompt,
@@ -621,6 +389,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 cls,
                 ApiEndpoint(path="/proxy/openai/images/generations", method="POST"),
                 response_model=OpenAIImageGenerationResponse,
+                asset_urls=True,
                 data=OpenAIImageGenerationRequest(
                     model=model,
                     prompt=prompt,
@@ -632,16 +401,21 @@ class OpenAIGPTImage1(IO.ComfyNode):
                     moderation="low",
                 ),
             )
-        return IO.NodeOutput(await validate_and_cast_response(response))
+        return IO.NodeOutput(await validate_and_cast_response(response, cls=cls))
 
 
-def _gpt_image_shared_inputs():
+GPT_IMAGE_QUALITIES = ("low", "medium", "high")
+GPT_IMAGE_25_QUALITIES = ("low", "medium", "high", "xhigh", "max")
+GPT_IMAGE_MODELS = ("gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2", "gpt-image-1.5", "gpt-image-1")
+
+
+def _gpt_image_shared_inputs(qualities: tuple[str, ...] = GPT_IMAGE_QUALITIES):
     """Inputs shared by all GPT Image models (quality + reference images + mask)."""
     return [
         IO.Combo.Input(
             "quality",
             default="low",
-            options=["low", "medium", "high"],
+            options=list(qualities),
             tooltip="Image quality, affects cost and generation time.",
         ),
         IO.Autogrow.Input(
@@ -681,13 +455,58 @@ def _gpt_image_legacy_model_inputs():
     ]
 
 
+def _gpt_image_2_model_inputs(backgrounds: tuple[str, ...], qualities: tuple[str, ...]):
+    return [
+        IO.Combo.Input(
+            "size",
+            default="auto",
+            options=[
+                "auto",
+                "1024x1024",
+                "1024x1536",
+                "1536x1024",
+                "2048x2048",
+                "2048x1152",
+                "1152x2048",
+                "3840x2160",
+                "2160x3840",
+                "Custom",
+            ],
+            tooltip="Image size. Select 'Custom' to use the custom width and height.",
+        ),
+        IO.Int.Input(
+            "custom_width",
+            default=1024,
+            min=480,
+            max=3840,
+            step=16,
+            tooltip="Used only when `size` is 'Custom'. Must be a multiple of 16.",
+        ),
+        IO.Int.Input(
+            "custom_height",
+            default=1024,
+            min=480,
+            max=3840,
+            step=16,
+            tooltip="Used only when `size` is 'Custom'. Must be a multiple of 16.",
+        ),
+        IO.Combo.Input(
+            "background",
+            default="auto",
+            options=list(backgrounds),
+            tooltip="Return image with or without background.",
+        ),
+        *_gpt_image_shared_inputs(qualities),
+    ]
+
+
 class OpenAIGPTImageNodeV2(IO.ComfyNode):
 
     @classmethod
     def define_schema(cls):
         return IO.Schema(
             node_id="OpenAIGPTImageNodeV2",
-            display_name="OpenAI GPT Image 2",
+            display_name="OpenAI GPT Image 2.5",
             category="partner/image/OpenAI",
             description="Generates images via OpenAI's GPT Image endpoint.",
             inputs=[
@@ -701,49 +520,16 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                     "model",
                     options=[
                         IO.DynamicCombo.Option(
+                            "gpt-image-2.5-flare",
+                            _gpt_image_2_model_inputs(("auto", "opaque", "transparent"), GPT_IMAGE_25_QUALITIES),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "gpt-image-2.5-sunburst",
+                            _gpt_image_2_model_inputs(("auto", "opaque", "transparent"), GPT_IMAGE_25_QUALITIES),
+                        ),
+                        IO.DynamicCombo.Option(
                             "gpt-image-2",
-                            [
-                                IO.Combo.Input(
-                                    "size",
-                                    default="auto",
-                                    options=[
-                                        "auto",
-                                        "1024x1024",
-                                        "1024x1536",
-                                        "1536x1024",
-                                        "2048x2048",
-                                        "2048x1152",
-                                        "1152x2048",
-                                        "3840x2160",
-                                        "2160x3840",
-                                        "Custom",
-                                    ],
-                                    tooltip="Image size. Select 'Custom' to use the custom width and height.",
-                                ),
-                                IO.Int.Input(
-                                    "custom_width",
-                                    default=1024,
-                                    min=1024,
-                                    max=3840,
-                                    step=16,
-                                    tooltip="Used only when `size` is 'Custom'. Must be a multiple of 16.",
-                                ),
-                                IO.Int.Input(
-                                    "custom_height",
-                                    default=1024,
-                                    min=1024,
-                                    max=3840,
-                                    step=16,
-                                    tooltip="Used only when `size` is 'Custom'. Must be a multiple of 16.",
-                                ),
-                                IO.Combo.Input(
-                                    "background",
-                                    default="auto",
-                                    options=["auto", "opaque"],
-                                    tooltip="Return image with or without background.",
-                                ),
-                                *_gpt_image_shared_inputs(),
-                            ],
+                            _gpt_image_2_model_inputs(("auto", "opaque", "transparent"), GPT_IMAGE_QUALITIES),
                         ),
                         IO.DynamicCombo.Option("gpt-image-1.5", _gpt_image_legacy_model_inputs()),
                         IO.DynamicCombo.Option("gpt-image-1", _gpt_image_legacy_model_inputs()),
@@ -777,7 +563,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["model", "model.quality", "n"]),
+                depends_on=IO.PriceBadgeDepends(widgets=["model", "model.quality", "model.size", "n"], input_groups=["model.images"]),
                 expr="""
                 (
                   $ranges := {
@@ -792,22 +578,66 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                       "high":   [0.133, 0.22]
                     },
                     "gpt-image-2": {
-                      "low":    [0.0058, 0.0228],
-                      "medium": [0.0492, 0.2016],
-                      "high":   [0.198, 0.804]
+                      "low":    [0.0019, 0.0237],
+                      "medium": [0.0186, 0.2135],
+                      "high":   [0.0744, 0.8539]
+                    },
+                    "gpt-image-2.5-flare": {
+                      "low":    [0.0023, 0.0283],
+                      "medium": [0.0056, 0.0636],
+                      "high":   [0.0222, 0.2544],
+                      "xhigh":  [0.0388, 0.4523],
+                      "max":    [0.0887, 1.0175]
+                    },
+                    "gpt-image-2.5-sunburst": {
+                      "low":    [0.0023, 0.0283],
+                      "medium": [0.0056, 0.0636],
+                      "high":   [0.0222, 0.2544],
+                      "xhigh":  [0.0388, 0.4523],
+                      "max":    [0.0887, 1.0175]
                     }
                   };
-                  $range := $lookup($lookup($ranges, widgets.model), $lookup(widgets, "model.quality"));
+                  $presets := {
+                    "gpt-image-2": {
+                      "low": {"1024x1024": 0.0071, "1024x1536": 0.0057, "1536x1024": 0.0057, "2048x2048": 0.0143, "2048x1152": 0.0057, "1152x2048": 0.0057, "3840x2160": 0.0134, "2160x3840": 0.0134},
+                      "medium": {"1024x1024": 0.0632, "1024x1536": 0.0494, "1536x1024": 0.0494, "2048x2048": 0.1284, "2048x1152": 0.0509, "1152x2048": 0.0509, "3840x2160": 0.1201, "2160x3840": 0.1201},
+                      "high": {"1024x1024": 0.2529, "1024x1536": 0.1976, "1536x1024": 0.1976, "2048x2048": 0.5138, "2048x1152": 0.2034, "1152x2048": 0.2034, "3840x2160": 0.4803, "2160x3840": 0.4803}
+                    },
+                    "gpt-image-2.5": {
+                      "low": {"1024x1024": 0.0084, "1024x1536": 0.0068, "1536x1024": 0.0068, "2048x2048": 0.0170, "2048x1152": 0.0067, "1152x2048": 0.0067, "3840x2160": 0.0159, "2160x3840": 0.0159},
+                      "medium": {"1024x1024": 0.0188, "1024x1536": 0.0147, "1536x1024": 0.0147, "2048x2048": 0.0383, "2048x1152": 0.0157, "1152x2048": 0.0157, "3840x2160": 0.0371, "2160x3840": 0.0371},
+                      "high": {"1024x1024": 0.0753, "1024x1536": 0.0589, "1536x1024": 0.0589, "2048x2048": 0.1531, "2048x1152": 0.0606, "1152x2048": 0.0606, "3840x2160": 0.1431, "2160x3840": 0.1431},
+                      "xhigh": {"1024x1024": 0.1339, "1024x1536": 0.1055, "1536x1024": 0.1055, "2048x2048": 0.2721, "2048x1152": 0.1077, "1152x2048": 0.1077, "3840x2160": 0.2544, "2160x3840": 0.2544},
+                      "max": {"1024x1024": 0.3013, "1024x1536": 0.2354, "1536x1024": 0.2354, "2048x2048": 0.6123, "2048x1152": 0.2424, "1152x2048": 0.2424, "3840x2160": 0.5724, "2160x3840": 0.5724}
+                    }
+                  };
+                  $perImage := {
+                    "gpt-image-1": [0.0019, 0.0019],
+                    "gpt-image-1.5": [0.0016, 0.0016],
+                    "gpt-image-2": [0.0098, 0.0147],
+                    "gpt-image-2.5-flare": [0.0117, 0.0176],
+                    "gpt-image-2.5-sunburst": [0.0117, 0.0176]
+                  };
+                  $model := widgets.model;
+                  $family := ($model = "gpt-image-2.5-flare" or $model = "gpt-image-2.5-sunburst") ? "gpt-image-2.5" : $model;
+                  $qualityRaw := $lookup(widgets, "model.quality");
+                  $quality := ($qualityRaw != null) ? $qualityRaw : "";
+                  $sizeRaw := $lookup(widgets, "model.size");
+                  $size := ($sizeRaw != null) ? $sizeRaw : "";
+                  $range := $lookup($lookup($ranges, $model), $quality);
+                  $preset := $lookup($lookup($lookup($presets, $family), $quality), $size);
+                  $out := ($preset != null) ? [$preset, $preset] : $range;
+                  $image := $lookup($perImage, $model);
+                  $refsRaw := $lookup(inputGroups, "model.images");
+                  $refs := ($refsRaw != null) ? $refsRaw : 0;
                   $nRaw := widgets.n;
                   $n := ($nRaw != null and $nRaw != 0) ? $nRaw : 1;
-                  ($n = 1)
-                    ? {"type":"range_usd","min_usd": $range[0], "max_usd": $range[1], "format": {"approximate": true}}
-                    : {
-                        "type":"range_usd",
-                        "min_usd": $range[0] * $n,
-                        "max_usd": $range[1] * $n,
-                        "format": { "suffix": "/Run", "approximate": true }
-                      }
+                  $min := ($out[0] + $refs * $image[0]) * $n;
+                  $max := ($out[1] + $refs * $image[1]) * $n;
+                  $format := ($n = 1) ? {"approximate": true} : {"suffix": "/Run", "approximate": true};
+                  ($min = $max)
+                    ? {"type": "usd", "usd": $min, "format": $format}
+                    : {"type": "range_usd", "min_usd": $min, "max_usd": $max, "format": $format}
                 )
                 """,
             ),
@@ -859,7 +689,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                 )
             size = f"{custom_width}x{custom_height}"
 
-        if model_id not in ("gpt-image-1", "gpt-image-1.5", "gpt-image-2"):
+        if model_id not in GPT_IMAGE_MODELS:
             raise ValueError(f"Unknown model: {model_id}")
 
         if image_tensors:
@@ -907,6 +737,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                 cls,
                 ApiEndpoint(path="/proxy/openai/images/edits", method="POST"),
                 response_model=OpenAIImageGenerationResponse,
+                asset_urls=True,
                 data=OpenAIImageEditRequest(
                     model=model_id,
                     prompt=prompt,
@@ -924,6 +755,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                 cls,
                 ApiEndpoint(path="/proxy/openai/images/generations", method="POST"),
                 response_model=OpenAIImageGenerationResponse,
+                asset_urls=True,
                 data=OpenAIImageGenerationRequest(
                     model=model_id,
                     prompt=prompt,
@@ -934,7 +766,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                     moderation="low",
                 ),
             )
-        return IO.NodeOutput(await validate_and_cast_response(response))
+        return IO.NodeOutput(await validate_and_cast_response(response, cls=cls))
 
 
 class OpenAIChatNode(IO.ComfyNode):
@@ -998,7 +830,12 @@ class OpenAIChatNode(IO.ComfyNode):
                 expr="""
                 (
                   $m := widgets.model;
-                  $contains($m, "o4-mini") ? {
+                  $contains($m, "gpt-6-astra") ? {
+                    "type": "list_usd",
+                    "usd": [0.0143, 0.0715],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                  : $contains($m, "o4-mini") ? {
                     "type": "list_usd",
                     "usd": [0.0011, 0.0044],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
@@ -1144,6 +981,15 @@ class OpenAIChatNode(IO.ComfyNode):
         advanced_options: ModelResponseProperties | None = None,
     ) -> IO.NodeOutput:
         validate_string(prompt, strip_whitespace=False)
+        if advanced_options is not None and advanced_options.reasoning is not None:
+            effort = advanced_options.reasoning.effort
+            supported = SUPPORTED_REASONING_EFFORTS.get(model)
+            if supported is not None and effort not in supported:
+                if not supported:
+                    raise ValueError(f"{model} is not a reasoning model; set reasoning_effort to 'default'.")
+                raise ValueError(
+                    f"{model} does not support reasoning_effort '{effort}'. Supported: {', '.join(supported)} or 'default'."
+                )
 
         # Create response
         create_response = await sync_op(
@@ -1263,7 +1109,7 @@ class OpenAIChatConfig(IO.ComfyNode):
                     min=16,
                     default=4096,
                     max=16384,
-                    tooltip="An upper bound for the number of tokens that can be generated for a response, including visible output tokens",
+                    tooltip="An upper bound for the number of tokens that can be generated for a response, including visible output tokens and reasoning tokens",
                     optional=True,
                     advanced=True,
                 ),
@@ -1272,6 +1118,16 @@ class OpenAIChatConfig(IO.ComfyNode):
                     multiline=True,
                     optional=True,
                     tooltip="Instructions for the model on how to generate the response",
+                ),
+                IO.Combo.Input(
+                    "reasoning_effort",
+                    options=REASONING_EFFORT_OPTIONS,
+                    default="default",
+                    optional=True,
+                    tooltip="How much the model reasons before answering. 'default' leaves the choice to the model. "
+                    "Supported levels differ per model: GPT-6 Astra low-max, GPT-5.6 none-max (no minimal), "
+                    "GPT-5.5 none-xhigh, GPT-5.5 Pro medium-xhigh, GPT-5 minimal-high, o-series low-high; "
+                    "GPT-4.1 has no reasoning. Unsupported levels are rejected before the request is sent.",
                 ),
             ],
             outputs=[
@@ -1285,6 +1141,7 @@ class OpenAIChatConfig(IO.ComfyNode):
         truncation: bool,
         instructions: str | None = None,
         max_output_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> IO.NodeOutput:
         """
         Configure advanced options for the OpenAI Chat Node.
@@ -1300,6 +1157,7 @@ class OpenAIChatConfig(IO.ComfyNode):
                 instructions=instructions,
                 truncation=truncation,
                 max_output_tokens=max_output_tokens,
+                reasoning=None if reasoning_effort in (None, "default") else Reasoning(effort=reasoning_effort),
             )
         )
 
@@ -1308,8 +1166,6 @@ class OpenAIExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
         return [
-            OpenAIDalle2,
-            OpenAIDalle3,
             OpenAIGPTImage1,
             OpenAIGPTImageNodeV2,
             OpenAIChatNode,
