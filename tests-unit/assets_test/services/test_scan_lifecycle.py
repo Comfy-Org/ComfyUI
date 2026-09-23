@@ -4,13 +4,21 @@ from unittest.mock import patch
 from sqlalchemy import select
 
 from app.assets.database.models import AssetContent
-from app.assets.scanner import build_asset_specs, seed_asset_specs, sync_prefixes_with_filesystem
+from app.assets.scanner import (
+    build_asset_specs,
+    seed_asset_specs,
+    stat_seed_specs,
+)
+from assets_test.helpers import sync_prefixes_in_session
 
 
 def _scan(session, root: Path) -> int:
     paths = [str(path) for path in root.iterdir()]
     specs, _, _ = build_asset_specs(paths, set(), enable_metadata_extraction=False)
-    return seed_asset_specs(session, specs)
+    created, error = seed_asset_specs(session, specs, stat_seed_specs(specs))
+    if error is not None:
+        raise error
+    return created
 
 
 def test_e2e_scan_seed_detect_prune(session, temp_dir: Path):
@@ -26,7 +34,7 @@ def test_e2e_scan_seed_detect_prune(session, temp_dir: Path):
         edited.write_bytes(b"replacement")
         (root / "partial.part").write_bytes(b"partial")
         with patch("app.assets.scanner.mode.hashing_enabled", return_value=False):
-            sync_prefixes_with_filesystem(session, [str(root)])
+            sync_prefixes_in_session(session, [str(root)])
             _scan(session, root)
     session.commit()
     contents = list(session.scalars(select(AssetContent)))

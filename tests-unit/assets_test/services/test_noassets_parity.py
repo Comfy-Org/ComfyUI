@@ -19,6 +19,7 @@ from app.assets.manager import AssetsEnabled, NoAssets
 from app.assets.mode import hashing_enabled
 from app.assets.seeder import asset_seeder
 from app.assets.services.hash_mode_state import read_stored_mode
+from comfy_api import feature_flags
 
 
 class _Args:
@@ -193,6 +194,19 @@ def test_default_asset_manager_disables_assets_when_dependencies_are_unavailable
     assert "requirements.txt" in caplog.text
 
 
+def test_server_features_match_manager_when_asset_dependencies_are_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(manager.args, "enable_assets", True)
+    monkeypatch.setattr(manager, "dependencies_available", lambda: False)
+    monkeypatch.setitem(feature_flags.SERVER_FEATURE_FLAGS, "assets", True)
+
+    asset_manager = manager.default_asset_manager()
+
+    assert asset_manager.enabled is False
+    assert feature_flags.get_server_features(asset_manager.enabled)["assets"] is False
+
+
 def test_default_asset_manager_enables_assets_when_dependencies_are_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -200,3 +214,22 @@ def test_default_asset_manager_enables_assets_when_dependencies_are_available(
     monkeypatch.setattr(manager, "dependencies_available", lambda: True)
 
     assert isinstance(manager.default_asset_manager(), AssetsEnabled)
+
+
+def test_noassets_startup_cleans_temp_even_when_the_database_is_unusable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cleaned: list[bool] = []
+
+    def unusable_database() -> None:
+        raise RuntimeError("no such table: hash_mode_state")
+
+    monkeypatch.setattr(manager, "record_hash_mode_transition_intent", unusable_database)
+    monkeypatch.setattr(
+        manager, "run_startup", lambda *, enable_assets: cleaned.append(enable_assets)
+    )
+
+    with pytest.raises(RuntimeError):
+        _no_assets().startup()
+
+    assert cleaned == [False]

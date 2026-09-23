@@ -1,8 +1,7 @@
 """Serves the per-asset operations behind the API: reading an asset's detail,
 updating its name, tags, metadata and preview, deleting a record, and resolving
-a hash to a servable path. An update moves ``updated_at`` only when it actually
-changed something, so a call that requests what is already true is not recorded
-as a user edit.
+a hash to a servable path. Name and tag updates move ``updated_at`` only when
+the requested values differ. Other supplied metadata fields record a write.
 """
 
 import mimetypes
@@ -34,7 +33,7 @@ from app.assets.services.schemas import (
     ReferenceData,
     UserMetadata,
 )
-from app.database.db import create_session
+from app.database.db import create_session, run_write_txn
 
 
 def _record_to_detail_result(session, record) -> AssetDetailResult:
@@ -93,7 +92,7 @@ def update_asset_metadata(
     mime_type: str | None = None,
     preview_id: str | None = None,
 ) -> AssetDetailResult:
-    with create_session() as session:
+    def _work(session) -> None:
         record = get_record_by_id(session, reference_id)
         if record is None:
             raise ValueError(f"Asset {reference_id} not found")
@@ -143,7 +142,8 @@ def update_asset_metadata(
             session.flush()
             if _fetch_manual_tags(session, reference_id) != manual_tags_before:
                 bump_record_updated_at(session, reference_id)
-        session.commit()
+
+    run_write_txn(_work)
 
     detail = get_asset_detail(reference_id)
     if detail is None:
@@ -154,12 +154,13 @@ def update_asset_metadata(
 def delete_asset_reference(
     reference_id: str,
 ) -> bool:
-    with create_session() as session:
+    def _work(session) -> bool:
         if get_record_by_id(session, reference_id) is None:
             return False
         delete_record(session, reference_id)
-        session.commit()
         return True
+
+    return run_write_txn(_work)
 
 
 def asset_exists(asset_hash: str) -> bool:
@@ -169,6 +170,37 @@ def asset_exists(asset_hash: str) -> bool:
         return False
     with create_session() as session:
         return lookup_for_view(session, canonical) is not None
+
+
+def _preflight_hash_resolution(
+    canonical: str,
+) -> tuple[str, str, str | None, str, list[str]] | None:
+    """Qualify candidate rows and choose the served one before the writer lease is taken."""
+    with create_session() as session:
+        content = lookup_for_view(session, canonical)
+        if content is None:
+            return None
+
+        records = list(
+            session.scalars(
+                select(Asset)
+                .where(Asset.content_id == content.id)
+                .order_by(Asset.created_at, Asset.id)
+            )
+        )
+        display_name = os.path.basename(content.path)
+        mime_type = None
+        if records:
+            latest_record = records[-1]
+            display_name = latest_record.name or display_name
+            mime_type = latest_record.mime_type
+        return (
+            content.id,
+            content.path,
+            mime_type,
+            display_name,
+            [record.id for record in records],
+        )
 
 
 def resolve_hash_to_path(
@@ -189,35 +221,30 @@ def resolve_hash_to_path(
         canonical = validate_blake3_hash(asset_hash)
     except ValueError:
         return None
-    with create_session() as session:
-        content = lookup_for_view(session, canonical)
-        if content is None:
+
+    preflight = _preflight_hash_resolution(canonical)
+    if preflight is None:
+        return None
+    content_id, abs_path, mime_type, display_name, record_ids = preflight
+
+    if record_ids:
+        def _work(session) -> bool:
+            content = session.get(AssetContent, content_id)
+            if content is None or content.is_missing or content.hash != canonical:
+                return False
+            for record_id in record_ids:
+                update_record_access_time(session, record_id)
+            return True
+
+        if not run_write_txn(_work):
             return None
 
-        records = list(
-            session.scalars(
-                select(Asset)
-                .where(Asset.content_id == content.id)
-                .order_by(Asset.created_at, Asset.id)
-            )
-        )
-        display_name = os.path.basename(content.path)
-        mime_type = None
-        if records:
-            latest_record = records[-1]
-            display_name = latest_record.name or display_name
-            mime_type = latest_record.mime_type
-        for record in records:
-            update_record_access_time(session, record.id)
-        abs_path = content.path
-        session.commit()
-
-        ctype = (
-            mime_type
-            or mimetypes.guess_type(display_name)[0]
-            or mimetypes.guess_type(abs_path)[0]
-            or "application/octet-stream"
-        )
+    ctype = (
+        mime_type
+        or mimetypes.guess_type(display_name)[0]
+        or mimetypes.guess_type(abs_path)[0]
+        or "application/octet-stream"
+    )
     return DownloadResolutionResult(
         abs_path=abs_path,
         content_type=ctype,
@@ -240,33 +267,33 @@ def resolve_asset_for_download(
         record = get_record_by_id(session, reference_id)
         if record is None:
             raise ValueError(f"AssetReference {reference_id} not found")
-
         content = session.get(AssetContent, record.content_id)
-        if (
-            content is None
-            or content.is_missing
-            or not os.path.isfile(content.path)
-        ):
-            raise FileNotFoundError(
-                f"No live content for AssetReference {reference_id} "
-                f"(content id={record.content_id}, name={record.name})"
-            )
-
+        content_missing = content is None or content.is_missing
+        candidate_path = None if content is None else content.path
         ref_name = record.name
         asset_mime = record.mime_type
-        abs_path = content.path
+        content_id = record.content_id
 
+    if content_missing or candidate_path is None or not os.path.isfile(candidate_path):
+        raise FileNotFoundError(
+            f"No live content for AssetReference {reference_id} "
+            f"(content id={content_id}, name={ref_name})"
+        )
+
+    abs_path = candidate_path
+
+    def _work(session) -> None:
         update_record_access_time(session, reference_id)
-        session.commit()
 
-        ctype = (
-            asset_mime
-            or mimetypes.guess_type(ref_name or abs_path)[0]
-            or "application/octet-stream"
-        )
-        download_name = ref_name or os.path.basename(abs_path)
-        return DownloadResolutionResult(
-            abs_path=abs_path,
-            content_type=ctype,
-            download_name=download_name,
-        )
+    run_write_txn(_work)
+    ctype = (
+        asset_mime
+        or mimetypes.guess_type(ref_name or abs_path)[0]
+        or "application/octet-stream"
+    )
+    download_name = ref_name or os.path.basename(abs_path)
+    return DownloadResolutionResult(
+        abs_path=abs_path,
+        content_type=ctype,
+        download_name=download_name,
+    )

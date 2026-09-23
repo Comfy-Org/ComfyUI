@@ -8,14 +8,15 @@ still downloading out of the catalog.
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy.orm import Session
-
+from app.assets.event_log import emit, error_type
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 
 PARTIAL_DOWNLOAD_EXTENSIONS = frozenset({
@@ -66,32 +67,61 @@ def _two_stat_admit(paths_with_stats: list[tuple[str, os.stat_result]]) -> tuple
     return admitted, watched
 
 
-def tick_watch_list(session: Session) -> None:
-    from app.assets.scanner import seed_asset_specs, SeedAssetSpec
+def tick_watch_list(
+    interrupt_check: Callable[[], bool] | None = None,
+) -> None:
+    from app.assets.scanner import SeedAssetSpec, insert_asset_specs
 
-    remaining: list[_WatchEntry] = []
-    for entry in _WATCH_LIST:
+    queued_count = len(_WATCH_LIST)
+    for _ in range(queued_count):
+        if interrupt_check and interrupt_check():
+            break
+        # Popped before anything that can fail: leaving the entry on the list
+        # while a stat, a spec build or a seed blows up wedges the list, because
+        # the entry is re-attempted every tick and never reaches the increment
+        # _WATCH_SCAN_RETRIES needs to retire it. An interrupt breaks before the
+        # pop, so entries the tick never reached stay queued.
+        entry = _WATCH_LIST.pop(0)
         try:
             current = os.stat(entry.path)
-        except FileNotFoundError:
+        except OSError as exc:
+            logging.warning("Dropping watched asset after stat failed: %s", entry.path)
+            emit("scanner.watch_stat_failed", error_type=error_type(exc))
             continue
         if (current.st_mtime_ns, current.st_size) == (entry.last_stat.st_mtime_ns, entry.last_stat.st_size):
-            name, tags = get_name_and_tags_from_asset_path(entry.path)
-            spec: SeedAssetSpec = {
-                "abs_path": entry.path,
-                "size_bytes": current.st_size,
-                "mtime_ns": current.st_mtime_ns,
-                "info_name": name,
-                "tags": tags,
-                "fname": compute_loader_path(entry.path),
-                "metadata": None,
-                "mime_type": mimetypes.guess_type(entry.path, strict=False)[0],
-                "job_id": None,
-            }
-            seed_asset_specs(session, [spec])
+            try:
+                name, tags = get_name_and_tags_from_asset_path(entry.path)
+                spec: SeedAssetSpec = {
+                    "abs_path": entry.path,
+                    "size_bytes": current.st_size,
+                    "mtime_ns": current.st_mtime_ns,
+                    "info_name": name,
+                    "tags": tags,
+                    "fname": compute_loader_path(entry.path),
+                    "metadata": None,
+                    "mime_type": mimetypes.guess_type(entry.path, strict=False)[0],
+                    "job_id": None,
+                }
+            except Exception as exc:
+                logging.warning(
+                    "Dropping watched asset after spec construction failed: %s", entry.path
+                )
+                emit("scanner.watch_spec_failed", error_type=error_type(exc))
+                continue
+            try:
+                _created, seed_error = insert_asset_specs([spec], set(spec["tags"]))
+            except BaseException:
+                # A fault that escapes the write transaction is the database's,
+                # not this file's: the seed never happened, so the entry goes
+                # back rather than being retired by a lock the next tick may get.
+                _WATCH_LIST.insert(0, entry)
+                raise
+            if seed_error is not None:
+                logging.warning(
+                    "Dropping watched asset after seeding failed: %s", entry.path
+                )
+                emit("scanner.watch_seed_failed", error_type=error_type(seed_error))
             continue
-        entry.last_stat = current
-        entry.ticks += 1
-        if entry.ticks < _WATCH_SCAN_RETRIES:
-            remaining.append(entry)
-    _WATCH_LIST[:] = remaining
+        next_entry = _WatchEntry(entry.path, current, entry.ticks + 1)
+        if next_entry.ticks < _WATCH_SCAN_RETRIES:
+            _WATCH_LIST.append(next_entry)

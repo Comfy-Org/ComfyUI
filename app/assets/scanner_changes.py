@@ -8,13 +8,14 @@ so a restored file can never leave two live rows describing one location.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from app.assets.database.models import AssetContent
+from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import (
     create_content,
     create_record,
@@ -24,14 +25,32 @@ from app.assets.database.queries.records import (
 from app.assets.helpers import sql_path_under_prefix, to_stored_hash
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 from app.assets.services.snapshot_hash import snapshot_hash
+from app.database.db import create_session, run_write_txn
 
 _pending_verification_ids: list[str] = []
-_pending_recovery_paths: list[str] = []
+
+
+class PreparedRecovery(NamedTuple):
+    path: str
+    initial_stat: os.stat_result
+    snapshot: tuple[str, os.stat_result] | None
+
+
+class _PendingVerificationPreflight(NamedTuple):
+    content_id: str
+    path: str | None
+    content_hash: str | None
+    size_bytes: int | None
+    mtime_ns: int | None
+    outcome: Literal["drop", "gone", "retry", "ready"]
+
+
+def prepare_missing_content_recovery(path: str, stat_result: os.stat_result) -> PreparedRecovery:
+    return PreparedRecovery(path, stat_result, snapshot_hash(path))
 
 
 def clear_pending_verifications() -> None:
     _pending_verification_ids.clear()
-    _pending_recovery_paths.clear()
 
 
 def queue_pending_verification(content_id: str) -> None:
@@ -39,15 +58,13 @@ def queue_pending_verification(content_id: str) -> None:
         _pending_verification_ids.append(content_id)
 
 
-def pending_recovery_count() -> int:
-    return len(_pending_recovery_paths)
-
-
-def recover_missing_content(
-    session: Session, path: str, stat_result: os.stat_result, hashing_is_enabled: bool
+def recover_missing_content_from_preparation(
+    session: Session,
+    path: str,
+    stat_result: os.stat_result,
+    prepared: PreparedRecovery,
+    pending_recovery_paths: list[str],
 ) -> Literal["recovered", "no_match", "unstable"]:
-    if not hashing_is_enabled:
-        return "no_match"
     occupied = session.scalar(
         sa.select(AssetContent.id)
         .where(AssetContent.path == path, AssetContent.is_missing.is_(False))
@@ -55,12 +72,21 @@ def recover_missing_content(
     )
     if occupied is not None:
         return "no_match"
-    snapshot = snapshot_hash(path)
-    if snapshot is None:
-        if path not in _pending_recovery_paths:
-            _pending_recovery_paths.append(path)
+    if prepared.snapshot is None or (
+        prepared.initial_stat.st_size != stat_result.st_size
+        or prepared.initial_stat.st_mtime_ns != stat_result.st_mtime_ns
+    ):
+        if path not in pending_recovery_paths:
+            pending_recovery_paths.append(path)
         return "unstable"
-    digest, verified_stat = snapshot
+    digest, verified_stat = prepared.snapshot
+    if (
+        verified_stat.st_size != stat_result.st_size
+        or verified_stat.st_mtime_ns != stat_result.st_mtime_ns
+    ):
+        if path not in pending_recovery_paths:
+            pending_recovery_paths.append(path)
+        return "unstable"
     stored_hash = to_stored_hash(digest)
     matches = list(
         session.scalars(
@@ -133,62 +159,128 @@ def detect_content_change(
     content: AssetContent,
     stat_result: os.stat_result,
     hashing_is_enabled: bool,
+    pending_verification_ids: list[str] | None = None,
 ) -> None:
     if content.mtime_ns == stat_result.st_mtime_ns:
         # Ruling #10: size drift with unchanged mtime is undefined behavior.
         return
     if hashing_is_enabled:
-        queue_pending_verification(content.id)
+        if content.hash is None:
+            session.execute(
+                sa.update(Asset)
+                .where(Asset.content_id == content.id)
+                .values(system_metadata=None)
+            )
+        if pending_verification_ids is None:
+            queue_pending_verification(content.id)
+        elif content.id not in pending_verification_ids:
+            pending_verification_ids.append(content.id)
         return
     if content.size_bytes == stat_result.st_size:
         # User identity rule: a same-size mtime bump (rsync, cloud sync, backup restore) is the
-        # same file — never split, or the record's tags and metadata are destroyed.
+        # same file — never split, or the record's user tags and identity are destroyed.
         # The stored hash goes with the refreshed stat: OFF mode cannot prove the bytes, and a
         # refreshed stat alone would re-qualify the row to be served under a digest it may no
-        # longer match.
+        # longer match. Extracted metadata described the old bytes, so it is cleared alongside
+        # the hash and the next enrich pass re-derives it.
         content.size_bytes = stat_result.st_size
         content.mtime_ns = stat_result.st_mtime_ns
         content.hash = None
+        session.execute(
+            sa.update(Asset)
+            .where(Asset.content_id == content.id)
+            .values(system_metadata=None)
+        )
         return
     split_content(session, content, stat_result, hash_value=None)
 
 
-def drain_pending_verifications(session: Session, limit: int | None = None) -> int:
+def _preflight_pending_verification(
+    content_id: str,
+) -> _PendingVerificationPreflight:
+    with create_session() as session:
+        content = session.get(AssetContent, content_id)
+        if content is None or content.is_missing:
+            return _PendingVerificationPreflight(
+                content_id, None, None, None, None, "drop"
+            )
+        path = content.path
+        content_hash = content.hash
+        size_bytes = content.size_bytes
+        mtime_ns = content.mtime_ns
+    try:
+        os.stat(path, follow_symlinks=True)
+    except FileNotFoundError:
+        outcome: Literal["drop", "gone", "retry", "ready"] = "gone"
+    except OSError:
+        outcome = "retry"
+    else:
+        outcome = "ready"
+    return _PendingVerificationPreflight(
+        content_id, path, content_hash, size_bytes, mtime_ns, outcome
+    )
+
+
+def _apply_pending_verification(
+    session: Session,
+    preflight: _PendingVerificationPreflight,
+    snapshot: tuple[str, os.stat_result] | None,
+) -> Literal["drop", "processed", "retry"]:
+    if preflight.outcome == "drop":
+        return "drop"
+    content = session.get(AssetContent, preflight.content_id)
+    if (
+        content is None
+        or content.is_missing
+        or content.path != preflight.path
+        or content.hash != preflight.content_hash
+        or content.size_bytes != preflight.size_bytes
+        or content.mtime_ns != preflight.mtime_ns
+    ):
+        return "drop"
+    assert preflight.path is not None
+    if preflight.outcome == "gone":
+        mark_content_missing(session, content.id)
+        return "processed"
+    if preflight.outcome == "retry" or snapshot is None:
+        return "retry"
+    digest, verified_stat = snapshot
+    stored_hash = to_stored_hash(digest)
+    if content.hash == stored_hash or content.hash is None:
+        content.hash = stored_hash
+        content.size_bytes = verified_stat.st_size
+        content.mtime_ns = verified_stat.st_mtime_ns
+    else:
+        split_content(session, content, verified_stat, hash_value=stored_hash)
+    return "processed"
+
+
+def drain_pending_verifications(
+    limit: int | None = None,
+    interrupt_check: Callable[[], bool] | None = None,
+) -> int:
     queued_count = min(len(_pending_verification_ids), limit or len(_pending_verification_ids))
     processed = 0
     for _ in range(queued_count):
-        content_id = _pending_verification_ids.pop(0)
-        content = session.get(AssetContent, content_id)
-        if content is None or content.is_missing:
-            continue
-        try:
-            os.stat(content.path, follow_symlinks=True)
-        except FileNotFoundError:
-            mark_content_missing(session, content.id)
+        if interrupt_check and interrupt_check():
+            break
+        content_id = _pending_verification_ids[0]
+        preflight = _preflight_pending_verification(content_id)
+        snapshot: tuple[str, os.stat_result] | None = None
+        if preflight.outcome == "ready":
+            assert preflight.path is not None
+            try:
+                snapshot = snapshot_hash(preflight.path)
+            except OSError:
+                preflight = preflight._replace(outcome="retry")
+        outcome = run_write_txn(
+            lambda session: _apply_pending_verification(session, preflight, snapshot)
+        )
+        _pending_verification_ids.pop(0)
+        if outcome == "retry":
+            queue_pending_verification(content_id)
+        elif outcome == "processed":
             processed += 1
-            continue
-        except OSError:
-            queue_pending_verification(content_id)
-            continue
-
-        try:
-            snapshot = snapshot_hash(content.path)
-        except OSError:
-            queue_pending_verification(content_id)
-            continue
-        if snapshot is None:
-            queue_pending_verification(content_id)
-            continue
-        digest, verified_stat = snapshot
-        stored_hash = to_stored_hash(digest)
-
-        if content.hash == stored_hash or content.hash is None:
-            content.hash = stored_hash
-            content.size_bytes = verified_stat.st_size
-            content.mtime_ns = verified_stat.st_mtime_ns
-        else:
-            split_content(session, content, verified_stat, hash_value=stored_hash)
-        processed += 1
     return processed
 
 

@@ -8,9 +8,9 @@ without parsing prose, and the existing human-readable lines stay exactly as
 they are.
 
 The field vocabulary is closed. Only the names in :data:`ALLOWED_FIELDS` may be
-carried, each has a validator, and no string value may contain a path separator
-or logfmt delimiter — so file names, paths, asset ids and content hashes cannot
-ride along.
+carried, each has a validator, and no string value may contain a path separator,
+logfmt delimiter or line break — so file names, paths, asset ids and content
+hashes cannot ride along.
 """
 
 import logging
@@ -22,14 +22,15 @@ from typing import Any
 TAG = "[assets-event]"
 
 MAX_STRING_LENGTH = 64
-FORBIDDEN_STRING_CHARS = ("/", "\\", ":", " ", "=", '"')
+FORBIDDEN_STRING_CHARS = ("/", "\\", ":", " ", "=", '"', "\n", "\r")
 
 ROOTS = frozenset({"models", "input", "output", "user", "temp"})
 PHASES = frozenset({"fast", "enrich", "full"})
 STAGES = frozenset({"mark_missing", "pruning", "fast_scan", "enrich", "finalize"})
-STAT_SITES = frozenset({"discovery", "enrich"})
+STAT_SITES = frozenset({"discovery", "enrich", "reference_stat"})
 ALLOWED_EVENTS = frozenset({
     "assets.enabled",
+    "assets.disabled",
     "seeder.scan_started",
     "seeder.scan_completed",
     "seeder.scan_failed",
@@ -43,6 +44,16 @@ ALLOWED_EVENTS = frozenset({
     "scanner.temp_sync_failed",
     "scanner.mark_missing_failed",
     "scanner.stat_failed",
+    "scanner.invalid_mtime",
+    "scanner.watch_stat_failed",
+    "scanner.watch_spec_failed",
+    "scanner.watch_seed_failed",
+    "ingest.register_failed",
+})
+
+WARNING_LEVEL_EVENTS = frozenset({
+    "ingest.register_failed",
+    "assets.disabled",
 })
 
 
@@ -89,6 +100,8 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "error_type": _is_safe_string,
     "hashing_enabled": _is_flag,
     "site": _one_of(STAT_SITES),
+    "output_kind": _one_of(frozenset({"executed", "cached"})),
+    "job_id": _is_safe_string,
 }
 
 _warned_call_sites: set[tuple[str, int]] = set()
@@ -119,7 +132,13 @@ def _caller_call_site() -> tuple[str, int]:
     return (caller.filename, caller.lineno or 0)
 
 
-def emit(event: str, *, root: str | None = None, **fields: Any) -> None:
+def emit(
+    event: str,
+    *,
+    root: str | None = None,
+    job_id: str | None = None,
+    **fields: Any,
+) -> None:
     """Log one tagged event line.
 
     An invalid call raises in strict mode (under pytest, or with
@@ -129,6 +148,8 @@ def emit(event: str, *, root: str | None = None, **fields: Any) -> None:
     """
     if root is not None:
         fields["root"] = root
+    if job_id is not None:
+        fields["job_id"] = job_id
 
     problem = _find_problem(event, fields)
     if problem is None:
@@ -137,7 +158,8 @@ def emit(event: str, *, root: str | None = None, **fields: Any) -> None:
             for name, value in sorted(fields.items())
         )
         line = f"{TAG} {event}" + (f" {pairs}" if pairs else "")
-        logging.info("%s", line)
+        log = logging.warning if event in WARNING_LEVEL_EVENTS else logging.info
+        log("%s", line)
         return
 
     if _strict_mode():

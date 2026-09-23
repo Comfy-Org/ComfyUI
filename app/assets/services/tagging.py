@@ -23,7 +23,7 @@ from app.assets.database.queries.tags import list_tag_counts_for_filtered_assets
 from app.assets.database.models import Asset, AssetTag
 from app.assets.helpers import normalize_tags
 from app.assets.services.schemas import TagUsage
-from app.database.db import create_session
+from app.database.db import create_session, run_write_txn
 
 
 def apply_tags(
@@ -31,7 +31,7 @@ def apply_tags(
     tags: list[str],
     origin: str = "manual",
 ) -> AddTagsResult:
-    with create_session() as session:
+    def _work(session) -> AddTagsResult:
         if session.get(Asset, reference_id) is None:
             raise ValueError(f"Asset {reference_id} not found")
 
@@ -57,20 +57,20 @@ def apply_tags(
                 .order_by(AssetTag.tag_name)
             )
         )
-        session.commit()
+        return AddTagsResult(
+            added=sorted(added),
+            already_present=sorted((requested_tags & set(total_tags)) - set(added)),
+            total_tags=total_tags,
+        )
 
-    return AddTagsResult(
-        added=sorted(added),
-        already_present=sorted((requested_tags & set(total_tags)) - set(added)),
-        total_tags=total_tags,
-    )
+    return run_write_txn(_work)
 
 
 def remove_tags(
     reference_id: str,
     tags: list[str],
 ) -> RemoveTagsResult:
-    with create_session() as session:
+    def _work(session) -> RemoveTagsResult:
         if session.get(Asset, reference_id) is None:
             raise ValueError(f"Asset {reference_id} not found")
 
@@ -109,14 +109,14 @@ def remove_tags(
                 .order_by(AssetTag.tag_name)
             )
         )
-        session.commit()
+        return RemoveTagsResult(
+            removed=sorted(removable_tags),
+            not_present=sorted(requested_tags - removable_tags - protected_tags),
+            total_tags=total_tags,
+            protected=sorted(protected_tags),
+        )
 
-    return RemoveTagsResult(
-        removed=sorted(removable_tags),
-        not_present=sorted(requested_tags - removable_tags - protected_tags),
-        total_tags=total_tags,
-        protected=sorted(protected_tags),
-    )
+    return run_write_txn(_work)
 
 
 def list_tags(

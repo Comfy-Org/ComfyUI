@@ -175,13 +175,113 @@ def test_same_size_mtime_bump_does_not_split(session: Session, temp_dir: Path) -
     )
     assert len(rows_at_path) == 1
     surviving = session.get(Asset, record_id)
-    assert surviving.system_metadata == {"k": "v"}
+    assert surviving.system_metadata is None
     tags = fetch_record_tags(session, record_id)
     assert "keepme" in tags
     assert "missing" not in tags
 
     assert live.mtime_ns == 2000
     assert live.size_bytes == 100
+
+
+def test_hashing_off_same_size_change_clears_linked_system_metadata(
+    session: Session, temp_dir: Path
+) -> None:
+    path = temp_dir / "metadata-off.safetensors"
+    content = create_content(
+        session,
+        str(path),
+        hash="blake3:old",
+        size_bytes=100,
+        mtime_ns=1000,
+    )
+    record = create_record(
+        session,
+        content.id,
+        path.name,
+        system_metadata={"w": 1},
+    )
+    session.commit()
+
+    detect_content_change(
+        session,
+        content,
+        _FakeStat(st_size=100, st_mtime_ns=2000),
+        hashing_is_enabled=False,
+    )
+    session.commit()
+    session.expire_all()
+
+    assert session.get(AssetContent, content.id).hash is None
+    assert session.get(Asset, record.id).system_metadata is None
+
+
+def test_hashing_on_null_hash_change_clears_metadata_and_queues_verification(
+    session: Session, temp_dir: Path
+) -> None:
+    path = temp_dir / "metadata-pending.safetensors"
+    content = create_content(
+        session,
+        str(path),
+        hash=None,
+        size_bytes=100,
+        mtime_ns=1000,
+    )
+    record = create_record(
+        session,
+        content.id,
+        path.name,
+        system_metadata={"w": 1},
+    )
+    session.commit()
+    pending_verification_ids: list[str] = []
+
+    detect_content_change(
+        session,
+        content,
+        _FakeStat(st_size=100, st_mtime_ns=2000),
+        hashing_is_enabled=True,
+        pending_verification_ids=pending_verification_ids,
+    )
+    session.commit()
+    session.expire_all()
+
+    assert session.get(Asset, record.id).system_metadata is None
+    assert pending_verification_ids == [content.id]
+
+
+def test_hashing_on_hashed_change_preserves_metadata_until_verification(
+    session: Session, temp_dir: Path
+) -> None:
+    path = temp_dir / "metadata-hashed.safetensors"
+    content = create_content(
+        session,
+        str(path),
+        hash="blake3:old",
+        size_bytes=100,
+        mtime_ns=1000,
+    )
+    record = create_record(
+        session,
+        content.id,
+        path.name,
+        system_metadata={"w": 1},
+    )
+    session.commit()
+    pending_verification_ids: list[str] = []
+
+    detect_content_change(
+        session,
+        content,
+        _FakeStat(st_size=100, st_mtime_ns=2000),
+        hashing_is_enabled=True,
+        pending_verification_ids=pending_verification_ids,
+    )
+    session.commit()
+    session.expire_all()
+
+    assert session.get(Asset, record.id).system_metadata == {"w": 1}
+    assert pending_verification_ids == [content.id]
 
 
 def test_accepted_mtime_bump_drops_the_unverifiable_hash(
@@ -211,7 +311,7 @@ def test_accepted_mtime_bump_drops_the_unverifiable_hash(
 
     surviving = session.get(Asset, record_id)
     assert surviving is not None and surviving.content_id == content_id
-    assert surviving.system_metadata == {"k": "v"}
+    assert surviving.system_metadata is None
     assert "keepme" in fetch_record_tags(session, record_id)
     listed, _, _ = list_records_page(session, RecordPageSpec(limit=100))
     assert record_id in {row.id for row in listed}
@@ -249,7 +349,7 @@ def test_accepted_mtime_bump_is_not_re_detected_by_the_next_scan(
 
     detect_content_change(session, content, path.stat(), hashing_is_enabled=True)
 
-    assert drain_pending_verifications(session) == 0
+    assert drain_pending_verifications() == 0
 
     detect_content_change(session, content, path.stat(), hashing_is_enabled=False)
     session.commit()
@@ -281,7 +381,7 @@ def test_dropped_hash_is_refilled_in_place_by_a_later_hash_mode_pass(
     assert record_id in _candidates_under(session, temp_dir, compute_hashes=True)
 
     enqueue_transition_work(session, "off_to_on")
-    drain_transition_queue(session)
+    drain_transition_queue()
     session.commit()
     session.expire_all()
 
@@ -296,8 +396,8 @@ def test_dropped_hash_is_refilled_in_place_by_a_later_hash_mode_pass(
     )
     assert len(rows_at_path) == 1
     assert "keepme" in fetch_record_tags(session, record_id)
-    assert session.get(Asset, record_id).system_metadata == {"k": "v"}
-    assert record_id not in _candidates_under(session, temp_dir, compute_hashes=True)
+    assert session.get(Asset, record_id).system_metadata is None
+    assert record_id in _candidates_under(session, temp_dir, compute_hashes=True)
 
 
 def test_mtime_and_size_change_splits_with_null_metadata(
@@ -375,7 +475,7 @@ def test_transition_drain_split_replacement_has_null_metadata(
     path.write_bytes(b"different new bytes")
 
     enqueue_transition_work(session, "off_to_on")
-    drain_transition_queue(session)
+    drain_transition_queue()
     session.commit()
     session.expire_all()
 

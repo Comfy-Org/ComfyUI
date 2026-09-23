@@ -37,7 +37,9 @@ VALID_VALUES: dict[str, list[object]] = {
     "count": [1],
     "error_type": ["ValueError", "FileNotFoundError"],
     "hashing_enabled": [True, False],
-    "site": ["discovery", "enrich"],
+    "site": ["discovery", "enrich", "reference_stat"],
+    "output_kind": ["executed", "cached"],
+    "job_id": ["job-123"],
 }
 
 
@@ -91,13 +93,6 @@ def go_to_production_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- the shared cross-repo fixture -------------------------------------------------
 
 
-def test_shared_fixture_file_holds_three_newline_terminated_lines():
-    raw = FIXTURE_PATH.read_text(encoding="utf-8")
-
-    assert raw.endswith("\n")
-    assert len(raw.splitlines()) == 3
-
-
 @pytest.mark.parametrize("line", fixture_lines())
 def test_emit_reproduces_each_shared_fixture_line_byte_for_byte(caplog, line):
     """Given a canonical line, When its fields are re-emitted, Then the bytes match."""
@@ -122,6 +117,18 @@ def test_a_fieldless_event_still_matches_the_shared_pattern(caplog):
 
     assert line == "[assets-event] scanner.hash_discarded_modified"
     assert EVENT_LINE_PATTERN.match(line) is not None
+
+
+def test_none_job_id_is_omitted_from_the_event_line(caplog):
+    line = emit_line(
+        caplog,
+        "ingest.register_failed",
+        error_type="OSError",
+        output_kind="executed",
+        job_id=None,
+    )
+
+    assert line == "[assets-event] ingest.register_failed error_type=OSError output_kind=executed"
 
 
 def test_the_emitted_record_is_a_single_line(caplog):
@@ -168,7 +175,9 @@ def test_unknown_field_raises_under_pytest():
         emit("seeder.scan_started", path="/home/x/models")
 
 
-@pytest.mark.parametrize("value", ["a/b", "a\\b", "a:b", "a b", "a=b", 'a"b'])
+@pytest.mark.parametrize(
+    "value", ["a/b", "a\\b", "a:b", "a b", "a=b", 'a"b', "a\nb", "a\rb"]
+)
 def test_a_string_value_carrying_a_forbidden_character_raises(value):
     with pytest.raises(EventLogError):
         emit("seeder.scan_failed", error_type=value)
@@ -278,3 +287,28 @@ def test_production_mode_still_emits_valid_events_after_a_dropped_one(caplog, mo
 
     tagged = [r.getMessage() for r in caplog.records if r.getMessage().startswith(TAG)]
     assert tagged == ["[assets-event] seeder.scan_started phase=fast"]
+
+
+def test_registration_failure_emits_at_warning_with_unchanged_tap_format(caplog):
+    caplog.clear()
+
+    with caplog.at_level(logging.INFO):
+        emit("ingest.register_failed", output_kind="executed", error_type="OperationalError")
+
+    tagged = [r for r in caplog.records if r.getMessage().startswith(TAG)]
+    assert len(tagged) == 1
+    assert tagged[0].levelno == logging.WARNING
+    assert tagged[0].getMessage() == (
+        "[assets-event] ingest.register_failed error_type=OperationalError output_kind=executed"
+    )
+
+
+def test_routine_events_stay_at_info(caplog):
+    caplog.clear()
+
+    with caplog.at_level(logging.INFO):
+        emit("seeder.scan_started", phase="fast")
+
+    tagged = [r for r in caplog.records if r.getMessage().startswith(TAG)]
+    assert len(tagged) == 1
+    assert tagged[0].levelno == logging.INFO

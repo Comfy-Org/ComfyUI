@@ -2,8 +2,7 @@
 and files, recording a hash-mode transition, and handing the filesystem scan to
 the background seeder. Startup only enqueues transition work — draining it
 belongs to the seeder, so a large library cannot stall the server before it
-accepts requests. It also settles, before any of that, whether the database
-dependencies exist at all, disabling the asset routes when they do not.
+accepts requests.
 """
 
 from __future__ import annotations
@@ -20,7 +19,7 @@ from app.assets.database.queries.records import delete_record
 from app.assets.helpers import sql_path_under_prefix
 from app.assets.services.hash_mode_state import enqueue_transition_work
 from app.assets.services.hash_mode_state import record_transition_intent
-from app.database.db import can_create_session, create_session
+from app.database.db import can_create_session, create_session, run_write_txn
 from comfy.cli_args import args
 
 _excluded_scan_roots: set[str] = set()
@@ -34,15 +33,13 @@ def get_excluded_scan_roots() -> frozenset[str]:
 def record_hash_mode_transition_intent() -> None:
     global _hash_mode_transition
 
-    with create_session() as session:
-        _hash_mode_transition = record_transition_intent(session)
-        session.commit()
+    transition = run_write_txn(record_transition_intent)
+    _hash_mode_transition = transition
 
 
 def enqueue_mode_transition_work() -> None:
     with create_session() as session:
         enqueue_transition_work(session, _hash_mode_transition)
-        session.commit()
 
 
 def wipe_temp_db_rows(session) -> tuple[int, int]:
@@ -108,9 +105,7 @@ def start_asset_seeder() -> bool:
 
 def run_asset_startup() -> None:
     try:
-        with create_session() as session:
-            wipe_temp_db_rows(session)
-            session.commit()
+        run_write_txn(wipe_temp_db_rows)
     except Exception:
         logging.exception("Temp DB row wipe failed; skipping filesystem cleanup")
         enqueue_mode_transition_work()
@@ -133,9 +128,7 @@ def run_startup(*, enable_assets: bool) -> None:
 
 def run_asset_shutdown_cleanup() -> None:
     try:
-        with create_session() as session:
-            wipe_temp_db_rows(session)
-            session.commit()
+        run_write_txn(wipe_temp_db_rows)
     except Exception:
         logging.exception("Temp DB row wipe failed during shutdown")
     finally:

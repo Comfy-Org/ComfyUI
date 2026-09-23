@@ -1,5 +1,5 @@
 """Declares the asset schema: content rows describing bytes on disk, records
-describing what a user sees, and the tag and metadata tables hanging off them.
+describing what a user sees, and the asset_tags table hanging off them.
 The split is the point — many records can name one content row, and retiring
 content by marking it missing rather than deleting it is what keeps a path's
 history intact. Constraints declared here, not application code, are what make
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import (
@@ -21,8 +20,6 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
-    Integer,
-    Numeric,
     String,
     Text,
     text,
@@ -103,9 +100,6 @@ class Asset(Base):
     preview: Mapped[Asset | None] = relationship(
         "Asset", foreign_keys=[preview_id], remote_side=lambda: [Asset.id]
     )
-    metadata_entries: Mapped[list[AssetMeta]] = relationship(
-        back_populates="asset", cascade="all,delete-orphan", passive_deletes=True
-    )
     tag_links: Mapped[list[AssetTag]] = relationship(
         back_populates="asset", cascade="all,delete-orphan", passive_deletes=True
     )
@@ -118,33 +112,6 @@ class Asset(Base):
         Index("ix_assets_name", "name"),
         Index("ix_assets_created_at", "created_at"),
         Index("ix_assets_preview_id", "preview_id"),
-    )
-
-
-class AssetMeta(Base):
-    __tablename__ = "asset_meta"
-
-    asset_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("assets.id", ondelete="CASCADE"), primary_key=True
-    )
-    key: Mapped[str] = mapped_column(String(256), primary_key=True)
-    ordinal: Mapped[int] = mapped_column(Integer, primary_key=True, default=0)
-    val_str: Mapped[str | None] = mapped_column(String(2048))
-    val_num: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
-    val_bool: Mapped[bool | None] = mapped_column(Boolean)
-    val_json: Mapped[Any | None] = mapped_column(JSON)
-
-    asset: Mapped[Asset] = relationship(back_populates="metadata_entries")
-
-    __table_args__ = (
-        Index("ix_asset_meta_key", "key"),
-        Index("ix_asset_meta_key_val_str", "key", "val_str"),
-        Index("ix_asset_meta_key_val_num", "key", "val_num"),
-        Index("ix_asset_meta_key_val_bool", "key", "val_bool"),
-        CheckConstraint(
-            "val_str IS NOT NULL OR val_num IS NOT NULL OR val_bool IS NOT NULL OR val_json IS NOT NULL",
-            name="ck_asset_meta_has_value",
-        ),
     )
 
 

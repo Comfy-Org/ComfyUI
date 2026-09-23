@@ -1,6 +1,9 @@
+import logging
 import os
+import threading
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -88,10 +91,166 @@ def test_never_stabilizes_dropped_after_cap(session, temp_dir: Path):
         target_ns = max(path.stat().st_mtime_ns, previous_target_ns) + 1_000_000
         os.utime(path, ns=(target_ns, target_ns))
         previous_target_ns = target_ns
-        tick_watch_list(session)
+        tick_watch_list()
 
     assert _WATCH_LIST == []
     assert session.scalars(select(AssetContent)).all() == []
+
+
+def test_stat_error_drops_entry_and_allows_other_watch_entries_to_commit(
+    session, temp_dir: Path, monkeypatch, caplog: pytest.LogCaptureFixture
+):
+    unreadable_path = temp_dir / "unreadable.bin"
+    stable_path = temp_dir / "stable.bin"
+    unreadable_path.write_bytes(b"unreadable")
+    stable_path.write_bytes(b"stable")
+    unreadable_stat = unreadable_path.stat()
+    stable_stat = stable_path.stat()
+    _WATCH_LIST[:] = [
+        _WatchEntry(str(unreadable_path), unreadable_stat),
+        _WatchEntry(str(stable_path), stable_stat),
+    ]
+    real_os = scanner_admission.os
+
+    def _stat(path: str):
+        if path == str(unreadable_path):
+            raise PermissionError(path)
+        return real_os.stat(path)
+
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
+    monkeypatch.setattr(scanner_admission, "os", SimpleNamespace(stat=_stat))
+
+    with caplog.at_level(logging.INFO):
+        tick_watch_list()
+    session.commit()
+
+    persisted_paths = set(session.scalars(select(AssetContent.path)).all())
+    assert persisted_paths == {str(stable_path)}
+    assert _WATCH_LIST == []
+    assert any(
+        record.getMessage()
+        == f"Dropping watched asset after stat failed: {unreadable_path}"
+        for record in caplog.records
+    )
+    assert any(
+        record.getMessage()
+        == "[assets-event] scanner.watch_stat_failed error_type=PermissionError"
+        for record in caplog.records
+    )
+
+
+def test_seed_failure_does_not_stop_watch_list_drain(
+    session,
+    temp_dir: Path,
+    monkeypatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    paths = [temp_dir / name for name in ("broken.bin", "stable.bin")]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
+    attempted: list[str] = []
+
+    def seed_or_return_error(_session, specs, *_args, **_kwargs) -> tuple[int, Exception | None]:
+        path = specs[0]["abs_path"]
+        attempted.append(path)
+        if path == str(paths[0]):
+            return 0, RuntimeError("forced watch seed failure")
+        return 1, None
+
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
+    monkeypatch.setattr("app.assets.scanner.seed_asset_specs", seed_or_return_error)
+
+    with caplog.at_level(logging.INFO):
+        tick_watch_list()
+
+    assert attempted == [str(path) for path in paths]
+    assert _WATCH_LIST == []
+    assert any(
+        record.getMessage()
+        == f"Dropping watched asset after seeding failed: {paths[0]}"
+        for record in caplog.records
+    )
+    assert any(
+        record.getMessage()
+        == "[assets-event] scanner.watch_seed_failed error_type=RuntimeError"
+        for record in caplog.records
+    )
+
+
+def test_spec_construction_failure_drops_the_entry_without_wedging_the_watch_list(
+    session,
+    temp_dir: Path,
+    monkeypatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    changing_path = temp_dir / "changing.bin"
+    unresolvable_path = temp_dir / "unresolvable.bin"
+    stable_path = temp_dir / "stable.bin"
+    for path in (changing_path, unresolvable_path, stable_path):
+        path.write_bytes(path.name.encode())
+    changing_stat = changing_path.stat()
+    changing_path.write_bytes(b"still-downloading-and-now-longer")
+    _WATCH_LIST[:] = [
+        _WatchEntry(str(changing_path), changing_stat),
+        _WatchEntry(str(unresolvable_path), unresolvable_path.stat()),
+        _WatchEntry(str(stable_path), stable_path.stat()),
+    ]
+    resolve_name_and_tags = scanner_admission.get_name_and_tags_from_asset_path
+
+    def _name_and_tags(path: str) -> tuple[str, list[str]]:
+        if path == str(unresolvable_path):
+            raise ValueError(
+                "Path is not within input, output, temp, or configured model bases: "
+                f"{path}"
+            )
+        return resolve_name_and_tags(path)
+
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
+    monkeypatch.setattr(
+        scanner_admission, "get_name_and_tags_from_asset_path", _name_and_tags
+    )
+
+    with caplog.at_level(logging.INFO):
+        tick_watch_list()
+    session.commit()
+
+    assert set(session.scalars(select(AssetContent.path)).all()) == {str(stable_path)}
+    assert [(entry.path, entry.ticks) for entry in _WATCH_LIST] == [
+        (str(changing_path), 1)
+    ]
+    assert any(
+        record.getMessage()
+        == f"Dropping watched asset after spec construction failed: {unresolvable_path}"
+        for record in caplog.records
+    )
+    assert any(
+        record.getMessage()
+        == "[assets-event] scanner.watch_spec_failed error_type=ValueError"
+        for record in caplog.records
+    )
+
+
+def test_unexpected_fault_mid_drain_leaves_unvisited_entries_on_the_watch_list(
+    session, temp_dir: Path, monkeypatch
+) -> None:
+    paths = [temp_dir / name for name in ("first.bin", "exploding.bin", "untouched.bin")]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
+
+    def seed_or_explode(_session, specs, *_args, **_kwargs) -> tuple[int, Exception | None]:
+        if specs[0]["abs_path"] == str(paths[1]):
+            raise MemoryError("forced unrecoverable fault")
+        return 1, None
+
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
+    monkeypatch.setattr("app.assets.scanner.seed_asset_specs", seed_or_explode)
+
+    with pytest.raises(MemoryError, match="^forced unrecoverable fault$"):
+        tick_watch_list()
+
+    assert [entry.path for entry in _WATCH_LIST] == [str(paths[1]), str(paths[2])]
 
 
 def test_stable_scan_admission_removes_watch_entry_before_next_tick(session, temp_dir: Path, monkeypatch):
@@ -111,7 +270,7 @@ def test_stable_scan_admission_removes_watch_entry_before_next_tick(session, tem
         ),
         patch("app.assets.scanner.seed_asset_specs") as seed_asset_specs,
     ):
-        tick_watch_list(session)
+        tick_watch_list()
 
     assert admitted == [str(path)]
     assert watched == []
@@ -168,3 +327,34 @@ def test_nonempty_candidate_batch_still_pays_stability_gap(temp_dir: Path, monke
     assert sleeps == [0.1]
     assert admitted == [str(path)]
     assert watched == []
+
+
+def test_watch_list_interrupts_between_entries(temp_dir: Path, monkeypatch):
+    paths = [temp_dir / f"watched-{index}.bin" for index in range(3)]
+    for path in paths:
+        path.write_bytes(path.name.encode())
+    _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
+    interrupted = threading.Event()
+    inserted: list[str] = []
+
+    def record_insert(specs, _tags) -> tuple[int, Exception | None]:
+        inserted.append(specs[0]["abs_path"])
+        interrupted.set()
+        return 1, None
+
+    monkeypatch.setattr("app.assets.scanner.insert_asset_specs", record_insert)
+    monkeypatch.setattr(
+        scanner_admission,
+        "get_name_and_tags_from_asset_path",
+        lambda path: (Path(path).name, []),
+    )
+    monkeypatch.setattr(
+        scanner_admission,
+        "compute_loader_path",
+        lambda path: Path(path).name,
+    )
+
+    tick_watch_list(interrupt_check=interrupted.is_set)
+
+    assert inserted == [str(paths[0])]
+    assert [entry.path for entry in _WATCH_LIST] == [str(path) for path in paths[1:]]

@@ -12,9 +12,7 @@ from app.assets.database.queries.records import create_content
 from app.assets.services.lookup import (
     claim_qualified_content,
     is_temp_path as _is_temp_path,
-    lookup_for_from_hash,
     lookup_for_view,
-    refresh_qualified_content,
 )
 from app.database.models import Base
 
@@ -45,15 +43,6 @@ def _make_file(tmp_path, name: str, content: bytes = b"bytes") -> str:
     return str(p)
 
 
-def test_temp_only_match_from_hash_returns_none(session, tmp_path):
-    f = _make_file(tmp_path, "f.png")
-    create_content(session, path=f, hash="abc123")
-    session.commit()
-    with patch("app.assets.services.lookup.is_temp_path", return_value=True):
-        result = lookup_for_from_hash(session, "abc123")
-    assert result is None
-
-
 def test_temp_only_match_view_returns_none(session, tmp_path):
     f = _make_file(tmp_path, "f2.png")
     create_content(session, path=f, hash="abc123")
@@ -67,18 +56,6 @@ def test_sibling_prefix_not_temp(tmp_path):
     with patch("folder_paths.get_temp_directory", return_value=str(tmp_path / "temp")):
         assert not _is_temp_path(str(tmp_path / "temp-other" / "f.png"))
         assert _is_temp_path(str(tmp_path / "temp" / "f.png"))
-
-
-def test_off_mode_from_hash_returns_none(session, tmp_path):
-    class FakeArgs:
-        enable_asset_hashing = False
-
-    mode_module.init(FakeArgs())
-    f = _make_file(tmp_path, "f3.png")
-    create_content(session, path=f, hash="abc123")
-    session.commit()
-    result = lookup_for_from_hash(session, "abc123")
-    assert result is None
 
 
 def test_upload_content_lookup_not_gated_on_hashing_flag(session, tmp_path):
@@ -104,7 +81,7 @@ def test_stale_older_newer_live_returns_newer(session, tmp_path):
     session.execute(update(AssetContent).where(AssetContent.id == c_new.id).values(created_at=new_time))
     session.commit()
 
-    result = lookup_for_from_hash(session, "xyz")
+    result = lookup_for_view(session, "xyz")
     assert result is not None
     assert result.id == c_new.id
 
@@ -156,7 +133,7 @@ def test_refresh_qualified_content_none_when_file_vanishes(session, tmp_path):
 
     os.unlink(f)
 
-    assert refresh_qualified_content(session, content.id) is None
+    assert lookup_for_view(session, content.hash) is None
 
 
 def test_size_mismatch_disqualifies_a_row_that_never_recorded_an_mtime(session, tmp_path):

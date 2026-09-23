@@ -10,7 +10,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session as SASession
+from sqlalchemy.orm import Session as SASession, sessionmaker
 
 from app.assets import mode
 from app.assets.api import routes
@@ -18,8 +18,10 @@ import app.assets.mode as mode_module
 import folder_paths
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_record
-from app.assets.scanner import enrich_asset
-from app.assets.scanner_changes import recover_missing_content
+from app.assets.scanner_changes import (
+    prepare_missing_content_recovery,
+    recover_missing_content_from_preparation,
+)
 from app.assets.services import asset_management, ingest
 from app.assets.services.asset_management import get_asset_detail
 from app.assets.services.ingest import (
@@ -27,6 +29,8 @@ from app.assets.services.ingest import (
     upload_from_temp_path,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
+
+from ..helpers import enrich_via_prepare_apply as enrich_asset
 
 
 @pytest.fixture
@@ -184,8 +188,12 @@ def test_recovery_matches_prefixed_stored_hash(session, temp_dir):
     path.unlink()
     path.write_bytes(original_bytes)
     stat = os.stat(str(path))
-    result = recover_missing_content(
-        session, str(path), stat, hashing_is_enabled=True
+    result = recover_missing_content_from_preparation(
+        session,
+        str(path),
+        stat,
+        prepare_missing_content_recovery(str(path), stat),
+        [],
     )
 
     assert result == "recovered"
@@ -209,6 +217,7 @@ async def test_all_read_surfaces_agree_on_prefixed_hash(
     monkeypatch.setattr(mode, "hashing_enabled", lambda: True)
     monkeypatch.setattr(ingest, "create_session", _factory)
     monkeypatch.setattr(asset_management, "create_session", _factory)
+    monkeypatch.setattr("app.database.db.WriteSession", sessionmaker(bind=db_engine))
 
     content_bytes = b"one-asset-all-surfaces-agree"
     temp = _write_temp(content_bytes)
