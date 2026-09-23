@@ -977,7 +977,15 @@ def set_attr_param(obj, attr, value):
     # their version counter is frozen and nn.Parameter() cannot wrap them.
     if (not torch.is_inference_mode_enabled()) and value.is_inference():
         value = value.clone()
-    return set_attr(obj, attr, torch.nn.Parameter(value, requires_grad=False))
+    # A quantized weight is a tensor subclass, so nn.Parameter() takes its custom
+    # path -- detach().requires_grad_() -- rather than _make_subclass. Called from
+    # inside torch.inference_mode, which every node executes under, that detach()
+    # returns an inference tensor and requires_grad_() then raises "Cannot set
+    # version_counter for inference tensor". Suspending inference mode for the wrap
+    # is what makes it legal. Plain tensors never reach that path and are unaffected.
+    with torch.inference_mode(False):
+        param = torch.nn.Parameter(value, requires_grad=False)
+    return set_attr(obj, attr, param)
 
 def set_attr_buffer(obj, attr, value):
     obj, name = resolve_attr(obj, attr)

@@ -1148,7 +1148,14 @@ def _quantized_apply(module, fn, recurse=True):
         p = fn(param)
         if (not torch.is_inference_mode_enabled()) and p.is_inference():
             p = p.clone()
-        module.register_parameter(key, torch.nn.Parameter(p, requires_grad=False))
+        # A QuantizedTensor is a tensor subclass, so nn.Parameter() takes its custom
+        # detach().requires_grad_() path rather than _make_subclass. Under
+        # torch.inference_mode -- which every node executes under, and which
+        # unpatch_model's self.model.to(device) reaches through here -- that detach()
+        # returns an inference tensor and requires_grad_() raises "Cannot set
+        # version_counter for inference tensor". Suspend it for the wrap.
+        with torch.inference_mode(False):
+            module.register_parameter(key, torch.nn.Parameter(p, requires_grad=False))
     for key, buf in module._buffers.items():
         if buf is not None:
             module._buffers[key] = fn(buf)
