@@ -1550,10 +1550,6 @@ class Lumina2(BaseModel):
         if ref_contexts is not None:
             out['ref_contexts'] = comfy.conds.CONDList(ref_contexts)
 
-        direct_context = kwargs.get("direct_context", None)  # Ming-Image
-        if direct_context is not None:
-            out['direct_context'] = comfy.conds.CONDRegular(direct_context)
-
         return out
 
     def extra_conds_shapes(self, **kwargs):
@@ -1567,6 +1563,9 @@ class MingImage(Lumina2):
     def extra_conds(self, **kwargs):
         ref_latents = kwargs.pop("reference_latents", None)
         out = super().extra_conds(**kwargs)
+        direct_context = kwargs.get("direct_context", None)
+        if direct_context is not None:
+            out['direct_context'] = comfy.conds.CONDRegular(direct_context)
         if ref_latents is not None:
             out['ref_frames'] = comfy.conds.CONDList([self.process_latent_in(lat)[:, :, f] for lat in ref_latents for f in range(lat.shape[2])])
         return out

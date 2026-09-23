@@ -22,7 +22,7 @@ class TextEncodeMingImageEdit(io.ComfyNode):
                         names=[f"image_{i}" for i in range(1, 9)],
                         min=0,
                     ),
-                    tooltip="Optional reference images, seen by the text encoder and appended to the latent sequence as clean frames. The first image sets the canvas; the others are resized to it.",
+                    tooltip="Optional reference images, seen by the text encoder and appended to the latent sequence as clean frames. Later images are resized to the first one, and the sampled latent should match its size.",
                 ),
             ],
             outputs=[

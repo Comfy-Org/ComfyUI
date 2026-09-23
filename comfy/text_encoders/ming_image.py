@@ -8,7 +8,8 @@ from tokenizers import Tokenizer
 import comfy.ops
 from comfy import sd1_clip
 from comfy.ldm.modules.attention import optimized_attention_for_device
-from comfy.text_encoders.llama import MLP, RMSNorm, TransformerBlock, apply_rope, moe_experts_forward, precompute_freqs_cis
+from comfy.text_encoders.llama import MLP, RMSNorm, TransformerBlock, moe_experts_forward, precompute_freqs_cis
+from comfy.text_encoders.qwen35 import apply_partial_rope
 from comfy.text_encoders import qwen_vl
 
 IMAGE_PATCH_TOKEN = 157157
@@ -71,9 +72,7 @@ class BailingAttention(nn.Module):
         xq, xk, xv = qkv.split((self.num_heads, self.num_kv_heads, self.num_kv_heads), dim=1)
         xq = self.q_norm(xq)
         xk = self.k_norm(xk)
-        q_rot, k_rot = apply_rope(xq[..., :self.rope_dim].contiguous(), xk[..., :self.rope_dim].contiguous(), freqs_cis)
-        xq = torch.cat((q_rot, xq[..., self.rope_dim:]), dim=-1)
-        xk = torch.cat((k_rot, xk[..., self.rope_dim:]), dim=-1)
+        xq, xk = apply_partial_rope(xq, xk, freqs_cis, self.rope_dim)
         out = optimized_attention(xq, xk, xv, self.num_heads, mask=attention_mask, skip_reshape=True, enable_gqa=True)
         return self.dense(out)
 
@@ -264,7 +263,7 @@ class MingImageEncoder(nn.Module):
 class _MingRawTokenizer:
     def __init__(self, tokenizer_json_bytes=None, **kwargs):
         if isinstance(tokenizer_json_bytes, torch.Tensor):
-            tokenizer_json_bytes = bytes(tokenizer_json_bytes.tolist())
+            tokenizer_json_bytes = tokenizer_json_bytes.numpy().tobytes()
         if not isinstance(tokenizer_json_bytes, bytes):
             raise ValueError("The Ming-Image text encoder file must contain the tokenizer_json tensor.")
         self.tokenizer = Tokenizer.from_str(tokenizer_json_bytes.decode("utf-8"))
@@ -329,6 +328,13 @@ class MingImageClipModel(sd1_clip.SDClipModel):
 class MingImageTEModel(sd1_clip.SD1ClipModel):
     def __init__(self, device="cpu", dtype=None, model_options={}):
         super().__init__(device=device, dtype=dtype, name="ming_image", clip_model=MingImageClipModel, model_options=model_options)
+
+    def memory_estimation_function(self, tokens, device=None):
+        # both expert banks of a MoE layer sit in fp32 while it runs, on top of the weights; images expand to a few hundred tokens each
+        config = BailingMoeV2Config()
+        banks = 3 * config.hidden_size * config.moe_intermediate_size * config.num_experts * 4
+        num_tokens = sum(600 if isinstance(t[0], dict) else 1 for batch in tokens.get("ming_image", []) for t in batch)
+        return banks + num_tokens * config.hidden_size * 64
 
 
 def te(dtype_llama=None, llama_quantization_metadata=None):

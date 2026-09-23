@@ -1576,8 +1576,6 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 return CastBiasWeightContext(self, input, offloadable=True)
 
             def _dequantize_bank(self, weight, dtype):
-                if weight._qdata.ndim == 3:
-                    return weight.dequantize().to(dtype)
                 # in expert chunks: the W4A8 dequantize kernel allocates over twice its output in temporaries
                 flat = QuantizedTensor(weight._qdata, weight._layout_cls, dataclasses.replace(weight._params, orig_dtype=dtype))
                 out = torch.empty((self.num_experts, self.out_features, self.in_features), dtype=dtype, device=weight.device)
@@ -1600,7 +1598,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 Not re-entrant — do not nest calls on the same instance.
                 """
                 with self._cast_bank(input) as (weight, bias):
-                    if self._full_precision_mm and isinstance(weight, QuantizedTensor):
+                    if self._full_precision_mm and isinstance(weight, QuantizedTensor) and weight._qdata.ndim == 2:  # flat per-row banks; 3-D banks dequantize per expert
                         weight = self._dequantize_bank(weight, input.dtype)
                     self._resident_bank = (weight, bias)
                     try:
@@ -1621,7 +1619,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 if isinstance(weight, QuantizedTensor):
                     qw = self._expert_qt_from(weight, i)
                 else:
-                    qw = weight[i]
+                    qw = cast_to_input(weight[i], input, copy=False)
                 b = cast_to_input(bias[i], input, copy=False) if bias is not None else None
 
                 if isinstance(qw, QuantizedTensor):

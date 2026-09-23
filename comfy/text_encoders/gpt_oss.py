@@ -13,8 +13,7 @@ import torch.nn.functional as F
 import comfy.ops
 from comfy import sd1_clip
 from comfy.ldm.modules.attention import optimized_attention_for_device
-from comfy.text_encoders.llama import moe_experts_forward
-from comfy.text_encoders.llama import RMSNorm, apply_rope
+from comfy.text_encoders.llama import RMSNorm, apply_rope, moe_experts_forward
 
 
 @dataclass
