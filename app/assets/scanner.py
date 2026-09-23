@@ -423,6 +423,8 @@ def observe_asset_specs(specs: list[SeedAssetSpec]) -> dict[str, _SpecObservatio
         except OSError:
             observed[path] = None
             continue
+        if snapshot is not None:
+            stat_result = snapshot[1]  # the stat the hash was verified against
         observed[path] = _SpecObservation(stat_result, snapshot)
     return observed
 
