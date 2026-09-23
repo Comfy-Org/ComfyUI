@@ -159,6 +159,7 @@ upcast.add_argument("--dont-upcast-attention", action="store_true", help="Disabl
 
 
 parser.add_argument("--enable-manager", action="store_true", help="Enable the ComfyUI-Manager feature.")
+parser.add_argument("--enable-agent", action="store_true", help="Enable the ComfyUI agent feature.")
 manager_group = parser.add_mutually_exclusive_group()
 manager_group.add_argument("--disable-manager-ui", action="store_true", help="Disables only the ComfyUI-Manager UI and endpoints. Scheduled installations and similar background tasks will still operate.")
 manager_group.add_argument("--enable-manager-legacy-ui", action="store_true", help="Enables the legacy UI of ComfyUI-Manager. Implies --enable-manager.")

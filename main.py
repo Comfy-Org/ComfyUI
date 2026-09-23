@@ -137,6 +137,28 @@ if args.enable_manager:
         handle_comfyui_manager_unavailable()
 
 
+def handle_comfy_agent_unavailable():
+    agent_req_path = os.path.join(os.path.dirname(os.path.abspath(folder_paths.__file__)), "agent_requirements.txt")
+    uv_available = shutil.which("uv") is not None
+
+    pip_cmd = f"{sys.executable} -m pip install -r {agent_req_path}"
+    msg = f"\n\nTo use the `--enable-agent` feature, the `comfy-agent` package must be installed first.\ncommand:\n\t{pip_cmd}"
+    if uv_available:
+        msg += f"\nor using uv:\n\tuv pip install -r {agent_req_path}"
+    msg += "\n"
+    logging.info("[agent-event] package_missing")
+    logging.warning(msg)
+    args.enable_agent = False
+
+
+if args.enable_agent:
+    logging.info("[agent-event] flag_enabled")
+    agent_spec = importlib.util.find_spec("comfy_agent")
+    # A bare comfy_agent directory on sys.path resolves as a namespace package with no origin.
+    if agent_spec is None or agent_spec.origin is None:
+        handle_comfy_agent_unavailable()
+
+
 def apply_custom_paths():
     # extra model paths
     extra_model_paths_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "extra_model_paths.yaml")
