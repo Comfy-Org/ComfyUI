@@ -169,14 +169,12 @@ class HitPawGeneralImageEnhance(IO.ComfyNode):
         )
         if initial_res.code != 200:
             raise ValueError(f"Task creation failed with code {initial_res.code}: {initial_res.message}")
-        request_price = initial_res.data.consume_coins / 1000
         final_response = await poll_op(
             cls,
             ApiEndpoint(path="/proxy/hitpaw/api/task-status", method="POST"),
             data=TaskCreateDataResponse(job_id=initial_res.data.job_id),
             response_model=TaskStatusResponse,
             status_extractor=lambda x: x.data.status,
-            price_extractor=lambda x: request_price,
             poll_interval=10.0,
         )
         return IO.NodeOutput(await download_url_to_image_tensor(final_response.data.res_url))
@@ -312,7 +310,6 @@ class HitPawVideoEnhance(IO.ComfyNode):
             wait_label="Creating task",
             final_label_on_success="Task created",
         )
-        request_price = initial_res.data.consume_coins / 1000
         if initial_res.code != 200:
             raise ValueError(f"Task creation failed with code {initial_res.code}: {initial_res.message}")
         final_response = await poll_op(
@@ -321,7 +318,6 @@ class HitPawVideoEnhance(IO.ComfyNode):
             data=TaskStatusPollRequest(job_id=initial_res.data.job_id),
             response_model=TaskStatusResponse,
             status_extractor=lambda x: x.data.status,
-            price_extractor=lambda x: request_price,
             poll_interval=10.0,
         )
         return IO.NodeOutput(await download_url_to_video_output(final_response.data.res_url))

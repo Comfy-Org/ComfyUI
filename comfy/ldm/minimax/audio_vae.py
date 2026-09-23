@@ -99,7 +99,7 @@ class UpSample1d(nn.Module):
     def forward(self, x):
         _, C, _ = x.shape
         x = F.pad(x, (self.pad, self.pad), mode="replicate")
-        x = F.conv_transpose1d(x, self.filter.expand(C, -1, -1).to(x.dtype), stride=self.stride, groups=C).mul_(self.ratio)
+        x = F.conv_transpose1d(x, comfy.ops.cast_to_input(self.filter.expand(C, -1, -1), x), stride=self.stride, groups=C).mul_(self.ratio)
         x = x[..., self.pad_left:-self.pad_right]
         return x
 
@@ -115,7 +115,7 @@ class LowPassFilter1d(nn.Module):
     def forward(self, x):
         _, C, _ = x.shape
         x = F.pad(x, (self.pad_left, self.pad_right), mode="replicate")
-        return F.conv1d(x, self.filter.expand(C, -1, -1).to(x.dtype), stride=self.stride, groups=C)
+        return F.conv1d(x, comfy.ops.cast_to_input(self.filter.expand(C, -1, -1), x), stride=self.stride, groups=C)
 
 
 class DownSample1d(nn.Module):

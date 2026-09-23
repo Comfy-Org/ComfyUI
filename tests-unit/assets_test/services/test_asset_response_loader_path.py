@@ -43,7 +43,7 @@ def test_uses_persisted_loader_path_without_recomputing():
         loader_path="SENTINEL/stored.safetensors",
     )
 
-    resp = _build_asset_response(result)
+    resp = _build_asset_response(result, {})
 
     assert resp.loader_path == "SENTINEL/stored.safetensors"
 
@@ -67,7 +67,7 @@ def test_null_stored_loader_path_is_served_as_null(tmp_path: Path):
         mock_fp.models_dir = str(models)
 
         result = _make_result(file_path=str(f), loader_path=None)
-        resp = _build_asset_response(result)
+        resp = _build_asset_response(result, {})
 
         assert resp.loader_path is None
         assert resp.display_name == "checkpoints/bar.safetensors"
@@ -77,7 +77,33 @@ def test_all_path_fields_null_without_file_path():
     """API-created / hash-only references (no file_path) expose no paths."""
     result = _make_result(file_path=None, loader_path=None)
 
-    resp = _build_asset_response(result)
+    resp = _build_asset_response(result, {})
 
     assert resp.loader_path is None
     assert resp.display_name is None
+
+
+def test_display_name_is_serialized_and_file_path_is_not(tmp_path: Path):
+    models = tmp_path / "models"
+    ckpt = models / "checkpoints"
+    ckpt.mkdir(parents=True)
+    f = ckpt / "flux.safetensors"
+    f.touch()
+
+    with patch("app.assets.services.path_utils.folder_paths") as mock_fp, patch(
+        "app.assets.services.path_utils.get_comfy_models_folders",
+        return_value=[("checkpoints", [str(ckpt)], {".safetensors"})],
+    ):
+        mock_fp.get_input_directory.return_value = str(tmp_path / "in")
+        mock_fp.get_output_directory.return_value = str(tmp_path / "out")
+        mock_fp.get_temp_directory.return_value = str(tmp_path / "tmp")
+        mock_fp.models_dir = str(models)
+
+        result = _make_result(file_path=str(f), loader_path=None)
+        resp = _build_asset_response(result, {})
+        dumped = resp.model_dump(mode="json")
+
+    assert dumped["display_name"] == "checkpoints/flux.safetensors"
+    assert "file_path" not in dumped, (
+        "the namespace-rooted storage path must not leak into this public response"
+    )

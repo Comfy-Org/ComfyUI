@@ -188,7 +188,7 @@ def validate_string(
         )
     if max_length and len(string) > max_length:
         raise Exception(
-            f" Field '{field_name} cannot be longer than {max_length} characters; was {len(string)} characters long."
+            f"Field '{field_name}' cannot be longer than {max_length} characters; was {len(string)} characters long."
         )
 
 

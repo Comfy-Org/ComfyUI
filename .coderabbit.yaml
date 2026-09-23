@@ -11,6 +11,10 @@ reviews:
   review_status: false
   review_details: true
   commit_status: true
+  # Without this, a review that never happened (rate limit, internal error)
+  # still posts a green "CodeRabbit" commit status, so a throttled review is
+  # indistinguishable from a clean one.
+  fail_commit_status: true
   collapse_walkthrough: true
   changed_files_summary: false
   sequence_diagrams: false

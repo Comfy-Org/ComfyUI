@@ -16,12 +16,14 @@ import comfy.text_encoders.genmo
 import comfy.text_encoders.lt
 import comfy.text_encoders.hunyuan_video
 import comfy.text_encoders.minimax
+import comfy.text_encoders.minimax_music
 import comfy.text_encoders.cosmos
 import comfy.text_encoders.lumina2
 import comfy.text_encoders.wan
 import comfy.text_encoders.ace
 import comfy.text_encoders.omnigen2
 import comfy.text_encoders.qwen_image
+import comfy.text_encoders.qwen_image21
 import comfy.text_encoders.hunyuan_image
 import comfy.text_encoders.kandinsky5
 import comfy.text_encoders.z_image
@@ -32,10 +34,12 @@ import comfy.text_encoders.mage_flow
 import comfy.text_encoders.joyimage
 import comfy.text_encoders.anima
 import comfy.text_encoders.ace15
+import comfy.text_encoders.yue2
 import comfy.text_encoders.longcat_image
 import comfy.text_encoders.ernie
 import comfy.text_encoders.cogvideo
 import comfy.text_encoders.hidream_o1
+import comfy.text_encoders.sensenova
 import comfy.text_encoders.pixeldit
 
 from . import supported_models_base
@@ -963,6 +967,7 @@ class MiniMaxH3(supported_models_base.BASE):
 
     sampling_settings = {
         "shift": 12.0,
+        "audio_shift": 3.0,
     }
 
     unet_extra_config = {}
@@ -1449,6 +1454,20 @@ class WAN22_Animate(WAN21_T2V):
         out = model_base.WAN22_Animate(self, device=device)
         return out
 
+class WAN_Animate2(WAN21_T2V):
+    unet_config = {
+        "image_model": "wan2.1",
+        "model_type": "animate2",
+    }
+
+    sampling_settings = {
+        "shift": 5.0,
+    }
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.WAN_Animate2(self, device=device)
+        return out
+
 class WAN22_T2V(WAN21_T2V):
     unet_config = {
         "image_model": "wan2.1",
@@ -1461,6 +1480,31 @@ class WAN22_T2V(WAN21_T2V):
     def get_model(self, state_dict, prefix="", device=None):
         out = model_base.WAN22(self, image_to_video=True, device=device)
         return out
+
+class Trellis2(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "trellis2"
+    }
+
+    unet_extra_config = {"num_heads": 12}
+
+    sampling_settings = {
+        "shift": 3.0,
+    }
+
+    memory_usage_factor = 6
+
+    latent_format = latent_formats.Trellis2
+    vae_key_prefix = ["vae."]
+    clip_vision_prefix = "conditioner.main_image_encoder.model."
+    # this is only needed for the texture model
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.Trellis2(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        return None
 
 class WAN21_FlowRVS(WAN21_T2V):
     unet_config = {
@@ -1677,6 +1721,44 @@ class HiDreamO1(supported_models_base.BASE):
         return supported_models_base.ClipTarget(
             comfy.text_encoders.hidream_o1.HiDreamO1Tokenizer,
             comfy.text_encoders.hidream_o1.HiDreamO1TE,
+        )
+
+class SenseNovaU15(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "sensenova_u15",
+    }
+
+    sampling_settings = {
+        "shift": 3.0,
+        "noise_scale": 1.0,
+    }
+
+    latent_format = latent_formats.HiDreamO1Pixel
+    memory_usage_factor = 0.033
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    optimizations = {"fp8": False}
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.SenseNovaU15(self, device=device)
+
+    def process_unet_state_dict(self, state_dict):
+        state_dict.pop("language_model.lm_head.weight", None)
+        return state_dict
+
+    def process_vae_state_dict(self, state_dict):
+        return {"pixel_space_vae": torch.tensor(1.0)}
+
+    def process_clip_state_dict(self, state_dict):
+        return {"_sensenova_te_sentinel": torch.zeros(1)}
+
+    def clip_target(self, state_dict={}):
+        return supported_models_base.ClipTarget(
+            comfy.text_encoders.sensenova.SenseNovaTokenizer,
+            comfy.text_encoders.sensenova.SenseNovaTextEncoder,
         )
 
 class Chroma(supported_models_base.BASE):
@@ -1970,6 +2052,35 @@ class QwenImage(supported_models_base.BASE):
         hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen25_7b.transformer.".format(pref))
         return supported_models_base.ClipTarget(comfy.text_encoders.qwen_image.QwenImageTokenizer, comfy.text_encoders.qwen_image.te(**hunyuan_detect))
 
+class QwenImage21(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "qwen_image21",
+    }
+
+    # scheduler mu at 1024x1024 (base 0.5 @ 256 tokens, max 0.9 @ 8192)
+    sampling_settings = {
+        "multiplier": 1.0,
+        "shift": 0.69,
+    }
+
+    memory_usage_factor = 6.0
+
+    unet_extra_config = {}
+    latent_format = latent_formats.QwenImage21
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.QwenImage21(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        pref = self.text_encoder_key_prefix[0]
+        hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen3vl_8b.transformer.".format(pref))
+        return supported_models_base.ClipTarget(comfy.text_encoders.qwen_image21.QwenImage21Tokenizer, comfy.text_encoders.qwen_image21.te(**hunyuan_detect))
+
 class JoyImage(supported_models_base.BASE):
     unet_config = {
         "image_model": "joyimage",
@@ -2184,6 +2295,49 @@ class ACEStep15(supported_models_base.BASE):
             detect["lm_model"] = "qwen3_4b"
 
         return supported_models_base.ClipTarget(comfy.text_encoders.ace15.ACE15Tokenizer, comfy.text_encoders.ace15.te(**detect))
+
+class YuE2(supported_models_base.BASE):
+    unet_config = {"audio_model": "yue2"}
+    unet_extra_config = {}
+    latent_format = latent_formats.YuE2
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+    sampling_settings = {"multiplier": 1.0}
+    memory_usage_factor = 4.0
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.YuE2(self, device=device)
+
+    def model_type(self, state_dict, prefix=""):
+        return model_base.ModelType.FLOW
+
+    def clip_target(self, state_dict={}):
+        detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, self.text_encoder_key_prefix[0])
+        return supported_models_base.ClipTarget(comfy.text_encoders.yue2.YuE2Tokenizer, comfy.text_encoders.yue2.te(**detect))
+
+
+class MiniMaxMusic3(supported_models_base.BASE):
+    unet_config = {
+        "audio_model": "minimax_music3",
+    }
+
+    latent_format = comfy.latent_formats.MiniMaxMusic3
+    memory_usage_factor = 2.0
+    supported_inference_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+    sampling_settings = {"multiplier": 1.0}
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.MiniMaxMusic3(self, device=device)
+
+    def model_type(self, state_dict, prefix=""):
+        return model_base.ModelType.FLOW
+
+    def clip_target(self, state_dict={}):
+        detect = comfy.text_encoders.minimax_music.detect_merged_config(state_dict, self.text_encoder_key_prefix[0])
+        target = supported_models_base.ClipTarget(comfy.text_encoders.minimax_music.MiniMaxMusic3Tokenizer, comfy.text_encoders.minimax_music.MiniMaxMusic3TEModel)
+        target.params["projection_config"] = detect
+        return target
 
 
 class LongCatImage(supported_models_base.BASE):
@@ -2463,6 +2617,7 @@ models = [
     WAN22_S2V,
     WAN21_HuMo,
     WAN22_Animate,
+    WAN_Animate2,
     WAN21_FlowRVS,
     WAN21_SCAIL,
     WAN21_SCAIL2,
@@ -2473,15 +2628,19 @@ models = [
     TripoSplat,
     HiDream,
     HiDreamO1,
+    SenseNovaU15,
     Chroma,
     SeedVR2,
     ChromaRadiance,
     ACEStep,
     ACEStep15,
+    MiniMaxMusic3,
+    YuE2,
     Omnigen2,
     Boogu,
     MageFlow,
     QwenImage,
+    QwenImage21,
     JoyImage,
     Ideogram4,
     Krea2,
@@ -2498,5 +2657,6 @@ models = [
     CogVideoX_I2V,
     CogVideoX_T2V,
     SVD_img2vid,
+    Trellis2,
     DepthAnything3,
 ]

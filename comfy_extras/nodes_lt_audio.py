@@ -95,7 +95,7 @@ class LTXVEmptyLatentAudio(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="LTXVEmptyLatentAudio",
-            display_name="LTXV Empty Latent Audio",
+            display_name="Empty LTXV Latent Audio",
             category="model/latent/ltxv",
             inputs=[
                 io.Int.Input(
@@ -173,7 +173,7 @@ class LTXAVTextEncoderLoader(io.ComfyNode):
             node_id="LTXAVTextEncoderLoader",
             display_name="Load LTXV Audio Text Encoder",
             category="model/loaders",
-            description="Recipes:\nltxav: gemma 3 12B",
+            description="Recipes:\nltxav: gemma 3 12B or matching gemma 4 model",
             inputs=[
                 io.Combo.Input(
                     "text_encoder",

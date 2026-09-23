@@ -3,6 +3,7 @@ import av
 import torch
 import folder_paths
 import json
+import weakref
 from typing import Optional
 from typing_extensions import override
 from fractions import Fraction
@@ -72,6 +73,65 @@ class SaveWEBM(io.ComfyNode):
 
         return io.NodeOutput(images, ui=ui.PreviewVideo([ui.SavedResult(file, subfolder, io.FolderType.output)]))
 
+def _save_video_codec_input(supported_codecs: list[str], *, optional=False, hidden=False):
+    codec_options = []
+    if "auto" in supported_codecs:
+        codec_options.append(io.DynamicCombo.Option("auto", []))
+    if "h264" in supported_codecs:
+        codec_options.append(
+            io.DynamicCombo.Option(
+                "h264",
+                [
+                    io.DynamicCombo.Input(
+                        "encoding",
+                        display_name="encoding mode",
+                        options=[
+                            io.DynamicCombo.Option("auto", []),
+                            io.DynamicCombo.Option(
+                                "re-encode",
+                                [
+                                    io.Float.Input("crf", default=23.0, min=0.0, max=51.0, step=1.0, tooltip="Lower values produce higher quality and larger files."),
+                                ],
+                            ),
+                        ],
+                        optional=True,
+                        tooltip="Automatic preserves compatible H.264 streams. Re-encode applies custom encoding options.",
+                    ),
+                ],
+            )
+        )
+    if "av1" in supported_codecs:
+        codec_options.append(
+            io.DynamicCombo.Option(
+                "av1",
+                [
+                    io.DynamicCombo.Input(
+                        "encoding",
+                        display_name="encoding mode",
+                        options=[
+                            io.DynamicCombo.Option("auto", []),
+                            io.DynamicCombo.Option(
+                                "re-encode",
+                                [
+                                    io.Float.Input("crf", default=30.0, min=0.0, max=63.0, step=1.0, tooltip="Lower values produce higher quality and larger files."),
+                                ],
+                            ),
+                        ],
+                        optional=True,
+                        tooltip="Automatic preserves compatible AV1 streams. Re-encode applies custom encoding options.",
+                    ),
+                ],
+            )
+        )
+    return io.DynamicCombo.Input(
+        "codec",
+        options=codec_options,
+        optional=optional,
+        tooltip="The output video codec. Auto preserves a compatible source stream. H.264 and AV1 re-encoding support SDR, HDR (HLG), and HDR PQ.",
+        extra_dict={"hidden": True} if hidden else None,
+    )
+
+
 class SaveVideo(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -85,41 +145,35 @@ class SaveVideo(io.ComfyNode):
             inputs=[
                 io.Video.Input("video", tooltip="The video to save."),
                 io.String.Input("filename_prefix", default="video/ComfyUI", tooltip="The prefix for the file to save. This may include formatting information such as %date:yyyy-MM-dd% or %Empty Latent Image.width% to include values from nodes."),
-                io.Combo.Input("format", options=Types.VideoContainer.as_input(), default="auto", tooltip="The format to save the video as."),
                 io.DynamicCombo.Input(
-                    "codec",
+                    "format",
                     options=[
-                        io.DynamicCombo.Option("auto", []),
-                        io.DynamicCombo.Option(
-                            "h264",
-                            [
-                                io.DynamicCombo.Input(
-                                    "encoding",
-                                    display_name="encoding mode",
-                                    options=[
-                                        io.DynamicCombo.Option("auto", []),
-                                        io.DynamicCombo.Option(
-                                            "re-encode",
-                                            [io.Float.Input("crf", default=23.0, min=0.0, max=51.0, step=1.0, tooltip="Lower values produce higher quality and larger files.")],
-                                        ),
-                                    ],
-                                    optional=True,
-                                    tooltip="Automatic preserves compatible H.264 streams. Re-encode applies a custom CRF.",
-                                ),
-                            ],
-                        ),
+                        io.DynamicCombo.Option("auto", [_save_video_codec_input(["auto", "h264", "av1"])]),
+                        io.DynamicCombo.Option("mp4", [_save_video_codec_input(["auto", "h264", "av1"])]),
+                        io.DynamicCombo.Option("mkv", [_save_video_codec_input(["auto", "h264", "av1"])]),
+                        io.DynamicCombo.Option("webm", [_save_video_codec_input(["auto", "av1"])]),
                     ],
-                    tooltip="The codec to use for the video.",
+                    tooltip="The output container. Auto uses MP4 for Auto/H.264 and WebM for AV1. MP4, MKV, and WebM select a specific container.",
                 ),
+                _save_video_codec_input(["auto", "h264", "av1"], optional=True, hidden=True),
             ],
             hidden=[io.Hidden.prompt, io.Hidden.extra_pnginfo],
             is_output_node=True,
-            outputs=[io.Video.Output("video")],
+            outputs=[io.Video.Output("video", tooltip="The input video, unchanged.")],
         )
 
     @classmethod
-    def execute(cls, video: Input.Video, filename_prefix, format: str, codec: io.DynamicCombo.Type) -> io.NodeOutput:
+    def execute(cls, video: Input.Video, filename_prefix, format: io.DynamicCombo.Type | str, codec: io.DynamicCombo.Type | None = None) -> io.NodeOutput:
+        if isinstance(format, dict):
+            format_name = format["format"]
+            codec = format.get("codec") or codec
+        else:
+            format_name = format
+        if codec is None:
+            codec = {"codec": "auto"}
         codec_name = codec["codec"]
+        if format_name == "auto":
+            format_name = "webm" if codec_name == "av1" else "mp4"
         encoding = codec.get("encoding") or {}
         width, height = video.get_dimensions()
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
@@ -137,11 +191,11 @@ class SaveVideo(io.ComfyNode):
                 metadata["prompt"] = cls.hidden.prompt
             if len(metadata) > 0:
                 saved_metadata = metadata
-        file = f"{filename}_{counter:05}_.{Types.VideoContainer.get_extension(format)}"
+        file = f"{filename}_{counter:05}_.{Types.VideoContainer.get_extension(format_name)}"
         video.save_to(
             os.path.join(full_output_folder, file),
-            format=Types.VideoContainer(format),
-            codec=codec_name,
+            format=Types.VideoContainer(format_name),
+            codec=Types.VideoCodec(codec_name),
             metadata=saved_metadata,
             crf=encoding.get("crf"),
         )
@@ -163,16 +217,27 @@ class CreateVideo(io.ComfyNode):
                 io.Image.Input("images", tooltip="The images to create a video from."),
                 io.Float.Input("fps", default=30.0, min=1.0, max=120.0, step=1.0),
                 io.Audio.Input("audio", optional=True, tooltip="The audio to add to the video."),
-                io.Int.Input(
+                io.Combo.Input(
                     "bit_depth",
-                    min=8,
-                    max=10,
-                    default=8,
-                    step=2,
-                    tooltip="Bit depth of the created video. 10-bit keeps smoother gradients with less"
-                    " banding, but some players and downstream nodes may not support it.",
+                    options=["auto", 8, 10],
+                    default="auto",
+                    tooltip="Auto uses 8-bit for sRGB and 10-bit for HDR. Explicit 8-bit and 10-bit choices are independent of colorspace.",
                     optional=True,
-                    display_mode=io.NumberDisplay.number,
+                ),
+                io.Combo.Input(
+                    "color_space",
+                    options=["sRGB", "HDR", "HDR PQ"],
+                    default="sRGB",
+                    optional=True,
+                    tooltip="Colorspace of the input images. HDR selects BT.2020/HLG and HDR PQ selects BT.2020/PQ.",
+                ),
+                io.Combo.Input(
+                    "codec",
+                    options=["none", *Types.VideoCodec.as_input()],
+                    default="none",
+                    advanced=True,
+                    optional=True,
+                    tooltip="Optionally encode the video immediately. None keeps the images in tensor form; Auto uses H.264.",
                 ),
             ],
             outputs=[
@@ -182,14 +247,63 @@ class CreateVideo(io.ComfyNode):
 
     @classmethod
     def execute(
-        cls, images: Input.Image, fps: float, audio: Optional[Input.Audio] = None, bit_depth: int = 8,
+        cls, images: Input.Image, fps: float, audio: Optional[Input.Audio] = None, bit_depth: int | str = "auto", color_space: str = "sRGB", codec: str = "none",
     ) -> io.NodeOutput:
-        return io.NodeOutput(
-            InputImpl.VideoFromComponents(
-                Types.VideoComponents(images=images, audio=audio, frame_rate=Fraction(fps)),
-                bit_depth=bit_depth,
-            )
+        if bit_depth == "auto":
+            bit_depth = 10 if color_space in ("HDR", "HDR PQ") else 8
+        video = InputImpl.VideoFromComponents(
+            Types.VideoComponents(images=images, audio=audio, frame_rate=Fraction(fps)),
+            bit_depth=bit_depth,
+            color_space=color_space,
         )
+        if codec != "none":
+            video = InputImpl.VideoFromList([video], codec=Types.VideoCodec(codec))
+        return io.NodeOutput(video)
+
+
+class ConcatenateVideo(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="ConcatenateVideo",
+            display_name="Concatenate Video",
+            category="video",
+            essentials_category="Video Tools",
+            description="Concatenates videos in order without decoding compatible encoded inputs.",
+            inputs=[
+                io.Autogrow.Input(
+                    "videos",
+                    template=io.Autogrow.TemplatePrefix(
+                        io.Video.Input("video", tooltip="A video segment to append."),
+                        prefix="video",
+                        min=1,
+                        max=100,
+                    ),
+                    tooltip="Video segments to concatenate in input order.",
+                ),
+                io.Combo.Input(
+                    "codec",
+                    options=Types.VideoCodec.as_input(),
+                    default="auto",
+                    advanced=True,
+                    tooltip="Codec used to encode videos tensors. Auto uses H.264; already encoded videos remain unchanged.",
+                ),
+                io.Audio.Input(
+                    "complete_audio",
+                    optional=True,
+                    advanced=True,
+                    tooltip="Optional complete soundtrack for the concatenated video. Overrides audio carried by the input videos.",
+                ),
+            ],
+            outputs=[io.Video.Output(tooltip="The concatenated video.")],
+            is_input_list=True,
+        )
+
+    @classmethod
+    def execute(cls, videos: io.Autogrow.Type, codec=None, complete_audio=None) -> io.NodeOutput:
+        videos = [video for group in videos.values() for video in group]
+        audio = complete_audio[0] if complete_audio else None
+        return io.NodeOutput(InputImpl.VideoFromList(videos, audio, Types.VideoCodec(codec[0] if codec else "auto")))
 
 class GetVideoComponents(io.ComfyNode):
     @classmethod
@@ -199,7 +313,7 @@ class GetVideoComponents(io.ComfyNode):
             search_aliases=["extract frames", "split video", "video to images", "demux"],
             display_name="Get Video Components",
             category="video",
-            description="Extracts all components from a video: frames, audio, framerate, and bit depth.",
+            description="Extracts video frames, audio, frame rate, bit depth, and color space.",
             inputs=[
                 io.Video.Input("video", tooltip="The video to extract components from."),
             ],
@@ -207,14 +321,21 @@ class GetVideoComponents(io.ComfyNode):
                 io.Image.Output(display_name="images"),
                 io.Audio.Output(display_name="audio"),
                 io.Float.Output(display_name="fps"),
-                io.Int.Output(display_name="bit_depth"),
+                io.Combo.Output(display_name="bit_depth"),
+                io.Combo.Output(display_name="color_space"),
             ],
         )
 
     @classmethod
     def execute(cls, video: Input.Video) -> io.NodeOutput:
         components = video.get_components()
-        return io.NodeOutput(components.images, components.audio, float(components.frame_rate), video.get_bit_depth())
+        return io.NodeOutput(
+            components.images,
+            components.audio,
+            float(components.frame_rate),
+            video.get_bit_depth(),
+            video.get_color_space(),
+        )
 
 
 class LoadVideo(io.ComfyNode):
@@ -229,6 +350,7 @@ class LoadVideo(io.ComfyNode):
             display_name="Load Video",
             category="video",
             essentials_category="Basics",
+            has_intermediate_output=True,
             inputs=[
                 io.Combo.Input("file", options=sorted(files), upload=io.UploadType.video),
             ],
@@ -240,7 +362,8 @@ class LoadVideo(io.ComfyNode):
     @classmethod
     def execute(cls, file) -> io.NodeOutput:
         video_path = folder_paths.get_annotated_filepath(file)
-        return io.NodeOutput(InputImpl.VideoFromFile(video_path))
+        source = InputImpl.VideoFromFile(video_path)
+        return io.NodeOutput(source, ui=preview_input_video(file, source))
 
     @classmethod
     def fingerprint_inputs(s, file):
@@ -256,6 +379,67 @@ class LoadVideo(io.ComfyNode):
             return "Invalid video file: {}".format(file)
 
         return True
+
+_preview_results: "weakref.WeakKeyDictionary[Input.Video, tuple[str, ui.SavedResult]]" = weakref.WeakKeyDictionary()
+
+
+def preview_input_video(file: str, video: Input.Video | None = None) -> ui.PreviewVideo:
+    name, _ = folder_paths.annotated_filepath(file)
+    subfolder, _, filename = name.replace("\\", "/").rpartition("/")
+    result = ui.SavedResult(filename, subfolder, io.FolderType.input)
+    if video is not None:
+        _preview_results[video] = (folder_paths.get_annotated_filepath(file), result)
+    return ui.PreviewVideo([result])
+
+
+def save_video_preview(video: Input.Video) -> ui.PreviewVideo:
+    cached = _preview_results.get(video)
+    if cached is not None and os.path.isfile(cached[0]):
+        return ui.PreviewVideo([cached[1]])
+
+    full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+        "ComfyUI_temp_video", folder_paths.get_temp_directory(), 0, 0
+    )
+    preview_format = Types.VideoContainer.MP4
+    file = f"{filename}_{counter:05}_.{Types.VideoContainer.get_extension(preview_format)}"
+    full_path = os.path.join(full_output_folder, file)
+    video.save_to(
+        full_path,
+        format=preview_format,
+        codec="auto",
+        preset="ultrafast",
+    )
+    result = ui.SavedResult(file, subfolder, io.FolderType.temp)
+    _preview_results[video] = (full_path, result)
+    return ui.PreviewVideo([result])
+
+
+def apply_video_trim(video: Input.Video, trim, strict_duration: bool = False) -> Input.Video:
+    trim = trim or {}
+    start_time = float(trim.get("start_time", 0.0))
+    duration = float(trim.get("duration", 0.0))
+    if duration < 0:
+        raise ValueError(f"Trim duration must be >= 0, got {duration}")
+    if start_time == 0.0 and duration == 0.0:
+        return video
+
+    trimmed = video.as_trimmed(start_time, duration, strict_duration=strict_duration)
+    if trimmed is None:
+        raise ValueError(
+            f"Failed to trim video:\nSource duration: {video.get_duration()}\nStart time: {start_time}\nTarget duration: {duration}"
+        )
+    return trimmed
+
+
+def apply_video_crop(video: Input.Video, crop) -> Input.Video:
+    crop = crop or {}
+    return video.as_cropped(
+        int(crop.get("x", 0)),
+        int(crop.get("y", 0)),
+        int(crop.get("width", 0)),
+        int(crop.get("height", 0)),
+    )
+
 
 class VideoSlice(io.ComfyNode):
     @classmethod
@@ -304,6 +488,74 @@ class VideoSlice(io.ComfyNode):
         )
 
 
+class VideoTrim(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="VideoTrim",
+            display_name="Trim Video (Advanced)",
+            search_aliases=["trim video duration", "skip first frames", "cut video", "start time"],
+            category="video",
+            is_experimental=True,
+            is_output_node=True,
+            essentials_category="Video Tools",
+            has_intermediate_output=True,
+            inputs=[
+                io.Video.Input("video"),
+                io.VideoEdit.Input(
+                    "trim",
+                    features=["trim"],
+                    tooltip="Trim window using start/end frames.",
+                ),
+                io.Boolean.Input(
+                    "strict_duration",
+                    default=False,
+                    advanced=True,
+                    tooltip="If True, when the specified duration is not possible, an error will be raised.",
+                ),
+            ],
+            outputs=[
+                io.Video.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, video: io.Video.Type, trim: io.VideoEdit.Type, strict_duration: bool) -> io.NodeOutput:
+        trimmed = apply_video_trim(video, (trim or {}).get("trim"), strict_duration=strict_duration)
+        return io.NodeOutput(trimmed, ui=save_video_preview(trimmed))
+
+
+class VideoCrop(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="VideoCrop",
+            display_name="Crop Video",
+            search_aliases=["crop video", "cut region", "spatial crop"],
+            category="video",
+            is_experimental=True,
+            is_output_node=True,
+            essentials_category="Video Tools",
+            has_intermediate_output=True,
+            inputs=[
+                io.Video.Input("video"),
+                io.VideoEdit.Input(
+                    "crop",
+                    features=["crop"],
+                    tooltip="Crop region in pixels. Zero width/height keeps the full frame.",
+                ),
+            ],
+            outputs=[
+                io.Video.Output(),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, video: io.Video.Type, crop: io.VideoEdit.Type) -> io.NodeOutput:
+        cropped = apply_video_crop(video, (crop or {}).get("crop"))
+        return io.NodeOutput(cropped, ui=save_video_preview(cropped))
+
+
 class VideoExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
@@ -311,9 +563,12 @@ class VideoExtension(ComfyExtension):
             SaveWEBM,
             SaveVideo,
             CreateVideo,
+            ConcatenateVideo,
             GetVideoComponents,
             LoadVideo,
             VideoSlice,
+            VideoTrim,
+            VideoCrop,
         ]
 
 async def comfy_entrypoint() -> VideoExtension:

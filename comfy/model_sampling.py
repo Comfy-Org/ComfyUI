@@ -118,6 +118,16 @@ class IMG_TO_IMG_FLOW(CONST):
     def inverse_noise_scaling(self, sigma, latent):
         return 1.0 - latent
 
+class IMG_TO_IMG_VELOCITY(CONST):
+    def calculate_denoised(self, sigma, model_output, model_input):
+        return model_input - model_output
+
+    def noise_scaling(self, sigma, noise, latent_image, max_denoise=False):
+        return latent_image
+
+    def inverse_noise_scaling(self, sigma, latent):
+        return latent
+
 class COSMOS_RFLOW:
     def calculate_input(self, sigma, noise):
         sigma = (sigma / (sigma + 1))
@@ -324,6 +334,27 @@ class ModelSamplingDiscreteFlow(torch.nn.Module):
         if percent >= 1.0:
             return 0.0
         return time_snr_shift(self.shift, 1.0 - percent)
+
+class ModelSamplingAV(ModelSamplingDiscreteFlow):
+    """Flow sampling for packed audio-video latents whose audio stream has its own flow shift.
+
+    Carrying the audio latent scaled onto the video schedule makes the pack an ordinary
+    single-schedule flow latent whose audio target is scaled by audio_scale.
+    """
+    def __init__(self, model_config=None):
+        super().__init__(model_config)
+        sampling_settings = model_config.sampling_settings if model_config is not None else {}
+        self.audio_shift = sampling_settings.get("audio_shift", None)
+
+    def set_parameters(self, shift=1.0, audio_shift=None, timesteps=1000, multiplier=1000):
+        self.audio_shift = audio_shift
+        super().set_parameters(shift=shift, timesteps=timesteps, multiplier=multiplier)
+
+    @property
+    def audio_scale(self):
+        if self.audio_shift is None:
+            return 1.0
+        return self.shift / self.audio_shift
 
 class StableCascadeSampling(ModelSamplingDiscrete):
     def __init__(self, model_config=None):

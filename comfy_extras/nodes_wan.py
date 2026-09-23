@@ -6,6 +6,8 @@ import comfy.model_management
 import comfy.utils
 import comfy.latent_formats
 import comfy.clip_vision
+import comfy.ldm.wan.model_animate2
+import comfy.patcher_extension
 import json
 import numpy as np
 from typing import Tuple, TypedDict
@@ -1248,6 +1250,167 @@ class WanAnimateToVideo(io.ComfyNode):
         out_latent["samples"] = latent
         return io.NodeOutput(positive, negative, out_latent, trim_latent, max(0, ref_motion_latent_length * 4 - 3), video_frame_offset + length)
 
+class WanAnimate2ToVideo(io.ComfyNode):
+
+    CONTINUE_MOTION_FRAMES = 1
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="WanAnimate2ToVideo",
+            category="model/conditioning/wan/animate",
+            description="Animate a character in a reference image using a video, effectively replicating the facial animation, body motion and hands gesture from the video.",
+            inputs=[
+                io.Conditioning.Input("positive"),
+                io.Conditioning.Input("negative"),
+                io.Vae.Input("vae"),
+                io.Int.Input("width", default=832, min=16, max=nodes.MAX_RESOLUTION, step=16, tooltip="Output video width in pixels."),
+                io.Int.Input("height", default=480, min=16, max=nodes.MAX_RESOLUTION, step=16, tooltip="Output video height in pixels."),
+                io.Int.Input("length", default=81, min=1, max=nodes.MAX_RESOLUTION, step=4, tooltip="Number of frames to generate."),
+                io.Int.Input("batch_size", default=1, min=1, max=4096, tooltip="Number of videos to generate simultaneously."),
+                io.Image.Input("reference_image", optional=True, tooltip="The character to animate."),
+                io.Image.Input("pose_video", optional=True, tooltip="The video whose motion is transferred to the reference character."),
+                io.ClipVisionOutput.Input("clip_vision_output", optional=True, tooltip="CLIP vision of the reference image."),
+                io.Conditioning.Input("positive_pose", optional=True, tooltip="Prompt for the pose-video branch, describing the motion rather than the character. Defaults to positive. Used for both the cond and uncond passes."),
+                io.ClipVisionOutput.Input("clip_vision_output_pose", optional=True, tooltip="CLIP vision of the pose video's first frame. Defaults to clip_vision_output."),
+                io.Image.Input("continue_motion", optional=True, tooltip="Previous motion sequence to continue from for temporal consistency."),
+                io.Int.Input("video_frame_offset", default=0, min=0, max=nodes.MAX_RESOLUTION, step=1, tooltip="Frames to seek into the pose video. Connect to the video_frame_offset output of the previous node when extending."),
+                io.Float.Input("pose_strength", default=1.0, min=0.0, max=10.0, step=0.01, tooltip="Scales the pose video's influence on the motion. 1.0 is the trained behavior; below weakens adherence, above amplifies. 0.0 mutes it but does not fully remove it."),
+                io.Float.Input("pose_start_percent", default=0.0, min=0.0, max=1.0, step=0.01, tooltip="Sampling percent at which the pose influence starts. Outside the window the pose branch is skipped entirely, which also speeds those steps up."),
+                io.Float.Input("pose_end_percent", default=1.0, min=0.0, max=1.0, step=0.01, tooltip="Sampling percent at which the pose influence ends. Motion is mostly established early, so e.g. 0.7 can loosen fine detail while keeping the choreography."),
+                io.Float.Input("reference_image_strength", default=1.0, min=0.0, max=10.0, step=0.01, tooltip="Scales how strongly generated frames attend to the reference image's latent frame. Below 1.0 loosens identity/appearance adherence (e.g. to let the prompt restyle), above tightens it against drift."),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="positive"),
+                io.Conditioning.Output(display_name="negative"),
+                io.Latent.Output(display_name="latent"),
+                io.Int.Output(display_name="trim_latent", tooltip="Number of latent frames that should be trimmed before decoding."),
+                io.Int.Output(display_name="trim_image", tooltip="Number of overlapping image frames when extending a video."),
+                io.Int.Output(display_name="video_frame_offset", tooltip="Frames to seek into the pose video."),
+            ],
+            is_experimental=True,
+        )
+
+    @classmethod
+    def execute(cls, positive, negative, vae, width, height, length, batch_size, video_frame_offset, reference_image=None, pose_video=None, clip_vision_output=None, positive_pose=None, clip_vision_output_pose=None, continue_motion=None, pose_strength=1.0, pose_start_percent=0.0, pose_end_percent=1.0, reference_image_strength=1.0) -> io.NodeOutput:
+        if pose_start_percent > pose_end_percent:
+            raise ValueError("pose_start_percent ({}) must not be greater than pose_end_percent ({}).".format(pose_start_percent, pose_end_percent))
+        latent_length = ((length - 1) // 4) + 1
+        latent_width = width // 8
+        latent_height = height // 8
+
+        if reference_image is None:
+            reference_image = torch.zeros((1, height, width, 3))
+
+        ref_image = comfy.utils.common_upscale(reference_image[:1].movedim(-1, 1), width, height, "area", "center").movedim(1, -1)
+        ref_latent = vae.encode(ref_image[:, :, :, :3])
+        trim_latent = ref_latent.shape[2]
+
+        ref_motion_latent_length = 0
+        if continue_motion is None:
+            image = torch.ones((length, height, width, 3)) * 0.5
+        else:
+            continue_motion = continue_motion[-cls.CONTINUE_MOTION_FRAMES:]
+            video_frame_offset = max(0, video_frame_offset - continue_motion.shape[0])
+            continue_motion = comfy.utils.common_upscale(continue_motion[-length:].movedim(-1, 1), width, height, "area", "center").movedim(1, -1)
+            # 0.5 is mid-grey, matching upstream's zeros in [-1, 1] pixel space
+            image = torch.ones((length, height, width, continue_motion.shape[-1]), device=continue_motion.device, dtype=continue_motion.dtype) * 0.5
+            image[:continue_motion.shape[0]] = continue_motion
+            ref_motion_latent_length += ((continue_motion.shape[0] - 1) // 4) + 1
+
+        concat_latent_image = torch.cat((ref_latent, vae.encode(image[:, :, :, :3])), dim=2)
+
+        # 1-channel, 0 == known; concat_cond inverts and repeats it to the 4 mask channels
+        mask = torch.ones((1, 1, latent_length + trim_latent, latent_height, latent_width), device=concat_latent_image.device, dtype=concat_latent_image.dtype)
+        mask[:, :, :trim_latent + ref_motion_latent_length] = 0.0
+
+        positive = node_helpers.conditioning_set_values(positive, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
+        negative = node_helpers.conditioning_set_values(negative, {"concat_latent_image": concat_latent_image, "concat_mask": mask})
+
+        if clip_vision_output is not None:
+            positive = node_helpers.conditioning_set_values(positive, {"clip_vision_output": clip_vision_output})
+            negative = node_helpers.conditioning_set_values(negative, {"clip_vision_output": clip_vision_output})
+
+        # not windowed with the pose values: the reference frame is part of the latent on every step
+        if reference_image_strength != 1.0:
+            positive = node_helpers.conditioning_set_values(positive, {"reference_strength": reference_image_strength})
+            negative = node_helpers.conditioning_set_values(negative, {"reference_strength": reference_image_strength})
+
+        # set on the negative too: upstream runs the pose branch once, outside the CFG loop, so it never sees the negative prompt
+        pose_values = {}
+        if pose_video is not None:
+            if pose_video.shape[0] <= video_frame_offset:
+                raise ValueError("pose_video has {} frames but video_frame_offset is {} -- nothing left to read.".format(pose_video.shape[0], video_frame_offset))
+            pose_video = pose_video[video_frame_offset:]
+            pose_video = comfy.utils.common_upscale(pose_video[:length].movedim(-1, 1), width, height, "area", "center").movedim(1, -1)
+            if pose_video.shape[0] < length:  # hold the last frame, as upstream pads its clips
+                pose_video = torch.cat((pose_video,) + (pose_video[-1:],) * (length - pose_video.shape[0]), dim=0)
+            pose_values["pose_video_latent"] = vae.encode(pose_video[:, :, :, :3])
+
+        pose_clip = clip_vision_output_pose if clip_vision_output_pose is not None else clip_vision_output
+        if pose_clip is not None:
+            pose_values["clip_vision_output_pose"] = pose_clip
+
+        pose_cond = positive_pose if positive_pose is not None else positive
+        if len(pose_cond) > 0:
+            pose_values["cross_attn_pose"] = pose_cond[0][0]
+
+        if pose_strength != 1.0:
+            pose_values["pose_strength"] = pose_strength
+
+        if pose_start_percent > 0.0 or pose_end_percent < 1.0:
+            # windowed via cond timestep ranges: the pose values ride a cond limited to the window, and complement conds without them cover the rest, where the model runs without the pose branch at all
+            def windowed(cond):
+                parts = node_helpers.conditioning_set_values(cond, {**pose_values, "start_percent": pose_start_percent, "end_percent": pose_end_percent})
+                if pose_start_percent > 0.0:
+                    parts = parts + node_helpers.conditioning_set_values(cond, {"start_percent": 0.0, "end_percent": pose_start_percent})
+                if pose_end_percent < 1.0:
+                    parts = parts + node_helpers.conditioning_set_values(cond, {"start_percent": pose_end_percent, "end_percent": 1.0})
+                return parts
+            positive = windowed(positive)
+            negative = windowed(negative)
+        else:
+            positive = node_helpers.conditioning_set_values(positive, pose_values)
+            negative = node_helpers.conditioning_set_values(negative, pose_values)
+
+        latent = torch.zeros([batch_size, 16, latent_length + trim_latent, latent_height, latent_width], device=comfy.model_management.intermediate_device())
+        out_latent = {}
+        out_latent["samples"] = latent
+        return io.NodeOutput(positive, negative, out_latent, trim_latent, max(0, ref_motion_latent_length * 4 - 3), video_frame_offset + length)
+
+
+class WanAnimate2Cache(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="WanAnimate2Cache",
+            category="model/conditioning/wan/animate",
+            description=(
+                "Caches the pose-video's per-block activations so it runs once instead of on every sampling step. Roughly halves generation time "
+                "Tradeoff is ~12.5 GB of system RAM at 480x832/81 frames in bf16 (scales with resolution and length). "
+                "With context windows each window is cached separately, so RAM scales with the window count; use the static_standard schedule, as uniform schedules shift the windows every step and nothing ever recurs to hit the cache."
+            ),
+            inputs=[
+                io.Model.Input("model"),
+                io.Combo.Input("device", options=["cpu", "gpu"], default="cpu",
+                               tooltip="Where to keep the cache. cpu (RAM) is the safe choice, the cache will not fit in VRAM alongside the model at typical sizes. gpu (VRAM) can be faster if it fits."),
+                io.Combo.Input("dtype", options=["default", "int8", "int4"], default="default",
+                               tooltip="Storage precision. default stores the activations in the model's compute dtype. int8 halves the cache, int4 quarters it, convrot is used to retain accuracy."),
+            ],
+            outputs=[io.Model.Output()],
+            is_experimental=True,
+        )
+
+    @classmethod
+    def execute(cls, model, device, dtype="default") -> io.NodeOutput:
+        store = comfy.model_management.get_torch_device() if device == "gpu" else torch.device("cpu")
+        cache = comfy.ldm.wan.model_animate2.PoseBranchCache(store_device=store, dtype=dtype)
+        m = model.clone()
+        m.model_options["transformer_options"]["animate2_cache"] = cache
+        m.add_callback(comfy.patcher_extension.CallbacksMP.ON_CLEANUP, lambda patcher: cache.free())
+        return io.NodeOutput(m)
+
+
 class Wan22ImageToVideoLatent(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -1475,6 +1638,8 @@ class WanExtension(ComfyExtension):
             WanSoundImageToVideoExtend,
             WanHuMoImageToVideo,
             WanAnimateToVideo,
+            WanAnimate2ToVideo,
+            WanAnimate2Cache,
             Wan22ImageToVideoLatent,
             WanInfiniteTalkToVideo,
         ]

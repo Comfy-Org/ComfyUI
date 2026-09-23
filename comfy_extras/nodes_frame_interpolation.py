@@ -3,6 +3,7 @@ from tqdm import tqdm
 from typing_extensions import override
 
 import comfy.model_patcher
+import comfy.storage
 import comfy.utils
 import folder_paths
 from comfy import model_management
@@ -41,6 +42,7 @@ class FrameInterpolationModelLoader(io.ComfyNode):
             model,
             load_device=model_management.get_torch_device(),
             offload_device=model_management.unet_offload_device(),
+            fast_disk=comfy.storage.state_dict_fast_disk(sd),
         )
         return io.NodeOutput(patcher)
 

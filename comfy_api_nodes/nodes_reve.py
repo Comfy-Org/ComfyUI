@@ -137,6 +137,7 @@ class ReveImageCreateNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            is_deprecated=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(
                     widgets=["upscale", "upscale.upscale_factor"],
@@ -228,6 +229,7 @@ class ReveImageEditNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            is_deprecated=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(
                     widgets=["model", "upscale", "upscale.upscale_factor"],
@@ -337,6 +339,7 @@ class ReveImageRemixNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            is_deprecated=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(
                     widgets=["model", "upscale", "upscale.upscale_factor"],

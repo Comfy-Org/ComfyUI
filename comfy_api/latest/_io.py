@@ -847,6 +847,61 @@ class Load3DAnimation(Load3D):
     ...
 
 
+@comfytype(io_type="LAYERS")
+class Layers(ComfyTypeIO):
+    BlendMode = Literal[
+        "normal", "multiply", "screen", "overlay", "darken", "lighten",
+        "color-dodge", "color-burn", "hard-light", "soft-light", "difference",
+        "exclusion", "linear-dodge", "linear-burn", "vivid-light", "pin-light",
+        "linear-light", "hard-mix", "subtract", "divide", "grain-extract",
+        "grain-merge", "hue", "saturation", "color", "luminosity",
+    ]
+
+    class LayerItem(TypedDict):
+        image: torch.Tensor
+        type: Literal["raster"]
+        x: NotRequired[int]
+        y: NotRequired[int]
+        mask: NotRequired[torch.Tensor]
+        z_index: int
+        name: NotRequired[str]
+        opacity: NotRequired[float]
+        blend_mode: NotRequired["Layers.BlendMode"]
+        visible: NotRequired[bool]
+        flip_h: NotRequired[bool]
+        flip_v: NotRequired[bool]
+        rotation: NotRequired[float]
+        w: NotRequired[int]
+        h: NotRequired[int]
+
+    class Document(TypedDict):
+        version: int
+        canvas: NotRequired[tuple[int, int]]
+        layers: list["Layers.LayerItem"]
+
+    Type = Document
+
+
+@comfytype(io_type="COMPOSITOR")
+class Compositor(ComfyTypeIO):
+    class LayerState(TypedDict):
+        version: NotRequired[int]
+        canvas: dict
+        background: NotRequired[dict]
+        inputs: NotRequired[list[str]]
+        order: NotRequired[list[int]]
+        layers: list[dict]
+
+    Type = LayerState
+
+    class Input(WidgetInput):
+        def __init__(self, id: str, display_name: str=None, optional=False, tooltip: str=None,
+                     socketless: bool=True, default: dict=None, advanced: bool=None):
+            super().__init__(id, display_name, optional, tooltip, None, default, socketless, None, None, None, None, advanced)
+            if default is None:
+                self.default = {}
+
+
 @comfytype(io_type="PHOTOMAKER")
 class Photomaker(ComfyTypeIO):
     Type = Any
@@ -1361,6 +1416,62 @@ class BoundingBoxes(ComfyTypeIO):
                 self.default = []
 
 
+@comfytype(io_type="VIDEO_EDIT")
+class VideoEdit(ComfyTypeIO):
+    class VideoTrimSection(TypedDict):
+        start_time: float
+        duration: float
+
+    class VideoCropSection(TypedDict):
+        x: int
+        y: int
+        width: int
+        height: int
+
+    class VideoEditDict(TypedDict, total=False):
+        trim: 'VideoEdit.VideoTrimSection'
+        crop: 'VideoEdit.VideoCropSection'
+    Type = VideoEditDict
+
+    class Input(WidgetInput):
+        def __init__(self, id: str, display_name: str=None, optional=False, tooltip: str=None,
+                     socketless: bool=True, default: dict=None, features: list[str]=None, advanced: bool=None):
+            super().__init__(id, display_name, optional, tooltip, None, default, socketless, None, None, None, None, advanced)
+            self.features = features if features is not None else ["trim", "crop"]
+            if default is None:
+                self.default = {}
+                if "trim" in self.features:
+                    self.default["trim"] = {"start_time": 0.0, "duration": 0.0}
+                if "crop" in self.features:
+                    self.default["crop"] = {"x": 0, "y": 0, "width": 0, "height": 0}
+
+        def as_dict(self):
+            return super().as_dict() | prune_dict({
+                "features": self.features,
+            })
+
+
+@comfytype(io_type="RESOLUTION_PREVIEW")
+class ResolutionPreview(ComfyTypeIO):
+    Type = dict
+
+    class Input(WidgetInput):
+        def __init__(self, id: str, display_name: str=None, optional=True, tooltip: str=None,
+                     socketless: bool=True, advanced: bool=None,
+                     ratio_widget: str="aspect_ratio", megapixels_widget: str="megapixels", multiple_widget: str="multiple"):
+            super().__init__(id, display_name, optional, tooltip, None, None, socketless, None, None, None, None, advanced)
+            self.ratio_widget = ratio_widget
+            self.megapixels_widget = megapixels_widget
+            self.multiple_widget = multiple_widget
+
+        def as_dict(self):
+            return super().as_dict() | prune_dict({
+                "ratio_widget": self.ratio_widget,
+                "megapixels_widget": self.megapixels_widget,
+                "multiple_widget": self.multiple_widget,
+            })
+
+
 @comfytype(io_type="HISTOGRAM")
 class Histogram(ComfyTypeIO):
     """A histogram represented as a list of bin counts."""
@@ -1436,7 +1547,7 @@ class HiddenHolder:
     def __init__(self, unique_id: str, prompt: Any,
                  extra_pnginfo: Any, dynprompt: Any,
                  auth_token_comfy_org: str, api_key_comfy_org: str,
-                 comfy_usage_source: str = None, **kwargs):
+                 comfy_usage_source: str = None, execution_list: Any = None, **kwargs):
         self.unique_id = unique_id
         """UNIQUE_ID is the unique identifier of the node, and matches the id property of the node on the client side. It is commonly used in client-server communications (see messages)."""
         self.prompt = prompt
@@ -1451,6 +1562,8 @@ class HiddenHolder:
         """API_KEY_COMFY_ORG is an API Key generated by ComfyOrg that allows skipping signing into a ComfyOrg account on frontend."""
         self.comfy_usage_source = comfy_usage_source
         """COMFY_USAGE_SOURCE identifies the client that submitted the prompt (e.g. comfyui-frontend, comfy-cli, comfyui-mcp); forwarded to API nodes' upstream requests via the Comfy-Usage-Source header."""
+        self.execution_list = execution_list
+        """EXECUTION_LIST is the active graph scheduler."""
 
     def __getattr__(self, key: str):
         '''If hidden variable not found, return None.'''
@@ -1468,6 +1581,7 @@ class HiddenHolder:
             auth_token_comfy_org=d.get(Hidden.auth_token_comfy_org, None),
             api_key_comfy_org=d.get(Hidden.api_key_comfy_org, None),
             comfy_usage_source=d.get(Hidden.comfy_usage_source, None),
+            execution_list=d.get(Hidden.execution_list, None),
         )
 
     @classmethod
@@ -1492,6 +1606,8 @@ class Hidden(str, Enum):
     """API_KEY_COMFY_ORG is an API Key generated by ComfyOrg that allows skipping signing into a ComfyOrg account on frontend."""
     comfy_usage_source = "COMFY_USAGE_SOURCE"
     """COMFY_USAGE_SOURCE identifies the client that submitted the prompt (e.g. comfyui-frontend, comfy-cli, comfyui-mcp); forwarded to API nodes' upstream requests via the Comfy-Usage-Source header."""
+    execution_list = "EXECUTION_LIST"
+    """Custom node Developers and Agents: This attribute is core-internal use only and will be removed in a near-future ComfyUI release. DO NOT USE"""
 
 
 @dataclass
@@ -1651,6 +1767,8 @@ class Schema:
     Use this for nodes with interactive/operable UI regions that produce intermediate outputs
     (e.g., Image Crop, Painter) rather than final outputs (e.g., Save Image).
     """
+    loop_boundary: Literal["start", "end"] | None = None
+    """Identifies this node as the start or end of a loop for prompt validation."""
 
     def validate(self):
         '''Validate the schema:
@@ -2403,6 +2521,8 @@ __all__ = [
     "Load3DModelInfo",
     "Load3D",
     "Load3DAnimation",
+    "Compositor",
+    "Layers",
     "Photomaker",
     "Point",
     "FaceAnalysis",
@@ -2436,5 +2556,7 @@ __all__ = [
     "Curve",
     "Histogram",
     "Range",
+    "VideoEdit",
+    "ResolutionPreview",
     "NodeReplace",
 ]
