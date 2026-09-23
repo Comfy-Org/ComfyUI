@@ -65,3 +65,17 @@ def test_backup_gives_up_when_the_destination_stays_locked(tmp_path, monkeypatch
     finally:
         holder.execute("ROLLBACK")
         holder.close()
+
+
+def test_backup_past_its_deadline_still_completes_when_nothing_blocks_it(tmp_path, monkeypatch):
+    source = tmp_path / "source.db"
+    destination = tmp_path / "destination.db"
+    with sqlite3.connect(source) as conn:
+        conn.execute("CREATE TABLE t (x)")
+        conn.execute("INSERT INTO t VALUES (1)")
+    monkeypatch.setattr(db_module, "_BACKUP_TIMEOUT_SECONDS", -1.0)
+
+    db_module._backup_database(str(source), str(destination))
+
+    with sqlite3.connect(destination) as conn:
+        assert conn.execute("SELECT x FROM t").fetchall() == [(1,)]

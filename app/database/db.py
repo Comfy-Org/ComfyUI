@@ -137,6 +137,7 @@ def prepare_file_db_path(db_path):
 
 
 _BACKUP_TIMEOUT_SECONDS = 5.0
+_SQLITE_BUSY, _SQLITE_LOCKED = 5, 6  # sqlite3 only exports these names from Python 3.11
 
 
 def _backup_database(source_path, destination_path):
@@ -146,7 +147,7 @@ def _backup_database(source_path, destination_path):
     deadline = time.monotonic() + _BACKUP_TIMEOUT_SECONDS
 
     def give_up_when_locked_too_long(status, remaining, total):
-        if time.monotonic() > deadline:
+        if status in (_SQLITE_BUSY, _SQLITE_LOCKED) and time.monotonic() > deadline:
             raise TimeoutError(f"'{destination_path}' stayed locked; database backup abandoned")
 
     with closing(sqlite3.connect(source_path)) as source:
