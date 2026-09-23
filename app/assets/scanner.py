@@ -421,6 +421,7 @@ def observe_asset_specs(specs: list[SeedAssetSpec]) -> dict[str, _SpecObservatio
             stat_result = os.stat(path, follow_symlinks=True)
             snapshot = snapshot_hash(path) if hashing_is_enabled else None
         except FileNotFoundError:
+            logging.warning("Skipping vanished asset during scan: %s", path)
             observed[path] = None
             continue
         except OSError as e:
@@ -448,8 +449,7 @@ def seed_asset_specs(
             try:
                 with session.begin_nested():
                     observation = observed[path]
-                    if observation is None:
-                        logging.warning("Skipping vanished asset during scan: %s", path)
+                    if observation is None:  # observe_asset_specs already logged why
                         continue
                     stat_result = observation.stat_result
                     recovery = recover_missing_content(

@@ -135,9 +135,11 @@ def test_seed_logs_the_real_error_for_an_unreadable_path(
     session.commit()
 
     assert created == 2
-    assert "Asset scan error: phase=seed_observation error_type=permission_denied" in [
-        record.getMessage() for record in caplog.records
-    ]
+    messages = [record.getMessage() for record in caplog.records]
+    assert "Asset scan error: phase=seed_observation error_type=permission_denied" in messages
+    assert not any(
+        "vanished" in message and str(unreadable_path) in message for message in messages
+    ), "an unreadable file still exists and must not also be reported as vanished"
 
 
 def test_seed_isolates_a_poisoned_spec_and_persists_the_specs_around_it(
