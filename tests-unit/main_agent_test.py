@@ -4,8 +4,6 @@ import ast
 import importlib
 import logging
 import os
-import shutil
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,8 +36,6 @@ def _run_agent_check(monkeypatch, caplog, find_spec):
         "importlib": importlib,
         "logging": logging,
         "os": os,
-        "shutil": shutil,
-        "sys": sys,
     }
     monkeypatch.setattr(importlib.util, "find_spec", find_spec)
     with caplog.at_level(logging.INFO):
@@ -52,13 +48,13 @@ def test_enable_agent_flag_parses():
     assert parser.parse_args([]).enable_agent is False
 
 
-def test_missing_agent_package_disables_flag_and_logs_install_hint(monkeypatch, caplog):
+def test_missing_agent_package_disables_flag_without_install_command(monkeypatch, caplog):
     args = _run_agent_check(monkeypatch, caplog, lambda name: None)
 
     assert args.enable_agent is False
     warning = next(record.getMessage() for record in caplog.records if record.levelno == logging.WARNING)
-    assert "-m pip install -r " in warning
     assert "agent_requirements.txt" in warning
+    assert "pip install" not in warning
 
 
 def test_namespace_agent_package_counts_as_missing(monkeypatch, caplog):

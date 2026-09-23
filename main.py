@@ -139,15 +139,9 @@ if args.enable_manager:
 
 def handle_comfy_agent_unavailable():
     agent_req_path = os.path.join(os.path.dirname(os.path.abspath(folder_paths.__file__)), "agent_requirements.txt")
-    uv_available = shutil.which("uv") is not None
-
-    pip_cmd = f"{sys.executable} -m pip install -r {agent_req_path}"
-    msg = f"\n\nTo use the `--enable-agent` feature, the `comfy-agent` package must be installed first.\ncommand:\n\t{pip_cmd}"
-    if uv_available:
-        msg += f"\nor using uv:\n\tuv pip install -r {agent_req_path}"
-    msg += "\n"
     logging.info("[agent-event] package_missing")
-    logging.warning(msg)
+    # No install command until comfy-agent is published: an unregistered PyPI name could be claimed by anyone.
+    logging.warning(f"\n\n`--enable-agent` was passed but the `comfy-agent` package is not installed, so the agent is disabled.\nThe agent requirements are listed in {agent_req_path}\n")
     args.enable_agent = False
 
 
