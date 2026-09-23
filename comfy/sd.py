@@ -857,6 +857,11 @@ class VAE:
                     self.memory_used_decode = lambda shape, dtype: 8000 * shape[3] * shape[4] * (16 * 16) * model_management.dtype_size(dtype)
                 else:  # Wan 2.1 VAE
                     dim = sd["decoder.head.0.gamma"].shape[0]
+                    self.upscale_ratio = (lambda a: max(0, a * 4 - 3), 8, 8)
+                    self.upscale_index_formula = (4, 8, 8)
+                    self.downscale_ratio = (lambda a: max(0, math.floor((a + 3) / 4)), 8, 8)
+                    self.downscale_index_formula = (4, 8, 8)
+                    self.latent_dim = 3
                     self.latent_channels = 16
                     self.output_channels = sd["encoder.conv1.weight"].shape[1]
                     self.conv_out_channels = sd["decoder.head.2.weight"].shape[0]
@@ -864,19 +869,8 @@ class VAE:
                     ddconfig = {"dim": dim, "z_dim": self.latent_channels, "dim_mult": [1, 2, 4, 4], "num_res_blocks": 2, "attn_scales": [], "temperal_downsample": [False, True, True], "image_channels": self.output_channels, "conv_out_channels": self.conv_out_channels, "dropout": 0.0}
                     self.first_stage_model = comfy.ldm.wan.vae.WanVAE(**ddconfig)
                     self.working_dtypes = [torch.bfloat16, torch.float16, torch.float32]
-                    if self.output_channels == 4:  # Ming-Image RGBA VAE: single images, 4-D latents
-                        self.upscale_ratio = 8
-                        self.downscale_ratio = 8
-                        self.memory_used_encode = lambda shape, dtype: 1500 * shape[2] * shape[3] * model_management.dtype_size(dtype)
-                        self.memory_used_decode = lambda shape, dtype: 2200 * shape[2] * shape[3] * (8*8) * model_management.dtype_size(dtype)
-                    else:
-                        self.upscale_ratio = (lambda a: max(0, a * 4 - 3), 8, 8)
-                        self.upscale_index_formula = (4, 8, 8)
-                        self.downscale_ratio = (lambda a: max(0, math.floor((a + 3) / 4)), 8, 8)
-                        self.downscale_index_formula = (4, 8, 8)
-                        self.latent_dim = 3
-                        self.memory_used_encode = lambda shape, dtype: (1500 if shape[2]<=4 else 6000) * shape[3] * shape[4] * model_management.dtype_size(dtype)
-                        self.memory_used_decode = lambda shape, dtype: (2200 if shape[2]<=4 else 7000) * shape[3] * shape[4] * (8*8) * model_management.dtype_size(dtype)
+                    self.memory_used_encode = lambda shape, dtype: (1500 if shape[2]<=4 else 6000) * shape[3] * shape[4] * model_management.dtype_size(dtype)
+                    self.memory_used_decode = lambda shape, dtype: (2200 if shape[2]<=4 else 7000) * shape[3] * shape[4] * (8*8) * model_management.dtype_size(dtype)
 
 
             # Hunyuan 3d v2 2.0 & 2.1

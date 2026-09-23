@@ -459,8 +459,6 @@ class WanVAE(nn.Module):
                                  attn_scales, self.temperal_upsample, dropout)
 
     def encode(self, x):
-        if x.ndim == 4:
-            return self.encode(x.unsqueeze(2)).squeeze(2)
         conv_idx = [0]
         ## cache
         t = x.shape[2]
@@ -491,8 +489,6 @@ class WanVAE(nn.Module):
         return mu
 
     def decode(self, z):
-        if z.ndim == 4:
-            return self.decode(z.unsqueeze(2)).squeeze(2)
         # z: [b,c,t,h,w]
         iter_ = 1 + z.shape[2] // 2
         feat_map = None

@@ -778,6 +778,8 @@ class Wan21(LatentFormat):
 
 class MingImage(LatentFormat):
     latent_channels = 16
+    latent_dimensions = 3
+    temporal_downscale_ratio = 4
     scale_factor = 8.0064
 
     latent_rgb_factors = [

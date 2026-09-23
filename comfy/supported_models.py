@@ -1255,6 +1255,9 @@ class MingImage(ZImage):
 
     latent_format = latent_formats.MingImage
 
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.MingImage(self, device=device)
+
     def clip_target(self, state_dict={}):
         return supported_models_base.ClipTarget(comfy.text_encoders.ming_image.MingImageTokenizer, comfy.text_encoders.ming_image.te())
 

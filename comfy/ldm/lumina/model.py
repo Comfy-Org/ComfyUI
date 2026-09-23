@@ -671,7 +671,7 @@ class NextDiT(nn.Module):
         freqs_cis = (self.rope_embedder(cap_pos_ids).movedim(1, 2),)
         return embeds, freqs_cis, cap_feats_len
 
-    def embed_all(self, x, cap_feats=None, siglip_feats=None, offset=0, omni=False, transformer_options={}, cap_extra=None):
+    def embed_all(self, x, cap_feats=None, siglip_feats=None, offset=0, omni=False, transformer_options={}, cap_extra=None, ref_frames=[]):
         bsz = 1
         pH = pW = self.patch_size
         device = x.device
@@ -712,6 +712,12 @@ class NextDiT(nn.Module):
         B, C, H, W = x.shape
         x = self.x_embedder(x.view(B, C, H // pH, pH, W // pW, pW).permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2))
         x_pos_ids = pos_ids_x(cap_feats_len + 1, H // pH, W // pW, bsz, device, transformer_options=transformer_options)
+        for f, ref in enumerate(ref_frames):  # Ming-Image: clean reference frames follow the target frame on the t axis
+            ref = comfy.ldm.common_dit.pad_to_patch_size(ref, (pH, pW))
+            rH, rW = ref.shape[-2], ref.shape[-1]
+            ref = self.x_embedder(ref.view(ref.shape[0], C, rH // pH, pH, rW // pW, pW).permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2))
+            x = torch.cat((x, comfy.utils.repeat_to_batch_size(ref, B)), dim=1)
+            x_pos_ids = torch.cat((x_pos_ids, pos_ids_x(cap_feats_len + 2 + f, rH // pH, rW // pW, bsz, device, transformer_options=transformer_options)), dim=1)
         if self.pad_tokens_multiple is not None:
             x, pad_extra = pad_zimage(x, self.x_pad_token, self.pad_tokens_multiple)
             x_pos_ids = torch.nn.functional.pad(x_pos_ids, (0, 0, 0, pad_extra))
@@ -722,7 +728,7 @@ class NextDiT(nn.Module):
 
 
     def patchify_and_embed(
-        self, x: torch.Tensor, cap_feats: torch.Tensor, cap_mask: torch.Tensor, t: torch.Tensor, num_tokens, ref_latents=[], ref_contexts=[], siglip_feats=[], direct_context=None, transformer_options={}
+        self, x: torch.Tensor, cap_feats: torch.Tensor, cap_mask: torch.Tensor, t: torch.Tensor, num_tokens, ref_latents=[], ref_contexts=[], siglip_feats=[], direct_context=None, ref_frames=[], transformer_options={}
     ) -> Tuple[torch.Tensor, torch.Tensor, List[Tuple[int, int]], List[int], torch.Tensor]:
         bsz = x.shape[0]
         cap_mask = None  # TODO?
@@ -756,7 +762,7 @@ class NextDiT(nn.Module):
 
         H, W = x.shape[-2], x.shape[-1]
         img_sizes = [(H, W)] * bsz
-        out = self.embed_all(x, cap_feats, main_siglip, offset=start_t, omni=omni, transformer_options=transformer_options, cap_extra=direct_context)
+        out = self.embed_all(x, cap_feats, main_siglip, offset=start_t, omni=omni, transformer_options=transformer_options, cap_extra=direct_context, ref_frames=ref_frames)
         img_len = out[0][-1].shape[1]
         cap_len = out[0][0].shape[1]
         for i, e in enumerate(out[0]):
@@ -829,7 +835,7 @@ class NextDiT(nn.Module):
         ).execute(x, timesteps, context, num_tokens, attention_mask, **kwargs)
 
     # def forward(self, x, t, cap_feats, cap_mask):
-    def _forward(self, x, timesteps, context, num_tokens, attention_mask=None, ref_latents=[], ref_contexts=[], siglip_feats=[], direct_context=None, transformer_options={}, **kwargs):
+    def _forward(self, x, timesteps, context, num_tokens, attention_mask=None, ref_latents=[], ref_contexts=[], siglip_feats=[], direct_context=None, ref_frames=[], transformer_options={}, **kwargs):
         omni = len(ref_latents) > 0
         if omni:
             timesteps = torch.cat([timesteps * 0, timesteps], dim=0)
@@ -837,6 +843,9 @@ class NextDiT(nn.Module):
         t = 1.0 - timesteps
         cap_feats = context
         cap_mask = attention_mask
+        frames = x.ndim == 5  # Ming-Image latents carry a frame axis
+        if frames:
+            x = x.squeeze(2)
         bs, c, h, w = x.shape
         x = comfy.ldm.common_dit.pad_to_patch_size(x, (self.patch_size, self.patch_size))
         """
@@ -859,7 +868,7 @@ class NextDiT(nn.Module):
 
         patches = transformer_options.get("patches", {})
         x_is_tensor = isinstance(x, torch.Tensor)
-        img, mask, img_size, cap_size, freqs_cis, timestep_zero_index = self.patchify_and_embed(x, cap_feats, cap_mask, adaln_input, num_tokens, ref_latents=ref_latents, ref_contexts=ref_contexts, siglip_feats=siglip_feats, direct_context=direct_context, transformer_options=transformer_options)
+        img, mask, img_size, cap_size, freqs_cis, timestep_zero_index = self.patchify_and_embed(x, cap_feats, cap_mask, adaln_input, num_tokens, ref_latents=ref_latents, ref_contexts=ref_contexts, siglip_feats=siglip_feats, direct_context=direct_context, ref_frames=ref_frames, transformer_options=transformer_options)
         freqs_cis = freqs_cis.to(img.device)
 
         transformer_options["total_blocks"] = len(self.layers)
@@ -878,6 +887,8 @@ class NextDiT(nn.Module):
 
         img = self.final_layer(img, adaln_input, timestep_zero_index=timestep_zero_index)
         img = self.unpatchify(img, img_size, cap_size, return_tensor=x_is_tensor)[:, :, :h, :w]
+        if frames:
+            img = img.unsqueeze(2)
         return -img
 
 

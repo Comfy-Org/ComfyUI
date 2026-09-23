@@ -9,6 +9,7 @@ import comfy.ops
 from comfy import sd1_clip
 from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy.text_encoders.llama import MLP, RMSNorm, TransformerBlock, apply_rope, moe_experts_forward, precompute_freqs_cis
+from comfy.text_encoders import qwen_vl
 
 IMAGE_PATCH_TOKEN = 157157
 
@@ -65,12 +66,10 @@ class BailingAttention(nn.Module):
 
     def forward(self, x, attention_mask, freqs_cis, optimized_attention):
         batch, seq_len, _ = x.shape
-        qkv = self.query_key_value(x).view(batch, seq_len, self.num_heads + 2 * self.num_kv_heads, self.head_dim)
-        xq, xk, xv = qkv.split((self.num_heads, self.num_kv_heads, self.num_kv_heads), dim=2)
-        xq = self.q_norm(xq.transpose(1, 2))
-        xk = self.k_norm(xk.transpose(1, 2))
-        xv = xv.transpose(1, 2)
-
+        qkv = self.query_key_value(x).view(batch, seq_len, -1, self.head_dim).transpose(1, 2)
+        xq, xk, xv = qkv.split((self.num_heads, self.num_kv_heads, self.num_kv_heads), dim=1)
+        xq = self.q_norm(xq)
+        xk = self.k_norm(xk)
         q_rot, k_rot = apply_rope(xq[..., :self.rope_dim].contiguous(), xk[..., :self.rope_dim].contiguous(), freqs_cis)
         xq = torch.cat((q_rot, xq[..., self.rope_dim:]), dim=-1)
         xk = torch.cat((k_rot, xk[..., self.rope_dim:]), dim=-1)
@@ -82,7 +81,6 @@ class BailingGate(nn.Module):
     def __init__(self, config, device=None, dtype=None, ops=None):
         super().__init__()
         self.top_k = config.num_experts_per_tok
-        self.num_experts = config.num_experts
         self.n_group = config.n_group
         self.topk_group = config.topk_group
         self.routed_scaling_factor = config.routed_scaling_factor
@@ -92,22 +90,13 @@ class BailingGate(nn.Module):
     def forward(self, x):
         scores = torch.sigmoid(self.proj(x.float()))
         routing = scores + comfy.ops.cast_to_input(self.expert_bias, scores, copy=False)
-
         num_tokens = routing.shape[0]
-        group_scores = routing.view(num_tokens, self.n_group, -1).topk(2, dim=-1)[0].sum(dim=-1)
-        group_idx = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
-        group_mask = torch.zeros_like(group_scores).scatter_(1, group_idx, 1)
-        score_mask = group_mask.unsqueeze(-1).expand(num_tokens, self.n_group, self.num_experts // self.n_group).reshape(num_tokens, -1)
-        topk_idx = torch.topk(routing.masked_fill(~score_mask.bool(), float("-inf")), k=self.top_k, dim=-1, sorted=False)[1]
-
+        grouped = routing.view(num_tokens, self.n_group, -1)
+        group_idx = torch.topk(grouped.topk(2, dim=-1)[0].sum(dim=-1), k=self.topk_group, dim=-1, sorted=False)[1]
+        group_mask = torch.zeros(num_tokens, self.n_group, dtype=torch.bool, device=x.device).scatter_(1, group_idx, True)
+        topk_idx = torch.topk(grouped.masked_fill(~group_mask.unsqueeze(-1), float("-inf")).view(num_tokens, -1), k=self.top_k, dim=-1, sorted=False)[1]
         topk_weight = torch.gather(scores, dim=1, index=topk_idx)
-        topk_weight = topk_weight / (topk_weight.sum(dim=-1, keepdim=True) + 1e-20)
-        return topk_idx, topk_weight * self.routed_scaling_factor
-
-
-def swiglu(gate_up):
-    gate, up = gate_up.chunk(2, dim=-1)
-    return F.silu(gate) * up
+        return topk_idx, topk_weight / (topk_weight.sum(dim=-1, keepdim=True) + 1e-20) * self.routed_scaling_factor
 
 
 class BailingExperts(nn.Module):
@@ -118,7 +107,7 @@ class BailingExperts(nn.Module):
         self.down_proj = ops.MoEExperts(num_experts=config.num_experts, in_features=config.moe_intermediate_size, out_features=config.hidden_size, bias=False, device=device, dtype=dtype)
 
     def forward(self, x, topk_idx, topk_weight):
-        return moe_experts_forward(x, topk_idx, topk_weight, self.num_experts, self.gate_up_proj, self.down_proj, swiglu)
+        return moe_experts_forward(x, topk_idx, topk_weight, self.num_experts, self.gate_up_proj, self.down_proj, comfy.ops._swiglu_eager)
 
 
 class BailingSparseMoe(nn.Module):
@@ -135,10 +124,8 @@ class BailingSparseMoe(nn.Module):
         text_idx, text_weight = self.gate(flat)
         image_idx, image_weight = self.image_gate(flat)
         mask = image_mask.reshape(-1, 1)
-        topk_idx = torch.where(mask, image_idx, text_idx)
-        topk_weight = torch.where(mask, image_weight, text_weight)
-        out = self.experts(flat, topk_idx, topk_weight).view(batch, seq_len, hidden)
-        return out + self.shared_experts(x)
+        out = self.experts(flat, torch.where(mask, image_idx, text_idx), torch.where(mask, image_weight, text_weight))
+        return out.view(batch, seq_len, hidden) + self.shared_experts(x)
 
 
 class BailingDecoderLayer(nn.Module):
@@ -169,37 +156,37 @@ class BailingMoeV2(nn.Module):
         self.layers = nn.ModuleList([BailingDecoderLayer(config, i, device=device, dtype=dtype, ops=ops) for i in range(config.num_hidden_layers)])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps, device=device, dtype=dtype)
 
-    def freqs_cis(self, seq_len, start, size, device):
-        # video_rope: the query block is a 1 x size image grid, text before and after is 1-D
-        pos = torch.arange(seq_len, device=device, dtype=torch.float32)
-        after = start + 1 + pos[:seq_len - start - size]
-        t = torch.cat((pos[:start], torch.full((size,), float(start), device=device), after))
-        w = torch.cat((pos[:start], start + pos[:size] - (size - 1) // 2, after))
-
+    def freqs_cis(self, seq_len, blocks, device):
+        # video_rope: an image block takes one text position, its tokens form an (h, w) grid centered there
+        t = torch.arange(seq_len, device=device, dtype=torch.float32)
+        for start, gh, gw in blocks:
+            t[start + gh * gw:] -= gh * gw - 1
+        h = t.clone()
+        w = t.clone()
+        shift = 0
+        for start, gh, gw in blocks:
+            end = start + gh * gw
+            t[start:end] = start - shift
+            h[start:end] = start - shift + (torch.arange(gh, device=device) - (gh - 1) // 2).repeat_interleave(gw)
+            w[start:end] = start - shift + (torch.arange(gw, device=device) - (gw - 1) // 2).repeat(gh)
+            shift += gh * gw - 1
         inv_freq = 1.0 / (self.config.rope_theta ** (torch.arange(0, self.config.rope_dim, 2, device=device, dtype=torch.float32) / self.config.rope_dim))
-        freqs_t = t[:, None] * inv_freq
-        freqs_w = w[:, None] * inv_freq
-        freqs = freqs_t.clone()
-        freqs[:, 1:24:2] = freqs_w[:, 1:24:2]
-        emb = torch.cat((freqs, freqs), dim=-1).unsqueeze(0)
-        half = emb.shape[-1] // 2
-        sin = emb.sin()
-        return emb.cos(), sin[..., :half], -sin[..., half:]
+        freqs = t[:, None] * inv_freq
+        freqs[:, 0:24:2] = h[:, None] * inv_freq[0:24:2]
+        freqs[:, 1:24:2] = w[:, None] * inv_freq[1:24:2]
+        freqs = freqs.unsqueeze(0)
+        return torch.cat((freqs, freqs), dim=-1).cos(), freqs.sin(), -freqs.sin()
 
-    def forward(self, embeds, attention_mask, start, size, capture_layers):
-        x = embeds
+    def forward(self, x, attention_mask, blocks, capture_layers):
         seq_len = x.shape[1]
-        device = x.device
-        freqs_cis = self.freqs_cis(seq_len, start, size, device)
-
-        mask = torch.empty(seq_len, seq_len, dtype=x.dtype, device=device).fill_(torch.finfo(x.dtype).min / 4).triu_(1)
-        if attention_mask is not None:
-            pad = 1.0 - attention_mask.to(x.dtype).reshape((attention_mask.shape[0], 1, 1, seq_len)).expand(-1, 1, seq_len, seq_len)
-            mask = mask + pad.masked_fill(pad.to(torch.bool), torch.finfo(x.dtype).min / 4)
-        optimized_attention = optimized_attention_for_device(device, mask=True, small_input=True)
-
-        image_mask = torch.zeros(x.shape[:2], dtype=torch.bool, device=device)
-        image_mask[:, start:start + size] = True
+        freqs_cis = self.freqs_cis(seq_len, blocks, x.device)
+        neg = torch.finfo(x.dtype).min / 4
+        mask = torch.full((seq_len, seq_len), neg, dtype=x.dtype, device=x.device).triu_(1)
+        mask = mask + (attention_mask == 0).to(x.dtype)[:, None, None, :] * neg
+        optimized_attention = optimized_attention_for_device(x.device, mask=True, small_input=True)
+        image_mask = torch.zeros(x.shape[:2], dtype=torch.bool, device=x.device)
+        for start, gh, gw in blocks:
+            image_mask[:, start:start + gh * gw] = True
 
         captured = []
         for i, layer in enumerate(self.layers):
@@ -234,9 +221,14 @@ class MingImageEncoder(nn.Module):
         super().__init__()
         config = BailingMoeV2Config(**config_dict)
         connector_config = MingConnectorConfig()
-        self.dtype = dtype
         self.num_layers = config.num_hidden_layers
         self.thinker = BailingMoeV2(config, device=device, dtype=dtype, ops=operations)
+        self.vision = qwen_vl.Qwen2VLVisionTransformer(hidden_size=1280, output_hidden_size=8192, intermediate_size=3456, num_heads=16, num_layers=32, device=device, dtype=dtype, ops=operations)
+        self.linear_proj = nn.Sequential(
+            operations.Linear(8192, config.hidden_size, device=device, dtype=dtype),
+            nn.GELU(),
+            operations.Linear(config.hidden_size, config.hidden_size, device=device, dtype=dtype),
+        )
         self.connector = MingConnector(connector_config, device=device, dtype=dtype, ops=operations)
         self.query_tokens = nn.Parameter(torch.empty(256, config.hidden_size, device=device, dtype=dtype))
         self.proj_in = operations.Linear(config.hidden_size, connector_config.hidden_size, device=device, dtype=dtype)
@@ -253,15 +245,17 @@ class MingImageEncoder(nn.Module):
     def preprocess_embed(self, embed, device):
         if embed["type"] == "query":
             return self.query_tokens, None
+        if embed["type"] == "image":
+            pixels, grid = qwen_vl.process_qwen2vl_images(embed["data"], min_pixels=451584, max_pixels=451584)
+            feats = self.vision(pixels.to(device, dtype=torch.float32), grid)
+            return F.normalize(self.linear_proj(feats), dim=-1), grid
         return None, None
 
     def forward(self, embeds, attention_mask, embeds_info):
-        query = next(e for e in embeds_info if e["type"] == "query")
-        start, size = query["index"], query["size"]
-        hidden, captured = self.thinker(embeds, attention_mask, start, size, self.capture_layers)
-
+        blocks = [(e["index"], int(e["extra"][0][1]) // 2, int(e["extra"][0][2]) // 2) if e["type"] == "image" else (e["index"], 1, e["size"]) for e in embeds_info]
+        start, _, size = blocks[-1]
+        hidden, captured = self.thinker(embeds, attention_mask, blocks, self.capture_layers)
         cap_feats = self.proj_out(self.connector(self.proj_in(hidden[:, start:start + size])))
-
         direct = torch.cat([c[:, :start - 1] for c in captured], dim=-1)
         return cap_feats, self.proj_directvlm(direct)
 
@@ -270,6 +264,8 @@ class _MingRawTokenizer:
     def __init__(self, tokenizer_json_bytes=None, **kwargs):
         if isinstance(tokenizer_json_bytes, torch.Tensor):
             tokenizer_json_bytes = bytes(tokenizer_json_bytes.tolist())
+        if not isinstance(tokenizer_json_bytes, bytes):
+            raise ValueError("The Ming-Image text encoder file must contain the tokenizer_json tensor.")
         self.tokenizer = Tokenizer.from_str(tokenizer_json_bytes.decode("utf-8"))
 
     @classmethod
@@ -282,18 +278,14 @@ class _MingRawTokenizer:
     def get_vocab(self):
         return self.tokenizer.get_vocab()
 
-    def convert_tokens_to_ids(self, tokens):
-        return [self.tokenizer.token_to_id(t) for t in tokens]
-
     def decode(self, ids, **kwargs):
         return self.tokenizer.decode(ids, skip_special_tokens=kwargs.get("skip_special_tokens", False))
 
 
 class MingTokenizer(sd1_clip.SDTokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
-        tokenizer_json = tokenizer_data.get("tokenizer_json", None)
-        self.tokenizer_json_data = tokenizer_json
-        super().__init__(tokenizer_json, pad_with_end=False, embedding_directory=embedding_directory, embedding_size=2048, embedding_key='ming_image', tokenizer_class=_MingRawTokenizer, has_start_token=False, has_end_token=False, pad_to_max_length=False, max_length=99999999, min_length=1, pad_token=156892, disable_weights=True, tokenizer_data=tokenizer_data)
+        self.tokenizer_json_data = tokenizer_data.get("tokenizer_json", None)
+        super().__init__(self.tokenizer_json_data, pad_with_end=False, embedding_directory=embedding_directory, embedding_size=2048, embedding_key='ming_image', tokenizer_class=_MingRawTokenizer, has_start_token=False, has_end_token=False, pad_to_max_length=False, max_length=99999999, min_length=1, pad_token=156892, disable_weights=True, tokenizer_data=tokenizer_data)
 
     def state_dict(self):
         return {"tokenizer_json": self.tokenizer_json_data}
@@ -303,15 +295,18 @@ class MingImageTokenizer(sd1_clip.SD1Tokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name="ming_image", tokenizer=MingTokenizer)
         self.llama_template = "<role>SYSTEM</role>你是一个友好的AI助手。\n\ndetailed thinking off<|role_end|><role>HUMAN</role>{}<|role_end|><role>ASSISTANT</role><image><imagePatch></image>"
+        self.llama_template_images = "<role>SYSTEM</role>你是一个友好的AI助手。\n\ndetailed thinking off<|role_end|><role>HUMAN</role><image><imagePatch></image>\n{}<|role_end|><role>ASSISTANT</role><image><imagePatch></image>"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], **kwargs):
         if llama_template is None:
-            llama_template = self.llama_template
+            llama_template = self.llama_template_images if len(images) > 0 else self.llama_template
         tokens = super().tokenize_with_weights(llama_template.format(text), return_word_ids=return_word_ids, **kwargs)
+        images = iter(images)
         for r in tokens["ming_image"]:
             for i in range(len(r)):
                 if r[i][0] == IMAGE_PATCH_TOKEN:
-                    r[i] = ({"type": "query"},) + r[i][1:]
+                    image = next(images, None)
+                    r[i] = ({"type": "query"} if image is None else {"type": "image", "data": image},) + r[i][1:]
         return tokens
 
 
