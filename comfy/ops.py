@@ -19,6 +19,7 @@
 import torch
 import logging
 import contextlib
+import dataclasses
 import inspect
 import comfy.model_management
 from comfy.cli_args import args, PerformanceFeature
@@ -1549,8 +1550,18 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def _apply(self, fn, recurse=True):
                 return _quantized_apply(self, fn, recurse)
 
-            def _load_from_state_dict(self, *args):
-                _load_quantized_module(self, super()._load_from_state_dict, *args, load_extra_params=False)
+            def _load_from_state_dict(self, state_dict, prefix, *args):
+                layer_conf = state_dict.get(f"{prefix}comfy_quant", None)
+                quant_format = json.loads(layer_conf.numpy().tobytes()).get("format") if layer_conf is not None else None
+                scale = state_dict.get(f"{prefix}weight_scale", None)
+                if quant_format == "asym_w4a8_int8" or (quant_format == "int8_tensorwise" and scale is not None and scale.ndim == 3):
+                    # per-row scaled layouts are 2-D only: keep the bank as [E * out, in] and slice rows per expert
+                    for name in ("weight", "weight_scale", "weight_s_rel", "weight_s_channel"):
+                        t = state_dict.get(f"{prefix}{name}", None)
+                        if t is not None and t.ndim > 1 and t.shape[0] == self.num_experts:
+                            state_dict[f"{prefix}{name}"] = t.reshape(self.num_experts * t.shape[1], *t.shape[2:])
+                    self._orig_shape = (self.num_experts * self.out_features, self.in_features)
+                _load_quantized_module(self, super()._load_from_state_dict, state_dict, prefix, *args, load_extra_params=False)
 
             def expert_weight(self, i: int):
                 """Expert i's weight (Tensor or per-expert QuantizedTensor view)."""
@@ -1565,15 +1576,9 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 return CastBiasWeightContext(self, input, offloadable=True)
 
             def _dequantize_bank(self, weight, dtype):
-                if self.quant_format != "int8_tensorwise":
+                if weight._qdata.ndim == 3:
                     return weight.dequantize().to(dtype)
-                # the int8 kernels take one [out, in] matrix: dequantize the bank as [E * out, in]
-                params = weight._params
-                kwargs = {"scale": params.scale.reshape(-1, 1) if params.scale.dim() > 1 else params.scale, "orig_dtype": dtype, "orig_shape": (self.num_experts * self.out_features, self.in_features)}
-                if hasattr(params, "convrot"):
-                    kwargs["convrot"] = params.convrot
-                    kwargs["convrot_groupsize"] = params.convrot_groupsize
-                flat = QuantizedTensor(weight._qdata.reshape(-1, weight._qdata.shape[-1]), weight._layout_cls, type(params)(**kwargs))
+                flat = QuantizedTensor(weight._qdata, weight._layout_cls, dataclasses.replace(weight._params, orig_dtype=dtype))
                 return flat.dequantize().view(self.num_experts, self.out_features, self.in_features)
 
             @contextlib.contextmanager
@@ -1621,6 +1626,10 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def _expert_qt_from(self, weight: QuantizedTensor, i: int) -> QuantizedTensor:
                 """Build a per-expert QuantizedTensor by indexing into a resident bank."""
                 params = weight._params
+                if weight._qdata.ndim == 2:
+                    rows = slice(i * self.out_features, (i + 1) * self.out_features)
+                    per_row = {f.name: getattr(params, f.name)[rows] for f in dataclasses.fields(params) if torch.is_tensor(getattr(params, f.name)) and getattr(params, f.name).ndim >= 1 and getattr(params, f.name).shape[0] == weight._qdata.shape[0]}
+                    return QuantizedTensor(weight._qdata[rows], weight._layout_cls, dataclasses.replace(params, orig_shape=(self.out_features, self.in_features), **per_row))
                 kwargs = {
                     "scale": params.scale[i] if params.scale.dim() else params.scale,
                     "orig_dtype": params.orig_dtype,
