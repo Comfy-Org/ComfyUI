@@ -155,6 +155,12 @@ def rope_rotation_table(angles, dtype):
     return table.to(dtype)
 
 
+# out_proj's output peaks at 6.63e4 against fp16's 65504.
+_FP16_OUT_PROJ_SCALE = 64.0
+# fc2's output overflows by ~56x (measured peak 3.69e6).
+_FP16_FC2_SCALE = 256.0
+
+
 class Attention(nn.Module):
     def __init__(self, hidden, heads, head_dim, eps, gate_compress=False, dtype=None, device=None, operations=None):
         super().__init__()
@@ -198,7 +204,11 @@ class Attention(nn.Module):
         k = AttentionTensorContainer(k.transpose(0, 1).unsqueeze(0))
         v = AttentionTensorContainer(v.transpose(0, 1).unsqueeze(0))
         out = optimized_attention(q, k, v, self.heads, preferred_attention=self.comfy_attention, mask=None, skip_reshape=True, transformer_options=transformer_options)
-        return self.out_proj(out.squeeze(0))
+        out = out.squeeze(0)
+        if out.dtype == torch.float16:
+            out = out.div_(_FP16_OUT_PROJ_SCALE)
+            return self.out_proj(out).to(torch.float32).mul_(_FP16_OUT_PROJ_SCALE)
+        return self.out_proj(out)
 
 
 class MLP(nn.Module):
@@ -208,7 +218,14 @@ class MLP(nn.Module):
         self.fc2 = operations.Linear(ffn, hidden, bias=False, dtype=dtype, device=device)
 
     def forward(self, x):
-        return comfy.ops.linear_input_act(self.fc2, self.fc1(x), "swiglu")
+        if x.dtype != torch.float16:
+            return comfy.ops.linear_input_act(self.fc2, self.fc1(x), "swiglu")
+        # the fused activation path cannot express fc2's input scale, so fp16 takes
+        # the unfused branch; the swiglu is not exactly representable so it runs in fp32
+        gate, up = self.fc1(x).chunk(2, dim=-1)
+        act = torch.nn.functional.silu(gate.to(torch.float32)).mul_(up.to(torch.float32))
+        act = act.div_(_FP16_FC2_SCALE).to(torch.float16)
+        return self.fc2(act).to(torch.float32).mul_(_FP16_FC2_SCALE)
 
 
 class AdalnProj(nn.Module):
@@ -291,11 +308,15 @@ class DiTBlock(nn.Module):
 
     def forward(self, x, t_emb, mod_segments, rope_freqs, transformer_options={}, attention=None):
         attention = self.attn if attention is None else attention
+        # the residual reaches ~1e7 across the 50 blocks, so under fp16 it is carried
+        # in fp32 and only the branches run narrow, unscaling their own output
+        branch_dtype = transformer_options.get("minimax_branch_dtype", x.dtype)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(t_emb)
-        h = _mod_scale_shift(self.norm1(x), shift_msa, scale_msa, mod_segments)
-        x = _mod_gate(x, gate_msa, attention(h, rope_freqs=rope_freqs, transformer_options=transformer_options), mod_segments)
-        h = _mod_scale_shift(self.norm2(x), shift_mlp, scale_mlp, mod_segments)
-        return _mod_gate(x, gate_mlp, self.mlp(h), mod_segments)
+        h = _mod_scale_shift(self.norm1(x), shift_msa, scale_msa, mod_segments).to(branch_dtype)
+        att = attention(h, rope_freqs=rope_freqs, transformer_options=transformer_options)
+        x = _mod_gate(x, gate_msa, att.to(x.dtype), mod_segments)
+        h = _mod_scale_shift(self.norm2(x), shift_mlp, scale_mlp, mod_segments).to(branch_dtype)
+        return _mod_gate(x, gate_mlp, self.mlp(h).to(x.dtype), mod_segments)
 
 
 class FinalLayer(nn.Module):
@@ -507,6 +528,11 @@ class MiniMaxH3Model(nn.Module):
         self.token_refiner = TokenRefiner(token_refiner_num_layers, hidden_size, num_attention_heads,
                                           attention_head_dim, ffn_hidden_size, norm_eps, qk_norm_eps,
                                           final_norm_eps, dtype=dtype, device=device, operations=operations)
+        # the text conditioning is preprocessed at a wider dtype than the one these
+        # weights are loaded in, so they are cast at use rather than matched by the caller
+        for module in (self.condition_proj, *self.token_refiner.modules()):
+            if hasattr(module, "comfy_cast_weights"):
+                module.comfy_cast_weights = True
         self.blocks = nn.ModuleList([
             DiTBlock(hidden_size, num_attention_heads, attention_head_dim, ffn_hidden_size,
                      time_embed_dim, norm_eps, qk_norm_eps, **curve, gate_compress=gate_compress,
@@ -720,7 +746,10 @@ class MiniMaxH3Model(nn.Module):
                                              transformer_options=transformer_options)
 
         # segments are contiguous: assemble by slices, embed rows follow segment order
-        h = torch.empty(layout.seq_len, self.hidden_size, dtype=dtype, device=device)
+        # allocated at the accumulation width so every block is entered with the same
+        # dtype and records the same allocations, which the memory compiler requires
+        residual_dtype = torch.float32 if dtype == torch.float16 else dtype
+        h = torch.empty(layout.seq_len, self.hidden_size, dtype=residual_dtype, device=device)
         voff = aoff = 0
         for a, b, kind in layout.segments:
             n = b - a
@@ -749,6 +778,7 @@ class MiniMaxH3Model(nn.Module):
         # blocks
         patches_replace = transformer_options.get("patches_replace", {})
         blocks_replace = patches_replace.get("dit", {})
+        transformer_options["minimax_branch_dtype"] = dtype
         prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), device, transformer_options)
         for i, block in enumerate(self.blocks):
             comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")
