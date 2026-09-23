@@ -12,6 +12,7 @@ from comfy.text_encoders.llama import MLP, RMSNorm, TransformerBlock, apply_rope
 from comfy.text_encoders import qwen_vl
 
 IMAGE_PATCH_TOKEN = 157157
+IMAGE_BLOCK = "<image><imagePatch></image>"
 
 
 @dataclass
@@ -294,12 +295,13 @@ class MingTokenizer(sd1_clip.SDTokenizer):
 class MingImageTokenizer(sd1_clip.SD1Tokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name="ming_image", tokenizer=MingTokenizer)
-        self.llama_template = "<role>SYSTEM</role>你是一个友好的AI助手。\n\ndetailed thinking off<|role_end|><role>HUMAN</role>{}<|role_end|><role>ASSISTANT</role><image><imagePatch></image>"
-        self.llama_template_images = "<role>SYSTEM</role>你是一个友好的AI助手。\n\ndetailed thinking off<|role_end|><role>HUMAN</role><image><imagePatch></image>\n{}<|role_end|><role>ASSISTANT</role><image><imagePatch></image>"
+        self.llama_template = "<role>SYSTEM</role>你是一个友好的AI助手。\n\ndetailed thinking off<|role_end|><role>HUMAN</role>{}<|role_end|><role>ASSISTANT</role>" + IMAGE_BLOCK
 
     def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], **kwargs):
         if llama_template is None:
-            llama_template = self.llama_template_images if len(images) > 0 else self.llama_template
+            llama_template = self.llama_template
+            if len(images) > 0:  # reference images lead the user turn, separated by blank lines like the vendor processor
+                llama_template = llama_template.replace("{}", "\n\n".join([IMAGE_BLOCK] * len(images)) + "\n{}")
         tokens = super().tokenize_with_weights(llama_template.format(text), return_word_ids=return_word_ids, **kwargs)
         images = iter(images)
         for r in tokens["ming_image"]:

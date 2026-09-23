@@ -1,3 +1,4 @@
+import comfy.utils
 import node_helpers
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
@@ -14,7 +15,15 @@ class TextEncodeMingImageEdit(io.ComfyNode):
                 io.Clip.Input("clip"),
                 io.String.Input("prompt", multiline=True, dynamic_prompts=True),
                 io.Vae.Input("vae"),
-                io.Image.Input("image"),
+                io.Autogrow.Input(
+                    "images",
+                    template=io.Autogrow.TemplateNames(
+                        io.Image.Input("image"),
+                        names=[f"image_{i}" for i in range(1, 9)],
+                        min=1,
+                    ),
+                    tooltip="Reference images, seen by the text encoder and appended to the latent sequence as clean frames. The first image sets the canvas; the others are resized to it.",
+                ),
             ],
             outputs=[
                 io.Conditioning.Output(),
@@ -22,10 +31,13 @@ class TextEncodeMingImageEdit(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, vae, image) -> io.NodeOutput:
-        tokens = clip.tokenize(prompt, images=[image[:, :, :, :3]])
+    def execute(cls, clip, prompt, vae, images: io.Autogrow.Type) -> io.NodeOutput:
+        images = [images[name] for name in sorted(images, key=lambda n: int(n.rsplit("_", 1)[-1])) if images[name] is not None]
+        tokens = clip.tokenize(prompt, images=[image[:, :, :, :3] for image in images])
         conditioning = clip.encode_from_tokens_scheduled(tokens)
-        conditioning = node_helpers.conditioning_set_values(conditioning, {"reference_latents": [vae.encode(image)]}, append=True)
+        height, width = images[0].shape[1:3]  # every reference frame shares the canvas of the first one, as the vendor processor does
+        ref_latents = [vae.encode(comfy.utils.common_upscale(image.movedim(-1, 1), width, height, "bilinear", "disabled").movedim(1, -1)) for image in images]
+        conditioning = node_helpers.conditioning_set_values(conditioning, {"reference_latents": ref_latents}, append=True)
         return io.NodeOutput(conditioning)
 
 
