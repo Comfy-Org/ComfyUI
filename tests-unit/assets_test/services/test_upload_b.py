@@ -1425,8 +1425,10 @@ def test_reupload_reads_the_reused_file_before_the_claim_transaction(
         )
         return real_extract(*args, **kwargs)
 
+    stored_paths = []
     try:
-        upload_from_temp_path(temp_path=temp1, name="claim.bin", tags=["output"], client_filename="claim.bin")
+        first = upload_from_temp_path(temp_path=temp1, name="claim.bin", tags=["output"], client_filename="claim.bin")
+        stored_paths.append(first.ref.file_path)
         monkeypatch.setattr(ingest_module, "create_session", recording_create_session)
         monkeypatch.setattr(ingest_module, "_extract_system_metadata_sync", recording_extract)
 
@@ -1439,6 +1441,6 @@ def test_reupload_reads_the_reused_file_before_the_claim_transaction(
         with mock_create_session() as session:
             assert session.scalar(select(func.count()).select_from(AssetContent)) == 1
     finally:
-        for path in (temp1, temp2):
-            if os.path.exists(path):
+        for path in (temp1, temp2, *stored_paths):
+            if path and os.path.exists(path):
                 os.unlink(path)
