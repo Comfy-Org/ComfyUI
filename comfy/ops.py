@@ -1578,8 +1578,21 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def _dequantize_bank(self, weight, dtype):
                 if weight._qdata.ndim == 3:
                     return weight.dequantize().to(dtype)
+                # in expert chunks: the W4A8 dequantize kernel allocates over twice its output in temporaries
                 flat = QuantizedTensor(weight._qdata, weight._layout_cls, dataclasses.replace(weight._params, orig_dtype=dtype))
-                return flat.dequantize().view(self.num_experts, self.out_features, self.in_features)
+                out = torch.empty((self.num_experts, self.out_features, self.in_features), dtype=dtype, device=weight.device)
+                step = max(1, (256 << 20) // (self.out_features * self.in_features * out.element_size()))
+                for first in range(0, self.num_experts, step):
+                    last = min(first + step, self.num_experts)
+                    out[first:last] = self._bank_rows(flat, first, last).dequantize().view(last - first, self.out_features, self.in_features)
+                return out
+
+            def _bank_rows(self, weight: QuantizedTensor, first: int, last: int) -> QuantizedTensor:
+                """Experts [first, last) of a flat [E * out, in] bank as one QuantizedTensor."""
+                params = weight._params
+                rows = slice(first * self.out_features, last * self.out_features)
+                per_row = {f.name: getattr(params, f.name)[rows] for f in dataclasses.fields(params) if torch.is_tensor(getattr(params, f.name)) and getattr(params, f.name).ndim >= 1 and getattr(params, f.name).shape[0] == weight._qdata.shape[0]}
+                return QuantizedTensor(weight._qdata[rows], weight._layout_cls, dataclasses.replace(params, orig_shape=((last - first) * self.out_features, self.in_features), **per_row))
 
             @contextlib.contextmanager
             def bank_resident(self, input):
@@ -1625,11 +1638,9 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 
             def _expert_qt_from(self, weight: QuantizedTensor, i: int) -> QuantizedTensor:
                 """Build a per-expert QuantizedTensor by indexing into a resident bank."""
-                params = weight._params
                 if weight._qdata.ndim == 2:
-                    rows = slice(i * self.out_features, (i + 1) * self.out_features)
-                    per_row = {f.name: getattr(params, f.name)[rows] for f in dataclasses.fields(params) if torch.is_tensor(getattr(params, f.name)) and getattr(params, f.name).ndim >= 1 and getattr(params, f.name).shape[0] == weight._qdata.shape[0]}
-                    return QuantizedTensor(weight._qdata[rows], weight._layout_cls, dataclasses.replace(params, orig_shape=(self.out_features, self.in_features), **per_row))
+                    return self._bank_rows(weight, i, i + 1)
+                params = weight._params
                 kwargs = {
                     "scale": params.scale[i] if params.scale.dim() else params.scale,
                     "orig_dtype": params.orig_dtype,
