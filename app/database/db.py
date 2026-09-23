@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 import sqlite3
+import time
 from contextlib import closing
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
@@ -135,11 +136,22 @@ def prepare_file_db_path(db_path):
     copy_legacy_default_db(db_path)
 
 
+_BACKUP_TIMEOUT_SECONDS = 5.0
+
+
 def _backup_database(source_path, destination_path):
     # A plain file copy misses committed pages still in the WAL file.
+    # sqlite3's backup() retries a locked database forever, so bound it: another
+    # client holding the destination must not hang startup.
+    deadline = time.monotonic() + _BACKUP_TIMEOUT_SECONDS
+
+    def give_up_when_locked_too_long(status, remaining, total):
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"'{destination_path}' stayed locked; database backup abandoned")
+
     with closing(sqlite3.connect(source_path)) as source:
         with closing(sqlite3.connect(destination_path)) as destination:
-            source.backup(destination)
+            source.backup(destination, progress=give_up_when_locked_too_long)
     shutil.copymode(source_path, destination_path)
 
 

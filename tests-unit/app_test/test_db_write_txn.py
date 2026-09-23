@@ -47,3 +47,21 @@ def test_read_session_does_not_take_the_write_lock(file_db):
     with db_module.create_session() as session:
         session.execute(text("SELECT 1")).scalar_one()
         assert _other_writer_can_begin(file_db) is True
+
+
+def test_backup_gives_up_when_the_destination_stays_locked(tmp_path, monkeypatch):
+    source = tmp_path / "source.db"
+    destination = tmp_path / "destination.db"
+    with sqlite3.connect(source) as conn:
+        conn.execute("CREATE TABLE t (x)")
+    with sqlite3.connect(destination) as conn:
+        conn.execute("CREATE TABLE u (y)")
+    holder = sqlite3.connect(destination, isolation_level=None, timeout=0)
+    holder.execute("BEGIN IMMEDIATE")
+    monkeypatch.setattr(db_module, "_BACKUP_TIMEOUT_SECONDS", 0.0)
+    try:
+        with pytest.raises(TimeoutError):
+            db_module._backup_database(str(source), str(destination))
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
