@@ -2,7 +2,8 @@ import torch
 
 from comfy.cli_args import args
 
-args.cpu = True
+if not torch.cuda.is_available():
+    args.cpu = True
 
 import comfy.quant_ops
 from comfy.ldm.minimax.vae import Attention
