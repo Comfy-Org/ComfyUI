@@ -1558,12 +1558,33 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     return self._expert_qt_from(self.weight, i)
                 return self.weight[i]
 
+            def _cast_bank(self, input):
+                # A quantized bank stays quantized: the layouts dequantize one [out, in] matrix at a time, per expert.
+                if isinstance(self.weight, QuantizedTensor):
+                    return CastBiasWeightContext(self, input=None, dtype=self.weight.dtype, device=input.device, bias_dtype=input.dtype, offloadable=True)
+                return CastBiasWeightContext(self, input, offloadable=True)
+
+            def _dequantize_bank(self, weight, dtype):
+                if self.quant_format != "int8_tensorwise":
+                    return weight.dequantize().to(dtype)
+                # the int8 kernels take one [out, in] matrix: dequantize the bank as [E * out, in]
+                params = weight._params
+                kwargs = {"scale": params.scale.reshape(-1, 1) if params.scale.dim() > 1 else params.scale, "orig_dtype": dtype, "orig_shape": (self.num_experts * self.out_features, self.in_features)}
+                if hasattr(params, "convrot"):
+                    kwargs["convrot"] = params.convrot
+                    kwargs["convrot_groupsize"] = params.convrot_groupsize
+                flat = QuantizedTensor(weight._qdata.reshape(-1, weight._qdata.shape[-1]), weight._layout_cls, type(params)(**kwargs))
+                return flat.dequantize().view(self.num_experts, self.out_features, self.in_features)
+
             @contextlib.contextmanager
             def bank_resident(self, input):
                 """Cast the whole bank once; expert_linear inside reuses the cast.
                 Not re-entrant — do not nest calls on the same instance.
                 """
-                with CastBiasWeightContext(self, input, offloadable=True) as self._resident_bank:
+                with self._cast_bank(input) as (weight, bias):
+                    if self._full_precision_mm and isinstance(weight, QuantizedTensor):
+                        weight = self._dequantize_bank(weight, input.dtype)
+                    self._resident_bank = (weight, bias)
                     try:
                         yield self
                     finally:
@@ -1575,7 +1596,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 if resident is not None:
                     weight, bias = resident
                     return self._expert_linear_impl(input, weight, bias, i)
-                with CastBiasWeightContext(self, input, offloadable=True) as (weight, bias):
+                with self._cast_bank(input) as (weight, bias):
                     return self._expert_linear_impl(input, weight, bias, i)
 
             def _expert_linear_impl(self, input, weight, bias, i):
@@ -1594,8 +1615,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     if use_fast:
                         qin = QuantizedTensor.from_float(input, self.layout_type)
                         return torch.nn.functional.linear(qin, qw, b)
-                    out = input @ qw.dequantize().t()
-                    return out + b if b is not None else out
+                    qw = cast_to_input(qw.dequantize(), input, copy=False)
                 return torch.nn.functional.linear(input, qw, b)
 
             def _expert_qt_from(self, weight: QuantizedTensor, i: int) -> QuantizedTensor:
