@@ -5,6 +5,7 @@ import torch
 import comfy
 import comfy.model_management
 import comfy.model_patcher
+import comfy.storage
 import comfy.samplers
 import comfy.utils
 import folder_paths
@@ -101,6 +102,7 @@ class OpticalFlowLoader(io.ComfyNode):
             model,
             load_device=comfy.model_management.get_torch_device(),
             offload_device=comfy.model_management.unet_offload_device(),
+            fast_disk=comfy.storage.state_dict_fast_disk(sd),
         )
         return io.NodeOutput(patcher)
 

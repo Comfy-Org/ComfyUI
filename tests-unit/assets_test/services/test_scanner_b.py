@@ -15,7 +15,8 @@ from app.assets.scanner import (
     mark_contents_missing_outside_prefixes,
     mark_missing_outside_prefixes_safely,
     seed_asset_specs,
-    sync_prefixes_with_filesystem,
+    apply_reference_observations,
+    observe_references_on_filesystem,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
 
@@ -192,7 +193,9 @@ def test_unhashed_missing_content_gets_tagged(session, temp_dir: Path):
     session.add(record)
     session.commit()
 
-    sync_prefixes_with_filesystem(session, prefixes=[str(temp_dir)])
+    apply_reference_observations(
+        session, observe_references_on_filesystem(session, [str(temp_dir)])[0]
+    )
     session.commit()
 
     session.expire_all()

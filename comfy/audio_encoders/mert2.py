@@ -163,8 +163,9 @@ class MERT2(nn.Module):
 
     def position_embeddings(self, x):
         inverse = 1.0 / (10000 ** (torch.arange(0, self.head_dim, 2, device=x.device, dtype=torch.float32) / self.head_dim))
-        angles = torch.arange(x.shape[1], device=x.device, dtype=torch.float32)[:, None] * inverse
-        cos, sin = angles.cos().to(x.dtype), angles.sin().to(x.dtype)
+        # Match the released encoder's autocast outer product before sin/cos.
+        angles = torch.arange(x.shape[1], device=x.device, dtype=torch.float32).to(x.dtype)[:, None] * inverse.to(x.dtype)
+        cos, sin = angles.cos(), angles.sin()
         return torch.stack((cos, -sin, sin, cos), dim=-1).reshape(1, 1, x.shape[1], -1, 2, 2).float()
 
     def forward(self, mel, layer_weight, output_hidden_states=False):

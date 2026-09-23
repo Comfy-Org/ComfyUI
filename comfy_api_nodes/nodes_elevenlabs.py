@@ -404,6 +404,7 @@ class ElevenLabsTextToSpeech(IO.ComfyNode):
             ),
             data=request,
             as_binary=True,
+            asset_urls=True,
         )
         return IO.NodeOutput(audio_bytes_to_audio_input(response))
 
@@ -449,6 +450,7 @@ class ElevenLabsAudioIsolation(IO.ComfyNode):
             files={"audio": ("audio.mp4", audio_bytes_io, "audio/mp4")},
             content_type="multipart/form-data",
             as_binary=True,
+            asset_urls=True,
         )
         return IO.NodeOutput(audio_bytes_to_audio_input(response))
 
@@ -545,6 +547,7 @@ class ElevenLabsTextToSoundEffects(IO.ComfyNode):
                 loop=model.get("loop", None),
             ),
             as_binary=True,
+            asset_urls=True,
         )
         return IO.NodeOutput(audio_bytes_to_audio_input(response))
 
@@ -762,6 +765,7 @@ class ElevenLabsSpeechToSpeech(IO.ComfyNode):
             files={"audio": ("audio.mp4", audio_bytes_io.getvalue(), "audio/mp4")},
             content_type="multipart/form-data",
             as_binary=True,
+            asset_urls=True,
         )
         return IO.NodeOutput(audio_bytes_to_audio_input(response))
 
@@ -901,6 +905,7 @@ class ElevenLabsTextToDialogue(IO.ComfyNode):
             ),
             data=request,
             as_binary=True,
+            asset_urls=True,
         )
         return IO.NodeOutput(audio_bytes_to_audio_input(response))
 

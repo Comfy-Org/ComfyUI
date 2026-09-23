@@ -154,6 +154,7 @@ def _run_faulting_fast_phase(
         )
 
     monkeypatch.setattr(scanner_module, "create_session", database_session)
+    monkeypatch.setattr(scanner_module, "create_write_session", database_session)
     monkeypatch.setattr(scanner_module, "create_record", create_record_or_raise)
     monkeypatch.setattr(scanner_module.mode, "hashing_enabled", lambda: False)
     _configure_fast_phase(monkeypatch, paths, specs)

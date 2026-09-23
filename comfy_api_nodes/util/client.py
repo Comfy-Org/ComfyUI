@@ -30,12 +30,14 @@ from . import request_logger
 from ._helpers import (
     _retry_after_wait,
     default_base_url,
+    diagnose_connectivity,
     get_comfy_api_headers,
     get_node_id,
     is_processing_interrupted,
     sleep_with_interrupt,
 )
 from .common_exceptions import ApiServerError, LocalNetworkError, ProcessingInterrupted
+from .download_helpers import download_url_to_bytesio
 
 M = TypeVar("M", bound=BaseModel)
 
@@ -75,6 +77,8 @@ class _RequestConfig:
     price_extractor: Callable[[dict[str, Any]], float | None] | None = None
     is_rate_limited: Callable[[int, Any], bool] | None = None
     response_header_validator: Callable[[dict[str, str]], None] | None = None
+    idempotency_key: str | None = None
+    asset_urls: bool = False
 
 
 @dataclass
@@ -92,6 +96,16 @@ class _PollUIState:
 
 _RETRY_STATUS = {408, 500, 502, 503, 504}  # status 429 is handled separately
 _MAX_RETRY_AFTER_WAIT = 150.0  # Cap a server Retry-After at this many seconds so a large hint can't block execution
+
+IDEMPOTENCY_KEY_HEADER = "Idempotency-Key"
+ASSET_FORMAT_HEADER = "Comfy-Asset-Format"
+ASSET_FORMAT_URL = "url"
+_IDEMPOTENT_REPLAYED_HEADER = "Idempotent-Replayed"
+_ERROR_TYPE_HEADER = "X-Comfy-Error-Type"
+_IDEMPOTENCY_IN_FLIGHT = "idempotency_in_flight"
+_IDEMPOTENCY_TERMINAL = frozenset({"idempotency_consumed", "idempotency_mismatch"})
+_IDEMPOTENCY_IN_FLIGHT_WAIT = 2.0
+_IDEMPOTENCY_IN_FLIGHT_MAX_WAIT = 30.0
 
 PRICE_CREDITS_HEADER = "X-Comfy-Credits-Used"
 """Proxy response header with the actual cost in Comfy credits. When present on any successful proxied response,
@@ -183,6 +197,7 @@ async def sync_op(
     monitor_progress: bool = True,
     max_retries_on_rate_limit: int = 16,
     is_rate_limited: Callable[[int, Any], bool] | None = None,
+    asset_urls: bool = False,
 ) -> M:
     raw = await sync_op_raw(
         cls,
@@ -203,6 +218,7 @@ async def sync_op(
         monitor_progress=monitor_progress,
         max_retries_on_rate_limit=max_retries_on_rate_limit,
         is_rate_limited=is_rate_limited,
+        asset_urls=asset_urls,
     )
     if not isinstance(raw, dict):
         raise Exception("Expected JSON response to validate into a Pydantic model, got non-JSON (binary or text).")
@@ -279,12 +295,16 @@ async def sync_op_raw(
     max_retries_on_rate_limit: int = 16,
     is_rate_limited: Callable[[int, Any], bool] | None = None,
     response_header_validator: Callable[[dict[str, str]], None] | None = None,
+    idempotent: bool = True,
+    asset_urls: bool = False,
 ) -> dict[str, Any] | bytes:
     """
     Make a single network request.
       - If as_binary=False (default): returns JSON dict (or {'_raw': '<text>'} if non-JSON).
       - If as_binary=True: returns bytes.
       - response_header_validator: optional callback receiving response headers dict
+      - asset_urls=True: asks the proxy for Comfy-hosted URLs in place of inline media; a JSON {"url": ...}
+        answer to an as_binary request is downloaded and returned as the bytes.
     """
     if isinstance(data, BaseModel):
         data = data.model_dump(exclude_none=True)
@@ -310,6 +330,8 @@ async def sync_op_raw(
         max_retries_on_rate_limit=max_retries_on_rate_limit,
         is_rate_limited=is_rate_limited,
         response_header_validator=response_header_validator,
+        idempotency_key=uuid.uuid4().hex if idempotent and endpoint.method != "GET" else None,
+        asset_urls=asset_urls,
     )
     return await _request_base(cfg, expect_binary=as_binary)
 
@@ -418,6 +440,7 @@ async def poll_op_raw(
                     as_binary=False,
                     final_label_on_success=None,
                     monitor_progress=False,
+                    idempotent=False,
                 )
                 if not isinstance(resp_json, dict):
                     raise Exception("Polling endpoint returned non-JSON response.")
@@ -433,6 +456,7 @@ async def poll_op_raw(
                             as_binary=False,
                             final_label_on_success=None,
                             monitor_progress=False,
+                            idempotent=False,
                         )
                 raise
 
@@ -522,6 +546,7 @@ async def poll_op_raw(
                             as_binary=False,
                             final_label_on_success=None,
                             monitor_progress=False,
+                            idempotent=False,
                         )
                 raise
             if not is_queued:
@@ -609,46 +634,50 @@ def _estimate_progress_pct(elapsed_seconds: float, p50_seconds: int | None, p90_
     return 90 + int(5.0 * (elapsed_seconds - p50_seconds) / (horizon - p50_seconds))
 
 
-async def _diagnose_connectivity() -> dict[str, bool]:
-    """Best-effort connectivity diagnostics to distinguish local vs. server issues."""
-    results = {
-        "internet_accessible": False,
-        "api_accessible": False,
-    }
-    timeout = aiohttp.ClientTimeout(total=5.0)
+def _normalize_files(files: dict[str, Any] | list[tuple[str, Any]]) -> list[tuple[str, str, Any, str]]:
+    """Flatten `files` into (field_name, filename, value, content_type) once per request.
 
-    # Probe Google and Baidu in parallel: Google is blocked by the GFW in mainland China, so a Baidu probe is required
-    # to correctly detect that Chinese users with working internet do have working internet.
-    internet_probe_urls = ("https://www.google.com", "https://www.baidu.com")
+    File-like values are read into bytes here because aiohttp closes IOBase payloads
+    after sending, which would break re-sending the same body on retry.
+    """
+    out = []
+    file_iter = files if isinstance(files, list) else files.items()
+    for field_name, file_obj in file_iter:
+        if file_obj is None:
+            continue
+        if isinstance(file_obj, tuple):
+            filename, file_value, content_type = _unpack_tuple(file_obj)
+        else:
+            filename = getattr(file_obj, "name", field_name)
+            file_value = file_obj
+            content_type = "application/octet-stream"
+        if hasattr(file_value, "read"):
+            with contextlib.suppress(Exception):
+                file_value.seek(0)
+            data = file_value.read()
+            if not isinstance(file_value, BytesIO):
+                with contextlib.suppress(Exception):
+                    file_value.close()
+            file_value = data
+        out.append((field_name, filename, file_value, content_type))
+    return out
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async def _probe(url: str) -> bool:
-            try:
-                async with session.get(url) as resp:
-                    return resp.status < 500
-            except (ClientError, OSError, asyncio.TimeoutError):
-                return False
 
-        probe_tasks = [asyncio.create_task(_probe(u)) for u in internet_probe_urls]
-        try:
-            for fut in asyncio.as_completed(probe_tasks):
-                if await fut:
-                    results["internet_accessible"] = True
-                    break
-        finally:
-            for t in probe_tasks:
-                if not t.done():
-                    t.cancel()
-            await asyncio.gather(*probe_tasks, return_exceptions=True)
-        if not results["internet_accessible"]:
-            return results
-
-        parsed = urlparse(default_base_url())
-        health_url = f"{parsed.scheme}://{parsed.netloc}/health"
-        with contextlib.suppress(ClientError, OSError):
-            async with session.get(health_url) as resp:
-                results["api_accessible"] = resp.status < 500
-    return results
+def _build_multipart_form(cfg: _RequestConfig, files: list[tuple[str, str, Any, str]]) -> aiohttp.FormData:
+    if cfg.multipart_parser and cfg.data:
+        form = cfg.multipart_parser(cfg.data)
+        if not isinstance(form, aiohttp.FormData):
+            raise ValueError("multipart_parser must return aiohttp.FormData")
+    else:
+        form = aiohttp.FormData(default_to_multipart=True)
+        if cfg.data:
+            for k, v in cfg.data.items():
+                if v is None:
+                    continue
+                form.add_field(k, str(v) if not isinstance(v, (bytes, bytearray)) else v)
+    for field_name, filename, file_value, content_type in files:
+        form.add_field(field_name, file_value, filename=filename, content_type=content_type)
+    return form
 
 
 def _unpack_tuple(t: tuple) -> tuple[str, Any, str]:
@@ -675,7 +704,18 @@ _TERMINAL_SERVICE_REFUSALS = frozenset({"comfy_cloud_provider_disabled"})
 
 
 def _is_terminal_service_refusal(body: Any) -> bool:
-    return isinstance(body, dict) and body.get("error") in _TERMINAL_SERVICE_REFUSALS
+    if not isinstance(body, dict):
+        return False
+    err = body.get("error")
+    return isinstance(err, str) and err in _TERMINAL_SERVICE_REFUSALS
+
+
+def _response_detail(body: Any) -> str:
+    if isinstance(body, dict):
+        for key in ("detail", "message"):
+            if isinstance(body.get(key), str) and body[key]:
+                return body[key]
+    return ""
 
 
 def _provider_error_detail(metadata: Any) -> str | None:
@@ -707,6 +747,8 @@ def _friendly_http_message(status: int, body: Any) -> str:
         return "There is a problem with your account. Please contact support@comfy.org."
     if status == 429:
         return "Rate Limit Exceeded: The server returned 429 after all retry attempts. Please wait and try again."
+    if isinstance(body, dict) and body.get("error_type") == "service_unavailable":
+        return "The API server could not verify this request right now. Please try again in a moment."
     try:
         if isinstance(body, dict):
             err = body.get("error")
@@ -729,6 +771,9 @@ def _friendly_http_message(status: int, body: Any) -> str:
                     return f"API Error: {msg} (Type: {typ})"
                 if msg:
                     return f"API Error: {msg}"
+            detail = _response_detail(body)
+            if detail:
+                return f"API Error: {detail}"
             return f"API Error: {json.dumps(body)}"
         else:
             txt = str(body)
@@ -737,6 +782,17 @@ def _friendly_http_message(status: int, body: Any) -> str:
             return f"API Error (status {status})"
     except Exception:
         return f"HTTP {status}: Unknown error"
+
+
+def _idempotency_error_message(error_type: str, body: Any) -> str:
+    if error_type == "idempotency_consumed":
+        return (
+            "The server could not return the result of the previous attempt of this request. "
+            f"Run the node again. ({error_type})"
+        )
+    detail = _response_detail(body)
+    suffix = f"{error_type}: {detail}" if detail else error_type
+    return f"The server rejected the retry of this request as different from the original attempt. ({suffix})"
 
 
 def _generate_operation_id(method: str, path: str, attempt: int) -> str:
@@ -771,6 +827,43 @@ def _snapshot_request_body_for_logging(
     return data or {}
 
 
+async def _read_binary_body(resp: aiohttp.ClientResponse, cfg: _RequestConfig, start_time: float) -> bytes:
+    buff = bytearray()
+    last_tick = time.monotonic()
+    async for chunk in resp.content.iter_chunked(64 * 1024):
+        buff.extend(chunk)
+        now = time.monotonic()
+        if now - last_tick >= 1.0:
+            last_tick = now
+            if is_processing_interrupted():
+                raise ProcessingInterrupted("Task cancelled")
+            if cfg.monitor_progress:
+                _display_time_progress(cfg.node_cls, cfg.wait_label, int(now - start_time))
+    return bytes(buff)
+
+
+def _asset_url_from_envelope(resp: aiohttp.ClientResponse, body: bytes) -> str | None:
+    if resp.content_type != "application/json":
+        return None
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    asset_url = payload.get("url") if isinstance(payload, dict) else None
+    return asset_url if isinstance(asset_url, str) and asset_url else None
+
+
+async def _download_asset(asset_url: str, cfg: _RequestConfig) -> bytes:
+    buf = BytesIO()
+    try:
+        await download_url_to_bytesio(asset_url, buf, timeout=None, cls=cfg.node_cls)
+    except (ProcessingInterrupted, LocalNetworkError, ApiServerError):
+        raise
+    except Exception as e:
+        raise Exception(f"The request completed, but its result could not be downloaded: {e}") from e
+    return buf.getvalue()
+
+
 async def _request_base(cfg: _RequestConfig, expect_binary: bool):
     """Core request with retries, per-second interruption monitoring, true cancellation, and friendly errors."""
     url = cfg.endpoint.path
@@ -781,6 +874,8 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
 
     method = cfg.endpoint.method
     params = _merge_params(cfg.endpoint.query_params, method, cfg.data if method == "GET" else None)
+    keyed = is_comfy_api_request and bool(cfg.idempotency_key)
+    multipart_files = _normalize_files(cfg.files) if cfg.content_type == "multipart/form-data" and method != "GET" and cfg.files else []
 
     async def _monitor(stop_evt: asyncio.Event, start_ts: float):
         """Every second: update elapsed time and signal interruption."""
@@ -795,15 +890,19 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
             return  # normal shutdown
 
     start_time = cfg.progress_origin_ts if cfg.progress_origin_ts is not None else time.monotonic()
+    first_attempt_ts = time.monotonic()
     attempt = 0
+    retries_used = 0
     delay = cfg.retry_delay
     rate_limit_attempts = 0
     rate_limit_delay = cfg.retry_delay
+    in_flight_waits = 0
     operation_succeeded: bool = False
     final_elapsed_seconds: int | None = None
     extracted_price: float | None = None
     while True:
         attempt += 1
+        attempt_ts = time.monotonic()
         stop_event = asyncio.Event()
         monitor_task: asyncio.Task | None = None
         sess: aiohttp.ClientSession | None = None
@@ -816,11 +915,19 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
             payload_headers.update(get_comfy_api_headers(cfg.node_cls))
         if cfg.endpoint.headers:
             payload_headers.update(cfg.endpoint.headers)
+        if keyed:
+            payload_headers[IDEMPOTENCY_KEY_HEADER] = cfg.idempotency_key
+        if cfg.asset_urls and is_comfy_api_request:
+            payload_headers[ASSET_FORMAT_HEADER] = ASSET_FORMAT_URL
 
         payload_kw: dict[str, Any] = {"headers": payload_headers}
         if method == "GET":
             payload_headers.pop("Content-Type", None)
-        request_body_log = _snapshot_request_body_for_logging(cfg.content_type, method, cfg.data, cfg.files)
+        request_body_log = (
+            _snapshot_request_body_for_logging(cfg.content_type, method, cfg.data, cfg.files)
+            if in_flight_waits == 0
+            else None
+        )
         try:
             if cfg.monitor_progress:
                 monitor_task = asyncio.create_task(_monitor(stop_event, start_time))
@@ -829,36 +936,8 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
             sess = aiohttp.ClientSession(timeout=timeout)
 
             if cfg.content_type == "multipart/form-data" and method != "GET":
-                # aiohttp will set Content-Type boundary; remove any fixed Content-Type
                 payload_headers.pop("Content-Type", None)
-                if cfg.multipart_parser and cfg.data:
-                    form = cfg.multipart_parser(cfg.data)
-                    if not isinstance(form, aiohttp.FormData):
-                        raise ValueError("multipart_parser must return aiohttp.FormData")
-                else:
-                    form = aiohttp.FormData(default_to_multipart=True)
-                    if cfg.data:
-                        for k, v in cfg.data.items():
-                            if v is None:
-                                continue
-                            form.add_field(k, str(v) if not isinstance(v, (bytes, bytearray)) else v)
-                if cfg.files:
-                    file_iter = cfg.files if isinstance(cfg.files, list) else cfg.files.items()
-                    for field_name, file_obj in file_iter:
-                        if file_obj is None:
-                            continue
-                        if isinstance(file_obj, tuple):
-                            filename, file_value, content_type = _unpack_tuple(file_obj)
-                        else:
-                            filename = getattr(file_obj, "name", field_name)
-                            file_value = file_obj
-                            content_type = "application/octet-stream"
-                        # Attempt to rewind BytesIO for retries
-                        if isinstance(file_value, BytesIO):
-                            with contextlib.suppress(Exception):
-                                file_value.seek(0)
-                        form.add_field(field_name, file_value, filename=filename, content_type=content_type)
-                payload_kw["data"] = form
+                payload_kw["data"] = _build_multipart_form(cfg, multipart_files)
             elif cfg.content_type == "application/x-www-form-urlencoded" and method != "GET":
                 payload_headers["Content-Type"] = "application/x-www-form-urlencoded"
                 payload_kw["data"] = cfg.data or {}
@@ -893,18 +972,63 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
             # Otherwise, request finished
             resp = await req_task
             async with resp:
+                if keyed and resp.headers.get(_IDEMPOTENT_REPLAYED_HEADER):
+                    logging.info("Server replayed the response of a previous attempt for %s %s", method, url)
                 if resp.status >= 400:
                     try:
                         body = await resp.json()
                     except (ContentTypeError, json.JSONDecodeError):
                         body = await resp.text()
+                    error_type = resp.headers.get(_ERROR_TYPE_HEADER) or (body.get("error_type") if isinstance(body, dict) else "")
+                    error_type = error_type.strip().lower() if isinstance(error_type, str) else ""
+                    if keyed and resp.status == 409 and error_type in _IDEMPOTENCY_TERMINAL:
+                        msg = _idempotency_error_message(error_type, body)
+                        request_logger.log_request_response(
+                            operation_id=operation_id,
+                            request_method=method,
+                            request_url=url,
+                            response_status_code=resp.status,
+                            response_headers=dict(resp.headers),
+                            response_content=body,
+                            error_message=msg,
+                        )
+                        raise Exception(msg)
                     should_retry = False
+                    in_flight = False
                     wait_time = 0.0
+                    remaining = 0.0
                     retry_label = ""
                     is_rl = resp.status == 429 or (
                         cfg.is_rate_limited is not None and cfg.is_rate_limited(resp.status, body)
                     )
-                    if is_rl and rate_limit_attempts < cfg.max_retries_on_rate_limit:
+                    if keyed and resp.status == 409 and error_type == _IDEMPOTENCY_IN_FLIGHT:
+                        remaining = cfg.timeout - (time.monotonic() - first_attempt_ts)
+                        if remaining <= 0:
+                            msg = (
+                                "The server is still processing the previous attempt of this request "
+                                "and did not finish within the node's timeout."
+                            )
+                            request_logger.log_request_response(
+                                operation_id=operation_id,
+                                request_method=method,
+                                request_url=url,
+                                response_status_code=resp.status,
+                                response_headers=dict(resp.headers),
+                                response_content=body,
+                                error_message=msg,
+                            )
+                            raise Exception(msg)
+                        in_flight_waits += 1
+                        in_flight = True
+                        retries_used = 0
+                        delay = cfg.retry_delay
+                        wait_time = min(
+                            _IDEMPOTENCY_IN_FLIGHT_MAX_WAIT,
+                            _IDEMPOTENCY_IN_FLIGHT_WAIT * 1.5 ** (in_flight_waits - 1),
+                        )
+                        retry_label = f"previous attempt still in progress, check {in_flight_waits}"
+                        should_retry = True
+                    elif is_rl and rate_limit_attempts < cfg.max_retries_on_rate_limit:
                         rate_limit_attempts += 1
                         wait_time = min(rate_limit_delay, 30.0)
                         rate_limit_delay *= cfg.retry_backoff
@@ -913,16 +1037,23 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                     elif (
                         resp.status in _RETRY_STATUS
                         and not _is_terminal_service_refusal(body)
-                        and (attempt - rate_limit_attempts) <= cfg.max_retries
+                        and retries_used < cfg.max_retries
                     ):
+                        retries_used += 1
                         wait_time = delay
                         delay *= cfg.retry_backoff
-                        retry_label = f"retry {attempt - rate_limit_attempts} of {cfg.max_retries}"
+                        retry_label = f"retry {retries_used} of {cfg.max_retries}"
                         should_retry = True
 
                     if should_retry:
-                        wait_time = _retry_after_wait(resp.headers.get("Retry-After"), wait_time, _MAX_RETRY_AFTER_WAIT)
-                        logging.warning(
+                        retry_after = _retry_after_wait(resp.headers.get("Retry-After"), wait_time, _MAX_RETRY_AFTER_WAIT)
+                        if in_flight:
+                            wait_time = min(max(wait_time, retry_after), remaining)
+                        else:
+                            wait_time = retry_after
+                            if keyed and resp.headers.get(_IDEMPOTENT_REPLAYED_HEADER):
+                                cfg.idempotency_key = uuid.uuid4().hex
+                        (logging.info if in_flight else logging.warning)(
                             "HTTP %s %s -> %s. Waiting %.2fs (%s).",
                             method,
                             url,
@@ -960,19 +1091,9 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                     raise Exception(msg)
 
                 if expect_binary:
-                    buff = bytearray()
-                    last_tick = time.monotonic()
-                    async for chunk in resp.content.iter_chunked(64 * 1024):
-                        buff.extend(chunk)
-                        now = time.monotonic()
-                        if now - last_tick >= 1.0:
-                            last_tick = now
-                            if is_processing_interrupted():
-                                raise ProcessingInterrupted("Task cancelled")
-                            if cfg.monitor_progress:
-                                _display_time_progress(cfg.node_cls, cfg.wait_label, int(now - start_time))
-                    bytes_payload = bytes(buff)
+                    bytes_payload = await _read_binary_body(resp, cfg, start_time)
                     resp_headers = {k.lower(): v for k, v in resp.headers.items()}
+                    asset_url = _asset_url_from_envelope(resp, bytes_payload) if cfg.asset_urls else None
                     if is_comfy_api_request:
                         _maybe_remember_credits_used(cfg.node_cls, resp.headers.get(PRICE_CREDITS_HEADER))
                         _maybe_remember_server_estimate(cfg.node_cls, resp.headers)
@@ -981,8 +1102,6 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                             extracted_price = cfg.price_extractor(resp_headers)
                     if cfg.response_header_validator:
                         cfg.response_header_validator(resp_headers)
-                    operation_succeeded = True
-                    final_elapsed_seconds = int(time.monotonic() - start_time)
                     request_logger.log_request_response(
                         operation_id=operation_id,
                         request_method=method,
@@ -991,6 +1110,10 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                         response_headers=resp_headers,
                         response_content=bytes_payload,
                     )
+                    if asset_url:
+                        bytes_payload = await _download_asset(asset_url, cfg)
+                    operation_succeeded = True
+                    final_elapsed_seconds = int(time.monotonic() - start_time)
                     return bytes_payload
                 else:
                     try:
@@ -1023,15 +1146,18 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
         except ProcessingInterrupted:
             logging.debug("Polling was interrupted by user")
             raise
-        except (ClientError, OSError) as e:
-            if (attempt - rate_limit_attempts) <= cfg.max_retries:
+        except (ClientError, OSError, asyncio.TimeoutError) as e:
+            if retries_used < cfg.max_retries:
+                retries_used += 1
                 logging.warning(
-                    "Connection error calling %s %s. Retrying in %.2fs (%d/%d): %s",
+                    "Connection error calling %s %s after %.1fs. Retrying in %.2fs (%d/%d): %s: %s",
                     method,
                     url,
+                    time.monotonic() - attempt_ts,
                     delay,
-                    attempt - rate_limit_attempts,
+                    retries_used,
                     cfg.max_retries,
+                    type(e).__name__,
                     str(e),
                 )
                 request_logger.log_request_response(
@@ -1052,7 +1178,7 @@ async def _request_base(cfg: _RequestConfig, expect_binary: bool):
                 )
                 delay *= cfg.retry_backoff
                 continue
-            diag = await _diagnose_connectivity()
+            diag = await diagnose_connectivity()
             if not diag["internet_accessible"]:
                 request_logger.log_request_response(
                     operation_id=operation_id,

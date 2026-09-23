@@ -341,7 +341,7 @@ class ModelPatcher:
     def __init__(self, model, load_device, offload_device, size=0, weight_inplace_update=False, fast_disk=False):
         self.size = size
         self.model = model
-        self.fast_disk = bool(comfy.model_management.args.fast_disk or fast_disk)
+        self.fast_disk = fast_disk
         if not hasattr(self.model, 'device'):
             logging.debug("Model doesn't have a device attribute.")
             self.model.device = offload_device
@@ -874,6 +874,8 @@ class ModelPatcher:
             bk = self.backup.get(k, None)
             hbk = self.hook_backup.get(k, None)
             weight, set_func, convert_func = get_key_weight(self.model, k)
+            if not isinstance(weight, torch.Tensor):
+                continue
             if bk is not None:
                 weight = bk.weight
             if hbk is not None:
