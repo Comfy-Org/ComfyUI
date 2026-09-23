@@ -10,7 +10,8 @@ from app.assets.helpers import to_stored_hash
 from app.assets.scanner import (
     clear_pending_verifications,
     drain_pending_verifications,
-    sync_prefixes_with_filesystem,
+    apply_reference_observations,
+    observe_references_on_filesystem,
 )
 from app.assets.scanner_changes import queue_pending_verification
 from app.assets.services.snapshot_hash import snapshot_hash
@@ -44,6 +45,11 @@ def _bump_mtime(path: Path) -> None:
     os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
 
 
+def _sync_references(session, root: Path) -> None:
+    observations, _ = observe_references_on_filesystem(session, [str(root)])
+    apply_reference_observations(session, observations)
+
+
 def _stored_hash(path: Path) -> str:
     snapshot = snapshot_hash(str(path))
     assert snapshot is not None
@@ -63,7 +69,7 @@ def test_off_mode_same_size_touch_does_not_split(session, temp_dir: Path):
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
         patch("app.assets.scanner.mode.hashing_enabled", return_value=False),
     ):
-        sync_prefixes_with_filesystem(session, [str(input_root)])
+        _sync_references(session, input_root)
     session.commit()
 
     contents = list(session.scalars(select(AssetContent)))
@@ -86,7 +92,7 @@ def test_off_mode_size_change_splits(session, temp_dir: Path):
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
         patch("app.assets.scanner.mode.hashing_enabled", return_value=False),
     ):
-        sync_prefixes_with_filesystem(session, [str(input_root)])
+        _sync_references(session, input_root)
     session.commit()
 
     contents = list(session.scalars(select(AssetContent).order_by(AssetContent.created_at)))
@@ -107,7 +113,7 @@ def test_hash_mode_touch_refreshes_mtime(session, temp_dir: Path):
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
         patch("app.assets.scanner.mode.hashing_enabled", return_value=True),
     ):
-        sync_prefixes_with_filesystem(session, [str(input_root)])
+        _sync_references(session, input_root)
         processed = drain_pending_verifications(session)
     session.commit()
 
@@ -133,7 +139,7 @@ def test_hash_mode_real_edit_splits(session, temp_dir: Path):
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
         patch("app.assets.scanner.mode.hashing_enabled", return_value=True),
     ):
-        sync_prefixes_with_filesystem(session, [str(input_root)])
+        _sync_references(session, input_root)
         drain_pending_verifications(session)
     session.commit()
 
@@ -158,7 +164,7 @@ def test_old_record_id_resolves_to_missing_content_after_split(session, temp_dir
         patch("folder_paths.get_input_directory", return_value=str(input_root)),
         patch("app.assets.scanner.mode.hashing_enabled", return_value=True),
     ):
-        sync_prefixes_with_filesystem(session, [str(input_root)])
+        _sync_references(session, input_root)
         drain_pending_verifications(session)
     session.commit()
 
@@ -195,3 +201,35 @@ def test_hash_mode_split_uses_stat_from_the_verified_snapshot(session, temp_dir:
     assert live_content is not None
     assert live_content.size_bytes == len(new_payload)
     assert live_content.mtime_ns == path.stat().st_mtime_ns
+
+
+def test_observation_is_skipped_when_the_row_changed_before_it_was_applied(
+    session, temp_dir: Path
+):
+    input_root = temp_dir / "input"
+    input_root.mkdir()
+    path = input_root / "raced.bin"
+    path.write_bytes(b"v1")
+    content, _ = _seed_content(session, path, hash_value=None)
+    path.write_bytes(b"v2 is longer")
+    _bump_mtime(path)
+
+    with (
+        patch("folder_paths.get_input_directory", return_value=str(input_root)),
+        patch("app.assets.scanner.mode.hashing_enabled", return_value=False),
+    ):
+        observations, _ = observe_references_on_filesystem(session, [str(input_root)])
+        assert len(observations) == 1
+        # The file changes again and another writer records that before the observation lands.
+        path.write_bytes(b"v3 is longer still")
+        _bump_mtime(path)
+        content.size_bytes = path.stat().st_size
+        content.mtime_ns = path.stat().st_mtime_ns
+        session.commit()
+        apply_reference_observations(session, observations)
+    session.commit()
+
+    contents = list(session.scalars(select(AssetContent)))
+    assert len(contents) == 1
+    assert contents[0].is_missing is False
+    assert contents[0].size_bytes == len(b"v3 is longer still")

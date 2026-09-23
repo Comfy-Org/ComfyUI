@@ -47,7 +47,7 @@ from app.assets.services.schemas import (
     UserMetadata,
 )
 from app.assets.services.snapshot_hash import snapshot_hash
-from app.database.db import create_session
+from app.database.db import create_session, create_write_session
 
 
 def _normalize_hash_input(hash_str: str) -> str:
@@ -719,7 +719,7 @@ def register_executed_output(
         system_metadata = _extract_system_metadata_sync(
             locator, mime_type, stat_result
         )
-        with create_session() as session:
+        with create_write_session() as session:
             created_content_id: str | None = None
             try:
                 existing = session.scalars(
@@ -745,16 +745,17 @@ def register_executed_output(
                     tags=path_tags,
                     system_metadata=system_metadata,
                 )
+                # Read before commit: expiry would reload them in a second write transaction.
+                record_id = record.id
+                record_content_id = record.content_id
+                record_job_id = record.job_id
+                record_name = record.name
                 session.commit()
             except Exception:
                 session.rollback()
                 if created_content_id is not None:
                     _discard_unreferenced_content(session, created_content_id)
                 raise
-            record_id = record.id
-            record_content_id = record.content_id
-            record_job_id = record.job_id
-            record_name = record.name
     except Exception:
         logging.exception("Failed to register executed output: %s", locator)
         return None

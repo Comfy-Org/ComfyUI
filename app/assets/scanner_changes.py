@@ -44,8 +44,13 @@ def pending_recovery_count() -> int:
 
 
 def recover_missing_content(
-    session: Session, path: str, stat_result: os.stat_result, hashing_is_enabled: bool
+    session: Session,
+    path: str,
+    snapshot: tuple[str, os.stat_result] | None,
+    hashing_is_enabled: bool,
 ) -> Literal["recovered", "no_match", "unstable"]:
+    """``snapshot`` is ``snapshot_hash(path)``, taken by the caller before its write
+    transaction opens so the file is never hashed while the write lock is held."""
     if not hashing_is_enabled:
         return "no_match"
     occupied = session.scalar(
@@ -55,7 +60,6 @@ def recover_missing_content(
     )
     if occupied is not None:
         return "no_match"
-    snapshot = snapshot_hash(path)
     if snapshot is None:
         if path not in _pending_recovery_paths:
             _pending_recovery_paths.append(path)
