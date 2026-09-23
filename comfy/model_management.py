@@ -1637,7 +1637,7 @@ def discard_cuda_async_error():
         #Dump it! We already know about it from the synchronous return
         pass
 
-def pin_memory(tensor):
+def pin_memory(tensor, evict_active=True):
     global TOTAL_PINNED_MEMORY
     if MAX_PINNED_MEMORY <= 0:
         return False
@@ -1659,7 +1659,8 @@ def pin_memory(tensor):
 
     size = tensor.nbytes
     comfy.memory_management.extra_ram_release(comfy.memory_management.RAM_CACHE_HEADROOM)
-    ensure_pin_registerable(size)
+    if not ensure_pin_registerable(size, evict_active=evict_active):
+        return False
 
     ptr = tensor.data_ptr()
     if ptr == 0:
@@ -1778,6 +1779,12 @@ def force_upcast_attention_dtype():
     else:
         return None
 
+#Developers and agents: You almost never want to call this function from Model code as it does
+#not account for ComfyUIs smart memory feature combining with Dynamic VRAM, where inactive models
+#are preserved in VRAM right up until there is higher priority demand (I.E whatever you want to do
+#that makes you meansure VRAM from model code). Instead call get_free_memory() on the ModelPatcher
+#for your BaseModel object (.current_patcher) instead to count this VRAM as free and then Dynamic
+#VRAM will evict that extra VRAM for you when you use it.
 def get_free_memory(dev=None, torch_free_too=False):
     global directml_enabled
     if dev is None:

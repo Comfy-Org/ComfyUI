@@ -13,7 +13,7 @@ import math
 
 import torch
 import torch.nn.functional as F
-import torchaudio
+import comfy.audio
 
 import nodes
 import comfy.model_management
@@ -24,6 +24,7 @@ import comfy.patcher_extension
 import comfy.utils
 import node_helpers
 from comfy.ldm.minimax.model import FRAME_PER_TOKEN, FRAME_RESCALE
+from comfy.ldm.minimax.vae import IMAGENET_MEAN
 from comfy_api.latest import ComfyExtension, io
 
 CANVAS_MULTIPLE = 32
@@ -76,7 +77,7 @@ def _encode_ref_audio(audio_vae, audio):
     sr = audio["sample_rate"]
     vae_sr = getattr(audio_vae, "audio_sample_rate", 32000)
     if sr != vae_sr:
-        waveform = torchaudio.functional.resample(waveform, sr, vae_sr)
+        waveform = comfy.audio.resample(waveform, sr, vae_sr)
     z = audio_vae.encode(waveform[:1].movedim(1, -1))  # [1, 32, 2, T]
     return z, z.shape[-1]
 
@@ -460,7 +461,12 @@ class MiniMaxH3FunControlPatch:
                     source = torch.zeros(frame_count, 3, height, width, dtype=visibility.dtype, device=visibility.device)
                 else:
                     source = self._fit_frames(self.source_video, frame_count, width, height)
-                masked_latent = self._encode(source * visibility.to(source.device), target_shape)
+                visibility = visibility.to(source.device)
+                masked = source * visibility
+                if self.model_patch.model.inpaint_post_norm:
+                    # the pixel the VAE normalizes to zero, i.e. holes at mid-gray instead of black
+                    masked += (1.0 - visibility) * torch.tensor(IMAGENET_MEAN, dtype=source.dtype, device=source.device).view(1, 3, 1, 1)
+                masked_latent = self._encode(masked, target_shape)
                 if hint is None:
                     hint = torch.zeros_like(masked_latent)
                 visibility_latent = F.interpolate(

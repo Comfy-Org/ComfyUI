@@ -1,6 +1,7 @@
 import math
 import sys
 import inspect
+import json
 
 import torch
 import torch.nn.functional as F
@@ -70,6 +71,34 @@ def get_attention_function(name: str, default: Any=...) -> Union[Callable, None]
         else:
             return default
     return REGISTERED_ATTENTION_FUNCTIONS[name]
+
+
+class ComfyAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = None
+        self.function = None
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        self.config = None
+        self.function = None
+        metadata = state_dict.pop(prefix + "config", None)
+        if metadata is not None:
+            config = json.loads(metadata.numpy().tobytes())
+            method = config.get("attention")
+            if method == "comfy_kitchen_int8":
+                self.config = config
+                if COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE and comfy_kitchen.int8_attention_is_available(model_management.get_torch_device()):
+                    self.function = attention_comfy_kitchen_int8
+            else:
+                logging.warning(f"Ignoring unsupported attention method {method!r} for {prefix.rstrip('.')}")
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        if self.config is not None:
+            destination[prefix + "config"] = torch.tensor(list(json.dumps(self.config).encode("utf-8")), dtype=torch.uint8)
+
 
 from comfy.cli_args import args
 import comfy.ops
@@ -171,6 +200,7 @@ class AttentionTensorContainer:
 def wrap_attn(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        preferred_attention = kwargs.pop("preferred_attention", None)
         containers = None
         if len(args) >= 3 and isinstance(args[0], AttentionTensorContainer):
             if not isinstance(args[1], AttentionTensorContainer) or not isinstance(args[2], AttentionTensorContainer):
@@ -191,6 +221,10 @@ def wrap_attn(func):
                                 return optimized_attention_override.container_function(*args, **kwargs)
                             args = tuple(container.take() for container in containers) + args[3:]
                         return optimized_attention_override(func, *args, **kwargs)
+                if preferred_attention is not None:
+                    attention = preferred_attention.function
+                    if attention is not None:
+                        return attention(*args, **kwargs)
 
             if containers is not None:
                 if wrapper.container_function is not None:

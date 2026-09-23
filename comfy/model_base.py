@@ -2661,6 +2661,9 @@ class QwenImage21(QwenImage):
     def __init__(self, model_config, model_type=ModelType.FLUX, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.qwen_image21.model.QwenImage21Transformer2DModel)
 
+    def get_dynamic_vram__units(self):
+        return list(self.diffusion_model.transformer_blocks), []
+
     @property
     def current_patcher(self):
         return self._current_patcher
@@ -2671,6 +2674,7 @@ class QwenImage21(QwenImage):
         self._current_patcher = patcher
         diffusion_model = getattr(self, "diffusion_model", None)
         if diffusion_model is not None:
+            diffusion_model.current_patcher = patcher
             diffusion_model.reset_prefix_cache(patcher is not None and len(patcher.hook_patches) == 0)
 
     def extra_conds(self, **kwargs):
