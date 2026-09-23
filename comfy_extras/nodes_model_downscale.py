@@ -35,7 +35,7 @@ class PatchModelAddDownscale(io.ComfyNode):
         def input_block_patch(h, transformer_options):
             if transformer_options["block"][1] == block_number:
                 sigma = transformer_options["sigmas"][0].item()
-                if sigma <= sigma_start and sigma >= sigma_end:
+                if sigma <= sigma_start and sigma > sigma_end:
                     h = comfy.utils.common_upscale(h, round(h.shape[-1] * (1.0 / downscale_factor)), round(h.shape[-2] * (1.0 / downscale_factor)), downscale_method, "disabled")
             return h
 

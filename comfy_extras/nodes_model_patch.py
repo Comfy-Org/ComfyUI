@@ -709,7 +709,7 @@ class WanUni3CCnetPatch:
             sigmas = transformer_options.get("sigmas", None)
             if sigmas is not None:
                 sigma = sigmas[0].item()
-                if sigma > self.sigma_start or sigma < self.sigma_end:
+                if sigma > self.sigma_start or sigma <= self.sigma_end:
                     active = False
             if active:
                 x = kwargs.get("x")

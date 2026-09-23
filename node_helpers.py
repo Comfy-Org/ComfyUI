@@ -24,14 +24,13 @@ def conditioning_set_values(conditioning, values={}, append=False):
 
 def conditioning_set_values_with_timestep_range(conditioning, values={}, start_percent=0.0, end_percent=1.0):
     """
-    Apply values to conditioning only during [start_percent, end_percent], keeping the
+    Apply values to conditioning only during [start_percent, end_percent), keeping the
     original conditioning active outside that range. Respects existing per-entry ranges.
     """
     if start_percent > end_percent:
         logging.warning(f"start_percent ({start_percent}) must be <= end_percent ({end_percent})")
         return conditioning
 
-    EPS = 1e-5 # the sampler gates entries with strict > / <, shift boundaries slightly to ensure only one conditioning is active per timestep
     c = []
     for t in conditioning:
         cond_start = t[1].get("start_percent", 0.0)
@@ -44,12 +43,12 @@ def conditioning_set_values_with_timestep_range(conditioning, values={}, start_p
             continue
 
         if intersect_start > cond_start: # part before the requested range
-            c.extend(conditioning_set_values([t], {"start_percent": cond_start, "end_percent": intersect_start - EPS}))
+            c.extend(conditioning_set_values([t], {"start_percent": cond_start, "end_percent": intersect_start}))
 
         c.extend(conditioning_set_values([t], {**values, "start_percent": intersect_start, "end_percent": intersect_end}))
 
         if intersect_end < cond_end: # part after the requested range
-            c.extend(conditioning_set_values([t], {"start_percent": intersect_end + EPS, "end_percent": cond_end}))
+            c.extend(conditioning_set_values([t], {"start_percent": intersect_end, "end_percent": cond_end}))
     return c
 
 def pillow(fn, arg):

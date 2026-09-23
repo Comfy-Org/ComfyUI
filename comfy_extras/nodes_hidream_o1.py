@@ -225,7 +225,7 @@ class HiDreamO1PatchSeamSmoothing(io.ComfyNode):
             x = args[0]
             sigma = float(args[3]["sigmas"][0])
             pred = executor(*args, **kwargs)
-            if not (end_sigma <= sigma <= start_sigma):
+            if not (end_sigma < sigma <= start_sigma):
                 return pred
             # Pick shift-level by sigma phase across the gated range.
             if len(shift_levels) == 1:

@@ -482,7 +482,7 @@ class MiniMaxH3FunControlPatch:
     def diffusion_model_wrapper(self, executor, x, timestep, context, transformer_options={}, **kwargs):
         sigmas = transformer_options.get("sigmas")
         sigma = float(sigmas[0]) if sigmas is not None else float(timestep.flatten()[0]) / 1000.0
-        self.active = self.sigma_end <= sigma <= self.sigma_start
+        self.active = self.sigma_end < sigma <= self.sigma_start
         self.control_stream = None
         if self.active:
             with comfy.model_prefetch.pause_malloc_graph():
