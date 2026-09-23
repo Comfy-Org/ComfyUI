@@ -632,7 +632,11 @@ class _AssetSeeder:
                 all_prefixes = get_owned_prefixes()
                 marked = mark_missing_outside_prefixes_safely(all_prefixes)
                 marked_count = 0 if marked is None else marked
-                if marked is not None:
+                if marked is None:
+                    self._add_error(
+                        "Marking missing assets failed; scan continued without pruning"
+                    )
+                else:
                     emit(
                         "seeder.marked_missing",
                         count=marked_count,

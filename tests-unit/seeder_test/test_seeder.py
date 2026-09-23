@@ -549,13 +549,14 @@ def test_standalone_mark_missing_failure_returns_none_and_emits_no_success_event
     assert events_named(caplog, "seeder.marked_missing") == []
 
 
-def test_scan_prune_failure_completes_without_type_error(
+def test_scan_prune_failure_is_reported_and_the_scan_still_runs(
     scan_seeder: _AssetSeeder,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     scan_seeder._prune_first = True
     scan_seeder._phase = ScanPhase.FAST
+    fast_phase_roots: list[tuple[str, ...]] = []
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
     monkeypatch.setattr(
         seeder_module, "mark_missing_outside_prefixes_safely", lambda _prefixes: None
@@ -563,12 +564,20 @@ def test_scan_prune_failure_completes_without_type_error(
     monkeypatch.setattr(
         seeder_module, "sync_temp_references_safely", lambda _progress: None
     )
-    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda _roots: (0, 0, 0))
+
+    def run_fast_phase(roots: tuple[str, ...]) -> tuple[int, int, int]:
+        fast_phase_roots.append(roots)
+        return 0, 0, 0
+
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", run_fast_phase)
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_scan()
 
-    assert scan_seeder._errors == []
+    assert scan_seeder._errors == [
+        "Marking missing assets failed; scan continued without pruning"
+    ]
+    assert fast_phase_roots == [("models", "input")]
     assert events_named(caplog, "seeder.marked_missing") == []
 
 
