@@ -955,6 +955,8 @@ def create_weights_overlap_linear(length: int, full_length: int, idxs: list[int]
     # based on code in Kijai's WanVideoWrapper: https://github.com/kijai/ComfyUI-WanVideoWrapper/blob/dbb2523b37e4ccdf45127e5ae33e31362f755c8e/nodes.py#L1302
     # only expected overlap is given different weights
     weights_torch = torch.ones((length))
+    if context_overlap <= 0:
+        return weights_torch
     # blend left-side on all except first window
     if min(idxs) > 0:
         ramp_up = torch.linspace(1e-37, 1, context_overlap)
