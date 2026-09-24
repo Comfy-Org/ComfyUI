@@ -95,7 +95,8 @@ jobs:
             ${{ inputs.cache_tag }}_python_deps.tar
             update_comfyui_and_python_dependencies.bat
           key: ${{ runner.os }}-build-${{ inputs.cache_tag }}-${{ inputs.python_minor }}
-      - shell: bash
+      - name: Extract cached Python dependencies
+        shell: bash
         run: |
           mv ${{ inputs.cache_tag }}_python_deps.tar ../
           mv update_comfyui_and_python_dependencies.bat ../
@@ -104,7 +105,8 @@ jobs:
           pwd
           ls
 
-      - shell: bash
+      - name: Set up embedded Python and install dependencies
+        shell: bash
         run: |
           cd ..
           cp -r ComfyUI ComfyUI_copy
@@ -130,8 +132,10 @@ jobs:
             rm ./Lib/site-packages/torch/lib/libprotobuf.lib
           fi
 
+      - name: Bundle ComfyUI portable layout
+        shell: bash
+        run: |
           cd ..
-
           git clone --depth 1 https://github.com/comfyanonymous/taesd
           cp taesd/*.safetensors ./ComfyUI_copy/models/vae_approx/
 
@@ -148,12 +152,15 @@ jobs:
 
           echo 'local-portable' > ComfyUI/.comfy_environment
 
+      - name: Create portable 7z archive
+        shell: bash
+        run: |
           cd ..
-
           "C:\Program Files\7-Zip\7z.exe" a -t7z -m0=lzma2 -mx=9 -mfb=128 -md=768m -ms=on -mf=BCJ2 ComfyUI_windows_portable.7z ComfyUI_windows_portable
           mv ComfyUI_windows_portable.7z ComfyUI/ComfyUI_windows_portable_${{ inputs.rel_name }}${{ inputs.rel_extra_name }}.7z
 
-      - shell: bash
+      - name: Quick-test portable package
+        shell: bash
         if: ${{ inputs.test_release }}
         run: |
           cd ..
