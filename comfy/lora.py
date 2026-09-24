@@ -147,6 +147,9 @@ def model_lora_keys_clip(model, key_map={}):
 
     for k in sdk:
         if k.endswith(".weight"):
+            if k.startswith("gemma2_2b.transformer.model"): #Lumina
+                l_key = k[len("gemma2_2b.transformer.model."):-len(".weight")]
+                key_map["lora_te_{}".format(l_key.replace(".", "_"))] = k
             if k.startswith("t5xxl.transformer."):#OneTrainer SD3 and Flux lora
                 l_key = k[len("t5xxl.transformer."):-len(".weight")]
                 t5_index = 1
