@@ -56,6 +56,10 @@ fi
 if [[ -n "$DATA_DIR" ]]; then
 	export HF_HOME="${HF_HOME:-$DATA_DIR/huggingface}"
 	export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$DATA_DIR/.triton}"
+	# One copy of each checkpoint on the (per-GB billed) volume: download next
+	# to the models dir and move into place, instead of HF cache + a copy
+	# (82 GB for H3 + FLUX.2 klein rather than 164 GB).
+	export COMFY_HF_DOWNLOAD_MODE="${COMFY_HF_DOWNLOAD_MODE:-direct}"
 	mkdir -p "$HF_HOME" "$TRITON_CACHE_DIR"
 fi
 
