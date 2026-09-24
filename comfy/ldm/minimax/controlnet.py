@@ -21,11 +21,13 @@ class MiniMaxH3FunControl(torch.nn.Module):
     def __init__(self, control_in_dim=49, injection_layers=(0, 10, 20, 30, 40), hidden_size=5376,
                  num_attention_heads=56, attention_head_dim=128, ffn_hidden_size=14336,
                  time_embed_dim=2688, patch_size=(1, 2, 2), norm_eps=1e-5, qk_norm_eps=1e-5,
-                 use_adaln_curves=False, dtype=None, device=None, operations=None):
+                 use_adaln_curves=False, inpaint_post_norm=False, dtype=None, device=None, operations=None):
         super().__init__()
         self.dtype = dtype
         self.patch_size = tuple(patch_size)
         self.injection_layers = tuple(injection_layers)
+        # v2 checkpoints mask the source video after VAE normalization (holes at mid-gray, not black)
+        self.inpaint_post_norm = inpaint_post_norm
         if not self.injection_layers or self.injection_layers[0] != 0:
             raise ValueError("MiniMax H3 Fun control injection layers must start at layer 0")
         if self.injection_layers != tuple(sorted(set(self.injection_layers))):

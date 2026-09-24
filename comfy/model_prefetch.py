@@ -1,9 +1,9 @@
-import contextlib
 import logging
 import threading
 import warnings
 import weakref
 
+import comfy_kitchen as ck
 import torch
 
 import comfy_aimdo.malloc_graph
@@ -14,11 +14,11 @@ import comfy.model_management
 import comfy.ops
 
 PREFETCH_QUEUES = []
-GRAPH_MODULES = weakref.WeakSet()
 GRAPH_WARMED_MODULES = weakref.WeakSet()
 GRAPH_CAPTURE_STREAMS = {}
-ACTIVE_MALLOC_GRAPHS = {}
+MALLOC_GRAPHS = {}
 MALLOC_GRAPH_BREAKS = 0
+MALLOC_GRAPH_ROGUES = 0
 MALLOC_GRAPH_USED = False
 
 def _malloc_graph_break():
@@ -29,40 +29,96 @@ def _malloc_graph_break():
 def malloc_graph_enabled(device):
     return not args.disable_comfy_compiler and comfy.memory_management.aimdo_enabled and comfy.model_management.is_device_cuda(device)
 
-@contextlib.contextmanager
-def pause_malloc_graph(sync=False):
-    graph = ACTIVE_MALLOC_GRAPHS.get(threading.get_ident())
-    if graph is not None:
-        graph.pause(sync=sync)
-    try:
-        yield
-    finally:
-        if graph is not None:
-            graph.resume(sync=sync)
+class _PauseMallocGraph:
+    def __init__(self, sync=False):
+        self.sync = sync
 
-def malloc_graph_begin(module, device):
+    def __enter__(self):
+        graph = MALLOC_GRAPHS.get(threading.get_ident())
+        if graph is not None and graph._comfy_active:
+            graph.pause(sync=self.sync)
+
+    def __exit__(self, *args):
+        graph = MALLOC_GRAPHS.get(threading.get_ident())
+        if graph is not None and graph._comfy_active:
+            graph.resume(sync=self.sync)
+
+def pause_malloc_graph(sync=False):
+    return _PauseMallocGraph(sync)
+
+class _MallocGraphScope:
+    def __init__(self, device):
+        self.device = device
+
+    def __enter__(self):
+        malloc_graph_begin(self.device)
+
+    def __exit__(self, exc_type, *args):
+        if exc_type is None:
+            malloc_graph_end()
+        else:
+            cleanup_malloc_graph()
+
+def malloc_graph_scope(device):
+    return _MallocGraphScope(device)
+
+def malloc_graph_begin(device):
     global MALLOC_GRAPH_USED
     if not malloc_graph_enabled(device):
         return
-    graph = getattr(module, "_comfy_malloc_graph", None)
+    thread_id = threading.get_ident()
+    graph = MALLOC_GRAPHS.get(thread_id)
     if graph is None:
         graph = comfy_aimdo.malloc_graph.record(
             comfy.model_management.current_stream(device), args.assert_graph_breaks
         )
-        module._comfy_malloc_graph = graph
-        comfy.model_management.MALLOC_GRAPH_MODULES.add(module)
+        graph._comfy_cuda_graph_modules = weakref.WeakSet()
+        MALLOC_GRAPHS[thread_id] = graph
     else:
         graph.push()
-    ACTIVE_MALLOC_GRAPHS[threading.get_ident()] = graph
+    if hasattr(ck, "set_allocation_context"):
+        ck.set_allocation_context(pause_malloc_graph())
+    graph._comfy_active = True
     MALLOC_GRAPH_USED = True
 
 def malloc_graph_end():
     thread_id = threading.get_ident()
-    graph = ACTIVE_MALLOC_GRAPHS.get(thread_id)
-    if graph is not None:
+    graph = MALLOC_GRAPHS.get(thread_id)
+    if graph is not None and graph._comfy_active:
         if graph.pop():
             _malloc_graph_break()
-        ACTIVE_MALLOC_GRAPHS.pop(thread_id)
+        graph._comfy_active = False
+
+def cleanup_malloc_graph():
+    global MALLOC_GRAPH_ROGUES
+
+    graph = MALLOC_GRAPHS.pop(threading.get_ident(), None)
+    if graph is not None:
+        if graph._comfy_active:
+            graph.abort()
+            graph._comfy_active = False
+        for module in graph._comfy_cuda_graph_modules:
+            _drop_graph(module)
+        MALLOC_GRAPH_ROGUES += graph.rogue_count
+        del graph
+
+def pin_modules(comfy_modules, device, dtype=None):
+    registerable_size = 0
+    for s in comfy_modules:
+        registerable_size += comfy.memory_management.vram_aligned_size([s.weight, s.bias])
+        for param_key in ("weight", "bias"):
+            lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
+            if lowvram_fn is not None:
+                registerable_size += lowvram_fn.memory_required()
+
+    offload_stream, fully_faulted = comfy.ops.cast_modules_with_vbar(comfy_modules, None, device, None, True, return_faulted=True)
+    if not (comfy_modules and comfy_modules[0]._pin_state["fast_disk"]):
+        comfy.model_management.ensure_pin_registerable(registerable_size)
+    comfy.model_management.sync_stream(device, offload_stream)
+    if fully_faulted and dtype is not None:
+        for comfy_module in comfy_modules:
+            comfy.ops.resolve_cast_module_with_vbar(comfy_module, dtype, device, dtype, None, False, return_weights=False)
+    return offload_stream, fully_faulted
 
 def cleanup_prefetched_modules(module, comfy_modules):
     for s in comfy_modules:
@@ -95,11 +151,10 @@ def _drop_graph(module):
 def cleanup_prefetch_queues():
     global PREFETCH_QUEUES
     global MALLOC_GRAPH_BREAKS
+    global MALLOC_GRAPH_ROGUES
     global MALLOC_GRAPH_USED
 
-    graph = ACTIVE_MALLOC_GRAPHS.pop(threading.get_ident(), None)
-    if graph is not None:
-        graph.abort()
+    cleanup_malloc_graph()
     for queue in PREFETCH_QUEUES:
         for entry in queue:
             if entry is None or not isinstance(entry, tuple):
@@ -109,17 +164,17 @@ def cleanup_prefetch_queues():
             if comfy_modules is not None:
                 cleanup_prefetched_modules(prefetched_module, comfy_modules)
     PREFETCH_QUEUES = []
-    for module in GRAPH_MODULES:
-        _drop_graph(module)
-    GRAPH_MODULES.clear()
     GRAPH_WARMED_MODULES.clear()
     if MALLOC_GRAPH_USED:
-        logging.info("Comfy model compiler graph breaks: %d", MALLOC_GRAPH_BREAKS)
+        logging.info("Comfy model compiler graph breaks: %d, rogues: %d", MALLOC_GRAPH_BREAKS, MALLOC_GRAPH_ROGUES)
     MALLOC_GRAPH_BREAKS = 0
+    MALLOC_GRAPH_ROGUES = 0
     MALLOC_GRAPH_USED = False
 
 def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_graph=False, generator=None, malloc_scope=None):
-    malloc_graph = ACTIVE_MALLOC_GRAPHS.get(threading.get_ident())
+    malloc_graph = MALLOC_GRAPHS.get(threading.get_ident())
+    if malloc_graph is not None and not malloc_graph._comfy_active:
+        malloc_graph = None
     enable_graph = enable_graph and malloc_graph is not None and not args.disable_cuda_graphs and comfy.model_management.is_device_cuda(device) and getattr(module, "_v_block", None) is not None
     if queue is None:
         if malloc_graph is not None and malloc_scope is not None:
@@ -180,21 +235,7 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
                 if hasattr(s, "_v"):
                     comfy_modules.append(s)
 
-        registerable_size = 0
-        for s in comfy_modules:
-            registerable_size += comfy.memory_management.vram_aligned_size([s.weight, s.bias])
-            for param_key in ("weight", "bias"):
-                lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
-                if lowvram_fn is not None:
-                    registerable_size += lowvram_fn.memory_required()
-
-        offload_stream, fully_faulted = comfy.ops.cast_modules_with_vbar(comfy_modules, None, device, None, True, return_faulted=True)
-        if not comfy.model_management.args.fast_disk:
-            comfy.model_management.ensure_pin_registerable(registerable_size)
-        comfy.model_management.sync_stream(device, offload_stream)
-        if fully_faulted and dtype is not None:
-            for comfy_module in comfy_modules:
-                comfy.ops.resolve_cast_module_with_vbar(comfy_module, dtype, device, dtype, None, False, return_weights=False)
+        offload_stream, fully_faulted = pin_modules(comfy_modules, device, dtype)
         queue[0] = (offload_stream, (module, comfy_modules))
 
     if core is not None:
@@ -223,7 +264,7 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
                 comfy.model_management.current_stream(device).wait_stream(capture_stream)
                 graph.replay()
                 module._comfy_graph = {"graph": graph, "signature": signature}
-                GRAPH_MODULES.add(module)
+                malloc_graph._comfy_cuda_graph_modules.add(module)
                 return
         if capture_stream is None:
             core()

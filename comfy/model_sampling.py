@@ -118,6 +118,16 @@ class IMG_TO_IMG_FLOW(CONST):
     def inverse_noise_scaling(self, sigma, latent):
         return 1.0 - latent
 
+class IMG_TO_IMG_VELOCITY(CONST):
+    def calculate_denoised(self, sigma, model_output, model_input):
+        return model_input - model_output
+
+    def noise_scaling(self, sigma, noise, latent_image, max_denoise=False):
+        return latent_image
+
+    def inverse_noise_scaling(self, sigma, latent):
+        return latent
+
 class COSMOS_RFLOW:
     def calculate_input(self, sigma, noise):
         sigma = (sigma / (sigma + 1))

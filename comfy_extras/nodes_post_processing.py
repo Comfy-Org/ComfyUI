@@ -47,6 +47,8 @@ class Blend(io.ComfyNode):
         blended_image = cls.blend_mode(image1, image2, blend_mode)
         blended_image = image1 * (1 - blend_factor) + blended_image * blend_factor
         blended_image = torch.clamp(blended_image, 0, 1)
+        if image1.shape[-1] == 4:  # alpha stores transparency, not color
+            blended_image[..., 3] = image1[..., 3]
         return io.NodeOutput(blended_image)
 
     @classmethod

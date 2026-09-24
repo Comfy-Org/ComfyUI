@@ -23,6 +23,7 @@ import logging
 import comfy.ldm.lightricks.av_model
 import comfy.ldm.minimax.model
 import comfy.ldm.minimax_music.dit
+import comfy.ldm.yue2.model
 import comfy.nested_tensor
 import comfy.ldm.lightricks.symmetric_patchifier
 import comfy.context_windows
@@ -62,6 +63,7 @@ import comfy.ldm.omnigen.omnigen2
 import comfy.ldm.seedvr.model
 import comfy.ldm.boogu.model
 import comfy.ldm.qwen_image.model
+import comfy.ldm.qwen_image21.model
 import comfy.ldm.mage_flow.model
 import comfy.ldm.joyimage.model
 import comfy.ldm.ideogram4.model
@@ -1557,6 +1559,17 @@ class Lumina2(BaseModel):
             out['ref_latents'] = list([1, 16, sum(map(lambda a: math.prod(a.size()[2:]), ref_latents))])
         return out
 
+class MingImage(Lumina2):
+    def extra_conds(self, **kwargs):
+        ref_latents = kwargs.pop("reference_latents", None)
+        out = super().extra_conds(**kwargs)
+        direct_context = kwargs.get("direct_context", None)
+        if direct_context is not None:
+            out['direct_context'] = comfy.conds.CONDRegular(direct_context)
+        if ref_latents is not None:
+            out['ref_frames'] = comfy.conds.CONDList([self.process_latent_in(lat)[:, :, f] for lat in ref_latents for f in range(lat.shape[2])])
+        return out
+
 class ZImagePixelSpace(Lumina2):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         BaseModel.__init__(self, model_config, model_type, device=device, unet_model=comfy.ldm.lumina.model.NextDiTPixelSpace)
@@ -2551,6 +2564,25 @@ class ACEStep15(BaseModel):
         out['refer_audio'] = comfy.conds.CONDRegular(refer_audio)
         return out
 
+class YuE2(BaseModel):
+    def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.yue2.model.YuE2)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        context = kwargs["cross_attn"].to(device=kwargs["device"], dtype=self.get_dtype_inference())
+        out["c_crossattn"] = comfy.conds.CONDRegular(context)
+        out["yue2_chunks"] = comfy.conds.CONDConstant(kwargs["yue2_chunks"])
+        return out
+
+    def extra_conds_shapes(self, **kwargs):
+        return {"c_crossattn": kwargs["cross_attn"].shape}
+
+    def memory_required(self, input_shape, cond_shapes={}):
+        context_size = sum(math.prod(shape) for shape in cond_shapes.get("c_crossattn", []))
+        return super().memory_required(input_shape, cond_shapes) + context_size * comfy.model_management.dtype_size(self.get_dtype_inference())
+
+
 class MiniMaxMusic3(BaseModel):
     def __init__(self, model_config, model_type=ModelType.FLOW, device=None):
         super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.minimax_music.dit.MiniMaxMusic3DiT)
@@ -2624,7 +2656,8 @@ class QwenImage(BaseModel):
         out = {}
         ref_latents = kwargs.get("reference_latents", None)
         if ref_latents is not None:
-            out['ref_latents'] = list([1, 16, sum(map(lambda a: math.prod(a.size()), ref_latents)) // 16])
+            c = self.latent_format.latent_channels
+            out['ref_latents'] = list([1, c, sum(map(lambda a: math.prod(a.size()), ref_latents)) // c])
         return out
 
 class MageFlow(QwenImage):
@@ -2635,11 +2668,31 @@ class MageFlow(QwenImage):
         # Mage runs in bf16 and rounds its timestep frequency table to the timestep dtype, keep that on fp32 devices.
         return timestep.to(torch.bfloat16)
 
-    def extra_conds_shapes(self, **kwargs):
-        out = {}
-        ref_latents = kwargs.get("reference_latents", None)
-        if ref_latents is not None:
-            out['ref_latents'] = list([1, 128, sum(map(lambda a: math.prod(a.size()), ref_latents)) // 128])
+class QwenImage21(QwenImage):
+    def __init__(self, model_config, model_type=ModelType.FLUX, device=None):
+        super().__init__(model_config, model_type, device=device, unet_model=comfy.ldm.qwen_image21.model.QwenImage21Transformer2DModel)
+
+    def get_dynamic_vram__units(self):
+        return list(self.diffusion_model.transformer_blocks), []
+
+    @property
+    def current_patcher(self):
+        return self._current_patcher
+
+    @current_patcher.setter
+    def current_patcher(self, patcher):
+        # set by pre_run / cleanup: the prefix K/V cache lives for one sampling run, off when hooks can repatch weights mid-run
+        self._current_patcher = patcher
+        diffusion_model = getattr(self, "diffusion_model", None)
+        if diffusion_model is not None:
+            diffusion_model.current_patcher = patcher
+            diffusion_model.reset_prefix_cache(patcher is not None and len(patcher.hook_patches) == 0)
+
+    def extra_conds(self, **kwargs):
+        out = super().extra_conds(**kwargs)
+        image_slots = kwargs.get("image_slots", None)
+        if image_slots is not None:
+            out['image_slots'] = comfy.conds.CONDConstant(image_slots)
         return out
 
 class JoyImage(BaseModel):
