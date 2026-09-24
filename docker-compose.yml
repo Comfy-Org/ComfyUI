@@ -66,6 +66,11 @@ services:
       # HF_TOKEN is passed through from the host env or a .env file (required
       # for gated models, e.g. the FLUX.2 klein 9B fp8 checkpoint).
       - HF_TOKEN=${HF_TOKEN:-}
+      # Require 'Authorization: Bearer <token>' on every route: wrapper API and
+      # native /prompt, /queue, /view, /ws (which also takes ?token=), frontend.
+      # Unset/empty = open, as before. Set it in .env, one random token per
+      # public box (see README 'Authentication'). The healthcheck below sends it.
+      # - WRAPPER_AUTH_TOKEN=${WRAPPER_AUTH_TOKEN:-}   # require Authorization: Bearer on every route
     restart: unless-stopped
     deploy:
       resources:
@@ -75,7 +80,7 @@ services:
               count: all
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8188/system_stats')"]
+      test: ["CMD", "python", "-c", "import os, urllib.request; t = os.environ.get('WRAPPER_AUTH_TOKEN'); urllib.request.urlopen(urllib.request.Request('http://localhost:8188/system_stats', headers={'Authorization': 'Bearer ' + t} if t else {}))"]
       interval: 30s
       timeout: 10s
       retries: 5
