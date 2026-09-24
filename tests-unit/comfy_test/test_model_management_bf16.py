@@ -2,7 +2,7 @@ import torch
 
 from comfy.cli_args import args as cli_args
 
-if not torch.cuda.is_available():
+if not torch.cuda.is_available() and not torch.backends.mps.is_available():
     cli_args.cpu = True
 
 import comfy.model_management as mm
