@@ -32,17 +32,35 @@ class TestDockerCompose(unittest.TestCase):
         self.assertEqual(devices[0]["driver"], "nvidia")
         self.assertIn("gpu", devices[0]["capabilities"][0])
 
-    def test_build_target_and_command(self):
+    def test_build_target_and_entrypoint_env(self):
+        # The server flags are built by docker/entrypoint.sh (the same script a
+        # RunPod pod runs), so compose sets env and has no `command` of its own.
         cf = self.compose["services"]["comfyui"]
         self.assertEqual(cf["build"]["target"], "comfyui")
-        command = cf["command"]
-        self.assertIn("--auto-download-models", command)
-        self.assertIn("--vram-headroom $${VRAM_HEADROOM_GB:-2}", command)
-        self.assertIn("--disable-async-offload", command)  # async offload default-off
-        self.assertIn("$${COMFYUI_ARGS:-}", command)
-        self.assertTrue(any(e.startswith("HF_TOKEN") for e in cf["environment"]))
-        self.assertIn("VRAM_HEADROOM_GB=${VRAM_HEADROOM_GB:-2}", cf["environment"])
-        self.assertIn("ASYNC_OFFLOAD_STREAMS=${ASYNC_OFFLOAD_STREAMS:-0}", cf["environment"])
+        self.assertNotIn("command", cf)
+        self.assertTrue(cf["image"].startswith("${COMFYUI_IMAGE:-shivanshtalwar0/comfyui"))
+        env = cf["environment"]
+        self.assertTrue(any(e.startswith("HF_TOKEN") for e in env))
+        for entry in ("VRAM_HEADROOM_GB=${VRAM_HEADROOM_GB:-2}",
+                      "ASYNC_OFFLOAD_STREAMS=${ASYNC_OFFLOAD_STREAMS:-0}",
+                      "AUTO_DOWNLOAD_MODELS=${AUTO_DOWNLOAD_MODELS:-1}",
+                      "COMFYUI_ARGS=${COMFYUI_ARGS:-}",
+                      "WRAPPER_AUTH_TOKEN=${WRAPPER_AUTH_TOKEN:-}"):
+            self.assertIn(entry, env)
+        self.assertEqual(cf["ports"], ["${COMFYUI_HOST_PORT:-8188}:8188"])
+
+    def test_entrypoint_builds_the_server_flags(self):
+        with open(os.path.join(ROOT, "docker", "entrypoint.sh")) as f:
+            script = f.read()
+        self.assertIn("--auto-download-models", script)
+        self.assertIn('--vram-headroom "${VRAM_HEADROOM_GB:-2}"', script)
+        self.assertIn("--disable-async-offload", script)  # async offload default-off
+        self.assertIn("--fast-disk", script)
+        self.assertIn("COMFYUI_ARGS", script)
+        self.assertIn("/workspace", script)  # RunPod network volume
+        self.assertIn('"prefetch"', script)
+        self.assertTrue(os.access(os.path.join(ROOT, "docker", "entrypoint.sh"), os.X_OK),
+                        "docker/entrypoint.sh must be executable")
 
     def test_model_and_state_volumes(self):
         volumes = self.compose["services"]["comfyui"]["volumes"]
@@ -84,6 +102,16 @@ class TestDockerfile(unittest.TestCase):
         for tool in ("gcc", "g++", "make"):
             self.assertIn(tool, apt, f"{tool} must be installed for Triton JIT")
 
+    def test_cuda_only_and_entrypoint(self):
+        self.assertIn("ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu128", self.dockerfile)
+        self.assertIn("assert torch.version.cuda", self.dockerfile)
+        torch_install = self.dockerfile.index('--index-url "${TORCH_INDEX_URL}"')
+        requirements_install = self.dockerfile.index("pip install -r requirements.txt")
+        self.assertLess(torch_install, requirements_install,
+                        "CUDA torch must be installed before requirements.txt")
+        self.assertIn('ENTRYPOINT ["tini", "--", "/opt/ComfyUI/docker/entrypoint.sh"]', self.dockerfile)
+        self.assertIn("HEALTHCHECK", self.dockerfile)
+
     def test_copy_sources_exist(self):
         for path in ("requirements.txt", "manager_requirements.txt"):
             self.assertTrue(os.path.isfile(os.path.join(ROOT, path)),
@@ -96,6 +124,13 @@ class TestDockerignore(unittest.TestCase):
             ignore = f.read()
         for excluded in (".git", "models/*", "output/*", "*.safetensors"):
             self.assertIn(excluded, ignore)
+
+    def test_excludes_local_environments_and_secrets(self):
+        # Every top-level dot-entry: .venv (~1.5 GB), tool caches, .claude
+        # worktrees and .env secrets must never reach the image.
+        with open(os.path.join(ROOT, ".dockerignore")) as f:
+            lines = [line.strip() for line in f]
+        self.assertIn("/.*", lines)
 
 
 if __name__ == "__main__":

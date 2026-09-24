@@ -302,7 +302,6 @@ def minimax_h3_models(quantization, ref2va=False, unet_name=None, clip_name=None
     q = MINIMAX_H3_QUANT_MODELS[quantization]
     unet = unet_name or (q["ref2va"] if ref2va else q["unet"])
     clip = clip_name or q["clip"]
-    files = [unet, clip, MINIMAX_H3_VIDEO_VAE, MINIMAX_H3_AUDIO_VAE]
     return [
         {"folder": "diffusion_models", "filename": unet,
          "url": f"{MINIMAX_H3_BASE_URL}/diffusion_models/{unet}"},

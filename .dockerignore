@@ -22,3 +22,15 @@ models/*
 
 # Triton JIT kernel cache (mounted at runtime via docker-compose)
 /.triton
+
+# Local environments, tool caches, agent worktrees, logs and secrets never
+# belong in the image: every top-level dot-entry is excluded (.venv, .claude
+# worktrees and tool caches like .reasonix are each 50 MB to 1.5 GB; .env holds
+# secrets). Nothing at runtime reads a dotfile from the repo root.
+/.*
+venv
+*.log
+
+# Tests are not needed at runtime.
+tests
+tests-unit
