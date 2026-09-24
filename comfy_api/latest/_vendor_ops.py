@@ -7,7 +7,6 @@ they can move out to the packs that own them without touching it.
 """
 from __future__ import annotations
 
-import asyncio
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -21,7 +20,6 @@ if TYPE_CHECKING:
         ImageRef,
         InpaintModelRef,
         InterpolationStatesRef,
-        LatentRef,
         MaskRef,
         ModelRef,
         Ref,
