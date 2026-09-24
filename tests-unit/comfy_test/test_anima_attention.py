@@ -1,7 +1,12 @@
 import torch
 
-import comfy.ops
-from comfy.ldm.anima.model import Attention
+from comfy.cli_args import args
+
+if not torch.cuda.is_available():
+    args.cpu = True
+
+import comfy.ops  # noqa: E402
+from comfy.ldm.anima.model import Attention  # noqa: E402
 
 
 def make_attention():
