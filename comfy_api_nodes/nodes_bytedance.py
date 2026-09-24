@@ -15,6 +15,7 @@ from comfy_api_nodes.apis.bytedance import (
     RECOMMENDED_PRESETS_SEEDREAM_4,
     RECOMMENDED_PRESETS_SEEDREAM_4_0,
     RECOMMENDED_PRESETS_SEEDREAM_4_5,
+    RECOMMENDED_PRESETS_SEEDREAM_5_FLASH,
     RECOMMENDED_PRESETS_SEEDREAM_5_LITE,
     RECOMMENDED_PRESETS_SEEDREAM_5_PRO,
     SEEDANCE2_REF_VIDEO_PIXEL_LIMITS,
@@ -90,6 +91,7 @@ _VERIFICATION_POLL_INTERVAL_SEC = 3
 
 SEEDREAM_MODELS = {
     "seedream 5.0 pro": "seedream-5-0-pro-260628",
+    "seedream 5.0 flash": "seedream-5-0-flash-260915",
     "seedream 5.0 lite": "seedream-5-0-260128",
     "seedream-4-5-251128": "seedream-4-5-251128",
     "seedream-4-0-250828": "seedream-4-0-250828",
@@ -97,6 +99,7 @@ SEEDREAM_MODELS = {
 
 SEEDREAM_PRESETS = {
     "seedream-5-0-pro-260628": RECOMMENDED_PRESETS_SEEDREAM_5_PRO,
+    "seedream-5-0-flash-260915": RECOMMENDED_PRESETS_SEEDREAM_5_FLASH,
     "seedream-5-0-260128": RECOMMENDED_PRESETS_SEEDREAM_5_LITE,
     "seedream-4-5-251128": RECOMMENDED_PRESETS_SEEDREAM_4_5,
     "seedream-4-0-250828": RECOMMENDED_PRESETS_SEEDREAM_4_0,
@@ -426,7 +429,7 @@ class ByteDanceSeedreamNode(IO.ComfyNode):
             inputs=[
                 IO.Combo.Input(
                     "model",
-                    options=list(SEEDREAM_MODELS.keys()),
+                    options=["seedream 5.0 pro", "seedream 5.0 lite", "seedream-4-5-251128", "seedream-4-0-250828"],
                 ),
                 IO.String.Input(
                     "prompt",
@@ -630,6 +633,7 @@ def _seedream_model_inputs(
     max_height: int = 4992,
     supports_batch: bool = True,
     supports_fast: bool = False,
+    supports_thinking: bool = True,
     include_common: bool = False,
 ):
     inputs = [
@@ -721,17 +725,20 @@ def _seedream_model_inputs(
                     tooltip='Whether to add an "AI generated" watermark to the image.',
                     advanced=True,
                 ),
-                IO.Boolean.Input(
-                    "thinking",
-                    default=True,
-                    tooltip=(
-                        "Enable the model's prompt-optimization reasoning ('thinking') for better adherence. "
-                        "Can substantially increase generation time — notably on Seedream 5.0 Pro. "
-                        "Can only be disabled for text-to-image (not when reference images are provided)."
-                    ),
-                    advanced=True,
-                ),
             ]
+        )
+    if include_common and supports_thinking:
+        inputs.append(
+            IO.Boolean.Input(
+                "thinking",
+                default=True,
+                tooltip=(
+                    "Enable the model's prompt-optimization reasoning ('thinking') for better adherence. "
+                    "Can substantially increase generation time — notably on Seedream 5.0 Pro. "
+                    "Can only be disabled for text-to-image (not when reference images are provided)."
+                ),
+                advanced=True,
+            )
         )
     return inputs
 
@@ -760,10 +767,22 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                             _seedream_model_inputs(
                                 max_ref_images=10,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_5_PRO,
-                                max_width=3136,
-                                max_height=2496,
+                                max_width=4096,
+                                max_height=4096,
                                 supports_batch=False,
                                 supports_fast=True,
+                                include_common=True,
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "seedream 5.0 flash",
+                            _seedream_model_inputs(
+                                max_ref_images=10,
+                                presets=RECOMMENDED_PRESETS_SEEDREAM_5_FLASH,
+                                max_width=4096,
+                                max_height=4096,
+                                supports_batch=False,
+                                supports_thinking=False,
                                 include_common=True,
                             ),
                         ),
@@ -818,6 +837,7 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                   $refs := $lookup(inputGroups, "model.images");
                   $extra := ($type($refs) = "number" and $refs > 1) ? ($refs - 1) * 0.003 : 0;
                   $isPro := $contains($model, "5.0 pro");
+                  $isFlash := $contains($model, "5.0 flash");
                   $isCustom := $contains($sp, "custom");
                   $sizeKnown := $isCustom ? $px > 0 : ($contains($sp, "1k") or $contains($sp, "2k"));
                   $proPrice := $isCustom
@@ -833,10 +853,11 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                     : {
                         "type": "usd",
                         "usd": $isPro ? $proPrice + $extra
+                               : $isFlash ? 0.02574
                                : $contains($model, "5.0 lite") ? 0.035
                                : $contains($model, "4-5") ? 0.04
                                : 0.03,
-                        "format": { "suffix": $isPro ? "/Image" : " x images/Run", "approximate": true }
+                        "format": { "suffix": ($isPro or $isFlash) ? "/Image" : " x images/Run", "approximate": true }
                       }
                 )
                 """,
@@ -855,7 +876,8 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
         validate_string(prompt, strip_whitespace=True, min_length=1)
         model_id = SEEDREAM_MODELS[model["model"]]
         presets = SEEDREAM_PRESETS[model_id]
-        is_pro = "seedream-5-0-pro" in model_id
+        is_flash = "seedream-5-0-flash" in model_id
+        is_pro_or_flash = is_flash or "seedream-5-0-pro" in model_id
 
         size_preset = model.get("size_preset", presets[0][0])
         width = model.get("width", 2048)
@@ -879,14 +901,14 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
 
         out_num_pixels = w * h
         mp_provided = out_num_pixels / 1_000_000.0
-        if is_pro:
+        if is_pro_or_flash:
             if out_num_pixels < 921_600:
                 raise ValueError(
                     f"Minimum image resolution for the selected model is 0.92MP, but {mp_provided:.2f}MP provided."
                 )
-            if out_num_pixels > 4_194_304:
+            if out_num_pixels > 4_624_220:
                 raise ValueError(
-                    f"Maximum image resolution for the selected model is 4.19MP, but {mp_provided:.2f}MP provided."
+                    f"Maximum image resolution for the selected model is 4.62MP, but {mp_provided:.2f}MP provided."
                 )
         else:
             if ("seedream-4-5" in model_id or "seedream-5-0" in model_id) and out_num_pixels < 3_686_400:
@@ -922,7 +944,7 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
         reference_images_urls: list[str] = []
         if image_tensors:
             for tensor in image_tensors:
-                validate_image_aspect_ratio(tensor, (1, 3), (3, 1))
+                validate_image_aspect_ratio(tensor, (1, 16), (16, 1), strict=False)
             reference_images_urls = await upload_images_to_comfyapi(
                 cls,
                 image_tensors,
@@ -932,7 +954,7 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
             )
 
         optimize_prompt_options = None
-        if n_input_images == 0:
+        if n_input_images == 0 and not is_flash:
             optimize_prompt_options = Seedream5OptimizePromptOptions(thinking="enabled" if thinking else "disabled")
         elif prompt_optimization == "fast":
             optimize_prompt_options = Seedream5OptimizePromptOptions(mode="fast")
@@ -946,8 +968,8 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                 image=reference_images_urls,
                 size=f"{w}x{h}",
                 seed=seed,
-                sequential_image_generation=None if is_pro else sequential_image_generation,
-                sequential_image_generation_options=None if is_pro else Seedream4Options(max_images=max_images),
+                sequential_image_generation=None if is_pro_or_flash else sequential_image_generation,
+                sequential_image_generation_options=None if is_pro_or_flash else Seedream4Options(max_images=max_images),
                 watermark=watermark,
                 optimize_prompt_options=optimize_prompt_options,
             ),
