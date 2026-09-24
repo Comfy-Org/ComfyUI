@@ -72,7 +72,7 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         # failure classification - the swallow sites that used to report nothing
         CallSite("app/assets/scanner.py", "observe_references_on_filesystem", "scanner.stat_failed"),
         CallSite("app/assets/scanner.py", "observe_asset_specs", "scanner.stat_failed"),
-        CallSite("app/assets/scanner.py", "report_walk_error", "scanner.root_unreachable"),
+        CallSite("app/assets/scanner.py", "_report_unreachable_root", "scanner.root_unreachable"),
         CallSite("app/assets/scanner.py", "report_walk_error", "scanner.walk_failed"),
         CallSite("app/assets/scanner.py", "_report_metadata_failure", "scanner.metadata_failed"),
         CallSite(

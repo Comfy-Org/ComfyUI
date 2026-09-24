@@ -149,6 +149,70 @@ def test_a_permission_denied_reference_is_reported_and_still_skipped(monkeypatch
     assert observations == []
 
 
+def observe_real_references(
+    monkeypatch: pytest.MonkeyPatch, prefix: Path, root: str | None, caplog
+) -> tuple[_ScanState, list]:
+    """Observe two rows whose files do not exist under ``prefix``, on the real filesystem."""
+    contents = [
+        SimpleNamespace(id=f"content-{i}", path=str(prefix / f"{i}.bin"), size_bytes=1, mtime_ns=1)
+        for i in range(2)
+    ]
+    monkeypatch.setattr(scanner, "live_contents_under_prefixes", lambda _session, _prefixes: contents)
+    progress = _ScanState()
+    with caplog.at_level(logging.INFO):
+        observations, _survivors = scanner.observe_references_on_filesystem(
+            Mock(), [str(prefix)], progress, root
+        )
+    return progress, observations
+
+
+def test_references_under_an_unreachable_root_are_not_marked_missing(
+    temp_dir: Path, monkeypatch, caplog
+):
+    progress, observations = observe_real_references(
+        monkeypatch, temp_dir / "unmounted-disk", "models", caplog
+    )
+
+    assert observations == []
+    [event] = events(caplog, "scanner.root_unreachable")
+    assert (event["root"], event["reason"]) == ("models", "vanished")
+    assert buckets(progress) == {("walk_root", "vanished"): 1}
+
+
+def test_deleted_files_under_a_reachable_root_are_still_marked_missing(
+    temp_dir: Path, monkeypatch, caplog
+):
+    progress, observations = observe_real_references(monkeypatch, temp_dir, "models", caplog)
+
+    assert [observation.stat_result for observation in observations] == [None, None]
+    assert events(caplog, "scanner.root_unreachable") == []
+    assert buckets(progress) == {}
+
+
+def test_without_a_scan_root_an_absent_prefix_still_retires_its_references(
+    temp_dir: Path, monkeypatch, caplog
+):
+    # Temp is synced this way: it is deleted around startup and its rows must still retire.
+    _progress, observations = observe_real_references(
+        monkeypatch, temp_dir / "wiped-temp", None, caplog
+    )
+
+    assert [observation.stat_result for observation in observations] == [None, None]
+
+
+def test_the_reference_check_and_the_walk_report_an_unreachable_root_once(
+    temp_dir: Path, monkeypatch, caplog
+):
+    gone = temp_dir / "unmounted-input"
+    progress, _observations = observe_real_references(monkeypatch, gone, "input", caplog)
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(gone))
+
+    with caplog.at_level(logging.INFO):
+        scanner.collect_paths_for_roots(("input",), progress=progress)
+
+    assert len(events(caplog, "scanner.root_unreachable")) == 1
+
+
 # --- seed_observation ----------------------------------------------------------------
 
 

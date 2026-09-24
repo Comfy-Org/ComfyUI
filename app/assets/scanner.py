@@ -170,28 +170,70 @@ def collect_models_files() -> list[str]:
     return out
 
 
+def _report_unreachable_root(
+    root: RootType, exc: OSError, progress: _ScanProgress | None
+) -> None:
+    """``scanner.root_unreachable`` at most once per root per scan, from whichever of the
+    reference check and the walk notices first."""
+    if progress is not None:
+        progress.record_failure("walk_root", exc)
+        if not progress.mark_emitted(f"root_unreachable:{root}"):
+            return
+    emit_failure("scanner.root_unreachable", exc, root=root)
+
+
 def observe_references_on_filesystem(
-    session: Session, prefixes: list[str], progress: _ScanProgress | None = None
+    session: Session,
+    prefixes: list[str],
+    progress: _ScanProgress | None = None,
+    root: RootType | None = None,
 ) -> tuple[list[_ReferenceObservation], set[str]]:
     """Stat every live row under ``prefixes`` without writing, so the caller can
     apply the result in a short write transaction. Also returns the paths whose
-    file still exists."""
+    file still exists.
+
+    With ``root``, a row whose file is gone is only observed as missing when the
+    prefix it lives under can still be stat'ed, so an unmounted disk or a removed
+    drive leaves its library alone instead of marking all of it missing. Temp is
+    synced without ``root``: it is deleted and recreated around startup, and its
+    references must be retired while it is absent.
+    """
     contents = [
         (content.id, content.path, content.size_bytes, content.mtime_ns)
         for content in live_contents_under_prefixes(session, prefixes)
     ]
     observations: list[_ReferenceObservation] = []
     survivors: set[str] = set()
+    root_failures: dict[str, OSError | None] = {}
+
+    def unreachable_prefix(path: str) -> OSError | None:
+        owners = [prefix for prefix in prefixes if is_path_under_prefixes(path, [prefix])]
+        if not owners:
+            return None
+        prefix = max(owners, key=len)
+        if prefix not in root_failures:
+            try:
+                os.stat(prefix, follow_symlinks=True)
+                root_failures[prefix] = None
+            except OSError as exc:
+                root_failures[prefix] = exc
+                _log_scan_error("reference_root", exc)
+                if root is not None:
+                    _report_unreachable_root(root, exc, progress)
+        return root_failures[prefix]
+
     for content_id, path, size_bytes, mtime_ns in contents:
         try:
             stat_result = os.stat(path, follow_symlinks=True)
         except OSError as e:
-            # Only a plain ENOENT means the file was deleted. Any other failure, such as
-            # an offline network share (which Windows reports as ENOENT with a network
-            # winerror), leaves the row alone for this scan. A root that is simply
-            # absent, like an unmounted disk, still reads as ENOENT and is marked missing.
+            # Only a plain ENOENT under a reachable root means the file was deleted. Any
+            # other failure, such as an offline network share (which Windows reports as
+            # ENOENT with a network winerror), leaves the row alone for this scan.
             if classify_failure(e).reason == "vanished":
-                observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
+                if root is None or unreachable_prefix(path) is None:
+                    observations.append(
+                        _ReferenceObservation(content_id, size_bytes, mtime_ns, None)
+                    )
                 continue
             _log_scan_error("reference_stat", e)
             logging.debug("OSError checking %s: %s", path, e)
@@ -235,11 +277,11 @@ def apply_reference_observations(
 
 
 def _sync_prefixes_in_write_txn(
-    prefixes: list[str], progress: _ScanProgress | None
+    prefixes: list[str], progress: _ScanProgress | None, root: RootType | None = None
 ) -> set[str]:
     with create_session() as session:
         observations, survivors = observe_references_on_filesystem(
-            session, prefixes, progress
+            session, prefixes, progress, root
         )
     if observations:
         with create_write_session() as session:
@@ -260,7 +302,9 @@ def sync_root_safely(
     Returns survivors (existing paths) or empty set on failure.
     """
     try:
-        return _sync_prefixes_in_write_txn(get_scan_prefixes_for_root(root), progress)
+        return _sync_prefixes_in_write_txn(
+            get_scan_prefixes_for_root(root), progress, root
+        )
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
         emit_failure("scanner.fast_scan_failed", exc, root=root)
@@ -313,11 +357,12 @@ def _walk_error_reporter(
     def report_walk_error(site: str, exc: OSError) -> None:
         _log_scan_error(site, exc)
         if site == "walk_root":
-            emit_failure("scanner.root_unreachable", exc, root=root)
+            _report_unreachable_root(root, exc, progress)
+            return
         if progress is None:
             return
         progress.record_failure(site, exc)
-        if site == "walk_dir" and progress.mark_emitted(f"walk_failed:{root}"):
+        if progress.mark_emitted(f"walk_failed:{root}"):
             emit_failure("scanner.walk_failed", exc, root=root)
 
     return report_walk_error
