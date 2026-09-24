@@ -1,11 +1,14 @@
 
 services:
   comfyui:
+    # The published image (built and pushed by .github/workflows/docker-publish.yml).
+    # `docker compose pull` fetches it; `docker compose build` builds this tree
+    # into the same tag instead.
+    image: ${COMFYUI_IMAGE:-shivanshtalwar0/comfyui:latest}
     build:
       context: .
       dockerfile: Dockerfile
       target: comfyui
-    image: comfyui-sync-api:latest
     # VRAM/offload tuning for GPUs with limited VRAM (e.g. MiniMax H3 on a 32 GB
     # card): DynamicVRAM (default on NVIDIA) keeps inactive weights in RAM and
     # streams only active layers to the GPU; --vram-headroom leaves that much
@@ -23,9 +26,13 @@ services:
     # host RAM, so the kernel can evict page cache under pressure rather than
     # killing the process. Turn it off only on a box with enough RAM to hold
     # every checkpoint at once. Host swap (see .env.example) helps too.
-    command: sh -c 'if [ "$${ASYNC_OFFLOAD_STREAMS:-0}" -gt 0 ] 2>/dev/null; then OFFLOAD="--async-offload $${ASYNC_OFFLOAD_STREAMS}"; else OFFLOAD="--disable-async-offload"; fi; if [ "$${FAST_DISK:-1}" = "1" ]; then DISK="--fast-disk"; else DISK=""; fi; exec python main.py --listen 0.0.0.0 --port 8188 --auto-download-models --vram-headroom $${VRAM_HEADROOM_GB:-2} --cache-ram $${CACHE_RAM_GB:-2 8} $$OFFLOAD $$DISK $${COMFYUI_ARGS:-}'
+    #
+    # The flags themselves are built by docker/entrypoint.sh from the env below
+    # (the same script a RunPod pod runs), so compose needs no `command`.
     ports:
-      - "8188:8188"
+      # Host port -> the container's 8188 (e.g. COMFYUI_HOST_PORT=8282 on the
+      # FloStudio rig, which voxmin-backend reaches over WireGuard).
+      - "${COMFYUI_HOST_PORT:-8188}:8188"
     volumes:
       # Model weights live outside the image. Default ./models; point at a
       # shared project dir to reuse one model store between projects, e.g.
@@ -49,6 +56,10 @@ services:
       - ASYNC_OFFLOAD_STREAMS=${ASYNC_OFFLOAD_STREAMS:-0}
       - CACHE_RAM_GB=${CACHE_RAM_GB:-2 8}
       - FAST_DISK=${FAST_DISK:-1}
+      # 1 = fetch a workflow's checkpoints on first use (--auto-download-models).
+      - AUTO_DOWNLOAD_MODELS=${AUTO_DOWNLOAD_MODELS:-1}
+      # Extra ComfyUI flags appended by the entrypoint.
+      - COMFYUI_ARGS=${COMFYUI_ARGS:-}
       # Hard caps on MiniMax H3 jobs, enforced by the wrapper API before a job
       # is queued: over-budget requests get a 400 instead of OOM-killing the
       # server. Frame count bites hardest (the video VAE tiles spatially but
@@ -70,7 +81,7 @@ services:
       # native /prompt, /queue, /view, /ws (which also takes ?token=), frontend.
       # Unset/empty = open, as before. Set it in .env, one random token per
       # public box (see README 'Authentication'). The healthcheck below sends it.
-      # - WRAPPER_AUTH_TOKEN=${WRAPPER_AUTH_TOKEN:-}   # require Authorization: Bearer on every route
+      - WRAPPER_AUTH_TOKEN=${WRAPPER_AUTH_TOKEN:-}
     restart: unless-stopped
     deploy:
       resources:
@@ -87,7 +98,7 @@ services:
       start_period: 60s
 
   developer-api:
-    image: comfyui-sync-api:latest
+    image: ${COMFYUI_IMAGE:-shivanshtalwar0/comfyui:latest}
     depends_on:
       comfyui:
         condition: service_healthy

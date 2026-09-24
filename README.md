@@ -141,6 +141,46 @@ curl -o result.png -X POST http://127.0.0.1:8188/api/wrapper/flux2klein9b/genera
   -F "prompt=make it snow" -F "image=@input.png"
 ```
 
+### Docker image (local GPU box and RunPod)
+
+The worker is published to Docker Hub as **`shivanshtalwar0/comfyui`** by [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml):
+
+| Trigger | Tags pushed |
+|---|---|
+| push to `master` (source or Docker files changed) | `latest`, `sha-<short>` |
+| tag `vX.Y.Z` | `X.Y.Z`, `X.Y`, `sha-<short>` |
+| manual run (Actions → Docker image → Run workflow) | `<branch>`, `sha-<short>` |
+| pull request touching Docker files | nothing: build + smoke test only |
+
+Every build is smoke-tested before anything is pushed: torch has CUDA, `prefetch --dry-run` resolves every wrapper checkpoint, and the server boots (CPU mode) and answers `/api/wrapper/workflows` with 200 with the bearer token and 401 without it. Publishing needs the repository secret **`DOCKERHUB_TOKEN`** (a Docker Hub access token with Read & Write). `DOCKERHUB_USERNAME` / `DOCKERHUB_IMAGE` repository variables override the defaults.
+
+The image is **CUDA only**: `python:3.12-slim` plus the PyTorch **cu128** wheels (Blackwell / RTX 5090 kernels, host driver ≥ 570). The build fails if any dependency leaves it with a CPU torch. Nothing model-sized is baked in. [`docker/entrypoint.sh`](docker/entrypoint.sh) configures everything from env, so the image runs the same with or without a compose file:
+
+| Env | Default | Meaning |
+|---|---|---|
+| `WRAPPER_AUTH_TOKEN` | unset | Bearer token on every route (see Authentication). **Always set it on public boxes.** |
+| `COMFYUI_DATA_DIR` | `/workspace` if present | Persistent store: `models/` is linked to `<dir>/models`, `HF_HOME` to `<dir>/huggingface`, Triton's kernel cache to `<dir>/.triton`. |
+| `COMFYUI_MODELS_DIR` | `<data dir>/models` | Model store on its own. A bind mount on `/opt/ComfyUI/models` always wins. |
+| `COMFYUI_PORT` | `8188` | Container port. |
+| `AUTO_DOWNLOAD_MODELS` | `1` | Fetch a workflow's checkpoints on first use. |
+| `VRAM_HEADROOM_GB`, `CACHE_RAM_GB`, `ASYNC_OFFLOAD_STREAMS`, `FAST_DISK` | `2`, `2 8`, `0`, `1` | Memory tuning, as in `.env.example`. |
+| `COMFYUI_ARGS` | empty | Extra ComfyUI flags. |
+| `MIMO_API_KEY`, `HF_TOKEN` | unset | H3 prompt rewrite; gated FLUX.2 [klein] weights. |
+
+**Local GPU box**: `cp .env.example .env`, then `docker compose pull && docker compose up -d` (or `docker compose up -d --build` to build this tree). `COMFYUI_HOST_PORT=8282` publishes it where the FloStudio rig is reached over WireGuard.
+
+**RunPod (FloStudio burst pods)**: voxmin-backend creates the pods itself through the RunPod API. Set System Config → FloStudio → RunPod → image to `docker.io/shivanshtalwar0/comfyui:latest` (or a `sha-` tag), and attach a network volume. RunPod mounts it at `/workspace`, which the entrypoint uses for models, the HF cache and Triton kernels. The backend gives every pod its own `WRAPPER_AUTH_TOKEN` and reaches it on port 8188 through the RunPod proxy. Put `MIMO_API_KEY` / `HF_TOKEN` in the `runpod` ExternalApi row's `podEnv`.
+
+**Fill a network volume once** so the first pod doesn't spend its boot downloading ~40 GB. Run this on a cheap CPU pod with the volume attached, or locally against the model dir:
+
+```bash
+docker run --rm -e HF_TOKEN=... -v /workspace:/workspace shivanshtalwar0/comfyui prefetch
+# specs: minimaxh3[:nvfp4|int8|fp8|bf16]  minimaxh3-ref[:quant]  flux2klein9b
+docker run --rm -v "$PWD/models:/opt/ComfyUI/models" shivanshtalwar0/comfyui prefetch minimaxh3:int8 --dry-run
+```
+
+With no specs it fetches `minimaxh3:nvfp4 minimaxh3-ref:nvfp4 flux2klein9b` (override with `PREFETCH_MODELS`). That set is the FP8 H3 UNETs plus the 16 GB NVFP4 text encoder that a 32 GB Blackwell card needs, and the FLUX.2 [klein] stills model.
+
 ## Features
 - A visual node graph for building and reusing image, video, audio, 3D, and text workflows without code.
 - Reusable subgraphs, workflow templates, App Mode, and a local API for integrating workflows into applications.
