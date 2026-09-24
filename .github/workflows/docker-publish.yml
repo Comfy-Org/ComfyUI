@@ -329,6 +329,59 @@ jobs:
       - name: "Smoke test: prefetch runs inside the env on the volume"
         run: docker run --rm -v runpod-smoke-ws:/workspace "$RUNPOD_SMOKE_TAG" prefetch --dry-run
 
+      # The production path on RunPod: RunPod's own cached PyTorch image runs
+      # docker/runpod-bootstrap.sh, which fetches this code for a commit onto
+      # the volume and hands over to the entrypoint. The runpod image stands in
+      # for RunPod's here (same interpreter, so the same env key): the bootstrap
+      # replaces its baked code with the tarball, so the key is computed at boot
+      # and must find the env archive the steps above published.
+      - name: "Smoke test: bootstrap boots from a code tarball and the env archive on the volume"
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          mkdir -p code-server
+          git archive --format=tar.gz --prefix="ComfyUI-$sha/" -o code-server/code.tar.gz HEAD
+          python3 -m http.server 8099 --bind 127.0.0.1 --directory code-server > /dev/null 2>&1 &
+          server=$!
+          boot() {
+            local name=$1 t0 code=""
+            t0=$(date +%s)
+            docker run -d --name "$name" --network host -v runpod-smoke-ws:/workspace \
+              -v "$PWD/docker/runpod-bootstrap.sh:/bootstrap.sh:ro" \
+              -e COMFY_CODE_REF="$sha" -e COMFY_CODE_URL=http://127.0.0.1:8099/code.tar.gz \
+              -e WRAPPER_AUTH_TOKEN=smoke-token -e COMFYUI_ARGS=--cpu \
+              --entrypoint bash "$RUNPOD_SMOKE_TAG" /bootstrap.sh > /dev/null
+            while [ $(( $(date +%s) - t0 )) -lt 600 ]; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer smoke-token' http://127.0.0.1:8188/api/wrapper/workflows || true)
+              [ "$code" = "200" ] && break
+              [ "$(docker inspect -f '{{.State.Running}}' "$name")" = "true" ] || break
+              sleep 5
+            done
+            docker logs "$name" > "$name.log" 2>&1
+            echo "--- $name: HTTP $code after $(( $(date +%s) - t0 ))s"
+            grep -E '^(bootstrap|entrypoint):' "$name.log" || true
+            docker rm -f "$name" > /dev/null
+            if [ "$code" != "200" ]; then
+              tail -60 "$name.log"
+              echo "::error::$name did not come up (last HTTP $code)"
+              exit 1
+            fi
+          }
+
+          boot tarball-first
+          grep -q "code $sha downloaded" tarball-first.log || { echo "::error::the code was not fetched onto the volume"; exit 1; }
+          grep -q "env key computed at boot" tarball-first.log || { echo "::error::the env key was not computed at boot"; exit 1; }
+          grep -q "unpacked from /workspace/envs/" tarball-first.log || { echo "::error::the boot did not unpack the env archive"; exit 1; }
+          if grep -q "building it" tarball-first.log; then
+            echo "::error::the boot-time env key differs from the baked one, so it rebuilt the env"; exit 1
+          fi
+
+          # The code server is gone: a second pod must boot from the volume alone.
+          kill "$server"
+          boot tarball-second
+          grep -q "code $sha found on the volume" tarball-second.log \
+            || { echo "::error::the second boot did not reuse the code on the volume"; exit 1; }
+
       - name: Push to Docker Hub
         if: needs.mode.outputs.push == 'true'
         uses: docker/build-push-action@v6

@@ -7,10 +7,11 @@
 #     pod's network volume at /workspace and runs the image's own CMD (there is
 #     no compose file), so everything a pod needs is decided here from env.
 #
-# The `runpod` target (COMFY_IMAGE_VARIANT=runpod) ships without torch and the
-# pip requirements: the first pod on a network volume installs them into a
-# virtualenv on the volume and every later pod reuses it (see "Python env on
-# the volume" below).
+# The runpod variant (COMFY_IMAGE_VARIANT=runpod) ships without torch and the
+# pip requirements: the first pod on a network volume builds them into a
+# virtualenv archived on the volume and every later pod unpacks it (see
+# "Python env on the volume" below). It runs from the slim `runpod` image, or
+# from RunPod's own cached PyTorch image via docker/runpod-bootstrap.sh.
 #
 # Usage:
 #   (no args) or flags only   start ComfyUI; extra flags are appended
@@ -73,21 +74,31 @@ if [[ -n "$DATA_DIR" ]]; then
 	mkdir -p "$HF_HOME" "$TRITON_CACHE_DIR"
 fi
 
-# --- Python env on the volume (runpod image only) ----------------------------
+# --- Python env on the volume (runpod variant only) --------------------------
 # The full image (target `comfyui`, :latest) bakes torch and requirements.txt
 # in, which makes it a ~5 GB pull: a cold RunPod pod spent over 9 minutes just
-# pulling it. The `runpod` target leaves them out and keeps them on the
-# network volume instead, installed once by the first pod that needs them:
+# pulling it. The runpod variant keeps them on the network volume instead,
+# built once by the first pod that needs them:
 #
-#   <data dir>/envs/<key>/                     the virtualenv, built in place
-#                                              (venvs are path-dependent)
-#   <data dir>/envs/<key>/.comfy-env-complete  written last; no marker = partial
-#   <data dir>/envs/.lock-<key>/               held by the pod building it
+#   <data dir>/envs/<key>.tar      the env, archived once; renamed into place
+#                                  only when complete
+#   <data dir>/envs/.lock-<key>/   held by the pod building it
+#   /opt/comfy-env/<key>/          the env itself, built or unpacked on each
+#                                  pod's container disk (venvs are
+#                                  path-dependent, so this path is fixed)
+#   .../<key>/.comfy-env-complete  written last; no marker = partial
 #
-# <key> (docker/env-key, baked at image build) hashes requirements.txt, the
-# torch index, the Python minor version, the arch and the OS release: an image
-# whose dependencies changed builds a fresh env next to the old one, and an
-# image that only changed code reuses it.
+# Why one archive and not the env directory on the volume: RunPod volumes are
+# MooseFS, which streams a big file fast (~800 MB/s measured) but creates small
+# files slowly. An env written in place (tens of thousands of files) was still
+# being written after 16 minutes, and every import from it pays a network
+# round trip per file. One tar is written once and unpacked in seconds.
+#
+# <key> hashes docker/env-inputs (printed by docker/env-inputs.sh):
+# requirements.txt, the torch index, the base interpreter, the arch and the OS.
+# The slim image bakes it; code fetched by docker/runpod-bootstrap.sh computes
+# it here at boot. An image whose dependencies changed builds a fresh env next
+# to the old one, and one that only changed code reuses it.
 #
 # The lock is a directory: mkdir is atomic on a network filesystem where flock
 # may not work (RunPod volumes are MooseFS). The owner writes its id into it
@@ -97,12 +108,13 @@ fi
 # pods does not matter), treats the builder as dead: it takes the lock over
 # (guarded by a second mkdir so two waiters cannot both do it) and rebuilds
 # from scratch. A builder checks it still owns the lock before it writes the
-# completion marker.
+# completion marker and before it publishes the archive.
 ENV_MARKER_NAME=.comfy-env-complete
 HEARTBEAT_PID=
 ENV_TOKEN=
 
 env_ready() { [[ -f "$ENV_DIR/$ENV_MARKER_NAME" && -x "$ENV_DIR/bin/python" ]]; }
+archive_ready() { [[ -s "$ENV_ARCHIVE" ]]; }
 lock_owner() { head -n 1 "$ENV_LOCK/owner" 2>/dev/null || true; }
 lock_state() { { cat "$ENV_LOCK/owner" "$ENV_LOCK/heartbeat" 2>/dev/null || true; } | tr '\n' ' '; }
 
@@ -152,14 +164,15 @@ break_stale_lock() {
 	rmdir "$ENV_LOCK.break" 2>/dev/null || true
 }
 
-# Build the env in place. Called only while holding the lock.
+# Build the env on the container disk, then publish it to the volume as one
+# archive. Called only while holding the lock.
 build_env() {
 	local t0=$SECONDS t base_python torch_info default_cache=/tmp/uv-cache
 	base_python=$(readlink -f "$(command -v python3)")
-	# uv's cache goes on the container disk, and packages are copied (not
-	# hardlinked) into the env, so nothing is stored twice on the per-GB
-	# billed volume. Bytecode is compiled once here, so no pod compiles
-	# torch's sources on import (PYTHONDONTWRITEBYTECODE is set).
+	# uv's cache goes on the container disk too and is removed once the env is
+	# built; packages are copied (not hardlinked) so removing it is safe.
+	# Bytecode is compiled once here, so no pod compiles torch's sources on
+	# import (PYTHONDONTWRITEBYTECODE is set).
 	export UV_CACHE_DIR="${UV_CACHE_DIR:-$default_cache}" UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1 \
 		UV_PYTHON_DOWNLOADS=never UV_NO_CONFIG=1
 	if [[ -e "$ENV_DIR" ]]; then
@@ -202,18 +215,50 @@ print("torch=%s cuda=%s" % (torch.__version__, cuda))
 	if [[ "$UV_CACHE_DIR" == "$default_cache" ]]; then
 		rm -rf "$UV_CACHE_DIR"
 	fi
+	archive_env
+}
+
+# Publish the finished env to the volume as one tar, written under a temporary
+# name and renamed into place last, so no pod ever reads a partial archive.
+archive_env() {
+	local t=$SECONDS tmp="$ENV_ARCHIVE.tmp-$$-$RANDOM"
+	tar -cf "$tmp" -C "$ENV_DIR" .
+	if [[ "$(lock_owner)" != "$ENV_TOKEN" ]]; then
+		rm -f "$tmp"
+		log "ERROR: lost the env lock while archiving (owner is now: $(lock_owner)); not publishing $ENV_ARCHIVE"
+		exit 1
+	fi
+	mv -f "$tmp" "$ENV_ARCHIVE"
+	log "env build: archived to $ENV_ARCHIVE ($(du -h "$ENV_ARCHIVE" | cut -f1)) in $((SECONDS - t))s"
+}
+
+# Unpack the volume's archive beside the final path and rename it into place,
+# so a pod killed mid-unpack never leaves a half env that looks complete.
+unpack_env() {
+	local t=$SECONDS partial="$ENV_DIR.partial"
+	rm -rf "$partial" "$ENV_DIR"
+	mkdir -p "$partial"
+	if ! tar -xf "$ENV_ARCHIVE" -C "$partial" || [[ ! -f "$partial/$ENV_MARKER_NAME" || ! -x "$partial/bin/python" ]]; then
+		rm -rf "$partial"
+		log "ERROR: $ENV_ARCHIVE is not a usable env for this image (the unpack failed, or it has no completion marker or interpreter). Delete it; the next pod rebuilds it."
+		exit 1
+	fi
+	mv "$partial" "$ENV_DIR"
+	UNPACK_SECONDS=$((SECONDS - t))
 }
 
 ensure_env() {
 	local t0=$SECONDS seen="" seen_at=$SECONDS state announced=""
+	# Unpacked already: this container restarted.
 	if env_ready; then
 		log "python env $ENV_KEY found at $ENV_DIR, reusing it (checked in $((SECONDS - t0))s)"
 		return 0
 	fi
-	mkdir -p "$ENVS_DIR"
+	mkdir -p "$ENVS_DIR" "$(dirname "$ENV_DIR")"
 	while :; do
-		if env_ready; then
-			log "python env $ENV_KEY found at $ENV_DIR, reusing it (waited $((SECONDS - t0))s for another pod to build it)"
+		if archive_ready; then
+			unpack_env
+			log "python env $ENV_KEY unpacked from $ENV_ARCHIVE in ${UNPACK_SECONDS}s, reusing it ($((SECONDS - t0))s in all)"
 			return 0
 		fi
 		if mkdir "$ENV_LOCK" 2>/dev/null; then
@@ -221,12 +266,12 @@ ensure_env() {
 			echo "$ENV_TOKEN" >"$ENV_LOCK/owner"
 			trap release_env_lock EXIT
 			start_heartbeat
-			if env_ready; then # finished by another pod since the check above
+			if archive_ready; then # published by another pod since the check above
 				release_env_lock
 				trap - EXIT
 				continue
 			fi
-			log "python env $ENV_KEY is not on the volume yet: building it at $ENV_DIR (once per volume and dependency set; other pods wait for it)"
+			log "python env $ENV_KEY is not on the volume yet: building it at $ENV_DIR and archiving it to $ENV_ARCHIVE (once per volume and dependency set; other pods wait for it)"
 			build_env
 			release_env_lock
 			trap - EXIT
@@ -259,12 +304,20 @@ if [[ "${COMFY_IMAGE_VARIANT:-}" == "runpod" ]]; then
 		log "ERROR: this is the runpod image. Its Python env (torch + requirements, several GB) lives on the network volume, and no volume is mounted. Mount one at /workspace (or set COMFYUI_DATA_DIR), or use shivanshtalwar0/comfyui:latest, which has everything baked in. For a shell without the env: --entrypoint bash."
 		exit 64
 	fi
+	if [[ ! -s "$COMFY_ROOT/docker/env-key" ]]; then
+		# Code fetched by docker/runpod-bootstrap.sh rather than baked into the
+		# slim image: compute the key the image would have baked.
+		bash "$COMFY_ROOT/docker/env-inputs.sh" >"$COMFY_ROOT/docker/env-inputs"
+		sha256sum "$COMFY_ROOT/docker/env-inputs" | cut -c1-16 >"$COMFY_ROOT/docker/env-key"
+		log "env key computed at boot: $(cat "$COMFY_ROOT/docker/env-key")"
+	fi
 	ENV_KEY=$(cat "$COMFY_ROOT/docker/env-key")
 	export COMFY_ENV_KEY="$ENV_KEY"
 	TORCH_INDEX_URL=$(sed -n 's/^torch_index=//p' "$COMFY_ROOT/docker/env-inputs")
 	ENVS_DIR="${COMFY_ENVS_DIR:-$DATA_DIR/envs}"
-	ENV_DIR="$ENVS_DIR/$ENV_KEY"
+	ENV_ARCHIVE="$ENVS_DIR/$ENV_KEY.tar"
 	ENV_LOCK="$ENVS_DIR/.lock-$ENV_KEY"
+	ENV_DIR="${COMFY_ENV_LOCAL_DIR:-/opt/comfy-env}/$ENV_KEY"
 	ENV_WAIT_SECONDS="${COMFY_ENV_WAIT_SECONDS:-1800}"
 	ENV_LOCK_STALE_SECONDS="${COMFY_ENV_LOCK_STALE_SECONDS:-120}"
 	for value in "$ENV_WAIT_SECONDS" "$ENV_LOCK_STALE_SECONDS"; do

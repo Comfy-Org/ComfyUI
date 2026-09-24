@@ -77,32 +77,22 @@ RUN python -m pip install -r requirements.txt && \
 FROM system AS runpod
 
 ARG TORCH_INDEX_URL
-# Bump when docker/entrypoint.sh changes HOW the env is built (packages, uv
-# flags), so every volume gets a fresh env instead of reusing an old recipe.
-ARG ENV_RECIPE=1
 
 # Only the static uv binary (not uvx): it builds the env on the first boot.
 COPY --from=uv /uv /usr/local/bin/uv
 
 COPY . .
 
-# The env key names the virtualenv on the volume (<data dir>/envs/<key>). It
-# hashes everything the env's contents depend on, so an image whose
+# The env key names the env archive on the volume (<data dir>/envs/<key>.tar).
+# It hashes everything the env's contents depend on, so an image whose
 # dependencies changed builds a fresh env next to the old one, while an image
-# that only changed code reuses the existing one. Python is keyed on its minor
-# version: patch releases are ABI compatible and the venv links to this
-# image's interpreter. docker/env-inputs keeps the hashed text, and the
-# entrypoint reads the torch index from it (one source of truth).
+# that only changed code reuses the existing one. docker/env-inputs.sh prints
+# the hashed text (the entrypoint runs the same script at boot for code that
+# docker/runpod-bootstrap.sh fetched, so both keys agree); docker/env-inputs
+# keeps it, and the entrypoint reads the torch index from it.
 RUN mkdir -p input output temp user models api_server/workflows && \
-    chmod +x docker/entrypoint.sh && \
-    { \
-        echo "recipe=${ENV_RECIPE}"; \
-        echo "python=$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"; \
-        echo "platform=$(uname -m)"; \
-        echo "os=$(. /etc/os-release && echo "${ID}${VERSION_ID}")"; \
-        echo "torch_index=${TORCH_INDEX_URL}"; \
-        echo "requirements_sha256=$(sha256sum requirements.txt | cut -d' ' -f1)"; \
-    } > docker/env-inputs && \
+    chmod +x docker/entrypoint.sh docker/env-inputs.sh docker/runpod-bootstrap.sh && \
+    TORCH_INDEX_URL="${TORCH_INDEX_URL}" docker/env-inputs.sh > docker/env-inputs && \
     sha256sum docker/env-inputs | cut -c1-16 > docker/env-key && \
     cat docker/env-inputs docker/env-key
 

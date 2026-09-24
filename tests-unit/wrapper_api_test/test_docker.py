@@ -6,13 +6,17 @@ as volumes, and the Dockerfile must order dependency installation before the
 source copy so Docker's cache keeps the base stage until requirements change.
 
 The `runpod` target is the slim RunPod variant: no torch or requirements in
-the image; the entrypoint builds them once into a virtualenv on the network
-volume under a lock and every later pod reuses it.
+the image; the entrypoint builds them once under a lock, archives the env to
+the network volume, and every later pod unpacks it. docker/runpod-bootstrap.sh
+runs the same entrypoint on RunPod's own cached image, with this code fetched
+onto the volume.
 """
 
 import os
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -182,13 +186,19 @@ class TestRunpodTarget(unittest.TestCase):
 
     def test_env_key_is_baked(self):
         self.assertIn("ARG TORCH_INDEX_URL", self.runpod)
-        # Everything the env's contents depend on goes into the hashed inputs.
-        for part in ("recipe=${ENV_RECIPE}", "python=", "sys.version_info[:2]", "platform=$(uname -m)",
-                     "torch_index=${TORCH_INDEX_URL}", "sha256sum requirements.txt"):
-            self.assertIn(part, self.runpod)
-        self.assertIn("> docker/env-inputs", self.runpod)
+        # One script prints the hashed inputs, for the image and for the boot-time key alike.
+        self.assertIn('TORCH_INDEX_URL="${TORCH_INDEX_URL}" docker/env-inputs.sh > docker/env-inputs', self.runpod)
         self.assertIn("sha256sum docker/env-inputs | cut -c1-16 > docker/env-key", self.runpod)
         self.assertIn("COMFY_IMAGE_VARIANT=runpod", self.runpod)
+        self.assertNotIn("ENV_RECIPE", self.dockerfile, "the recipe lives in docker/env-inputs.sh")
+        inputs = read("docker", "env-inputs.sh")
+        # Everything the env's contents depend on goes into the hashed inputs.
+        for part in ('echo "recipe=$ENV_RECIPE"', "sys.version_info[:2]", 'echo "python_path=$python"', "platform=$(uname -m)",
+                     "sha256sum requirements.txt"):
+            self.assertIn(part, inputs)
+        # The script's default index is the Dockerfile's, so a boot-time key matches the baked one.
+        default = re.search(r"^ARG TORCH_INDEX_URL=(\S+)$", self.dockerfile, re.MULTILINE).group(1)
+        self.assertIn(f"torch_index=${{TORCH_INDEX_URL:-{default}}}", inputs)
 
     def test_entrypoint_and_healthcheck(self):
         self.assertIn('ENTRYPOINT ["tini", "--", "/opt/ComfyUI/docker/entrypoint.sh"]', self.runpod)
@@ -213,9 +223,45 @@ class TestRunpodEntrypoint(unittest.TestCase):
         self.assertIn('"${COMFY_IMAGE_VARIANT:-}" == "runpod"', self.script)
         self.assertIn('ENV_KEY=$(cat "$COMFY_ROOT/docker/env-key")', self.script)
         self.assertIn('ENVS_DIR="${COMFY_ENVS_DIR:-$DATA_DIR/envs}"', self.script)
-        self.assertIn('ENV_DIR="$ENVS_DIR/$ENV_KEY"', self.script)
-        # The torch index comes from the baked inputs, so it always matches the key.
+        # One archive per key on the volume; the env itself on the container disk, at a fixed path.
+        self.assertIn('ENV_ARCHIVE="$ENVS_DIR/$ENV_KEY.tar"', self.script)
+        self.assertIn('ENV_DIR="${COMFY_ENV_LOCAL_DIR:-/opt/comfy-env}/$ENV_KEY"', self.script)
+        # The torch index comes from the hashed inputs, so it always matches the key.
         self.assertIn("s/^torch_index=//p", self.script)
+
+    def test_key_computed_at_boot_for_fetched_code(self):
+        start = self.script.index('if [[ ! -s "$COMFY_ROOT/docker/env-key" ]]; then')
+        block = self.script[start:self.script.index("\tfi\n", start)]
+        self.assertIn('bash "$COMFY_ROOT/docker/env-inputs.sh" >"$COMFY_ROOT/docker/env-inputs"', block)
+        self.assertIn('sha256sum "$COMFY_ROOT/docker/env-inputs" | cut -c1-16 >"$COMFY_ROOT/docker/env-key"', block)
+        self.assertLess(start, self.script.index('ENV_KEY=$(cat "$COMFY_ROOT/docker/env-key")'), "computed before it is read")
+
+    def test_archive_is_published_whole(self):
+        archive = self.script[self.script.index("archive_env() {"):self.script.index("unpack_env() {")]
+        write = archive.index('tar -cf "$tmp" -C "$ENV_DIR" .')
+        owner = archive.index('"$(lock_owner)" != "$ENV_TOKEN"')
+        publish = archive.index('mv -f "$tmp" "$ENV_ARCHIVE"')
+        self.assertLess(write, owner)
+        self.assertLess(owner, publish, "only the lock owner publishes, and only a finished archive")
+        build = self.script[self.script.index("build_env() {"):self.script.index("archive_env() {")]
+        self.assertLess(build.index('mv -f "$ENV_DIR/$ENV_MARKER_NAME.tmp" "$ENV_DIR/$ENV_MARKER_NAME"'), build.index("\tarchive_env\n"),
+                        "the archive carries the completion marker")
+
+    def test_unpack_renames_a_complete_env_into_place(self):
+        unpack = self.script[self.script.index("unpack_env() {"):self.script.index("ensure_env() {")]
+        self.assertIn('partial="$ENV_DIR.partial"', unpack)
+        extract = unpack.index('tar -xf "$ENV_ARCHIVE" -C "$partial"')
+        checked = unpack.index('! -f "$partial/$ENV_MARKER_NAME"')
+        renamed = unpack.index('mv "$partial" "$ENV_DIR"')
+        self.assertLess(extract, checked)
+        self.assertLess(checked, renamed)
+
+    def test_archive_before_build(self):
+        ensure = self.script[self.script.index("ensure_env() {"):self.script.index('if [[ "${COMFY_IMAGE_VARIANT:-}" == "runpod" ]]; then')]
+        # A restarted container reuses its unpacked env; otherwise the archive; only then build.
+        self.assertLess(ensure.index("if env_ready; then"), ensure.index("if archive_ready; then"))
+        self.assertLess(ensure.index("if archive_ready; then"), ensure.index('mkdir "$ENV_LOCK" 2>/dev/null'))
+        self.assertIn("if archive_ready; then # published by another pod", ensure, "the lock holder re-checks first")
 
     def test_fails_fast_without_a_volume(self):
         block = self.script[self.script.index('if [[ "${COMFY_IMAGE_VARIANT:-}" == "runpod" ]]; then'):]
@@ -278,7 +324,62 @@ class TestRunpodEntrypoint(unittest.TestCase):
 
     def test_logs_found_vs_built_timings(self):
         self.assertIn("reusing it (checked in $((SECONDS - t0))s)", self.script)
+        self.assertIn("unpacked from $ENV_ARCHIVE in ${UNPACK_SECONDS}s, reusing it", self.script)
         self.assertIn("built in $((SECONDS - t0))s", self.script)
+
+
+@unittest.skipIf(sys.platform == "win32", "bash scripts")
+class TestRunpodBootstrap(unittest.TestCase):
+    """docker/runpod-bootstrap.sh: code onto the volume, then the entrypoint, on RunPod's cached image."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = read("docker", "runpod-bootstrap.sh")
+
+    @staticmethod
+    def run_script(name, env):
+        return subprocess.run(["bash", os.path.join(ROOT, "docker", name)], env={"PATH": os.environ["PATH"], **env},
+                              capture_output=True, text=True, timeout=60)
+
+    def test_refuses_anything_but_a_commit(self):
+        with tempfile.TemporaryDirectory() as data:
+            for ref in ("", "master", "v1.2.3", "../etc", "ABCDEF1"):
+                result = self.run_script("runpod-bootstrap.sh", {"COMFY_CODE_REF": ref, "COMFYUI_DATA_DIR": data})
+                self.assertEqual(result.returncode, 64, f"{ref!r} must be refused")
+                self.assertIn("must be a commit sha", result.stderr)
+            self.assertEqual(os.listdir(data), [], "nothing is written for a refused ref")
+
+    def test_refuses_to_run_without_a_volume(self):
+        result = self.run_script("runpod-bootstrap.sh", {"COMFY_CODE_REF": "a" * 40, "COMFYUI_DATA_DIR": "/nonexistent-volume"})
+        self.assertEqual(result.returncode, 64)
+        self.assertIn("no writable network volume", result.stderr)
+
+    def test_code_cached_per_commit_and_published_whole(self):
+        self.assertIn('archive="$store/ComfyUI-$ref.tar.gz"', self.script)
+        self.assertIn('if [[ -s "$archive" ]]; then', self.script)
+        download = self.script.index('python3 - "$url" "$tmp"')
+        verified = self.script.index('gzip -t "$tmp"')
+        published = self.script.index('mv -f "$tmp" "$archive"')
+        self.assertLess(download, verified)
+        self.assertLess(verified, published)
+        self.assertIn("https://codeload.github.com/${COMFY_CODE_REPO:-januscaler/ComfyUI}/tar.gz/$ref", self.script)
+
+    def test_hands_over_to_the_entrypoint_as_the_runpod_variant(self):
+        unpacked = self.script.index('tar -xzf "$archive" -C "$root" --strip-components=1')
+        exported = self.script.index("export COMFY_IMAGE_VARIANT=runpod")
+        handed = self.script.index('exec bash "$root/docker/entrypoint.sh" "$@"')
+        self.assertLess(unpacked, exported)
+        self.assertLess(exported, handed)
+        self.assertIn("root=/opt/ComfyUI", self.script)
+
+    def test_env_inputs_script_prints_every_input(self):
+        result = self.run_script("env-inputs.sh", {})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        keys = [line.split("=", 1)[0] for line in result.stdout.splitlines()]
+        self.assertEqual(keys, ["recipe", "python", "python_path", "platform", "os", "torch_index", "requirements_sha256"])
+        self.assertEqual(result.stdout, self.run_script("env-inputs.sh", {}).stdout, "the key must be deterministic")
+        other = self.run_script("env-inputs.sh", {"TORCH_INDEX_URL": "https://download.pytorch.org/whl/cu130"})
+        self.assertNotEqual(result.stdout, other.stdout, "another torch index is another env")
 
 
 class TestPublishWorkflow(unittest.TestCase):
@@ -333,6 +434,17 @@ class TestPublishWorkflow(unittest.TestCase):
         self.assertIn("boot second", runs)
         self.assertIn("prefetch --dry-run", runs)
 
+    def test_runpod_smoke_test_boots_through_the_bootstrap(self):
+        # The production path: code tarball onto the volume, env from the archive, no rebuild.
+        runs = "\n".join(s.get("run", "") for s in self.jobs["runpod"]["steps"])
+        self.assertIn('git archive --format=tar.gz --prefix="ComfyUI-$sha/"', runs)
+        self.assertIn('--entrypoint bash "$RUNPOD_SMOKE_TAG" /bootstrap.sh', runs)
+        self.assertIn('-e COMFY_CODE_REF="$sha"', runs)
+        self.assertIn("env key computed at boot", runs)
+        self.assertIn("unpacked from /workspace/envs/", runs)
+        self.assertIn('kill "$server"', runs)
+        self.assertIn('code $sha found on the volume', runs)
+
     def test_full_smoke_tests_kept(self):
         runs = "\n".join(s.get("run", "") for s in self.jobs["build"]["steps"])
         self.assertIn("assert torch.version.cuda", runs)
@@ -343,7 +455,8 @@ class TestPublishWorkflow(unittest.TestCase):
 class TestReadme(unittest.TestCase):
     def test_documents_the_runpod_variant(self):
         readme = read("README.md")
-        for text in ("docker.io/shivanshtalwar0/comfyui:runpod", "prefetch --env-only", "/workspace/envs/<key>"):
+        for text in ("docker.io/shivanshtalwar0/comfyui:runpod", "prefetch --env-only", "/workspace/envs/<key>.tar",
+                     "docker/runpod-bootstrap.sh", "COMFY_CODE_REF", "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"):
             self.assertTrue(text in readme, f"README must document {text!r}")
 
 
