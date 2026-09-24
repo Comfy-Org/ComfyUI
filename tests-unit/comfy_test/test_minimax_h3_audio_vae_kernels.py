@@ -69,16 +69,17 @@ def _downsample_reference(x, filter):
 
 @pytest.mark.parametrize("length", [1, 2, 17, 257])
 @pytest.mark.parametrize("upsample", [True, False])
-def test_minimax_h3_fir_kernel_matches_torch(length, upsample):
+@pytest.mark.parametrize("temporal_stride", [1, 2])
+def test_minimax_h3_fir_kernel_matches_torch(length, upsample, temporal_stride):
     if not torch.cuda.is_available():
         pytest.skip("requires a supported HIP GPU")
 
     device = torch.device("cuda")
     layer = UpSample1d() if upsample else LowPassFilter1d(stride=2)
     layer = layer.to(device)
-    # Striding exercises the kernel's explicit input strides; lengths cover
-    # replicate padding at the boundary and masked final blocks.
-    x = torch.randn(2, 3, length * 2, device=device)[:, :, ::2]
+    # Lengths cover replicate padding and masked blocks; temporal_stride tests
+    # both contiguous inputs and explicit non-contiguous input strides.
+    x = torch.randn(2, 3, length * temporal_stride, device=device)[:, :, ::temporal_stride]
     if not audio_vae_kernels.can_use(x, layer.filter):
         pytest.skip("requires a supported HIP GPU")
 

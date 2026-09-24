@@ -21,8 +21,8 @@ _SUPPORTED_HIP_ARCHES = {
 
 if triton is not None:
     @triton.jit
-    def _fir2x(X, FILTER, Y, LENGTH: tl.constexpr, OUTPUT: tl.constexpr,
-               CHANNELS: tl.constexpr, SB: tl.constexpr, SC: tl.constexpr, ST: tl.constexpr,
+    def _fir2x(X, FILTER, Y, LENGTH, OUTPUT,
+               CHANNELS, SB, SC, ST,
                UP: tl.constexpr, BLOCK: tl.constexpr):
         bc = tl.program_id(0)
         j = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
@@ -46,8 +46,8 @@ if triton is not None:
 
 
     @triton.jit
-    def _snake_beta_f32(X, ALPHA, BETA, Y, LENGTH: tl.constexpr, CHANNELS: tl.constexpr,
-                       STRIDE_B: tl.constexpr, STRIDE_C: tl.constexpr, STRIDE_T: tl.constexpr,
+    def _snake_beta_f32(X, ALPHA, BETA, Y, LENGTH, CHANNELS,
+                       STRIDE_B, STRIDE_C, STRIDE_T,
                        BLOCK: tl.constexpr):
         bc = tl.program_id(0)
         offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
