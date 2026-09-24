@@ -285,11 +285,10 @@ def test_causal_memory_cache_holds_unpackable_tails_as_they_are():
     assert not cache._packable(torch.zeros(4, 8)) and not cache._packable("not a tensor")
     tail = torch.randn(1, 96, 2, 4, 4)
     cache["conv"] = tail
-    assert cache["conv"] is tail and "conv" in cache
+    assert cache.get("conv") is tail and "conv" in cache
     assert cache.pop("conv") is tail and "conv" not in cache
     assert cache.pop("conv", "fallback") == "fallback"
-    with pytest.raises(KeyError):
-        cache["missing"]
+    assert cache.get("missing") is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="tails pack on CUDA")
@@ -299,13 +298,13 @@ def test_causal_memory_cache_packing_round_trips(channels):
     cache = _AlwaysPackedCache()
     cache["conv"] = tail
     assert "conv" in cache.packed
-    restored = cache["conv"]
+    restored = cache.get("conv")
     assert restored.shape == tail.shape and restored.dtype == tail.dtype
     assert restored.is_contiguous(memory_format=torch.channels_last_3d)
     assert _rel_err(restored, tail) < 1e-2
     plain = torch.randn(1, 96, 2, 4, 4)
     cache["conv"] = plain   # replaces the packed entry
-    assert cache["conv"] is plain and "conv" not in cache.packed
+    assert cache.get("conv") is plain and "conv" not in cache.packed
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="offload moves tails between CUDA and host memory")
@@ -323,7 +322,7 @@ def test_causal_memory_cache_offload_round_trips_across_slices():
             offloaded[k] = tails[k] * (slice_idx + 1)
         assert not any(q.is_cuda for q, *_ in offloaded.packed.values()), "offloaded tails stay off the GPU between slices"
         for k in keys:
-            a, b = resident[k], offloaded[k]
+            a, b = resident.get(k), offloaded.get(k)
             assert b.is_contiguous(memory_format=torch.channels_last_3d)
             assert torch.equal(a, b), f"{k} slice {slice_idx}: offloaded tail differs"
     assert offloaded.pop("conv0") is not None and "conv0" not in offloaded
@@ -347,22 +346,101 @@ def test_causal_memory_cache_offloads_small_tails_and_parked_frames_exactly():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="ring entries pack and offload on CUDA")
+def _ring(cache, key):
+    frames = []
+    cache.for_each_frame(key, lambda i, frame: frames.append(frame.clone()))
+    return torch.cat(frames, dim=2)
+
+
 def test_causal_memory_cache_frame_ring_keeps_the_last_frames():
-    """push_frames extends a key's tail one frame at a time; get() returns the last `keep`
+    """push_frames extends a key's tail one frame at a time; for_each_frame reads the last `keep`
     frames in order, retired frames are dropped, and a plain assignment replaces the ring."""
     cache = _AlwaysPackedCache(offload=True)
     frames = [f.contiguous(memory_format=torch.channels_last_3d) for f in _cache_tail(128, frames=4).split(1, dim=2)]
     cache.push_frames("conv", torch.cat(frames[:2], dim=2), keep=2)
     assert "conv" in cache
-    assert _rel_err(cache["conv"], torch.cat(frames[:2], dim=2)) < 1e-2
+    assert _rel_err(_ring(cache, "conv"), torch.cat(frames[:2], dim=2)) < 1e-2
     cache.push_frames("conv", frames[2], keep=2)          # one new frame: one packed entry
     assert len(cache._rings["conv"]) == 2
-    assert _rel_err(cache["conv"], torch.cat(frames[1:3], dim=2)) < 1e-2
+    assert _rel_err(_ring(cache, "conv"), torch.cat(frames[1:3], dim=2)) < 1e-2
     cache.push_frames("conv", frames[3], keep=2)
     assert len(cache.plain) + len(cache.packed) == 2, "retired frames must be dropped, not accumulated"
     cache["conv"] = frames[0]                              # plain assignment replaces the ring
-    assert "conv" not in cache._rings and cache["conv"].shape == frames[0].shape
+    assert "conv" not in cache._rings and cache.get("conv").shape == frames[0].shape
+    assert len(cache.plain) + len(cache.packed) == 1
     cache.free()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ring entries are CUDA frames")
+@pytest.mark.parametrize("offload", [False, True])
+def test_causal_memory_cache_push_frames_copies_out_of_the_callers_buffer(offload):
+    """Frames too small to pack are pushed as views of the conv's padded buffer; held as views they
+    would keep the whole buffer alive, and the caller reuses it once the push returns."""
+    cache = vae_mod.CausalMemoryCache(offload=offload)
+    buf = _cache_tail(64, frames=4)
+    expected = buf[:, :, -2:].clone()
+    cache.push_frames("conv", buf[:, :, -2:], keep=2)
+    buf.zero_()
+    if not offload:
+        assert all(t.untyped_storage().data_ptr() != buf.untyped_storage().data_ptr() for t in cache.plain.values())
+    assert torch.equal(_ring(cache, "conv"), expected)
+    cache.free()
+
+
+def _half_cuda(module):
+    torch.manual_seed(0)
+    for p in module.parameters():
+        torch.nn.init.normal_(p, std=0.1)
+    return module.to("cuda", torch.float16)
+
+
+def _slices(channels, frames, h, w):
+    """fp16 activations for consecutive slices; the reference runs them NCDHW, which takes the eager
+    path. Sized so the fp16-accumulate runs reach the kitchen conv, which leaves small launches to cuDNN."""
+    torch.manual_seed(1)
+    return [torch.randn(1, channels, t, h, w, device="cuda", dtype=torch.float16) for t in frames]
+
+
+def _states(n):
+    return [vae_mod.MemoryState.INITIALIZING] + [vae_mod.MemoryState.ACTIVE] * (n - 1)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the buffered convs run fp16 on CUDA")
+@pytest.mark.parametrize("fp16acc", [False, True])
+@pytest.mark.parametrize("temporal_down", [False, True])
+def test_seedvr2_downsample_buffered_matches_padded_conv(temporal_down, fp16acc, monkeypatch):
+    """The buffered downsampler writes into the conv's buffer with its own right/bottom border in
+    place of F.pad; across slices it must match the pad-then-conv path and its cache."""
+    down = _half_cuda(vae_mod.Downsample3D(16, temporal_down=temporal_down))
+    slices = _slices(16, (9, 8) if temporal_down else (5, 4), h=160, w=160)
+    ref_cache, cache = vae_mod.CausalMemoryCache(), vae_mod.CausalMemoryCache()
+    for x, state in zip(slices, _states(len(slices))):
+        ref = down.run([x], state, ref_cache)
+        with monkeypatch.context() as m:
+            m.setattr(torch.backends.cuda.matmul, "allow_fp16_accumulation", fp16acc, raising=False)
+            got = down.run([x.contiguous(memory_format=torch.channels_last_3d)], state, cache)
+        assert got.shape == ref.shape
+        assert _rel_err(got, ref) < (2e-3 if fp16acc else 1e-3)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the buffered convs run fp16 on CUDA")
+@pytest.mark.parametrize("fp16acc", [False, True])
+def test_seedvr2_upsample_per_frame_matches_whole_slice(fp16acc, monkeypatch):
+    """The decoder's last temporal upsampler runs a latent frame at a time through frames(); its
+    output frames, and the whole-slice buffered run, must match the eager shuffle-then-conv path."""
+    up = _half_cuda(vae_mod.Upsample3D(16, temporal_up=True))
+    slices = _slices(16, (1, 1, 1), h=64, w=64)
+    caches = [vae_mod.CausalMemoryCache() for _ in range(3)]
+    for x, state in zip(slices, _states(len(slices))):
+        ref = up.run([x], state, caches[0])
+        x = x.contiguous(memory_format=torch.channels_last_3d)
+        with monkeypatch.context() as m:
+            m.setattr(torch.backends.cuda.matmul, "allow_fp16_accumulation", fp16acc, raising=False)
+            whole = up.run([x], state, caches[1])
+            per_frame = torch.cat([box.pop() for box in up.frames([x], state, caches[2])], dim=2)
+        for got in (whole, per_frame):
+            assert got.shape == ref.shape
+            assert _rel_err(got, ref) < (2e-3 if fp16acc else 1e-3)
 
 
 def _make_block(is_last_layer, dim=16, heads=2, head_dim=8):
@@ -493,10 +571,15 @@ def test_seedvr2_causal_norm_wrapper_silu_matches_norm_then_silu(silu):
     torch.testing.assert_close(got, _reference_group_norm(norm, x, silu), rtol=1e-5, atol=1e-6)
 
 
-def _decode_estimate(frames, height, width):
+def _decode_estimate(frames, height, width, dtype=torch.float16, batch=1):
     wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
     latent_t = (frames - 1) // 4 + 1
-    return wrapper.comfy_memory_used_decode((1, 16, latent_t, height // 8, width // 8))
+    return wrapper.comfy_memory_used_decode((batch, 16, latent_t, height // 8, width // 8), dtype)
+
+
+def _encode_estimate(frames, height, width, dtype=torch.float16, batch=1):
+    wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
+    return wrapper.comfy_memory_used_encode((batch, 3, frames, height, width), dtype)
 
 
 def test_seedvr2_decode_estimate_is_flat_in_clip_length():
@@ -519,6 +602,7 @@ def test_seedvr2_decode_estimate_is_flat_in_clip_length():
     (21, 720, 1280, 3.01),
     (9, 864, 1536, 4.01),
     (21, 1080, 1920, 6.26),
+    (9, 2160, 3840, 23.98),
 ])
 def test_seedvr2_decode_estimate_tracks_measured_peak(frames, height, width, measured_gib):
     """The least free VRAM (to 0.5 GiB) an untiled decode ran in under cudaMallocAsync, RTX 5090;
@@ -537,14 +621,46 @@ def test_seedvr2_decode_estimate_tracks_measured_peak(frames, height, width, mea
     (21, 720, 1280, 2.51),
     (9, 864, 1536, 3.01),
     (21, 1088, 1920, 5.01),
+    (9, 2160, 3840, 19.73),
 ])
 def test_seedvr2_encode_estimate_tracks_measured_floor(frames, height, width, measured_gib):
     """Same measurement as the decode table; slicing and the frame-chunked head keep an encode flat
     in clip length, so the estimate must not grow with it."""
-    wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
-    estimate = wrapper.comfy_memory_used_encode((1, 3, frames, height, width))
+    estimate = _encode_estimate(frames, height, width)
     assert measured_gib <= estimate / 1024 ** 3 < measured_gib * 1.35
-    assert wrapper.comfy_memory_used_encode((1, 3, frames * 10, height, width)) == estimate
+    assert _encode_estimate(frames * 10, height, width) == estimate
+
+
+@pytest.mark.parametrize("dtype, decode_factor, encode_factor", [(torch.bfloat16, 5, 3), (torch.float32, 10, 6)])
+def test_seedvr2_estimates_scale_for_the_eager_path(dtype, decode_factor, encode_factor):
+    """Only fp16 runs the channels-last path the figures are fitted on; bf16 and fp32 run the eager
+    path, measured at 2.4-5x (bf16) and 4-8.4x (fp32) the fp16 estimate. A batch is run a video at a
+    time, so the estimate is per video."""
+    assert _decode_estimate(21, 720, 1280, dtype) / _decode_estimate(21, 720, 1280) == pytest.approx(decode_factor)
+    assert _encode_estimate(21, 720, 1280, dtype) / _encode_estimate(21, 720, 1280) == pytest.approx(encode_factor)
+    assert _decode_estimate(21, 720, 1280, dtype, batch=3) == _decode_estimate(21, 720, 1280, dtype)
+    assert _encode_estimate(21, 720, 1280, dtype, batch=3) == _encode_estimate(21, 720, 1280, dtype)
+    assert _tile_side(8, dtype) < _tile_side(8)
+
+
+def test_seedvr2_batch_runs_a_video_at_a_time():
+    """The buffered convs and the estimates are per video: a batch is split before slicing, and the
+    slices land back in their video's place (in the preallocated output too)."""
+    vae = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
+    vae.slicing_sample_min_size = vae.slicing_latent_min_size = 2
+    seen = []
+
+    def run(x, memory_state=vae_mod.MemoryState.DISABLED, memory_cache=None):
+        seen.append(x.size(0))
+        return x[:, :3].clone()
+    vae._decode = vae._encode = run
+    z = torch.randn(2, 16, 7, 4, 4)
+    torch.testing.assert_close(vae.slicing_decode(z), z[:, :3], rtol=0, atol=0)
+    out = torch.empty(2, 3, 7, 4, 4)
+    assert vae.slicing_decode(z, output_buffer=out) is out
+    torch.testing.assert_close(out, z[:, :3], rtol=0, atol=0)
+    torch.testing.assert_close(vae.slicing_encode(z), z[:, :3], rtol=0, atol=0)
+    assert set(seen) == {1}
 
 
 def test_seedvr2_encode_accepts_the_chunked_io_device_kwarg():
@@ -572,10 +688,10 @@ def test_seedvr2_decode_output_shape_matches_decode():
     assert vae_mod.VideoAutoencoderKLWrapper.comfy_has_chunked_io is True
 
 
-def _tile_side(free_gib):
+def _tile_side(free_gib, dtype=torch.float16):
     wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
     wrapper.spatial_downsample_factor = 8
-    return wrapper.preferred_decode_tile(free_gib * 1024 ** 3)
+    return wrapper.preferred_decode_tile(free_gib * 1024 ** 3, dtype)
 
 
 def test_seedvr2_tile_side_tracks_free_memory_within_bounds():

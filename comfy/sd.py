@@ -598,8 +598,8 @@ class VAE:
                 self.latent_channels = comfy.ldm.seedvr.vae.SEEDVR2_LATENT_CHANNELS
                 self.latent_dim = 3
                 self.disable_offload = True
-                self.memory_used_decode = lambda shape, dtype: self.first_stage_model.comfy_memory_used_decode(shape)
-                self.memory_used_encode = lambda shape, dtype: self.first_stage_model.comfy_memory_used_encode(shape)
+                self.memory_used_decode = self.first_stage_model.comfy_memory_used_decode
+                self.memory_used_encode = self.first_stage_model.comfy_memory_used_encode
                 self.working_dtypes = [torch.float16, torch.bfloat16, torch.float32]
                 self.handles_tiling = True
                 self.format_encoded = self.first_stage_model.comfy_format_encoded
@@ -1318,7 +1318,7 @@ class VAE:
                     # A VAE that can size its own tiles raises the 256-pixel floor.
                     prefers_tile = getattr(self.first_stage_model, "preferred_decode_tile", None)
                     if prefers_tile is not None:
-                        tile = max(tile, prefers_tile(self.patcher.get_free_memory(self.device)))
+                        tile = max(tile, prefers_tile(self.patcher.get_free_memory(self.device), self.vae_dtype))
                     overlap = tile // 4
                     if self.handles_tiling:
                         memory_used = self.memory_used_decode(self._tile_bounded_shape(samples_in.shape, tile, tile, None), self.vae_dtype)

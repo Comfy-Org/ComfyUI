@@ -22,15 +22,20 @@ SEEDVR2_VAE_CACHE_QUANT_BYTES = 64 * 1024 ** 2         # tails at or above this 
 SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL = 6200             # host-held caches and parked frames, per output-frame pixel.
 
 # VAE decode estimate: the free VRAM an untiled decode needs under cudaMallocAsync (ComfyUI's default),
-# fitted 2-11% above the measured floor.
-SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL = 3000            # working set, per output-frame pixel.
+# fitted 3-7% above the measured floor from 480p to 4K.
+SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL = 3100            # working set, per output-frame pixel.
 SEEDVR2_DECODE_BYTES_PER_OUTPUT_PIXEL = 6              # decoded fp16 frames, per output pixel.
 SEEDVR2_DECODE_FIXED_BYTES = 384 * 1024 ** 2
 SEEDVR2_DECODE_LAB_BYTES_PER_OUTPUT_PIXEL = 160        # colour correction is per frame in the node.
 
-# VAE encode estimate, likewise fitted 2-16% above the measured floor; slicing keeps it flat in clip length.
-SEEDVR2_ENCODE_BYTES_PER_PIXEL = 2300                  # per input-frame pixel.
-SEEDVR2_ENCODE_FIXED_BYTES = 672 * 1024 ** 2
+# VAE encode estimate, likewise fitted 3-23% above the measured floor; slicing keeps it flat in clip length.
+SEEDVR2_ENCODE_BYTES_PER_PIXEL = 2550                  # per input-frame pixel.
+SEEDVR2_ENCODE_FIXED_BYTES = 576 * 1024 ** 2
+
+# The fits cover the fp16 channels-last path; other dtypes run the eager path, measured at about this
+# many times the estimate per two bytes of element.
+SEEDVR2_EAGER_DECODE_FACTOR = 5
+SEEDVR2_EAGER_ENCODE_FACTOR = 3
 
 # Tiled decode, in latent units (8 output pixels each).
 SEEDVR2_TILE_MEM_HEADROOM = 0.6
@@ -46,8 +51,6 @@ BYTEDANCE_VAE_SCALING_FACTOR = 0.9152   # configs_3b/main.yaml:57.
 BYTEDANCE_VAE_SHIFTING_FACTOR = 0.0
 BYTEDANCE_VAE_CONV_MEM_GIB = 0.5
 BYTEDANCE_VAE_NORM_MEM_GIB = 0.5
-BYTEDANCE_LOGVAR_CLAMP_MIN = -30.0      # video_vae_v3/modules/types.py:28.
-BYTEDANCE_LOGVAR_CLAMP_MAX = 20.0       # video_vae_v3/modules/types.py:28.
 BYTEDANCE_GN_CHUNKS_FP16 = 4            # causal_inflation_lib.py:351 (GroupNorm chunk count, fp16).
 BYTEDANCE_GN_CHUNKS_FP32 = 2            # causal_inflation_lib.py:351 (GroupNorm chunk count, fp32).
 BYTEDANCE_BLOCK_OUT_CHANNELS = (128, 256, 512, 512)  # s8_c16_t4_inflation_sd3.yaml:7-11.
