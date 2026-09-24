@@ -11,7 +11,7 @@ import comfy.ops
 import comfy.quant_ops
 
 from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder
-from comfy.ldm.modules.attention import optimized_attention_masked
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_masked
 from comfy.ldm.flux.layers import EmbedND
 from comfy.ldm.flux.math import apply_rope
 import comfy.patcher_extension
@@ -95,6 +95,7 @@ class JointAttention(nn.Module):
 
         """
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
         self.n_local_heads = n_heads
         self.n_local_kv_heads = self.n_kv_heads
@@ -175,7 +176,10 @@ class JointAttention(nn.Module):
         if n_rep >= 1:
             xk = xk.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
             xv = xv.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
-        output = optimized_attention_masked(xq.movedim(1, 2), xk.movedim(1, 2), xv.movedim(1, 2), self.n_local_heads, x_mask, skip_reshape=True, transformer_options=transformer_options)
+        xq = AttentionTensorContainer(xq.movedim(1, 2))
+        xk = AttentionTensorContainer(xk.movedim(1, 2))
+        xv = AttentionTensorContainer(xv.movedim(1, 2))
+        output = optimized_attention_masked(xq, xk, xv, self.n_local_heads, x_mask, skip_reshape=True, transformer_options=transformer_options, preferred_attention=self.comfy_attention)
 
         return self.out(output)
 
