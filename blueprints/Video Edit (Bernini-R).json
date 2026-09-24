@@ -3314,7 +3314,7 @@
           }
         ],
         "extra": {},
-        "category": "Video generation and editing/Video Edit",
+        "category": "Video editing/Video Edit",
         "description": "This subgraph uses Depth Anything 3 to predict spatially consistent geometry from any number of images or video frames, with or without known camera poses. It outputs depth maps, camera poses, and optionally 3D Gaussian parameters for novel view synthesis."
       },
       {

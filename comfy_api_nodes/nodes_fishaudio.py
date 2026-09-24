@@ -293,6 +293,7 @@ class FishAudioTextToSpeech(IO.ComfyNode):
             ),
             data=request,
             as_binary=True,
+            asset_urls=True,
         )
         return IO.NodeOutput(audio_bytes_to_audio_input(response))
 

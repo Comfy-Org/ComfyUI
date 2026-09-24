@@ -1,4 +1,7 @@
 import os
+import shutil
+import sqlite3
+from contextlib import closing
 
 from app.database import db
 from comfy.cli_args import database_default_path
@@ -132,3 +135,58 @@ def test_prepare_file_database_accepts_relative_database_path(monkeypatch, tmp_p
 
     assert os.getcwd() == str(tmp_path)
     assert not list(tmp_path.iterdir())
+
+
+def test_legacy_copy_includes_rows_still_in_the_wal(monkeypatch, tmp_path):
+    legacy_db = tmp_path / "install" / "user" / "comfyui.db"
+    user_db = tmp_path / "custom_user" / "comfyui.db"
+    legacy_db.parent.mkdir(parents=True)
+    user_db.parent.mkdir(parents=True)
+    writer = sqlite3.connect(legacy_db)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE t (x)")
+    writer.execute("INSERT INTO t VALUES (1)")
+    writer.commit()
+    # An unclean exit: the committed rows stay in comfyui.db-wal.
+    shutil.copy(legacy_db, tmp_path / "main-only.db")
+    shutil.copy(str(legacy_db) + "-wal", tmp_path / "saved-wal")
+    writer.close()
+    shutil.copy(tmp_path / "main-only.db", legacy_db)
+    shutil.copy(tmp_path / "saved-wal", str(legacy_db) + "-wal")
+
+    monkeypatch.setattr(db.args, "database_url", None)
+    monkeypatch.setattr(db, "get_legacy_default_db_path", lambda: str(legacy_db))
+
+    db.copy_legacy_default_db(str(user_db))
+
+    with closing(sqlite3.connect(user_db)) as copied:
+        assert copied.execute("SELECT x FROM t").fetchall() == [(1,)]
+
+
+def test_legacy_copy_skipped_when_its_wal_cannot_be_checkpointed(monkeypatch, tmp_path):
+    legacy_db = tmp_path / "install" / "user" / "comfyui.db"
+    user_db = tmp_path / "custom_user" / "comfyui.db"
+    legacy_db.parent.mkdir(parents=True)
+    user_db.parent.mkdir(parents=True)
+    writer = sqlite3.connect(legacy_db)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE t (x)")
+    writer.execute("INSERT INTO t VALUES (1)")
+    writer.commit()
+    reader = sqlite3.connect(legacy_db, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT x FROM t").fetchall()  # an open read pins the WAL
+
+    monkeypatch.setattr(db.args, "database_url", None)
+    monkeypatch.setattr(db, "get_legacy_default_db_path", lambda: str(legacy_db))
+
+    try:
+        db.copy_legacy_default_db(str(user_db))
+    finally:
+        reader.close()
+        writer.close()
+
+    assert not user_db.exists()
+    assert legacy_db.exists()

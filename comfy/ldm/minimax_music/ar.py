@@ -261,6 +261,9 @@ class MiniMaxMusic3AR(nn.Module):
 
         generator = torch.Generator(device=device).manual_seed(derive_seed(seed, "ar"))
         decoder = self.model.audio_decoder
+        decode_buffers = None
+        if self.model.graph_dynamic_vbar_blocks and comfy.model_prefetch.malloc_graph_enabled(device) and not comfy.model_management.args.disable_cuda_graphs:
+            decode_buffers = self.model.init_decode_buffers(last_hidden.shape[0], device, execution_dtype)
         depth_io = {
             "hidden": torch.empty_like(last_hidden),
             "c0": torch.empty((last_hidden.shape[0],), dtype=torch.long, device=device),
@@ -297,7 +300,7 @@ class MiniMaxMusic3AR(nn.Module):
                         break
 
             if frame_index:
-                comfy.model_prefetch.malloc_graph_begin(self, device)
+                comfy.model_prefetch.malloc_graph_begin(device)
             c0, code_or_stop, stop_token = self._sample_c0(last_hidden, cfg_scale, top_k, generator, vocab_mask)
             if pending_code is None:
                 pending_code = torch.empty_like(code_or_stop, device="cpu", pin_memory=cuda_device)
@@ -338,7 +341,7 @@ class MiniMaxMusic3AR(nn.Module):
                 pending_hidden_valid = True
 
             feedback = self._embed_audio_frame(feedback_codes, execution_dtype)
-            output = self.model(None, embeds=feedback, past_key_values=past, dtype=execution_dtype)
+            output = self.model(None, embeds=feedback, past_key_values=past, dtype=execution_dtype, decode_buffers=decode_buffers)
             last_hidden.copy_(output[0][:, -1])
             past = output[2]
             del output, feedback, frame_hidden, depth_hidden, feedback_codes, c0_embed, c0, code_or_stop
