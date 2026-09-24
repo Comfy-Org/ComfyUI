@@ -599,7 +599,7 @@ class VAE:
                 self.latent_dim = 3
                 self.disable_offload = True
                 self.memory_used_decode = lambda shape, dtype: self.first_stage_model.comfy_memory_used_decode(shape)
-                self.memory_used_encode = lambda shape, dtype: (max(shape[2], 5) * shape[3] * shape[4] * 64) * model_management.dtype_size(dtype)
+                self.memory_used_encode = lambda shape, dtype: self.first_stage_model.comfy_memory_used_encode(shape)
                 self.working_dtypes = [torch.float16, torch.bfloat16, torch.float32]
                 self.handles_tiling = True
                 self.format_encoded = self.first_stage_model.comfy_format_encoded

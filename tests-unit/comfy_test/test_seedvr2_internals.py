@@ -331,6 +331,21 @@ def test_causal_memory_cache_offload_round_trips_across_slices():
     assert vae_mod.comfy.model_management.TOTAL_PINNED_MEMORY == pinned_before
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="offload moves tails between CUDA and host memory")
+def test_causal_memory_cache_offloads_small_tails_and_parked_frames_exactly():
+    """Below the packing threshold an offloaded tail goes to the host as it is, like parked frames:
+    both come back bit-exact."""
+    cache = vae_mod.CausalMemoryCache(offload=True)
+    tail = _cache_tail(64)
+    cache["conv"] = tail
+    assert not cache.packed["conv"][0].is_cuda
+    assert torch.equal(cache.pop("conv"), tail)
+    frames = list(_cache_tail(128, frames=3).split(1, dim=2))
+    keys = cache.park("tail", frames)
+    assert all(torch.equal(cache.pop(k), f) for k, f in zip(keys, frames))
+    cache.free()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="ring entries pack and offload on CUDA")
 def test_causal_memory_cache_frame_ring_keeps_the_last_frames():
     """push_frames extends a key's tail one frame at a time; get() returns the last `keep`
@@ -500,14 +515,14 @@ def test_seedvr2_decode_estimate_is_flat_in_clip_length():
 
 
 @pytest.mark.parametrize("frames, height, width, measured_gib", [
-    (9, 480, 864, 3.52),
-    (21, 720, 1280, 6.07),
-    (9, 864, 1536, 8.38),
-    (21, 1080, 1920, 12.66),
+    (9, 480, 864, 2.51),
+    (21, 720, 1280, 4.01),
+    (9, 864, 1536, 5.51),
+    (21, 1080, 1920, 9.01),
 ])
 def test_seedvr2_decode_estimate_tracks_measured_peak(frames, height, width, measured_gib):
-    """Measured on an RTX 5090 with the caches offloaded and a one-frame tail; the estimate
-    should sit just above reality, never under it."""
+    """The least free VRAM (to 0.5 GiB) an untiled decode ran in under cudaMallocAsync, RTX 5090;
+    the estimate should sit just above it, never under it."""
     estimate_gib = _decode_estimate(frames, height, width) / 1024 ** 3
     assert estimate_gib >= measured_gib, (
         f"estimate {estimate_gib:.2f} GiB under-reports the measured {measured_gib:.2f} GiB peak"
@@ -515,6 +530,21 @@ def test_seedvr2_decode_estimate_tracks_measured_peak(frames, height, width, mea
     assert estimate_gib < measured_gib * 1.35, (
         f"estimate {estimate_gib:.2f} GiB is far above the measured {measured_gib:.2f} GiB peak"
     )
+
+
+@pytest.mark.parametrize("frames, height, width, measured_gib", [
+    (9, 480, 864, 1.48),
+    (21, 720, 1280, 3.48),
+    (9, 864, 1536, 4.48),
+    (21, 1088, 1920, 6.98),
+])
+def test_seedvr2_encode_estimate_tracks_measured_floor(frames, height, width, measured_gib):
+    """Same measurement as the decode table; slicing and the frame-chunked head keep an encode flat
+    in clip length, so the estimate must not grow with it."""
+    wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
+    estimate = wrapper.comfy_memory_used_encode((1, 3, frames, height, width))
+    assert measured_gib <= estimate / 1024 ** 3 < measured_gib * 1.35
+    assert wrapper.comfy_memory_used_encode((1, 3, frames * 10, height, width)) == estimate
 
 
 def test_seedvr2_encode_accepts_the_chunked_io_device_kwarg():
@@ -553,7 +583,7 @@ def test_seedvr2_tile_side_tracks_free_memory_within_bounds():
     picks is predicted to fit the memory it was sized against."""
     assert _tile_side(0.1) == vae_mod.SEEDVR2_MIN_TILE_LATENT
     assert _tile_side(10_000) == vae_mod.SEEDVR2_MAX_TILE_LATENT
-    assert _tile_side(6) < _tile_side(30)
+    assert _tile_side(3) < _tile_side(30)
     assert _tile_side(30) * 8 >= 512
     for free in (2, 4, 8, 16, 24, 32, 80):
         side = _tile_side(free)

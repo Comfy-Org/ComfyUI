@@ -26,6 +26,8 @@ from comfy.ldm.seedvr.constants import (
     SEEDVR2_DECODE_FIXED_BYTES,
     SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL,
     SEEDVR2_DECODE_LAB_BYTES_PER_OUTPUT_PIXEL,
+    SEEDVR2_ENCODE_BYTES_PER_PIXEL,
+    SEEDVR2_ENCODE_FIXED_BYTES,
     SEEDVR2_MAX_TILE_LATENT,
     SEEDVR2_MIN_TILE_LATENT,
     SEEDVR2_TILE_MEM_HEADROOM,
@@ -338,32 +340,48 @@ class CausalMemoryCache:
             self._pinned.append(host)
         return host
 
-    def _stash(self, qdata, params):
-        """Start the copy of a packed tail to host buffers; its sources stay alive until it lands.
+    def _to_host(self, *tensors):
+        """Start copying ``tensors`` to host buffers; they stay alive until the copy lands.
         One copy in flight at a time: sources held for copies the CPU ran ahead of are what grows
         the peak (2x at 720p on either allocator); record_stream instead grows cudaMallocAsync's pool."""
         if self._landing is not None:
             self._landing[0].synchronize()
-        self._device = qdata.device
-        stream = self._transfer_stream(qdata.device)
+        self._device = tensors[0].device
+        stream = self._transfer_stream(self._device)
         host = [comfy.model_management.cast_to(t, None, torch.device("cpu"), non_blocking=True, stream=stream, r=self._host_like(t))
-                for t in (qdata, params.scale)]
+                for t in tensors]
         event = torch.cuda.Event()
         event.record(stream)
-        self._landing = (event, qdata, params.scale)
-        return host[0], dataclasses.replace(params, scale=host[1])
+        self._landing = (event, tensors)
+        return host
+
+    def park(self, owner, frames):
+        """Hold channels_last ``frames`` unpacked in host memory until popped, the first already on
+        its way back; returns their keys."""
+        keys = [(owner, "parked", i) for i in range(len(frames))]
+        host = self._to_host(*(f.permute(0, 2, 3, 4, 1) for f in frames))
+        for key, h, f in zip(keys, host, frames):
+            self.packed[key] = (h, None, f.shape)
+            if key not in self._order:
+                self._order.append(key)
+        if keys:
+            self._staged[keys[0]] = self._bring_back(keys[0], self._device)
+        return keys
 
     def _bring_back(self, key, device):
-        """Start the copy of an offloaded tail back to the GPU; returns (qdata, params, event)."""
+        """Start the copy of an offloaded entry back to the GPU; returns (data, params, event)."""
         hq, params, _ = self.packed[key]
         # allocated on the compute stream, which the copy then waits on: queued work may still be releasing the block
-        qdata, scale = torch.empty_like(hq, device=device), torch.empty_like(params.scale, device=device)
+        qdata = torch.empty_like(hq, device=device)
         stream = self._transfer_stream(device)
         comfy.model_management.cast_to(hq, None, device, non_blocking=True, stream=stream, r=qdata)
-        comfy.model_management.cast_to(params.scale, None, device, non_blocking=True, stream=stream, r=scale)
+        if params is not None:
+            scale = torch.empty_like(params.scale, device=device)
+            comfy.model_management.cast_to(params.scale, None, device, non_blocking=True, stream=stream, r=scale)
+            params = dataclasses.replace(params, scale=scale)
         event = torch.cuda.Event()
         event.record(stream)
-        return qdata, dataclasses.replace(params, scale=scale), event
+        return qdata, params, event
 
     def _top(self, key):
         return key[0] if isinstance(key, tuple) and len(key) == 2 and key[0] in self._rings else key
@@ -398,10 +416,15 @@ class CausalMemoryCache:
             sub = (key, self._ring_serial)
             self[sub] = frames[:, :, j:j + 1].clone(memory_format=_CL)
             ring.append(sub)
-        while len(ring) > keep:
-            self.discard(ring.popleft())
+        self.keep_last(key, keep)
         if key not in self._order:
             self._order.append(key)
+
+    def keep_last(self, key, keep):
+        """Drop all but the newest ``keep`` frames of ``key``'s ring."""
+        ring = self._rings.get(key, ())
+        while len(ring) > keep:
+            self.discard(ring.popleft())
 
     def _packable(self, value):
         return (
@@ -409,6 +432,7 @@ class CausalMemoryCache:
             and value.dim() == 5
             and value.is_cuda
             and value.is_contiguous(memory_format=_CL)
+            and value.shape[1] % 4 == 0   # ConvRot rotates power-of-4 channel groups
             and value.numel() * value.element_size() >= SEEDVR2_VAE_CACHE_QUANT_BYTES
         )
 
@@ -417,18 +441,27 @@ class CausalMemoryCache:
             for sub in self._rings.pop(key):
                 self.discard(sub)
         self.discard(key)
-        if not self._packable(value):
+        if self._packable(value):
+            c = value.shape[1]
+            g = self.CONVROT_GROUPSIZE
+            while g > 4 and c % g:
+                g //= 4
+            # rows of the NDHWC view are tokens: the rotation spreads each token's outliers over its channels
+            qdata, params = comfy.quant_ops.TensorWiseINT8Layout.quantize(
+                value.permute(0, 2, 3, 4, 1).reshape(-1, c), is_weight=True, per_channel=True, convrot=True, convrot_groupsize=g)
+        elif self.offload and value.is_cuda and value.dim() == 5 and value.is_contiguous(memory_format=_CL):
+            # too small to be worth packing, but off the GPU all the same: long-lived small blocks
+            # fragment the big activations' segments (720p needed 2 GiB more free VRAM)
+            qdata, params = value.permute(0, 2, 3, 4, 1), None
+        else:
             self.plain[key] = value
             return
-        c = value.shape[1]
-        g = self.CONVROT_GROUPSIZE
-        while g > 4 and c % g:
-            g //= 4
-        # rows of the NDHWC view are tokens: the rotation spreads each token's outliers over its channels
-        qdata, params = comfy.quant_ops.TensorWiseINT8Layout.quantize(
-            value.permute(0, 2, 3, 4, 1).reshape(-1, c), is_weight=True, per_channel=True, convrot=True, convrot_groupsize=g)
         if self.offload:
-            qdata, params = self._stash(qdata, params)
+            if params is None:
+                qdata, = self._to_host(qdata)
+            else:
+                qdata, scale = self._to_host(qdata, params.scale)
+                params = dataclasses.replace(params, scale=scale)
             top = self._top(key)
             if top not in self._order:
                 self._order.append(top)
@@ -447,6 +480,21 @@ class CausalMemoryCache:
             self._prefetch_after(key, self._device)
         return out
 
+    def for_each_frame(self, key, fn, count=None):
+        """``fn(i, frame)`` over get(key)'s first ``count`` frames one at a time, never holding the
+        whole unpacked tail."""
+        ring = self._rings.get(key)
+        if ring is None:
+            whole = self._get_entry(key)
+            for i in range(whole.size(2) if count is None else count):
+                fn(i, whole[:, :, i:i + 1])
+            del whole
+        else:
+            for i, sub in enumerate(list(ring)[:count]):
+                fn(i, self._get_entry(sub))
+        if self.offload and self._device is not None:
+            self._prefetch_after(key, self._device)
+
     def _get_entry(self, key):
         if key in self.plain:
             return self.plain[key]
@@ -454,22 +502,17 @@ class CausalMemoryCache:
         if self.offload:
             qdata, params, event = self._staged.pop(key, None) or self._bring_back(key, self._device)
             comfy.model_management.current_stream(self._device).wait_event(event)
+        if params is None:   # parked unpacked, NDHWC
+            return qdata.permute(0, 4, 1, 2, 3)
         flat = comfy.quant_ops.TensorWiseINT8Layout.dequantize(qdata, params)
         return flat.view(b, t, h, w, c).permute(0, 4, 1, 2, 3)
 
     def pop(self, key, default=None):
-        ring = self._rings.pop(key, None)
-        if ring is not None:
-            frames = [self._get_entry(sub) for sub in ring]
-            for sub in ring:
-                self.discard(sub)
-            return torch.cat(frames, dim=2) if len(frames) > 1 else frames[0]
-        if key in self.plain:
-            return self.plain.pop(key)
-        if key not in self.packed:
+        if key not in self:
             return default
-        value = self._get_entry(key)
-        self.discard(key)
+        value = self.get(key)
+        for sub in self._rings.pop(key, None) or (key,):
+            self.discard(sub)
         return value
 
     def discard(self, key):
@@ -480,7 +523,7 @@ class CausalMemoryCache:
         if staged is not None:   # its GPU copy is freed on the compute stream
             comfy.model_management.current_stream(self._device).wait_event(staged[2])
         if entry is not None and self.offload:
-            for t in (entry[0], entry[1].scale):
+            for t in (entry[0],) if entry[1] is None else (entry[0], entry[1].scale):
                 self._spare.setdefault((t.shape, t.dtype), []).append(t)
 
     def free(self):
@@ -513,6 +556,39 @@ class MemoryState(Enum):
     INITIALIZING = 1
     ACTIVE = 2
     UNSET = 3
+
+
+def _frame_chunked(owner, run, source, chunk, memory_state, memory_cache, frame_pixels):
+    """``run(x, memory_state, memory_cache)`` over a causal, spatial-only stage ``chunk`` frames at a
+    time, the cache carrying state between chunks: exact, and only a chunk's activations are live.
+    ``source`` (a 1-list) is emptied, so nothing here keeps the whole input alive."""
+    sample = source.pop()
+    if not chunk or sample.size(2) <= chunk:
+        return run(sample, memory_state, memory_cache)
+    local_cache = memory_state == MemoryState.DISABLED or memory_cache is None
+    if local_cache:
+        # under the same host-memory policy as a sliced pass
+        memory_cache = CausalMemoryCache(offload=_offload_caches_for(frame_pixels))
+        memory_state = MemoryState.INITIALIZING
+    outs = []
+    try:
+        pieces = list(sample.split(chunk, dim=2))
+        del sample
+        if memory_cache.offload and pieces[0].is_contiguous(memory_format=_CL):
+            # the rest waits in host memory, fetched a chunk ahead: resident, the whole input sat
+            # under every chunk's peak (2.5 GiB for the decoder's tail at 1080p)
+            pieces[0] = pieces[0].clone(memory_format=_CL)
+            pieces[1:] = memory_cache.park(owner, pieces[1:])
+
+        def take(i):   # nothing here keeps the chunk alive once the stage moves past it
+            piece, pieces[i] = pieces[i], None
+            return piece if torch.is_tensor(piece) else memory_cache.pop(piece)
+        for i in range(len(pieces)):
+            outs.append(run(take(i), memory_state if i == 0 else MemoryState.ACTIVE, memory_cache))
+    finally:
+        if local_cache:
+            memory_cache.free()
+    return torch.cat(outs, dim=2)
 
 def get_cache_size(conv_module, input_len, pad_len, dim=0):
     dilated_kernel_size = conv_module.dilation[dim] * (conv_module.kernel_size[dim] - 1) + 1
@@ -864,9 +940,10 @@ class InflatedCausalConv3d(ops.Conv3d):
             memory_cache = CausalMemoryCache()   # DISABLED: nothing is kept anyway
         elif memory_state != MemoryState.ACTIVE:
             memory_cache.pop(self, None)
-        memory = memory_cache.get(self)
-        has_memory = memory is not None
+        has_memory = self in memory_cache
         halo = cache_size if has_memory else self.temporal_padding * 2
+        if t == 1 and halo == 2 and kt == 3:
+            return self._ck_taps(like, x_shape, memory_state, memory_cache, write_body, residual, has_memory)
         hp, wp = h + 2 * ph, w + 2 * pw
 
         buf = torch.empty((b, c, halo + t, hp, wp), dtype=like.dtype, device=like.device, memory_format=_CL)
@@ -875,8 +952,9 @@ class InflatedCausalConv3d(ops.Conv3d):
         if halo:
             front = buf[:, :, :halo]
             if has_memory:
-                front[:, :, :, ph:ph + h, pw:pw + w].copy_(memory)
-                del memory   # the unpacked halo is two full frames; nothing past the copy needs it
+                # after the body, whose source is freed by then: the unpacked halo is two full frames
+                core = front[:, :, :, ph:ph + h, pw:pw + w]
+                memory_cache.for_each_frame(self, lambda i, frame: core[:, :, i:i + 1].copy_(frame))
                 for dim, lo, hi in ((3, ph, ph + h), (4, pw, pw + w)):
                     if lo:
                         front.narrow(dim, 0, lo).zero_()
@@ -918,6 +996,41 @@ class InflatedCausalConv3d(ops.Conv3d):
         finally:
             comfy.ops.uncast_bias_weight(self, weight, bias, offload_stream)
         if residual is not None and fused_residual is None:
+            out += residual
+        return out
+
+    def _ck_taps(self, like, x_shape, memory_state, memory_cache, write_body, residual, has_memory):
+        """A one-frame chunk against its two-frame halo as three single-frame convs summed into the
+        output: the 3-frame buffer was the tail's peak (1.5 GiB lower floor at 1080p). The halo taps
+        run on cuDNN straight from the unpacked frames, its padding in place of a buffer. Without a
+        cache the halo is the frame itself, so the taps sum first."""
+        b, c, _, h, w = x_shape
+        _, ph, pw = self.padding
+        buf = torch.empty((b, c, 1, h + 2 * ph, w + 2 * pw), dtype=like.dtype, device=like.device, memory_format=_CL)
+        write_body(buf)
+        del write_body
+        _ndhwc_filter(self)
+        weight, bias, offload_stream = comfy.ops.cast_bias_weight(self, buf, offloadable=True)
+        try:
+            tap = weight[:, :, 2:] if has_memory else weight.sum(dim=2, keepdim=True)
+            tap = tap.contiguous(memory_format=_CL)
+            if _fp16_accumulate_wanted(buf):
+                out = comfy_kitchen.fp16_conv3d(buf, tap, bias)
+            else:
+                out = F.conv3d(buf, tap, bias)
+            if memory_state in (MemoryState.INITIALIZING, MemoryState.ACTIVE):
+                # pushed now so the buffer can go; three kept, as the oldest is still this call's first tap
+                core = buf[:, :, :, ph:ph + h, pw:pw + w]
+                memory_cache.push_frames(self, core if has_memory else core.expand(-1, -1, 2, -1, -1), 3)
+            del buf
+            if has_memory:
+                def halo_tap(i, frame):
+                    out.add_(F.conv3d(frame, weight[:, :, i:i + 1].contiguous(memory_format=_CL), padding=(0, ph, pw)))
+                memory_cache.for_each_frame(self, halo_tap, count=2)
+                memory_cache.keep_last(self, 2)
+        finally:
+            comfy.ops.uncast_bias_weight(self, weight, bias, offload_stream)
+        if residual is not None:
             out += residual
         return out
 
@@ -1646,6 +1759,7 @@ class Encoder3D(nn.Module):
         super().__init__()
         self.layers_per_block = layers_per_block
         self.temporal_down_num = temporal_down_num
+        self.head_blocks = max(0, len(block_out_channels) - temporal_down_num - 1)   # the spatial-only down blocks
 
         self.conv_in = InflatedCausalConv3d(
             in_channels,
@@ -1707,6 +1821,15 @@ class Encoder3D(nn.Module):
         )
 
 
+    # Frames per pass through the full-resolution, spatial-only head; None runs a slice's frames at once.
+    head_frames = 1
+
+    def _head(self, sample, memory_state, memory_cache):
+        sample = self.conv_in(sample, memory_state=memory_state, memory_cache=memory_cache)
+        for down_block in self.down_blocks[:self.head_blocks]:
+            sample = down_block(sample, memory_state=memory_state, memory_cache=memory_cache)
+        return sample
+
     def forward(
         self,
         sample: torch.FloatTensor,
@@ -1714,8 +1837,11 @@ class Encoder3D(nn.Module):
         memory_cache = None,
     ) -> torch.FloatTensor:
         sample = sample.to(next(self.parameters()).device)
-        sample = self.conv_in(sample, memory_state=memory_state, memory_cache=memory_cache)
-        for down_block in self.down_blocks:
+        frame_pixels = sample.size(-2) * sample.size(-1)
+        source = [sample]
+        del sample
+        sample = _frame_chunked(self, self._head, source, self.head_frames, memory_state, memory_cache, frame_pixels)
+        for down_block in self.down_blocks[self.head_blocks:]:
             sample = down_block(sample, memory_state=memory_state, memory_cache=memory_cache)
 
         sample = self.mid_block(sample, memory_state=memory_state, memory_cache=memory_cache)
@@ -1829,29 +1955,29 @@ class Decoder3D(nn.Module):
         sample = self.mid_block(sample, latent_embeds, memory_state=memory_state, memory_cache=memory_cache)
         sample = sample.to(upscale_dtype)
 
-        for up_block in self.up_blocks[:self.temporal_up_num]:
+        *head, last = self.up_blocks[:self.temporal_up_num]
+        for up_block in head:
             sample = up_block(sample, latent_embeds, memory_state=memory_state, memory_cache=memory_cache)
+        for resnet in last.resnets:
+            sample = resnet(sample, temb=None, memory_state=memory_state, memory_cache=memory_cache)
 
-        chunk = self.tail_frames
-        if not chunk or sample.size(2) <= chunk:
-            return self._tail(sample, latent_embeds, memory_state, memory_cache)
-        # The tail is spatial-only and causal: run it a few frames at a time, the cache carrying state.
-        local_cache = memory_state == MemoryState.DISABLED or memory_cache is None
-        if local_cache:
-            # under the same host-memory policy as a sliced decode
-            ups = sum(1 for blk in self.up_blocks[self.temporal_up_num:] if blk.upsamplers is not None)
-            frame_pixels = sample.size(-2) * sample.size(-1) * 4 ** ups
-            memory_cache = CausalMemoryCache(offload=_offload_caches_for(frame_pixels))
-            memory_state = MemoryState.INITIALIZING
-        outs = []
-        try:
-            for i, piece in enumerate(sample.split(chunk, dim=2)):
-                state = memory_state if i == 0 else MemoryState.ACTIVE
-                outs.append(self._tail(piece, latent_embeds, state, memory_cache))
-        finally:
-            if local_cache:
-                memory_cache.free()
-        return torch.cat(outs, dim=2)
+        # From the last temporal upsampler on, everything is causal and per frame: it runs an input
+        # frame at a time (two output frames), and the spatial-only tail a frame at a time within that.
+        ups = sum(1 for blk in self.up_blocks[self.temporal_up_num - 1:] if blk.upsamplers is not None)
+        frame_pixels = sample.size(-2) * sample.size(-1) * 4 ** ups
+        tr = last.upsamplers[0].temporal_ratio
+
+        def upsample_and_tail(x, state, cache):
+            for upsampler in last.upsamplers:
+                x = upsampler(x, memory_state=state, memory_cache=cache)
+            source = [x]
+            del x
+            return _frame_chunked(self, lambda y, s, c: self._tail(y, latent_embeds, s, c),
+                                  source, self.tail_frames, state, cache, frame_pixels)
+        source = [sample]
+        del sample
+        return _frame_chunked(last, upsample_and_tail, source, self.tail_frames and max(1, self.tail_frames // tr),
+                              memory_state, memory_cache, frame_pixels)
 
 class VideoAutoencoderKL(nn.Module):
     def __init__(
@@ -1939,7 +2065,7 @@ class VideoAutoencoderKL(nn.Module):
                 self.slicing_sample_min_size,
                 getattr(self, "temporal_downsample_factor", 1),
             )
-            x_slices = [s.to(self.device) for s in x[:, :, 1:].split(split_size=split_size, dim=2)]
+            x_slices = list(x[:, :, 1:].split(split_size=split_size, dim=2))   # _encode moves each to the device
             min_active_len = getattr(self, "temporal_downsample_factor", 1)
             if len(x_slices) > 1 and x_slices[-1].shape[2] < min_active_len:
                 x_slices[-2] = torch.cat((x_slices[-2], x_slices[-1]), dim=2)
@@ -1947,7 +2073,7 @@ class VideoAutoencoderKL(nn.Module):
             try:
                 encoded_slices = [
                     self._encode(
-                        torch.cat((x[:, :, :1].to(self.device), x_slices[0]), dim=2),
+                        torch.cat((x[:, :, :1], x_slices[0]), dim=2),
                         memory_state=MemoryState.INITIALIZING,
                         memory_cache=memory_cache,
                     )
@@ -2189,6 +2315,10 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         samples = samples.contiguous()
         samples = samples * BYTEDANCE_VAE_SCALING_FACTOR
         return samples
+
+    def comfy_memory_used_encode(self, shape):
+        """Peak device memory of an encode of (b, c, t, h, w) pixels, in bytes: one frame's area sets it."""
+        return shape[-2] * shape[-1] * SEEDVR2_ENCODE_BYTES_PER_PIXEL + SEEDVR2_ENCODE_FIXED_BYTES
 
     def comfy_memory_used_decode(self, shape):
         """Peak device memory of a decode, in bytes: one frame's area sets it, the clip barely moves it."""
