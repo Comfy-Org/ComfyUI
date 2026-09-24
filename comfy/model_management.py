@@ -144,7 +144,23 @@ except:
     npu_available = False
 
 try:
-    import torch_mlu  # noqa: F401
+    import torch_mlu  # noqa: F
+    _ = torch.mlu.device_count()
+    mlu_available = torch.mlu.is_available()
+except:
+    mlu_available = False
+
+# Set the default CUDA device based on the --cuda-device argument
+if torch.cuda.is_available():
+    cuda_device = getattr(args, 'cuda_device', None)
+    if cuda_device is not None and isinstance(cuda_device, int):
+        if 0 <= cuda_device < torch.cuda.device_count():
+            torch.cuda.set_device(cuda_device)
+        else:
+            logging.warning(f"CUDA device {cuda_device} is out of range, using default device 0")
+    else:
+        # Default to device 0 if not specified
+        torch.cuda.set_device(0)401
     _ = torch.mlu.device_count()
     mlu_available = torch.mlu.is_available()
 except:
