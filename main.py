@@ -354,16 +354,15 @@ def prompt_worker(q, server_instance, asset_manager):
             server_instance.last_prompt_id = prompt_id
 
             sensitive = item[5]
-            extra_data = item[3].copy()
-            for k in sensitive:
-                extra_data[k] = sensitive[k]
+            extra_data = {**item[3], **sensitive}
 
             asset_manager.pause_background_scan()
             e.execute(item[2], prompt_id, extra_data, item[4])
 
             need_gc = True
 
-            remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
+            def remove_sensitive(prompt):
+                return prompt[:5] + prompt[6:]
             q.task_done(item_id,
                         e.history_result,
                         status=execution.PromptQueue.ExecutionStatus(
