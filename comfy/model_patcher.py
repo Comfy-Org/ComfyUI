@@ -2045,7 +2045,12 @@ class ModelPatcherDynamic(ModelPatcher):
                 move_weight_functions(m, device_to)
 
                 if hasattr(m, "_v"):
-                    v_block = m._v if v_block is None else (v_block[0], v_block[1], max(v_block[2], m._v[1] + m._v[2] - v_block[1]))
+                    if v_block is None:
+                        v_block = m._v
+                    else:
+                        block_start = min(v_block[1], m._v[1])
+                        block_end = max(v_block[1] + v_block[2], m._v[1] + m._v[2])
+                        v_block = (v_block[0], block_start, block_end - block_start)
                 if end_of_block is not None:
                     unit = end_of_block
                     (unit[0] if isinstance(unit, (list, tuple)) else unit)._v_block = v_block
