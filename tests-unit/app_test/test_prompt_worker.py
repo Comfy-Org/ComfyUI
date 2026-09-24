@@ -61,6 +61,15 @@ class Executor:
         self.success = True
         self.status_messages = []
 
+    def execution_backend_maintenance_interval(self) -> float | None:
+        return None
+
+    def maintain_execution_backend(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
     def execute(self, *args, **kwargs) -> None:
         return None
 
