@@ -262,170 +262,92 @@ def test_var_attention_optimized_split_calls_dense_backend_per_window(monkeypatc
 
 
 class _AlwaysPackedCache(vae_mod.CausalMemoryCache):
-    """Drops the cuda/size gate so the pack/unpack maths can be exercised on CPU."""
+    """Drops the size gate so small tails exercise the packing."""
 
     def _packable(self, value):
-        return (
-            torch.is_tensor(value)
-            and value.dim() == 5
-            and value.shape[1] & (value.shape[1] - 1) == 0
-            and (value.is_contiguous() or value.is_contiguous(memory_format=torch.channels_last_3d))
-        )
+        return torch.is_tensor(value) and value.is_cuda and value.is_contiguous(memory_format=torch.channels_last_3d)
 
 
-def _cache_tail(channels, dtype=torch.float16, seed=0):
-    generator = torch.Generator(device="cpu").manual_seed(seed)
-    tail = torch.randn(1, channels, 2, 8, 8, generator=generator)
+def _cache_tail(channels, frames=2):
+    torch.manual_seed(0)
+    tail = torch.randn(1, channels, frames, 48, 64, device="cuda") * 2
     tail[:, ::5] *= 20.0  # the per-channel outliers the rotation exists to spread
-    return tail.to(dtype)
+    return tail.half().contiguous(memory_format=torch.channels_last_3d)
 
 
-@pytest.mark.parametrize("channels", [64, 128])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_causal_memory_cache_roundtrip_preserves_tail(channels, dtype):
-    tail = _cache_tail(channels, dtype)
-    cache = _AlwaysPackedCache()
-    cache["conv"] = tail
-
-    restored = cache["conv"]
-
-    assert restored.shape == tail.shape
-    assert restored.dtype == tail.dtype
-    error = (restored.float() - tail.float()).norm() / tail.float().norm()
-    assert error < 1e-2, f"rotated int8 cache round trip drifted by {error:.2e}"
+def _rel_err(a, b):
+    return ((a.float() - b.float()).norm() / b.float().norm()).item()
 
 
-def test_causal_memory_cache_packs_only_large_contiguous_cuda_tails():
-    """Everything else is held as it is, and comes back as the same object."""
+def test_causal_memory_cache_holds_unpackable_tails_as_they_are():
     cache = vae_mod.CausalMemoryCache()
-    assert not cache._packable(_cache_tail(128)), "cpu tails stay unpacked"
-    assert not cache._packable(torch.zeros(1, 64, 2, 4, 4)), "small tails stay unpacked"
-    assert not cache._packable(torch.zeros(1, 128, 2, 64, 64)[:, :, :1]), "non-contiguous tails stay unpacked"
+    assert not cache._packable(torch.zeros(1, 128, 2, 4, 4)), "cpu tails stay unpacked"
     assert not cache._packable(torch.zeros(4, 8)) and not cache._packable("not a tensor")
     tail = torch.randn(1, 96, 2, 4, 4)
     cache["conv"] = tail
     assert cache["conv"] is tail and "conv" in cache
     assert cache.pop("conv") is tail and "conv" not in cache
     assert cache.pop("conv", "fallback") == "fallback"
-    channels_last = _cache_tail(128, torch.float16).contiguous(memory_format=torch.channels_last_3d)
-    always = _AlwaysPackedCache()
-    always["conv"] = channels_last
-    assert "conv" in always.plain, "off CUDA a channels_last tail is held plain, not mis-flattened"
-
-
-def test_causal_memory_cache_pop_returns_packed_value():
-    tail = _cache_tail(64)
-    cache = _AlwaysPackedCache()
-    cache["conv"] = tail
-
-    popped = cache.pop("conv")
-
-    assert popped is not None, "pop must return the packed tail, not the default"
-    assert popped.shape == tail.shape
-    assert "conv" not in cache
-    assert cache.pop("conv", "fallback") == "fallback"
-
-
-def test_causal_memory_cache_overwrite_replaces_across_representations():
-    cache = _AlwaysPackedCache()
-    packed_tail = _cache_tail(64)
-    plain_tail = torch.randn(1, 96, 2, 4, 4)
-
-    cache["conv"] = packed_tail
-    cache["conv"] = plain_tail
-    assert cache["conv"] is plain_tail
-
-    cache["conv"] = packed_tail
-    assert cache["conv"] is not plain_tail
-    assert cache["conv"].shape == packed_tail.shape
-
     with pytest.raises(KeyError):
         cache["missing"]
 
 
-def test_causal_memory_cache_blocking_is_exact(monkeypatch):
-    """Row blocking bounds the working copy; it must not change a value, and a budget below one
-    token still advances one token at a time."""
-    tail = _cache_tail(64)
-    monkeypatch.setattr(vae_mod, "SEEDVR2_VAE_CACHE_QUANT_CHUNK_BYTES", 1 << 40)
-    single = _AlwaysPackedCache()
-    single["conv"] = tail
-    unblocked = single["conv"]
-    monkeypatch.setattr(vae_mod, "SEEDVR2_VAE_CACHE_QUANT_CHUNK_BYTES", 1)
-    blocked_cache = _AlwaysPackedCache()
-    blocked_cache["conv"] = tail
-    assert vae_mod.CausalMemoryCache._token_blocks((1, 512, 1, 2, 2), 2) == [(i, i + 1) for i in range(4)]
-    assert torch.equal(blocked_cache["conv"], unblocked)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="tails pack on CUDA")
+@pytest.mark.parametrize("channels", [128, 256, 512])
+def test_causal_memory_cache_packing_round_trips(channels):
+    tail = _cache_tail(channels)
+    cache = _AlwaysPackedCache()
+    cache["conv"] = tail
+    assert "conv" in cache.packed
+    restored = cache["conv"]
+    assert restored.shape == tail.shape and restored.dtype == tail.dtype
+    assert restored.is_contiguous(memory_format=torch.channels_last_3d)
+    assert _rel_err(restored, tail) < 1e-2
+    plain = torch.randn(1, 96, 2, 4, 4)
+    cache["conv"] = plain   # replaces the packed entry
+    assert cache["conv"] is plain and "conv" not in cache.packed
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="offload moves tails between CUDA and pinned host memory")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="offload moves tails between CUDA and host memory")
 def test_causal_memory_cache_offload_round_trips_across_slices():
-    """Offloaded tails come back exactly as the resident packing would return them, in the
-    order the next slice reads them (which is what the one-ahead prefetch assumes), and the
-    GPU holds only the tails in flight rather than every one."""
-    torch.manual_seed(0)
+    """Offloaded tails come back exactly as the resident packing returns them, in the order the
+    next slice reads them (which the one-ahead prefetch assumes), and free() unpins the host buffers."""
     keys = [f"conv{i}" for i in range(6)]
-    tails = {k: (torch.randn(1, 128, 2, 96, 160, device="cuda") * 2).half().contiguous(
-        memory_format=torch.channels_last_3d) for k in keys}
-    resident = vae_mod.CausalMemoryCache(offload=False)
-    offloaded = vae_mod.CausalMemoryCache(offload=True)
+    tails = {k: _cache_tail(128) for k in keys}
+    pinned_before = vae_mod.comfy.model_management.TOTAL_PINNED_MEMORY
+    resident = _AlwaysPackedCache()
+    offloaded = _AlwaysPackedCache(offload=True)
     for slice_idx in range(3):
         for k in keys:
             resident[k] = tails[k] * (slice_idx + 1)
             offloaded[k] = tails[k] * (slice_idx + 1)
-        torch.cuda.synchronize()
-        gpu_bytes = sum(q.numel() for q, *_ in offloaded.packed.values() if q is not None)
-        assert gpu_bytes == 0, "offloaded tails should not be resident between slices"
+        assert not any(q.is_cuda for q, *_ in offloaded.packed.values()), "offloaded tails stay off the GPU between slices"
         for k in keys:
             a, b = resident[k], offloaded[k]
             assert b.is_contiguous(memory_format=torch.channels_last_3d)
             assert torch.equal(a, b), f"{k} slice {slice_idx}: offloaded tail differs"
     assert offloaded.pop("conv0") is not None and "conv0" not in offloaded
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="the kitchen's int8 quantizers pack channels_last CUDA tails")
-@pytest.mark.parametrize("channels", [128, 256, 512])
-def test_causal_memory_cache_kitchen_packing_round_trips(channels):
-    """channels_last CUDA tails pack through the kitchen's ConvRot quantizer (one kernel where
-    the width allows a 256-group) and come back within the same error as the torch packing."""
-    torch.manual_seed(0)
-    tail = (torch.randn(1, channels, 2, 48, 64, device="cuda") * 2)
-    tail[:, ::5] *= 20.0
-    tail = tail.half().contiguous(memory_format=torch.channels_last_3d)
-    cache = _AlwaysPackedCache(offload=False)   # the size gate is not what is under test
-    cache["conv"] = tail
-    scheme = cache.packed["conv"][3]
-    assert isinstance(scheme, tuple) and scheme[0] == "ck", "kitchen packing was not used"
-    assert scheme[1] == (256 if channels % 256 == 0 else 64)
-    restored = cache["conv"]
-    assert restored.shape == tail.shape and restored.dtype == tail.dtype
-    assert restored.is_contiguous(memory_format=torch.channels_last_3d)
-    error = (restored.float() - tail.float()).norm() / tail.float().norm()
-    assert error < 1e-2, f"kitchen packing drifted by {error:.2e}"
+    offloaded.free()
+    assert vae_mod.comfy.model_management.TOTAL_PINNED_MEMORY == pinned_before
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="ring entries pack and offload on CUDA")
 def test_causal_memory_cache_frame_ring_keeps_the_last_frames():
     """push_frames extends a key's tail one frame at a time; get() returns the last `keep`
     frames in order, retired frames are dropped, and a plain assignment replaces the ring."""
-    torch.manual_seed(0)
-    cache = vae_mod.CausalMemoryCache(offload=True)
-    frames = [(torch.randn(1, 128, 1, 96, 160, device="cuda") * 2).half().contiguous(memory_format=torch.channels_last_3d)
-              for _ in range(4)]
+    cache = _AlwaysPackedCache(offload=True)
+    frames = [f.contiguous(memory_format=torch.channels_last_3d) for f in _cache_tail(128, frames=4).split(1, dim=2)]
     cache.push_frames("conv", torch.cat(frames[:2], dim=2), keep=2)
     assert "conv" in cache
-    got = cache["conv"]
-    ref = torch.cat(frames[:2], dim=2)
-    assert got.shape == ref.shape and (got.float() - ref.float()).norm() / ref.float().norm() < 1e-2
+    assert _rel_err(cache["conv"], torch.cat(frames[:2], dim=2)) < 1e-2
     cache.push_frames("conv", frames[2], keep=2)          # one new frame: one packed entry
     assert len(cache._rings["conv"]) == 2
-    got = cache["conv"]
-    ref = torch.cat(frames[1:3], dim=2)
-    assert (got.float() - ref.float()).norm() / ref.float().norm() < 1e-2
+    assert _rel_err(cache["conv"], torch.cat(frames[1:3], dim=2)) < 1e-2
     cache.push_frames("conv", frames[3], keep=2)
     assert len(cache.plain) + len(cache.packed) == 2, "retired frames must be dropped, not accumulated"
     cache["conv"] = frames[0]                              # plain assignment replaces the ring
     assert "conv" not in cache._rings and cache["conv"].shape == frames[0].shape
+    cache.free()
 
 
 def _make_block(is_last_layer, dim=16, heads=2, head_dim=8):
@@ -620,46 +542,22 @@ def test_seedvr2_decode_output_shape_matches_decode():
     assert vae_mod.VideoAutoencoderKLWrapper.comfy_has_chunked_io is True
 
 
-def _tile_side(free_gib, monkeypatch):
+def _tile_side(free_gib):
     wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
     wrapper.spatial_downsample_factor = 8
-    monkeypatch.setattr(
-        vae_mod.comfy.model_management, "get_free_memory", lambda device: free_gib * 1024 ** 3
-    )
-    return wrapper._tile_side_for_budget(torch.device("cpu"))
+    return wrapper.preferred_decode_tile(free_gib * 1024 ** 3)
 
 
-def test_seedvr2_tile_side_tracks_free_memory_within_bounds(monkeypatch):
+def test_seedvr2_tile_side_tracks_free_memory_within_bounds():
     """Grows with free memory, stays inside [min, max] on whole latent blocks, and the tile it
     picks is predicted to fit the memory it was sized against."""
-    assert _tile_side(0.1, monkeypatch) == vae_mod.SEEDVR2_MIN_TILE_LATENT
-    assert _tile_side(10_000, monkeypatch) == vae_mod.SEEDVR2_MAX_TILE_LATENT
-    assert _tile_side(6, monkeypatch) < _tile_side(30, monkeypatch)
-    assert _tile_side(30, monkeypatch) * 8 >= 512
+    assert _tile_side(0.1) == vae_mod.SEEDVR2_MIN_TILE_LATENT
+    assert _tile_side(10_000) == vae_mod.SEEDVR2_MAX_TILE_LATENT
+    assert _tile_side(6) < _tile_side(30)
+    assert _tile_side(30) * 8 >= 512
     for free in (2, 4, 8, 16, 24, 32, 80):
-        side = _tile_side(free, monkeypatch)
+        side = _tile_side(free)
         assert vae_mod.SEEDVR2_MIN_TILE_LATENT <= side <= vae_mod.SEEDVR2_MAX_TILE_LATENT and side % 8 == 0
         if side != vae_mod.SEEDVR2_MIN_TILE_LATENT:
             predicted = (side * 8) ** 2 * vae_mod.SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL + vae_mod.SEEDVR2_DECODE_FIXED_BYTES
             assert predicted <= free * 1024 ** 3
-
-
-def test_seedvr2_decode_tiled_honours_explicit_tiles(monkeypatch):
-    """An explicit tile size from the caller must win over the memory-derived one."""
-    wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
-    wrapper.spatial_downsample_factor = 8
-    seen = {}
-
-    def fake_decode(z, seedvr2_tiling=None):
-        seen.update(seedvr2_tiling)
-        return z
-
-    wrapper.decode = fake_decode
-    monkeypatch.setattr(
-        vae_mod.VideoAutoencoderKLWrapper, "_tile_side_for_budget", lambda self, device: 96
-    )
-    wrapper.decode_tiled(torch.zeros(1, 16, 2, 8, 8), tile_x=40, tile_y=40, overlap=8)
-    assert seen["tile_size"] == (320, 320)
-    seen.clear()
-    wrapper.decode_tiled(torch.zeros(1, 16, 2, 8, 8))
-    assert seen["tile_size"] == (768, 768), "no explicit size should use the memory-derived tile"

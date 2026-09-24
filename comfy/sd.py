@@ -1318,10 +1318,7 @@ class VAE:
                     # A VAE that can size its own tiles raises the 256-pixel floor.
                     prefers_tile = getattr(self.first_stage_model, "preferred_decode_tile", None)
                     if prefers_tile is not None:
-                        try:
-                            tile = max(tile, int(prefers_tile(self.device)))
-                        except Exception:
-                            logging.exception("Falling back to the default decode tile size.")
+                        tile = max(tile, prefers_tile(self.patcher.get_free_memory(self.device)))
                     overlap = tile // 4
                     if self.handles_tiling:
                         memory_used = self.memory_used_decode(self._tile_bounded_shape(samples_in.shape, tile, tile, None), self.vae_dtype)

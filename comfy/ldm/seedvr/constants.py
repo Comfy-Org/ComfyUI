@@ -19,9 +19,7 @@ SEEDVR2_LATENT_CHANNELS = 16
 
 # VAE temporal caches: int8-packed (rotated, per-token scales) between slices.
 SEEDVR2_VAE_CACHE_QUANT_BYTES = 64 * 1024 ** 2         # tails at or above this size are packed.
-SEEDVR2_VAE_CACHE_QUANT_CHUNK_BYTES = 32 * 1024 ** 2   # working-copy budget per pack/unpack block.
 SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL = 4600             # packed caches per output-frame pixel.
-SEEDVR2_CACHE_OFFLOAD_HOST_RATIO = 3.0                 # offload to pinned RAM only with this much of it free.
 
 # VAE decode peak estimate (caches offloaded, one-frame tail); fitted 1.14-1.25x above measured.
 SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL = 6500            # working set, per output-frame pixel.

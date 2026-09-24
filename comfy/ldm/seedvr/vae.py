@@ -21,12 +21,10 @@ from comfy.ldm.seedvr.constants import (
     BYTEDANCE_VAE_TEMPORAL_DOWNSAMPLE,
     SEEDVR2_LATENT_CHANNELS,
     SEEDVR2_VAE_CACHE_QUANT_BYTES,
-    SEEDVR2_VAE_CACHE_QUANT_CHUNK_BYTES,
     SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL,
     SEEDVR2_DECODE_BYTES_PER_OUTPUT_PIXEL,
     SEEDVR2_DECODE_FIXED_BYTES,
     SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL,
-    SEEDVR2_CACHE_OFFLOAD_HOST_RATIO,
     SEEDVR2_DECODE_LAB_BYTES_PER_OUTPUT_PIXEL,
     SEEDVR2_MAX_TILE_LATENT,
     SEEDVR2_MIN_TILE_LATENT,
@@ -36,18 +34,17 @@ from comfy.ldm.modules.attention import optimized_attention
 from comfy.ldm.modules.diffusionmodules.model import vae_attention
 
 import collections
+import dataclasses
 import math
 from enum import Enum
 
 import logging
 import comfy.model_management
 import comfy.ops
-import comfy.system_memory
+import comfy.quant_ops
 import comfy_kitchen
 
 _CL = torch.channels_last_3d
-
-from comfy_kitchen.tensor.int8_utils import _build_hadamard as _ck_hadamard, _rotate_activation as _ck_rotate
 
 
 def _ck_eligible(x):
@@ -72,6 +69,12 @@ def _match_layout(t, ref):
     if ref.is_contiguous(memory_format=_CL) and not t.is_contiguous(memory_format=_CL):
         return t.contiguous(memory_format=_CL)
     return t
+
+
+def _ndhwc_filter(conv):
+    """Store a resident filter NDHWC once, so cast_bias_weight hands it back without a per-call copy."""
+    if conv.weight.is_cuda and not conv.weight.is_contiguous(memory_format=_CL):
+        conv.weight.data = conv.weight.data.contiguous(memory_format=_CL)
 ops = comfy.ops.manual_cast
 
 
@@ -291,93 +294,71 @@ def ignore_padding(model):
 
 
 _CACHE_MISS = object()
-_HADAMARD_CACHE = {}
 
 
 class CausalMemoryCache:
-    """Per-convolution temporal tails, int8-packed (rotated, per-token scales) between slices.
+    """Per-convolution temporal tails, kept between the slices of one encode or decode.
 
-    CUDA channels_last tails pack through the kitchen's ConvRot quantizer; NCDHW tails through the
-    blocked torch path; anything else is held plain. Packed tails are offloaded to pinned host
-    memory, and a tail can be a ring of per-frame entries so extending it packs one frame.
+    Large channels_last CUDA tails are int8-packed (ConvRot, per-token scales); with ``offload`` the
+    packed tails live in host memory and the next reader's tail is prefetched while this one runs.
+    A tail can be a ring of per-frame entries, so extending it packs one frame. free() ends the pass.
     """
 
-    # Offload packed tails to pinned host memory; they were 64% of the live memory under the peak.
-    offload_default = True
+    CONVROT_GROUPSIZE = 256
 
-    def __init__(self, offload=None):
+    def __init__(self, offload=False):
+        self.offload = offload
         self.plain = {}
-        self.packed = {}
-        self.offload = self.offload_default if offload is None else offload
+        self.packed = {}       # key -> (qdata, params, shape), on the host when offloaded
         self._order = []       # keys in packing order, which is the order the next slice reads them
-        self._host = {}        # key -> pinned (qdata, scale) buffers, reused across slices
-        self._ready = {}       # key -> event: its host copy has landed
-        self._staged = {}      # key -> (qdata, scale, event) already brought back for its reader
-        self._pending = collections.deque()  # (event, tensors) sources a copy still reads
+        self._staged = {}      # key -> (qdata, params, event) on its way back to the GPU
+        self._spare = {}       # (shape, dtype) -> host buffers of dropped entries
+        self._pinned = []
         self._stream = None
         self._device = None
-        # A key's cache can be held as a ring of per-frame entries (subkeys), so a caller that
-        # extends the sequence by one frame packs one frame instead of re-packing the whole tail.
-        self._rings = {}       # key -> deque of subkeys, oldest first
+        self._rings = {}       # key -> deque of per-frame subkeys, oldest first
         self._ring_serial = 0
 
     def _transfer_stream(self, device):
+        """The one stream this cache copies on, so copies reusing a host buffer stay ordered;
+        it starts after the compute queued so far. None copies on the compute stream."""
         if self._stream is None:
-            self._stream = torch.cuda.Stream(device=device)
+            self._stream = comfy.model_management.get_offload_stream(device)
+        if self._stream is not None:
+            self._stream.wait_stream(comfy.model_management.current_stream(device))
         return self._stream
 
-    def _reap(self):
-        """Drop the sources of device-to-host copies that have completed."""
-        while self._pending and self._pending[0][0].query():
-            self._pending.popleft()
+    def _host_like(self, t):
+        spare = self._spare.get((t.shape, t.dtype))
+        if spare:
+            return spare.pop()
+        host = torch.empty(t.shape, dtype=t.dtype, device="cpu")
+        if comfy.model_management.pin_memory(host, evict_active=False):
+            self._pinned.append(host)
+        return host
 
-    def _stash(self, key, qdata, scale):
-        """Start the copy of a packed tail to its pinned buffers; the tensors stay alive until it lands."""
-        stream = self._transfer_stream(qdata.device)
+    def _stash(self, qdata, params):
+        """Start the copy of a packed tail to host buffers; the sources stay alive until it lands."""
         self._device = qdata.device
-        host = self._host.get(key)
-        if (host is None or host[0].shape != qdata.shape or host[0].stride() != qdata.stride()
-                or host[1].shape != scale.shape or host[1].dtype != scale.dtype):
-            try:
-                host = (torch.empty_like(qdata, device="cpu", pin_memory=True),
-                        torch.empty_like(scale, device="cpu", pin_memory=True))
-            except RuntimeError as e:   # no more lockable host memory: keep the rest resident
-                logging.warning(f"SeedVR2 VAE: cannot pin host memory for the temporal cache, keeping it on the GPU ({e})")
-                self.offload = False
-                return False
-            self._host[key] = host
-        stream.wait_stream(torch.cuda.current_stream(qdata.device))  # after the pack kernels
-        with torch.cuda.stream(stream):
-            host[0].copy_(qdata, non_blocking=True)
-            host[1].copy_(scale, non_blocking=True)
-            event = torch.cuda.Event()
-            event.record(stream)
-        self._ready[key] = event
-        self._pending.append((event, qdata, scale))
-        self._reap()
-        return True
+        stream = self._transfer_stream(qdata.device)
+        host = []
+        for t in (qdata, params.scale):
+            host.append(comfy.model_management.cast_to(t, None, torch.device("cpu"), non_blocking=True, stream=stream, r=self._host_like(t)))
+            if stream is not None:
+                t.record_stream(stream)
+        return host[0], dataclasses.replace(params, scale=host[1])
 
     def _bring_back(self, key, device):
-        """Start the copy of a tail from its pinned buffers; returns (qdata, scale, event)."""
+        """Start the copy of an offloaded tail back to the GPU; returns (qdata, params, event)."""
+        hq, params, _ = self.packed[key]
+        # allocated on the compute stream, which the copy then waits on: queued work may still be releasing the block
+        qdata, scale = torch.empty_like(hq, device=device), torch.empty_like(params.scale, device=device)
         stream = self._transfer_stream(device)
-        hq, hs = self._host[key]
-        # Allocated on the compute stream (used and freed there); the transfer stream must not
-        # write a block that queued compute work may still be releasing.
-        qdata, scale = torch.empty_like(hq, device=device), torch.empty_like(hs, device=device)
-        stream.wait_stream(torch.cuda.current_stream(device))
-        stream.wait_event(self._ready[key])   # the host copy must have landed
-        with torch.cuda.stream(stream):
-            qdata.copy_(hq, non_blocking=True)
-            scale.copy_(hs, non_blocking=True)
-            event = torch.cuda.Event()
-            event.record(stream)
-        return qdata, scale, event
-
-    def _fetch(self, key, device):
-        staged = self._staged.pop(key, None)
-        qdata, scale, event = staged if staged is not None else self._bring_back(key, device)
-        torch.cuda.current_stream(device).wait_event(event)
-        return qdata, scale
+        comfy.model_management.cast_to(hq, None, device, non_blocking=True, stream=stream, r=qdata)
+        comfy.model_management.cast_to(params.scale, None, device, non_blocking=True, stream=stream, r=scale)
+        event = torch.cuda.Event()
+        event.record(stream)
+        return qdata, dataclasses.replace(params, scale=scale), event
 
     def _top(self, key):
         return key[0] if isinstance(key, tuple) and len(key) == 2 and key[0] in self._rings else key
@@ -393,11 +374,8 @@ class CausalMemoryCache:
         except (ValueError, IndexError):
             return
         for sub in self._entries_of(nxt):
-            if sub not in self._staged and sub in self._host and self.packed.get(sub, (0,))[0] is None:
+            if sub in self.packed and sub not in self._staged:
                 self._staged[sub] = self._bring_back(sub, device)
-
-    def has_ring(self, key):
-        return key in self._rings
 
     def push_frames(self, key, frames, keep):
         """Extend ``key``'s tail by ``frames``, keeping the last ``keep``; each frame is its own entry."""
@@ -424,133 +402,55 @@ class CausalMemoryCache:
         return (
             torch.is_tensor(value)
             and value.dim() == 5
-            and value.device.type == "cuda"
+            and value.is_cuda
+            and value.is_contiguous(memory_format=_CL)
             and value.numel() * value.element_size() >= SEEDVR2_VAE_CACHE_QUANT_BYTES
-            and value.shape[1] & (value.shape[1] - 1) == 0
-            and (value.is_contiguous() or value.is_contiguous(memory_format=_CL))
         )
-
-    @staticmethod
-    def _token_blocks(shape, element_size):
-        """(start, stop) token spans holding one working copy under the chunk budget."""
-        b, c, t, h, w = shape
-        tokens = t * h * w
-        step = max(1, SEEDVR2_VAE_CACHE_QUANT_CHUNK_BYTES // max(1, b * c * element_size))
-        return [(start, min(start + step, tokens)) for start in range(0, tokens, step)]
 
     def __setitem__(self, key, value):
         if key in self._rings:   # a whole tail replaces the ring
             for sub in self._rings.pop(key):
                 self.discard(sub)
-        self.plain.pop(key, None)
-        self.packed.pop(key, None)
-        self._staged.pop(key, None)
+        self.discard(key)
         if not self._packable(value):
             self.plain[key] = value
             return
-        # Hadamard rotation before quantizing (ConvRot): a bmm over a free reshape.
-        b, c = value.shape[:2]
-        cl = not value.is_contiguous() and value.is_contiguous(memory_format=_CL)
-        if cl and not (value.is_cuda and c % 64 == 0):
-            self.plain[key] = value   # the kitchen's quantizer is CUDA and groups channels by 64
-            return
-        if cl:
-            # The kitchen's quantizer: fused rotate+quantize at 256 groups, else rotate then quantize.
-            from comfy_kitchen.backends import cuda as _ck_cuda
-            group = 256 if c % 256 == 0 else 64
-            x2d = value.permute(0, 2, 3, 4, 1).reshape(-1, c)              # (b*tokens, c), a view
-            if group == 256:
-                qdata, scale = _ck_cuda.quantize_int8_rowwise_convrot(x2d, group)
-            else:
-                qdata, scale = _ck_cuda.quantize_int8_rowwise(
-                    _ck_rotate(x2d, _ck_hadamard(group, device=x2d.device, dtype=x2d.dtype), group))
-            entry = (qdata, scale, value.dtype, ("ck", group, tuple(value.shape)))
-            if self.offload and self._stash(key, qdata, scale):
-                top = self._top(key)
-                if top not in self._order:
-                    self._order.append(top)
-                self.packed[key] = (None, None, value.dtype, entry[3])
-            else:
-                self.packed[key] = entry
-            return
-        rot = self._rotation(c, value).expand(b, c, c)
-        source = value.view(b, c, -1)
-        qdata = torch.empty(value.shape, device=value.device, dtype=torch.int8)
-        scale = torch.empty((b, 1, *value.shape[2:]), device=value.device, dtype=value.dtype)
-        qdata_flat, scale_flat = qdata.view(b, c, -1), scale.view(b, 1, -1)
-        for start, stop in self._token_blocks(value.shape, value.element_size()):
-            rotated = torch.bmm(rot, source[:, :, start:stop])
-            # Per-token scale: rotation spreads each token's outliers across all channels, so the
-            # scale that matters is per position, not per channel.
-            # inf-norm is amax(abs(..)) as one fused reduction, without the full-size abs() temporary.
-            block_scale = torch.linalg.vector_norm(
-                rotated, float("inf"), dim=1, keepdim=True,
-            ).clamp_min(1e-8) / 127.0
-            rotated.div_(block_scale).round_().clamp_(-127, 127)
-            # Assigning fp16 into the int8 buffer casts in the same pass the copy already makes.
-            qdata_flat[:, :, start:stop] = rotated
-            scale_flat[:, :, start:stop] = block_scale
-        if self.offload and value.is_cuda and self._stash(key, qdata, scale):
+        c = value.shape[1]
+        g = self.CONVROT_GROUPSIZE
+        while g > 4 and c % g:
+            g //= 4
+        # rows of the NDHWC view are tokens: the rotation spreads each token's outliers over its channels
+        qdata, params = comfy.quant_ops.TensorWiseINT8Layout.quantize(
+            value.permute(0, 2, 3, 4, 1).reshape(-1, c), is_weight=True, per_channel=True, convrot=True, convrot_groupsize=g)
+        if self.offload:
+            qdata, params = self._stash(qdata, params)
             top = self._top(key)
             if top not in self._order:
                 self._order.append(top)
-            self.packed[key] = (None, None, value.dtype, False)   # its data is on the host
-            return
-        self.packed[key] = (qdata, scale, value.dtype, False)
+        self.packed[key] = (qdata, params, value.shape)
 
     def get(self, key, default=None):
         ring = self._rings.get(key)
         if ring is not None:
             frames = [self._get_entry(sub) for sub in ring]
-            if self.offload and self._device is not None:
-                self._prefetch_after(key, self._device)
-            return torch.cat(frames, dim=2) if len(frames) > 1 else frames[0]
-        if key in self.plain:
-            return self.plain[key]
-        if key not in self.packed:
+            out = torch.cat(frames, dim=2) if len(frames) > 1 else frames[0]
+        elif key in self.plain or key in self.packed:
+            out = self._get_entry(key)
+        else:
             return default
-        out = self._get_entry(key)
         if self.offload and self._device is not None:
             self._prefetch_after(key, self._device)
         return out
 
     def _get_entry(self, key):
-        if key in self.plain:   # below the packing threshold, or unpackable
+        if key in self.plain:
             return self.plain[key]
-        entry = self.packed[key]
-        qdata, scale, dtype, cl = entry
-        if qdata is None:
-            self._reap()
-            qdata, scale = self._fetch(key, self._device)
-        if isinstance(cl, tuple):   # the kitchen scheme: ("ck", group, shape)
-            from comfy_kitchen.backends import cuda as _ck_cuda
-            _, group, shape = cl
-            b, c, t, h, w = shape
-            flat = _ck_cuda.dequantize_int8_simple_dtype(qdata, scale, _ck_cuda.DTYPE_TO_CODE[dtype])
-            # the regular Hadamard is symmetric and orthonormal: the same rotation undoes it
-            flat = _ck_rotate(flat, _ck_hadamard(group, device=flat.device, dtype=flat.dtype), group)
-            return flat.view(b, t, h, w, c).permute(0, 4, 1, 2, 3)
-        b, c = qdata.shape[:2]
-        out = torch.empty(qdata.shape, device=qdata.device, dtype=dtype)
-        # Hadamard is orthonormal, so the inverse is its transpose.
-        rot_t = self._rotation(c, out).transpose(1, 2).expand(b, c, c)
-        qdata_flat, scale_flat, out_flat = qdata.view(b, c, -1), scale.view(b, 1, -1), out.view(b, c, -1)
-        for start, stop in self._token_blocks(qdata.shape, out.element_size()):
-            # int8 * dtype promotes, so the dequantize is one pass rather than a cast then a multiply.
-            block = qdata_flat[:, :, start:stop] * scale_flat[:, :, start:stop]
-            torch.bmm(rot_t, block, out=out_flat[:, :, start:stop])
-        return out
-
-    @staticmethod
-    def _rotation(channels, like):
-        cached = _HADAMARD_CACHE.get((channels, like.device, like.dtype))
-        if cached is None:
-            h = torch.ones((1, 1), device=like.device, dtype=torch.float32)
-            while h.shape[0] < channels:
-                h = torch.cat([torch.cat([h, h], dim=1), torch.cat([h, -h], dim=1)], dim=0)
-            cached = (h / math.sqrt(channels)).to(like.dtype).unsqueeze(0)
-            _HADAMARD_CACHE[(channels, like.device, like.dtype)] = cached
-        return cached
+        qdata, params, (b, c, t, h, w) = self.packed[key]
+        if self.offload:
+            qdata, params, event = self._staged.pop(key, None) or self._bring_back(key, self._device)
+            comfy.model_management.current_stream(self._device).wait_event(event)
+        flat = comfy.quant_ops.TensorWiseINT8Layout.dequantize(qdata, params)
+        return flat.view(b, t, h, w, c).permute(0, 4, 1, 2, 3)
 
     def pop(self, key, default=None):
         ring = self._rings.pop(key, None)
@@ -564,18 +464,28 @@ class CausalMemoryCache:
         if key not in self.packed:
             return default
         value = self._get_entry(key)
-        self.packed.pop(key, None)
-        self._staged.pop(key, None)
-        self._ready.pop(key, None)
+        self.discard(key)
         return value
 
     def discard(self, key):
-        """Drop an entry without bringing it back: retired ring frames are never read again."""
+        """Drop an entry without bringing it back; its host buffers are reused."""
         self.plain.pop(key, None)
-        self.packed.pop(key, None)
-        self._staged.pop(key, None)
-        self._ready.pop(key, None)
-        self._host.pop(key, None)
+        entry = self.packed.pop(key, None)
+        staged = self._staged.pop(key, None)
+        if staged is not None:   # its GPU copy is freed on the compute stream
+            comfy.model_management.current_stream(self._device).wait_event(staged[2])
+        if entry is not None and self.offload:
+            for t in (entry[0], entry[1].scale):
+                self._spare.setdefault((t.shape, t.dtype), []).append(t)
+
+    def free(self):
+        """Unpin the host buffers at the end of the pass; the cache is empty afterwards."""
+        if self._pinned:
+            torch.cuda.synchronize(self._device)   # no copy may still be using a buffer when it is unpinned
+        for t in self._pinned:
+            comfy.model_management.unpin_memory(t)
+        self._pinned, self._spare, self._staged = [], {}, {}
+        self.plain, self.packed, self._rings, self._order = {}, {}, {}, []
 
     def __contains__(self, key):
         return key in self.plain or key in self.packed or key in self._rings
@@ -587,13 +497,10 @@ class CausalMemoryCache:
         return value
 
 
-def _offload_caches_for(frame_pixels, device=None):
-    """Whether a pass over this frame area sends its temporal caches to pinned host memory:
-    only when the host has several times the set free, since pinned memory is locked RAM."""
-    if not CausalMemoryCache.offload_default:
-        return False
-    needed = frame_pixels * SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL
-    return comfy.system_memory.virtual_memory_available() > needed * SEEDVR2_CACHE_OFFLOAD_HOST_RATIO
+def _offload_caches_for(frame_pixels):
+    """Whether a pass over this frame area keeps its packed caches in host memory: when there is
+    room for them, reclaiming RAM from inactive models if needed."""
+    return comfy.model_management.ensure_pin_budget(frame_pixels * SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL, evict_active=False)
 
 
 class MemoryState(Enum):
@@ -771,10 +678,13 @@ def causal_norm_wrapper(norm_layer: nn.Module, x: torch.Tensor, silu: bool = Fal
             if _ck_eligible(x) and isinstance(norm_layer, nn.GroupNorm) and norm_layer.affine:
                 # Per-frame statistics, like the reshape below; accepts either layout and emits
                 # channels_last_3d, which is where the convolution wants its input.
-                weight, bias = comfy.ops.cast_bias_weight(norm_layer, x)
-                return comfy_kitchen.group_norm_silu_pad3d(
-                    x, weight, bias, norm_layer.num_groups, norm_layer.eps, (0, 0, 0, 0, 0), silu,
-                ).to(input_dtype)
+                weight, bias, offload_stream = comfy.ops.cast_bias_weight(norm_layer, x, offloadable=True)
+                try:
+                    return comfy_kitchen.group_norm_silu_pad3d(
+                        x, weight, bias, norm_layer.num_groups, norm_layer.eps, (0, 0, 0, 0, 0), silu,
+                    ).to(input_dtype)
+                finally:
+                    comfy.ops.uncast_bias_weight(norm_layer, weight, bias, offload_stream)
             b, c, t, h, w = x.shape
             x = x.transpose(1, 2).reshape(b * t, c, h, w)
             memory_occupy = x.numel() * x.element_size() / 1024**3
@@ -918,23 +828,16 @@ class InflatedCausalConv3d(ops.Conv3d):
 
     def _ck_conv(self, padded):
         """Run an already-padded channels_last_3d input through the conv, kitchen or cuDNN."""
-        weight, bias = comfy.ops.cast_bias_weight(self, padded)
-        if weight.dtype != torch.float16:
-            with ignore_padding(self):
-                return torch.nn.Conv3d.forward(self, padded)
-        weight = self._ck_filter(weight)
-        if _fp16_accumulate_wanted(padded):
-            return comfy_kitchen.fp16_conv3d(padded, weight, bias, stride=tuple(self.stride))
-        # cuDNN keeps channels_last_3d in and out, so the layout still saves its transposes
-        return F.conv3d(padded, weight, bias, stride=tuple(self.stride))
-
-    def _ck_filter(self, weight):
-        """The NDHWC copy of the filter, made once while the weights stay resident: cast_bias_weight
-        hands back the same tensor each call then, so identity is a sound cache key."""
-        if getattr(self, "_ck_weight_src", None) is not weight:
-            self._ck_weight = weight.contiguous(memory_format=_CL)
-            self._ck_weight_src = weight
-        return self._ck_weight
+        _ndhwc_filter(self)
+        weight, bias, offload_stream = comfy.ops.cast_bias_weight(self, padded, offloadable=True)
+        try:
+            weight_cl = weight.contiguous(memory_format=_CL)
+            if _fp16_accumulate_wanted(padded):
+                return comfy_kitchen.fp16_conv3d(padded, weight_cl, bias, stride=tuple(self.stride))
+            # cuDNN keeps channels_last_3d in and out, so the layout still saves its transposes
+            return F.conv3d(padded, weight_cl, bias, stride=tuple(self.stride))
+        finally:
+            comfy.ops.uncast_bias_weight(self, weight, bias, offload_stream)
 
     def _symmetric_padding(self):
         return tuple(p for p in reversed(self.padding) for _ in range(2))
@@ -969,7 +872,7 @@ class InflatedCausalConv3d(ops.Conv3d):
         kt = self.kernel_size[0]
         cache_size = kt - self.stride[0]
         if memory_cache is None:
-            memory_cache = CausalMemoryCache(offload=False)   # DISABLED: nothing is kept anyway
+            memory_cache = CausalMemoryCache()   # DISABLED: nothing is kept anyway
         elif memory_state != MemoryState.ACTIVE:
             memory_cache.pop(self, None)
         memory = memory_cache.get(self)
@@ -1002,30 +905,30 @@ class InflatedCausalConv3d(ops.Conv3d):
             else:
                 memory_cache.push_frames(self, core[:, :, -cache_size:], cache_size)
 
-        weight, bias = comfy.ops.cast_bias_weight(self, buf)
-        weight = self._ck_filter(weight)
-        stride = tuple(self.stride)
-        if not _fp16_accumulate_wanted(buf):
-            out = F.conv3d(buf, weight, bias, stride=stride)   # cuDNN, NDHWC in and out
-            if residual is not None:
-                out += residual
-            self._ck_launched(out.device)
-            return out
-        zt = buf.size(2) - kt + 1
-        out = torch.empty((b, weight.size(0), zt, hp - self.kernel_size[1] + 1, wp - self.kernel_size[2] + 1),
-                          dtype=buf.dtype, device=buf.device, memory_format=_CL)
-        # each call's input and output views stay under the kernel's 32-bit offsets
-        per_frame = max(c * hp * wp, weight.size(0) * out.size(3) * out.size(4))
-        chunk = max(1, min(zt, self._CK_MAX_VIEW_ELEMENTS // per_frame - (kt - 1)))
-        fused_residual = residual
-        if residual is not None and (residual.shape != out.shape or residual.dtype != out.dtype
-                                     or not _ndhwc_like(residual)):
-            fused_residual = None   # the epilogue wants the output's shape and layout; add after
-        for z0 in range(0, zt, chunk):
-            z1 = min(zt, z0 + chunk)
-            comfy_kitchen.fp16_conv3d(buf[:, :, z0:z1 + kt - 1], weight, bias,
-                                      residual=None if fused_residual is None else fused_residual[:, :, z0:z1],
-                                      stride=stride, out=out[:, :, z0:z1])
+        _ndhwc_filter(self)
+        weight, bias, offload_stream = comfy.ops.cast_bias_weight(self, buf, offloadable=True)
+        try:
+            weight_cl = weight.contiguous(memory_format=_CL)
+            stride = tuple(self.stride)
+            fused_residual = None
+            if not _fp16_accumulate_wanted(buf):
+                out = F.conv3d(buf, weight_cl, bias, stride=stride)   # cuDNN, NDHWC in and out
+            else:
+                zt = buf.size(2) - kt + 1
+                out = torch.empty((b, weight.size(0), zt, hp - self.kernel_size[1] + 1, wp - self.kernel_size[2] + 1),
+                                  dtype=buf.dtype, device=buf.device, memory_format=_CL)
+                # each call's input and output views stay under the kernel's 32-bit offsets
+                per_frame = max(c * hp * wp, weight.size(0) * out.size(3) * out.size(4))
+                chunk = max(1, min(zt, self._CK_MAX_VIEW_ELEMENTS // per_frame - (kt - 1)))
+                if residual is not None and residual.shape == out.shape and residual.dtype == out.dtype and _ndhwc_like(residual):
+                    fused_residual = residual   # otherwise added after: the epilogue wants the output's shape and layout
+                for z0 in range(0, zt, chunk):
+                    z1 = min(zt, z0 + chunk)
+                    comfy_kitchen.fp16_conv3d(buf[:, :, z0:z1 + kt - 1], weight_cl, bias,
+                                              residual=None if fused_residual is None else fused_residual[:, :, z0:z1],
+                                              stride=stride, out=out[:, :, z0:z1])
+        finally:
+            comfy.ops.uncast_bias_weight(self, weight, bias, offload_stream)
         if residual is not None and fused_residual is None:
             out += residual
         self._ck_launched(out.device)
@@ -1034,11 +937,8 @@ class InflatedCausalConv3d(ops.Conv3d):
     def _ck_buffered_applies(self, x, memory_state):
         """Whether _ck_buffered can take this call: the frame-offset write needs a batch of one,
         and stride is not folded into the buffer sizes."""
-        if not (self._ck_applies(x) and memory_state != MemoryState.UNSET and x.size(0) == 1):
-            return False
-        if tuple(self.stride) != (1, 1, 1):
-            return False
-        return self.weight.dtype == torch.float16 or bool(getattr(self, "weight_function", None))
+        return (self._ck_applies(x) and memory_state != MemoryState.UNSET and x.size(0) == 1
+                and tuple(self.stride) == (1, 1, 1))
 
     def fused_norm_conv(self, source, norm, memory_state, memory_cache, residual=None):
         """GroupNorm + SiLU written straight into the conv's buffer; ``source`` (a 1-list) is emptied
@@ -1048,16 +948,19 @@ class InflatedCausalConv3d(ops.Conv3d):
                 and norm.affine):
             return None
         _, ph, pw = self.padding
-        gw, gb = comfy.ops.cast_bias_weight(norm, x)
         like, shape = x.new_empty(0), x.shape
         del x
+        gw, gb, offload_stream = comfy.ops.cast_bias_weight(norm, like, offloadable=True)
 
         def write_body(dst):
             comfy_kitchen.group_norm_silu_pad3d(
                 source.pop(), gw, gb, norm.num_groups, norm.eps, (pw, pw, ph, ph, 0), True,
                 zero_pad=True, out=dst,
             )
-        return self._ck_buffered(like, shape, memory_state, memory_cache, write_body, residual=residual)
+        try:
+            return self._ck_buffered(like, shape, memory_state, memory_cache, write_body, residual=residual)
+        finally:
+            comfy.ops.uncast_bias_weight(norm, gw, gb, offload_stream)
 
     def memory_limit_conv(
         self,
@@ -1304,11 +1207,12 @@ class Upsample3D(nn.Module):
 
         if (_ck_eligible(hidden_states) and _fp16_accumulate_wanted(hidden_states)
                 and hidden_states.is_contiguous(memory_format=_CL)):
-            weight, bias = comfy.ops.cast_bias_weight(self.upscale_conv, hidden_states)
-            if getattr(self, "_ck_up_weight_src", None) is not weight:
-                self._ck_up_weight = weight.contiguous(memory_format=_CL)
-                self._ck_up_weight_src = weight
-            hidden_states = comfy_kitchen.fp16_conv3d(hidden_states, self._ck_up_weight, bias)
+            _ndhwc_filter(self.upscale_conv)
+            weight, bias, offload_stream = comfy.ops.cast_bias_weight(self.upscale_conv, hidden_states, offloadable=True)
+            try:
+                hidden_states = comfy_kitchen.fp16_conv3d(hidden_states, weight.contiguous(memory_format=_CL), bias)
+            finally:
+                comfy.ops.uncast_bias_weight(self.upscale_conv, weight, bias, offload_stream)
         else:
             hidden_states = self.upscale_conv(hidden_states)
         b, channels, f, h, w = hidden_states.shape
@@ -1945,19 +1849,22 @@ class Decoder3D(nn.Module):
         if not chunk or sample.size(2) <= chunk:
             return self._tail(sample, latent_embeds, memory_state, memory_cache)
         # The tail is spatial-only and causal: run it a few frames at a time, the cache carrying state.
-        if memory_state == MemoryState.DISABLED or memory_cache is None:
-            # a local cache for this call, under the same host-memory policy as a sliced decode
+        local_cache = memory_state == MemoryState.DISABLED or memory_cache is None
+        if local_cache:
+            # under the same host-memory policy as a sliced decode
             ups = sum(1 for blk in self.up_blocks[self.temporal_up_num:] if blk.upsamplers is not None)
             frame_pixels = sample.size(-2) * sample.size(-1) * 4 ** ups
             memory_cache = CausalMemoryCache(offload=_offload_caches_for(frame_pixels))
             memory_state = MemoryState.INITIALIZING
         outs = []
-        for i, piece in enumerate(sample.split(chunk, dim=2)):
-            state = memory_state if i == 0 else MemoryState.ACTIVE
-            outs.append(self._tail(piece, latent_embeds, state, memory_cache))
-        sample = torch.cat(outs, dim=2)
-
-        return sample
+        try:
+            for i, piece in enumerate(sample.split(chunk, dim=2)):
+                state = memory_state if i == 0 else MemoryState.ACTIVE
+                outs.append(self._tail(piece, latent_embeds, state, memory_cache))
+        finally:
+            if local_cache:
+                memory_cache.free()
+        return torch.cat(outs, dim=2)
 
 class VideoAutoencoderKL(nn.Module):
     def __init__(
@@ -2040,9 +1947,7 @@ class VideoAutoencoderKL(nn.Module):
 
     def slicing_encode(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_slicing and (x.shape[2] - 1) > self.slicing_sample_min_size:
-            # same policy as the decode: the caches only go to the host when that buys headroom
-            memory_cache = CausalMemoryCache(
-                offload=_offload_caches_for(x.shape[-2] * x.shape[-1], self.device))
+            memory_cache = CausalMemoryCache(offload=_offload_caches_for(x.shape[-2] * x.shape[-1]))
             split_size = max(
                 self.slicing_sample_min_size,
                 getattr(self, "temporal_downsample_factor", 1),
@@ -2052,36 +1957,28 @@ class VideoAutoencoderKL(nn.Module):
             if len(x_slices) > 1 and x_slices[-1].shape[2] < min_active_len:
                 x_slices[-2] = torch.cat((x_slices[-2], x_slices[-1]), dim=2)
                 x_slices.pop()
-            encoded_slices = [
-                self._encode(
-                    torch.cat((x[:, :, :1].to(self.device), x_slices[0]), dim=2),
-                    memory_state=MemoryState.INITIALIZING,
-                    memory_cache=memory_cache,
-                )
-            ]
-            for x_idx in range(1, len(x_slices)):
-                encoded_slices.append(
-                    self._encode(x_slices[x_idx], memory_state=MemoryState.ACTIVE, memory_cache=memory_cache)
-                )
-            out = torch.cat(encoded_slices, dim=2)
-            return out
+            try:
+                encoded_slices = [
+                    self._encode(
+                        torch.cat((x[:, :, :1].to(self.device), x_slices[0]), dim=2),
+                        memory_state=MemoryState.INITIALIZING,
+                        memory_cache=memory_cache,
+                    )
+                ]
+                for x_idx in range(1, len(x_slices)):
+                    encoded_slices.append(
+                        self._encode(x_slices[x_idx], memory_state=MemoryState.ACTIVE, memory_cache=memory_cache)
+                    )
+            finally:
+                memory_cache.free()
+            return torch.cat(encoded_slices, dim=2)
         else:
             return self._encode(x.to(self.device))
-
-    def _offload_caches(self, z):
-        """Offload the temporal caches only when the host has room for several times the pinned set."""
-        if not z.is_cuda:
-            return False
-        return self._offload_caches_for(z.shape[-2] * z.shape[-1] * self.spatial_downsample_factor ** 2)
-
-    @staticmethod
-    def _offload_caches_for(frame_pixels):
-        return _offload_caches_for(frame_pixels)
 
     def slicing_decode(self, z: torch.Tensor, output_buffer=None) -> torch.Tensor:
         """Decode slice by slice; with ``output_buffer`` each slice is written into it (no cat, no accumulation)."""
         if self.use_slicing and (z.shape[2] - 1) > self.slicing_latent_min_size:
-            memory_cache = CausalMemoryCache(offload=self._offload_caches(z))
+            memory_cache = CausalMemoryCache(offload=_offload_caches_for(z.shape[-2] * z.shape[-1] * self.spatial_downsample_factor ** 2))
             z_slices = z[:, :, 1:].split(split_size=self.slicing_latent_min_size, dim=2)
             decoded_slices = []
             write_pos = 0
@@ -2096,13 +1993,16 @@ class VideoAutoencoderKL(nn.Module):
                     decoded[..., :output_buffer.size(-2), :output_buffer.size(-1)])
                 write_pos += frames
 
-            emit(self._decode(
-                torch.cat((z[:, :, :1], z_slices[0]), dim=2),
-                memory_state=MemoryState.INITIALIZING,
-                memory_cache=memory_cache,
-            ))
-            for z_idx in range(1, len(z_slices)):
-                emit(self._decode(z_slices[z_idx], memory_state=MemoryState.ACTIVE, memory_cache=memory_cache))
+            try:
+                emit(self._decode(
+                    torch.cat((z[:, :, :1], z_slices[0]), dim=2),
+                    memory_state=MemoryState.INITIALIZING,
+                    memory_cache=memory_cache,
+                ))
+                for z_idx in range(1, len(z_slices)):
+                    emit(self._decode(z_slices[z_idx], memory_state=MemoryState.ACTIVE, memory_cache=memory_cache))
+            finally:
+                memory_cache.free()
             if output_buffer is not None:
                 return output_buffer
             return torch.cat(decoded_slices, dim=2)
@@ -2247,14 +2147,9 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
     # can be tiled without trying first. See preferred_decode_tile for the sizing that follows.
     comfy_decode_estimate_is_reliable = True
 
-    def preferred_decode_tile(self, device):
-        """Spatial tile side, in latent units, that fits the free VRAM."""
-        return self._tile_side_for_budget(device)
-
-    def _tile_side_for_budget(self, device):
-        """Largest square tile whose decode fits the free VRAM, from the same per-pixel figure as the estimate."""
-        free = comfy.model_management.get_free_memory(device)
-        budget = free * SEEDVR2_TILE_MEM_HEADROOM - SEEDVR2_DECODE_FIXED_BYTES
+    def preferred_decode_tile(self, free_memory):
+        """Largest square tile, in latent units, whose decode fits ``free_memory``, from the same per-pixel figure as the estimate."""
+        budget = free_memory * SEEDVR2_TILE_MEM_HEADROOM - SEEDVR2_DECODE_FIXED_BYTES
         if budget <= 0:
             return SEEDVR2_MIN_TILE_LATENT
         area = budget / SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL
@@ -2262,15 +2157,9 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
         side = (side // 8) * 8  # keep tiles a whole number of latent blocks
         return max(SEEDVR2_MIN_TILE_LATENT, min(SEEDVR2_MAX_TILE_LATENT, side))
 
-    def decode_tiled(self, z, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
+    def decode_tiled(self, z, tile_x=32, tile_y=32, overlap=8, tile_t=None, overlap_t=None):
         # SeedVR2's causal VAE owns temporal via the MemoryState cache; external
         # temporal tiling breaks that continuity, so only spatial tiling is applied.
-        if tile_x is None or tile_y is None:
-            side = self._tile_side_for_budget(z.device)
-            tile_x = side if tile_x is None else tile_x
-            tile_y = side if tile_y is None else tile_y
-        if overlap is None:
-            overlap = max(8, min(tile_x, tile_y) // 8)
         sf = self.spatial_downsample_factor
         seedvr2_tiling = {
             "enable_tiling": True,
@@ -2345,7 +2234,7 @@ class VideoAutoencoderKLWrapper(VideoAutoencoderKL):
             + frames * area * SEEDVR2_DECODE_BYTES_PER_OUTPUT_PIXEL
             + SEEDVR2_DECODE_FIXED_BYTES
         )
-        if not self._offload_caches_for(area):
+        if not _offload_caches_for(area):
             decode_peak += area * SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL   # the temporal caches stay resident
         # The node's colour correction runs after the decode, one frame (LAB) or a free-memory
         # sized chunk (wavelet, adain) at a time with its own OOM back-off, so it never coincides
