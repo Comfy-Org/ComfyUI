@@ -345,13 +345,13 @@ def test_causal_memory_cache_offloads_small_tails_and_parked_frames_exactly():
     cache.free()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="ring entries pack and offload on CUDA")
 def _ring(cache, key):
     frames = []
     cache.for_each_frame(key, lambda i, frame: frames.append(frame.clone()))
     return torch.cat(frames, dim=2)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ring entries pack and offload on CUDA")
 def test_causal_memory_cache_frame_ring_keeps_the_last_frames():
     """push_frames extends a key's tail one frame at a time; for_each_frame reads the last `keep`
     frames in order, retired frames are dropped, and a plain assignment replaces the ring."""
@@ -571,10 +571,19 @@ def test_seedvr2_causal_norm_wrapper_silu_matches_norm_then_silu(silu):
     torch.testing.assert_close(got, _reference_group_norm(norm, x, silu), rtol=1e-5, atol=1e-6)
 
 
-def _decode_estimate(frames, height, width, dtype=torch.float16, batch=1):
+def _decode_estimate(frames, height, width, dtype=torch.float16, batch=1, offload=True):
+    """Whether the caches can be pinned in host memory depends on the machine's RAM; the measured
+    floors are with them offloaded, so the test decides it instead of the machine."""
     wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
     latent_t = (frames - 1) // 4 + 1
-    return wrapper.comfy_memory_used_decode((batch, 16, latent_t, height // 8, width // 8), dtype)
+    with patch.object(vae_mod, "_offload_caches_for", lambda frame_pixels: offload):
+        return wrapper.comfy_memory_used_decode((batch, 16, latent_t, height // 8, width // 8), dtype)
+
+
+def test_seedvr2_decode_estimate_charges_resident_caches_without_offload():
+    """Without room to pin the caches in host memory they stay on the GPU, and the estimate says so."""
+    resident = _decode_estimate(21, 1080, 1920, offload=False) - _decode_estimate(21, 1080, 1920)
+    assert resident == 1080 * 1920 * vae_mod.SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL
 
 
 def _encode_estimate(frames, height, width, dtype=torch.float16, batch=1):
