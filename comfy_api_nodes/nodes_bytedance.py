@@ -765,8 +765,8 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                             _seedream_model_inputs(
                                 max_ref_images=10,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_5_PRO,
-                                max_width=4096,
-                                max_height=4096,
+                                max_width=4514,
+                                max_height=4514,
                                 supports_batch=False,
                                 supports_fast=True,
                                 include_common=True,
@@ -777,8 +777,8 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                             _seedream_model_inputs(
                                 max_ref_images=10,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_5_FLASH,
-                                max_width=4096,
-                                max_height=4096,
+                                max_width=4514,
+                                max_height=4514,
                                 supports_batch=False,
                                 supports_thinking=False,
                                 include_common=True,
