@@ -289,6 +289,7 @@ def ignore_padding(model):
     finally:
         model.padding = orig_padding
 
+
 _CACHE_MISS = object()
 _HADAMARD_CACHE = {}
 
@@ -1912,7 +1913,6 @@ class Decoder3D(nn.Module):
         self.conv_out = InflatedCausalConv3d(
             block_out_channels[0], out_channels, 3, padding=1, inflation_mode=inflation_mode
         )
-
 
     # Frames per pass through the spatial-only tail; None runs a slice's frames at once.
     tail_frames = 1

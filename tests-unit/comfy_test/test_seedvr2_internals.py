@@ -27,6 +27,7 @@ _NUM_CHANNELS = 8
 _NUM_GROUPS = 4
 _TENSOR_SHAPE = (1, 8, 2, 4, 4)
 
+
 @pytest.fixture(autouse=True)
 def _isolate_weight_patches():
     """Keep these tests independent of leaked weight patches.
