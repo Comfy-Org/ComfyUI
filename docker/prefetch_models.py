@@ -32,6 +32,13 @@ sys.path.insert(0, ROOT)
 DEFAULT_SPECS = ["minimaxh3:nvfp4", "minimaxh3-ref:nvfp4", "flux2klein9b"]
 
 
+def say(message: str, *, error: bool = False) -> None:
+    """Print for a CLI script (the repo's ruff config bans print())."""
+    stream = sys.stderr if error else sys.stdout
+    stream.write(message + "\n")
+    stream.flush()
+
+
 def models_for(spec: str) -> list[dict]:
     from api_wrapper import workflows as wf
 
@@ -73,27 +80,27 @@ def main(argv: list[str]) -> int:
         present = folder_paths.get_full_path(folder, filename)
         target_dir = (folder_paths.get_folder_paths(folder) or ["?"])[0]
         if present:
-            print(f"ok       {folder}/{filename}")
+            say(f"ok       {folder}/{filename}")
             continue
         if opts.dry_run:
             missing += 1
-            print(f"missing  {folder}/{filename} -> {target_dir}")
+            say(f"missing  {folder}/{filename} -> {target_dir}")
             continue
-        print(f"download {folder}/{filename} -> {target_dir}", flush=True)
+        say(f"download {folder}/{filename} -> {target_dir}")
         path, error = model_downloader.download_model(folder, filename, url)
         if path is None:
             failures += 1
-            print(f"FAILED   {folder}/{filename}: {error}", file=sys.stderr, flush=True)
+            say(f"FAILED   {folder}/{filename}: {error}", error=True)
         else:
-            print(f"ok       {folder}/{filename} ({os.path.getsize(path) / 1e9:.1f} GB)", flush=True)
+            say(f"ok       {folder}/{filename} ({os.path.getsize(path) / 1e9:.1f} GB)")
 
     if opts.dry_run:
-        print(f"prefetch (dry run): {len(wanted) - missing} of {len(wanted)} file(s) present, {missing} to download")
+        say(f"prefetch (dry run): {len(wanted) - missing} of {len(wanted)} file(s) present, {missing} to download")
         return 0
     if failures:
-        print(f"prefetch: {failures} of {len(wanted)} file(s) failed", file=sys.stderr)
+        say(f"prefetch: {failures} of {len(wanted)} file(s) failed", error=True)
         return 1
-    print(f"prefetch: {len(wanted)} file(s) ready")
+    say(f"prefetch: {len(wanted)} file(s) ready")
     return 0
 
 

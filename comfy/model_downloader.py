@@ -114,7 +114,6 @@ def _download_direct_url(url: str, dest: str, progress_key: str | None = None) -
 def _download_huggingface_resolve_url(url: str, dest: str, progress_key: str | None = None) -> bool:
     try:
         from huggingface_hub import hf_hub_download, get_hf_file_metadata
-        from huggingface_hub.utils import HfHubHTTPError
 
         parts = url.replace("https://huggingface.co/", "").split("/resolve/")
         if len(parts) != 2:
@@ -171,7 +170,6 @@ def _download_huggingface_resolve_url(url: str, dest: str, progress_key: str | N
 
 def _start_progress_monitor(progress_key: str, dest_path: str) -> threading.Thread:
     def _monitor():
-        start = time.time()
         while progress_key in _download_progress:
             if os.path.isfile(dest_path):
                 sz = os.path.getsize(dest_path)
