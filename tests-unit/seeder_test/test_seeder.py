@@ -165,7 +165,7 @@ def test_enrich_phase_does_not_count_returned_ids_as_failures(
     monkeypatch.setattr(
         seeder_module,
         "enrich_assets_batch",
-        lambda *_args, **_kwargs: (0, ["record-1", "record-2"]),
+        lambda *_args, **_kwargs: (0, ["record-1", "record-2"], 2),
     )
     monkeypatch.setattr(scan_seeder, "_check_pause_and_cancel", lambda _stage: False)
 
