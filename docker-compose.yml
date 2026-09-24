@@ -1,0 +1,45 @@
+name: comfyui-sos
+
+services:
+  comfyui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.10-slim-bookworm}
+        APT_MIRROR: ${APT_MIRROR:-}
+        APT_SECURITY_MIRROR: ${APT_SECURITY_MIRROR:-}
+        # RTX 50 系列（Blackwell）使用 CUDA 13.0 版本的 PyTorch
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu130
+    image: comfyui-sos:gpu
+    container_name: comfyui-sos
+    ports:
+      - "8188:8188"
+    volumes:
+      # 持久化数据目录：模型、输出、输入、用户配置、自定义节点
+      - ./models:/app/models
+      - ./output:/app/output
+      - ./input:/app/input
+      - ./user:/app/user
+      - ./temp:/app/temp
+      - ./custom_nodes:/app/custom_nodes
+    environment:
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      DO_NOT_TRACK: "1"
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8188/', timeout=5).read(1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
