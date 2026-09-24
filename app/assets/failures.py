@@ -13,6 +13,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import logging
 import re
 import struct
 from types import TracebackType
@@ -74,7 +75,8 @@ def _errno_codes(*names: str) -> frozenset[int]:
 
 _ERRNO_REASONS: tuple[tuple[frozenset[int], str], ...] = (
     (_errno_codes("EACCES", "EPERM"), "permission_denied"),
-    (_errno_codes("ENOENT"), "vanished"),
+    # ENOTDIR: a directory on the path was replaced by a file, so the file is gone.
+    (_errno_codes("ENOENT", "ENOTDIR"), "vanished"),
     (_errno_codes("EBUSY", "ETXTBSY"), "locked"),
     (
         _errno_codes(
@@ -88,7 +90,7 @@ _ERRNO_REASONS: tuple[tuple[frozenset[int], str], ...] = (
     (_errno_codes("EIO"), "io_error"),
     (_errno_codes("EILSEQ"), "encoding"),
     (_errno_codes("ENAMETOOLONG"), "name_too_long"),
-    (_errno_codes("ELOOP", "ENOTDIR"), "path_loop"),
+    (_errno_codes("ELOOP"), "path_loop"),
     (_errno_codes("EFBIG", "EOVERFLOW"), "too_large"),
     (_errno_codes("ENOSPC", "EDQUOT"), "no_space"),
     (_errno_codes("EROFS"), "read_only"),
@@ -137,6 +139,9 @@ class Fingerprint(NamedTuple):
     exc_class: str
     exc_site: str
     exc_line: int
+
+
+UNKNOWN_FINGERPRINT = Fingerprint("0" * 12, EXTERNAL, NO_SITE, 0)
 
 
 class FailureDescription(NamedTuple):
@@ -195,8 +200,6 @@ def _class_reason(exc: BaseException) -> str | None:
         return "dependency_missing"
     if isinstance(exc, PermissionError):
         return "permission_denied"
-    if isinstance(exc, TimeoutError):
-        return "timeout"
     if cls.__name__ == "IntegrityError" and cls.__module__.split(".")[0] in {"sqlalchemy", "sqlite3"}:
         return "db_constraint"
     return None
@@ -215,6 +218,8 @@ def _classify_one(exc: BaseException) -> Classification | None:
         reason = "vanished"  # raised without an errno, as tests and some libraries do
     if reason is None and isinstance(exc, ConnectionError):
         reason = "network_unavailable"
+    if reason is None and isinstance(exc, TimeoutError):
+        reason = "timeout"  # after errno, so a share's ETIMEDOUT reads as network
     sqlite_code = getattr(exc, "sqlite_errorcode", None)
     if reason is None and isinstance(sqlite_code, int):
         reason = _SQLITE_REASONS.get(sqlite_code & 0xFF)
@@ -229,8 +234,18 @@ def classify_failure(exc: BaseException) -> Classification:
     The raised exception wins over its causes; a SQLAlchemy error defers to the
     driver error it wraps. When nothing matches, the reason is ``other`` and the
     raw errno and winerror of the raised exception are kept, so an unmapped code
-    is still visible.
+    is still visible. This never raises: scan code branches on the result, and a
+    telemetry bug must not break a scan.
     """
+    try:
+        return _classify(exc)
+    except Exception:
+        logging.debug("Failure classification failed", exc_info=True)
+        reason = "vanished" if isinstance(exc, FileNotFoundError) else "other"
+        return Classification(reason, "none", NO_WINERROR)
+
+
+def _classify(exc: BaseException) -> Classification:
     for link in _chain(exc):
         for candidate in (link, getattr(link, "orig", None)):
             if isinstance(candidate, BaseException):
@@ -300,11 +315,22 @@ def exception_fingerprint(exc: BaseException) -> Fingerprint:
     exc_site, exc_line = NO_SITE, 0
     for module, function, line in reversed(_frames(exc.__traceback__)):
         if module == _SITE_PACKAGE or module.startswith(_SITE_PACKAGE + "."):
-            exc_site = _identifier(f"{module.removeprefix('app.')}.{function}")
+            short_module = module.removeprefix("app.")
+            # A name too long for a field keeps its module rather than reading as external.
+            for candidate in (f"{short_module}.{function}", short_module):
+                if _IDENTIFIER.fullmatch(candidate):
+                    exc_site = candidate
+                    break
             exc_line = line
             break
     return Fingerprint(exc_fp, exception_class(exc), exc_site, exc_line)
 
 
 def describe_failure(exc: BaseException) -> FailureDescription:
-    return FailureDescription(*classify_failure(exc), *exception_fingerprint(exc))
+    """Every field an event carries about ``exc``. Never raises, like classify_failure."""
+    try:
+        fingerprint = exception_fingerprint(exc)
+    except Exception:
+        logging.debug("Exception fingerprinting failed", exc_info=True)
+        fingerprint = UNKNOWN_FINGERPRINT
+    return FailureDescription(*classify_failure(exc), *fingerprint)

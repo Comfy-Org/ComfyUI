@@ -187,8 +187,9 @@ def observe_references_on_filesystem(
             stat_result = os.stat(path, follow_symlinks=True)
         except OSError as e:
             # Only a plain ENOENT means the file was deleted. Any other failure, such as
-            # an offline share (which Windows also reports as ENOENT), leaves the row
-            # alone for this scan, so an unreachable library is not marked missing.
+            # an offline network share (which Windows reports as ENOENT with a network
+            # winerror), leaves the row alone for this scan. A root that is simply
+            # absent, like an unmounted disk, still reads as ENOENT and is marked missing.
             if classify_failure(e).reason == "vanished":
                 observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
                 continue

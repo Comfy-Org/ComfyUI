@@ -255,6 +255,22 @@ def test_an_unreadable_subdirectory_is_reported_and_the_rest_still_listed(temp_d
     assert heard == [("walk_dir", PermissionError)]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions as non-root"
+)
+def test_a_root_that_exists_but_cannot_be_listed_is_reported_as_the_root(temp_dir: Path):
+    root = temp_dir / "locked-root"
+    root.mkdir()
+    root.chmod(0)
+    heard: list[str] = []
+    try:
+        assert list_files_recursively(str(root), lambda site, _exc: heard.append(site)) == []
+    finally:
+        root.chmod(0o755)
+
+    assert heard == ["walk_root"]
+
+
 def test_collecting_an_unreachable_input_root_emits_root_unreachable(
     temp_dir: Path, monkeypatch, caplog
 ):
@@ -327,7 +343,7 @@ def test_mixed_causes_survive_the_emit_once_event_as_buckets(monkeypatch, caplog
 
     with caplog.at_level(logging.INFO):
         scanner.build_asset_specs(paths, set(), progress=progress)
-        _emit_failure_buckets(progress)
+        _emit_failure_buckets(progress, "fast", None)
 
     assert [e["reason"] for e in events(caplog, "scanner.stat_failed")] == ["permission_denied"]
     lines = events(caplog, "scanner.failure_bucket")
@@ -346,7 +362,7 @@ def test_bucket_lines_are_capped_most_frequent_first(monkeypatch, caplog):
             progress.record_failure(site, OSError(errno.EIO, "x"))
 
     with caplog.at_level(logging.INFO):
-        _emit_failure_buckets(progress)
+        _emit_failure_buckets(progress, "fast", None)
 
     assert [(e["site"], e["count"]) for e in events(caplog, "scanner.failure_bucket")] == [
         ("enrich", 3),

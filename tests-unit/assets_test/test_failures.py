@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DatabaseError, IntegrityError
 
+from app.assets import failures
 from app.assets.event_log import ALLOWED_FIELDS, TAG, emit_failure
 from app.assets.failures import (
     EXTERNAL,
@@ -86,6 +87,8 @@ def raise_from(module: ModuleType, function: str = "fail") -> BaseException:
         (OSError(errno.EILSEQ, "seq"), ("encoding", "EILSEQ", -1)),
         (OSError(errno.ENAMETOOLONG, "long"), ("name_too_long", "ENAMETOOLONG", -1)),
         (OSError(errno.ELOOP, "loop"), ("path_loop", "ELOOP", -1)),
+        (NotADirectoryError(errno.ENOTDIR, "parent is a file"), ("vanished", "ENOTDIR", -1)),
+        (OSError(errno.ETIMEDOUT, "share timed out"), ("network_unavailable", "ETIMEDOUT", -1)),
         (OSError(errno.EFBIG, "big"), ("too_large", "EFBIG", -1)),
         (OSError(errno.ENOSPC, "full"), ("no_space", "ENOSPC", -1)),
         (OSError(errno.EROFS, "ro"), ("read_only", "EROFS", -1)),
@@ -312,3 +315,25 @@ def test_emit_failure_line_carries_only_validated_fields_and_nothing_user_derive
     assert "secret" not in line
     assert "model" not in line
     assert os.sep not in line.removeprefix(TAG)
+
+
+def test_a_classifier_bug_falls_back_instead_of_raising(monkeypatch):
+    def broken(_exc):
+        raise RuntimeError("classifier bug")
+
+    monkeypatch.setattr(failures, "_classify", broken)
+    monkeypatch.setattr(failures, "exception_fingerprint", broken)
+
+    assert classify_failure(FileNotFoundError(errno.ENOENT, "gone")).reason == "vanished"
+    description = describe_failure(OSError(errno.EIO, "io"))
+    assert description.reason == "other"
+    assert description.exc_fp == "0" * 12
+
+
+def test_a_site_too_long_for_the_field_keeps_its_module(tmp_path: Path):
+    name = "f" * 60
+    module = load_module(
+        "app.assets.fake", f"def {name}():\n    raise OSError(5, 'x')\n", tmp_path / "fake.py"
+    )
+
+    assert exception_fingerprint(raise_from(module, name)).exc_site == "assets.fake"

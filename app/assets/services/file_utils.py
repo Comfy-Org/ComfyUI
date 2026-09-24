@@ -48,8 +48,8 @@ def list_files_recursively(
     """Recursively list all files in a directory, following symlinks.
 
     What cannot be read is left out of the listing. ``on_error`` hears about it as
-    ``("walk_root", exc)`` when ``base_dir`` itself cannot be stat'ed, such as an
-    unmounted share, and ``("walk_dir", exc)`` for a directory below it.
+    ``("walk_root", exc)`` when ``base_dir`` itself cannot be stat'ed or listed, such
+    as an unmounted share, and ``("walk_dir", exc)`` for a directory below it.
     """
     out: list[str] = []
     base_abs = os.path.abspath(base_dir)
@@ -63,7 +63,7 @@ def list_files_recursively(
 
     def report_dir_error(exc: OSError) -> None:
         if on_error is not None:
-            on_error("walk_dir", exc)
+            on_error("walk_root" if exc.filename == base_abs else "walk_dir", exc)
 
     # Track seen real directory identities to prevent circular symlink loops
     seen_dirs: set[tuple[int, int]] = set()

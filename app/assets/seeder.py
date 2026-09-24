@@ -129,15 +129,18 @@ class _ScanState:
         self.failure_buckets[(site, describe_failure(exc))] += 1
 
 
-# Well under the launcher tap's hourly cap per event, so a scan's buckets arrive whole.
+# Bounds one scan's lines. A launcher that rate-limits per event name can still drop
+# buckets when failing scans repeat within its window, e.g. an output scan per prompt.
 _MAX_FAILURE_BUCKETS = 50
 
 
-def _emit_failure_buckets(state: _ScanState) -> None:
+def _emit_failure_buckets(state: _ScanState, phase: str, root: str | None) -> None:
     """One ``scanner.failure_bucket`` line per distinct failure this scan, most frequent first."""
     for (site, failure), count in state.failure_buckets.most_common(_MAX_FAILURE_BUCKETS):
         emit(
             "scanner.failure_bucket",
+            phase=phase,
+            root=root,
             site=site,
             reason=failure.reason,
             errno_name=failure.errno_name,
@@ -792,7 +795,7 @@ class _AssetSeeder:
                             },
                         )
                 if self._scan_state is not None:
-                    _emit_failure_buckets(self._scan_state)
+                    _emit_failure_buckets(self._scan_state, phase.value, root)
             finally:
                 with self._lock:
                     start_paused = self._state is State.PAUSED
