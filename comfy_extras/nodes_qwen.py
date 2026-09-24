@@ -256,14 +256,20 @@ class QwenImage21FunControlPatch:
             comfy.model_management.load_models_gpu(loaded_models)
         self.control = torch.cat([control, keep, inpaint], dim=1)
 
-    def diffusion_model_wrapper(self, executor, x, timestep, *args, **kwargs):
+    def diffusion_model_wrapper(self, executor, x, timestep, context, ref_latents, image_slots, transformer_options, **kwargs):
         sigma = float(timestep.flatten()[0])
         self.active = self.sigma_end <= sigma <= self.sigma_start
         if self.active:
             with comfy.model_prefetch.pause_malloc_graph():
                 self.prepare(*x.shape[-2:])
+        else:
+            # outside the range the block patches are dropped so the model can use its prefix cache
+            dit = transformer_options.get("patches_replace", {}).get("dit", {})
+            dit = {k: p.previous if isinstance(p, QwenImage21FunControlBlockPatch) and p.control_patch is self else p for k, p in dit.items()}
+            dit = {k: p for k, p in dit.items() if p is not None}
+            transformer_options = {**transformer_options, "patches_replace": {**transformer_options["patches_replace"], "dit": dit}}
         try:
-            return executor(x, timestep, *args, **kwargs)
+            return executor(x, timestep, context, ref_latents, image_slots, transformer_options, **kwargs)
         finally:
             self.stream = None
             self.pristine = None
@@ -279,8 +285,8 @@ class QwenImage21FunControlPatch:
         model = self.model_patch.model
         index = self.injection_layers.index(block_index)
         if index == 0:
-            control = self.control.to(out["img"].device, out["img"].dtype).flatten(2).transpose(1, 2)
-            self.stream = model.init_stream(self.pristine, control, args["prefix_len"])
+            self.control = self.control.to(out["img"].device, out["img"].dtype)
+            self.stream = model.init_stream(self.pristine, self.control.flatten(2).transpose(1, 2), args["prefix_len"])
             self.pristine = None
         self.stream, skip = model.step(index, self.stream, args["mod"], args["pe"], args["attn_fn"], args["prefix_len"], args["transformer_options"])
         out["img"].add_(skip, alpha=self.strength)
@@ -288,6 +294,8 @@ class QwenImage21FunControlPatch:
 
     def to(self, device_or_dtype):
         if isinstance(device_or_dtype, torch.device):
+            if self.control is not None:
+                self.control = self.control.to(device_or_dtype)
             self.stream = None
         return self
 
