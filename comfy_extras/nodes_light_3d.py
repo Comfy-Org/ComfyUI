@@ -19,6 +19,8 @@ _DEFAULT_EYE = (0.0, 6.0, 8.0)
 _DEFAULT_TARGET = (0.0, -0.5, 0.0)
 _DEFAULT_FOV = 35.0
 _DEFAULT_LIGHT_POSITION = (0.0, 1.8, 1.8)
+_MIN_OUTER_CONE = 1.0
+_MAX_CONE = 90.0
 
 
 def _hex_to_rgb01(color):
@@ -118,8 +120,8 @@ def _clean_light(light) -> IO.Load3DLightInfo.LightInfo:
         if rng > 0.0:
             cleaned["range"] = rng
     if kind == "spot":
-        outer = float(light.get("outerConeAngle", 45.0))
-        cleaned["innerConeAngle"] = min(float(light.get("innerConeAngle", 30.0)), outer)
+        outer = min(max(float(light.get("outerConeAngle", 45.0)), _MIN_OUTER_CONE), _MAX_CONE)
+        cleaned["innerConeAngle"] = min(max(float(light.get("innerConeAngle", 30.0)), 0.0), outer)
         cleaned["outerConeAngle"] = outer
     radius = float(light.get("radius", 0.0) or 0.0)
     if radius > 0.0:
@@ -317,47 +319,47 @@ class RenderLight(IO.ComfyNode):
         f, r, u = _camera_basis(eye, target, up_hint)
 
         H, W = int(height), int(width)
-        ys = 1.0 - (torch.arange(H, device=dev, dtype=torch.float32) + 0.5) / H * 2.0
-        xs = (torch.arange(W, device=dev, dtype=torch.float32) + 0.5) / W * 2.0 - 1.0
-        gy, gx = torch.meshgrid(ys, xs, indexing="ij")
         tn = math.tan(0.5 * fov_rad)
         aspect = W / H
-        d = torch.nn.functional.normalize(
-            (r * (gx * tn * aspect)[..., None] + u * (gy * tn)[..., None] + f).reshape(-1, 3),
-            dim=-1, eps=1e-6)
-        o = eye[None, :].expand(H * W, 3)
+        out_dev = comfy.model_management.intermediate_device()
+        free = comfy.model_management.get_free_memory(dev)
+        ray_chunk = int(min(1 << 22, max(1 << 20, (free * 0.25) / 400)))
 
-        bg_rgb = torch.tensor(_hex_to_rgb01(_SKY_COLOR), device=dev)
+        bg_rgb = torch.tensor(_hex_to_rgb01(_SKY_COLOR), device=out_dev)
         sky_rgb = torch.tensor(_hex_to_linear_rgb(sky_color), device=dev) * float(ambient)
         ground_rgb = torch.tensor(_hex_to_linear_rgb(ground_color), device=dev) * float(ambient)
         img = bg_rgb[None, :].repeat(H * W, 1)
         per_light = [bg_rgb[None, :].repeat(H * W, 1) for _ in lights]
-        ray_chunk = 1 << 22
         for s in range(0, H * W, ray_chunk):
             e = min(s + ray_chunk, H * W)
-            t_hit, face, hit = _closest_hit_rays_bvh(o[s:e], d[s:e], tri, bvh, tmin=1e-5, tmax=1e30)
+            idx = torch.arange(s, e, device=dev)
+            gy = 1.0 - ((idx // W).float() + 0.5) / H * 2.0
+            gx = ((idx % W).float() + 0.5) / W * 2.0 - 1.0
+            d = torch.nn.functional.normalize(
+                r * (gx * tn * aspect)[:, None] + u * (gy * tn)[:, None] + f, dim=-1, eps=1e-6)
+            o = eye[None, :].expand(e - s, 3)
+            t_hit, face, hit = _closest_hit_rays_bvh(o, d, tri, bvh, tmin=1e-5, tmax=1e30)
             if not bool(hit.any()):
                 continue
             fh = face[hit].clamp_min(0)
-            P = o[s:e][hit] + t_hit[hit, None] * d[s:e][hit]
+            P = o[hit] + t_hit[hit, None] * d[hit]
             bary = _barycentric(P, tri[fh])
             N = torch.nn.functional.normalize(
                 (bary[:, :, None] * normals[faces[fh]]).sum(1), dim=-1, eps=1e-6)
             albedo = albedo_per_face[fh, None] / math.pi
             up_mix = (N[:, 1:2] * 0.5 + 0.5)
             radiance = ground_rgb[None, :] + (sky_rgb - ground_rgb)[None, :] * up_mix
+            hit_out = hit.to(out_dev)
             for light, buf in zip(lights, per_light):
                 contribution = _light_contribution(light, P, N, tri, bvh, dev, shadow_samples)
                 radiance = radiance + contribution
                 local = buf[s:e]
-                local[hit] = _linear_to_srgb(albedo * contribution).clamp(0.0, 1.0)
-                buf[s:e] = local
+                local[hit_out] = _linear_to_srgb(albedo * contribution).clamp(0.0, 1.0).to(out_dev)
             local = img[s:e]
-            local[hit] = _linear_to_srgb(albedo * radiance).clamp(0.0, 1.0)
-            img[s:e] = local
+            local[hit_out] = _linear_to_srgb(albedo * radiance).clamp(0.0, 1.0).to(out_dev)
 
-        image = img.reshape(H, W, 3)[None].cpu()
-        per_light_images = (torch.stack([buf.reshape(H, W, 3) for buf in per_light]).cpu()
+        image = img.reshape(H, W, 3)[None]
+        per_light_images = (torch.stack([buf.reshape(H, W, 3) for buf in per_light])
                             if per_light else image)
         return IO.NodeOutput(image, per_light_images)
 

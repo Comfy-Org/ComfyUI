@@ -50,9 +50,16 @@ class TestCleanLight:
         assert "innerConeAngle" not in cleaned
         assert cleaned["target"] == {"x": 0.0, "y": 0.0, "z": 0.0}
 
-    def test_spot_inner_cone_is_clamped_to_outer(self):
-        cleaned = _clean_light({"type": "spot", "innerConeAngle": 60.0, "outerConeAngle": 45.0})
-        assert cleaned["innerConeAngle"] == 45.0
+    @pytest.mark.parametrize("inner,outer,expected", [
+        (12.0, 20.0, (12.0, 20.0)),
+        (60.0, 45.0, (45.0, 45.0)),
+        (-5.0, 45.0, (0.0, 45.0)),
+        (10.0, -1.0, (1.0, 1.0)),
+        (30.0, 120.0, (30.0, 90.0)),
+    ])
+    def test_spot_cones_are_clamped(self, inner, outer, expected):
+        cleaned = _clean_light({"type": "spot", "innerConeAngle": inner, "outerConeAngle": outer})
+        assert (cleaned["innerConeAngle"], cleaned["outerConeAngle"]) == expected
 
     def test_radius_and_cast_shadow_round_trip(self):
         cleaned = _clean_light(directional(radius=0.5, castShadow=False))
