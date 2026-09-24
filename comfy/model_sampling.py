@@ -275,7 +275,7 @@ class ModelSamplingContinuousEDM(torch.nn.Module):
         percent = 1.0 - percent
 
         log_sigma_min = math.log(self.sigma_min)
-        return torch.tensor(math.exp((math.log(self.sigma_max) - log_sigma_min) * percent + log_sigma_min), dtype=torch.float32).item()
+        return math.exp((math.log(self.sigma_max) - log_sigma_min) * percent + log_sigma_min)
 
 
 class ModelSamplingContinuousV(ModelSamplingContinuousEDM):
