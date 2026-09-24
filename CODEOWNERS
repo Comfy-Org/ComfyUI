@@ -1,5 +1,73 @@
+# Code owners for Comfy-Org/ComfyUI.
+#
+# Last matching rule wins (not additive). Default first, then narrower
+# overrides. GitHub only honors owners with WRITE access on this repo;
+# owners without write are silently ignored.
+#
+# First-pass Greenlight / Agentic Approval CODEOWNERS audit. Owners below
+# are taken from 12-month authorship and recent human PR approvals, then
+# checked for write access. Uncertainties are flagged in the PR, not guessed
+# here as extra handles.
+
+# Default: existing core-engine maintainers. Unchanged from the previous
+# default line. @kosinkadink is kept because the project already named them;
+# GitHub currently reports only read access for that account on this repo, so
+# they cannot satisfy a required review until write is restored.
 * @comfyanonymous @kosinkadink @guill @alexisrolland @rattus128 @kijai
 
+# Public HTTP API contract. Local copy is synced from cloud and extended for
+# the assets API. 12-month authors with write: mattmillerai, synap5e,
+# christian-byrne.
+/openapi.yaml @mattmillerai @synap5e @christian-byrne
+
+# SQLite schema and Alembic migrations for the local assets DB. None of the
+# default six are recent authors here.
+/alembic.ini @synap5e @luke-mino-altherr @mattmillerai
+/alembic_db/ @synap5e @luke-mino-altherr @mattmillerai
+/app/database/ @synap5e @luke-mino-altherr @mattmillerai
+
+# Asset library that those migrations serve (high 60-day churn).
+/app/assets/ @synap5e @luke-mino-altherr @mattmillerai
+
+# Versioned custom-node Python API (v0_0_1 / v0_0_2 / latest). Top 12-month
+# authors with write: bigcat88, jtydhr88, comfyanonymous.
+/comfy_api/ @comfyanonymous @bigcat88 @jtydhr88
+
+# ComfyNodeABC / IO typing — stable contract for third-party custom nodes.
+/comfy/comfy_types/ @comfyanonymous @guill @jtydhr88
+
+# HTTP server surface consumed by the frontend, scripts, and custom nodes.
+/server.py @comfyanonymous @christian-byrne
+
+# extra_model_paths.yaml contract: example file, loader, and folder resolver.
+/extra_model_paths.yaml.example @comfyanonymous @christian-byrne
+/utils/extra_config.py @comfyanonymous @christian-byrne
+/folder_paths.py @comfyanonymous @kijai @mattmillerai
+
+# Checkpoint / state-dict compatibility. Careless changes break existing
+# checkpoints and third-party nodes that depend on loader behavior.
+/comfy/sd.py @comfyanonymous @kijai @rattus128
+/comfy/model_detection.py @comfyanonymous @kijai @rattus128
+/comfy/supported_models.py @comfyanonymous @kijai @rattus128
+/comfy/model_management.py @comfyanonymous @rattus128
+
+# Prompt-graph execution — workflow JSON compatibility lives here, not in a
+# separate schema file.
+/execution.py @comfyanonymous @rattus128
+/comfy_execution/ @comfyanonymous @rattus128
+
+# Partner / billed API nodes. 12-month authorship is almost entirely
+# @bigcat88; @alexisrolland is the primary human approver of those PRs.
+/comfy_api_nodes/ @bigcat88 @alexisrolland
+
+# Dependency pins. requirements.txt also carries frontend-package bumps
+# usually approved by @alexisrolland.
+/requirements.txt @comfyanonymous @rattus128 @alexisrolland
+/pyproject.toml @comfyanonymous @rattus128
+/manager_requirements.txt @ltdrdata @comfyanonymous
+
+# Repo security, CI, portable-build scripts, and agent instructions.
+# Keep last so they win over the default. Unchanged from the previous file.
 /CODEOWNERS @comfyanonymous
 /AGENTS.md @comfyanonymous
 /.ci/ @comfyanonymous
