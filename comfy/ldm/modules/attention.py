@@ -846,6 +846,7 @@ except AttributeError as error:
 
 @wrap_attn
 def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    causal = kwargs.get("causal", False)
     if skip_reshape:
         b, _, _, dim_head = q.shape
     else:
@@ -863,14 +864,14 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
             mask = mask.unsqueeze(1)
 
     try:
-        if mask is not None:
+        if mask is not None and not causal:
             raise RuntimeError("Mask must not be set for Flash attention")
         out = flash_attn_wrapper(
             q.transpose(1, 2),
             k.transpose(1, 2),
             v.transpose(1, 2),
             dropout_p=0.0,
-            causal=False,
+            causal=causal,
             softmax_scale=kwargs.get("scale", -1.0),
         ).transpose(1, 2)
     except Exception as e:
