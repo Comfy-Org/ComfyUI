@@ -515,10 +515,10 @@ def test_seedvr2_decode_estimate_is_flat_in_clip_length():
 
 
 @pytest.mark.parametrize("frames, height, width, measured_gib", [
-    (9, 480, 864, 2.51),
-    (21, 720, 1280, 4.01),
-    (9, 864, 1536, 5.51),
-    (21, 1080, 1920, 9.01),
+    (9, 480, 864, 1.51),
+    (21, 720, 1280, 3.01),
+    (9, 864, 1536, 4.01),
+    (21, 1080, 1920, 6.26),
 ])
 def test_seedvr2_decode_estimate_tracks_measured_peak(frames, height, width, measured_gib):
     """The least free VRAM (to 0.5 GiB) an untiled decode ran in under cudaMallocAsync, RTX 5090;
@@ -533,10 +533,10 @@ def test_seedvr2_decode_estimate_tracks_measured_peak(frames, height, width, mea
 
 
 @pytest.mark.parametrize("frames, height, width, measured_gib", [
-    (9, 480, 864, 1.48),
-    (21, 720, 1280, 3.48),
-    (9, 864, 1536, 4.48),
-    (21, 1088, 1920, 6.98),
+    (9, 480, 864, 1.51),
+    (21, 720, 1280, 2.51),
+    (9, 864, 1536, 3.01),
+    (21, 1088, 1920, 5.01),
 ])
 def test_seedvr2_encode_estimate_tracks_measured_floor(frames, height, width, measured_gib):
     """Same measurement as the decode table; slicing and the frame-chunked head keep an encode flat

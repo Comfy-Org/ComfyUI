@@ -22,15 +22,15 @@ SEEDVR2_VAE_CACHE_QUANT_BYTES = 64 * 1024 ** 2         # tails at or above this 
 SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL = 6200             # host-held caches and parked frames, per output-frame pixel.
 
 # VAE decode estimate: the free VRAM an untiled decode needs under cudaMallocAsync (ComfyUI's default),
-# fitted 1-14% above the measured floor.
-SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL = 4100            # working set, per output-frame pixel.
+# fitted 2-11% above the measured floor.
+SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL = 3000            # working set, per output-frame pixel.
 SEEDVR2_DECODE_BYTES_PER_OUTPUT_PIXEL = 6              # decoded fp16 frames, per output pixel.
-SEEDVR2_DECODE_FIXED_BYTES = 960 * 1024 ** 2
+SEEDVR2_DECODE_FIXED_BYTES = 384 * 1024 ** 2
 SEEDVR2_DECODE_LAB_BYTES_PER_OUTPUT_PIXEL = 160        # colour correction is per frame in the node.
 
-# VAE encode estimate, likewise fitted 1-16% above the measured floor; slicing keeps it flat in clip length.
-SEEDVR2_ENCODE_BYTES_PER_PIXEL = 3800                  # per input-frame pixel.
-SEEDVR2_ENCODE_FIXED_BYTES = 256 * 1024 ** 2
+# VAE encode estimate, likewise fitted 2-16% above the measured floor; slicing keeps it flat in clip length.
+SEEDVR2_ENCODE_BYTES_PER_PIXEL = 2300                  # per input-frame pixel.
+SEEDVR2_ENCODE_FIXED_BYTES = 672 * 1024 ** 2
 
 # Tiled decode, in latent units (8 output pixels each).
 SEEDVR2_TILE_MEM_HEADROOM = 0.6

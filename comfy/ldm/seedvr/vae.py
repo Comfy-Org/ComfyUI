@@ -317,6 +317,7 @@ class CausalMemoryCache:
         self._spare = {}       # (shape, dtype) -> host buffers of dropped entries
         self._pinned = []
         self._landing = None   # (event, sources) of the copy to the host still in flight
+        self._pad = {}         # key -> (top, bottom, left, right) zero border an entry was stored with
         self._stream = None
         self._device = None
         self._rings = {}       # key -> deque of per-frame subkeys, oldest first
@@ -400,8 +401,10 @@ class CausalMemoryCache:
             if sub in self.packed and sub not in self._staged:
                 self._staged[sub] = self._bring_back(sub, device)
 
-    def push_frames(self, key, frames, keep):
-        """Extend ``key``'s tail by ``frames``, keeping the last ``keep``; each frame is its own entry."""
+    def push_frames(self, key, frames, keep, pad=(0, 0, 0, 0)):
+        """Extend ``key``'s tail by ``frames``, keeping the last ``keep``; each frame is its own entry.
+        ``frames`` may carry a zero border ``pad`` (top, bottom, left, right): frames of the caller's padded buffer are packed
+        or sent to the host as they are, without a cropped copy."""
         if key in self.plain or key in self.packed:
             whole = self.pop(key)
             ring = self._rings[key] = collections.deque()
@@ -414,7 +417,12 @@ class CausalMemoryCache:
         for j in range(frames.size(2)):
             self._ring_serial += 1
             sub = (key, self._ring_serial)
-            self[sub] = frames[:, :, j:j + 1].clone(memory_format=_CL)
+            frame = frames[:, :, j:j + 1]
+            if not frame.is_contiguous(memory_format=_CL) or not (self.offload or self._packable(frame)):
+                frame = frame.clone(memory_format=_CL)   # kept as it is: not as a view of the caller's buffer
+            self[sub] = frame
+            if any(pad):
+                self._pad[sub] = pad
             ring.append(sub)
         self.keep_last(key, keep)
         if key not in self._order:
@@ -470,30 +478,41 @@ class CausalMemoryCache:
     def get(self, key, default=None):
         ring = self._rings.get(key)
         if ring is not None:
-            frames = [self._get_entry(sub) for sub in ring]
+            frames = [self._frame(sub, (0, 0, 0, 0)) for sub in ring]
             out = torch.cat(frames, dim=2) if len(frames) > 1 else frames[0]
         elif key in self.plain or key in self.packed:
-            out = self._get_entry(key)
+            out = self._frame(key, (0, 0, 0, 0))
         else:
             return default
         if self.offload and self._device is not None:
             self._prefetch_after(key, self._device)
         return out
 
-    def for_each_frame(self, key, fn, count=None):
-        """``fn(i, frame)`` over get(key)'s first ``count`` frames one at a time, never holding the
-        whole unpacked tail."""
+    def for_each_frame(self, key, fn, count=None, pad=(0, 0, 0, 0)):
+        """``fn(i, frame)`` over get(key)'s first ``count`` frames one at a time, each with a zero
+        border ``pad``, never holding the whole unpacked tail."""
         ring = self._rings.get(key)
         if ring is None:
-            whole = self._get_entry(key)
+            whole = self._frame(key, pad)
             for i in range(whole.size(2) if count is None else count):
                 fn(i, whole[:, :, i:i + 1])
             del whole
         else:
             for i, sub in enumerate(list(ring)[:count]):
-                fn(i, self._get_entry(sub))
+                fn(i, self._frame(sub, pad))
         if self.offload and self._device is not None:
             self._prefetch_after(key, self._device)
+
+    def _frame(self, key, pad):
+        """An entry with a zero border ``pad``, cropping or padding the border it was stored with."""
+        value = self._get_entry(key)
+        have = self._pad.get(key, (0, 0, 0, 0))
+        if have != pad:
+            if any(have):
+                value = value[:, :, :, have[0]:value.size(3) - have[1], have[2]:value.size(4) - have[3]]
+            if any(pad):
+                value = F.pad(value, (pad[2], pad[3], pad[0], pad[1])).contiguous(memory_format=_CL)
+        return value
 
     def _get_entry(self, key):
         if key in self.plain:
@@ -518,6 +537,7 @@ class CausalMemoryCache:
     def discard(self, key):
         """Drop an entry without bringing it back; its host buffers are reused."""
         self.plain.pop(key, None)
+        self._pad.pop(key, None)
         entry = self.packed.pop(key, None)
         staged = self._staged.pop(key, None)
         if staged is not None:   # its GPU copy is freed on the compute stream
@@ -532,7 +552,7 @@ class CausalMemoryCache:
             torch.cuda.synchronize(self._device)   # no copy may still be using a buffer when it is unpinned
         for t in self._pinned:
             comfy.model_management.unpin_memory(t)
-        self._pinned, self._spare, self._staged, self._landing = [], {}, {}, None
+        self._pinned, self._spare, self._staged, self._landing, self._pad = [], {}, {}, None, {}
         self.plain, self.packed, self._rings, self._order = {}, {}, {}, []
 
     def __contains__(self, key):
@@ -559,12 +579,12 @@ class MemoryState(Enum):
 
 
 def _frame_chunked(owner, run, source, chunk, memory_state, memory_cache, frame_pixels):
-    """``run(x, memory_state, memory_cache)`` over a causal, spatial-only stage ``chunk`` frames at a
-    time, the cache carrying state between chunks: exact, and only a chunk's activations are live.
-    ``source`` (a 1-list) is emptied, so nothing here keeps the whole input alive."""
-    sample = source.pop()
-    if not chunk or sample.size(2) <= chunk:
-        return run(sample, memory_state, memory_cache)
+    """``run(source, memory_state, memory_cache)`` over a causal, spatial-only stage ``chunk`` frames at
+    a time, the cache carrying state between chunks: exact, and only a chunk's activations are live.
+    ``source`` is a 1-list the stage pops, so no caller keeps its input alive (the input of a module
+    call is held until that module returns)."""
+    if not chunk or source[0].size(2) <= chunk:
+        return run(source, memory_state, memory_cache)
     local_cache = memory_state == MemoryState.DISABLED or memory_cache is None
     if local_cache:
         # under the same host-memory policy as a sliced pass
@@ -572,17 +592,16 @@ def _frame_chunked(owner, run, source, chunk, memory_state, memory_cache, frame_
         memory_state = MemoryState.INITIALIZING
     outs = []
     try:
-        pieces = list(sample.split(chunk, dim=2))
-        del sample
+        pieces = list(source.pop().split(chunk, dim=2))
         if memory_cache.offload and pieces[0].is_contiguous(memory_format=_CL):
             # the rest waits in host memory, fetched a chunk ahead: resident, the whole input sat
             # under every chunk's peak (2.5 GiB for the decoder's tail at 1080p)
             pieces[0] = pieces[0].clone(memory_format=_CL)
             pieces[1:] = memory_cache.park(owner, pieces[1:])
 
-        def take(i):   # nothing here keeps the chunk alive once the stage moves past it
+        def take(i):
             piece, pieces[i] = pieces[i], None
-            return piece if torch.is_tensor(piece) else memory_cache.pop(piece)
+            return [piece if torch.is_tensor(piece) else memory_cache.pop(piece)]
         for i in range(len(pieces)):
             outs.append(run(take(i), memory_state if i == 0 else MemoryState.ACTIVE, memory_cache))
     finally:
@@ -927,13 +946,19 @@ class InflatedCausalConv3d(ops.Conv3d):
     # under this many elements (2 GiB of fp16), which is one call at 1080p and two at 1440p.
     _CK_MAX_VIEW_ELEMENTS = 2 ** 30
 
-    def _ck_buffered(self, like, x_shape, memory_state, memory_cache, write_body, residual=None):
+    # _ck_taps runs each halo tap in this many bands of output rows, so a tap's own output is that
+    # fraction of a frame (cuDNN cannot accumulate into the conv's output)
+    _TAP_BANDS = 4
+
+    def _ck_buffered(self, like, x_shape, memory_state, memory_cache, write_body, residual=None, pad=None):
         """Run this conv from one padded buffer: halo in front, ``write_body`` writes the padded frames
         behind it, and the conv reads and writes frame-window views. ``residual`` goes into the kitchen
-        conv's epilogue (added explicitly on the cuDNN path). Replicates forward()'s cache handling.
+        conv's epilogue (added explicitly on the cuDNN path). ``pad`` is the buffer's spatial border
+        (top, bottom, left, right), the conv's own padding by default. Replicates forward()'s cache handling.
         """
         b, c, t, h, w = x_shape
         _, ph, pw = self.padding
+        pad = pad or (ph, ph, pw, pw)
         kt = self.kernel_size[0]
         cache_size = kt - self.stride[0]
         if memory_cache is None:
@@ -942,9 +967,9 @@ class InflatedCausalConv3d(ops.Conv3d):
             memory_cache.pop(self, None)
         has_memory = self in memory_cache
         halo = cache_size if has_memory else self.temporal_padding * 2
-        if t == 1 and halo == 2 and kt == 3:
+        if t == 1 and halo == 2 and kt == 3 and tuple(self.stride) == (1, 1, 1):
             return self._ck_taps(like, x_shape, memory_state, memory_cache, write_body, residual, has_memory)
-        hp, wp = h + 2 * ph, w + 2 * pw
+        hp, wp = h + pad[0] + pad[1], w + pad[2] + pad[3]
 
         buf = torch.empty((b, c, halo + t, hp, wp), dtype=like.dtype, device=like.device, memory_format=_CL)
         write_body(buf[:, :, halo:])
@@ -952,24 +977,18 @@ class InflatedCausalConv3d(ops.Conv3d):
         if halo:
             front = buf[:, :, :halo]
             if has_memory:
-                # after the body, whose source is freed by then: the unpacked halo is two full frames
-                core = front[:, :, :, ph:ph + h, pw:pw + w]
-                memory_cache.for_each_frame(self, lambda i, frame: core[:, :, i:i + 1].copy_(frame))
-                for dim, lo, hi in ((3, ph, ph + h), (4, pw, pw + w)):
-                    if lo:
-                        front.narrow(dim, 0, lo).zero_()
-                        front.narrow(dim, hi, lo).zero_()   # symmetric border
+                # after the body, whose source is freed by then; the frames come with their zero border
+                memory_cache.for_each_frame(self, lambda i, frame: front[:, :, i:i + 1].copy_(frame), pad=pad)
             else:
                 # extend_head's tiled first frame, already padded
                 front.copy_(buf[:, :, halo:halo + 1].expand(-1, -1, halo, -1, -1))
         if cache_size and memory_state in (MemoryState.INITIALIZING, MemoryState.ACTIVE):
-            core = buf[:, :, :, ph:ph + h, pw:pw + w]
             if has_memory:
                 # the halo frames are already the cache's newest entries: push only the new ones
                 # (push_frames splits a tail that was stored whole before extending it)
-                memory_cache.push_frames(self, core[:, :, halo:][:, :, -min(t, cache_size):], cache_size)
+                memory_cache.push_frames(self, buf[:, :, halo:][:, :, -min(t, cache_size):], cache_size, pad=pad)
             else:
-                memory_cache.push_frames(self, core[:, :, -cache_size:], cache_size)
+                memory_cache.push_frames(self, buf[:, :, -cache_size:], cache_size, pad=pad)
 
         _ndhwc_filter(self)
         weight, bias, offload_stream = comfy.ops.cast_bias_weight(self, buf, offloadable=True)
@@ -980,17 +999,18 @@ class InflatedCausalConv3d(ops.Conv3d):
             if not _fp16_accumulate_wanted(buf):
                 out = F.conv3d(buf, weight_cl, bias, stride=stride)   # cuDNN, NDHWC in and out
             else:
-                zt = buf.size(2) - kt + 1
-                out = torch.empty((b, weight.size(0), zt, hp - self.kernel_size[1] + 1, wp - self.kernel_size[2] + 1),
+                sd, sh, sw = stride
+                zt = (buf.size(2) - kt) // sd + 1
+                out = torch.empty((b, weight.size(0), zt, (hp - self.kernel_size[1]) // sh + 1, (wp - self.kernel_size[2]) // sw + 1),
                                   dtype=buf.dtype, device=buf.device, memory_format=_CL)
                 # each call's input and output views stay under the kernel's 32-bit offsets
                 per_frame = max(c * hp * wp, weight.size(0) * out.size(3) * out.size(4))
-                chunk = max(1, min(zt, self._CK_MAX_VIEW_ELEMENTS // per_frame - (kt - 1)))
+                chunk = max(1, min(zt, (self._CK_MAX_VIEW_ELEMENTS // per_frame - kt) // sd + 1))
                 if residual is not None and residual.shape == out.shape and residual.dtype == out.dtype and _ndhwc_like(residual):
                     fused_residual = residual   # otherwise added after: the epilogue wants the output's shape and layout
                 for z0 in range(0, zt, chunk):
                     z1 = min(zt, z0 + chunk)
-                    comfy_kitchen.fp16_conv3d(buf[:, :, z0:z1 + kt - 1], weight_cl, bias,
+                    comfy_kitchen.fp16_conv3d(buf[:, :, z0 * sd:(z1 - 1) * sd + kt], weight_cl, bias,
                                               residual=None if fused_residual is None else fused_residual[:, :, z0:z1],
                                               stride=stride, out=out[:, :, z0:z1])
         finally:
@@ -1020,13 +1040,17 @@ class InflatedCausalConv3d(ops.Conv3d):
                 out = F.conv3d(buf, tap, bias)
             if memory_state in (MemoryState.INITIALIZING, MemoryState.ACTIVE):
                 # pushed now so the buffer can go; three kept, as the oldest is still this call's first tap
-                core = buf[:, :, :, ph:ph + h, pw:pw + w]
-                memory_cache.push_frames(self, core if has_memory else core.expand(-1, -1, 2, -1, -1), 3)
+                memory_cache.push_frames(self, buf if has_memory else buf.expand(-1, -1, 2, -1, -1), 3, pad=(ph, ph, pw, pw))
             del buf
             if has_memory:
+                rows = -(-out.size(3) // self._TAP_BANDS)
+
                 def halo_tap(i, frame):
-                    out.add_(F.conv3d(frame, weight[:, :, i:i + 1].contiguous(memory_format=_CL), padding=(0, ph, pw)))
-                memory_cache.for_each_frame(self, halo_tap, count=2)
+                    tap_i = weight[:, :, i:i + 1].contiguous(memory_format=_CL)
+                    for r0 in range(0, out.size(3), rows):
+                        r1 = min(out.size(3), r0 + rows)
+                        out[:, :, :, r0:r1].add_(F.conv3d(frame[:, :, :, r0:r1 + 2 * ph], tap_i))
+                memory_cache.for_each_frame(self, halo_tap, count=2, pad=(ph, ph, pw, pw))
                 memory_cache.keep_last(self, 2)
         finally:
             comfy.ops.uncast_bias_weight(self, weight, bias, offload_stream)
@@ -1035,10 +1059,8 @@ class InflatedCausalConv3d(ops.Conv3d):
         return out
 
     def _ck_buffered_applies(self, x, memory_state):
-        """Whether _ck_buffered can take this call: the frame-offset write needs a batch of one,
-        and stride is not folded into the buffer sizes."""
-        return (self._ck_applies(x) and memory_state != MemoryState.UNSET and x.size(0) == 1
-                and tuple(self.stride) == (1, 1, 1))
+        """Whether _ck_buffered can take this call: the frame-offset write needs a batch of one."""
+        return self._ck_applies(x) and memory_state != MemoryState.UNSET and x.size(0) == 1
 
     def fused_norm_conv(self, source, norm, memory_state, memory_cache, residual=None):
         """GroupNorm + SiLU written straight into the conv's buffer; ``source`` (a 1-list) is emptied
@@ -1155,8 +1177,9 @@ class InflatedCausalConv3d(ops.Conv3d):
             memory_cache = {}
         if memory_state != MemoryState.ACTIVE:
             memory_cache.pop(self, None)
+        # a 1x1x1 conv has no halo to save by splitting: split and concatenated, its output is held twice
         if (
-            math.isinf(self.memory_limit)
+            (math.isinf(self.memory_limit) or tuple(self.kernel_size) == (1, 1, 1))
             and torch.is_tensor(input)
         ):
             return self.basic_forward(input, memory_state, memory_cache)
@@ -1296,6 +1319,50 @@ class Upsample3D(nn.Module):
 
         self.conv = conv
 
+    def _expand(self, x, weight, bias, i, j, t):
+        """One shuffle phase of the 1x1 expansion; its output channels are (sr, sr, tr, c)."""
+        c = x.size(1)
+        k = ((i * self.spatial_ratio + j) * self.temporal_ratio + t) * c
+        wk = weight[k:k + c].contiguous(memory_format=_CL)
+        bk = None if bias is None else bias[k:k + c]
+        if _fp16_accumulate_wanted(x):
+            return comfy_kitchen.fp16_conv3d(x, wk, bk)
+        return F.conv3d(x, wk, bk)
+
+    def frames_apply(self, x, memory_state):
+        return x.size(2) == 1 and x.is_contiguous(memory_format=_CL) and self.conv._ck_buffered_applies(x, memory_state)
+
+    def frames(self, source, memory_state, memory_cache):
+        """This upsampler over a one-frame ``source`` (a 1-list), an output frame at a time: each
+        temporal phase's expansion goes straight into the conv's buffer and the conv runs on that frame
+        alone. Each output is yielded boxed, so nothing here holds it while the caller uses it."""
+        x = source.pop()
+        b, c, _, h, w = x.shape
+        sr = self.spatial_ratio
+        _, ph, pw = self.conv.padding
+        h_out, w_out = h * sr, w * sr
+        # the video's first frame keeps only its first phase, as remove_head does
+        phases = [0] if self.temporal_up and memory_state != MemoryState.ACTIVE else range(self.temporal_ratio)
+        _ndhwc_filter(self.upscale_conv)
+        for n, t in enumerate(phases):
+            def write_body(dst):
+                for dim, lo, hi in ((3, ph, ph + h_out), (4, pw, pw + w_out)):
+                    if lo:
+                        dst.narrow(dim, 0, lo).zero_()
+                        dst.narrow(dim, hi, dst.size(dim) - hi).zero_()
+                core = dst[:, :, :, ph:ph + h_out, pw:pw + w_out]
+                weight, bias, offload_stream = comfy.ops.cast_bias_weight(self.upscale_conv, x, offloadable=True)
+                try:
+                    for i in range(sr):
+                        for j in range(sr):
+                            core[:, :, :, i::sr, j::sr].copy_(self._expand(x, weight, bias, i, j, t))
+                finally:
+                    comfy.ops.uncast_bias_weight(self.upscale_conv, weight, bias, offload_stream)
+            state = memory_state if n == 0 else MemoryState.ACTIVE
+            box = [self.conv._ck_buffered(x.new_empty(0), (b, c, 1, h_out, w_out), state, memory_cache, write_body)]
+            yield box
+            del box
+
     def forward(
         self,
         hidden_states: torch.FloatTensor,
@@ -1305,53 +1372,51 @@ class Upsample3D(nn.Module):
         if hidden_states.shape[1] != self.channels:
             raise ValueError(f"SeedVR2 upsample expected {self.channels} channels, got {hidden_states.shape[1]}.")
 
-        if (_ck_eligible(hidden_states) and _fp16_accumulate_wanted(hidden_states)
-                and hidden_states.is_contiguous(memory_format=_CL)):
-            _ndhwc_filter(self.upscale_conv)
-            weight, bias, offload_stream = comfy.ops.cast_bias_weight(self.upscale_conv, hidden_states, offloadable=True)
-            try:
-                hidden_states = comfy_kitchen.fp16_conv3d(hidden_states, weight.contiguous(memory_format=_CL), bias)
-            finally:
-                comfy.ops.uncast_bias_weight(self.upscale_conv, weight, bias, offload_stream)
-        else:
-            hidden_states = self.upscale_conv(hidden_states)
-        b, channels, f, h, w = hidden_states.shape
-        c = channels // (self.spatial_ratio * self.spatial_ratio * self.temporal_ratio)
-        # channels_last_3d is only defined for 5-D tensors, so decide before the view.
-        keep_layout = hidden_states.is_contiguous(memory_format=_CL)
-        buffered = keep_layout and self.conv._ck_buffered_applies(hidden_states, memory_state)
-        hidden_states = hidden_states.view(b, self.spatial_ratio, self.spatial_ratio, self.temporal_ratio, c, f, h, w)
-        f_out, h_out, w_out = f * self.temporal_ratio, h * self.spatial_ratio, w * self.spatial_ratio
-        if buffered:
-            # One strided copy from the (b, sr, sr, tr, c, f, h, w) view into the conv's padded buffer;
-            # the source is boxed so the copy is the last thing to hold it.
-            sr, tr = self.spatial_ratio, self.temporal_ratio
+        sr, tr = self.spatial_ratio, self.temporal_ratio
+        if hidden_states.is_contiguous(memory_format=_CL) and self.conv._ck_buffered_applies(hidden_states, memory_state):
+            # The 1x1 expansion one shuffle phase at a time, each written straight to its strided place in
+            # the conv's padded buffer: a phase's output is a quarter (an eighth) of the expanded tensor.
+            b, c, f, h, w = hidden_states.shape
             drop_head = self.temporal_up and memory_state != MemoryState.ACTIVE
+            h_out, w_out = h * sr, w * sr
             _, ph, pw = self.conv.padding
             like = hidden_states.new_empty(0)                 # dtype/device only, shares nothing
             source = [hidden_states]
             del hidden_states
-
-            def as_split(core, frames):
-                """(b, c, F, H, W) view -> (b, sr, sr, tr, c, f, h, w), the source's order."""
-                return core.view(b, c, frames // tr, tr, h, sr, w, sr).permute(0, 5, 7, 3, 1, 2, 4, 6)
 
             def write_body(dst):
                 for dim, lo, hi in ((3, ph, ph + h_out), (4, pw, pw + w_out)):
                     if lo:
                         dst.narrow(dim, 0, lo).zero_()
                         dst.narrow(dim, hi, dst.size(dim) - hi).zero_()
-                core = dst[:, :, :, ph:ph + h_out, pw:pw + w_out]           # (b, c, F', H, W)
-                src = source.pop()
-                if not drop_head:
-                    as_split(core, f_out).copy_(src)
-                    return
-                # frame 0 <- (f=0, t=0); frames 1.. <- f >= 1 (temporal_up means tr == 2)
-                core[:, :, 0].view(b, c, h, sr, w, sr).permute(0, 3, 5, 1, 2, 4).copy_(
-                    src[:, :, :, 0, :, 0])
-                as_split(core[:, :, 1:], f_out - tr).copy_(src[:, :, :, :, :, 1:])
-            return self.conv._ck_buffered(like, (b, c, f_out - int(drop_head), h_out, w_out),
+                core = dst[:, :, :, ph:ph + h_out, pw:pw + w_out]
+                x = source.pop()
+                _ndhwc_filter(self.upscale_conv)
+                weight, bias, offload_stream = comfy.ops.cast_bias_weight(self.upscale_conv, x, offloadable=True)
+                try:
+                    for i in range(sr):
+                        for j in range(sr):
+                            for t in range(tr):
+                                y = self._expand(x, weight, bias, i, j, t)
+                                frames = core[:, :, :, i::sr, j::sr]
+                                if not drop_head:
+                                    frames[:, :, t::tr].copy_(y)
+                                elif t == 0:   # the first input frame keeps only its first phase
+                                    frames[:, :, 0].copy_(y[:, :, 0])
+                                    frames[:, :, 1::tr].copy_(y[:, :, 1:])
+                                else:
+                                    frames[:, :, t + 1::tr].copy_(y[:, :, 1:])
+                                del y
+                finally:
+                    comfy.ops.uncast_bias_weight(self.upscale_conv, weight, bias, offload_stream)
+            return self.conv._ck_buffered(like, (b, c, f * tr - int(drop_head), h_out, w_out),
                                           memory_state, memory_cache, write_body)
+
+        hidden_states = self.upscale_conv(hidden_states)
+        b, channels, f, h, w = hidden_states.shape
+        c = channels // (sr * sr * tr)
+        keep_layout = hidden_states.is_contiguous(memory_format=_CL)
+        hidden_states = hidden_states.view(b, sr, sr, tr, c, f, h, w)
         if keep_layout:
             # Same element mapping as below, written so the copy lands in NDHWC and the
             # following convolution keeps the layout.
@@ -1415,6 +1480,22 @@ class Downsample3D(nn.Module):
 
         if hidden_states.shape[1] != self.channels:
             raise ValueError(f"SeedVR2 downsample expected {self.channels} channels, got {hidden_states.shape[1]}.")
+
+        if hidden_states.is_contiguous(memory_format=_CL) and self.conv._ck_buffered_applies(hidden_states, memory_state):
+            # straight into the conv's buffer, its right and bottom zero border in place of the pad copy
+            b, c, t, h, w = hidden_states.shape
+            border = int(self.spatial_down)
+            like = hidden_states.new_empty(0)
+            source = [hidden_states]
+            del hidden_states
+
+            def write_body(dst):
+                if border:
+                    dst[:, :, :, h:].zero_()
+                    dst[:, :, :, :h, w:].zero_()
+                dst[:, :, :, :h, :w].copy_(source.pop())
+            return self.conv._ck_buffered(like, (b, c, t, h, w), memory_state, memory_cache, write_body,
+                                          pad=(0, border, 0, border))
 
         if self.spatial_down:
             pad = (0, 1, 0, 1)
@@ -1501,12 +1582,10 @@ class ResnetBlock3D(nn.Module):
         if temb is not None:
             hidden_states = hidden_states + temb
 
-        if self.conv_shortcut is not None:
-            input_tensor = self.conv_shortcut(input_tensor, memory_state=memory_state, memory_cache=memory_cache)
-
-        # The skip connection rides in the conv's epilogue when the scale is one (it always is in
-        # the decoder), which spares a pass over the output per block.
-        residual = input_tensor if self.output_scale_factor == 1.0 else None
+        # An identity skip rides in conv2's epilogue when the scale is one (it always is in the
+        # decoder), sparing a pass over the output. A 1x1 shortcut runs after conv2 instead: computed
+        # first, its output would sit under conv2's buffer and output (the input is held either way).
+        residual = input_tensor if self.conv_shortcut is None and self.output_scale_factor == 1.0 else None
         source = [hidden_states]
         del hidden_states
         hidden_states = self.conv2.fused_norm_conv(source, self.norm2, memory_state, memory_cache, residual=residual)
@@ -1514,9 +1593,13 @@ class ResnetBlock3D(nn.Module):
             hidden_states = causal_norm_wrapper(self.norm2, source.pop(), silu=True)
             hidden_states = self.conv2(hidden_states, memory_state=memory_state, memory_cache=memory_cache)
             residual = None
-        if residual is None:
-            return (input_tensor + hidden_states) / self.output_scale_factor
-        return hidden_states
+        if residual is not None:
+            return hidden_states
+        if self.conv_shortcut is not None:
+            input_tensor = self.conv_shortcut(input_tensor, memory_state=memory_state, memory_cache=memory_cache)
+        if self.output_scale_factor == 1.0:
+            return hidden_states.add_(input_tensor)
+        return (input_tensor + hidden_states) / self.output_scale_factor
 
 
 class DownEncoderBlock3D(nn.Module):
@@ -1824,10 +1907,14 @@ class Encoder3D(nn.Module):
     # Frames per pass through the full-resolution, spatial-only head; None runs a slice's frames at once.
     head_frames = 1
 
-    def _head(self, sample, memory_state, memory_cache):
-        sample = self.conv_in(sample, memory_state=memory_state, memory_cache=memory_cache)
+    def _head(self, source, memory_state, memory_cache):
+        sample = self.conv_in(source.pop(), memory_state=memory_state, memory_cache=memory_cache)
         for down_block in self.down_blocks[:self.head_blocks]:
-            sample = down_block(sample, memory_state=memory_state, memory_cache=memory_cache)
+            # layer by layer: calling the block would hold its input until the block returns
+            for resnet in down_block.resnets:
+                sample = resnet(sample, temb=None, memory_state=memory_state, memory_cache=memory_cache)
+            for downsampler in down_block.downsamplers or ():
+                sample = downsampler(sample, memory_state=memory_state, memory_cache=memory_cache)
         return sample
 
     def forward(
@@ -1842,7 +1929,11 @@ class Encoder3D(nn.Module):
         del sample
         sample = _frame_chunked(self, self._head, source, self.head_frames, memory_state, memory_cache, frame_pixels)
         for down_block in self.down_blocks[self.head_blocks:]:
-            sample = down_block(sample, memory_state=memory_state, memory_cache=memory_cache)
+            # layer by layer, as in _head
+            for resnet in down_block.resnets:
+                sample = resnet(sample, temb=None, memory_state=memory_state, memory_cache=memory_cache)
+            for downsampler in down_block.downsamplers or ():
+                sample = downsampler(sample, memory_state=memory_state, memory_cache=memory_cache)
 
         sample = self.mid_block(sample, memory_state=memory_state, memory_cache=memory_cache)
 
@@ -1934,11 +2025,21 @@ class Decoder3D(nn.Module):
     # Frames per pass through the spatial-only tail; None runs a slice's frames at once.
     tail_frames = 1
 
-    def _tail(self, sample, latent_embeds, memory_state, memory_cache):
+    def _tail(self, source, memory_state, memory_cache):
+        sample = source.pop()
         for up_block in self.up_blocks[self.temporal_up_num:]:
-            sample = up_block(sample, latent_embeds, memory_state=memory_state, memory_cache=memory_cache)
-        sample = causal_norm_wrapper(self.conv_norm_out, sample, silu=True)
-        return self.conv_out(sample, memory_state=memory_state, memory_cache=memory_cache)
+            # layer by layer: calling the block would hold its input until the block returns
+            for resnet in up_block.resnets:
+                sample = resnet(sample, temb=None, memory_state=memory_state, memory_cache=memory_cache)
+            for upsampler in up_block.upsamplers or ():
+                sample = upsampler(sample, memory_state=memory_state, memory_cache=memory_cache)
+        source = [sample]
+        del sample
+        out = self.conv_out.fused_norm_conv(source, self.conv_norm_out, memory_state, memory_cache)
+        if out is None:
+            sample = causal_norm_wrapper(self.conv_norm_out, source.pop(), silu=True)
+            out = self.conv_out(sample, memory_state=memory_state, memory_cache=memory_cache)
+        return out
 
     def forward(
         self,
@@ -1967,13 +2068,20 @@ class Decoder3D(nn.Module):
         frame_pixels = sample.size(-2) * sample.size(-1) * 4 ** ups
         tr = last.upsamplers[0].temporal_ratio
 
-        def upsample_and_tail(x, state, cache):
+        up = last.upsamplers[0]
+
+        def upsample_and_tail(source, state, cache):
+            if up.frames_apply(source[0], state):
+                # each output frame goes on through the tail as soon as it exists
+                outs = [self._tail(box, state if n == 0 else MemoryState.ACTIVE, cache)
+                        for n, box in enumerate(up.frames(source, state, cache))]
+                return torch.cat(outs, dim=2)
+            x = source.pop()
             for upsampler in last.upsamplers:
                 x = upsampler(x, memory_state=state, memory_cache=cache)
-            source = [x]
+            source.append(x)
             del x
-            return _frame_chunked(self, lambda y, s, c: self._tail(y, latent_embeds, s, c),
-                                  source, self.tail_frames, state, cache, frame_pixels)
+            return _frame_chunked(self, self._tail, source, self.tail_frames, state, cache, frame_pixels)
         source = [sample]
         del sample
         return _frame_chunked(last, upsample_and_tail, source, self.tail_frames and max(1, self.tail_frames // tr),
