@@ -120,14 +120,14 @@ class LatentInterpolate(io.ComfyNode):
 
         s2 = reshape_latent_to(s1.shape, s2)
 
-        m1 = torch.linalg.vector_norm(s1, dim=(1))
-        m2 = torch.linalg.vector_norm(s2, dim=(1))
+        m1 = torch.linalg.vector_norm(s1, dim=1, keepdim=True)
+        m2 = torch.linalg.vector_norm(s2, dim=1, keepdim=True)
 
         s1 = torch.nan_to_num(s1 / m1)
         s2 = torch.nan_to_num(s2 / m2)
 
         t = (s1 * ratio + s2 * (1.0 - ratio))
-        mt = torch.linalg.vector_norm(t, dim=(1))
+        mt = torch.linalg.vector_norm(t, dim=1, keepdim=True)
         st = torch.nan_to_num(t / mt)
 
         samples_out["samples"] = st * (m1 * ratio + m2 * (1.0 - ratio))
