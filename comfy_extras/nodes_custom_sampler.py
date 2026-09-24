@@ -1149,7 +1149,7 @@ class CFGOverride(io.ComfyNode):
         return io.Schema(
             node_id="CFGOverride",
             display_name="CFG Override",
-            description="Override cfg to a fixed value over a [start, end] percent (sigma) range. "
+            description="Override cfg to a fixed value over a [start, end) percent (sigma) range. "
                         "With multiple overrides, the one nearest the sampler wins on overlap.",
             category="model/sampling/guiders",
             inputs=[
