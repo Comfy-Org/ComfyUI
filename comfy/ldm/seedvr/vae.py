@@ -314,6 +314,7 @@ class CausalMemoryCache:
         self._staged = {}      # key -> (qdata, params, event) on its way back to the GPU
         self._spare = {}       # (shape, dtype) -> host buffers of dropped entries
         self._pinned = []
+        self._landing = None   # (event, sources) of the copy to the host still in flight
         self._stream = None
         self._device = None
         self._rings = {}       # key -> deque of per-frame subkeys, oldest first
@@ -338,14 +339,18 @@ class CausalMemoryCache:
         return host
 
     def _stash(self, qdata, params):
-        """Start the copy of a packed tail to host buffers; the sources stay alive until it lands."""
+        """Start the copy of a packed tail to host buffers; its sources stay alive until it lands.
+        One copy in flight at a time: sources held for copies the CPU ran ahead of are what grows
+        the peak (2x at 720p on either allocator); record_stream instead grows cudaMallocAsync's pool."""
+        if self._landing is not None:
+            self._landing[0].synchronize()
         self._device = qdata.device
         stream = self._transfer_stream(qdata.device)
-        host = []
-        for t in (qdata, params.scale):
-            host.append(comfy.model_management.cast_to(t, None, torch.device("cpu"), non_blocking=True, stream=stream, r=self._host_like(t)))
-            if stream is not None:
-                t.record_stream(stream)
+        host = [comfy.model_management.cast_to(t, None, torch.device("cpu"), non_blocking=True, stream=stream, r=self._host_like(t))
+                for t in (qdata, params.scale)]
+        event = torch.cuda.Event()
+        event.record(stream)
+        self._landing = (event, qdata, params.scale)
         return host[0], dataclasses.replace(params, scale=host[1])
 
     def _bring_back(self, key, device):
@@ -484,7 +489,7 @@ class CausalMemoryCache:
             torch.cuda.synchronize(self._device)   # no copy may still be using a buffer when it is unpinned
         for t in self._pinned:
             comfy.model_management.unpin_memory(t)
-        self._pinned, self._spare, self._staged = [], {}, {}
+        self._pinned, self._spare, self._staged, self._landing = [], {}, {}, None
         self.plain, self.packed, self._rings, self._order = {}, {}, {}, []
 
     def __contains__(self, key):
@@ -846,22 +851,6 @@ class InflatedCausalConv3d(ops.Conv3d):
     # under this many elements (2 GiB of fp16), which is one call at 1080p and two at 1440p.
     _CK_MAX_VIEW_ELEMENTS = 2 ** 30
 
-    # Buffered convs the CPU may run ahead of the GPU: with a stream-ordered allocator every buffer
-    # allocated ahead is live until the GPU releases it (unthrottled: 2.5x the peak).
-    _CK_INFLIGHT_DEPTH = 2
-    _ck_inflight = collections.deque()
-
-    @classmethod
-    def _ck_throttle(cls):
-        while len(cls._ck_inflight) >= cls._CK_INFLIGHT_DEPTH:
-            cls._ck_inflight.popleft().synchronize()
-
-    @classmethod
-    def _ck_launched(cls, device):
-        event = torch.cuda.Event()
-        event.record(torch.cuda.current_stream(device))
-        cls._ck_inflight.append(event)
-
     def _ck_buffered(self, like, x_shape, memory_state, memory_cache, write_body, residual=None):
         """Run this conv from one padded buffer: halo in front, ``write_body`` writes the padded frames
         behind it, and the conv reads and writes frame-window views. ``residual`` goes into the kitchen
@@ -880,7 +869,6 @@ class InflatedCausalConv3d(ops.Conv3d):
         halo = cache_size if has_memory else self.temporal_padding * 2
         hp, wp = h + 2 * ph, w + 2 * pw
 
-        self._ck_throttle()
         buf = torch.empty((b, c, halo + t, hp, wp), dtype=like.dtype, device=like.device, memory_format=_CL)
         write_body(buf[:, :, halo:])
         del write_body   # and with it the source it captured: nothing but the buffer feeds the conv
@@ -931,7 +919,6 @@ class InflatedCausalConv3d(ops.Conv3d):
             comfy.ops.uncast_bias_weight(self, weight, bias, offload_stream)
         if residual is not None and fused_residual is None:
             out += residual
-        self._ck_launched(out.device)
         return out
 
     def _ck_buffered_applies(self, x, memory_state):
