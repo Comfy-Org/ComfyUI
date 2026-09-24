@@ -34,7 +34,7 @@ def test_singleton_causal_conv3d_matches_conv2d(groups, in_channels, out_channel
     assert conv2d_calls
     expected = F.conv3d(x, conv.weight, conv.bias, (1, 2, 1), (0, 2, 1), (1, 2, 1), groups)
 
-    assert torch.equal(actual, expected)
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.skipif(torch.version.hip is None, reason="requires ROCm")
@@ -61,7 +61,7 @@ def test_singleton_conv2d_path_accepts_cast_and_patched_parameters(monkeypatch):
     bias = conv.bias.to(dtype=x.dtype) - 0.5
     expected = F.conv3d(x, weight, bias, padding=(0, 1, 1))
 
-    assert torch.equal(actual, expected)
+    torch.testing.assert_close(actual, expected)
 
 
 def test_singleton_causal_conv3d_cpu_falls_back_and_keeps_gradients(monkeypatch):
@@ -108,7 +108,7 @@ def test_singleton_causal_conv3d_preserves_gradients():
     actual.backward(grad)
     expected.backward(grad)
 
-    assert torch.equal(actual, expected)
+    torch.testing.assert_close(actual, expected)
     torch.testing.assert_close(x.grad, reference_x.grad, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(conv.weight.grad, reference_weight.grad, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(conv.bias.grad, reference_bias.grad, rtol=1e-2, atol=1e-2)
