@@ -11,6 +11,9 @@ a. keyword fields come from the closed vocabulary, the event is a string literal
 b. no other log line anywhere carries the tag, so the tap only ever sees emits
 c. the call sites present in the tree match an explicit manifest
 d. ``error_type=`` values come from ``event_log.error_type()``, never a string
+
+``event_log.emit_failure(event, exc, ...)`` counts as an emit call; it derives
+``error_type`` and the failure description from ``exc`` itself.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from app.assets.event_log import ALLOWED_EVENTS, ALLOWED_FIELDS, TAG
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MODULE_SCOPE = "<module>"
 EVENT_LOG_NAME = "event_log"
+EMIT_FUNCTIONS = frozenset({"emit", "emit_failure"})
 LOG_METHODS = frozenset({"debug", "info", "warning", "error", "exception", "critical", "log"})
 FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 
@@ -51,6 +55,7 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite("app/assets/seeder.py", "_run_scan", "seeder.marked_missing"),
         CallSite("app/assets/seeder.py", "mark_missing_outside_prefixes", "seeder.marked_missing"),
         CallSite("app/assets/seeder.py", "_run_fast_phase", "seeder.batch_insert_failed"),
+        CallSite("app/assets/seeder.py", "_emit_failure_buckets", "scanner.failure_bucket"),
         # todo 11 - scanner failure paths
         CallSite("app/assets/scanner.py", "sync_root_safely", "scanner.fast_scan_failed"),
         CallSite("app/assets/scanner.py", "sync_temp_references_safely", "scanner.temp_sync_failed"),
@@ -64,6 +69,12 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite("app/assets/scanner.py", "build_asset_specs", "scanner.stat_failed"),
         CallSite("app/assets/scanner.py", "enrich_asset", "scanner.stat_failed"),
         CallSite("app/assets/scanner.py", "seed_asset_specs", "scanner.invalid_mtime"),
+        # failure classification - the swallow sites that used to report nothing
+        CallSite("app/assets/scanner.py", "observe_references_on_filesystem", "scanner.stat_failed"),
+        CallSite("app/assets/scanner.py", "observe_asset_specs", "scanner.stat_failed"),
+        CallSite("app/assets/scanner.py", "report_walk_error", "scanner.root_unreachable"),
+        CallSite("app/assets/scanner.py", "report_walk_error", "scanner.walk_failed"),
+        CallSite("app/assets/scanner.py", "_report_metadata_failure", "scanner.metadata_failed"),
         CallSite(
             "app/assets/scanner_admission.py", "tick_watch_list", "scanner.watch_stat_failed"
         ),
@@ -81,6 +92,7 @@ class Aliases(NamedTuple):
 
     module: frozenset[str]
     emit: frozenset[str]
+    emit_failure: frozenset[str]
     error_type: frozenset[str]
 
 
@@ -116,6 +128,7 @@ def _scoped_nodes(tree: ast.Module) -> Iterator[tuple[ast.AST, str]]:
 def _resolve_aliases(tree: ast.Module) -> Aliases:
     module: set[str] = set()
     emit: set[str] = set()
+    emit_failure: set[str] = set()
     error_type: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -127,11 +140,15 @@ def _resolve_aliases(tree: ast.Module) -> Aliases:
             for alias in node.names:
                 if from_event_log and alias.name == "emit":
                     emit.add(alias.asname or alias.name)
+                elif from_event_log and alias.name == "emit_failure":
+                    emit_failure.add(alias.asname or alias.name)
                 elif from_event_log and alias.name == "error_type":
                     error_type.add(alias.asname or alias.name)
                 elif not from_event_log and alias.name == EVENT_LOG_NAME:
                     module.add(alias.asname or alias.name)
-    return Aliases(frozenset(module), frozenset(emit), frozenset(error_type))
+    return Aliases(
+        frozenset(module), frozenset(emit), frozenset(emit_failure), frozenset(error_type)
+    )
 
 
 def _dotted_name(node: ast.expr) -> str | None:
@@ -146,16 +163,16 @@ def _dotted_name(node: ast.expr) -> str | None:
 
 
 def _is_emit_call(func: ast.expr, aliases: Aliases) -> bool:
-    if isinstance(func, ast.Attribute) and func.attr == "emit":
+    if isinstance(func, ast.Attribute) and func.attr in EMIT_FUNCTIONS:
         return _dotted_name(func.value) in aliases.module
-    return isinstance(func, ast.Name) and func.id in aliases.emit
+    return isinstance(func, ast.Name) and func.id in aliases.emit | aliases.emit_failure
 
 
 def _is_unresolvable_emit_call(func: ast.expr, aliases: Aliases) -> bool:
     return (
         bool(aliases.module)
         and isinstance(func, ast.Attribute)
-        and func.attr == "emit"
+        and func.attr in EMIT_FUNCTIONS
         and _dotted_name(func.value) is None
     )
 
@@ -181,9 +198,16 @@ def _is_log_call(func: ast.expr) -> bool:
     return isinstance(func, ast.Attribute) and func.attr in LOG_METHODS
 
 
-def _event_of(call: ast.Call) -> str | None:
-    """The literal event name, or None when it is not a plain string literal."""
-    if len(call.args) != 1:
+def _event_of(call: ast.Call, aliases: Aliases) -> str | None:
+    """The literal event name, or None when it is not a plain string literal.
+
+    emit() takes the event alone; emit_failure() takes it plus the exception.
+    """
+    func = call.func
+    is_failure = (isinstance(func, ast.Attribute) and func.attr == "emit_failure") or (
+        isinstance(func, ast.Name) and func.id in aliases.emit_failure
+    )
+    if len(call.args) != (2 if is_failure else 1):
         return None
     first = call.args[0]
     if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
@@ -210,7 +234,7 @@ def _file_faults(call: ast.Call, aliases: Aliases) -> Iterator[tuple[str, str]]:
     if _is_unresolvable_emit_call(call.func, aliases):
         yield "event_names", "the emit receiver cannot be resolved statically"
     elif _is_emit_call(call.func, aliases):
-        event = _event_of(call)
+        event = _event_of(call, aliases)
         if event not in ALLOWED_EVENTS:
             yield "event_names", "the event must be one string literal in the allowed vocabulary"
         yield from _field_faults(call, aliases)
@@ -227,7 +251,7 @@ def _scan_file(root: Path, relative: str) -> tuple[Counter[CallSite], list[tuple
         if not isinstance(node, ast.Call):
             continue
         if _is_emit_call(node.func, aliases):
-            event = _event_of(node)
+            event = _event_of(node, aliases)
             if event is not None and event in ALLOWED_EVENTS:
                 sites[CallSite(relative, scope, event)] += 1
         for category, reason in _file_faults(node, aliases):
@@ -330,3 +354,21 @@ def test_unresolvable_emit_receiver_is_a_scan_failure(tmp_path: Path) -> None:
 
     assert sites == Counter()
     assert [category for category, _reason in faults] == ["event_names"]
+
+
+def test_emit_failure_calls_are_scanned_and_need_the_exception(tmp_path: Path) -> None:
+    relative = "app/assets/failing.py"
+    _write_scan_fixture(
+        tmp_path,
+        relative,
+        "from app.assets.event_log import emit_failure\n\n"
+        "def probe(exc):\n"
+        '    emit_failure("scanner.stat_failed", exc, site="discovery")\n'
+        '    emit_failure("scanner.stat_failed", site="discovery")\n'
+        '    emit_failure("scanner.stat_failed", exc, path="/x")\n',
+    )
+
+    sites, faults = _scan_file(tmp_path, relative)
+
+    assert sites == Counter({CallSite(relative, "probe", "scanner.stat_failed"): 2})
+    assert [category for category, _reason in faults] == ["event_names", "vocabulary"]

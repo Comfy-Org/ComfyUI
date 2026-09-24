@@ -10,11 +10,13 @@ import logging
 import os
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Callable, TypedDict
 
-from app.assets.event_log import emit, error_type
+from app.assets.event_log import emit, emit_failure
+from app.assets.failures import FailureDescription, describe_failure
 from app.assets.scanner import (
     RootType,
     build_asset_specs,
@@ -112,6 +114,7 @@ class _ScanState:
     permission_denied: int = 0
     cancel_stage: str | None = None
     _emitted_keys: set[str] = field(default_factory=set)
+    failure_buckets: Counter[tuple[str, FailureDescription]] = field(default_factory=Counter)
 
     def mark_emitted(self, key: str) -> bool:
         """Return True the first call with `key` this scan, False every call after."""
@@ -119,6 +122,33 @@ class _ScanState:
             return False
         self._emitted_keys.add(key)
         return True
+
+    def record_failure(self, site: str, exc: BaseException) -> None:
+        """Count every failure by its site and description, whether or not it was the
+        first of its kind, so a scan's mix of causes survives the emit-once events."""
+        self.failure_buckets[(site, describe_failure(exc))] += 1
+
+
+# Well under the launcher tap's hourly cap per event, so a scan's buckets arrive whole.
+_MAX_FAILURE_BUCKETS = 50
+
+
+def _emit_failure_buckets(state: _ScanState) -> None:
+    """One ``scanner.failure_bucket`` line per distinct failure this scan, most frequent first."""
+    for (site, failure), count in state.failure_buckets.most_common(_MAX_FAILURE_BUCKETS):
+        emit(
+            "scanner.failure_bucket",
+            site=site,
+            reason=failure.reason,
+            errno_name=failure.errno_name,
+            winerror=failure.winerror,
+            exc_fp=failure.exc_fp,
+            exc_class=failure.exc_class,
+            exc_site=failure.exc_site,
+            exc_line=failure.exc_line,
+            count=count,
+        )
+    state.failure_buckets.clear()
 
 
 def _snapshot_progress(state: _ScanState) -> Progress:
@@ -740,12 +770,7 @@ class _AssetSeeder:
         except Exception as e:
             self._add_error(f"Scan failed: {e}")
             logging.exception("Asset scan failed")
-            emit(
-                "seeder.scan_failed",
-                phase=phase.value,
-                error_type=error_type(e),
-                root=root,
-            )
+            emit_failure("seeder.scan_failed", e, phase=phase.value, root=root)
             self._emit_event("assets.seed.error", {"message": str(e)})
         finally:
             try:
@@ -766,6 +791,8 @@ class _AssetSeeder:
                                 "created": total_created,
                             },
                         )
+                if self._scan_state is not None:
+                    _emit_failure_buckets(self._scan_state)
             finally:
                 with self._lock:
                     start_paused = self._state is State.PAUSED
@@ -814,7 +841,7 @@ class _AssetSeeder:
             return total_created, skipped_existing, 0
 
         t_collect = time.perf_counter()
-        paths = collect_paths_for_roots(roots)
+        paths = collect_paths_for_roots(roots, progress=scan_state)
         logging.debug(
             "Fast scan: collect_paths took %.3fs (%d paths found)",
             time.perf_counter() - t_collect,
@@ -864,8 +891,9 @@ class _AssetSeeder:
             batch = specs[i : i + batch_size]
             batch_tags = {t for spec in batch for t in spec["tags"]}
             created = 0
+            batch_error: Exception | None = None
             try:
-                created, batch_error = insert_asset_specs(batch, batch_tags)
+                created, batch_error = insert_asset_specs(batch, batch_tags, progress=scan_state)
                 total_created += created
                 if batch_error is not None:
                     raise batch_error
@@ -883,7 +911,9 @@ class _AssetSeeder:
                     i,
                     created,
                 )
-                emit("seeder.batch_insert_failed", error_type=error_type(e))
+                if e is not batch_error:  # a per-spec failure was already counted
+                    scan_state.record_failure("batch_insert", e)
+                emit_failure("seeder.batch_insert_failed", e)
 
             scanned = i + len(batch)
             now = time.perf_counter()
@@ -902,7 +932,7 @@ class _AssetSeeder:
                 last_progress_time = now
 
         self._update_progress(scanned=len(specs), created=total_created)
-        tick_watch_list()
+        tick_watch_list(progress=scan_state)
         logging.info(
             "Fast scan complete: %.3fs total (created=%d, skipped=%d, total_paths=%d)",
             time.perf_counter() - t_fast_start,
@@ -923,7 +953,7 @@ class _AssetSeeder:
         with create_session() as session:
             drain_pending_verifications(session)
             session.commit()
-            tick_watch_list()
+            tick_watch_list(progress=scan_state)
             for _ in range(3):
                 drain_transition_queue(session)
                 session.commit()

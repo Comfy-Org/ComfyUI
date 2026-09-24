@@ -10,6 +10,7 @@ import logging
 import mimetypes
 import os
 import struct
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -174,7 +175,9 @@ class ExtractedMetadata:
 
 
 def _read_safetensors_header(
-    path: str, max_size: int = MAX_SAFETENSORS_HEADER_SIZE
+    path: str,
+    max_size: int = MAX_SAFETENSORS_HEADER_SIZE,
+    on_error: Callable[[BaseException], None] | None = None,
 ) -> dict[str, Any] | None:
     """Read only the JSON header from a safetensors file.
 
@@ -184,6 +187,8 @@ def _read_safetensors_header(
     Args:
         path: Absolute path to safetensors file
         max_size: Maximum header size to read (default 8MB)
+        on_error: Optional callback told why a header could not be read or
+            parsed, so a corrupt header is distinguishable from no header
 
     Returns:
         Parsed header dict or None if failed
@@ -200,7 +205,9 @@ def _read_safetensors_header(
             if len(header_data) < length_of_header:
                 return None
             return json.loads(header_data.decode("utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError, struct.error):
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, struct.error) as exc:
+        if on_error is not None:
+            on_error(exc)
         return None
 
 
@@ -278,6 +285,7 @@ def extract_file_metadata(
     abs_path: str,
     stat_result: os.stat_result | None = None,
     relative_filename: str | None = None,
+    on_error: Callable[[BaseException], None] | None = None,
 ) -> ExtractedMetadata:
     """Extract metadata from a file using tier 1 and tier 2 methods.
 
@@ -289,6 +297,8 @@ def extract_file_metadata(
         stat_result: Optional pre-fetched stat result (saves a syscall)
         relative_filename: Optional relative filename to use instead of basename
             (e.g., "flux/123/model.safetensors" for model paths)
+        on_error: Optional callback told about each failure the extraction
+            absorbs; the extraction itself still returns what it could read
 
     Returns:
         ExtractedMetadata with all available fields populated
@@ -308,19 +318,22 @@ def extract_file_metadata(
     if stat_result is None:
         try:
             stat_result = os.stat(abs_path, follow_symlinks=True)
-        except OSError:
-            pass
+        except OSError as exc:
+            if on_error is not None:
+                on_error(exc)
 
     if stat_result:
         meta.content_length = stat_result.st_size
 
     # Tier 2: Safetensors header (if applicable and enabled)
     if ext.lower() in SAFETENSORS_EXTENSIONS:
-        header = _read_safetensors_header(abs_path)
+        header = _read_safetensors_header(abs_path, on_error=on_error)
         if header:
             try:
                 _extract_safetensors_metadata(header, meta)
             except Exception as e:
                 logging.debug("Safetensors meta extract failed %s: %s", abs_path, e)
+                if on_error is not None:
+                    on_error(e)
 
     return meta

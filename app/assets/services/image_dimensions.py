@@ -7,13 +7,16 @@ into ``AssetReference.system_metadata``.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
 def extract_image_dimensions(
-    file_path: str, mime_type: str | None = None
+    file_path: str,
+    mime_type: str | None = None,
+    on_error: Callable[[BaseException], None] | None = None,
 ) -> dict[str, Any] | None:
     """Extract image dimensions for the file at ``file_path``.
 
@@ -21,6 +24,7 @@ def extract_image_dimensions(
         file_path: Absolute path to a file on disk.
         mime_type: Optional MIME type hint. When provided and not prefixed
             with ``image/``, extraction is skipped without touching the file.
+        on_error: Optional callback told about an image that could not be read.
 
     Returns:
         ``{"kind": "image", "width": W, "height": H}`` when the file is a
@@ -50,6 +54,8 @@ def extract_image_dimensions(
         logger.debug(
             "Failed to read image dimensions from %s: %s", file_path, exc
         )
+        if on_error is not None:
+            on_error(exc)
         return None
 
     if (

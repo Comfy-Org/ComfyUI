@@ -133,8 +133,9 @@ def test_stat_error_drops_entry_and_allows_other_watch_entries_to_commit(
         for record in caplog.records
     )
     assert any(
-        record.getMessage()
-        == "[assets-event] scanner.watch_stat_failed error_type=PermissionError"
+        record.getMessage().startswith("[assets-event] scanner.watch_stat_failed ")
+        and " error_type=PermissionError " in record.getMessage()
+        and " reason=permission_denied " in record.getMessage()
         for record in caplog.records
     )
 
@@ -150,7 +151,7 @@ def test_seed_failure_does_not_stop_watch_list_drain(
     _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
     batches: list[list[str]] = []
 
-    def insert_with_one_failure(specs, _tag_pool) -> tuple[int, Exception | None]:
+    def insert_with_one_failure(specs, _tag_pool, **_kwargs) -> tuple[int, Exception | None]:
         batches.append([spec["abs_path"] for spec in specs])
         return 1, RuntimeError("forced watch seed failure")
 
@@ -167,8 +168,9 @@ def test_seed_failure_does_not_stop_watch_list_drain(
         for record in caplog.records
     )
     assert any(
-        record.getMessage()
-        == "[assets-event] scanner.watch_seed_failed error_type=RuntimeError"
+        record.getMessage().startswith("[assets-event] scanner.watch_seed_failed ")
+        and " error_type=RuntimeError " in record.getMessage()
+        and " reason=other " in record.getMessage()
         for record in caplog.records
     )
 
@@ -221,8 +223,9 @@ def test_spec_construction_failure_drops_the_entry_without_wedging_the_watch_lis
         for record in caplog.records
     )
     assert any(
-        record.getMessage()
-        == "[assets-event] scanner.watch_spec_failed error_type=ValueError"
+        record.getMessage().startswith("[assets-event] scanner.watch_spec_failed ")
+        and " error_type=ValueError " in record.getMessage()
+        and " reason=other " in record.getMessage()
         for record in caplog.records
     )
 

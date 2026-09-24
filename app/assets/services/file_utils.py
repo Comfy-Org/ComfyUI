@@ -1,4 +1,5 @@
 import os
+from collections.abc import Callable
 
 
 def get_mtime_ns(stat_result: os.stat_result) -> int:
@@ -41,21 +42,39 @@ def is_visible(name: str) -> bool:
     return not name.startswith(".")
 
 
-def list_files_recursively(base_dir: str) -> list[str]:
-    """Recursively list all files in a directory, following symlinks."""
+def list_files_recursively(
+    base_dir: str, on_error: Callable[[str, OSError], None] | None = None
+) -> list[str]:
+    """Recursively list all files in a directory, following symlinks.
+
+    What cannot be read is left out of the listing. ``on_error`` hears about it as
+    ``("walk_root", exc)`` when ``base_dir`` itself cannot be stat'ed, such as an
+    unmounted share, and ``("walk_dir", exc)`` for a directory below it.
+    """
     out: list[str] = []
     base_abs = os.path.abspath(base_dir)
     if not os.path.isdir(base_abs):
+        if on_error is not None:
+            try:
+                os.stat(base_abs)
+            except OSError as exc:
+                on_error("walk_root", exc)
         return out
+
+    def report_dir_error(exc: OSError) -> None:
+        if on_error is not None:
+            on_error("walk_dir", exc)
+
     # Track seen real directory identities to prevent circular symlink loops
     seen_dirs: set[tuple[int, int]] = set()
     for dirpath, subdirs, filenames in os.walk(
-        base_abs, topdown=True, followlinks=True
+        base_abs, topdown=True, onerror=report_dir_error, followlinks=True
     ):
         try:
             st = os.stat(dirpath)
             dir_id = (st.st_dev, st.st_ino)
-        except OSError:
+        except OSError as exc:
+            report_dir_error(exc)
             subdirs.clear()
             continue
         if dir_id in seen_dirs:
