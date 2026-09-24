@@ -140,18 +140,21 @@ curl -o result.png -X POST http://127.0.0.1:8188/api/wrapper/flux2klein9b/genera
 
 ### Docker image (local GPU box and RunPod)
 
-The worker is published to Docker Hub as **`shivanshtalwar0/comfyui`** by [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml):
+The worker is published to Docker Hub as **`shivanshtalwar0/comfyui`** by [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml), in two flavours built from the same [`Dockerfile`](Dockerfile):
 
-| Trigger | Tags pushed |
-|---|---|
-| push to `master` (source or Docker files changed) | `latest`, `sha-<short>` |
-| tag `vX.Y.Z` | `X.Y.Z`, `X.Y`, `sha-<short>` |
-| manual run (Actions → Docker image → Run workflow) | `<branch>`, `sha-<short>` |
-| pull request touching Docker files | nothing: build + smoke test only |
+- **full** (target `comfyui`, the default): torch + requirements baked in, a ~5.2 GB compressed pull. The local GPU box runs it.
+- **runpod** (target `runpod`): the same system packages and sources, no Python dependencies, a ~0.38 GB pull. The first pod on a network volume installs the Python env onto the volume and every later pod reuses it (see [RunPod variant](#runpod-variant-runpod)).
 
-Every build is smoke-tested before anything is pushed: torch has CUDA, `prefetch --dry-run` resolves every wrapper checkpoint, and the server boots (CPU mode) and answers `/api/wrapper/workflows` with 200 with the bearer token and 401 without it. Publishing needs the repository secret **`DOCKERHUB_TOKEN`** (a Docker Hub access token with Read & Write). `DOCKERHUB_USERNAME` / `DOCKERHUB_IMAGE` repository variables override the defaults.
+| Trigger | full image tags | runpod image tags |
+|---|---|---|
+| push to `master` (source or Docker files changed) | `latest`, `sha-<short>` | `runpod`, `runpod-sha-<short>` |
+| tag `vX.Y.Z` | `X.Y.Z`, `X.Y`, `sha-<short>` | `runpod-X.Y.Z`, `runpod-X.Y`, `runpod-sha-<short>` |
+| manual run (Actions → Docker image → Run workflow) | `<branch>`, `sha-<short>` | `runpod-<branch>`, `runpod-sha-<short>` |
+| pull request touching Docker files | nothing: build + smoke test only | nothing: build + smoke test only |
 
-The image is **CUDA only**: `python:3.12-slim` plus the PyTorch **cu128** wheels (Blackwell / RTX 5090 kernels, host driver ≥ 570). The build fails if any dependency leaves it with a CPU torch. Nothing model-sized is baked in. [`docker/entrypoint.sh`](docker/entrypoint.sh) configures everything from env, so the image runs the same with or without a compose file:
+Every build is smoke-tested before anything is pushed. Full image: torch has CUDA, `prefetch --dry-run` resolves every wrapper checkpoint, and the server boots (CPU mode) and answers `/api/wrapper/workflows` with 200 with the bearer token and 401 without it. Runpod image: no torch in the image, it refuses to start without a volume, a first container on a fresh docker volume builds the real CUDA env on it and passes the same 200/401 check, and a second container on that volume reuses the env (no rebuild) and comes up faster. The two flavours build in parallel jobs with separate registry build caches (`:buildcache`, `:buildcache-runpod`). Publishing needs the repository secret **`DOCKERHUB_TOKEN`** (a Docker Hub access token with Read & Write). `DOCKERHUB_USERNAME` / `DOCKERHUB_IMAGE` repository variables override the defaults.
+
+Both images are **CUDA only**: `python:3.12-slim` plus the PyTorch **cu128** wheels (Blackwell / RTX 5090 kernels, host driver ≥ 570). The full image's build fails if any dependency leaves it with a CPU torch; the runpod image's env build on the volume fails the same way. Nothing model-sized is baked in. [`docker/entrypoint.sh`](docker/entrypoint.sh) configures everything from env, so the image runs the same with or without a compose file:
 
 | Env | Default | Meaning |
 |---|---|---|
@@ -164,20 +167,53 @@ The image is **CUDA only**: `python:3.12-slim` plus the PyTorch **cu128** wheels
 | `COMFYUI_ARGS` | empty | Extra ComfyUI flags. |
 | `COMFY_HF_DOWNLOAD_MODE` | `direct` with a data dir, else `cache` | `direct` downloads Hugging Face weights next to the models dir and moves them in (one copy). `cache` keeps the HF cache plus a copy, which is useful when the HF cache is shared between projects. |
 | `MIMO_API_KEY`, `HF_TOKEN` | unset | H3 prompt rewrite; gated FLUX.2 [klein] weights. |
+| `COMFY_ENV_WAIT_SECONDS` | `1800` | Runpod image: how long a pod waits for another pod that is building the env before it gives up. |
+| `COMFY_ENV_LOCK_STALE_SECONDS` | `120` | Runpod image: an env lock whose heartbeat has not moved for this long belongs to a dead pod and is taken over. |
+| `COMFY_ENVS_DIR` | `<data dir>/envs` | Runpod image: where the envs live. |
 
 **Local GPU box**: `cp .env.example .env`, then `docker compose pull && docker compose up -d` (or `docker compose up -d --build` to build this tree). `COMFYUI_HOST_PORT=8282` publishes it where the FloStudio rig is reached over WireGuard.
 
-**RunPod (FloStudio burst pods)**: voxmin-backend creates the pods itself through the RunPod API. Set System Config → FloStudio → RunPod → image to `docker.io/shivanshtalwar0/comfyui:latest` (or a `sha-` tag), and attach a network volume. RunPod mounts it at `/workspace`, which the entrypoint uses for models, the HF cache and Triton kernels. The backend gives every pod its own `WRAPPER_AUTH_TOKEN` and reaches it on port 8188 through the RunPod proxy. Put `MIMO_API_KEY` / `HF_TOKEN` in the `runpod` ExternalApi row's `podEnv`.
+**RunPod (FloStudio burst pods)**: voxmin-backend creates the pods itself through the RunPod API. Set System Config → FloStudio → RunPod → image to `docker.io/shivanshtalwar0/comfyui:runpod` (or a `runpod-sha-` tag; see [RunPod variant](#runpod-variant-runpod)), and attach a network volume. RunPod mounts it at `/workspace`, which the entrypoint uses for the Python env, models, the HF cache and Triton kernels. The backend gives every pod its own `WRAPPER_AUTH_TOKEN` and reaches it on port 8188 through the RunPod proxy. Put `MIMO_API_KEY` / `HF_TOKEN` in the `runpod` ExternalApi row's `podEnv`. The full `:latest` image works on RunPod too, but a cold pod has to pull all ~5.2 GB of it: one pod measured on EU-RO-1 (RTX 5090) spent more than 9 minutes on the pull alone at under 10 MB/s from Docker Hub.
 
-**Fill a network volume once** so the first pod doesn't spend its boot downloading ~40 GB. Run this on a cheap CPU pod with the volume attached, or locally against the model dir:
+**Fill a network volume once** so the first pod doesn't spend its boot downloading ~40 GB of weights (and, with the runpod image, installing the Python env). Run this on a cheap CPU pod with the volume attached, or locally against the model dir:
 
 ```bash
+# runpod image: builds the Python env on the volume, then downloads the weights
+docker run --rm -e HF_TOKEN=... -v /workspace:/workspace shivanshtalwar0/comfyui:runpod prefetch
+docker run --rm -v /workspace:/workspace shivanshtalwar0/comfyui:runpod prefetch --env-only   # env only
+# full image: weights only
 docker run --rm -e HF_TOKEN=... -v /workspace:/workspace shivanshtalwar0/comfyui prefetch
 # specs: minimaxh3[:nvfp4|int8|fp8|bf16]  minimaxh3-ref[:quant]  flux2klein9b
 docker run --rm -v "$PWD/models:/opt/ComfyUI/models" shivanshtalwar0/comfyui prefetch minimaxh3:int8 --dry-run
 ```
 
 With no specs it fetches `minimaxh3:nvfp4 minimaxh3-ref:nvfp4 flux2klein9b` (override with `PREFETCH_MODELS`). That set is the FP8 H3 UNETs plus the 16 GB NVFP4 text encoder that a 32 GB Blackwell card needs, and the FLUX.2 [klein] stills model.
+
+#### RunPod variant (`:runpod`)
+
+`docker.io/shivanshtalwar0/comfyui:runpod` is `python:3.12-slim` plus the apt packages (ffmpeg, git, and the gcc/g++/make that Triton's JIT needs at runtime), the `uv` binary and the ComfyUI sources: about **0.38 GB compressed** (1.1 GB unpacked) against **5.15 GB compressed** for the full image, 4.8 GB of which is the torch + requirements layers. Those live on the network volume instead:
+
+```
+/workspace/envs/<key>/                      virtualenv (torch cu128 + requirements.txt)
+/workspace/envs/<key>/.comfy-env-complete   written last: what was built, when, and how long it took
+/workspace/envs/.lock-<key>/                present only while a pod is building <key>
+```
+
+- **The key** (`/opt/ComfyUI/docker/env-key`, exported as `COMFY_ENV_KEY`) is a hash of `requirements.txt`, the torch index, the Python minor version, the CPU arch and the OS release, all computed when the image is built (the hashed text is in `docker/env-inputs`). An image that only changed code reuses the env already on the volume; an image whose dependencies changed builds a new one next to it.
+- **First boot on a volume** (or after a dependency change): the pod builds the env in place with `uv` (torch from the cu128 index first, then `requirements.txt`, bytecode precompiled so no pod compiles torch on import), checks that torch is a CUDA build, and only then writes the completion marker. `uv`'s download cache sits on the container disk (`/tmp`, deleted afterwards) and files are copied rather than hardlinked, so nothing is stored twice on the per-GB billed volume. The CUDA env is about 7.7 GB (108 packages, ~42k files; 4.2 GB of it NVIDIA libraries) from ~3.6 GB of wheels, so the volume needs that much room per env, and the container disk the same again for `uv`'s cache while the env builds.
+- **Every later boot** finds the marker and starts ComfyUI from the env straight away. The log says which it was: `python env <key> found at ... reusing it (checked in 0s)` or `... built in <n>s` (with the torch and requirements.txt times).
+- **Several pods at once**: only one builds. The lock is a directory (`mkdir` is atomic on a network filesystem, where `flock` may not be; RunPod volumes are MooseFS). The builder keeps a heartbeat file in it; the other pods wait (up to `COMFY_ENV_WAIT_SECONDS`) and then use the finished env. If the heartbeat stops moving for `COMFY_ENV_LOCK_STALE_SECONDS` (a pod killed mid-build), a waiting pod takes the lock over, deletes the half-built env and builds it again.
+- **No volume, no start**: without `/workspace` (or `COMFYUI_DATA_DIR`) the runpod image exits at once with an error. Use the full image anywhere without a volume. `prefetch` and any other command (`bash`, `uvicorn ...`) also run inside the env.
+
+Measured locally (Apple Silicon, Docker Desktop, a named docker volume at `/workspace`, CPU torch index for the test build): first boot built a 2.1 GB env in 25-27 s (torch 10-12 s, `requirements.txt` 13-14 s) and answered HTTP 200 after 31 s; a second container on the same volume reused it and answered after 4 s. Two containers started together on a fresh volume: one built, the other waited 25 s and reused it. A lock left by a "dead" builder was taken over after the stale window and the half-built env rebuilt. The CUDA env on a RunPod volume has not been timed yet: it is ~3.6 GB to download and ~7.7 GB / ~42k files to write to MooseFS, so expect minutes rather than seconds (the log prints the torch and `requirements.txt` times).
+
+A first boot of a real pod also has to fit in voxmin-backend's FloStudio boot timeout (900 s by default), so pre-build the env with `prefetch` (or `prefetch --env-only`) on a new volume rather than letting a customer's pod do it.
+
+Envs are never deleted automatically, because a pod still running an older image may be using its env. Once no pod runs an older image, free the space from a pod on the volume (the current key is in the image):
+
+```bash
+cd /workspace/envs && ls | grep -vx "$(cat /opt/ComfyUI/docker/env-key)" | xargs -r rm -rf
+```
 
 ## Features
 - A visual node graph for building and reusing image, video, audio, 3D, and text workflows without code.
