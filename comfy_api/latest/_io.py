@@ -654,7 +654,7 @@ class LatentUpscaleModel(ComfyTypeIO):
 class Audio(ComfyTypeIO):
     class AudioDict(TypedDict):
         waveform: torch.Tensor
-        sampler_rate: int
+        sample_rate: int
     Type = AudioDict
 
 @comfytype(io_type="VIDEO")
