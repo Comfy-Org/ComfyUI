@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_attention
 from comfy.ldm.flux.layers import EmbedND
 from comfy.ldm.flux.math import apply_rope1, rope
 import comfy.ldm.common_dit
@@ -81,17 +81,21 @@ class WanSelfAttention(nn.Module):
         q = qkv_fn_q(x)
         k = qkv_fn_k(x)
 
+        if patches.get("attn1_patch"):
+            q_patch, k_patch = q, k
+        q = AttentionTensorContainer(q.view(b, s, n * d))
+        k = AttentionTensorContainer(k.view(b, s, n * d))
+        v = AttentionTensorContainer(self.v(x).view(b, s, n * d))
+
         x = optimized_attention(
-            q.view(b, s, n * d),
-            k.view(b, s, n * d),
-            self.v(x).view(b, s, n * d),
+            q, k, v,
             heads=self.num_heads,
             transformer_options=transformer_options,
         )
 
         if "attn1_patch" in patches:
             for p in patches["attn1_patch"]:
-                x = p({"x": x, "q": q, "k": k, "transformer_options": transformer_options})
+                x = p({"x": x, "q": q_patch, "k": k_patch, "transformer_options": transformer_options})
 
         x = self.o(x)
         return x
@@ -106,9 +110,9 @@ class WanT2VCrossAttention(WanSelfAttention):
             context(Tensor): Shape [B, L2, C]
         """
         # compute query, key, value
-        q = self.norm_q(self.q(x))
-        k = self.norm_k(self.k(context))
-        v = self.v(context)
+        q = AttentionTensorContainer(self.norm_q(self.q(x)))
+        k = AttentionTensorContainer(self.norm_k(self.k(context)))
+        v = AttentionTensorContainer(self.v(context))
 
         # compute attention
         x = optimized_attention(q, k, v, heads=self.num_heads, transformer_options=transformer_options)
@@ -143,13 +147,15 @@ class WanI2VCrossAttention(WanSelfAttention):
 
         # compute query, key, value
         q = self.norm_q(self.q(x))
-        k = self.norm_k(self.k(context))
-        v = self.v(context)
         k_img = self.norm_k_img(self.k_img(context_img))
         v_img = self.v_img(context_img)
         # Sageattn can cause Nans here, don't allow it as there is no speed difference anyway as img attention is tiny.
         img_x = optimized_attention(q, k_img, v_img, heads=self.num_heads, transformer_options=transformer_options, low_precision_attention=False)
+        del k_img, v_img
         # compute attention
+        q = AttentionTensorContainer(q)
+        k = AttentionTensorContainer(self.norm_k(self.k(context)))
+        v = AttentionTensorContainer(self.v(context))
         x = optimized_attention(q, k, v, heads=self.num_heads, transformer_options=transformer_options)
 
         # output
