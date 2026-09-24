@@ -962,9 +962,13 @@ class ResizeImagesByShorterEdgeNode(ImageProcessingNode):
         if w < h:
             new_w = shorter_edge
             new_h = int(h * (shorter_edge / w))
-        else:
+        elif h < w:
             new_h = shorter_edge
             new_w = int(w * (shorter_edge / h))
+        else:
+            # Square image: set both dimensions directly to avoid precision loss from float operations
+            new_w = shorter_edge
+            new_h = shorter_edge
         img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         return pil_to_tensor(img)
 
@@ -994,9 +998,13 @@ class ResizeImagesByLongerEdgeNode(ImageProcessingNode):
             if w > h:
                 new_w = longer_edge
                 new_h = int(h * (longer_edge / w))
-            else:
+            elif h > w:
                 new_h = longer_edge
                 new_w = int(w * (longer_edge / h))
+            else:
+                # Square image: set both dimensions directly to avoid precision loss from float operations
+                new_w = longer_edge
+                new_h = longer_edge
             img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
             resized_images.append(pil_to_tensor(img))
         return torch.cat(resized_images, dim=0)
