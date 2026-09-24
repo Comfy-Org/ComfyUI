@@ -162,10 +162,12 @@ def test_minimax_h3_audio_kernel_launch_uses_input_device(monkeypatch):
     monkeypatch.setattr(audio_vae_kernels, "triton", SimpleNamespace(cdiv=lambda size, block: (size + block - 1) // block))
     monkeypatch.setattr(torch, "empty", lambda shape, dtype, device: _FakeCudaTensor(shape, device, dtype))
 
+    monkeypatch.delattr(audio_vae_kernels, "_fir2x", raising=False)
+    monkeypatch.delattr(audio_vae_kernels, "_snake_beta_f32", raising=False)
     fir_kernel = _FakeKernel(lambda: active_device[0])
     snake_kernel = _FakeKernel(lambda: active_device[0])
-    monkeypatch.setattr(audio_vae_kernels, "_fir2x", fir_kernel)
-    monkeypatch.setattr(audio_vae_kernels, "_snake_beta_f32", snake_kernel)
+    monkeypatch.setattr(audio_vae_kernels, "_fir2x", fir_kernel, raising=False)
+    monkeypatch.setattr(audio_vae_kernels, "_snake_beta_f32", snake_kernel, raising=False)
 
     x = _FakeCudaTensor(device="cuda:1")
     audio_vae_kernels.fir2x(x, _FakeCudaTensor((1, 1, 12), x.device), up=True)
