@@ -4,6 +4,7 @@ import urllib.request
 import shutil
 import threading
 import time
+import uuid
 from typing import Optional
 import yaml
 
@@ -64,7 +65,10 @@ def _download_huggingface_file(repo_and_path: str, dest: str, progress_key: str 
             kwargs["tqdm_kwargs"] = {"disable": True}
             kwargs["cache_only"] = False
 
-        downloaded = hf_hub_download(repo_id=repo_id, filename=filepath, **kwargs)
+        if _hf_direct_mode():
+            downloaded = _hf_fetch(repo_id, filepath, dest)
+        else:
+            downloaded = hf_hub_download(repo_id=repo_id, filename=filepath, **kwargs)
         _copy_to_dest(downloaded, dest)
         if os.path.getsize(downloaded) != os.path.getsize(dest):
             os.remove(dest)
@@ -86,6 +90,39 @@ def _copy_to_dest(src: str, dest: str) -> None:
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     if os.path.isfile(src):
         shutil.copy2(src, dest)
+
+
+def _hf_direct_mode() -> bool:
+    """COMFY_HF_DOWNLOAD_MODE=direct stores one copy of a Hugging Face file.
+
+    The default ``cache`` mode downloads into the Hugging Face cache and copies
+    the file into the models dir, so the weights exist twice. That is what lets
+    a cache shared between projects serve a repeat download, but on a dedicated
+    model store (a RunPod network volume, billed per GB) it doubles the size:
+    MiniMax H3 + FLUX.2 klein take 82 GB, not 164. ``direct`` downloads next to
+    the models dir and moves the file into place instead.
+    """
+    return os.environ.get("COMFY_HF_DOWNLOAD_MODE", "cache").strip().lower() == "direct"
+
+
+def _hf_fetch(repo_id: str, filepath: str, dest: str) -> str:
+    """Download ``repo_id``/``filepath`` straight to ``dest`` (direct mode).
+
+    The download is staged under ``<models>/.hf-staging/<id>/`` -- the same
+    disk as ``dest`` but outside every folder ComfyUI scans for models -- and
+    then moved into place, so the file is never copied and never cached.
+    Returns ``dest``.
+    """
+    from huggingface_hub import hf_hub_download
+
+    staging = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(dest))), ".hf-staging", uuid.uuid4().hex)
+    try:
+        downloaded = hf_hub_download(repo_id=repo_id, filename=filepath, local_dir=staging)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.move(downloaded, dest)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return dest
 
 
 def _download_direct_url(url: str, dest: str, progress_key: str | None = None) -> bool:
@@ -144,8 +181,13 @@ def _download_huggingface_resolve_url(url: str, dest: str, progress_key: str | N
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         logging.info(f"[ModelDownloader] Downloading from HuggingFace: {repo_id}  file: {filepath}")
 
-        downloaded = hf_hub_download(repo_id=repo_id, filename=filepath)
+        if _hf_direct_mode():
+            downloaded = _hf_fetch(repo_id, filepath, dest)
+        else:
+            downloaded = hf_hub_download(repo_id=repo_id, filename=filepath)
         if meta is not None and meta.size is not None and os.path.getsize(downloaded) != meta.size:
+            if downloaded == dest:
+                os.remove(dest)  # direct mode: the bad file is already at dest
             raise OSError(
                 f"Cached file size mismatch for {filepath}: got {os.path.getsize(downloaded)} bytes, "
                 f"expected {meta.size}; the Hugging Face cache entry is corrupt.")

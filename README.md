@@ -162,6 +162,7 @@ The image is **CUDA only**: `python:3.12-slim` plus the PyTorch **cu128** wheels
 | `AUTO_DOWNLOAD_MODELS` | `1` | Fetch a workflow's checkpoints on first use. |
 | `VRAM_HEADROOM_GB`, `CACHE_RAM_GB`, `ASYNC_OFFLOAD_STREAMS`, `FAST_DISK` | `2`, `2 8`, `0`, `1` | Memory tuning, as in `.env.example`. |
 | `COMFYUI_ARGS` | empty | Extra ComfyUI flags. |
+| `COMFY_HF_DOWNLOAD_MODE` | `direct` with a data dir, else `cache` | `direct` downloads Hugging Face weights next to the models dir and moves them in (one copy). `cache` keeps the HF cache plus a copy, which is useful when the HF cache is shared between projects. |
 | `MIMO_API_KEY`, `HF_TOKEN` | unset | H3 prompt rewrite; gated FLUX.2 [klein] weights. |
 
 **Local GPU box**: `cp .env.example .env`, then `docker compose pull && docker compose up -d` (or `docker compose up -d --build` to build this tree). `COMFYUI_HOST_PORT=8282` publishes it where the FloStudio rig is reached over WireGuard.

@@ -59,6 +59,8 @@ class TestDockerCompose(unittest.TestCase):
         self.assertIn("COMFYUI_ARGS", script)
         self.assertIn("/workspace", script)  # RunPod network volume
         self.assertIn('"prefetch"', script)
+        # One copy per checkpoint on a per-GB billed volume (not HF cache + copy).
+        self.assertIn('COMFY_HF_DOWNLOAD_MODE="${COMFY_HF_DOWNLOAD_MODE:-direct}"', script)
         self.assertTrue(os.access(os.path.join(ROOT, "docker", "entrypoint.sh"), os.X_OK),
                         "docker/entrypoint.sh must be executable")
 
