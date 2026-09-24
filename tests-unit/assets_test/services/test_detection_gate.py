@@ -4,8 +4,10 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.assets.database.models import Asset, AssetContent
+from app.assets.database.queries.records import mark_content_missing
 from app.assets.helpers import to_stored_hash
 from app.assets.scanner import (
     clear_pending_verifications,
@@ -233,3 +235,64 @@ def test_observation_is_skipped_when_the_row_changed_before_it_was_applied(
     assert len(contents) == 1
     assert contents[0].is_missing is False
     assert contents[0].size_bytes == len(b"v3 is longer still")
+
+
+def test_drain_commits_each_entry_before_hashing_the_next(session, temp_dir: Path, monkeypatch):
+    gone = temp_dir / "gone.bin"
+    kept = temp_dir / "kept.bin"
+    gone.write_bytes(b"gone")
+    kept.write_bytes(b"kept")
+    gone_content, _ = _seed_content(session, gone, None)
+    kept_content, _ = _seed_content(session, kept, None)
+    gone.unlink()
+    queue_pending_verification(gone_content.id)
+    queue_pending_verification(kept_content.id)
+    in_transaction_while_hashing = []
+
+    def recording_snapshot_hash(path: str):
+        in_transaction_while_hashing.append(session.connection().connection.driver_connection.in_transaction)
+        return snapshot_hash(path)
+
+    monkeypatch.setattr("app.assets.scanner_changes.snapshot_hash", recording_snapshot_hash)
+
+    assert drain_pending_verifications(session) == 2
+    assert in_transaction_while_hashing == [False]
+
+
+def _retire_during_hash(monkeypatch, session, content_id: str, replace: bool) -> None:
+    def competing_write_then_hash(path: str):
+        with Session(session.get_bind()) as other:
+            mark_content_missing(other, content_id)
+            if replace:
+                other.add(AssetContent(path=path, hash="blake3:" + "f" * 64, size_bytes=1, mtime_ns=1))
+            other.commit()
+        return snapshot_hash(path)
+
+    monkeypatch.setattr("app.assets.scanner_changes.snapshot_hash", competing_write_then_hash)
+
+
+@pytest.mark.parametrize(
+    ("replace", "seeded_hash"),
+    [(False, None), (True, "blake3:" + "0" * 64)],
+    ids=["retired", "replaced"],
+)
+def test_drain_skips_a_row_retired_while_hashing(
+    session, temp_dir: Path, monkeypatch, replace: bool, seeded_hash: str | None
+):
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
+    path = temp_dir / "raced.bin"
+    path.write_bytes(b"raced bytes")
+    content, _ = _seed_content(session, path, seeded_hash)
+    content_id = content.id
+    queue_pending_verification(content_id)
+    _retire_during_hash(monkeypatch, session, content_id, replace)
+
+    processed = drain_pending_verifications(session)
+    session.commit()
+
+    session.expire_all()
+    assert session.get(AssetContent, content_id).hash == seeded_hash
+    live = session.scalars(select(AssetContent).where(AssetContent.is_missing.is_(False))).all()
+    assert len(live) == (1 if replace else 0)
+    assert len(session.scalars(select(Asset)).all()) == 1
+    assert processed == 0

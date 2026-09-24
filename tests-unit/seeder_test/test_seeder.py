@@ -262,7 +262,7 @@ def test_enrich_phase_does_not_count_returned_ids_as_failures(
     )
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
     monkeypatch.setattr(seeder_module, "drain_pending_verifications", lambda _session: None)
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _session: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
     monkeypatch.setattr(seeder_module, "drain_transition_queue", lambda _session: None)
     monkeypatch.setattr(
         seeder_module,
@@ -609,7 +609,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
 
     monkeypatch.setattr(seeder_module, "insert_asset_specs", fail_insert)
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda current_session: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_fast_phase(("models",))

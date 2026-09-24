@@ -201,6 +201,7 @@ def _create_upload_record(
     mime_type: str | None,
     user_metadata: UserMetadata,
     preview_id: str | None,
+    system_metadata: dict[str, Any],
 ) -> Asset:
     if preview_id is not None and session.get(Asset, preview_id) is None:
         raise ValueError(f"preview_id {preview_id!r} does not reference an existing asset")
@@ -211,7 +212,7 @@ def _create_upload_record(
         mime_type=mime_type,
         loader_path=compute_loader_path(abs_path),
         tags=list(tags),
-        system_metadata=_extract_system_metadata_sync(abs_path, mime_type),
+        system_metadata=system_metadata,
     )
     if user_metadata:
         record.user_metadata = dict(user_metadata)
@@ -409,6 +410,8 @@ def _reuse_qualified_content(
     if content is None:
         return None
     content_id = content.id
+    # Read the file before the claim below opens the write transaction.
+    system_metadata = _extract_system_metadata_sync(content.path, spec.mime_type)
     if not claim_qualified_content(session, content_id, stored_hash):
         session.rollback()
         return None
@@ -425,6 +428,7 @@ def _reuse_qualified_content(
         spec.mime_type,
         spec.user_metadata,
         spec.preview_id,
+        system_metadata,
     )
     session.commit()
     return _record_to_upload_result(session, record, created_new=True)
@@ -486,6 +490,7 @@ def upload_from_temp_path(
     finally:
         _remove_temp_path(temp_path)
     size_bytes, mtime_ns = verified_stat.st_size, verified_stat.st_mtime_ns
+    system_metadata = _extract_system_metadata_sync(dest_abs, content_type)
     with create_session() as session:
         _reconcile_live_content_at_path(
             session,
@@ -507,6 +512,7 @@ def upload_from_temp_path(
                 content_type,
                 user_metadata,
                 preview_id,
+                system_metadata,
             )
             session.commit()
         except Exception:
@@ -564,6 +570,7 @@ def register_file_in_place(
     digest, verified_stat = _snapshot_hash_with_retry(locator)
     size_bytes, mtime_ns = verified_stat.st_size, verified_stat.st_mtime_ns
     stored_hash = to_stored_hash(digest)
+    system_metadata = _extract_system_metadata_sync(locator, content_type)
     with create_session() as session:
         _reconcile_live_content_at_path(
             session,
@@ -588,6 +595,7 @@ def register_file_in_place(
                 content_type,
                 None,
                 None,
+                system_metadata,
             )
             session.commit()
         except Exception:
@@ -621,6 +629,8 @@ def create_from_hash(
             logging.warning("create_from_hash: no asset found for hash %s", hash_str)
             return None
         content_id = content.id
+        # Read the file before the claim below opens the write transaction.
+        system_metadata = _extract_system_metadata_sync(content.path, mime_type)
         if not claim_qualified_content(session, content_id, stored_hash):
             session.rollback()
             return None
@@ -637,6 +647,7 @@ def create_from_hash(
             mime_type,
             user_metadata,
             preview_id,
+            system_metadata,
         )
         session.commit()
         return _record_to_upload_result(session, record, created_new=True)

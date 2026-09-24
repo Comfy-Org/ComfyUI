@@ -68,8 +68,8 @@ def _two_stat_admit(paths_with_stats: list[tuple[str, os.stat_result]]) -> tuple
     return admitted, watched
 
 
-def tick_watch_list(session: Session) -> None:
-    from app.assets.scanner import seed_asset_specs, SeedAssetSpec
+def tick_watch_list() -> None:
+    from app.assets.scanner import insert_asset_specs, SeedAssetSpec
 
     remaining: list[_WatchEntry] = []
     unvisited = iter(list(_WATCH_LIST))

@@ -161,10 +161,14 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
     queued_count = min(len(_pending_verification_ids), limit or len(_pending_verification_ids))
     processed = 0
     for _ in range(queued_count):
+        # Commit the previous entry's writes so this entry's hash runs with no transaction open.
+        # That needs a create_session() session: on a write session the next read takes the lock.
+        session.commit()
         content_id = _pending_verification_ids.pop(0)
         content = session.get(AssetContent, content_id)
         if content is None or content.is_missing:
             continue
+        loaded = (content.hash, content.size_bytes, content.mtime_ns)
         try:
             os.stat(content.path, follow_symlinks=True)
         except FileNotFoundError:
@@ -185,6 +189,10 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
             continue
         digest, verified_stat = snapshot
         stored_hash = to_stored_hash(digest)
+        # Skip a row another writer retired or changed while the file was hashed.
+        content = session.get(AssetContent, content_id, populate_existing=True)
+        if content is None or content.is_missing or (content.hash, content.size_bytes, content.mtime_ns) != loaded:
+            continue
 
         if content.hash == stored_hash or content.hash is None:
             content.hash = stored_hash

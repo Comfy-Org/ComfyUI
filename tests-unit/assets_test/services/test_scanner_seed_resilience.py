@@ -91,7 +91,7 @@ def _delete_during_recovery(monkeypatch: pytest.MonkeyPatch, path: Path) -> None
     def _hash_or_raise(candidate_path: str) -> str | None:
         if candidate_path == str(path):
             path.unlink()
-            raise OSError("file vanished during recovery")
+            raise FileNotFoundError("file vanished during recovery")
         return snapshot_hash(candidate_path)
 
     monkeypatch.setattr("app.assets.scanner.snapshot_hash", _hash_or_raise)
