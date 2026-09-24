@@ -612,9 +612,9 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dec_cond_key = '{}dec_net.cond_embed.weight'.format(key_prefix)
             if '{}cap_pad_token'.format(key_prefix) in state_dict_keys:
                 dit_config["pad_tokens_multiple"] = 32
-            # Ming-Image: Z-Image keys. Design ships without the learned pad tokens; Layer has them and only its repack metadata tells it apart.
+            # Ming-Image Design has no learned pad tokens; Layer needs a saved marker or repack metadata.
             ming_metadata = metadata is not None and "config" in metadata and json.loads(metadata["config"]).get("transformer", {}).get("image_model") == "ming_image"
-            if ming_metadata or ("pad_tokens_multiple" not in dit_config and dec_cond_key not in state_dict_keys):
+            if '{}__ming_image__'.format(key_prefix) in state_dict_keys or ming_metadata or ("pad_tokens_multiple" not in dit_config and dec_cond_key not in state_dict_keys):
                 dit_config["image_model"] = "ming_image"
                 if "pad_tokens_multiple" not in dit_config:
                     dit_config["masked_pad_multiple"] = 32

@@ -1258,6 +1258,14 @@ class MingImage(ZImage):
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.MingImage(self, device=device)
 
+    def process_unet_state_dict(self, state_dict):
+        state_dict.pop("__ming_image__", None)
+        return state_dict
+
+    def process_unet_state_dict_for_saving(self, state_dict):
+        state_dict["__ming_image__"] = torch.empty(0)
+        return super().process_unet_state_dict_for_saving(state_dict)
+
     def clip_target(self, state_dict={}):
         return supported_models_base.ClipTarget(comfy.text_encoders.ming_image.MingImageTokenizer, comfy.text_encoders.ming_image.te())
 
