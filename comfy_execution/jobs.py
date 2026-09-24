@@ -183,15 +183,15 @@ def is_text_preview(media_type: str, item: dict) -> bool:
     return any(filename.endswith(ext) for ext in TEXT_EXTENSIONS)
 
 
-def normalize_queue_item(item: tuple, status: str) -> dict:
+def normalize_queue_item(item: tuple, status: str, include_workflow: bool = False) -> dict:
     """Convert queue item tuple to unified job dict.
 
     Expects item with sensitive data already removed (5 elements).
     """
-    priority, prompt_id, _, extra_data, _ = item
+    priority, prompt_id, prompt, extra_data, _ = item
     create_time, workflow_id = _extract_job_metadata(extra_data)
 
-    return prune_dict({
+    job = prune_dict({
         'id': prompt_id,
         'status': status,
         'priority': priority,
@@ -200,6 +200,14 @@ def normalize_queue_item(item: tuple, status: str) -> dict:
         'previewable_outputs_count': 0,
         'workflow_id': workflow_id,
     })
+
+    if include_workflow:
+        job['workflow'] = {
+            'prompt': prompt,
+            'extra_data': extra_data,
+        }
+
+    return job
 
 
 def normalize_history_item(prompt_id: str, history_item: dict, include_outputs: bool = False) -> dict:
@@ -409,11 +417,11 @@ def get_job(prompt_id: str, running: list, queued: list, history: dict) -> Optio
 
     for item in running:
         if item[1] == prompt_id:
-            return normalize_queue_item(item, JobStatus.IN_PROGRESS)
+            return normalize_queue_item(item, JobStatus.IN_PROGRESS, include_workflow=True)
 
     for item in queued:
         if item[1] == prompt_id:
-            return normalize_queue_item(item, JobStatus.PENDING)
+            return normalize_queue_item(item, JobStatus.PENDING, include_workflow=True)
 
     return None
 
