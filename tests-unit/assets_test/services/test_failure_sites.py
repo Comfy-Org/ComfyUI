@@ -108,7 +108,7 @@ def test_reference_stat_failure_is_reported_once_and_counted_per_row(monkeypatch
     [event] = events(caplog, "scanner.stat_failed")
     assert event["site"] == "reference"
     assert event["reason"] == "network_unavailable"
-    assert event["errno_name"] == "ESTALE"
+    assert event["errno_name"] == errno.errorcode[errno.ESTALE]
     assert event["exc_site"] == "assets.scanner.observe_references_on_filesystem"
     assert buckets(progress) == {("reference", "network_unavailable"): 3}
     # An unreachable file is not a deleted one: nothing is marked missing.

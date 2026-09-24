@@ -49,7 +49,6 @@ REASONS = frozenset({
     "dependency_missing",
     "other",
 })
-ERRNO_NAMES = frozenset(errno.errorcode.values()) | {"none"}
 NO_WINERROR = -1
 NO_SITE = "none"
 EXTERNAL = "ext"

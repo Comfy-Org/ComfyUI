@@ -76,25 +76,25 @@ def raise_from(module: ModuleType, function: str = "fail") -> BaseException:
 @pytest.mark.parametrize(
     ("exc", "expected"),
     [
-        (PermissionError(errno.EACCES, "denied"), ("permission_denied", "EACCES", -1)),
-        (OSError(errno.EPERM, "denied"), ("permission_denied", "EPERM", -1)),
-        (FileNotFoundError(errno.ENOENT, "gone"), ("vanished", "ENOENT", -1)),
-        (OSError(errno.EBUSY, "busy"), ("locked", "EBUSY", -1)),
-        (OSError(errno.ESTALE, "stale"), ("network_unavailable", "ESTALE", -1)),
-        (OSError(errno.EHOSTUNREACH, "host"), ("network_unavailable", "EHOSTUNREACH", -1)),
-        (OSError(errno.ENODEV, "device"), ("device_unavailable", "ENODEV", -1)),
-        (OSError(errno.EIO, "io"), ("io_error", "EIO", -1)),
-        (OSError(errno.EILSEQ, "seq"), ("encoding", "EILSEQ", -1)),
-        (OSError(errno.ENAMETOOLONG, "long"), ("name_too_long", "ENAMETOOLONG", -1)),
-        (OSError(errno.ELOOP, "loop"), ("path_loop", "ELOOP", -1)),
-        (NotADirectoryError(errno.ENOTDIR, "parent is a file"), ("vanished", "ENOTDIR", -1)),
-        (OSError(errno.ETIMEDOUT, "share timed out"), ("network_unavailable", "ETIMEDOUT", -1)),
-        (OSError(errno.EFBIG, "big"), ("too_large", "EFBIG", -1)),
-        (OSError(errno.ENOSPC, "full"), ("no_space", "ENOSPC", -1)),
-        (OSError(errno.EROFS, "ro"), ("read_only", "EROFS", -1)),
-        (OSError(errno.EMFILE, "fds"), ("fd_exhausted", "EMFILE", -1)),
-        (OSError(errno.ENOMEM, "mem"), ("oom", "ENOMEM", -1)),
-        (OSError(errno.EXDEV, "cross-device"), ("other", "EXDEV", -1)),
+        (PermissionError(errno.EACCES, "denied"), ("permission_denied", errno.errorcode[errno.EACCES], -1)),
+        (OSError(errno.EPERM, "denied"), ("permission_denied", errno.errorcode[errno.EPERM], -1)),
+        (FileNotFoundError(errno.ENOENT, "gone"), ("vanished", errno.errorcode[errno.ENOENT], -1)),
+        (OSError(errno.EBUSY, "busy"), ("locked", errno.errorcode[errno.EBUSY], -1)),
+        (OSError(errno.ESTALE, "stale"), ("network_unavailable", errno.errorcode[errno.ESTALE], -1)),
+        (OSError(errno.EHOSTUNREACH, "host"), ("network_unavailable", errno.errorcode[errno.EHOSTUNREACH], -1)),
+        (OSError(errno.ENODEV, "device"), ("device_unavailable", errno.errorcode[errno.ENODEV], -1)),
+        (OSError(errno.EIO, "io"), ("io_error", errno.errorcode[errno.EIO], -1)),
+        (OSError(errno.EILSEQ, "seq"), ("encoding", errno.errorcode[errno.EILSEQ], -1)),
+        (OSError(errno.ENAMETOOLONG, "long"), ("name_too_long", errno.errorcode[errno.ENAMETOOLONG], -1)),
+        (OSError(errno.ELOOP, "loop"), ("path_loop", errno.errorcode[errno.ELOOP], -1)),
+        (NotADirectoryError(errno.ENOTDIR, "parent is a file"), ("vanished", errno.errorcode[errno.ENOTDIR], -1)),
+        (OSError(errno.ETIMEDOUT, "share timed out"), ("network_unavailable", errno.errorcode[errno.ETIMEDOUT], -1)),
+        (OSError(errno.EFBIG, "big"), ("too_large", errno.errorcode[errno.EFBIG], -1)),
+        (OSError(errno.ENOSPC, "full"), ("no_space", errno.errorcode[errno.ENOSPC], -1)),
+        (OSError(errno.EROFS, "ro"), ("read_only", errno.errorcode[errno.EROFS], -1)),
+        (OSError(errno.EMFILE, "fds"), ("fd_exhausted", errno.errorcode[errno.EMFILE], -1)),
+        (OSError(errno.ENOMEM, "mem"), ("oom", errno.errorcode[errno.ENOMEM], -1)),
+        (OSError(errno.EXDEV, "cross-device"), ("other", errno.errorcode[errno.EXDEV], -1)),
         (FileNotFoundError("raised without an errno"), ("vanished", "none", -1)),
         (ConnectionResetError("reset"), ("network_unavailable", "none", -1)),
         (MemoryError(), ("oom", "none", -1)),
@@ -146,7 +146,9 @@ def test_a_cause_is_classified_when_the_raised_exception_is_not():
         except OSError as inner:
             raise RuntimeError("wrapped") from inner
     except RuntimeError as outer:
-        assert classify_failure(outer) == Classification("network_unavailable", "ESTALE", -1)
+        assert classify_failure(outer) == Classification(
+            "network_unavailable", errno.errorcode[errno.ESTALE], -1
+        )
 
 
 def test_a_sqlite_error_is_classified_by_its_error_code(tmp_path: Path):
@@ -310,7 +312,7 @@ def test_emit_failure_line_carries_only_validated_fields_and_nothing_user_derive
     fields = dict(pair.split("=", 1) for pair in line.split()[2:])
     assert set(fields) <= set(ALLOWED_FIELDS)
     assert fields["reason"] == "vanished"
-    assert fields["errno_name"] == "ENOENT"
+    assert fields["errno_name"] == errno.errorcode[errno.ENOENT]
     assert fields["exc_site"] == "assets.services.file_utils.get_size_and_mtime_ns"
     assert "secret" not in line
     assert "model" not in line

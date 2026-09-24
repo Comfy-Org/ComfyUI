@@ -20,7 +20,7 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
-from app.assets.failures import ERRNO_NAMES, NO_WINERROR, REASONS, describe_failure
+from app.assets.failures import NO_WINERROR, REASONS, describe_failure
 
 TAG = "[assets-event]"
 
@@ -131,7 +131,9 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "hashing_enabled": _is_flag,
     "site": _one_of(SITES),
     "reason": _one_of(REASONS),
-    "errno_name": _one_of(ERRNO_NAMES),
+    # A pattern rather than this interpreter's errno table, so a name emitted on one
+    # platform (WSAESTALE on Windows) validates everywhere; mirrors the launcher tap.
+    "errno_name": _matches(r"E[A-Z0-9]{1,23}|WSA[A-Z0-9_]{1,24}|none"),
     "winerror": _is_winerror,
     "exc_fp": _matches(r"[0-9a-f]{12}"),
     "exc_class": _matches(r"[A-Za-z_][A-Za-z0-9_.]*"),
