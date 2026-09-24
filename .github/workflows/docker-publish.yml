@@ -1,0 +1,176 @@
+# Builds the ComfyUI + wrapper worker image and pushes it to Docker Hub
+# (shivanshtalwar0/comfyui). The same image runs on the FloStudio rig and as
+# on-demand RunPod pods started by voxmin-backend.
+#
+# - push to master        -> :latest, :sha-<short>
+# - tag vX.Y.Z            -> :X.Y.Z, :X.Y, :sha-<short>
+# - workflow_dispatch     -> :<branch>, :sha-<short> (e.g. to try a branch on RunPod)
+# - pull request          -> build + smoke test only, nothing is pushed
+#
+# Needs the repository secret DOCKERHUB_TOKEN (a Docker Hub access token with
+# Read & Write on the repository). DOCKERHUB_USERNAME / DOCKERHUB_IMAGE can be
+# set as repository variables to override the defaults below.
+name: Docker image
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker/**
+      - requirements.txt
+      - manager_requirements.txt
+      - "**.py"
+      - "**.yaml"
+      - .github/workflows/docker-publish.yml
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker/**
+      - requirements.txt
+      - manager_requirements.txt
+      - .github/workflows/docker-publish.yml
+  workflow_dispatch:
+    inputs:
+      push:
+        description: Push the image to Docker Hub
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME || 'shivanshtalwar0' }}
+  IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'shivanshtalwar0/comfyui' }}
+  SMOKE_TAG: comfyui-smoke:ci
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Decide whether to push
+        id: mode
+        env:
+          HAS_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+        run: |
+          push=false
+          case "${{ github.event_name }}" in
+            push) push=true ;;
+            workflow_dispatch) push="${{ inputs.push }}" ;;
+          esac
+          if [ "$push" = "true" ] && [ "$HAS_TOKEN" != "true" ]; then
+            echo "::error::DOCKERHUB_TOKEN is not set; add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          echo "push=$push" >> "$GITHUB_OUTPUT"
+          echo "login=$HAS_TOKEN" >> "$GITHUB_OUTPUT"
+
+      # The CUDA torch wheels alone are several GB; the stock runner is too
+      # tight to build and load the image without freeing space first.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: steps.mode.outputs.login == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: docker.io/${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=sha,prefix=sha-,format=short
+
+      # Build once into the runner's Docker so the image can be tested before
+      # anything is pushed. The registry cache is read when we are logged in.
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: comfyui
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ env.SMOKE_TAG }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: ${{ steps.mode.outputs.login == 'true' && format('type=registry,ref=docker.io/{0}:buildcache', env.IMAGE) || '' }}
+          provenance: false
+
+      - name: "Smoke test: torch and CUDA build"
+        run: |
+          docker run --rm --entrypoint python "$SMOKE_TAG" -c \
+            "import torch, torchvision, torchaudio; print('torch', torch.__version__, 'cuda', torch.version.cuda); assert torch.version.cuda, 'CPU-only torch in the image'"
+
+      - name: "Smoke test: model prefetch resolves every wrapper checkpoint"
+        run: docker run --rm "$SMOKE_TAG" prefetch --dry-run
+
+      - name: "Smoke test: server boots and the wrapper enforces bearer auth"
+        run: |
+          docker run -d --name smoke -p 8188:8188 \
+            -e WRAPPER_AUTH_TOKEN=smoke-token -e COMFYUI_ARGS=--cpu "$SMOKE_TAG"
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer smoke-token' http://127.0.0.1:8188/api/wrapper/workflows || true)
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          docker logs smoke 2>&1 | tail -40
+          test "$code" = "200" || { echo "::error::wrapper did not come up (last HTTP $code)"; exit 1; }
+          curl -s -H 'Authorization: Bearer smoke-token' http://127.0.0.1:8188/api/wrapper/workflows | python3 -c "import json,sys; names=[w['name'] for w in json.load(sys.stdin)['workflows']]; print(names); assert 'minimaxh3' in names"
+          unauth=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8188/api/wrapper/workflows)
+          test "$unauth" = "401" || { echo "::error::expected 401 without a token, got $unauth"; exit 1; }
+          docker rm -f smoke
+
+      # Same builder, so every layer comes from the build above.
+      - name: Push to Docker Hub
+        if: steps.mode.outputs.push == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: comfyui
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=docker.io/${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=docker.io/${{ env.IMAGE }}:buildcache,mode=max
+          provenance: false
+
+      - name: Summary
+        if: steps.mode.outputs.push == 'true'
+        run: |
+          {
+            echo "### Pushed"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo "RunPod image: \`docker.io/${IMAGE}:sha-${GITHUB_SHA::7}\` (or \`:latest\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
