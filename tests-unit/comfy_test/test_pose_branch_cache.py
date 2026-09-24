@@ -1,6 +1,11 @@
 import torch
 
-from comfy.ldm.wan.model_animate2 import PoseBranchCache
+from comfy.cli_args import args
+
+if not torch.cuda.is_available():
+    args.cpu = True
+
+from comfy.ldm.wan.model_animate2 import PoseBranchCache  # noqa: E402
 
 
 def test_select_promotes_matching_slot_when_earlier_slot_has_different_shape():
