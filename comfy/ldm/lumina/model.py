@@ -479,6 +479,9 @@ class NextDiT(nn.Module):
         self.pad_tokens_multiple = pad_tokens_multiple
         self.masked_pad_multiple = masked_pad_multiple
 
+        if image_model == "ming_image":
+            self.register_buffer("__ming_image__", torch.empty(0))
+
         self.x_embedder = operation_settings.get("operations").Linear(
             in_features=patch_size * patch_size * in_channels,
             out_features=dim,
