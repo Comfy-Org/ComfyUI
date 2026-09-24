@@ -609,13 +609,19 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
                 dit_config["allow_fp16"] = torch.std(state_dict['{}layers.{}.ffn_norm1.weight'.format(key_prefix, dit_config["n_layers"] - 2)], unbiased=False).item() < 0.42
             except Exception:
                 pass
+            dec_cond_key = '{}dec_net.cond_embed.weight'.format(key_prefix)
             if '{}cap_pad_token'.format(key_prefix) in state_dict_keys:
                 dit_config["pad_tokens_multiple"] = 32
+            # Ming-Image Design has no learned pad tokens; Layer needs a saved marker or repack metadata.
+            ming_metadata = metadata is not None and "config" in metadata and json.loads(metadata["config"]).get("transformer", {}).get("image_model") == "ming_image"
+            if '{}__ming_image__'.format(key_prefix) in state_dict_keys or ming_metadata or ("pad_tokens_multiple" not in dit_config and dec_cond_key not in state_dict_keys):
+                dit_config["image_model"] = "ming_image"
+                if "pad_tokens_multiple" not in dit_config:
+                    dit_config["masked_pad_multiple"] = 32
             sig_weight = state_dict.get('{}siglip_embedder.0.weight'.format(key_prefix), None)
             if sig_weight is not None:
                 dit_config["siglip_feat_dim"] = sig_weight.shape[0]
 
-            dec_cond_key = '{}dec_net.cond_embed.weight'.format(key_prefix)
             if dec_cond_key in state_dict_keys:  # pixel-space variant
                 dit_config["image_model"] = "zimage_pixel"
                 # patch_size and in_channels are derived from x_embedder:
