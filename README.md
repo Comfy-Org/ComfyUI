@@ -175,6 +175,8 @@ Both images are **CUDA only**: `python:3.12-slim` plus the PyTorch **cu128** whe
 
 **RunPod (FloStudio burst pods)**: voxmin-backend creates the pods itself through the RunPod API, with a network volume attached at `/workspace` (Python env, models, HF cache, Triton kernels). The backend gives every pod its own `WRAPPER_AUTH_TOKEN` and reaches it on port 8188 through the RunPod proxy; put `MIMO_API_KEY` / `HF_TOKEN` in the `runpod` ExternalApi row's `podEnv`. The fastest way to start a pod is **not to pull an image at all** (see [RunPod: no image pull](#runpod-no-image-pull)): pulls from Docker Hub ran at about 10 Mbps on EU-RO-1 hosts, over 9 minutes for the full `:latest` image (~5.2 GB) and 4-5 minutes even for the slim `:runpod` one, while those same hosts fetched Python wheels at ~700 Mbps.
 
+**Opening a pod's ComfyUI in a browser**: every route needs the pod's `WRAPPER_AUTH_TOKEN`, which a browser cannot send as a header. Whoever holds the token signs a short-lived login link instead, `https://<podId>-8188.proxy.runpod.net/?comfy_login=<exp>.<HMAC-SHA256(token, "comfy-login:<exp>")>` (at most 10 minutes ahead). Opening it sets an HttpOnly session cookie (12 h, signed the same way) and redirects to the clean URL; the UI, its API calls and its WebSocket then use the cookie, and the token itself never reaches the browser. voxmin-backend's admin pods panel builds these links ("Open ComfyUI"). See `middleware/wrapper_auth.py`.
+
 **Fill a network volume once** so the first pod doesn't spend its boot downloading ~40 GB of weights (and, with the runpod image, installing the Python env). Run this on a cheap CPU pod with the volume attached, or locally against the model dir:
 
 ```bash
