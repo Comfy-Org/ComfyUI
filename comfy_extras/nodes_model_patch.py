@@ -292,7 +292,7 @@ class ModelPatchLoader:
                 num_blocks += 1
             model = comfy.ldm.qwen_image21.model.QwenImage21FunControl(
                 num_blocks=num_blocks,
-                control_in_dim=sd["control_img_in.weight"].shape[1],
+                control_in_dim=129,
                 inner_dim=inner_dim,
                 attention_head_dim=sd["control_blocks.0.attn.norm_q.weight"].shape[0],
                 mlp_ratio=hidden_dim // inner_dim,
