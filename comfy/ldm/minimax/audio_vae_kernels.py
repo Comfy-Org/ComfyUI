@@ -76,15 +76,17 @@ def fir2x(x, filter, up):
     length = x.shape[-1]
     output_length = 2 * length if up else (length + 1) // 2
     output = torch.empty((*x.shape[:2], output_length), dtype=x.dtype, device=x.device)
-    _fir2x[(x.shape[0] * x.shape[1], triton.cdiv(output_length, 256))](
-        x, filter.contiguous(), output, length, output_length, x.shape[1], *x.stride(), up, BLOCK=256,
-        num_warps=4, enable_fp_fusion=False, allow_flush_denorm=False)
+    with torch.cuda.device(x.device):
+        _fir2x[(x.shape[0] * x.shape[1], triton.cdiv(output_length, 256))](
+            x, filter.contiguous(), output, length, output_length, x.shape[1], *x.stride(), up, BLOCK=256,
+            num_warps=4, enable_fp_fusion=False, allow_flush_denorm=False)
     return output
 
 
 def snake_beta(x, alpha, beta):
     output = torch.empty(x.shape, dtype=x.dtype, device=x.device)
-    _snake_beta_f32[(x.shape[0] * x.shape[1], triton.cdiv(x.shape[2], 256))](
-        x, alpha.contiguous(), beta.contiguous(), output, x.shape[2], x.shape[1], *x.stride(), BLOCK=256,
-        num_warps=4, enable_fp_fusion=False, allow_flush_denorm=False)
+    with torch.cuda.device(x.device):
+        _snake_beta_f32[(x.shape[0] * x.shape[1], triton.cdiv(x.shape[2], 256))](
+            x, alpha.contiguous(), beta.contiguous(), output, x.shape[2], x.shape[1], *x.stride(), BLOCK=256,
+            num_warps=4, enable_fp_fusion=False, allow_flush_denorm=False)
     return output
