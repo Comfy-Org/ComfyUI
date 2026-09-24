@@ -11,11 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout ComfyUI
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
       with:
         repository: "Comfy-Org/ComfyUI"
         path: "ComfyUI"
-    - uses: actions/setup-python@v4
+    - uses: actions/setup-python@v6
       with:
         python-version: '3.10'
     - name: Install requirements
@@ -39,7 +39,7 @@ jobs:
           exit 1
         fi
       working-directory: ComfyUI
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v6
       if: always()
       with:
         name: console-output
