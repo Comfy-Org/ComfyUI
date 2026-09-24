@@ -411,6 +411,8 @@ def prompt_worker(q, server_instance, asset_manager):
                     asset_manager.queue_output_scan()
                     asset_manager.resume_background_scan()
                     background_scan_paused = False
+        # BaseException is deliberate. This runs on the worker thread, so Ctrl-C lands in
+        # the main thread instead, and resume only flips the seeder's pause state.
         except BaseException:
             if background_scan_paused:
                 try:

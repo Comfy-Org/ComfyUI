@@ -113,7 +113,7 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "assets": args.enable_assets,
 }
 
-# CLI-provided flags cannot overwrite core flags
+# CLI-provided flags cannot overwrite core flags. Startup code may: main.py sets "assets".
 _cli_flags = {k: v for k, v in _parse_cli_feature_flags().items() if k not in _CORE_FEATURE_FLAGS}
 
 SERVER_FEATURE_FLAGS: dict[str, Any] = {**_CORE_FEATURE_FLAGS, **_cli_flags}
