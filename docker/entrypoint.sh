@@ -1,21 +1,31 @@
 #!/usr/bin/env bash
 # Container entrypoint for the ComfyUI wrapper worker image.
 #
-# One image serves every place it runs:
+# One entrypoint serves both image targets and every place they run:
 #   - a local GPU box through docker-compose.yml (bind mounts for models/ etc.);
 #   - an on-demand RunPod pod started by voxmin-backend, where RunPod mounts the
 #     pod's network volume at /workspace and runs the image's own CMD (there is
 #     no compose file), so everything a pod needs is decided here from env.
 #
+# The `runpod` target (COMFY_IMAGE_VARIANT=runpod) ships without torch and the
+# pip requirements: the first pod on a network volume installs them into a
+# virtualenv on the volume and every later pod reuses it (see "Python env on
+# the volume" below).
+#
 # Usage:
 #   (no args) or flags only   start ComfyUI; extra flags are appended
 #   prefetch [spec ...]       download wrapper checkpoints into the model store
-#                             and exit (fill a RunPod network volume once)
+#                             and exit (fill a RunPod network volume once). The
+#                             runpod image builds/verifies its Python env first.
+#   prefetch --env-only       runpod image: only build/verify the Python env
 #   <any other command>       run it as is (e.g. uvicorn for developer-api, bash)
 set -euo pipefail
 
 COMFY_ROOT=/opt/ComfyUI
 cd "$COMFY_ROOT"
+
+log() { echo "entrypoint: $*" >&2; }
+is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 # --- Persistent storage --------------------------------------------------
 # COMFYUI_DATA_DIR holds what must outlive a container: model weights, the
@@ -63,18 +73,239 @@ if [[ -n "$DATA_DIR" ]]; then
 	mkdir -p "$HF_HOME" "$TRITON_CACHE_DIR"
 fi
 
+# --- Python env on the volume (runpod image only) ----------------------------
+# The full image (target `comfyui`, :latest) bakes torch and requirements.txt
+# in, which makes it a ~5 GB pull: a cold RunPod pod spent over 9 minutes just
+# pulling it. The `runpod` target leaves them out and keeps them on the
+# network volume instead, installed once by the first pod that needs them:
+#
+#   <data dir>/envs/<key>/                     the virtualenv, built in place
+#                                              (venvs are path-dependent)
+#   <data dir>/envs/<key>/.comfy-env-complete  written last; no marker = partial
+#   <data dir>/envs/.lock-<key>/               held by the pod building it
+#
+# <key> (docker/env-key, baked at image build) hashes requirements.txt, the
+# torch index, the Python minor version, the arch and the OS release: an image
+# whose dependencies changed builds a fresh env next to the old one, and an
+# image that only changed code reuses it.
+#
+# The lock is a directory: mkdir is atomic on a network filesystem where flock
+# may not work (RunPod volumes are MooseFS). The owner writes its id into it
+# and rewrites a heartbeat file every few seconds from a background loop. A
+# waiting pod that sees owner + heartbeat unchanged for
+# COMFY_ENV_LOCK_STALE_SECONDS, timed by its own clock (so clock skew between
+# pods does not matter), treats the builder as dead: it takes the lock over
+# (guarded by a second mkdir so two waiters cannot both do it) and rebuilds
+# from scratch. A builder checks it still owns the lock before it writes the
+# completion marker.
+ENV_MARKER_NAME=.comfy-env-complete
+HEARTBEAT_PID=
+ENV_TOKEN=
+
+env_ready() { [[ -f "$ENV_DIR/$ENV_MARKER_NAME" && -x "$ENV_DIR/bin/python" ]]; }
+lock_owner() { head -n 1 "$ENV_LOCK/owner" 2>/dev/null || true; }
+lock_state() { { cat "$ENV_LOCK/owner" "$ENV_LOCK/heartbeat" 2>/dev/null || true; } | tr '\n' ' '; }
+
+start_heartbeat() {
+	(
+		beat=0
+		while :; do
+			owner=$(lock_owner)
+			# Stop once someone else owns the lock; an unreadable owner file is
+			# treated as a transient network-filesystem hiccup.
+			[[ -z "$owner" || "$owner" == "$ENV_TOKEN" ]] || exit 0
+			beat=$((beat + 1))
+			echo "beat $beat $(date -u +%FT%TZ)" >"$ENV_LOCK/heartbeat" 2>/dev/null || true
+			sleep "$ENV_HEARTBEAT_SECONDS"
+		done
+	) &
+	HEARTBEAT_PID=$!
+}
+
+release_env_lock() {
+	if [[ -n "$HEARTBEAT_PID" ]]; then
+		kill "$HEARTBEAT_PID" 2>/dev/null || true
+		wait "$HEARTBEAT_PID" 2>/dev/null || true
+		HEARTBEAT_PID=
+	fi
+	if [[ -n "$ENV_TOKEN" && "$(lock_owner)" == "$ENV_TOKEN" ]]; then
+		rm -rf "$ENV_LOCK"
+	fi
+}
+
+# Take over a lock whose state has not changed for the stale window. The
+# `.break` dir makes the check-and-remove exclusive between waiting pods.
+break_stale_lock() {
+	local stale=$1 unchanged_for=$2
+	if ! mkdir "$ENV_LOCK.break" 2>/dev/null; then
+		# Another pod is taking it over right now (a millisecond job). A break
+		# dir that outlives two stale windows belongs to a pod that died there.
+		if ((unchanged_for >= 2 * ENV_LOCK_STALE_SECONDS)); then
+			rmdir "$ENV_LOCK.break" 2>/dev/null || true
+		fi
+		return 0
+	fi
+	if [[ -d "$ENV_LOCK" && "$(lock_state)" == "$stale" ]]; then
+		log "env lock unchanged for ${unchanged_for}s (owner: ${stale:-none}); its builder is gone, taking over"
+		rm -rf "$ENV_LOCK"
+	fi
+	rmdir "$ENV_LOCK.break" 2>/dev/null || true
+}
+
+# Build the env in place. Called only while holding the lock.
+build_env() {
+	local t0=$SECONDS t base_python torch_info default_cache=/tmp/uv-cache
+	base_python=$(readlink -f "$(command -v python3)")
+	# uv's cache goes on the container disk, and packages are copied (not
+	# hardlinked) into the env, so nothing is stored twice on the per-GB
+	# billed volume. Bytecode is compiled once here, so no pod compiles
+	# torch's sources on import (PYTHONDONTWRITEBYTECODE is set).
+	export UV_CACHE_DIR="${UV_CACHE_DIR:-$default_cache}" UV_LINK_MODE=copy UV_COMPILE_BYTECODE=1 \
+		UV_PYTHON_DOWNLOADS=never UV_NO_CONFIG=1
+	if [[ -e "$ENV_DIR" ]]; then
+		log "removing the incomplete env at $ENV_DIR (no completion marker and no live builder)"
+		t=$SECONDS
+		rm -rf "$ENV_DIR"
+		log "env build: removed it in $((SECONDS - t))s"
+	fi
+	uv venv --python "$base_python" "$ENV_DIR"
+	t=$SECONDS
+	uv pip install --python "$ENV_DIR/bin/python" --index-url "$TORCH_INDEX_URL" torch torchvision torchaudio
+	log "env build: torch from $TORCH_INDEX_URL in $((SECONDS - t))s"
+	t=$SECONDS
+	uv pip install --python "$ENV_DIR/bin/python" -r "$COMFY_ROOT/requirements.txt"
+	log "env build: requirements.txt in $((SECONDS - t))s"
+	# CUDA only, like the full image's build-time assert. COMFY_ALLOW_CPU_TORCH=1
+	# exists for local tests with a CPU torch index only; it defaults off.
+	torch_info=$("$ENV_DIR/bin/python" -c '
+import os, torch
+cuda = torch.version.cuda
+if not cuda and os.environ.get("COMFY_ALLOW_CPU_TORCH") != "1":
+    raise SystemExit("torch %s is not a CUDA build; the runpod image is CUDA only" % torch.__version__)
+print("torch=%s cuda=%s" % (torch.__version__, cuda))
+')
+	uv pip freeze --python "$ENV_DIR/bin/python" >"$ENV_DIR/comfy-env-freeze.txt"
+	if [[ "$(lock_owner)" != "$ENV_TOKEN" ]]; then
+		log "ERROR: lost the env lock during the build (owner is now: $(lock_owner)); not marking $ENV_DIR complete"
+		exit 1
+	fi
+	{
+		echo "key=$ENV_KEY"
+		echo "$torch_info"
+		echo "built_at=$(date -u +%FT%TZ)"
+		echo "build_seconds=$((SECONDS - t0))"
+		echo "builder=$ENV_TOKEN"
+		cat "$COMFY_ROOT/docker/env-inputs"
+	} >"$ENV_DIR/$ENV_MARKER_NAME.tmp"
+	mv -f "$ENV_DIR/$ENV_MARKER_NAME.tmp" "$ENV_DIR/$ENV_MARKER_NAME"
+	log "env build: $torch_info"
+	if [[ "$UV_CACHE_DIR" == "$default_cache" ]]; then
+		rm -rf "$UV_CACHE_DIR"
+	fi
+}
+
+ensure_env() {
+	local t0=$SECONDS seen="" seen_at=$SECONDS state announced=""
+	if env_ready; then
+		log "python env $ENV_KEY found at $ENV_DIR, reusing it (checked in $((SECONDS - t0))s)"
+		return 0
+	fi
+	mkdir -p "$ENVS_DIR"
+	while :; do
+		if env_ready; then
+			log "python env $ENV_KEY found at $ENV_DIR, reusing it (waited $((SECONDS - t0))s for another pod to build it)"
+			return 0
+		fi
+		if mkdir "$ENV_LOCK" 2>/dev/null; then
+			ENV_TOKEN="${RUNPOD_POD_ID:-${HOSTNAME:-container}} pid=$$ $(date -u +%FT%TZ) $RANDOM"
+			echo "$ENV_TOKEN" >"$ENV_LOCK/owner"
+			trap release_env_lock EXIT
+			start_heartbeat
+			if env_ready; then # finished by another pod since the check above
+				release_env_lock
+				trap - EXIT
+				continue
+			fi
+			log "python env $ENV_KEY is not on the volume yet: building it at $ENV_DIR (once per volume and dependency set; other pods wait for it)"
+			build_env
+			release_env_lock
+			trap - EXIT
+			log "python env $ENV_KEY built in $((SECONDS - t0))s"
+			return 0
+		fi
+		# Someone else holds the lock: wait for it, or take it over when stale.
+		state=$(lock_state)
+		if [[ "$state" != "$seen" ]]; then
+			seen=$state
+			seen_at=$SECONDS
+		fi
+		if [[ -z "$announced" ]]; then
+			log "another pod is building python env $ENV_KEY (lock owner: $(lock_owner)); waiting up to ${ENV_WAIT_SECONDS}s"
+			announced=1
+		fi
+		if ((SECONDS - seen_at >= ENV_LOCK_STALE_SECONDS)); then
+			break_stale_lock "$seen" "$((SECONDS - seen_at))"
+		fi
+		if ((SECONDS - t0 >= ENV_WAIT_SECONDS)); then
+			log "ERROR: gave up after ${ENV_WAIT_SECONDS}s waiting for python env $ENV_KEY (lock $ENV_LOCK, owner: $(lock_owner)). If no pod is building it, delete that directory."
+			exit 1
+		fi
+		sleep "$ENV_POLL_SECONDS"
+	done
+}
+
+if [[ "${COMFY_IMAGE_VARIANT:-}" == "runpod" ]]; then
+	if [[ -z "$DATA_DIR" ]]; then
+		log "ERROR: this is the runpod image. Its Python env (torch + requirements, several GB) lives on the network volume, and no volume is mounted. Mount one at /workspace (or set COMFYUI_DATA_DIR), or use shivanshtalwar0/comfyui:latest, which has everything baked in. For a shell without the env: --entrypoint bash."
+		exit 64
+	fi
+	ENV_KEY=$(cat "$COMFY_ROOT/docker/env-key")
+	export COMFY_ENV_KEY="$ENV_KEY"
+	TORCH_INDEX_URL=$(sed -n 's/^torch_index=//p' "$COMFY_ROOT/docker/env-inputs")
+	ENVS_DIR="${COMFY_ENVS_DIR:-$DATA_DIR/envs}"
+	ENV_DIR="$ENVS_DIR/$ENV_KEY"
+	ENV_LOCK="$ENVS_DIR/.lock-$ENV_KEY"
+	ENV_WAIT_SECONDS="${COMFY_ENV_WAIT_SECONDS:-1800}"
+	ENV_LOCK_STALE_SECONDS="${COMFY_ENV_LOCK_STALE_SECONDS:-120}"
+	for value in "$ENV_WAIT_SECONDS" "$ENV_LOCK_STALE_SECONDS"; do
+		is_uint "$value" || { log "ERROR: COMFY_ENV_WAIT_SECONDS / COMFY_ENV_LOCK_STALE_SECONDS must be whole seconds"; exit 64; }
+	done
+	ENV_HEARTBEAT_SECONDS=$((ENV_LOCK_STALE_SECONDS / 8 > 0 ? ENV_LOCK_STALE_SECONDS / 8 : 1))
+	ENV_POLL_SECONDS=$((ENV_HEARTBEAT_SECONDS < 5 ? ENV_HEARTBEAT_SECONDS : 5))
+
+	ensure_env
+	# Everything below (the server, prefetch, passthrough commands) runs in it.
+	export VIRTUAL_ENV="$ENV_DIR"
+	export PATH="$ENV_DIR/bin:$PATH"
+fi
+
 # --- Subcommands ----------------------------------------------------------
 if [[ "${1:-}" == "prefetch" ]]; then
 	shift
-	exec python "$COMFY_ROOT/docker/prefetch_models.py" "$@"
+	env_only=0
+	prefetch_args=()
+	for arg in "$@"; do
+		if [[ "$arg" == "--env-only" ]]; then
+			env_only=1
+		else
+			prefetch_args+=("$arg")
+		fi
+	done
+	if ((env_only)); then
+		if [[ "${COMFY_IMAGE_VARIANT:-}" == "runpod" ]]; then
+			log "prefetch --env-only: python env $ENV_KEY is ready at $ENV_DIR"
+		else
+			log "prefetch --env-only: this image has its Python env baked in; nothing to do"
+		fi
+		exit 0
+	fi
+	exec python "$COMFY_ROOT/docker/prefetch_models.py" "${prefetch_args[@]}"
 fi
 if [[ $# -gt 0 && "$1" != -* ]]; then
 	exec "$@"
 fi
 
 # --- ComfyUI server ---------------------------------------------------------
-is_uint() { [[ "$1" =~ ^[0-9]+$ ]]; }
-
 args=(--listen "${COMFYUI_LISTEN:-0.0.0.0}" --port "${COMFYUI_PORT:-8188}")
 
 # The wrapper fetches the checkpoints a workflow needs on first use.
@@ -105,4 +336,5 @@ else
 	echo "entrypoint: WARNING: WRAPPER_AUTH_TOKEN is unset; the server is open to anyone who can reach it" >&2
 fi
 
+log "starting ComfyUI ($(command -v python), ${SECONDS}s after container start)"
 exec python main.py "${args[@]}" "${extra[@]}" "$@"

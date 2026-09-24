@@ -1,11 +1,20 @@
 # Builds the ComfyUI + wrapper worker image and pushes it to Docker Hub
-# (shivanshtalwar0/comfyui). The same image runs on the FloStudio rig and as
-# on-demand RunPod pods started by voxmin-backend.
+# (shivanshtalwar0/comfyui), in two flavours from the same Dockerfile:
 #
-# - push to master        -> :latest, :sha-<short>
-# - tag vX.Y.Z            -> :X.Y.Z, :X.Y, :sha-<short>
-# - workflow_dispatch     -> :<branch>, :sha-<short> (e.g. to try a branch on RunPod)
-# - pull request          -> build + smoke test only, nothing is pushed
+#   full    (target comfyui) torch + requirements baked in, ~5 GB compressed.
+#                            The FloStudio rig (docker-compose.yml) runs it.
+#   runpod  (target runpod)  no Python deps: the first pod on a network volume
+#                            installs them into /workspace/envs/<key> and every
+#                            later pod reuses them, so a cold pod pulls ~0.4 GB.
+#
+#                           full                        runpod
+# - push to master      -> :latest, :sha-<short>       :runpod, :runpod-sha-<short>
+# - tag vX.Y.Z          -> :X.Y.Z, :X.Y, :sha-<short>  :runpod-X.Y.Z, :runpod-X.Y, :runpod-sha-<short>
+# - workflow_dispatch   -> :<branch>, :sha-<short>     :runpod-<branch>, :runpod-sha-<short>
+# - pull request        -> build + smoke test only, nothing is pushed
+#
+# The two flavours build in parallel jobs (own runner disk, own registry build
+# cache: :buildcache and :buildcache-runpod).
 #
 # Needs the repository secret DOCKERHUB_TOKEN (a Docker Hub access token with
 # Read & Write on the repository). DOCKERHUB_USERNAME / DOCKERHUB_IMAGE can be
@@ -36,7 +45,7 @@ on:
   workflow_dispatch:
     inputs:
       push:
-        description: Push the image to Docker Hub
+        description: Push the images to Docker Hub
         type: boolean
         default: true
 
@@ -51,11 +60,14 @@ env:
   DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME || 'shivanshtalwar0' }}
   IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'shivanshtalwar0/comfyui' }}
   SMOKE_TAG: comfyui-smoke:ci
+  RUNPOD_SMOKE_TAG: comfyui-smoke:runpod
 
 jobs:
-  build:
+  mode:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    outputs:
+      push: ${{ steps.mode.outputs.push }}
+      login: ${{ steps.mode.outputs.login }}
     steps:
       - name: Decide whether to push
         id: mode
@@ -74,6 +86,11 @@ jobs:
           echo "push=$push" >> "$GITHUB_OUTPUT"
           echo "login=$HAS_TOKEN" >> "$GITHUB_OUTPUT"
 
+  build:
+    needs: mode
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
       # The CUDA torch wheels alone are several GB; the stock runner is too
       # tight to build and load the image without freeing space first.
       - name: Free disk space
@@ -92,7 +109,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        if: steps.mode.outputs.login == 'true'
+        if: needs.mode.outputs.login == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}
@@ -122,7 +139,7 @@ jobs:
           push: false
           tags: ${{ env.SMOKE_TAG }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: ${{ steps.mode.outputs.login == 'true' && format('type=registry,ref=docker.io/{0}:buildcache', env.IMAGE) || '' }}
+          cache-from: ${{ needs.mode.outputs.login == 'true' && format('type=registry,ref=docker.io/{0}:buildcache', env.IMAGE) || '' }}
           provenance: false
 
       - name: "Smoke test: torch and CUDA build"
@@ -151,7 +168,7 @@ jobs:
 
       # Same builder, so every layer comes from the build above.
       - name: Push to Docker Hub
-        if: steps.mode.outputs.push == 'true'
+        if: needs.mode.outputs.push == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -165,12 +182,174 @@ jobs:
           provenance: false
 
       - name: Summary
-        if: steps.mode.outputs.push == 'true'
+        if: needs.mode.outputs.push == 'true'
         run: |
           {
-            echo "### Pushed"
+            echo "### Pushed (full)"
             echo '```'
             echo "${{ steps.meta.outputs.tags }}"
             echo '```'
-            echo "RunPod image: \`docker.io/${IMAGE}:sha-${GITHUB_SHA::7}\` (or \`:latest\`)."
+            echo "Local GPU box image: \`docker.io/${IMAGE}:sha-${GITHUB_SHA::7}\` (or \`:latest\`)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  runpod:
+    needs: mode
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      # The image is small, but its smoke test builds the real CUDA env (torch
+      # cu128 + requirements, ~8 GB, plus uv's cache while installing) on a
+      # docker volume, exactly as the first pod on a network volume does.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: needs.mode.outputs.login == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: docker.io/${{ env.IMAGE }}
+          # Never :latest (metadata-action adds it to semver tags by default):
+          # that tag is the full image the local rig pulls.
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=runpod,enable={{is_default_branch}}
+            type=semver,pattern={{version}},prefix=runpod-
+            type=semver,pattern={{major}}.{{minor}},prefix=runpod-
+            type=ref,event=branch,prefix=runpod-,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=sha,prefix=runpod-sha-,format=short
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runpod
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ env.RUNPOD_SMOKE_TAG }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: ${{ needs.mode.outputs.login == 'true' && format('type=registry,ref=docker.io/{0}:buildcache-runpod', env.IMAGE) || '' }}
+          provenance: false
+
+      - name: "Smoke test: no Python deps baked in; uv and the env key are"
+        run: |
+          docker image ls "$RUNPOD_SMOKE_TAG"
+          docker run --rm --entrypoint sh "$RUNPOD_SMOKE_TAG" -c '
+            set -e
+            uv --version
+            cat docker/env-inputs
+            echo "env key: $(cat docker/env-key)"
+            python -c "import importlib.util as u, sys; sys.exit(\"torch is baked into the runpod image\" if u.find_spec(\"torch\") else 0)"'
+
+      - name: "Smoke test: refuses to start without a volume"
+        run: |
+          if docker run --rm "$RUNPOD_SMOKE_TAG" > novolume.log 2>&1; then
+            cat novolume.log; echo "::error::the runpod image started without a volume"; exit 1
+          fi
+          cat novolume.log
+          grep -q "no volume is mounted" novolume.log
+
+      # A named docker volume stands in for the RunPod network volume. The first
+      # boot builds the env on it (downloading the CUDA torch wheels); a second
+      # container on the same volume must reuse it and come up faster.
+      - name: "Smoke test: first boot builds the env on the volume, the second reuses it"
+        run: |
+          set -euo pipefail
+          docker volume create runpod-smoke-ws > /dev/null
+          boot() {
+            local name=$1 limit=$2 t0 code=""
+            t0=$(date +%s)
+            docker run -d --name "$name" -p 8188:8188 -v runpod-smoke-ws:/workspace \
+              -e WRAPPER_AUTH_TOKEN=smoke-token -e COMFYUI_ARGS=--cpu "$RUNPOD_SMOKE_TAG" > /dev/null
+            while [ $(( $(date +%s) - t0 )) -lt "$limit" ]; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer smoke-token' http://127.0.0.1:8188/api/wrapper/workflows || true)
+              [ "$code" = "200" ] && break
+              [ "$(docker inspect -f '{{.State.Running}}' "$name")" = "true" ] || break
+              sleep 5
+            done
+            boot_seconds=$(( $(date +%s) - t0 ))
+            docker logs "$name" > "$name.log" 2>&1
+            echo "--- $name: HTTP $code after ${boot_seconds}s"
+            grep '^entrypoint:' "$name.log" || true
+            if [ "$code" != "200" ]; then
+              tail -60 "$name.log"
+              echo "::error::$name did not come up within ${limit}s (last HTTP $code)"
+              exit 1
+            fi
+            curl -s -H 'Authorization: Bearer smoke-token' http://127.0.0.1:8188/api/wrapper/workflows | python3 -c "import json,sys; names=[w['name'] for w in json.load(sys.stdin)['workflows']]; print(names); assert 'minimaxh3' in names"
+            unauth=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8188/api/wrapper/workflows)
+            [ "$unauth" = "401" ] || { echo "::error::$name: expected 401 without a token, got $unauth"; exit 1; }
+          }
+
+          boot first 1800
+          first=$boot_seconds
+          grep -q "is not on the volume yet: building it" first.log \
+            || { echo "::error::the first boot did not build the env"; exit 1; }
+          docker rm -f first > /dev/null
+
+          boot second 600
+          second=$boot_seconds
+          if grep -q "building it" second.log; then
+            echo "::error::the second boot rebuilt the env instead of reusing it"; exit 1
+          fi
+          grep -q "reusing it" second.log \
+            || { echo "::error::the second boot did not report reusing the env"; exit 1; }
+          docker rm -f second > /dev/null
+          [ "$second" -lt "$first" ] \
+            || { echo "::error::the second boot (${second}s) was not faster than the first (${first}s)"; exit 1; }
+
+          env_size=$(docker run --rm -v runpod-smoke-ws:/workspace --entrypoint du "$RUNPOD_SMOKE_TAG" -sh /workspace/envs | cut -f1)
+          {
+            echo "### runpod image smoke test"
+            echo "- image: $(docker image inspect -f '{{.Size}}' "$RUNPOD_SMOKE_TAG" | awk '{printf "%.0f MB", $1/1e6}') uncompressed"
+            echo "- first boot (builds the env on the volume, $env_size): ${first}s to HTTP 200"
+            echo "- second boot (reuses it): ${second}s to HTTP 200"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Smoke test: prefetch runs inside the env on the volume"
+        run: docker run --rm -v runpod-smoke-ws:/workspace "$RUNPOD_SMOKE_TAG" prefetch --dry-run
+
+      - name: Push to Docker Hub
+        if: needs.mode.outputs.push == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runpod
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=docker.io/${{ env.IMAGE }}:buildcache-runpod
+          cache-to: type=registry,ref=docker.io/${{ env.IMAGE }}:buildcache-runpod,mode=max
+          provenance: false
+
+      - name: Summary
+        if: needs.mode.outputs.push == 'true'
+        run: |
+          {
+            echo "### Pushed (runpod)"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo "RunPod image: \`docker.io/${IMAGE}:runpod-sha-${GITHUB_SHA::7}\` (or \`:runpod\`)."
           } >> "$GITHUB_STEP_SUMMARY"
