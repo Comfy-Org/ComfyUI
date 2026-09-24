@@ -22,6 +22,7 @@ import comfy.model_management
 import comfy.model_base
 import comfy.weight_adapter as weight_adapter
 import logging
+import math
 import torch
 
 LORA_CLIP_MAP = {
@@ -34,15 +35,44 @@ LORA_CLIP_MAP = {
 }
 
 
-def load_lora(lora, to_load, log_missing=True):
+def load_lora(lora, to_load, log_missing=True, metadata=None):
     patch_dict = {}
     loaded_keys = set()
+    # Some trainers (SimpleTuner and other PEFT/diffusers-based ones) store alpha/rank only in
+    # the safetensors file metadata instead of a per-key .alpha tensor.
+    pairs = {}
+    if metadata is not None:
+        for k, v in metadata.items():
+            parts = k.rsplit(".", 1)
+            ns = parts[0] if len(parts) == 2 else ""
+            short = parts[-1]
+            try:
+                val = float(v)
+            except (ValueError, TypeError):
+                continue
+            if not math.isfinite(val):
+                continue
+            if short == "lora_alpha":
+                pairs.setdefault(ns, [None, None])[0] = val
+            elif short in ("r", "rank", "lora_rank") and val > 0:
+                pairs.setdefault(ns, [None, None])[1] = val
+
+    meta_alpha = None
+    meta_rank = None
+    found = {(a, r) for a, r in pairs.values() if a is not None and r is not None}
+    if len(found) > 1:
+        logging.warning("Multiple LoRA alpha/rank pairs in file metadata; ignoring metadata fallback.")
+    elif len(found) == 1:
+        meta_alpha, meta_rank = found.pop()
+
     for x in to_load:
         alpha_name = "{}.alpha".format(x)
         alpha = None
         if alpha_name in lora.keys():
             alpha = lora[alpha_name].item()
             loaded_keys.add(alpha_name)
+        elif meta_alpha is not None and meta_rank:
+            alpha = meta_alpha / meta_rank
 
         dora_scale_name = "{}.dora_scale".format(x)
         dora_scale = None
