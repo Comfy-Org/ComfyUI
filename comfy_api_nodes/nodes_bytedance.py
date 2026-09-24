@@ -15,6 +15,7 @@ from comfy_api_nodes.apis.bytedance import (
     RECOMMENDED_PRESETS_SEEDREAM_4,
     RECOMMENDED_PRESETS_SEEDREAM_4_0,
     RECOMMENDED_PRESETS_SEEDREAM_4_5,
+    RECOMMENDED_PRESETS_SEEDREAM_5_FLASH,
     RECOMMENDED_PRESETS_SEEDREAM_5_LITE,
     RECOMMENDED_PRESETS_SEEDREAM_5_PRO,
     SEEDANCE2_REF_VIDEO_PIXEL_LIMITS,
@@ -90,6 +91,7 @@ _VERIFICATION_POLL_INTERVAL_SEC = 3
 
 SEEDREAM_MODELS = {
     "seedream 5.0 pro": "seedream-5-0-pro-260628",
+    "seedream 5.0 flash": "seedream-5-0-flash-260915",
     "seedream 5.0 lite": "seedream-5-0-260128",
     "seedream-4-5-251128": "seedream-4-5-251128",
     "seedream-4-0-250828": "seedream-4-0-250828",
@@ -97,12 +99,11 @@ SEEDREAM_MODELS = {
 
 SEEDREAM_PRESETS = {
     "seedream-5-0-pro-260628": RECOMMENDED_PRESETS_SEEDREAM_5_PRO,
+    "seedream-5-0-flash-260915": RECOMMENDED_PRESETS_SEEDREAM_5_FLASH,
     "seedream-5-0-260128": RECOMMENDED_PRESETS_SEEDREAM_5_LITE,
     "seedream-4-5-251128": RECOMMENDED_PRESETS_SEEDREAM_4_5,
     "seedream-4-0-250828": RECOMMENDED_PRESETS_SEEDREAM_4_0,
 }
-
-SEEDREAM_LAYER_SEPARATION_MODEL = "seedream-5-0-pro-260628"
 
 # Long-running tasks endpoints(e.g., video)
 BYTEPLUS_TASK_ENDPOINT = "/proxy/byteplus/api/v3/contents/generations/tasks"
@@ -426,7 +427,7 @@ class ByteDanceSeedreamNode(IO.ComfyNode):
             inputs=[
                 IO.Combo.Input(
                     "model",
-                    options=list(SEEDREAM_MODELS.keys()),
+                    options=["seedream 5.0 pro", "seedream 5.0 lite", "seedream-4-5-251128", "seedream-4-0-250828"],
                 ),
                 IO.String.Input(
                     "prompt",
@@ -630,6 +631,7 @@ def _seedream_model_inputs(
     max_height: int = 4992,
     supports_batch: bool = True,
     supports_fast: bool = False,
+    supports_thinking: bool = True,
     include_common: bool = False,
 ):
     inputs = [
@@ -721,17 +723,20 @@ def _seedream_model_inputs(
                     tooltip='Whether to add an "AI generated" watermark to the image.',
                     advanced=True,
                 ),
-                IO.Boolean.Input(
-                    "thinking",
-                    default=True,
-                    tooltip=(
-                        "Enable the model's prompt-optimization reasoning ('thinking') for better adherence. "
-                        "Can substantially increase generation time — notably on Seedream 5.0 Pro. "
-                        "Can only be disabled for text-to-image (not when reference images are provided)."
-                    ),
-                    advanced=True,
-                ),
             ]
+        )
+    if include_common and supports_thinking:
+        inputs.append(
+            IO.Boolean.Input(
+                "thinking",
+                default=True,
+                tooltip=(
+                    "Enable the model's prompt-optimization reasoning ('thinking') for better adherence. "
+                    "Can substantially increase generation time — notably on Seedream 5.0 Pro. "
+                    "Can only be disabled for text-to-image (not when reference images are provided)."
+                ),
+                advanced=True,
+            )
         )
     return inputs
 
@@ -760,10 +765,22 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                             _seedream_model_inputs(
                                 max_ref_images=10,
                                 presets=RECOMMENDED_PRESETS_SEEDREAM_5_PRO,
-                                max_width=3136,
-                                max_height=2496,
+                                max_width=4514,
+                                max_height=4514,
                                 supports_batch=False,
                                 supports_fast=True,
+                                include_common=True,
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
+                            "seedream 5.0 flash",
+                            _seedream_model_inputs(
+                                max_ref_images=10,
+                                presets=RECOMMENDED_PRESETS_SEEDREAM_5_FLASH,
+                                max_width=4514,
+                                max_height=4514,
+                                supports_batch=False,
+                                supports_thinking=False,
                                 include_common=True,
                             ),
                         ),
@@ -818,6 +835,7 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                   $refs := $lookup(inputGroups, "model.images");
                   $extra := ($type($refs) = "number" and $refs > 1) ? ($refs - 1) * 0.003 : 0;
                   $isPro := $contains($model, "5.0 pro");
+                  $isFlash := $contains($model, "5.0 flash");
                   $isCustom := $contains($sp, "custom");
                   $sizeKnown := $isCustom ? $px > 0 : ($contains($sp, "1k") or $contains($sp, "2k"));
                   $proPrice := $isCustom
@@ -833,10 +851,11 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                     : {
                         "type": "usd",
                         "usd": $isPro ? $proPrice + $extra
+                               : $isFlash ? 0.02574
                                : $contains($model, "5.0 lite") ? 0.035
                                : $contains($model, "4-5") ? 0.04
                                : 0.03,
-                        "format": { "suffix": $isPro ? "/Image" : " x images/Run", "approximate": true }
+                        "format": { "suffix": ($isPro or $isFlash) ? "/Image" : " x images/Run", "approximate": true }
                       }
                 )
                 """,
@@ -855,7 +874,8 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
         validate_string(prompt, strip_whitespace=True, min_length=1)
         model_id = SEEDREAM_MODELS[model["model"]]
         presets = SEEDREAM_PRESETS[model_id]
-        is_pro = "seedream-5-0-pro" in model_id
+        is_flash = "seedream-5-0-flash" in model_id
+        is_pro_or_flash = is_flash or "seedream-5-0-pro" in model_id
 
         size_preset = model.get("size_preset", presets[0][0])
         width = model.get("width", 2048)
@@ -879,14 +899,14 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
 
         out_num_pixels = w * h
         mp_provided = out_num_pixels / 1_000_000.0
-        if is_pro:
+        if is_pro_or_flash:
             if out_num_pixels < 921_600:
                 raise ValueError(
                     f"Minimum image resolution for the selected model is 0.92MP, but {mp_provided:.2f}MP provided."
                 )
-            if out_num_pixels > 4_194_304:
+            if out_num_pixels > 4_624_220:
                 raise ValueError(
-                    f"Maximum image resolution for the selected model is 4.19MP, but {mp_provided:.2f}MP provided."
+                    f"Maximum image resolution for the selected model is 4.62MP, but {mp_provided:.2f}MP provided."
                 )
         else:
             if ("seedream-4-5" in model_id or "seedream-5-0" in model_id) and out_num_pixels < 3_686_400:
@@ -922,7 +942,7 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
         reference_images_urls: list[str] = []
         if image_tensors:
             for tensor in image_tensors:
-                validate_image_aspect_ratio(tensor, (1, 3), (3, 1))
+                validate_image_aspect_ratio(tensor, (1, 16), (16, 1), strict=False)
             reference_images_urls = await upload_images_to_comfyapi(
                 cls,
                 image_tensors,
@@ -932,7 +952,7 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
             )
 
         optimize_prompt_options = None
-        if n_input_images == 0:
+        if n_input_images == 0 and not is_flash:
             optimize_prompt_options = Seedream5OptimizePromptOptions(thinking="enabled" if thinking else "disabled")
         elif prompt_optimization == "fast":
             optimize_prompt_options = Seedream5OptimizePromptOptions(mode="fast")
@@ -946,8 +966,8 @@ class ByteDanceSeedreamNodeV3(IO.ComfyNode):
                 image=reference_images_urls,
                 size=f"{w}x{h}",
                 seed=seed,
-                sequential_image_generation=None if is_pro else sequential_image_generation,
-                sequential_image_generation_options=None if is_pro else Seedream4Options(max_images=max_images),
+                sequential_image_generation=None if is_pro_or_flash else sequential_image_generation,
+                sequential_image_generation_options=None if is_pro_or_flash else Seedream4Options(max_images=max_images),
                 watermark=watermark,
                 optimize_prompt_options=optimize_prompt_options,
             ),
@@ -1069,13 +1089,135 @@ class ByteDanceSeedreamNodeV2(ByteDanceSeedreamNodeV3):
             ),
         )
 
-class ByteDanceSeedreamLayerSeparationNode(IO.ComfyNode):
+
+def _seedream_layer_separation_inputs(supports_fast: bool) -> list:
+    inputs = [
+        IO.Image.Input(
+            "image",
+            tooltip=(
+                "The image to separate. Exactly one image, at least 512x512 pixels, aspect ratio "
+                "between 1:16 and 16:1. Inputs larger than about 4MP are downscaled before upload."
+            ),
+        ),
+        IO.String.Input(
+            "prompt",
+            multiline=True,
+            default="",
+            tooltip=(
+                "How to separate the image. Leave empty to auto-detect and separate all major elements. "
+                "Describe elements in natural language to control the separation, or target exact regions "
+                "with <bbox>left top right bottom</bbox> tags (0-1000 per-mille coordinates)."
+            ),
+        ),
+        IO.Combo.Input(
+            "size",
+            options=["auto", "1K", "1.5K", "2K"],
+            default="auto",
+            tooltip="Output resolution level. 'auto' follows the input image size (clamped to the 1K-2K range).",
+        ),
+        IO.Int.Input(
+            "seed",
+            default=42,
+            min=0,
+            max=2147483647,
+            step=1,
+            display_mode=IO.NumberDisplay.number,
+            control_after_generate=True,
+            tooltip="Seed to use for generation.",
+        ),
+    ]
+    if supports_fast:
+        inputs.append(
+            IO.Combo.Input(
+                "prompt_optimization",
+                options=["standard", "fast"],
+                default="standard",
+                advanced=True,
+                tooltip="Prompt-optimization mode: 'standard' gives higher quality, 'fast' shorter generation time.",
+            )
+        )
+    inputs.extend(
+        [
+            IO.Boolean.Input(
+                "watermark",
+                default=False,
+                advanced=True,
+                tooltip='Whether to add an "AI generated" watermark to the images.',
+            ),
+            IO.Boolean.Input(
+                "crop_layers",
+                default=False,
+                label_on="minimal size",
+                label_off="full canvas",
+                tooltip=(
+                    "Geometry of the layers/masks batch outputs (layer_stack is unaffected and always "
+                    "tight). Full canvas: each layer on a base-sized canvas at its bounding-box position - "
+                    "recompose directly with ImageCompositeMasked. Minimal size: each layer cropped to its "
+                    "bounding box (padded to the largest layer for batching) - much smaller tensors; "
+                    "rebuild placement with Layers From Bounding Boxes using the bboxes output."
+                ),
+            ),
+        ]
+    )
+    return inputs
+
+
+def _seedream_layer_separation_outputs() -> list:
+    return [
+        IO.Image.Output(
+            display_name="base_image",
+            tooltip="The base image (background plate) the layers stack onto.",
+        ),
+        IO.Mask.Output(
+            display_name="base_mask",
+            tooltip=(
+                "Transparency of the base image (1 = transparent, LoadImage convention); currently "
+                "always fully opaque."
+            ),
+        ),
+        IO.Image.Output(
+            display_name="layers",
+            tooltip=(
+                "Transparent layers ordered bottom to top. Full canvas mode: placed on a black "
+                "base-sized canvas at their bounding-box position. Minimal size mode: cropped to "
+                "their bounding box, anchored top-left, padded to the largest layer."
+            ),
+        ),
+        IO.Mask.Output(
+            display_name="masks",
+            tooltip=(
+                "Per-layer transparency, index-aligned with the layers batch (1 = transparent, "
+                "LoadImage convention). For ImageCompositeMasked-style compositing, add InvertMask first."
+            ),
+        ),
+        IO.BoundingBox.Output(
+            display_name="bboxes",
+            tooltip=(
+                "One placement box per layer, index-aligned with the layers batch (feed both, plus "
+                "masks, into Layers From Bounding Boxes to rebuild per-layer placement): {x, y, width, "
+                "height, metadata: {name, desc, z_index, native_size, content_rect, flags}}. "
+                "content_rect = [left, top, width, height] is the layer's content region within its "
+                "own frame; it lands on the canvas at the box position plus that offset."
+            ),
+        ),
+        IO.Layers.Output(
+            display_name="layer_stack",
+            tooltip=(
+                "Ready-to-edit layer document for Create Layered Image: the base plate plus each "
+                "element as its own named, tight-cropped layer at its true position and stacking "
+                "order. Connect directly, or extend with Add Layer."
+            ),
+        ),
+    ]
+
+
+class ByteDanceSeedreamLayerSeparationNodeV2(IO.ComfyNode):
 
     @classmethod
     def define_schema(cls):
         return IO.Schema(
-            node_id="ByteDanceSeedreamLayerSeparationNode",
-            display_name="ByteDance Seedream 5.0 Pro Layer Separation",
+            node_id="ByteDanceSeedreamLayerSeparationNodeV2",
+            display_name="ByteDance Seedream 5.0 Layer Separation",
             category="partner/image/ByteDance",
             search_aliases=["layer separation", "split layers", "decompose", "cutout", "RGBA layers"],
             description=(
@@ -1083,115 +1225,19 @@ class ByteDanceSeedreamLayerSeparationNode(IO.ComfyNode):
                 "each with stacking order, bounding box, name and description."
             ),
             inputs=[
-                IO.Image.Input(
-                    "image",
-                    tooltip=(
-                        "The image to separate. Exactly one image, at least 512x512 pixels, aspect ratio "
-                        "between 1:16 and 16:1. Inputs larger than about 4MP are downscaled before upload."
-                    ),
-                ),
-                IO.String.Input(
-                    "prompt",
-                    multiline=True,
-                    default="",
-                    tooltip=(
-                        "How to separate the image. Leave empty to auto-detect and separate all major elements. "
-                        "Describe elements in natural language to control the separation, or target exact regions "
-                        "with <bbox>left top right bottom</bbox> tags (0-1000 per-mille coordinates)."
-                    ),
-                ),
-                IO.Combo.Input(
-                    "size",
-                    options=["auto", "1K", "1.5K", "2K"],
-                    default="auto",
-                    tooltip="Output resolution level. 'auto' follows the input image size (clamped to the 1K-2K range).",
-                ),
-                IO.Int.Input(
-                    "seed",
-                    default=0,
-                    min=0,
-                    max=2147483647,
-                    step=1,
-                    display_mode=IO.NumberDisplay.number,
-                    control_after_generate=True,
-                    tooltip="Seed to use for generation.",
-                ),
-                IO.Combo.Input(
-                    "prompt_optimization",
-                    options=["standard", "fast"],
-                    default="standard",
-                    optional=True,
-                    advanced=True,
-                    tooltip="Prompt-optimization mode: 'standard' gives higher quality, 'fast' shorter generation time.",
-                ),
-                IO.Boolean.Input(
-                    "watermark",
-                    default=False,
-                    optional=True,
-                    advanced=True,
-                    tooltip='Whether to add an "AI generated" watermark to the images.',
-                ),
-                IO.Boolean.Input(
-                    "crop_layers",
-                    default=False,
-                    optional=True,
-                    label_on="minimal size",
-                    label_off="full canvas",
-                    tooltip=(
-                        "Geometry of the layers/masks batch outputs (layer_stack is unaffected and always "
-                        "tight). Full canvas: each layer on a base-sized canvas at its bounding-box position - "
-                        "recompose directly with ImageCompositeMasked. Minimal size: each layer cropped to its "
-                        "bounding box (padded to the largest layer for batching) - much smaller tensors; "
-                        "rebuild placement with Layers From Bounding Boxes using the bboxes output."
-                    ),
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "seedream 5.0 pro", _seedream_layer_separation_inputs(supports_fast=True)
+                        ),
+                        IO.DynamicCombo.Option(
+                            "seedream 5.0 flash", _seedream_layer_separation_inputs(supports_fast=False)
+                        ),
+                    ],
                 ),
             ],
-            outputs=[
-                IO.Image.Output(
-                    display_name="base_image",
-                    tooltip="The base image (background plate) the layers stack onto.",
-                ),
-                IO.Mask.Output(
-                    display_name="base_mask",
-                    tooltip=(
-                        "Transparency of the base image (1 = transparent, LoadImage convention); currently "
-                        "always fully opaque."
-                    ),
-                ),
-                IO.Image.Output(
-                    display_name="layers",
-                    tooltip=(
-                        "Transparent layers ordered bottom to top. Full canvas mode: placed on a black "
-                        "base-sized canvas at their bounding-box position. Minimal size mode: cropped to "
-                        "their bounding box, anchored top-left, padded to the largest layer."
-                    ),
-                ),
-                IO.Mask.Output(
-                    display_name="masks",
-                    tooltip=(
-                        "Per-layer transparency, index-aligned with the layers batch (1 = transparent, "
-                        "LoadImage convention). For ImageCompositeMasked-style compositing, add InvertMask first."
-                    ),
-                ),
-                IO.BoundingBox.Output(
-                    display_name="bboxes",
-                    tooltip=(
-                        "One placement box per layer, index-aligned with the layers batch (feed both, plus "
-                        "masks, into Layers From Bounding Boxes to rebuild per-layer placement): {x, y, width, "
-                        "height, metadata: {name, desc, z_index, native_size, content_rect, flags}}. "
-                        "content_rect = [left, top, width, height] is the layer's content region within its "
-                        "own frame; it lands on the canvas at the box position plus that offset."
-                    ),
-                ),
-                IO.Layers.Output(
-                    display_name="layer_stack",
-                    tooltip=(
-                        "Ready-to-edit layer document for Create Layered Image: the base plate plus each "
-                        "element as its own named, tight-cropped layer at its true position and stacking "
-                        "order. Connect directly, or extend with Add Layer."
-                    ),
-                ),
-            ],
+            outputs=_seedream_layer_separation_outputs(),
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
                 IO.Hidden.api_key_comfy_org,
@@ -1199,21 +1245,28 @@ class ByteDanceSeedreamLayerSeparationNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["size"]),
+                depends_on=IO.PriceBadgeDepends(widgets=["model", "model.size"]),
                 expr="""
                 (
-                  widgets.size in ["1k", "1.5k"]
+                  $size := $lookup(widgets, "model.size");
+                  $contains(widgets.model, "flash")
                     ? {
                         "type": "usd",
-                        "usd": 0.032,
+                        "usd": 0.02574,
                         "format": { "suffix": " x images/Run", "approximate": true }
                       }
-                    : {
-                        "type": "range_usd",
-                        "min_usd": 0.032,
-                        "max_usd": 0.064,
-                        "format": { "suffix": " x images/Run", "approximate": true }
-                      }
+                    : $size in ["1k", "1.5k"]
+                      ? {
+                          "type": "usd",
+                          "usd": 0.032175,
+                          "format": { "suffix": " x images/Run", "approximate": true }
+                        }
+                      : {
+                          "type": "range_usd",
+                          "min_usd": 0.032175,
+                          "max_usd": 0.06435,
+                          "format": { "suffix": " x images/Run", "approximate": true }
+                        }
                 )
                 """,
             ),
@@ -1222,7 +1275,8 @@ class ByteDanceSeedreamLayerSeparationNode(IO.ComfyNode):
     @classmethod
     async def execute(
         cls,
-        image: Input.Image,
+        model: dict | None = None,
+        image: Input.Image | None = None,
         prompt: str = "",
         size: str = "auto",
         seed: int = 0,
@@ -1230,19 +1284,36 @@ class ByteDanceSeedreamLayerSeparationNode(IO.ComfyNode):
         watermark: bool = False,
         crop_layers: bool = False,
     ) -> IO.NodeOutput:
+        if model is None:
+            model = {
+                "model": "seedream 5.0 pro",
+                "image": image,
+                "prompt": prompt,
+                "size": size,
+                "seed": seed,
+                "prompt_optimization": prompt_optimization,
+                "watermark": watermark,
+                "crop_layers": crop_layers,
+            }
+        image = model["image"]
+        crop_layers = model["crop_layers"]
         if get_number_of_images(image) != 1:
             raise ValueError("Only a single input image is supported.")
         validate_image_aspect_ratio(image, (1, 16), (16, 1), strict=False)
         validate_image_dimensions(image, min_width=512, min_height=512)
 
         request = Seedream5LayerSeparationRequest(
-            model=SEEDREAM_LAYER_SEPARATION_MODEL,
-            prompt=prompt.strip() or None,
+            model=SEEDREAM_MODELS[model["model"]],
+            prompt=model["prompt"].strip() or None,
             image=await upload_image_to_comfyapi(cls, image),
-            size=size,
-            seed=seed,
-            watermark=watermark,
-            optimize_prompt_options=Seedream5LayerOptimizePromptOptions(mode=prompt_optimization),
+            size=model["size"],
+            seed=model["seed"],
+            watermark=model["watermark"],
+            optimize_prompt_options=(
+                Seedream5LayerOptimizePromptOptions(mode=model["prompt_optimization"])
+                if "prompt_optimization" in model
+                else None
+            ),
         )
         response = await sync_op(
             cls,
@@ -1432,6 +1503,113 @@ class ByteDanceSeedreamLayerSeparationNode(IO.ComfyNode):
         bboxes = [boxes]
         layer_stack = {"version": 1, "canvas": (width, height), "layers": stack_items}
         return IO.NodeOutput(base_image, base_mask, layers, masks, bboxes, layer_stack)
+
+
+class ByteDanceSeedreamLayerSeparationNode(ByteDanceSeedreamLayerSeparationNodeV2):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="ByteDanceSeedreamLayerSeparationNode",
+            display_name="ByteDance Seedream 5.0 Pro Layer Separation (Legacy)",
+            category="partner/image/ByteDance",
+            search_aliases=["layer separation", "split layers", "decompose", "cutout", "RGBA layers"],
+            description=(
+                "Decompose an image into a background plate plus up to 16 repositionable transparent layers, "
+                "each with stacking order, bounding box, name and description."
+            ),
+            inputs=[
+                IO.Image.Input(
+                    "image",
+                    tooltip=(
+                        "The image to separate. Exactly one image, at least 512x512 pixels, aspect ratio "
+                        "between 1:16 and 16:1. Inputs larger than about 4MP are downscaled before upload."
+                    ),
+                ),
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip=(
+                        "How to separate the image. Leave empty to auto-detect and separate all major elements. "
+                        "Describe elements in natural language to control the separation, or target exact regions "
+                        "with <bbox>left top right bottom</bbox> tags (0-1000 per-mille coordinates)."
+                    ),
+                ),
+                IO.Combo.Input(
+                    "size",
+                    options=["auto", "1K", "1.5K", "2K"],
+                    default="auto",
+                    tooltip="Output resolution level. 'auto' follows the input image size (clamped to the 1K-2K range).",
+                ),
+                IO.Int.Input(
+                    "seed",
+                    default=0,
+                    min=0,
+                    max=2147483647,
+                    step=1,
+                    display_mode=IO.NumberDisplay.number,
+                    control_after_generate=True,
+                    tooltip="Seed to use for generation.",
+                ),
+                IO.Combo.Input(
+                    "prompt_optimization",
+                    options=["standard", "fast"],
+                    default="standard",
+                    optional=True,
+                    advanced=True,
+                    tooltip="Prompt-optimization mode: 'standard' gives higher quality, 'fast' shorter generation time.",
+                ),
+                IO.Boolean.Input(
+                    "watermark",
+                    default=False,
+                    optional=True,
+                    advanced=True,
+                    tooltip='Whether to add an "AI generated" watermark to the images.',
+                ),
+                IO.Boolean.Input(
+                    "crop_layers",
+                    default=False,
+                    optional=True,
+                    label_on="minimal size",
+                    label_off="full canvas",
+                    tooltip=(
+                        "Geometry of the layers/masks batch outputs (layer_stack is unaffected and always "
+                        "tight). Full canvas: each layer on a base-sized canvas at its bounding-box position - "
+                        "recompose directly with ImageCompositeMasked. Minimal size: each layer cropped to its "
+                        "bounding box (padded to the largest layer for batching) - much smaller tensors; "
+                        "rebuild placement with Layers From Bounding Boxes using the bboxes output."
+                    ),
+                ),
+            ],
+            outputs=_seedream_layer_separation_outputs(),
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            is_deprecated=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["size"]),
+                expr="""
+                (
+                  widgets.size in ["1k", "1.5k"]
+                    ? {
+                        "type": "usd",
+                        "usd": 0.032,
+                        "format": { "suffix": " x images/Run", "approximate": true }
+                      }
+                    : {
+                        "type": "range_usd",
+                        "min_usd": 0.032,
+                        "max_usd": 0.064,
+                        "format": { "suffix": " x images/Run", "approximate": true }
+                      }
+                )
+                """,
+            ),
+        )
 
 
 class ByteDanceTextToVideoNode(IO.ComfyNode):
@@ -3604,6 +3782,7 @@ class ByteDanceExtension(ComfyExtension):
             ByteDanceSeedreamNodeV2,
             ByteDanceSeedreamNodeV3,
             ByteDanceSeedreamLayerSeparationNode,
+            ByteDanceSeedreamLayerSeparationNodeV2,
             ByteDanceTextToVideoNode,
             ByteDanceImageToVideoNode,
             ByteDanceFirstLastFrameNode,
