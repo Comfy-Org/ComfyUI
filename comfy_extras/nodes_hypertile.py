@@ -16,7 +16,7 @@ def random_divisor(value: int, min_value: int, /, max_options: int = 1) -> int:
     ns = [value // i for i in divisors[:max_options]]  # has at least 1 element
 
     if len(ns) - 1 > 0:
-        idx = randint(low=0, high=len(ns) - 1, size=(1,)).item()
+        idx = randint(low=0, high=len(ns), size=(1,)).item()
     else:
         idx = 0
 
