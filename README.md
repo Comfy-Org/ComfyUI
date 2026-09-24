@@ -89,6 +89,7 @@ A simplified REST API on top of the regular ComfyUI API (`api_wrapper/`). It hid
 - `POST /api/wrapper/{workflow}/generate` — multipart form with `prompt` and `image` (optional `negative_prompt`, `seed`, `steps`, `cfg`, `megapixels`, `timeout`, `free_vram`, `quantization`). Runs the workflow to completion and returns the final file as a download (`Content-Disposition: attachment`). By default the request waits as long as the job takes; set `timeout` (5–86400 seconds) if you prefer a cap — the timeout response includes the `job_id` to pick the result up via `/jobs/{job_id}`. `GET /api/wrapper/workflows` lists the available `{workflow}` names (currently `flux2klein9b`).
 - `GET /api/wrapper/jobs/{job_id}` — job status (`pending` / `in_progress` / `completed` / `failed` / `cancelled`) with output image URLs; also useful to pick up a generate call that timed out (the timeout response includes the `job_id`).
 - `GET /api/wrapper/jobs/{job_id}/image` — redirects to the generated image.
+- `DELETE /api/wrapper/jobs/{job_id}` — worker cleanup once you have stored the result (or after a failure/cancel): deletes the job's output files, the uploads saved for it and its history entry, and answers `{"deleted": {"outputs": n, "inputs": m, "history": true|false}, "refused": 0}`. Idempotent (unknown job → zeros), `409` while the job is pending/running, and it never deletes anything outside ComfyUI's output/input/temp directories (real paths are checked; symlinks pointing out are refused). Each job's uploads and outputs live in their own `wrapper/<job_id>/` folder under `input/` and `output/`.
 - `POST /api/wrapper/free` — releases the GPU VRAM and RAM used by model execution (unloads all models, empties torch caches). When a job is running/queued the release happens automatically right after that job finishes.
 - `GET /api/wrapper/docs` — Swagger UI for the wrapper API (spec at `/api/wrapper/openapi.json`).
 
@@ -124,6 +125,21 @@ A rewrite takes 10–20 s (it is one call to a large model), so allow at least 6
 **Interactive docs:** with the server running, open `http://127.0.0.1:8188/api/wrapper/docs` in a browser to browse and try every endpoint (the "Try it out" button works — you can upload an image and generate right from the docs page). The raw OpenAPI spec is at `http://127.0.0.1:8188/api/wrapper/openapi.json` for code generation; swap the port if you started ComfyUI elsewhere.
 
 The first workflow shipped is `flux2klein9b`, a FLUX.2 [klein] 9B image edit: the input image is scaled to a megapixel budget, attached to the conditioning as a reference latent, and sampled with the flux2 custom sampler stack. `ideogram4` is a text-to-image workflow (no input image needed) using the Ideogram 4 dual-model CFG stack — it natively understands rich structured JSON prompts, e.g. `curl -F "prompt=$(cat prompt.json)"` with a JSON prompt describing composition, style and elements; the full example (with bounding boxes per element) is shown in the interactive docs. `minimaxh3` is an omni-modal video workflow with three task endpoints under `/api/wrapper/minimaxh3/{task}`: `text` (text-to-video), `image` (image-to-video, first/last frame uploads) and `reference` (ref2va: up to 9 reference images, 3 videos and 3 audio clips, referenced in the prompt as `<Picture i>` / `<Video k>` / `<Audio j>`); it returns a synchronized audio+video MP4. To add another workflow (e.g. a 3D model generator), add its graph builder to the `WORKFLOWS` registry in `api_wrapper/workflows.py`, a model-setup handler in `api_wrapper/routes.py`, and it immediately gets its own `/api/wrapper/{name}/generate` endpoint — output files (video/audio/3D) are detected automatically by their node output type. All endpoints are also available without the `/api` prefix.
+
+### Authentication
+
+Set `WRAPPER_AUTH_TOKEN` to require `Authorization: Bearer <token>` on **every** HTTP route of the server — the wrapper endpoints and the native ComfyUI ones alike (`/prompt`, `/queue`, `/history`, `/view`, `/object_info`, `/ws`, `/internal/...`, the docs pages and the static frontend). It is meant for publicly reachable boxes such as RunPod pods, where each pod is started with its own random token (e.g. `WRAPPER_AUTH_TOKEN=$(openssl rand -hex 32)`). Unset or empty, nothing changes: the server stays open, as before.
+
+- A missing or wrong token gets a `401` with `WWW-Authenticate: Bearer` and the body `{"error": {"type": "unauthorized", "message": "missing or invalid bearer token"}}`. The token is compared in constant time.
+- Browsers cannot set headers on a WebSocket, so `/ws` (and its `/api/ws` alias) also accepts the token as a query parameter: `ws://host:8188/ws?token=<token>&clientId=...`. No other route accepts `?token=`.
+- `OPTIONS` requests pass without a token: CORS preflights never carry credentials, and all they get back is an empty reply.
+- The token is read once at startup, so changing it needs a restart. The stock ComfyUI web UI does not send the header, so with auth on, the server is for API clients rather than for opening the frontend in a browser. The `developer-api` compose service does not send it either.
+
+```bash
+curl -o result.png -X POST http://127.0.0.1:8188/api/wrapper/flux2klein9b/generate \
+  -H "Authorization: Bearer $WRAPPER_AUTH_TOKEN" \
+  -F "prompt=make it snow" -F "image=@input.png"
+```
 
 ## Features
 - A visual node graph for building and reusing image, video, audio, 3D, and text workflows without code.

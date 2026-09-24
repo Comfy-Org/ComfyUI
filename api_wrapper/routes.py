@@ -9,8 +9,9 @@ audio, 3D asset, ...) as a downloadable file:
 - POST   /wrapper/{workflow}/prompt          (free prompt -> generated prompt, no render)
 - POST   /wrapper/{workflow}/{task}/prompt   (same, with the task pinned)
 - GET    /wrapper/workflows
-- GET    /wrapper/jobs/{job_id}          (also /api/wrapper/jobs/{job_id})
+- GET    /wrapper/jobs/{job_id}          (also /api/wrapper/jobs/{job_id}; `progress` while it runs)
 - GET    /wrapper/jobs/{job_id}/image
+- DELETE /wrapper/jobs/{job_id}          (worker cleanup: the job's outputs, uploads and history)
 - POST   /wrapper/free
 - GET    /wrapper/openapi.json
 - GET    /wrapper/docs
@@ -32,7 +33,10 @@ import execution
 import folder_paths
 from comfy import model_downloader, model_management
 from comfy_execution import jobs as comfy_jobs
+from comfy_execution.progress import get_progress_state
 
+from api_wrapper import cleanup as wrapper_cleanup
+from api_wrapper import progress as wrapper_progress
 from api_wrapper import prompt_rewriter
 from api_wrapper import workflows as wrapper_workflows
 from api_wrapper.openapi import WRAPPER_SWAGGER_HTML, spec_with_workflows
@@ -204,7 +208,7 @@ def _append_note(note, extra):
 
 
 def _input_path(ref):
-    """Absolute path of a saved upload ref ('wrapper/<uuid>.png')."""
+    """Absolute path of a saved upload ref ('wrapper/<job_id>/<uuid>.png')."""
     return os.path.join(folder_paths.get_input_directory(), *ref.split("/"))
 
 
@@ -566,7 +570,17 @@ def register_wrapper_routes(routes, prompt_server):
     async def generate(request):
         """Run one workflow (or workflow task) synchronously and return the
         final file. Task workflows get /wrapper/{name}/{task}/generate; flat
-        workflows use /wrapper/{name}/generate."""
+        workflows use /wrapper/{name}/generate.
+
+        The job id is minted up front so everything the job writes lands in
+        its own folders (input/wrapper/<job_id>/, output/wrapper/<job_id>/),
+        which DELETE /wrapper/jobs/{job_id} removes later. Uploads of a request
+        that fails before its job is queued are removed on the way out."""
+        prompt_id = str(uuid.uuid4())
+        with wrapper_cleanup.generate_scope(prompt_id) as scope:
+            return await _generate(request, prompt_id, scope)
+
+    async def _generate(request, prompt_id, scope):
         global _queue_number
 
         workflow_name = request.match_info["workflow"].lower()
@@ -637,7 +651,9 @@ def register_wrapper_routes(routes, prompt_server):
                 return _error_response("Too many files", f"'{name}' accepts at most {spec['max']} file(s).")
             allowed = UPLOAD_EXTENSIONS[spec["ext"]]
             limit = MAX_UPLOAD_BYTES[spec["ext"]]
-            wrapper_dir = os.path.join(folder_paths.get_input_directory(), "wrapper")
+            # Per job, so the cleanup endpoint can find (and remove) them later.
+            job_inputs = wrapper_cleanup.job_subfolder(prompt_id)
+            wrapper_dir = os.path.join(folder_paths.get_input_directory(), *job_inputs.split("/"))
             os.makedirs(wrapper_dir, exist_ok=True)
             refs = []
             for filename, data in items:
@@ -650,7 +666,7 @@ def register_wrapper_routes(routes, prompt_server):
                 saved = f"{uuid.uuid4().hex}{ext}"
                 with open(os.path.join(wrapper_dir, saved), "wb") as f:
                     f.write(data)
-                refs.append(f"wrapper/{saved}")
+                refs.append(f"{job_inputs}/{saved}")
             upload_refs[name] = refs
 
         downloaded = []
@@ -679,7 +695,7 @@ def register_wrapper_routes(routes, prompt_server):
             if param is None:
                 continue  # consumed by the wrapper (e.g. llm_image), not the graph
             build_kwargs[param] = refs if upload_spec[name]["max"] != 1 else refs[0]
-        build_kwargs["filename_prefix"] = f"wrapper/{workflow_name}"
+        build_kwargs["filename_prefix"] = f"{wrapper_cleanup.job_subfolder(prompt_id)}/{workflow_name}"
 
         prompt_record = None
         if task.get("prompt_rewrite"):
@@ -699,7 +715,6 @@ def register_wrapper_routes(routes, prompt_server):
                     return _error_response(e.message, e.details, status=e.status)
                 note = _append_note(note, rewrite_note)
 
-        prompt_id = str(uuid.uuid4())
         graph = task["build"](**build_kwargs)
 
         if prompt_record is not None:
@@ -738,6 +753,7 @@ def register_wrapper_routes(routes, prompt_server):
         try:
             _queue_number += 1
             prompt_queue.put((_queue_number, prompt_id, graph, extra_data, valid[2], {}))
+            scope.queued = True  # from here on the job is the caller's to DELETE
 
             # Default: free VRAM as soon as this job finishes. The worker consumes
             # these flags after the next prompt completes and unloads all models
@@ -934,11 +950,8 @@ def register_wrapper_routes(routes, prompt_server):
         except ValueError:
             return _error_response("Invalid job id", "job_id must be a canonical UUID.", status=400)
 
-        job = comfy_jobs.get_job(
-            job_id,
-            *_queue_snapshots(prompt_queue),
-            prompt_queue.get_history(),
-        )
+        running, queued = _queue_snapshots(prompt_queue)
+        job = comfy_jobs.get_job(job_id, running, queued, prompt_queue.get_history())
         if job is None:
             return _error_response("Job not found", f"No job with id {job_id}", status=404)
 
@@ -950,6 +963,10 @@ def register_wrapper_routes(routes, prompt_server):
                 image["filename"], image.get("subfolder", ""), image.get("type", "output")
             )
         job["images"] = images
+        # Additive: callers that predate it ignore the field. See api_wrapper/progress.py.
+        progress = wrapper_progress.job_progress(job_id, job.get("status"), get_progress_state(), queued)
+        if progress is not None:
+            job["progress"] = progress
         return web.json_response(job)
 
     @routes.get("/wrapper/jobs/{job_id}/image")
@@ -976,6 +993,9 @@ def register_wrapper_routes(routes, prompt_server):
                 )
                 raise web.HTTPFound(location)
         return _error_response("Job has no image output", status=404)
+
+    # DELETE /wrapper/jobs/{job_id}: see api_wrapper/cleanup.py.
+    wrapper_cleanup.register_routes(routes, prompt_queue)
 
     @routes.post("/wrapper/free")
     async def free_memory(request):

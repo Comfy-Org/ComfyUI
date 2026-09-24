@@ -119,7 +119,7 @@ WRAPPER_OPENAPI_SPEC = {
         },
         "/api/wrapper/jobs/{job_id}": {
             "get": {
-                "summary": "Get the status and result of a generation job",
+                "summary": "Get the status, progress and result of a generation job",
                 "operationId": "getJob",
                 "parameters": [
                     {"name": "job_id", "in": "path", "required": True, "schema": {"type": "string", "format": "uuid"}},
@@ -127,6 +127,29 @@ WRAPPER_OPENAPI_SPEC = {
                 "responses": {
                     "200": {"description": "Job details.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Job"}}}},
                     "404": {"description": "Unknown job id.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                },
+            },
+            "delete": {
+                "summary": "Delete everything a finished job left on this worker",
+                "description": (
+                    "Worker cleanup, for once the caller has stored the result (or after the job failed or was "
+                    "cancelled). Deletes the job's output files (every file its history entry lists, the prompt "
+                    "sidecar JSON, and the job's own output folder output/wrapper/{job_id}/), the input files the "
+                    "wrapper saved for it (its upload folder input/wrapper/{job_id}/: conditioning images, "
+                    "audio, reference files) and its history entry. Idempotent: an unknown or already deleted job "
+                    "answers 200 with zeros. Nothing outside ComfyUI's output/input/temp directories is ever "
+                    "deleted: paths are resolved to their real paths, and one that resolves outside (a traversal "
+                    "or a symlink pointing out) is refused and counted in `refused` instead. A job that is still "
+                    "pending or running, or whose generate request is still open, is refused with 409."),
+                "operationId": "deleteJob",
+                "parameters": [
+                    {"name": "job_id", "in": "path", "required": True, "schema": {"type": "string", "format": "uuid"}},
+                ],
+                "responses": {
+                    "200": {"description": "What was deleted.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CleanupResponse"}}}},
+                    "400": {"description": "job_id is not a canonical UUID.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                    "409": {"description": "The job is still pending or running (or its generate request is still open); wait or cancel it, then retry.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                    "500": {"description": "Some files could not be deleted (e.g. permissions). The history entry is kept so a retry can finish the job; the body also carries `deleted` and `refused` so far.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
                 },
             },
         },
@@ -185,6 +208,20 @@ WRAPPER_OPENAPI_SPEC = {
                     "job_id": {"type": "string", "format": "uuid", "description": "Poll /api/wrapper/jobs/{job_id} with this id."},
                 },
             },
+            "CleanupResponse": {
+                "type": "object",
+                "properties": {
+                    "deleted": {
+                        "type": "object",
+                        "properties": {
+                            "outputs": {"type": "integer", "minimum": 0, "description": "Output (and temp) files deleted, prompt sidecar included."},
+                            "inputs": {"type": "integer", "minimum": 0, "description": "Files deleted from the job's upload folder."},
+                            "history": {"type": "boolean", "description": "Whether a history entry existed and was deleted."},
+                        },
+                    },
+                    "refused": {"type": "integer", "minimum": 0, "description": "Paths left alone because they resolve outside ComfyUI's output/input/temp directories (or outside the job's own upload folder, for input files). Normally 0; each one is logged."},
+                },
+            },
             "FreeResponse": {
                 "type": "object",
                 "properties": {
@@ -211,6 +248,30 @@ WRAPPER_OPENAPI_SPEC = {
                         "description": "Generated images (only present once the job completed).",
                     },
                     "execution_error": {"type": "object", "nullable": True, "description": "Details when the job failed."},
+                    "progress": {"$ref": "#/components/schemas/JobProgress"},
+                },
+            },
+            "JobProgress": {
+                "type": "object",
+                "description": (
+                    "How far the job has got. Present while it is pending or in progress, and as 100 once it "
+                    "completed; absent for failed or cancelled jobs (older servers never send it). Each node of the "
+                    "prompt weighs its reported step total (the sampler's steps dominate) or 1, finished nodes count "
+                    "fully, and step counts the prompt asks for but no node has reported yet are reserved up front. "
+                    "Never decreases for a job and stays below 100 until the job completed."
+                ),
+                "properties": {
+                    "fraction": {"type": "number", "minimum": 0, "maximum": 1},
+                    "percent": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "node": {"type": "string", "nullable": True, "description": "Id of the node running now."},
+                    "node_class": {"type": "string", "nullable": True, "description": "Its class, e.g. SamplerCustomAdvanced."},
+                    "step": {
+                        "type": "object",
+                        "nullable": True,
+                        "description": "The running node's own steps, when it reports them.",
+                        "properties": {"value": {"type": "integer"}, "max": {"type": "integer"}},
+                    },
+                    "queue_position": {"type": "integer", "nullable": True, "description": "1-based place among pending jobs (1 runs next); null once running."},
                 },
             },
             "Error": {

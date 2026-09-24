@@ -61,6 +61,7 @@ from protocol import BinaryEventTypes
 
 # Import cache control middleware
 from middleware.cache_middleware import cache_control
+from middleware.wrapper_auth import AUTH_TOKEN_ENV, bearer_auth_middleware_from_env
 
 if args.enable_manager:
     import comfyui_manager
@@ -281,6 +282,13 @@ class PromptServer():
 
         if args.enable_manager:
             middlewares.append(comfyui_manager.create_middleware())
+
+        # Opt-in bearer auth on every route. First in the chain, so nothing
+        # (CORS, manager, handlers) runs for an unauthenticated request.
+        bearer_auth = bearer_auth_middleware_from_env()
+        if bearer_auth is not None:
+            middlewares.insert(0, bearer_auth)
+            logging.info(f"[Prompt Server] {AUTH_TOKEN_ENV} is set: every route requires Authorization: Bearer <token>")
 
         max_upload_size = round(args.max_upload_size * 1024 * 1024)
         self.app = web.Application(client_max_size=max_upload_size, middlewares=middlewares)
