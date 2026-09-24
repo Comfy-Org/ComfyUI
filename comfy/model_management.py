@@ -1968,7 +1968,9 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
 
     if is_amd():
         arch = torch.cuda.get_device_properties(device).gcnArchName
-        if any((a in arch) for a in AMD_RDNA2_AND_OLDER_ARCH):  # RDNA2 and older don't support bf16
+        # gfx1032 (Navi 23) has no tuned bf16 GEMM kernels and is much faster on fp16, but it's
+        # left out of AMD_RDNA2_AND_OLDER_ARCH because that list also disables cudnn, which helps gfx1032.
+        if any((a in arch) for a in AMD_RDNA2_AND_OLDER_ARCH) or "gfx1032" in arch:  # RDNA2 and older don't support bf16
             if manual_cast:
                 return True
             return False
