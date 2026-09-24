@@ -206,10 +206,12 @@ def observe_references_on_filesystem(
     survivors: set[str] = set()
     root_failures: dict[str, OSError | None] = {}
 
-    def unreachable_prefix(path: str) -> OSError | None:
+    def root_is_reachable(path: str) -> bool:
         owners = [prefix for prefix in prefixes if is_path_under_prefixes(path, [prefix])]
         if not owners:
-            return None
+            # The query selected the row but no prefix claims it (a stored path that is
+            # not normalized, say). Not knowing its root must not mark it missing.
+            return False
         prefix = max(owners, key=len)
         if prefix not in root_failures:
             try:
@@ -220,7 +222,7 @@ def observe_references_on_filesystem(
                 _log_scan_error("reference_root", exc)
                 if root is not None:
                     _report_unreachable_root(root, exc, progress)
-        return root_failures[prefix]
+        return root_failures[prefix] is None
 
     for content_id, path, size_bytes, mtime_ns in contents:
         try:
@@ -230,7 +232,7 @@ def observe_references_on_filesystem(
             # other failure, such as an offline network share (which Windows reports as
             # ENOENT with a network winerror), leaves the row alone for this scan.
             if classify_failure(e).reason == "vanished":
-                if root is None or unreachable_prefix(path) is None:
+                if root is None or root_is_reachable(path):
                     observations.append(
                         _ReferenceObservation(content_id, size_bytes, mtime_ns, None)
                     )
@@ -362,7 +364,7 @@ def _walk_error_reporter(
         if progress is None:
             return
         progress.record_failure(site, exc)
-        if progress.mark_emitted(f"walk_failed:{root}"):
+        if site == "walk_dir" and progress.mark_emitted(f"walk_failed:{root}"):
             emit_failure("scanner.walk_failed", exc, root=root)
 
     return report_walk_error

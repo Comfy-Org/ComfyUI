@@ -189,6 +189,17 @@ def test_deleted_files_under_a_reachable_root_are_still_marked_missing(
     assert buckets(progress) == {}
 
 
+def test_a_reference_no_prefix_claims_is_not_marked_missing(temp_dir: Path, monkeypatch):
+    stray = SimpleNamespace(id="content", path="relative/0.bin", size_bytes=1, mtime_ns=1)
+    monkeypatch.setattr(scanner, "live_contents_under_prefixes", lambda _session, _prefixes: [stray])
+
+    observations, _survivors = scanner.observe_references_on_filesystem(
+        Mock(), [str(temp_dir)], _ScanState(), "models"
+    )
+
+    assert observations == []
+
+
 def test_without_a_scan_root_an_absent_prefix_still_retires_its_references(
     temp_dir: Path, monkeypatch, caplog
 ):
