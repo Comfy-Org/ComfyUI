@@ -454,8 +454,7 @@ def seed_asset_specs(
         try:
             with session.begin_nested():
                 observation = observed[path]
-                if observation is None:
-                    logging.warning("Skipping vanished asset during scan: %s", path)
+                if observation is None:  # observe_asset_specs already logged why
                     continue
                 stat_result = observation.stat_result
                 if get_mtime_ns(stat_result) < 0:

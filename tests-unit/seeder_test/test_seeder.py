@@ -104,7 +104,7 @@ def _configure_fast_phase(
     )
     watch_session = Mock()
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(watch_session))
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _session: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
 
 
 def _run_faulting_fast_phase(

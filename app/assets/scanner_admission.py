@@ -15,8 +15,6 @@ import time
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy.orm import Session
-
 from app.assets.event_log import emit, error_type
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 
@@ -72,6 +70,7 @@ def tick_watch_list() -> None:
     from app.assets.scanner import insert_asset_specs, SeedAssetSpec
 
     remaining: list[_WatchEntry] = []
+    settled: list[SeedAssetSpec] = []
     unvisited = iter(list(_WATCH_LIST))
     try:
         for entry in unvisited:
@@ -101,17 +100,18 @@ def tick_watch_list() -> None:
                     )
                     emit("scanner.watch_spec_failed", error_type=error_type(exc))
                     continue
-                _created, seed_error = seed_asset_specs(session, [spec])
-                if seed_error is not None:
-                    logging.warning(
-                        "Dropping watched asset after seeding failed: %s", entry.path
-                    )
-                    emit("scanner.watch_seed_failed", error_type=error_type(seed_error))
+                settled.append(spec)
                 continue
             entry.last_stat = current
             entry.ticks += 1
             if entry.ticks < _WATCH_SCAN_RETRIES:
                 remaining.append(entry)
+        _created, seed_error = insert_asset_specs(settled, set())
+        if seed_error is not None:
+            # The batch reports only its first error, so failed entries can't be named here;
+            # like any settled entry, they leave the watch list either way.
+            logging.warning("Seeding settled watched assets failed for at least one entry")
+            emit("scanner.watch_seed_failed", error_type=error_type(seed_error))
     finally:
         # Skipping this write wedges the list: drained entries stay on it and are re-attempted
         # every tick, while entries past the fault never reach the increment _WATCH_SCAN_RETRIES

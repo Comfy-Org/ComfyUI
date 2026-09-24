@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 
 from app.assets import scanner_admission
 from app.assets.database.models import AssetContent
@@ -97,7 +98,7 @@ def test_never_stabilizes_dropped_after_cap(session, temp_dir: Path):
 
 
 def test_stat_error_drops_entry_and_allows_other_watch_entries_to_commit(
-    session, temp_dir: Path, monkeypatch, caplog: pytest.LogCaptureFixture
+    db_engine, session, temp_dir: Path, monkeypatch, caplog: pytest.LogCaptureFixture
 ):
     unreadable_path = temp_dir / "unreadable.bin"
     stable_path = temp_dir / "stable.bin"
@@ -118,10 +119,10 @@ def test_stat_error_drops_entry_and_allows_other_watch_entries_to_commit(
 
     monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
     monkeypatch.setattr(scanner_admission, "os", SimpleNamespace(stat=_stat))
+    monkeypatch.setattr("app.database.db.WriteSession", sessionmaker(bind=db_engine))
 
     with caplog.at_level(logging.INFO):
-        tick_watch_list(session)
-    session.commit()
+        tick_watch_list()
 
     persisted_paths = set(session.scalars(select(AssetContent.path)).all())
     assert persisted_paths == {str(stable_path)}
@@ -139,7 +140,6 @@ def test_stat_error_drops_entry_and_allows_other_watch_entries_to_commit(
 
 
 def test_seed_failure_does_not_stop_watch_list_drain(
-    session,
     temp_dir: Path,
     monkeypatch,
     caplog: pytest.LogCaptureFixture,
@@ -148,26 +148,22 @@ def test_seed_failure_does_not_stop_watch_list_drain(
     for path in paths:
         path.write_bytes(path.name.encode())
     _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
-    attempted: list[str] = []
+    batches: list[list[str]] = []
 
-    def seed_or_return_error(_session, specs) -> tuple[int, Exception | None]:
-        path = specs[0]["abs_path"]
-        attempted.append(path)
-        if path == str(paths[0]):
-            return 0, RuntimeError("forced watch seed failure")
-        return 1, None
+    def insert_with_one_failure(specs, _tag_pool) -> tuple[int, Exception | None]:
+        batches.append([spec["abs_path"] for spec in specs])
+        return 1, RuntimeError("forced watch seed failure")
 
     monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
-    monkeypatch.setattr("app.assets.scanner.seed_asset_specs", seed_or_return_error)
+    monkeypatch.setattr("app.assets.scanner.insert_asset_specs", insert_with_one_failure)
 
     with caplog.at_level(logging.INFO):
-        tick_watch_list(session)
+        tick_watch_list()
 
-    assert attempted == [str(path) for path in paths]
+    assert batches == [[str(path) for path in paths]]
     assert _WATCH_LIST == []
     assert any(
-        record.getMessage()
-        == f"Dropping watched asset after seeding failed: {paths[0]}"
+        record.getMessage() == "Seeding settled watched assets failed for at least one entry"
         for record in caplog.records
     )
     assert any(
@@ -178,6 +174,7 @@ def test_seed_failure_does_not_stop_watch_list_drain(
 
 
 def test_spec_construction_failure_drops_the_entry_without_wedging_the_watch_list(
+    db_engine,
     session,
     temp_dir: Path,
     monkeypatch,
@@ -209,10 +206,10 @@ def test_spec_construction_failure_drops_the_entry_without_wedging_the_watch_lis
     monkeypatch.setattr(
         scanner_admission, "get_name_and_tags_from_asset_path", _name_and_tags
     )
+    monkeypatch.setattr("app.database.db.WriteSession", sessionmaker(bind=db_engine))
 
     with caplog.at_level(logging.INFO):
-        tick_watch_list(session)
-    session.commit()
+        tick_watch_list()
 
     assert set(session.scalars(select(AssetContent.path)).all()) == {str(stable_path)}
     assert [(entry.path, entry.ticks) for entry in _WATCH_LIST] == [
@@ -231,23 +228,24 @@ def test_spec_construction_failure_drops_the_entry_without_wedging_the_watch_lis
 
 
 def test_unexpected_fault_mid_drain_leaves_unvisited_entries_on_the_watch_list(
-    session, temp_dir: Path, monkeypatch
+    temp_dir: Path, monkeypatch
 ) -> None:
     paths = [temp_dir / name for name in ("first.bin", "exploding.bin", "untouched.bin")]
     for path in paths:
         path.write_bytes(path.name.encode())
     _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
+    real_os = scanner_admission.os
 
-    def seed_or_explode(_session, specs) -> tuple[int, Exception | None]:
-        if specs[0]["abs_path"] == str(paths[1]):
+    def stat_or_explode(path: str):
+        if path == str(paths[1]):
             raise MemoryError("forced unrecoverable fault")
-        return 1, None
+        return real_os.stat(path)
 
     monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
-    monkeypatch.setattr("app.assets.scanner.seed_asset_specs", seed_or_explode)
+    monkeypatch.setattr(scanner_admission, "os", SimpleNamespace(stat=stat_or_explode))
 
     with pytest.raises(MemoryError, match="^forced unrecoverable fault$"):
-        tick_watch_list(session)
+        tick_watch_list()
 
     assert [entry.path for entry in _WATCH_LIST] == [str(paths[2])]
 
@@ -267,7 +265,7 @@ def test_stable_scan_admission_removes_watch_entry_before_next_tick(session, tem
             "app.assets.scanner_admission.get_name_and_tags_from_asset_path",
             return_value=("stable.bin", []),
         ),
-        patch("app.assets.scanner.insert_asset_specs") as insert_asset_specs,
+        patch("app.assets.scanner.insert_asset_specs", return_value=(0, None)) as insert_asset_specs,
     ):
         tick_watch_list()
 
@@ -341,7 +339,7 @@ def test_settled_entries_are_seeded_in_one_write_session_batch(temp_dir: Path):
             "app.assets.scanner_admission.get_name_and_tags_from_asset_path",
             side_effect=lambda path: (os.path.basename(path), []),
         ),
-        patch("app.assets.scanner.insert_asset_specs") as insert_asset_specs,
+        patch("app.assets.scanner.insert_asset_specs", return_value=(0, None)) as insert_asset_specs,
     ):
         tick_watch_list()
 
