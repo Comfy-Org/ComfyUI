@@ -11,7 +11,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, Protocol, TypedDict
+from typing import Callable, Literal, NamedTuple, Protocol, TypedDict
 
 import folder_paths
 import sqlalchemy as sa
@@ -54,7 +54,7 @@ from app.assets.services.path_utils import (
 )
 from app.assets.services.ingest import _discard_unreferenced_content
 from app.assets.services.snapshot_hash import snapshot_hash
-from app.database.db import create_session
+from app.database.db import create_session, create_write_session
 
 __all__ = [
     "clear_pending_verifications",
@@ -94,6 +94,20 @@ class UnenrichedContent:
     content_id: str
     record_id: str
     file_path: str
+
+
+class _ReferenceObservation(NamedTuple):
+    """One live row's file, stat'ed outside the write transaction.
+
+    ``size_bytes`` and ``mtime_ns`` are the row's values when observed, not the file's:
+    the write skips a row that no longer matches them. ``stat_result`` is None when the
+    file is gone.
+    """
+
+    content_id: str
+    size_bytes: int | None
+    mtime_ns: int | None
+    stat_result: os.stat_result | None
 
 
 def _log_scan_error(phase: str, error: OSError) -> None:
@@ -152,54 +166,77 @@ def collect_models_files() -> list[str]:
     return out
 
 
-def sync_references_with_filesystem(
-    session,
-    root: RootType,
-    collect_existing_paths: bool = False,
-    progress: _ScanProgress | None = None,
-) -> set[str] | None:
-    return sync_prefixes_with_filesystem(
-        session,
-        get_scan_prefixes_for_root(root),
-        collect_existing_paths=collect_existing_paths,
-        progress=progress,
-    )
-
-
-def sync_prefixes_with_filesystem(
-    session: Session,
-    prefixes: list[str],
-    collect_existing_paths: bool = False,
-    progress: _ScanProgress | None = None,
-) -> set[str] | None:
-    if not prefixes:
-        return set() if collect_existing_paths else None
-
+def observe_references_on_filesystem(
+    session: Session, prefixes: list[str], progress: _ScanProgress | None = None
+) -> tuple[list[_ReferenceObservation], set[str]]:
+    """Stat every live row under ``prefixes`` without writing, so the caller can
+    apply the result in a short write transaction. Also returns the paths whose
+    file still exists."""
+    contents = [
+        (content.id, content.path, content.size_bytes, content.mtime_ns)
+        for content in live_contents_under_prefixes(session, prefixes)
+    ]
+    observations: list[_ReferenceObservation] = []
     survivors: set[str] = set()
-    for content in live_contents_under_prefixes(session, prefixes):
+    for content_id, path, size_bytes, mtime_ns in contents:
         try:
-            stat_result = os.stat(content.path, follow_symlinks=True)
+            stat_result = os.stat(path, follow_symlinks=True)
         except FileNotFoundError:
-            mark_content_missing(session, content.id)
+            observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
         except PermissionError as e:
             _log_scan_error("reference_stat", e)
             if progress is not None:
                 progress.permission_denied += 1
-            logging.debug("Permission denied accessing %s", content.path)
+            logging.debug("Permission denied accessing %s", path)
         except OSError as e:
             _log_scan_error("reference_stat", e)
-            logging.debug("OSError checking %s: %s", content.path, e)
-            mark_content_missing(session, content.id)
+            logging.debug("OSError checking %s: %s", path, e)
+            observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
         else:
-            detect_content_change(
-                session,
-                content,
-                stat_result,
-                hashing_is_enabled=mode.hashing_enabled(),
-            )
-            survivors.add(os.path.abspath(content.path))
+            survivors.add(os.path.abspath(path))
+            if stat_result.st_mtime_ns != mtime_ns:
+                observations.append(
+                    _ReferenceObservation(content_id, size_bytes, mtime_ns, stat_result)
+                )
+    return observations, survivors
 
-    return survivors if collect_existing_paths else None
+
+def apply_reference_observations(
+    session: Session, observations: list[_ReferenceObservation]
+) -> None:
+    for observation in observations:
+        content = session.get(AssetContent, observation.content_id)
+        # Skip a row another writer changed since it was observed; the next scan sees it afresh.
+        if (
+            content is None
+            or content.is_missing
+            or content.size_bytes != observation.size_bytes
+            or content.mtime_ns != observation.mtime_ns
+        ):
+            continue
+        if observation.stat_result is None:
+            mark_content_missing(session, content.id)
+            continue
+        detect_content_change(
+            session,
+            content,
+            observation.stat_result,
+            hashing_is_enabled=mode.hashing_enabled(),
+        )
+
+
+def _sync_prefixes_in_write_txn(
+    prefixes: list[str], progress: _ScanProgress | None
+) -> set[str]:
+    with create_session() as session:
+        observations, survivors = observe_references_on_filesystem(
+            session, prefixes, progress
+        )
+    if observations:
+        with create_write_session() as session:
+            apply_reference_observations(session, observations)
+            session.commit()
+    return survivors
 
 
 def _is_under_prefixes(path: str, prefixes: list[str]) -> bool:
@@ -214,15 +251,7 @@ def sync_root_safely(
     Returns survivors (existing paths) or empty set on failure.
     """
     try:
-        with create_session() as sess:
-            survivors = sync_references_with_filesystem(
-                sess,
-                root,
-                collect_existing_paths=True,
-                progress=progress,
-            )
-            sess.commit()
-            return survivors or set()
+        return _sync_prefixes_in_write_txn(get_scan_prefixes_for_root(root), progress)
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
         emit(
@@ -238,13 +267,7 @@ def sync_temp_references_safely(
 ) -> None:
     """Retire temp references whose file is gone; temp is never scanned, so nothing else stats them."""
     try:
-        with create_session() as sess:
-            sync_prefixes_with_filesystem(
-                sess,
-                get_temp_prefixes(),
-                progress=progress,
-            )
-            sess.commit()
+        _sync_prefixes_in_write_txn(get_temp_prefixes(), progress)
     except Exception as exc:
         logging.exception("temp reference sync failed: %s", exc)
         emit(
@@ -375,7 +398,49 @@ def build_asset_specs(
     return specs, tag_pool, skipped
 
 
-def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
+class _SpecObservation(NamedTuple):
+    """A spec's file as seen before the write transaction opens.
+
+    ``snapshot`` is None when hashing is off, or when the file changed while being hashed.
+    """
+
+    stat_result: os.stat_result
+    snapshot: tuple[str, os.stat_result] | None
+
+
+def observe_asset_specs(specs: list[SeedAssetSpec]) -> dict[str, _SpecObservation | None]:
+    """Stat (and, in hashing mode, hash) each spec before the write transaction opens.
+
+    ``None`` marks a path that vanished or could not be read.
+    """
+    hashing_is_enabled = mode.hashing_enabled()
+    observed: dict[str, _SpecObservation | None] = {}
+    for spec in specs:
+        path = os.path.abspath(spec["abs_path"])
+        try:
+            stat_result = os.stat(path, follow_symlinks=True)
+            snapshot = snapshot_hash(path) if hashing_is_enabled else None
+        except FileNotFoundError:
+            logging.warning("Skipping vanished asset during scan: %s", path)
+            observed[path] = None
+            continue
+        except OSError as e:
+            _log_scan_error("seed_observation", e)
+            observed[path] = None
+            continue
+        if snapshot is not None:
+            stat_result = snapshot[1]  # the stat the hash was verified against
+        observed[path] = _SpecObservation(stat_result, snapshot)
+    return observed
+
+
+def seed_asset_specs(
+    session: Session,
+    specs: list[SeedAssetSpec],
+    observed: dict[str, _SpecObservation | None] | None = None,
+) -> int:
+    if observed is None:
+        observed = observe_asset_specs(specs)
     created = 0
     created_content_ids: list[str] = []
     try:
@@ -383,21 +448,16 @@ def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
             path = os.path.abspath(spec["abs_path"])
             try:
                 with session.begin_nested():
-                    try:
-                        stat_result = os.stat(path, follow_symlinks=True)
-                    except OSError:
-                        logging.warning("Skipping vanished asset during scan: %s", path)
+                    observation = observed[path]
+                    if observation is None:  # observe_asset_specs already logged why
                         continue
-                    try:
-                        recovery = recover_missing_content(
-                            session,
-                            path,
-                            stat_result,
-                            hashing_is_enabled=mode.hashing_enabled(),
-                        )
-                    except OSError:
-                        logging.warning("Skipping vanished asset during scan: %s", path)
-                        continue
+                    stat_result = observation.stat_result
+                    recovery = recover_missing_content(
+                        session,
+                        path,
+                        observation.snapshot,
+                        hashing_is_enabled=mode.hashing_enabled(),
+                    )
                     if recovery != "no_match":
                         continue
                     content, inserted = create_content_reporting_insert(
@@ -438,9 +498,10 @@ def seed_asset_specs(session: Session, specs: list[SeedAssetSpec]) -> int:
 def insert_asset_specs(specs: list[SeedAssetSpec], _tag_pool: set[str]) -> int:
     if not specs:
         return 0
-    with create_session() as sess:
-        created = seed_asset_specs(sess, specs)
-        sess.commit()
+    observed = observe_asset_specs(specs)
+    with create_write_session() as session:
+        created = seed_asset_specs(session, specs, observed)
+        session.commit()
         return created
 
 

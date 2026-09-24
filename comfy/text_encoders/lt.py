@@ -27,7 +27,7 @@ class Gemma3_Tokenizer():
     def state_dict(self):
         return {"spiece_model": self.tokenizer.serialize_model()}
 
-    def tokenize_with_weights(self, text, return_word_ids=False, image=None, llama_template=None, skip_template=True, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, image=None, llama_template=None, skip_template=True, system_prompt="", **kwargs):
         self.llama_template = "<start_of_turn>system\nYou are a helpful assistant.<end_of_turn>\n<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n"
         self.llama_template_images = "<start_of_turn>system\nYou are a helpful assistant.<end_of_turn>\n<start_of_turn>user\n\n<image_soft_token>{}<end_of_turn>\n\n<start_of_turn>model\n"
 
@@ -57,6 +57,8 @@ class Gemma3_Tokenizer():
                     llama_text = self.llama_template.format(text)
             else:
                 llama_text = llama_template.format(text)
+            if system_prompt:  # replaces the default system turn
+                llama_text = "<start_of_turn>system\n" + system_prompt + "<end_of_turn>\n" + llama_text[llama_text.index("<start_of_turn>user"):]
 
         text_tokens = super().tokenize_with_weights(llama_text, return_word_ids)
 

@@ -185,7 +185,7 @@ class PoseBranchCache:
                 t, params = comfy.quant_ops.TensorWiseINT8Layout.quantize(t.reshape(-1, t.shape[-1]), is_weight=True, per_channel=True, convrot=True, convrot_groupsize=g)
 
         t = t.to(self.store_device, copy=True)
-        if comfy.model_management.pin_memory(t):
+        if comfy.model_management.pin_memory(t, evict_active=False):
             self.slot["pinned"].append(t)
         self.slot["blocks"][i] = t
         # the scales follow the blocks off the GPU: per-window slots would otherwise pile them up in VRAM (~200 MB per window at 480p int4)

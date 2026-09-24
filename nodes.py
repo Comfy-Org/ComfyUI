@@ -293,6 +293,9 @@ class ConditioningZeroOut:
             conditioning_scale = d.get("conditioning_scale", None)
             if conditioning_scale is not None:
                 d["conditioning_scale"] = torch.zeros_like(conditioning_scale)
+            direct_context = d.get("direct_context", None)
+            if direct_context is not None:
+                d["direct_context"] = torch.zeros_like(direct_context)
             n = [torch.zeros_like(t[0]), d]
             c.append(n)
         return (c, )
@@ -2487,6 +2490,7 @@ async def init_builtin_extra_nodes():
         "nodes_seedvr.py",
         "nodes_context_windows.py",
         "nodes_qwen.py",
+        "nodes_ming.py",
         "nodes_mage.py",
         "nodes_joyimage.py",
         "nodes_boogu.py",

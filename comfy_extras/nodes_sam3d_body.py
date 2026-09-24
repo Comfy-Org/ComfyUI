@@ -11,6 +11,7 @@ from scipy.signal import savgol_coeffs
 
 import comfy.model_management
 import comfy.model_patcher
+import comfy.storage
 import comfy.ops
 import comfy.utils
 from comfy_api.latest import io, ComfyExtension, Types
@@ -96,6 +97,7 @@ class SAM3DBody_Loader(io.ComfyNode):
             load_device=load_device,
             offload_device=comfy.model_management.unet_offload_device(),
             size=comfy.model_management.module_size(model),
+            fast_disk=comfy.storage.state_dict_fast_disk(sd),
         )
         return io.NodeOutput(patcher)
 

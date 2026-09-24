@@ -88,7 +88,7 @@ def test_never_stabilizes_dropped_after_cap(session, temp_dir: Path):
         target_ns = max(path.stat().st_mtime_ns, previous_target_ns) + 1_000_000
         os.utime(path, ns=(target_ns, target_ns))
         previous_target_ns = target_ns
-        tick_watch_list(session)
+        tick_watch_list()
 
     assert _WATCH_LIST == []
     assert session.scalars(select(AssetContent)).all() == []
@@ -109,14 +109,14 @@ def test_stable_scan_admission_removes_watch_entry_before_next_tick(session, tem
             "app.assets.scanner_admission.get_name_and_tags_from_asset_path",
             return_value=("stable.bin", []),
         ),
-        patch("app.assets.scanner.seed_asset_specs") as seed_asset_specs,
+        patch("app.assets.scanner.insert_asset_specs") as insert_asset_specs,
     ):
-        tick_watch_list(session)
+        tick_watch_list()
 
     assert admitted == [str(path)]
     assert watched == []
     assert entries_after_admission == 0
-    seed_asset_specs.assert_not_called()
+    assert insert_asset_specs.call_args.args[0] == []
 
 
 def test_evicted_path_is_admitted_by_later_stable_scan(temp_dir: Path, monkeypatch):
@@ -168,3 +168,26 @@ def test_nonempty_candidate_batch_still_pays_stability_gap(temp_dir: Path, monke
     assert sleeps == [0.1]
     assert admitted == [str(path)]
     assert watched == []
+
+
+def test_settled_entries_are_seeded_in_one_write_session_batch(temp_dir: Path):
+    settled = [temp_dir / "first.bin", temp_dir / "second.bin"]
+    moving = temp_dir / "moving.bin"
+    for path in (*settled, moving):
+        path.write_bytes(path.name.encode())
+    _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in settled]
+    _WATCH_LIST.append(_WatchEntry(str(moving), (temp_dir / "first.bin").stat()))
+    with (
+        patch("app.assets.scanner_admission.compute_loader_path", side_effect=os.path.basename),
+        patch(
+            "app.assets.scanner_admission.get_name_and_tags_from_asset_path",
+            side_effect=lambda path: (os.path.basename(path), []),
+        ),
+        patch("app.assets.scanner.insert_asset_specs") as insert_asset_specs,
+    ):
+        tick_watch_list()
+
+    insert_asset_specs.assert_called_once()
+    specs, _ = insert_asset_specs.call_args.args
+    assert [spec["abs_path"] for spec in specs] == [str(path) for path in settled]
+    assert [entry.path for entry in _WATCH_LIST] == [str(moving)]

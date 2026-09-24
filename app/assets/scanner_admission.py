@@ -14,8 +14,6 @@ import time
 from dataclasses import dataclass
 from typing import Final
 
-from sqlalchemy.orm import Session
-
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 
 PARTIAL_DOWNLOAD_EXTENSIONS = frozenset({
@@ -66,10 +64,11 @@ def _two_stat_admit(paths_with_stats: list[tuple[str, os.stat_result]]) -> tuple
     return admitted, watched
 
 
-def tick_watch_list(session: Session) -> None:
-    from app.assets.scanner import seed_asset_specs, SeedAssetSpec
+def tick_watch_list() -> None:
+    from app.assets.scanner import insert_asset_specs, SeedAssetSpec
 
     remaining: list[_WatchEntry] = []
+    settled: list[SeedAssetSpec] = []
     for entry in _WATCH_LIST:
         try:
             current = os.stat(entry.path)
@@ -88,10 +87,11 @@ def tick_watch_list(session: Session) -> None:
                 "mime_type": mimetypes.guess_type(entry.path, strict=False)[0],
                 "job_id": None,
             }
-            seed_asset_specs(session, [spec])
+            settled.append(spec)
             continue
         entry.last_stat = current
         entry.ticks += 1
         if entry.ticks < _WATCH_SCAN_RETRIES:
             remaining.append(entry)
+    insert_asset_specs(settled, set())
     _WATCH_LIST[:] = remaining

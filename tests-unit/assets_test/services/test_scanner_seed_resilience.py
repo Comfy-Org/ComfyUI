@@ -64,7 +64,7 @@ def test_seed_persists_remaining_specs_when_path_vanishes_during_recovery_hash(
             raise OSError("file vanished during recovery")
         return snapshot_hash(path)
 
-    monkeypatch.setattr("app.assets.scanner_changes.snapshot_hash", _hash_or_raise)
+    monkeypatch.setattr("app.assets.scanner.snapshot_hash", _hash_or_raise)
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
         created = seed_asset_specs(session, specs)
@@ -82,10 +82,10 @@ def _delete_during_recovery(monkeypatch: pytest.MonkeyPatch, path: Path) -> None
     def _hash_or_raise(candidate_path: str) -> str | None:
         if candidate_path == str(path):
             path.unlink()
-            raise OSError("file vanished during recovery")
+            raise FileNotFoundError("file vanished during recovery")
         return snapshot_hash(candidate_path)
 
-    monkeypatch.setattr("app.assets.scanner_changes.snapshot_hash", _hash_or_raise)
+    monkeypatch.setattr("app.assets.scanner.snapshot_hash", _hash_or_raise)
 
 
 @pytest.mark.parametrize(
@@ -113,6 +113,33 @@ def test_seed_logs_once_for_each_vanished_path(
         if str(vanished_path) in record.getMessage()
     ]
     assert messages == [f"Skipping vanished asset during scan: {vanished_path}"]
+
+
+def test_seed_logs_the_real_error_for_an_unreadable_path(
+    session: Session,
+    temp_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    specs, unreadable_path = _specs_with_vanished_path(temp_dir)
+
+    def _hash_or_raise(path: str) -> str | None:
+        if path == str(unreadable_path):
+            raise PermissionError("permission denied")
+        return snapshot_hash(path)
+
+    monkeypatch.setattr("app.assets.scanner.snapshot_hash", _hash_or_raise)
+
+    with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
+        created = seed_asset_specs(session, specs)
+    session.commit()
+
+    assert created == 2
+    messages = [record.getMessage() for record in caplog.records]
+    assert "Asset scan error: phase=seed_observation error_type=permission_denied" in messages
+    assert not any(
+        "vanished" in message and str(unreadable_path) in message for message in messages
+    ), "an unreadable file still exists and must not also be reported as vanished"
 
 
 def test_seed_isolates_a_poisoned_spec_and_persists_the_specs_around_it(
