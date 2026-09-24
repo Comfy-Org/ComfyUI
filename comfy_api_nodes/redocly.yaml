@@ -1,0 +1,10 @@
+# This file is used to filter the Comfy Org OpenAPI spec for schemas related to API Nodes.
+
+apis:
+  filter:
+    root: openapi.yaml
+    decorators:
+      filter-in:
+        property: tags
+        value: ['API Nodes', 'Released']
+        matchStrategy: all
