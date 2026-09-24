@@ -200,8 +200,8 @@ class HiDreamO1PatchSeamSmoothing(io.ComfyNode):
 
         m = model.clone()
         model_sampling = m.get_model_object("model_sampling")
-        start_sigma = model_sampling.percent_to_sigma(start_percent)
-        end_sigma = model_sampling.percent_to_sigma(end_percent)
+        start_t = model_sampling.timestep(torch.tensor(model_sampling.percent_to_sigma(start_percent))).item()
+        end_t = model_sampling.timestep(torch.tensor(model_sampling.percent_to_sigma(end_percent))).item()
 
         edge_ramp_cache: dict = {}
 
@@ -223,15 +223,15 @@ class HiDreamO1PatchSeamSmoothing(io.ComfyNode):
 
         def smoothing_wrapper(executor, *args, **kwargs):
             x = args[0]
-            sigma = float(args[3]["sigmas"][0])
+            t = float(args[1][0])
             pred = executor(*args, **kwargs)
-            if not (end_sigma < sigma <= start_sigma):
+            if not (end_t < t <= start_t):
                 return pred
             # Pick shift-level by sigma phase across the gated range.
             if len(shift_levels) == 1:
                 level_idx = 0
             else:
-                phase = (start_sigma - sigma) / max(start_sigma - end_sigma, 1e-8)
+                phase = (start_t - t) / max(start_t - end_t, 1e-8)
                 level_idx = min(int(phase * len(shift_levels)), len(shift_levels) - 1)
             shifts = shift_levels[level_idx]
             window_tiles = window_tile_levels[level_idx]
