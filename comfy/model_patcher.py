@@ -1820,14 +1820,15 @@ class ModelPatcherDynamic(ModelPatcher):
         return size
 
     def _vbar_get(self, create=False):
-        #One VBAR per (model, load_device); do not replace it while modules still hold _v / _v_reservations.
+        #One VBAR per (model, load_device); do not replace it while modules still hold _v.
         if self.load_device == torch.device("cpu"):
             return None
         vbar = self.model.dynamic_vbars.get(self.load_device, None)
         if create and vbar is None:
-            size = self._vbar_size()
+            size = int(self._vbar_size() * 1.5)
             if size > 0:
                 vbar = comfy_aimdo.model_vbar.ModelVBAR(size, self.load_device.index)
+                vbar.reservations = {}
                 self.model.dynamic_vbars[self.load_device] = vbar
         return vbar
 
@@ -1988,9 +1989,6 @@ class ModelPatcherDynamic(ModelPatcher):
                     m.seed_key = n
                     m._pin_state = pin_state
                     set_dirty(m, dirty)
-                    if not hasattr(m, "_v_reservations"):
-                        m._v_reservations = {}
-
                     #Models that mix tiny and giant weights can causing lopsided stream buffer
                     #rotations and stall. force the tinys over.
                     if module_mem > self.DYNAMIC_FORCE_LOAD_MODULE_SIZE:
@@ -2005,18 +2003,23 @@ class ModelPatcherDynamic(ModelPatcher):
 
                     if force_load:
                         if hasattr(m, "_v"):
+                            if vbar is not None and hasattr(vbar, "reservations"):
+                                vbar.reservations.setdefault(n, m._v)
                             comfy_aimdo.model_vbar.vbar_unpin(m._v)
                             delattr(m, "_v")
                         force_load_param(self, "weight", device_to)
                         force_load_param(self, "bias", device_to)
                     else:
                         if vbar is not None and not hasattr(m, "_v"):
-                            reservation = m._v_reservations.get(vbar)
+                            reservation = vbar.reservations.get(n) if hasattr(vbar, "reservations") else None
                             if reservation is None:
                                 reservation = vbar.alloc(v_weight_size)
-                                m._v_reservations[vbar] = reservation
+                                if hasattr(vbar, "reservations"):
+                                    vbar.reservations[n] = reservation
                             elif reservation[2] < v_weight_size:
-                                raise MemoryError(f"VBAR reservation for {n} is too small")
+                                logging.warning("VBAR reservation for %s too small (%d < %d), reallocating", n, reservation[2], v_weight_size)
+                                reservation = vbar.alloc(v_weight_size)
+                                vbar.reservations[n] = reservation
                             m._v = (reservation[0], reservation[1], v_weight_size)
                             m._v_signature = None
                         allocated_size += v_weight_size
