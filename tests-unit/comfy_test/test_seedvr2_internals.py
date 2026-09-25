@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from unittest.mock import patch
 
 import pytest
@@ -675,7 +676,6 @@ def test_seedvr2_batch_runs_a_video_at_a_time():
 def test_seedvr2_encode_accepts_the_chunked_io_device_kwarg():
     """``comfy_has_chunked_io`` is one flag for both directions: sd.py leaves the pixels where they
     are and calls ``encode(x, device=...)``, so encode must take it and move the data itself."""
-    import inspect
     sig = inspect.signature(vae_mod.VideoAutoencoderKLWrapper.encode)
     assert "device" in sig.parameters, "encode must accept the chunked-io device kwarg"
     assert sig.parameters["device"].default is None, "device must be optional"
@@ -697,10 +697,11 @@ def test_seedvr2_decode_output_shape_matches_decode():
     assert vae_mod.VideoAutoencoderKLWrapper.comfy_has_chunked_io is True
 
 
-def _tile_side(free_gib, dtype=torch.float16):
+def _tile_side(free_gib, dtype=torch.float16, offload=True):
     wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(vae_mod.VideoAutoencoderKLWrapper)
     wrapper.spatial_downsample_factor = 8
-    return wrapper.preferred_decode_tile(free_gib * 1024 ** 3, dtype)
+    with patch.object(vae_mod, "_offload_caches_for", lambda frame_pixels: offload):
+        return wrapper.preferred_decode_tile(free_gib * 1024 ** 3, dtype)
 
 
 def test_seedvr2_tile_side_tracks_free_memory_within_bounds():
@@ -716,3 +717,12 @@ def test_seedvr2_tile_side_tracks_free_memory_within_bounds():
         if side != vae_mod.SEEDVR2_MIN_TILE_LATENT:
             predicted = (side * 8) ** 2 * vae_mod.SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL + vae_mod.SEEDVR2_DECODE_FIXED_BYTES
             assert predicted <= free * 1024 ** 3
+
+
+def test_seedvr2_tile_side_counts_resident_caches_without_offload():
+    """With no room to pin the caches they stay on the GPU, and the chosen tile must still fit with them."""
+    for free in (8, 16, 32):
+        side = _tile_side(free, offload=False)
+        assert side <= _tile_side(free)
+        per_pixel = vae_mod.SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL + vae_mod.SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL
+        assert (side * 8) ** 2 * per_pixel + vae_mod.SEEDVR2_DECODE_FIXED_BYTES <= free * 1024 ** 3

@@ -1372,12 +1372,15 @@ class VideoAutoencoderKLWrapper(nn.Module):
     comfy_decode_estimate_is_reliable = True
 
     def preferred_decode_tile(self, free_memory, dtype):
-        """Largest square tile, in latent units, whose decode fits ``free_memory``, from the same per-pixel figure as the estimate."""
+        """Largest square tile, in latent units, whose decode fits ``free_memory``, from the same per-pixel
+        figures as the estimate: the temporal caches count too when there is no room to pin them."""
         factor = _eager_factor(dtype, SEEDVR2_EAGER_DECODE_FACTOR)
         budget = free_memory * SEEDVR2_TILE_MEM_HEADROOM - SEEDVR2_DECODE_FIXED_BYTES * factor
         if budget <= 0:
             return SEEDVR2_MIN_TILE_LATENT
         area = budget / (SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL * factor)
+        if not _offload_caches_for(area):
+            area = budget / ((SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL + SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL) * factor)
         side = int(math.sqrt(max(area, 1.0))) // self.spatial_downsample_factor
         side = (side // 8) * 8  # keep tiles a whole number of latent blocks
         return max(SEEDVR2_MIN_TILE_LATENT, min(SEEDVR2_MAX_TILE_LATENT, side))
