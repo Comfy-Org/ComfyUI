@@ -13,6 +13,7 @@ from abc import ABC, abstractmethod
 import nodes
 
 from comfy_execution.graph_utils import is_link
+from comfy_execution.cache_provider import _contains_self_unequal, _serialize_cache_key
 
 NODE_CLASS_CONTAINS_UNIQUE_ID: Dict[str, bool] = {}
 
@@ -86,6 +87,7 @@ class CacheKeySetInputSignature(CacheKeySet):
         self.dynprompt = dynprompt
         self.is_changed_cache = is_changed_cache
         self.signatures = {}
+        self.tokens = {}
 
     def include_node_id_in_input(self) -> bool:
         return False
@@ -101,22 +103,36 @@ class CacheKeySetInputSignature(CacheKeySet):
             self.subcache_keys[node_id] = (node_id, node["class_type"])
 
     async def get_node_signature(self, dynprompt, node_id):
-        # A node's signature is its own inputs with each link replaced by the
-        # ancestor's signature, each node signed once, ancestors first.
+        # Each node is signed once, ancestors first, from an explicit stack. An
+        # ancestor still on the stack is a cycle, left for the execution list.
         stack = [node_id]
+        visiting = set()
         while stack:
             current = stack[-1]
             if current in self.signatures:
                 stack.pop()
                 continue
+            visiting.add(current)
             pending = [ancestor_id for ancestor_id in self.get_link_ancestors(dynprompt, current)
-                       if ancestor_id not in self.signatures]
+                       if ancestor_id not in self.signatures and ancestor_id not in visiting]
             if pending:
                 stack.extend(pending)
                 continue
             self.signatures[current] = await self.get_immediate_node_signature(dynprompt, current)
             stack.pop()
         return self.signatures[node_id]
+
+    def ancestor_token(self, ancestor_id):
+        # A link carries a digest of the ancestor's signature, so a key holds
+        # its whole ancestry without nesting. A signature with a value that is
+        # never equal to itself, such as a NaN fingerprint, or one that does not
+        # serialize gets a fresh NaN so its descendants never match across
+        # prompts either.
+        if ancestor_id not in self.tokens:
+            signature = self.signatures.get(ancestor_id)
+            token = None if signature is None or _contains_self_unequal(signature) else _serialize_cache_key(signature)
+            self.tokens[ancestor_id] = float("NaN") if token is None else token
+        return self.tokens[ancestor_id]
 
     async def get_immediate_node_signature(self, dynprompt, node_id):
         if not dynprompt.has_node(node_id):
@@ -129,15 +145,13 @@ class CacheKeySetInputSignature(CacheKeySet):
         if self.include_node_id_in_input() or (hasattr(class_def, "NOT_IDEMPOTENT") and class_def.NOT_IDEMPOTENT) or include_unique_id_in_input(class_type):
             signature.append(node_id)
         inputs = node["inputs"]
-        links = []
         for key in sorted(inputs.keys()):
             if is_link(inputs[key]):
                 (ancestor_id, ancestor_socket) = inputs[key]
-                links.append((key, self.signatures[ancestor_id], ancestor_socket))
+                signature.append((key, ("ANCESTOR", self.ancestor_token(ancestor_id), ancestor_socket)))
             else:
                 signature.append((key, inputs[key]))
-        # frozenset: its hash is cached
-        return frozenset([("SELF", to_hashable(signature)), *links])
+        return to_hashable(signature)
 
     def get_link_ancestors(self, dynprompt, node_id):
         if not dynprompt.has_node(node_id):
