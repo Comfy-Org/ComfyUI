@@ -1,3 +1,4 @@
+import queue
 import threading
 
 import pytest
@@ -5,33 +6,123 @@ import pytest
 from app.assets.services import gil
 
 
+class FakeClock:
+    """Stands in for gil._clock / gil._sleep; a sleep advances the clock by `sleep_cost`."""
+
+    def __init__(self, sleep_cost: float) -> None:
+        self.now = 100.0
+        self.sleep_cost = sleep_cost
+        self.slept = 0.0
+        self.sleeps = 0
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, _seconds: float) -> None:
+        self.now += self.sleep_cost
+        self.slept += self.sleep_cost
+        self.sleeps += 1
+
+
 @pytest.fixture
-def clock(monkeypatch):
-    now = [100.0]
-    sleeps: list[float] = []
-    monkeypatch.setattr(gil.time, "perf_counter", lambda: now[0])
-    monkeypatch.setattr(gil.time, "sleep", sleeps.append)
-    monkeypatch.setattr(gil, "_last", threading.local())
-    return now, sleeps
+def fake(monkeypatch):
+    def install(sleep_cost: float) -> FakeClock:
+        clock = FakeClock(sleep_cost)
+        monkeypatch.setattr(gil, "_clock", clock.clock)
+        monkeypatch.setattr(gil, "_sleep", clock.sleep)
+        monkeypatch.setattr(gil, "_interval", gil._UNCALIBRATED)
+        monkeypatch.setattr(gil, "_last", threading.local())
+        return clock
+
+    return install
 
 
-def test_sleeps_only_once_the_interval_has_passed(clock):
-    now, sleeps = clock
-    gil.yield_gil()
-    now[0] += gil._INTERVAL / 2
-    gil.yield_gil()
-    assert sleeps == []
-
-    now[0] += gil._INTERVAL * 1.5
-    gil.yield_gil()
-    assert sleeps == [gil._SLEEP]
+def calibrated(fake, sleep_cost: float) -> FakeClock:
+    clock = fake(sleep_cost)
+    gil.yield_gil()  # calibrates, then starts this thread's interval
+    clock.sleeps = 0
+    clock.slept = 0.0
+    return clock
 
 
-def test_interval_restarts_after_each_sleep(clock):
-    now, sleeps = clock
+def test_sleeps_only_once_the_interval_has_passed(fake):
+    clock = calibrated(fake, gil._SLEEP)
+    clock.now += gil._INTERVAL / 2
     gil.yield_gil()
-    now[0] += gil._INTERVAL * 1.5
-    gil.yield_gil()
-    gil.yield_gil()
-    assert sleeps == [gil._SLEEP]
+    assert clock.sleeps == 0
 
+    clock.now += gil._INTERVAL
+    gil.yield_gil()
+    assert clock.sleeps == 1
+
+
+def test_interval_restarts_after_each_sleep(fake):
+    clock = calibrated(fake, gil._SLEEP)
+    clock.now += gil._INTERVAL * 1.5
+    gil.yield_gil()
+    gil.yield_gil()
+    assert clock.sleeps == 1
+
+
+def run_hot_loop(clock: FakeClock, seconds: float, work_per_item: float = 0.0001) -> float:
+    """Simulate a loop doing `work_per_item` per call; return the fraction spent asleep."""
+    start = clock.now
+    while clock.now - start < seconds:
+        clock.now += work_per_item
+        gil.yield_gil()
+    return clock.slept / (clock.now - start)
+
+
+def test_accurate_sleep_keeps_the_measured_duty_cycle(fake):
+    clock = calibrated(fake, gil._SLEEP)
+    assert gil._interval == gil._INTERVAL
+    assert run_hot_loop(clock, 10.0) == pytest.approx(1 / 6, abs=0.02)
+
+
+def test_coarse_sleep_widens_the_interval_to_bound_the_duty_cycle(fake):
+    # A 1ms sleep that really takes a 15ms timer tick, as on Windows before Python 3.11.
+    clock = calibrated(fake, 0.015)
+    assert gil._interval == pytest.approx(gil._INTERVAL * 15)
+    assert run_hot_loop(clock, 30.0) == pytest.approx(1 / 6, abs=0.02)
+
+
+def test_sleep_too_coarse_to_be_worth_it_disables_yielding(fake):
+    clock = calibrated(fake, gil._MAX_SLEEP * 2)
+    assert gil._interval is None
+    assert run_hot_loop(clock, 1.0) == 0.0
+    assert clock.sleeps == 0
+
+
+def test_threads_do_not_consume_each_others_interval(fake):
+    clock = calibrated(fake, gil._SLEEP)
+    sleeps_seen: list[int] = []
+
+    def worker(inbox: queue.Queue, done: queue.Queue) -> None:
+        while inbox.get():
+            before = clock.sleeps
+            gil.yield_gil()
+            sleeps_seen.append(clock.sleeps - before)
+            done.put(True)
+
+    threads = []
+    for _ in range(2):
+        inbox, done = queue.Queue(), queue.Queue()
+        t = threading.Thread(target=worker, args=(inbox, done))
+        t.start()
+        threads.append((t, inbox, done))
+
+    def call(i: int) -> int:
+        _, inbox, done = threads[i]
+        inbox.put(True)
+        done.get(timeout=5)
+        return sleeps_seen[-1]
+
+    try:
+        assert call(0) == 0 and call(1) == 0  # each thread starts its own interval
+        clock.now += gil._INTERVAL * 1.5
+        assert call(0) == 1  # thread 0 yields and restarts only its own interval
+        assert call(1) == 1  # thread 1's interval is untouched, so it yields too
+    finally:
+        for t, inbox, _ in threads:
+            inbox.put(False)
+            t.join(timeout=5)
