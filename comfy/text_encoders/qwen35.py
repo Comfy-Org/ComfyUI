@@ -175,6 +175,12 @@ def torch_chunk_gated_delta_rule(query, key, value, g, beta, chunk_size=64, init
     return core_attn_out, last_recurrent_state
 
 
+def _can_use_gated_delta_decode(device, key_head_dim, value_head_dim):
+    registry = comfy_kitchen.registry
+    backend_enabled = registry.is_available("cuda") or registry.is_available("hip")
+    return backend_enabled and comfy_kitchen.gated_delta_decode_is_available(device, key_head_dim, value_head_dim)
+
+
 # GatedDeltaNet - Linear Attention Layer
 
 class GatedDeltaNet(nn.Module):
@@ -217,9 +223,11 @@ class GatedDeltaNet(nn.Module):
             and seq_len <= 6
         )
 
-        fused_available = getattr(comfy_kitchen, "gated_delta_decode_is_available", None)
-        use_fused = (use_recurrent and fused_available is not None and fused_available(x.device, self.key_head_dim, self.value_head_dim)
-                     and (seq_len == 1 or past_key_value.snap_backing is not None))
+        use_fused = (
+            use_recurrent
+            and _can_use_gated_delta_decode(x.device, self.key_head_dim, self.value_head_dim)
+            and (seq_len == 1 or past_key_value.snap_backing is not None)
+        )
 
         # Projections (shared)
         proj = self.in_proj_qkv(x)  # [B, seq_len, conv_dim]
