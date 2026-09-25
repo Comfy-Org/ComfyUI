@@ -97,6 +97,43 @@ def test_held_lock_blocks_before_any_migration_work(stale_db):
         holder.release()
 
 
+def test_legacy_database_copy_runs_under_file_lock(tmp_path, monkeypatch):
+    legacy_db = tmp_path / "legacy" / "comfyui.db"
+    target_db = tmp_path / "current" / "comfyui.db"
+    legacy_db.parent.mkdir()
+    legacy_db.write_bytes(b"legacy database")
+    copied: list[tuple[str, str]] = []
+    real_copy = db_module.shutil.copy
+
+    def _copy_while_locked(source: str, destination: str):
+        contender = FileLock(str(target_db) + ".lock")
+        try:
+            with pytest.raises(Timeout):
+                contender.acquire(timeout=0)
+        finally:
+            if contender.is_locked:
+                contender.release()
+        copied.append((source, destination))
+        return real_copy(source, destination)
+
+    monkeypatch.setattr(db_module.args, "database_url", None)
+    monkeypatch.setattr(db_module, "get_db_path", lambda: str(target_db))
+    monkeypatch.setattr(
+        db_module, "get_legacy_default_db_path", lambda: str(legacy_db)
+    )
+    monkeypatch.setattr(db_module, "_migrate_and_bind", lambda *_args: None)
+    monkeypatch.setattr(db_module.shutil, "copy", _copy_while_locked)
+    monkeypatch.setattr(db_module, "_db_lock", None)
+
+    try:
+        db_module._init_file_db(f"sqlite:///{target_db}")
+    finally:
+        if db_module._db_lock is not None:
+            db_module._db_lock.release(force=True)
+
+    assert copied == [(str(legacy_db) + ".bak", str(target_db))]
+
+
 def test_setup_database_routes_file_lock_to_lock_guidance(monkeypatch, caplog):
     monkeypatch.setattr(main, "dependencies_available", lambda: True)
 
