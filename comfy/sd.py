@@ -1929,6 +1929,10 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
             if clip_type == CLIPType.IDEOGRAM4:
                 clip_target.clip = comfy.text_encoders.ideogram4.te(**llama_detect(clip_data))
                 clip_target.tokenizer = comfy.text_encoders.ideogram4.Ideogram4Tokenizer
+            elif clip_type == CLIPType.QWEN_IMAGE:
+                clip_data[0] = comfy.utils.state_dict_prefix_replace(clip_data[0], {"model.language_model.": "model.", "model.visual.": "visual.", "lm_head.": "model.lm_head."})
+                clip_target.clip = comfy.text_encoders.qwen_image21.te(**llama_detect(clip_data))
+                clip_target.tokenizer = comfy.text_encoders.qwen_image21.QwenImage21Tokenizer
             else:
                 clip_target.clip = comfy.text_encoders.flux.klein_te(**llama_detect(clip_data), model_type="qwen3_8b")
                 clip_target.tokenizer = comfy.text_encoders.flux.KleinTokenizer8B
