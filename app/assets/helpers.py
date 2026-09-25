@@ -53,17 +53,23 @@ def path_prefix_matcher(prefixes: Iterable[str]) -> Callable[[str], bool]:
     check there costs rows x prefixes x depth. A normcase'd, separator-bounded
     string prefix keeps its component bounds and platform case rules.
     """
-    exact: set[str] = set()
-    stems: list[str] = []
+    # abspath keeps exactly two leading separators, and pathlib treats that "//" as an
+    # anchor of its own: "//server/f" is not under "/". Such paths are only matched
+    # against prefixes with the same anchor.
+    double = os.sep * 2
+    exact: dict[bool, set[str]] = {False: set(), True: set()}
+    stems: dict[bool, list[str]] = {False: [], True: []}
     for prefix in prefixes:
         base = os.path.normcase(os.path.abspath(prefix))
-        exact.add(base)
-        stems.append(base if base.endswith(os.sep) else base + os.sep)
-    stem_tuple = tuple(stems)
+        is_double = base.startswith(double)
+        exact[is_double].add(base)
+        stems[is_double].append(base if base.endswith(os.sep) else base + os.sep)
+    stem_tuples = {key: tuple(value) for key, value in stems.items()}
 
     def matches(path: str) -> bool:
         candidate = os.path.normcase(os.path.abspath(path))
-        return candidate in exact or candidate.startswith(stem_tuple)
+        is_double = candidate.startswith(double)
+        return candidate in exact[is_double] or candidate.startswith(stem_tuples[is_double])
 
     return matches
 
