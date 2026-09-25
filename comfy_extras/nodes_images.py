@@ -1067,6 +1067,17 @@ _REC2020_TO_REC709 = (
     (-0.1245504745215905, 1.1328998971259600, -0.0083494226043695),
     (-0.0181507633549053, -0.1005788980080076, 1.1187296613629125),
 )
+# AP1 / D60 and Rec.2020 / D65, with Bradford chromatic adaptation.
+_ACESCG_TO_REC2020 = (
+    (1.0258247476660107, -0.0200531908382148, -0.0057715568277955),
+    (-0.0022343695199762, 1.0045865018884792, -0.0023521323685036),
+    (-0.0050133514680893, -0.0252900718107852, 1.0303034232788744),
+)
+_REC2020_TO_ACESCG = (
+    (0.9748949779244186, 0.0195991086370050, 0.0055059134385761),
+    (0.0021795627977041, 0.9955354688932213, 0.0022849683090752),
+    (0.0047972396837727, 0.0245320166345895, 0.9706707436816380),
+)
 _REC709_LUMA = (0.2126390058715103, 0.7151686787677559, 0.0721923153607337)
 _REC2020_LUMA = (0.2627, 0.6780, 0.0593)
 _PQ_M1, _PQ_M2 = 2610 / 16384, 2523 / 32
@@ -1074,6 +1085,17 @@ _PQ_C1, _PQ_C2, _PQ_C3 = 3424 / 4096, 2413 / 128, 2392 / 128
 _SDR_WHITE_NITS = 203.0
 _HLG_PEAK_NITS = 1000.0
 _HLG_GAMMA = 1.2
+
+# LogC3 EI 800 transfer curve with Rec.709 primaries.
+_LOGC3_A, _LOGC3_B = 5.555556, 0.052272
+_LOGC3_C, _LOGC3_D = 0.247190, 0.385537
+_LOGC3_E, _LOGC3_F = 5.367655, 0.092809
+_LOGC3_CUT = 0.010591
+
+# ACEScct (S-2016-001) linear toe and logarithmic segment.
+_ACESCCT_SLOPE, _ACESCCT_OFFSET = 10.5402377416545, 0.0729055341958355
+_ACESCCT_LOG_SCALE, _ACESCCT_LOG_OFFSET = 17.52, 9.72
+_ACESCCT_CUT, _ACESCCT_LOG_CUT = 0.0078125, 0.155251141552511
 
 
 def _convert_rgb_primaries(rgb, matrix):
@@ -1111,16 +1133,16 @@ def _compress_rgb_gamut(rgb, weights):
 class ImageColorSpace(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
-        spaces = ["sRGB", "HDR", "HDR PQ", "linear"]
+        spaces = ["sRGB", "HDR", "HDR PQ", "linear", "HDR LogC3", "HDR ACEScct"]
         return IO.Schema(
             node_id="ImageColorSpace",
             display_name="Convert Image Color Space",
             category="image/color",
-            description="Convert sRGB, linear Rec.709, HDR (Rec.2020 HLG), and HDR PQ (Rec.2020 PQ). Linear 1.0 uses the same 203-nit reference white as sRGB; HLG uses a 1000-nit reference display. Linear output and linear-to-HDR conversions preserve extended values without tone mapping. SDR output and PQ-to-HLG conversion tone-map excess luminance across the batch and compress out-of-gamut colors. Conversions compute in float32 and return the intermediate device and dtype. Straight alpha is not color-transformed.",
+            description="Convert sRGB, linear Rec.709, HDR (Rec.2020 HLG), HDR PQ (Rec.2020 PQ), HDR LogC3, and HDR ACEScct. LogC3 uses the EI 800 curve with Rec.709 primaries and codes clamped to [0, 1]. ACEScct uses AP1 primaries and D60 white, with Bradford adaptation to D65. Convert LogC3 or ACEScct to linear for EXR saving. Linear 1.0 uses the same 203-nit reference white as sRGB; HLG uses a 1000-nit reference display. Linear and ACEScct outputs and linear-to-HDR conversions preserve extended values without tone mapping. SDR output and PQ-to-HLG conversion tone-map excess luminance across the batch and compress out-of-gamut colors. Conversions compute in float32 and return the intermediate device and dtype. Straight alpha is not color-transformed.",
             inputs=[
                 IO.Image.Input("image"),
                 IO.Combo.Input("source", options=spaces, default="sRGB", tooltip="Color space of the input pixels."),
-                IO.Combo.Input("destination", options=spaces, default="sRGB", tooltip="Color space of the output pixels. Set the save node to this same color space."),
+                IO.Combo.Input("destination", options=spaces, default="sRGB", tooltip="Color space of the output pixels. Set the save node to this same color space. Convert LogC3 or ACEScct to linear before saving EXR, or to sRGB/HDR/HDR PQ before saving video."),
             ],
             outputs=[IO.Image.Output()],
         )
@@ -1138,6 +1160,17 @@ class ImageColorSpace(IO.ComfyNode):
             rgb = _convert_rgb_primaries(srgb_to_linear(rgb), _REC709_TO_REC2020) * _SDR_WHITE_NITS
         elif source == "linear":
             rgb = _convert_rgb_primaries(rgb, _REC709_TO_REC2020) * _SDR_WHITE_NITS
+        elif source == "HDR LogC3":
+            rgb = rgb.clamp(0.0, 1.0)
+            low = (rgb - _LOGC3_F) / _LOGC3_E
+            high = (torch.pow(10.0, (rgb - _LOGC3_D) / _LOGC3_C) - _LOGC3_B) / _LOGC3_A
+            rgb = torch.where(rgb >= _LOGC3_E * _LOGC3_CUT + _LOGC3_F, high, low).clamp_min(0.0)
+            rgb = _convert_rgb_primaries(rgb, _REC709_TO_REC2020) * _SDR_WHITE_NITS
+        elif source == "HDR ACEScct":
+            low = (rgb - _ACESCCT_OFFSET) / _ACESCCT_SLOPE
+            high = torch.exp2(rgb * _ACESCCT_LOG_SCALE - _ACESCCT_LOG_OFFSET)
+            rgb = torch.where(rgb > _ACESCCT_LOG_CUT, high, low)
+            rgb = _convert_rgb_primaries(rgb, _ACESCG_TO_REC2020) * _SDR_WHITE_NITS
         elif source == "HDR":
             rgb = hlg_to_linear(rgb)
             luminance = _rgb_luminance(rgb, _REC2020_LUMA).clamp_min(0.0)
@@ -1151,6 +1184,16 @@ class ImageColorSpace(IO.ComfyNode):
 
         if destination == "linear":
             rgb = _convert_rgb_primaries(rgb / _SDR_WHITE_NITS, _REC2020_TO_REC709)
+        elif destination == "HDR LogC3":
+            rgb = _convert_rgb_primaries(rgb / _SDR_WHITE_NITS, _REC2020_TO_REC709).clamp_min(0.0)
+            low = _LOGC3_E * rgb + _LOGC3_F
+            high = _LOGC3_C * torch.log10(_LOGC3_A * rgb + _LOGC3_B) + _LOGC3_D
+            rgb = torch.where(rgb >= _LOGC3_CUT, high, low).clamp(0.0, 1.0)
+        elif destination == "HDR ACEScct":
+            rgb = _convert_rgb_primaries(rgb / _SDR_WHITE_NITS, _REC2020_TO_ACESCG)
+            low = _ACESCCT_SLOPE * rgb + _ACESCCT_OFFSET
+            high = (torch.log2(rgb.clamp_min(_ACESCCT_CUT)) + _ACESCCT_LOG_OFFSET) / _ACESCCT_LOG_SCALE
+            rgb = torch.where(rgb > _ACESCCT_CUT, high, low)
         elif destination == "sRGB":
             rgb = _convert_rgb_primaries(rgb / _SDR_WHITE_NITS, _REC2020_TO_REC709)
             rgb = _tone_map_luminance(rgb, _REC709_LUMA)
