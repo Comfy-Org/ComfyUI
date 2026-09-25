@@ -614,8 +614,9 @@ class InflatedCausalConv3d(ops.Conv3d):
     # under this many elements (2 GiB of fp16), which is one call at 1080p and two at 1440p.
     _CK_MAX_VIEW_ELEMENTS = 2 ** 30
 
-    # _ck_taps runs each halo tap in this many bands of output rows, so a tap's own output is that
-    # fraction of a frame (cuDNN cannot accumulate into the conv's output)
+    # _ck_taps runs each halo tap in this many bands of output rows: on cuDNN, which cannot accumulate
+    # into the conv's output, a tap's own output is then that fraction of a frame; the kitchen conv
+    # accumulates in place, and the bands keep its views under the 32-bit offsets
     _TAP_BANDS = 4
 
     def _ck_buffered(self, like, x_shape, memory_state, memory_cache, write_body, residual=None, pad=None):
@@ -691,8 +692,10 @@ class InflatedCausalConv3d(ops.Conv3d):
     def _ck_taps(self, like, x_shape, memory_state, memory_cache, write_body, residual, has_memory):
         """A one-frame chunk against its two-frame halo as three single-frame convs summed into the
         output: the 3-frame buffer was the tail's peak (1.5 GiB lower floor at 1080p). The halo taps
-        run on cuDNN straight from the unpacked frames, its padding in place of a buffer. Without a
-        cache the halo is the frame itself, so the taps sum first."""
+        run straight from the unpacked frames, their padding in place of a buffer; with fp16
+        accumulation the kitchen conv adds each tap, and the residual, into the output in its
+        epilogue (1.7x over cuDNN plus an add). Without a cache the halo is the frame itself, so the
+        taps sum first."""
         b, c, _, h, w = x_shape
         _, ph, pw = self.padding
         buf = torch.empty((b, c, 1, h + 2 * ph, w + 2 * pw), dtype=like.dtype, device=like.device, memory_format=_CL)
@@ -703,8 +706,13 @@ class InflatedCausalConv3d(ops.Conv3d):
         try:
             tap = weight[:, :, 2:] if has_memory else weight.sum(dim=2, keepdim=True)
             tap = tap.contiguous(memory_format=_CL)
-            if _fp16_accumulate_wanted(buf):
-                out = comfy_kitchen.fp16_conv3d(buf, tap, bias)
+            fp16_acc = _fp16_accumulate_wanted(buf)
+            if fp16_acc:
+                fused = (residual is not None and residual.shape == (b, weight.size(0), 1, h, w)
+                         and residual.dtype == buf.dtype and _ndhwc_like(residual))
+                out = comfy_kitchen.fp16_conv3d(buf, tap, bias, residual=residual if fused else None)
+                if fused:
+                    residual = None
             else:
                 out = F.conv3d(buf, tap, bias)
             if memory_state in (MemoryState.INITIALIZING, MemoryState.ACTIVE):
@@ -718,7 +726,11 @@ class InflatedCausalConv3d(ops.Conv3d):
                     tap_i = weight[:, :, i:i + 1].contiguous(memory_format=_CL)
                     for r0 in range(0, out.size(3), rows):
                         r1 = min(out.size(3), r0 + rows)
-                        out[:, :, :, r0:r1].add_(F.conv3d(frame[:, :, :, r0:r1 + 2 * ph], tap_i))
+                        band, x = out[:, :, :, r0:r1], frame[:, :, :, r0:r1 + 2 * ph]
+                        if fp16_acc:
+                            comfy_kitchen.fp16_conv3d(x, tap_i, residual=band, out=band)
+                        else:
+                            band.add_(F.conv3d(x, tap_i))
                 memory_cache.for_each_frame(self, halo_tap, count=2)
                 memory_cache.keep_last(self, 2)
         finally:
