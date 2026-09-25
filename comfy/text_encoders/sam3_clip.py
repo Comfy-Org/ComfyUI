@@ -51,7 +51,12 @@ class SAM3TokenizerWrapper(sd1_clip.SD1Tokenizer):
     def tokenize_with_weights(self, text: str, return_word_ids=False, **kwargs):
         parsed = _parse_prompts(text)
         if len(parsed) <= 1 and (not parsed or parsed[0][1] == 1):
-            return super().tokenize_with_weights(text, return_word_ids, **kwargs)
+            # Forward the PARSED phrase, not the raw text: this branch is taken
+            # for `foo` and for `foo:1`, and the raw form still carries the
+            # `:1` suffix, so the encoder grounded on "person:1" instead of
+            # "person". Falls back to `text` when nothing parsed (empty prompt).
+            single = parsed[0][0] if parsed else text
+            return super().tokenize_with_weights(single, return_word_ids, **kwargs)
         # Tokenize each prompt part separately, store per-part batches and metadata
         inner = getattr(self, self.clip)
         per_prompt = []
