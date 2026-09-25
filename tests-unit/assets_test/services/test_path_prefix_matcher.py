@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from app.assets.scanner_changes import path_prefix_matcher
+from app.assets.helpers import path_prefix_matcher
 
 from .path_prefix_cases import prefix_case_paths
 
@@ -22,3 +22,8 @@ def test_matches_path_is_relative_to(tmp_path):
 
 def test_no_prefixes_matches_nothing(tmp_path):
     assert path_prefix_matcher([])(str(tmp_path)) is False
+
+
+def test_filesystem_root_contains_everything(tmp_path):
+    path = os.path.abspath(str(tmp_path))
+    assert path_prefix_matcher([Path(path).anchor])(path) is True

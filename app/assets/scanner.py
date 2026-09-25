@@ -27,14 +27,13 @@ from app.assets.database.queries import (
     create_record,
 )
 from app.assets.database.models import Asset, AssetContent
-from app.assets.helpers import sql_path_under_prefix, to_stored_hash
+from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix, to_stored_hash
 from app.assets.lifecycle import get_excluded_scan_roots
 from app.assets.scanner_changes import (
     clear_pending_verifications,
     detect_content_change,
     drain_pending_verifications,
     live_contents_under_prefixes,
-    path_prefix_matcher,
     pending_recovery_count,
     recover_missing_content,
 )

@@ -1,10 +1,12 @@
 """Small conversions the asset system needs in more than one layer: canonical
-stored-hash strings, UTC timestamps, tag normalization, and a SQL predicate for
-path containment. That predicate is deliberately case-sensitive and
-component-bounded, because callers use it to choose rows for hard deletion.
+stored-hash strings, UTC timestamps, tag normalization, and path containment
+checks. The SQL predicate is deliberately case-sensitive and component-bounded,
+because callers use it to choose rows for hard deletion; the Python matcher
+follows ``Path.is_relative_to`` instead, including its platform case rules.
 """
 
 import os
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 
 import sqlalchemy as sa
@@ -40,6 +42,30 @@ def sql_path_under_prefix(
         column == base,
         sa.func.substr(column, 1, len(stem)) == stem,
     )
+
+
+def path_prefix_matcher(prefixes: Iterable[str]) -> Callable[[str], bool]:
+    """Return ``path -> Path(path).is_relative_to(<any prefix>)``, with the prefixes
+    normalized once.
+
+    The startup prune tests every catalogued row against every owned prefix, and
+    ``Path.is_relative_to`` walks the path's parents on each call, so a pathlib
+    check there costs rows x prefixes x depth. A normcase'd, separator-bounded
+    string prefix keeps its component bounds and platform case rules.
+    """
+    exact: set[str] = set()
+    stems: list[str] = []
+    for prefix in prefixes:
+        base = os.path.normcase(os.path.abspath(prefix))
+        exact.add(base)
+        stems.append(base if base.endswith(os.sep) else base + os.sep)
+    stem_tuple = tuple(stems)
+
+    def matches(path: str) -> bool:
+        candidate = os.path.normcase(os.path.abspath(path))
+        return candidate in exact or candidate.startswith(stem_tuple)
+
+    return matches
 
 
 def escape_sql_like_string(s: str, escape: str = "!") -> tuple[str, str]:

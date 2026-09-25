@@ -8,7 +8,6 @@ so a restored file can never leave two live rows describing one location.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable
 from typing import Literal
 
 import sqlalchemy as sa
@@ -21,7 +20,7 @@ from app.assets.database.queries.records import (
     mark_content_missing,
     unset_content_missing,
 )
-from app.assets.helpers import sql_path_under_prefix, to_stored_hash
+from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix, to_stored_hash
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 from app.assets.services.snapshot_hash import snapshot_hash
 
@@ -105,30 +104,6 @@ def recover_missing_content(
     candidate.size_bytes = verified_stat.st_size
     candidate.mtime_ns = verified_stat.st_mtime_ns
     return "recovered"
-
-
-def path_prefix_matcher(prefixes: Iterable[str]) -> Callable[[str], bool]:
-    """Return ``path -> Path(path).is_relative_to(<any prefix>)``, with the prefixes
-    normalized once.
-
-    The startup prune tests every catalogued row against every owned prefix, and
-    ``Path.is_relative_to`` walks the path's parents on each call, so a pathlib
-    check there costs rows x prefixes x depth. A normcase'd, separator-bounded
-    string prefix keeps its component bounds and platform case rules.
-    """
-    exact: set[str] = set()
-    stems: list[str] = []
-    for prefix in prefixes:
-        base = os.path.normcase(os.path.abspath(prefix))
-        exact.add(base)
-        stems.append(base if base.endswith(os.sep) else base + os.sep)
-    stem_tuple = tuple(stems)
-
-    def matches(path: str) -> bool:
-        candidate = os.path.normcase(os.path.abspath(path))
-        return candidate in exact or candidate.startswith(stem_tuple)
-
-    return matches
 
 
 def is_path_under_prefixes(path: str, prefixes: list[str]) -> bool:
