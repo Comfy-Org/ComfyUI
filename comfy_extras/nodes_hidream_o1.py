@@ -200,9 +200,8 @@ class HiDreamO1PatchSeamSmoothing(io.ComfyNode):
 
         m = model.clone()
         model_sampling = m.get_model_object("model_sampling")
-        multiplier = float(model_sampling.multiplier)
-        start_t = float(model_sampling.percent_to_sigma(start_percent)) * multiplier
-        end_t = float(model_sampling.percent_to_sigma(end_percent)) * multiplier
+        start_t = model_sampling.timestep(torch.tensor(model_sampling.percent_to_sigma(start_percent))).item()
+        end_t = model_sampling.timestep(torch.tensor(model_sampling.percent_to_sigma(end_percent))).item()
 
         edge_ramp_cache: dict = {}
 
@@ -226,7 +225,7 @@ class HiDreamO1PatchSeamSmoothing(io.ComfyNode):
             x = args[0]
             t = float(args[1][0])
             pred = executor(*args, **kwargs)
-            if not (end_t <= t <= start_t):
+            if not (end_t < t <= start_t):
                 return pred
             # Pick shift-level by sigma phase across the gated range.
             if len(shift_levels) == 1:
