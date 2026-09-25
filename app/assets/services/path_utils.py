@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Literal
 
 import folder_paths
-from app.assets.helpers import path_prefix_matcher
+from app.assets.helpers import cached_prefix_matcher
 
 
 _NON_MODEL_FOLDER_NAMES = frozenset({"configs", "custom_nodes"})
@@ -262,14 +262,14 @@ def get_backend_system_tags_from_path(path: str) -> list[str]:
         ("output", folder_paths.get_output_directory()),
         ("temp", folder_paths.get_temp_directory()),
     ):
-        if path_prefix_matcher([base])(fp_abs):
+        if cached_prefix_matcher((base,))(fp_abs):
             _add(role)
 
     ext = os.path.splitext(fp_abs)[1].lower()
     model_types: list[str] = []
     under_models_base = False
     for folder_name, bases, extensions in get_comfy_models_folders():
-        if path_prefix_matcher(bases)(fp_abs):
+        if cached_prefix_matcher(tuple(bases))(fp_abs):
             under_models_base = True
             # Empty set accepts any extension, matching
             # folder_paths.filter_files_extensions semantics.
@@ -304,7 +304,7 @@ def get_known_input_subfolder_tags_from_path(path: str) -> list[str]:
     """
     fp_abs = os.path.abspath(path)
     input_base = os.path.abspath(folder_paths.get_input_directory())
-    if not path_prefix_matcher([input_base])(fp_abs):
+    if not cached_prefix_matcher((input_base,))(fp_abs):
         return []
 
     rel = os.path.relpath(fp_abs, input_base)

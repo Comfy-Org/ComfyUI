@@ -5,6 +5,7 @@ because callers use it to choose rows for hard deletion; the Python matcher
 follows ``Path.is_relative_to`` instead, including its platform case rules.
 """
 
+import functools
 import os
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
@@ -53,19 +54,42 @@ def path_prefix_matcher(prefixes: Iterable[str]) -> Callable[[str], bool]:
     check there costs rows x prefixes x depth. A normcase'd, separator-bounded
     string prefix keeps its component bounds and platform case rules.
     """
-    exact: set[str] = set()
-    stems: list[str] = []
+    # abspath keeps exactly two leading separators, and pathlib treats that "//" as an
+    # anchor of its own: "//server/f" is not under "/". Such paths are only matched
+    # against prefixes with the same anchor.
+    double = os.sep * 2
+    exact: dict[bool, set[str]] = {False: set(), True: set()}
+    stems: dict[bool, list[str]] = {False: [], True: []}
     for prefix in prefixes:
         base = os.path.normcase(os.path.abspath(prefix))
-        exact.add(base)
-        stems.append(base if base.endswith(os.sep) else base + os.sep)
-    stem_tuple = tuple(stems)
+        is_double = base.startswith(double)
+        exact[is_double].add(base)
+        stems[is_double].append(base if base.endswith(os.sep) else base + os.sep)
+    stem_tuples = {key: tuple(value) for key, value in stems.items()}
 
     def matches(path: str) -> bool:
         candidate = os.path.normcase(os.path.abspath(path))
-        return candidate in exact or candidate.startswith(stem_tuple)
+        is_double = candidate.startswith(double)
+        return candidate in exact[is_double] or candidate.startswith(stem_tuples[is_double])
 
     return matches
+
+
+@functools.lru_cache(maxsize=None)
+def cached_prefix_matcher(prefixes: tuple[str, ...]) -> Callable[[str], bool]:
+    """path_prefix_matcher, built once per distinct prefix tuple, for callers that check
+    every scanned file against the same folders.
+
+    Keyed on the raw prefixes: normalizing them in the key would bring back the per-call
+    cost this avoids. A folder-config change is just a new key.
+
+    Precondition: the prefixes are absolute. That is not checked. main.py and
+    extra_model_paths make their folders absolute, but folder_paths' setters and
+    add_model_folder_path store whatever they are given, so a custom node can register a
+    relative one. A relative prefix is resolved against the working directory once, on
+    first use, and that resolution is then frozen for as long as the key is unchanged.
+    """
+    return path_prefix_matcher(prefixes)
 
 
 def escape_sql_like_string(s: str, escape: str = "!") -> tuple[str, str]:
