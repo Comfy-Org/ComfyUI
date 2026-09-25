@@ -23,6 +23,7 @@ _BASE = os.path.join(tempfile.gettempdir(), "asset-enrichment-test-base")
 class _ArgsStub:
     enable_assets = False
     enable_asset_hashing = False
+    enable_assets_output_scan = True
 
 
 class _Server:

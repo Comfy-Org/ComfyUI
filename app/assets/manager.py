@@ -69,6 +69,7 @@ class AssetManager(Protocol):
 class _ArgsLike(Protocol):
     enable_assets: bool
     enable_asset_hashing: bool
+    enable_assets_output_scan: bool
 
 
 def _shutdown_assets() -> None:
@@ -157,13 +158,13 @@ class AssetsEnabled:
         register_assets_routes(app, user_manager)
 
     def ensure_scan_started(self) -> None:
-        asset_seeder.start(roots=("models", "input", "output"))
+        asset_seeder.start(roots=mode.scannable_roots(("models", "input", "output")))
 
     def pause_background_scan(self) -> None:
         asset_seeder.pause()
 
     def queue_output_scan(self) -> None:
-        if not asset_seeder.is_disabled():
+        if not asset_seeder.is_disabled() and mode.output_scan_enabled():
             # FULL, not ENRICH: only a walk finds outputs a node never declared. Do not downgrade without re-weighing the cost.
             asset_seeder.enqueue_scan(
                 roots=("output",),
