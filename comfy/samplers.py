@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import comfy.model_management
+import comfy.model_sampling
 from .k_diffusion import sampling as k_diffusion_sampling
 from .extra_samplers import uni_pc
 from typing import TYPE_CHECKING, Callable, NamedTuple, Any
@@ -1414,7 +1415,7 @@ class KSampler:
         self.denoise = denoise
         self.model_options = model_options
 
-    def calculate_sigmas(self, steps):
+    def calculate_sigmas(self, steps, latent_image=None):
         sigmas = None
 
         discard_penultimate_sigma = False
@@ -1422,26 +1423,42 @@ class KSampler:
             steps += 1
             discard_penultimate_sigma = True
 
-        sigmas = calculate_sigmas(self.model.get_model_object("model_sampling"), self.scheduler, steps)
+        model_sampling = self.model.get_model_object("model_sampling")
+        resolved_sampling = model_sampling
+        if latent_image is not None and isinstance(
+            model_sampling, comfy.model_sampling.ModelSamplingFlux
+        ):
+            resolved_sampling = model_sampling.for_latent_image(latent_image)
+
+        sigmas = calculate_sigmas(resolved_sampling, self.scheduler, steps)
+        if resolved_sampling is not model_sampling:
+            sigmas = resolved_sampling.stretch_sigmas(sigmas)
 
         if discard_penultimate_sigma:
             sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
         return sigmas
 
-    def set_steps(self, steps, denoise=None):
+    def set_steps(self, steps, denoise=None, latent_image=None):
         self.steps = steps
         if denoise is None or denoise > 0.9999:
-            self.sigmas = self.calculate_sigmas(steps).to(self.device)
+            self.sigmas = self.calculate_sigmas(steps, latent_image).to(self.device)
         else:
             if denoise <= 0.0:
                 self.sigmas = torch.FloatTensor([])
             else:
                 new_steps = int(steps/denoise)
-                sigmas = self.calculate_sigmas(new_steps).to(self.device)
+                sigmas = self.calculate_sigmas(new_steps, latent_image).to(self.device)
                 self.sigmas = sigmas[-(steps + 1):]
 
     def sample(self, noise, positive, negative, cfg, latent_image=None, start_step=None, last_step=None, force_full_denoise=False, denoise_mask=None, sigmas=None, callback=None, disable_pbar=False, seed=None):
         if sigmas is None:
+            model_sampling = self.model.get_model_object("model_sampling")
+            if (
+                latent_image is not None
+                and isinstance(model_sampling, comfy.model_sampling.ModelSamplingFlux)
+                and model_sampling.dynamic_shift is not None
+            ):
+                self.set_steps(self.steps, self.denoise, latent_image)
             sigmas = self.sigmas
 
         if last_step is not None and last_step < (len(sigmas) - 1):

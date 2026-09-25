@@ -416,17 +416,53 @@ def flux_time_shift(mu: float, sigma: float, t):
 class ModelSamplingFlux(torch.nn.Module):
     def __init__(self, model_config=None):
         super().__init__()
+        self.model_config = model_config
         if model_config is not None:
             sampling_settings = model_config.sampling_settings
         else:
             sampling_settings = {}
 
+        self.dynamic_shift = sampling_settings.get("dynamic_shift")
+        self.shift_terminal = sampling_settings.get("shift_terminal")
         self.set_parameters(shift=sampling_settings.get("shift", 1.15))
 
     def set_parameters(self, shift=1.15, timesteps=10000):
         self.shift = shift
         ts = self.sigma((torch.arange(1, timesteps + 1, 1) / timesteps))
         self.register_buffer('sigmas', ts)
+
+    def for_latent_image(self, latent_image):
+        if self.dynamic_shift is None:
+            return self
+
+        settings = self.dynamic_shift
+        sequence_length = latent_image.shape[-2] * latent_image.shape[-1]
+        shift = settings["base_shift"] + (
+            settings["max_shift"] - settings["base_shift"]
+        ) * (sequence_length - settings["base_image_seq_len"]) / (
+            settings["max_image_seq_len"] - settings["base_image_seq_len"]
+        )
+
+        sampling = type(self)(self.model_config)
+        sampling.dynamic_shift = None
+        sampling.set_parameters(shift=shift)
+        return sampling
+
+    def stretch_sigmas(self, sigmas):
+        if self.shift_terminal is None:
+            return sigmas
+
+        has_terminal_zero = sigmas[-1].item() == 0.0
+        inference_sigmas = sigmas[:-1] if has_terminal_zero else sigmas
+        if inference_sigmas.numel() <= 1:
+            # A single point cannot preserve both endpoints while stretching.
+            return sigmas
+
+        scale_factor = (1 - inference_sigmas[-1]) / (1 - self.shift_terminal)
+        stretched_sigmas = 1 - ((1 - inference_sigmas) / scale_factor)
+        if has_terminal_zero:
+            return torch.cat((stretched_sigmas, sigmas[-1:]))
+        return stretched_sigmas
 
     @property
     def sigma_min(self):
