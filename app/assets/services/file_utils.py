@@ -49,7 +49,8 @@ def list_files_recursively(
 
     What cannot be read is left out of the listing. ``on_error`` hears about it as
     ``("walk_root", exc)`` when ``base_dir`` itself cannot be stat'ed or listed, such
-    as an unmounted share, and ``("walk_dir", exc)`` for a directory below it.
+    as an unmounted share, or is not a directory, and ``("walk_dir", exc)`` for a
+    directory below it.
     """
     out: list[str] = []
     base_abs = os.path.abspath(base_dir)
@@ -59,6 +60,8 @@ def list_files_recursively(
                 os.stat(base_abs)
             except OSError as exc:
                 on_error("walk_root", exc)
+            else:
+                on_error("walk_root", NotADirectoryError())
         return out
 
     def report_dir_error(exc: OSError) -> None:

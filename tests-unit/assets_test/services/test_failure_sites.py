@@ -19,6 +19,7 @@ from app.assets import seeder as seeder_module
 from app.assets.database.models import Asset
 from app.assets.database.queries import create_record
 from app.assets.event_log import TAG
+from app.assets.failures import classify_failure
 from app.assets.scanner import SeedAssetSpec
 from app.assets.scanner_admission import _WATCH_LIST, _WatchEntry, tick_watch_list
 from app.assets.seeder import _emit_failure_buckets, _ScanState
@@ -179,6 +180,24 @@ def test_references_under_an_unreachable_root_are_not_marked_missing(
     assert buckets(progress) == {("walk_root", "vanished"): 1}
 
 
+def test_references_under_a_root_that_is_a_file_are_not_marked_missing(
+    temp_dir: Path, monkeypatch, caplog
+):
+    not_a_dir = temp_dir / "models-is-a-file"
+    not_a_dir.write_bytes(b"x")
+
+    progress, observations = observe_real_references(monkeypatch, not_a_dir, "models", caplog)
+
+    assert observations == []
+    [event] = events(caplog, "scanner.root_unreachable")
+    assert (event["root"], event["reason"], event["exc_class"]) == (
+        "models",
+        "other",
+        "NotADirectoryError",
+    )
+    assert buckets(progress) == {("walk_root", "other"): 1}
+
+
 def test_deleted_files_under_a_reachable_root_are_still_marked_missing(
     temp_dir: Path, monkeypatch, caplog
 ):
@@ -299,13 +318,17 @@ def test_an_unreachable_root_is_reported_instead_of_listing_nothing_silently(tem
     assert heard == [("walk_root", FileNotFoundError)]
 
 
-def test_a_root_that_is_a_file_lists_nothing_without_an_error(temp_dir: Path):
+def test_a_root_that_is_a_file_is_reported_rather_than_listed_as_empty(temp_dir: Path):
     not_a_dir = temp_dir / "file.bin"
     not_a_dir.write_bytes(b"x")
-    heard: list[str] = []
+    heard: list[tuple[str, type[OSError]]] = []
 
-    assert list_files_recursively(str(not_a_dir), lambda site, _exc: heard.append(site)) == []
-    assert heard == []
+    listed = list_files_recursively(
+        str(not_a_dir), lambda site, exc: heard.append((site, type(exc)))
+    )
+
+    assert listed == []
+    assert heard == [("walk_root", NotADirectoryError)]
 
 
 @pytest.mark.skipif(
@@ -376,6 +399,24 @@ def test_a_corrupt_safetensors_header_is_reported_rather_than_read_as_no_header(
     extract_file_metadata(str(path), on_error=heard.append)
 
     assert [type(exc).__name__ for exc in heard] == ["JSONDecodeError"]
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        pytest.param(b"\x05\x00", "corrupt", id="truncated-before-the-length"),
+        pytest.param(struct.pack("<Q", 64) + b"{", "corrupt", id="truncated-inside-the-header"),
+        pytest.param(struct.pack("<Q", 2**40), "too_large", id="length-over-the-limit"),
+    ],
+)
+def test_a_structurally_broken_header_is_reported(temp_dir: Path, content: bytes, reason: str):
+    path = temp_dir / "partial.safetensors"
+    path.write_bytes(content)
+    heard: list[BaseException] = []
+
+    extract_file_metadata(str(path), on_error=heard.append)
+
+    assert [classify_failure(exc).reason for exc in heard] == [reason]
 
 
 def test_an_unreadable_image_is_reported(temp_dir: Path):

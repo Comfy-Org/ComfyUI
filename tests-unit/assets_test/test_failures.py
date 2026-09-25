@@ -7,6 +7,7 @@ import logging
 import os
 import sqlite3
 import struct
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -102,6 +103,8 @@ def raise_from(module: ModuleType, function: str = "fail") -> BaseException:
         (UnicodeEncodeError("utf-8", "\udcff", 0, 1, "surrogates"), ("encoding", "none", -1)),
         (json.JSONDecodeError("bad", "{", 0), ("corrupt", "none", -1)),
         (struct.error("short"), ("corrupt", "none", -1)),
+        (EOFError(), ("corrupt", "none", -1)),
+        (OverflowError(), ("too_large", "none", -1)),
         (ModuleNotFoundError("blake3"), ("dependency_missing", "none", -1)),
         (ValueError("anything"), ("other", "none", -1)),
     ],
@@ -151,6 +154,9 @@ def test_a_cause_is_classified_when_the_raised_exception_is_not():
         )
 
 
+@pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="sqlite3 exposes sqlite_errorcode from Python 3.11"
+)
 def test_a_sqlite_error_is_classified_by_its_error_code(tmp_path: Path):
     not_a_database = tmp_path / "garbage.sqlite3"
     not_a_database.write_bytes(b"x" * 4096)

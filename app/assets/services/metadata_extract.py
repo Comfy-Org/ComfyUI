@@ -197,15 +197,17 @@ def _read_safetensors_header(
         with open(path, "rb") as f:
             header_bytes = f.read(8)
             if len(header_bytes) < 8:
-                return None
+                raise EOFError()  # truncated before the header length
             length_of_header = struct.unpack("<Q", header_bytes)[0]
             if length_of_header > max_size:
-                return None
+                raise OverflowError()
             header_data = f.read(length_of_header)
             if len(header_data) < length_of_header:
-                return None
+                raise EOFError()  # truncated inside the header, e.g. a partial download
             return json.loads(header_data.decode("utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError, struct.error) as exc:
+    except (
+        OSError, EOFError, OverflowError, json.JSONDecodeError, UnicodeDecodeError, struct.error
+    ) as exc:
         if on_error is not None:
             on_error(exc)
         return None

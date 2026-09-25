@@ -191,8 +191,10 @@ def _class_reason(exc: BaseException) -> str | None:
         return "unsupported_format"
     if isinstance(exc, MemoryError):
         return "oom"
-    if isinstance(exc, (json.JSONDecodeError, struct.error)):
+    if isinstance(exc, (json.JSONDecodeError, struct.error, EOFError)):
         return "corrupt"
+    if isinstance(exc, OverflowError):
+        return "too_large"
     if isinstance(exc, UnicodeError):
         return "encoding"
     if isinstance(exc, ImportError):
@@ -234,7 +236,8 @@ def classify_failure(exc: BaseException) -> Classification:
     driver error it wraps. When nothing matches, the reason is ``other`` and the
     raw errno and winerror of the raised exception are kept, so an unmapped code
     is still visible. This never raises: scan code branches on the result, and a
-    telemetry bug must not break a scan.
+    telemetry bug must not break a scan. The sqlite error code needs Python 3.11;
+    before that, database errors other than constraint violations read as ``other``.
     """
     try:
         return _classify(exc)

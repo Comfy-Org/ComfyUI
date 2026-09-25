@@ -10,6 +10,7 @@ so the rows it never reached are selected again when the scan resumes.
 
 import logging
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, NamedTuple, Protocol, TypedDict
@@ -215,7 +216,11 @@ def observe_references_on_filesystem(
         prefix = max(owners, key=len)
         if prefix not in root_failures:
             try:
-                os.stat(prefix, follow_symlinks=True)
+                if not stat.S_ISDIR(os.stat(prefix, follow_symlinks=True).st_mode):
+                    # A file where the root should be is no more a library than a gap is.
+                    # "from None": this runs while handling the row's own error, which
+                    # must not become the root failure's cause.
+                    raise NotADirectoryError() from None
                 root_failures[prefix] = None
             except OSError as exc:
                 root_failures[prefix] = exc
