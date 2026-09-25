@@ -400,11 +400,20 @@ class UserManager():
             try:
                 body = await request.read()
 
+                if path.lower().endswith('.json'):
+                    try:
+                        json_data = json.loads(body.decode('utf-8'))
+                        formatted_body = json.dumps(json_data, indent=2).encode('utf-8')
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        formatted_body = body
+                else:
+                    formatted_body = body
+
                 dir_name = os.path.dirname(path)
                 fd, tmp_path = tempfile.mkstemp(dir=dir_name)
                 try:
                     with os.fdopen(fd, "wb") as f:
-                        f.write(body)
+                        f.write(formatted_body)
                     os.replace(tmp_path, path)
                 except:
                     os.unlink(tmp_path)
