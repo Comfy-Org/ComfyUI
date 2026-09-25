@@ -27,19 +27,23 @@ import re
 
 import aiohttp
 
-# Xiaomi's own OpenAI-compatible endpoint. Both model ids come from the same
-# API; mimo-v2.5 is the omnimodal build (text/image/audio/video) and
-# mimo-v2.5-pro is the larger, stronger reasoning build.
+# Xiaomi's own OpenAI-compatible endpoint. Every model id comes from the same
+# API. mimo-v2.6-flash (released 2026-09-22) is omnimodal
+# (text/image/audio/video), costs the same as mimo-v2.5, and Xiaomi rates it
+# above mimo-v2.5-pro, so it writes every prompt by default. mimo-v2.6-pro is the
+# larger build at ~3x the price. The V2.5 ids stay selectable.
 DEFAULT_BASE_URL = "https://api.xiaomimimo.com/v1"
-MODEL_PRO = "mimo-v2.5-pro"
-MODEL_OMNI = "mimo-v2.5"
+MODEL_FLASH = "mimo-v2.6-flash"
+MODEL_PRO = "mimo-v2.6-pro"
+MODEL_V25 = "mimo-v2.5"
+MODEL_V25_PRO = "mimo-v2.5-pro"
 MODEL_AUTO = "auto"
-MODEL_OPTIONS = (MODEL_AUTO, MODEL_PRO, MODEL_OMNI)
+MODEL_OPTIONS = (MODEL_AUTO, MODEL_FLASH, MODEL_PRO, MODEL_V25, MODEL_V25_PRO)
 # Confirmed against the live API: sending an image to mimo-v2.5-pro fails with
 # HTTP 404 {"message": "No endpoints found that support image input"} -- it is
-# not ignored, the whole request is rejected. mimo-v2.5 accepts images. This is
-# why MODEL_AUTO routes anything carrying an image to the omnimodal build.
-TEXT_ONLY_MODELS = frozenset({MODEL_PRO})
+# not ignored, the whole request is rejected. mimo-v2.5 and both V2.6 models
+# read images (checked 2026-09-25).
+TEXT_ONLY_MODELS = frozenset({MODEL_V25_PRO})
 
 SKILL_DIR = os.environ.get("H3_PROMPT_SKILL_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "h3_prompt_skill")
@@ -125,18 +129,18 @@ def default_model():
     return (os.environ.get("MIMO_MODEL") or MODEL_AUTO).strip() or MODEL_AUTO
 
 
-def resolve_model(requested, has_image):
+def resolve_model(requested):
     """Pick the concrete model id for a rewrite.
 
-    ``auto`` (the default) sends image-bearing rewrites to mimo-v2.5, the
-    omnimodal build, and everything else to mimo-v2.5-pro for its stronger
-    reasoning. Picking a model explicitly always wins -- including picking the
-    pro model with an image attached, which the caller may do knowingly.
+    ``auto`` (the default) sends every rewrite to mimo-v2.6-flash, which reads
+    the context image when there is one. Picking a model explicitly always wins
+    -- including the text-only mimo-v2.5-pro with an image attached, which the
+    caller may do knowingly.
     """
     choice = (requested or "").strip() or default_model()
     if choice == MODEL_AUTO:
-        return MODEL_OMNI if has_image else MODEL_PRO
-    if choice not in (MODEL_PRO, MODEL_OMNI):
+        return MODEL_FLASH
+    if choice not in MODEL_OPTIONS:
         raise RewriteError("Invalid llm_model",
                            f"llm_model must be one of: {', '.join(MODEL_OPTIONS)}.")
     return choice
@@ -155,18 +159,18 @@ def resolve_model_and_image(requested, image, image_is_explicit):
     clear error, while the context image the wrapper adds by itself (the
     keyframe or first reference) is just dropped, since the caller only chose
     the model. Returns (model, image, note)."""
-    model = resolve_model(requested, has_image=bool(image))
+    model = resolve_model(requested)
     if not image or supports_images(model):
         return model, image, None
     if image_is_explicit:
         raise RewriteError(
             "The selected model cannot read images",
             f"llm_model={model} is text-only, and the API rejects any request carrying an image. "
-            f"Send llm_image with llm_model={MODEL_OMNI} (the omnimodal build) or drop llm_model "
+            f"Send llm_image with llm_model={MODEL_FLASH} (omnimodal) or drop llm_model "
             "to let 'auto' pick it for you, or remove llm_image to write the prompt from text "
             f"alone with {model}.")
     return model, None, (f"{model} is text-only, so the prompt was written from text alone; "
-                         f"use llm_model={MODEL_OMNI} or 'auto' to give it visual context")
+                         f"use llm_model={MODEL_FLASH} or 'auto' to give it visual context")
 
 
 def load_guide(name):
@@ -327,14 +331,15 @@ async def rewrite(*, intent, mode, duration, frames, width, height,
             "ready-made H3 prompt as 'raw_prompt' instead to skip the rewrite.")
 
     data_url = image
-    model_used = resolve_model(model, has_image=bool(data_url))
+    model_used = resolve_model(model)
     messages = build_messages(
         intent=intent, mode=mode, duration=duration, frames=frames,
         width=width, height=height, reference_counts=reference_counts or {},
         image_data_url=data_url)
 
     # max_completion_tokens, the thinking object and both auth headers below are
-    # all confirmed accepted by the live API on both models. That the endpoint
+    # all confirmed accepted by the live API on both V2.5 models and on
+    # mimo-v2.6-flash. That the endpoint
     # *honours* thinking:disabled is inferred from latency and output shape
     # rather than observed -- the response does not report it back.
     payload = {

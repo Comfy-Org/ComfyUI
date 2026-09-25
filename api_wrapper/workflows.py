@@ -626,11 +626,10 @@ MINIMAX_H3_PROMPT_FORM_EXTRA = {
                                  "visual grounding for free. Ignored when 'raw_prompt' is set."},
     "llm_model": {"type": "string", "enum": list(MINIMAX_H3_LLM_MODELS), "default": "auto",
                   "description": "Which Xiaomi MiMo model writes the H3 prompt. Leave it on 'auto' "
-                                 "unless you have a reason not to: mimo-v2.5-pro is text-only and the "
-                                 "API rejects any request carrying an image, while mimo-v2.5 is the "
-                                 "omnimodal build that can see one. 'auto' picks mimo-v2.5 whenever "
-                                 "there is a context image and mimo-v2.5-pro otherwise, for its "
-                                 "stronger reasoning. Pinning mimo-v2.5-pro together with an uploaded "
+                                 "unless you have a reason not to: it picks mimo-v2.6-flash, which "
+                                 "reads the context image when there is one. mimo-v2.6-pro and "
+                                 "mimo-v2.5 read images too, but mimo-v2.5-pro is text-only and the "
+                                 "API rejects any request carrying an image. Pinning mimo-v2.5-pro together with an uploaded "
                                  "llm_image is refused with a 400; the context image the wrapper adds "
                                  "on its own (your keyframe or first reference) is instead skipped, "
                                  "and the response says so. Requires MIMO_API_KEY on the server."},
