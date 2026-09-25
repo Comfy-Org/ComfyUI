@@ -1138,7 +1138,7 @@ class ImageColorSpace(IO.ComfyNode):
             node_id="ImageColorSpace",
             display_name="Convert Image Color Space",
             category="image/color",
-            description="Convert sRGB, linear Rec.709, HDR (Rec.2020 HLG), HDR PQ (Rec.2020 PQ), HDR LogC3, and HDR ACEScct. LogC3 uses the EI 800 curve with Rec.709 primaries and codes clamped to [0, 1]. ACEScct uses AP1 primaries and D60 white, with Bradford adaptation to D65. Convert LogC3 or ACEScct to linear for EXR saving. Linear 1.0 uses the same 203-nit reference white as sRGB; HLG uses a 1000-nit reference display. Linear and ACEScct outputs and linear-to-HDR conversions preserve extended values without tone mapping. SDR output and PQ-to-HLG conversion tone-map excess luminance across the batch and compress out-of-gamut colors. Conversions compute in float32 and return the intermediate device and dtype. Straight alpha is not color-transformed.",
+            description="Convert sRGB, linear Rec.709, HDR (Rec.2020 HLG), HDR PQ (Rec.2020 PQ), HDR LogC3, and HDR ACEScct. LogC3 uses the EI 800 curve with Rec.709 primaries and codes clamped to [0, 1]. ACEScct uses AP1 primaries and D60 white, with Bradford adaptation to D65. Convert LogC3 or ACEScct to linear for EXR saving. Linear 1.0 uses the same 203-nit reference white as sRGB; HLG uses a 1000-nit reference display. Linear and ACEScct outputs preserve extended values. Linear-to-HDR conversions preserve highlights without tone mapping; HLG and PQ outputs clip negative channels. SDR output and PQ-to-HLG conversion tone-map excess luminance across the batch and compress out-of-gamut colors. Conversions compute in float32 and return the intermediate device and dtype. Straight alpha is not color-transformed.",
             inputs=[
                 IO.Image.Input("image"),
                 IO.Combo.Input("source", options=spaces, default="sRGB", tooltip="Color space of the input pixels."),
@@ -1200,7 +1200,8 @@ class ImageColorSpace(IO.ComfyNode):
             rgb = _compress_rgb_gamut(rgb, _REC709_LUMA)
             rgb = torch.where(rgb <= 0.0031308, rgb * 12.92, 1.055 * rgb.pow(1.0 / 2.4) - 0.055)
         elif destination == "HDR":
-            rgb = rgb / _HLG_PEAK_NITS
+            # Clip negative channels before luminance to avoid amplifying out-of-gamut shadows.
+            rgb = (rgb / _HLG_PEAK_NITS).clamp_min(0.0)
             if source == "HDR PQ":
                 rgb = _tone_map_luminance(rgb, _REC2020_LUMA)
             luminance = _rgb_luminance(rgb, _REC2020_LUMA).clamp_min(torch.finfo(rgb.dtype).tiny)
