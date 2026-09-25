@@ -249,6 +249,16 @@ def is_valid_directory(path: str) -> str:
         raise argparse.ArgumentTypeError(f"You do not have read permissions for '{path}'.")
     return path
 
+
+def parse_bool(value: str) -> bool:
+    lowered = value.strip().lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    raise argparse.ArgumentTypeError(f"Expected 'true' or 'false', got '{value}'.")
+
+
 parser.add_argument(
     "--front-end-root",
     type=is_valid_directory,
@@ -274,6 +284,12 @@ database_default_path = os.path.abspath(
 parser.add_argument("--database-url", type=str, default=None, help="Specify the database URL, e.g. for an in-memory database you can use 'sqlite:///:memory:'. Defaults to 'comfyui.db' in the effective user directory.")
 parser.add_argument("--enable-assets", action="store_true", help="Enable the assets system (API routes, database synchronization, and background scanning).")
 parser.add_argument("--enable-asset-hashing", action="store_true", help="Compute blake3 content hashes when scanning assets. Hashing enables future asset-portability features (deduplication, cross-machine model resolution) but adds startup cost and per-output cost on large models directories. Off by default; enable to opt in.")
+
+# Default for --enable-assets-output-scan; true keeps output in the asset scans.
+ASSETS_OUTPUT_SCAN_DEFAULT = True
+
+parser.add_argument("--enable-assets-output-scan", type=parse_bool, default=ASSETS_OUTPUT_SCAN_DEFAULT, nargs="?", const=True, metavar="true|false", help=f"Include the output directory in asset scans, and rescan it after each prompt. When false, outputs are still registered as nodes produce them, and outputs already in the database are kept and served, but new outputs are not hashed even with --enable-asset-hashing. Only applies with --enable-assets. (default: {str(ASSETS_OUTPUT_SCAN_DEFAULT).lower()})")
+
 parser.add_argument("--feature-flag", type=str, action='append', default=[], metavar="KEY[=VALUE]", help="Set a server feature flag. Use KEY=VALUE to set an explicit value, or bare KEY to set it to true. Can be specified multiple times. Boolean values (true/false) and numbers are auto-converted. Examples: --feature-flag show_signin_button=true  or  --feature-flag show_signin_button")
 parser.add_argument("--list-feature-flags", action="store_true", help="Print the registry of known CLI-settable feature flags as JSON and exit.")
 

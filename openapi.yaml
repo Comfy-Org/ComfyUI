@@ -2416,7 +2416,7 @@ paths:
                         schema:
                             properties:
                                 roots:
-                                    description: Root folder paths to scan (if omitted, scans all)
+                                    description: Root folder paths to scan (if omitted, scans all). The output root is skipped when output scanning is disabled.
                                     items:
                                         type: string
                                     type: array
