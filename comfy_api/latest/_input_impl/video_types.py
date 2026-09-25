@@ -1143,9 +1143,14 @@ class VideoFromComponents(VideoInput):
             frame_rate = Fraction(round(self.__components.frame_rate * 1000), 1000)
             # Create a video stream
             pix_fmt = "yuv420p10le" if is_10bit else "yuv420p"
+            width = self.__components.images.shape[2]
+            height = self.__components.images.shape[1]
+            # yuv420p/yuv420p10le use 2x2 chroma subsampling, so libx264 rejects odd dimensions.
+            pad_w = width % 2
+            pad_h = height % 2
             video_stream = output.add_stream(VIDEO_ENCODERS[output_codec], rate=frame_rate)
-            video_stream.width = self.__components.images.shape[2]
-            video_stream.height = self.__components.images.shape[1]
+            video_stream.width = width + pad_w
+            video_stream.height = height + pad_h
             video_stream.pix_fmt = pix_fmt
             video_stream.options = video_encoder_options(output_codec, crf, preset)
             if color_space is not None:
@@ -1171,9 +1176,13 @@ class VideoFromComponents(VideoInput):
                 if is_10bit:
                     # 16-bit RGB keeps float precision through the conversion to 10-bit YUV.
                     img = (frame.float() * 65535).clamp(0, 65535).cpu().numpy().astype(np.uint16)  # shape: (H, W, 3)
+                    if pad_w or pad_h:
+                        img = np.pad(img, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
                     frame = av.VideoFrame.from_ndarray(img, format="rgb48le")
                 else:
                     img = (frame * 255).clamp(0, 255).byte().cpu().numpy() # shape: (H, W, 3)
+                    if pad_w or pad_h:
+                        img = np.pad(img, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
                     frame = av.VideoFrame.from_ndarray(img, format='rgb24')
                 dst_colorspace = None
                 if color_space == "sRGB":
