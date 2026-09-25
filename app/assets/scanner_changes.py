@@ -205,11 +205,8 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
 def live_contents_under_prefixes(session: Session, prefixes: list[str]) -> list[AssetContent]:
     if not prefixes:
         return []
-    return list(
-        session.scalars(
-            sa.select(AssetContent).where(
-                AssetContent.is_missing.is_(False),
-                sa.or_(*(sql_path_under_prefix(AssetContent.path, prefix) for prefix in prefixes)),
-            )
-        )
+    stmt = sa.select(AssetContent).where(
+        AssetContent.is_missing.is_(False),
+        sa.or_(*(sql_path_under_prefix(AssetContent.path, prefix) for prefix in prefixes)),
     )
+    return list(session.scalars(stmt.execution_options(yield_per=500)))
