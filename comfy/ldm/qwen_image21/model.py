@@ -169,7 +169,7 @@ def block_causal_attention(segments, transformer_options={}, cache=None, block_i
         if cache is not None:
             # K and V stacked on dim 1 so batch stays first and quantized rows are per token and head
             cache.put(block_index, torch.stack([k[:, :prefix_len], v[:, :prefix_len]], dim=1))
-        outs = [optimized_attention(q[:, start:end].flatten(2), k[:, :end].flatten(2), v[:, :end].flatten(2), heads, mask=mask, transformer_options=transformer_options, preferred_attention=preferred_attention)
+        outs = [optimized_attention(q[:, start:end].flatten(2), k[:, :end].flatten(2), v[:, :end].flatten(2), heads, mask=mask, transformer_options=transformer_options, preferred_attention=preferred_attention, causal=mask is not None)
                 for start, end, mask in segments]
         return torch.cat(outs, dim=1) if len(outs) > 1 else outs[0]
     return attn
