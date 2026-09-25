@@ -20,6 +20,7 @@ class TripleCLIPLoader(io.ComfyNode):
                 io.Combo.Input("clip_name1", options=folder_paths.get_filename_list("text_encoders")),
                 io.Combo.Input("clip_name2", options=folder_paths.get_filename_list("text_encoders")),
                 io.Combo.Input("clip_name3", options=folder_paths.get_filename_list("text_encoders")),
+                io.Combo.Input("device", options=["default", "cpu"], optional=True, advanced=True),
             ],
             outputs=[
                 io.Clip.Output(),
@@ -27,11 +28,16 @@ class TripleCLIPLoader(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, clip_name1, clip_name2, clip_name3) -> io.NodeOutput:
+    def execute(cls, clip_name1, clip_name2, clip_name3, device="default") -> io.NodeOutput:
         clip_path1 = folder_paths.get_full_path_or_raise("text_encoders", clip_name1)
         clip_path2 = folder_paths.get_full_path_or_raise("text_encoders", clip_name2)
         clip_path3 = folder_paths.get_full_path_or_raise("text_encoders", clip_name3)
-        clip = comfy.sd.load_clip(ckpt_paths=[clip_path1, clip_path2, clip_path3], embedding_directory=folder_paths.get_folder_paths("embeddings"))
+
+        model_options = {}
+        if device == "cpu":
+            model_options["load_device"] = model_options["offload_device"] = torch.device("cpu")
+
+        clip = comfy.sd.load_clip(ckpt_paths=[clip_path1, clip_path2, clip_path3], embedding_directory=folder_paths.get_folder_paths("embeddings"), model_options=model_options)
         return io.NodeOutput(clip)
 
     load_clip = execute  # TODO: remove
