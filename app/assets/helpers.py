@@ -5,6 +5,7 @@ because callers use it to choose rows for hard deletion; the Python matcher
 follows ``Path.is_relative_to`` instead, including its platform case rules.
 """
 
+import functools
 import os
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
@@ -72,6 +73,19 @@ def path_prefix_matcher(prefixes: Iterable[str]) -> Callable[[str], bool]:
         return candidate in exact[is_double] or candidate.startswith(stem_tuples[is_double])
 
     return matches
+
+
+@functools.lru_cache(maxsize=None)
+def cached_prefix_matcher(prefixes: tuple[str, ...]) -> Callable[[str], bool]:
+    """path_prefix_matcher, built once per distinct prefix tuple, for callers that check
+    every scanned file against the same folders.
+
+    Keyed on the raw prefixes: normalizing them in the key would bring back the per-call
+    cost this avoids. That is sound because the callers pass absolute paths (folder_paths
+    bases and the input, output and temp directories), and a folder-config change is just
+    a new key.
+    """
+    return path_prefix_matcher(prefixes)
 
 
 def escape_sql_like_string(s: str, escape: str = "!") -> tuple[str, str]:
