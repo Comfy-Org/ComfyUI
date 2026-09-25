@@ -2,7 +2,7 @@ import types
 
 import pytest
 
-from comfy.text_encoders.llama import BaseGenerate, Qwen3VL_32BConfig
+from comfy.text_encoders.llama import BaseGenerate, Qwen3_8BConfig, Qwen3VL_32BConfig
 
 
 def test_generate_raises_clear_error_when_config_cannot_generate():
@@ -22,4 +22,13 @@ def test_generate_proceeds_when_config_allows_generation():
     with pytest.raises(AttributeError):
         # can_generate check passes; fails later touching embeds.device, proving
         # the guard doesn't block checkpoints that support generation.
+        BaseGenerate.generate(fake_self, embeds=None)
+
+
+def test_generate_proceeds_when_config_omits_can_generate():
+    """Qwen3_8BConfig doesn't set can_generate; the getattr(..., True) fallback
+    in generate() must still let it through unaffected."""
+    fake_self = types.SimpleNamespace(model=types.SimpleNamespace(config=Qwen3_8BConfig()))
+
+    with pytest.raises(AttributeError):
         BaseGenerate.generate(fake_self, embeds=None)
