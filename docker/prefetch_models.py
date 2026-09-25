@@ -9,13 +9,14 @@ instead (a throwaway CPU pod is enough) and every later pod starts warm:
     docker run --rm -v /path/to/models:/opt/ComfyUI/models -e HF_TOKEN=... \\
         shivanshtalwar0/comfyui prefetch
 
-Specs name a workflow and, for MiniMax H3, a quantization:
+Specs name a workflow and, for MiniMax H3 or Qwen Image 2.1, a quantization:
 
     minimaxh3[:quant]      text/image-to-video (fl2va) UNET + text encoder + VAEs
     minimaxh3-ref[:quant]  reference-to-video (ref2va) UNET + the same encoder/VAEs
     flux2klein9b           FLUX.2 [klein] 9B stills (gated on Hugging Face: HF_TOKEN)
+    qwenimage21[:quant]    Qwen Image 2.1 stills: int8 (default) or bf16 UNET + encoder
 
-Quantizations are the wrapper's: nvfp4 (fp8 UNET), int8, fp8, bf16; they pick
+H3 quantizations are the wrapper's: nvfp4 (fp8 UNET), int8, fp8, bf16; they pick
 the UNET. The text encoder is always the one the wrapper loads at render time,
 the smallest on disk, so the 16 GB nvfp4 one: fetching the 34 GB int8 or 66 GB
 bf16 encoder for an int8/bf16 UNET would only fill the volume. With no specs,
@@ -58,7 +59,12 @@ def models_for(spec: str) -> list[dict]:
                                     clip_name=wf.MINIMAX_H3_CLIP_ORDER[0])
     if name == "flux2klein9b":
         return list(wf.FLUX2_KLEIN_9B_MODELS)
-    raise SystemExit(f"prefetch: unknown spec {spec!r} (minimaxh3[:quant], minimaxh3-ref[:quant], flux2klein9b)")
+    if name == "qwenimage21":
+        quant = spec.partition(":")[2].strip().lower() or "int8"
+        if quant not in wf.QWEN_IMAGE_21_QUANT_MODELS:
+            raise SystemExit(f"prefetch: unknown quantization {quant!r} (one of {', '.join(wf.QWEN_IMAGE_21_QUANT_MODELS)})")
+        return wf.qwen_image_21_models(quant)
+    raise SystemExit(f"prefetch: unknown spec {spec!r} (minimaxh3[:quant], minimaxh3-ref[:quant], flux2klein9b, qwenimage21[:quant])")
 
 
 def main(argv: list[str]) -> int:

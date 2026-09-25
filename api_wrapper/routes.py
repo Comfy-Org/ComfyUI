@@ -479,28 +479,32 @@ async def _setup_ideogram4(fields, downloaded):
     }, note
 
 
+def _edit_canvas(fields):
+    """An image edit's optional output canvas: both width and height, or
+    neither (the output then takes the first image's size)."""
+    if "width" not in fields and "height" not in fields:
+        return {}
+    try:
+        width = int(fields["width"])
+        height = int(fields["height"])
+    except (KeyError, ValueError):
+        raise _SetupError("Invalid parameter value",
+                          "width and height must be sent together, as numbers.") from None
+    if not 256 <= width <= 8192 or not 256 <= height <= 8192:
+        raise _SetupError("Invalid size", "width/height must be between 256 and 8192.")
+    return {"width": width, "height": height}
+
+
 async def _setup_flux2klein9b_edit(fields, downloaded):
     """Model setup for the FLUX.2 [klein] 9B image edit: the shared model
-    setup, plus an optional output canvas (both width and height, or neither)."""
+    setup, plus an optional output canvas."""
     build_kwargs, note = await _setup_flux2klein9b(fields, downloaded)
-    if "width" in fields or "height" in fields:
-        try:
-            width = int(fields["width"])
-            height = int(fields["height"])
-        except (KeyError, ValueError):
-            raise _SetupError("Invalid parameter value",
-                              "width and height must be sent together, as numbers.") from None
-        if not 256 <= width <= 8192 or not 256 <= height <= 8192:
-            raise _SetupError("Invalid size", "width/height must be between 256 and 8192.")
-        build_kwargs["width"] = width
-        build_kwargs["height"] = height
+    build_kwargs.update(_edit_canvas(fields))
     return build_kwargs, note
 
 
-async def _setup_flux2klein9b_txt2img(fields, downloaded):
-    """Model setup for the FLUX.2 [klein] 9B text-to-image workflow: same
-    models as the image-edit variant, plus width/height validation."""
-    build_kwargs, note = await _setup_flux2klein9b(fields, downloaded)
+def _txt2img_canvas(fields):
+    """A text-to-image output size, 1024x1024 unless the request sets it."""
     try:
         width = int(fields.get("width", 1024))
         height = int(fields.get("height", 1024))
@@ -508,8 +512,53 @@ async def _setup_flux2klein9b_txt2img(fields, downloaded):
         raise _SetupError("Invalid parameter value", "width/height must be numbers.") from None
     if not 256 <= width <= 8192 or not 256 <= height <= 8192:
         raise _SetupError("Invalid size", "width/height must be between 256 and 8192.")
-    build_kwargs["width"] = width
-    build_kwargs["height"] = height
+    return {"width": width, "height": height}
+
+
+async def _setup_flux2klein9b_txt2img(fields, downloaded):
+    """Model setup for the FLUX.2 [klein] 9B text-to-image workflow: same
+    models as the image-edit variant, plus width/height validation."""
+    build_kwargs, note = await _setup_flux2klein9b(fields, downloaded)
+    build_kwargs.update(_txt2img_canvas(fields))
+    return build_kwargs, note
+
+
+async def _setup_qwenimage21(fields, downloaded):
+    """Model setup for Qwen Image 2.1: auto-download the int8 (or bf16) UNET
+    and text encoder + VAE. steps/cfg default to the templates' 25 and 1,
+    not the handler's shared 20 and 5 (which it has already validated)."""
+    quantization = fields.get("quantization", "int8").lower()
+    if quantization not in wrapper_workflows.QWEN_IMAGE_21_QUANT_MODELS:
+        raise _SetupError("Invalid quantization", "quantization must be 'int8' or 'bf16'.")
+    _raise_if_missing(await _download_models(wrapper_workflows.qwen_image_21_models(quantization), downloaded))
+    models = wrapper_workflows.QWEN_IMAGE_21_QUANT_MODELS[quantization]
+    return {
+        "unet_name": models["unet"],
+        "clip_name": models["clip"],
+        "steps": int(fields.get("steps", wrapper_workflows.QWEN_IMAGE_21_DEFAULT_STEPS)),
+        "cfg": float(fields.get("cfg", wrapper_workflows.QWEN_IMAGE_21_DEFAULT_CFG)),
+    }, None
+
+
+async def _setup_qwenimage21_edit(fields, downloaded):
+    """Model setup for the Qwen Image 2.1 image edit: the images' resolution
+    budget and an optional output canvas, checked before any download."""
+    try:
+        resolution = int(fields.get("resolution", 1024))
+    except ValueError:
+        raise _SetupError("Invalid parameter value", "resolution must be a number.") from None
+    if not 0 <= resolution <= 4096:
+        raise _SetupError("Invalid resolution", "resolution must be between 0 and 4096.")
+    canvas = _edit_canvas(fields)
+    build_kwargs, note = await _setup_qwenimage21(fields, downloaded)
+    build_kwargs.update(resolution=resolution, **canvas)
+    return build_kwargs, note
+
+
+async def _setup_qwenimage21_txt2img(fields, downloaded):
+    canvas = _txt2img_canvas(fields)
+    build_kwargs, note = await _setup_qwenimage21(fields, downloaded)
+    build_kwargs.update(canvas)
     return build_kwargs, note
 
 
@@ -605,6 +654,8 @@ async def _setup_minimax_h3_reference(fields, downloaded):
 
 _WORKFLOW_SETUPS = {"flux2klein9b": _setup_flux2klein9b_edit,
                     "flux2klein9b-txt2img": _setup_flux2klein9b_txt2img,
+                    "qwenimage21": _setup_qwenimage21_edit,
+                    "qwenimage21-txt2img": _setup_qwenimage21_txt2img,
                     "ideogram4": _setup_ideogram4,
                     "minimaxh3": {"text": _setup_minimax_h3_text,
                                   "image": _setup_minimax_h3_image,

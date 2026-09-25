@@ -197,6 +197,56 @@ class TestMiniMaxSetupContract(unittest.TestCase):
         self.assertEqual(kwargs["steps"], 20)
 
 
+class TestQwenImage21SetupContract(unittest.TestCase):
+    """Qwen Image 2.1 runs at the templates' 25 steps / cfg 1, not the shared
+    handler's 20 / 5, and each setup's kwargs build its graph."""
+
+    def setUp(self):
+        self._download_models = wrapper_routes._download_models
+        self.requested = []
+
+        async def no_download(models, downloaded):
+            self.requested.extend(m["filename"] for m in models)
+            return []
+
+        wrapper_routes._download_models = no_download
+
+    def tearDown(self):
+        wrapper_routes._download_models = self._download_models
+
+    def test_txt2img_defaults_are_the_templates(self):
+        kwargs, note = asyncio.run(wrapper_routes._setup_qwenimage21_txt2img({}, []))
+        self.assertIsNone(note)
+        self.assertEqual((kwargs["steps"], kwargs["cfg"]), (25, 1.0))
+        self.assertEqual((kwargs["width"], kwargs["height"]), (1024, 1024))
+        self.assertEqual(kwargs["unet_name"], wrapper_workflows.QWEN_IMAGE_21_UNET)
+        self.assertEqual(kwargs["clip_name"], wrapper_workflows.QWEN_IMAGE_21_CLIP)
+        self.assertIn(wrapper_workflows.QWEN_IMAGE_21_VAE, self.requested)
+        wrapper_workflows.build_qwen_image_21_text2img(prompt="x", **kwargs)
+
+    def test_edit_takes_resolution_canvas_and_bf16(self):
+        kwargs, _ = asyncio.run(wrapper_routes._setup_qwenimage21_edit(
+            {"quantization": "bf16", "steps": "40", "cfg": "4", "resolution": "0",
+             "width": "1024", "height": "576"}, []))
+        self.assertEqual((kwargs["steps"], kwargs["cfg"], kwargs["resolution"]), (40, 4.0, 0))
+        self.assertEqual((kwargs["width"], kwargs["height"]), (1024, 576))
+        self.assertEqual(kwargs["unet_name"], "qwen_image_2.1_bf16.safetensors")
+        self.assertEqual(kwargs["clip_name"], "qwen3vl_8b_bf16.safetensors")
+        wrapper_workflows.build_qwen_image_21_edit(prompt="x", image="wrapper/a.png", **kwargs)
+
+    def test_edit_canvas_is_both_or_neither(self):
+        kwargs, _ = asyncio.run(wrapper_routes._setup_qwenimage21_edit({}, []))
+        self.assertNotIn("width", kwargs)
+        with self.assertRaises(wrapper_routes._SetupError):
+            asyncio.run(wrapper_routes._setup_qwenimage21_edit({"width": "1024"}, []))
+
+    def test_bad_values_fail_before_any_download(self):
+        for fields in ({"quantization": "fp8"}, {"resolution": "5000"}, {"width": "10", "height": "10"}):
+            with self.assertRaises(wrapper_routes._SetupError):
+                asyncio.run(wrapper_routes._setup_qwenimage21_edit(fields, []))
+        self.assertEqual(self.requested, [])
+
+
 class TestPromptRewriteHook(unittest.TestCase):
     """The glue between an incoming request and the rewriter: which mode it
     reports, which labels it declares, and which upload it uses for visual

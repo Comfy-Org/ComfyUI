@@ -34,6 +34,36 @@ FLUX2_KLEIN_9B_UNET = "flux-2-klein-base-9b-fp8.safetensors"
 FLUX2_KLEIN_9B_CLIP = "qwen_3_8b_fp8mixed.safetensors"
 FLUX2_KLEIN_9B_VAE = "flux2-vae.safetensors"
 
+# Qwen Image 2.1 (Comfy-Org/Qwen-Image-2.1), text to image and image edit.
+QWEN_IMAGE_21_BASE_URL = "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main"
+QWEN_IMAGE_21_VAE = "qwen_image_2.1_vae_bf16.safetensors"
+# int8_convrot is what the official "Qwen Image 2.1" templates ship (7 GB UNET
+# + 9 GB encoder); bf16 is the full-precision pair (14 GB + 18 GB).
+QWEN_IMAGE_21_QUANT_MODELS = {
+    "int8": {"unet": "qwen_image_2.1_int8_convrot.safetensors", "clip": "qwen3vl_8b_int8_convrot.safetensors"},
+    "bf16": {"unet": "qwen_image_2.1_bf16.safetensors", "clip": "qwen3vl_8b_bf16.safetensors"},
+}
+QWEN_IMAGE_21_UNET = QWEN_IMAGE_21_QUANT_MODELS["int8"]["unet"]
+QWEN_IMAGE_21_CLIP = QWEN_IMAGE_21_QUANT_MODELS["int8"]["clip"]
+# The templates' KSampler: euler/simple, 25 steps, cfg 1 (the negative prompt
+# only matters once cfg is raised above 1).
+QWEN_IMAGE_21_DEFAULT_STEPS = 25
+QWEN_IMAGE_21_DEFAULT_CFG = 1.0
+
+
+def qwen_image_21_models(quantization):
+    """The UNET, text encoder and VAE a Qwen Image 2.1 job needs."""
+    q = QWEN_IMAGE_21_QUANT_MODELS[quantization]
+    return [
+        {"folder": "diffusion_models", "filename": q["unet"],
+         "url": f"{QWEN_IMAGE_21_BASE_URL}/diffusion_models/{q['unet']}"},
+        {"folder": "text_encoders", "filename": q["clip"],
+         "url": f"{QWEN_IMAGE_21_BASE_URL}/text_encoders/{q['clip']}"},
+        {"folder": "vae", "filename": QWEN_IMAGE_21_VAE,
+         "url": f"{QWEN_IMAGE_21_BASE_URL}/vae/{QWEN_IMAGE_21_VAE}"},
+    ]
+
+
 # Models required by the Ideogram 4 text-to-image workflow (fp8 + native nvfp4
 # variants). URL layout matches the Comfy-Org repos the shipped "Text to Image
 # (Ideogram v4)" blueprint points at.
@@ -229,6 +259,81 @@ def build_flux2_klein_9b_text2img(*, prompt, negative_prompt="", seed=0,
         "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["3", 0]}},
         "13": {"class_type": "SaveImage", "inputs": {"images": ["12", 0], "filename_prefix": filename_prefix}},
     }
+
+
+def build_qwen_image_21_text2img(*, prompt, negative_prompt="", seed=0,
+                                 steps=QWEN_IMAGE_21_DEFAULT_STEPS, cfg=QWEN_IMAGE_21_DEFAULT_CFG,
+                                 width=1024, height=1024,
+                                 filename_prefix="wrapper/qwenimage21_txt2img",
+                                 unet_name=QWEN_IMAGE_21_UNET, clip_name=QWEN_IMAGE_21_CLIP):
+    """Build the Qwen Image 2.1 text-to-image graph (API format).
+
+    Mirrors the official "Qwen Image 2.1: Text to Image" template:
+    TextEncodeQwenImage21 gives the positive and negative conditioning, and a
+    plain KSampler (euler, simple) samples an empty latent at width/height.
+    """
+    return {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip_name, "type": "qwen_image", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": QWEN_IMAGE_21_VAE}},
+        "4": {"class_type": "TextEncodeQwenImage21", "inputs": {
+            "clip": ["2", 0], "prompt": prompt, "negative_prompt": negative_prompt, "resolution": 1024}},
+        "5": {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+        "6": {"class_type": "KSampler", "inputs": {
+            "model": ["1", 0], "seed": seed, "steps": steps, "cfg": cfg, "sampler_name": "euler",
+            "scheduler": "simple", "positive": ["4", 0], "negative": ["4", 1],
+            "latent_image": ["5", 0], "denoise": 1.0}},
+        "7": {"class_type": "VAEDecode", "inputs": {"samples": ["6", 0], "vae": ["3", 0]}},
+        "8": {"class_type": "SaveImage", "inputs": {"images": ["7", 0], "filename_prefix": filename_prefix}},
+    }
+
+
+def build_qwen_image_21_edit(*, prompt, image=None, ref_images=(), negative_prompt="",
+                             seed=0, steps=QWEN_IMAGE_21_DEFAULT_STEPS, cfg=QWEN_IMAGE_21_DEFAULT_CFG,
+                             resolution=1024, width=None, height=None,
+                             filename_prefix="wrapper/qwenimage21",
+                             unet_name=QWEN_IMAGE_21_UNET, clip_name=QWEN_IMAGE_21_CLIP):
+    """Build the Qwen Image 2.1 image edit graph (API format).
+
+    Mirrors the official "Qwen Image 2.1: Image Edit" template. Every image
+    (``image`` first, then ``ref_images``) goes to TextEncodeQwenImage21,
+    which shows it to the text encoder and splices its VAE latent into the
+    sequence; the prompt names them <image1>, <image2>, ... in that order, and
+    image 1 is the one edited. ``resolution`` is the images' pixel budget
+    (about resolution x resolution, 0 keeps their own size). The output takes
+    image 1's resized size unless ``width``/``height`` set a canvas, which
+    should stay close to it or the edit shifts.
+    """
+    refs = ([image] if image else []) + list(_ref_list(ref_images))
+    if not refs:
+        raise ValueError("the image edit needs at least one image")
+    graph = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip_name, "type": "qwen_image", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": QWEN_IMAGE_21_VAE}},
+    }
+    # Autogrow slots are addressed by their flat dotted id ("images.image_1");
+    # a nested dict is dropped without a validation error.
+    images = {}
+    for i, ref in enumerate(refs, start=1):
+        graph[str(9 + i)] = {"class_type": "LoadImage", "inputs": {"image": ref}}
+        images[f"images.image_{i}"] = [str(9 + i), 0]
+    graph["4"] = {"class_type": "TextEncodeQwenImage21", "inputs": {
+        "clip": ["2", 0], "vae": ["3", 0], "prompt": prompt, "negative_prompt": negative_prompt,
+        "resolution": resolution, **images}}
+    latent = ["4", 2]
+    if width is not None:
+        graph["5"] = {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}}
+        latent = ["5", 0]
+    graph.update({
+        "6": {"class_type": "KSampler", "inputs": {
+            "model": ["1", 0], "seed": seed, "steps": steps, "cfg": cfg, "sampler_name": "euler",
+            "scheduler": "simple", "positive": ["4", 0], "negative": ["4", 1],
+            "latent_image": latent, "denoise": 1.0}},
+        "7": {"class_type": "VAEDecode", "inputs": {"samples": ["6", 0], "vae": ["3", 0]}},
+        "8": {"class_type": "SaveImage", "inputs": {"images": ["7", 0], "filename_prefix": filename_prefix}},
+    })
+    return graph
 
 
 # MiniMax H3 omni-modal video model files (Comfy-Org/MiniMax-H3). The fl2va
@@ -718,6 +823,17 @@ MINIMAX_H3_REF_FORM_EXTRA = {
 }
 
 
+QWEN_IMAGE_21_FORM_EXTRA = {
+    "steps": {"type": "integer", "minimum": 1, "maximum": 4096, "default": QWEN_IMAGE_21_DEFAULT_STEPS,
+              "description": "Sampling steps (euler). The official templates ship 25; Qwen's own pipeline uses about 40-50."},
+    "cfg": {"type": "number", "minimum": 0, "maximum": 100, "default": QWEN_IMAGE_21_DEFAULT_CFG,
+            "description": "CFG scale. 1 is the official setting and ignores negative_prompt; raise it only to use one."},
+    "quantization": {"type": "string", "enum": list(QWEN_IMAGE_21_QUANT_MODELS), "default": "int8",
+                     "description": "Weight precision of the UNET and text encoder: int8 (the templates' "
+                                    "int8_convrot, ~17 GB) or bf16 (~32 GB)."},
+}
+
+
 """The wrapper API's workflow registry.
 
 Each entry describes one dedicated workflow API: ``build`` constructs the
@@ -762,6 +878,49 @@ WORKFLOWS = {
                        "description": "Output height."},
         },
         "build": build_flux2_klein_9b_text2img,
+    },
+    "qwenimage21": {
+        "title": "Qwen Image 2.1 image edit",
+        "requires_image": True,
+        # Image 1 is `image` (else the first of `ref_images`); the node takes
+        # 16 images in all.
+        "image_fields": ["image", "ref_images"],
+        "uploads": {"image": {"ext": "image", "max": 1}, "ref_images": {"ext": "image", "max": 15}},
+        "uses": ["prompt", "negative_prompt", "seed"],
+        "form": ["prompt", "image", "ref_images", "negative_prompt", "seed", "steps", "cfg",
+                 "resolution", "width", "height"],
+        "extra_form_properties": {
+            **QWEN_IMAGE_21_FORM_EXTRA,
+            "prompt": {"type": "string",
+                       "description": "The edit instruction. The images are <image1>, <image2>, ... in upload "
+                                      "order (image, then ref_images) and <image1> is the one edited, e.g. "
+                                      "'Put the denim shirt from <image2> on the person in <image1>, keep "
+                                      "the pose, face and background.'"},
+            "resolution": {"type": "integer", "minimum": 0, "maximum": 4096, "default": 1024,
+                           "description": "Each image is resized to about resolution x resolution pixels "
+                                          "(aspect kept, multiples of 32) before encoding; 0 keeps its own "
+                                          "size. The output takes image 1's resized size."},
+            "width": {"type": "integer", "minimum": 256, "maximum": 8192,
+                      "description": "Output width, sent with height. Omit both to take image 1's size; a "
+                                     "canvas far from it shifts the edit."},
+            "height": {"type": "integer", "minimum": 256, "maximum": 8192,
+                       "description": "Output height, sent with width."},
+        },
+        "build": build_qwen_image_21_edit,
+    },
+    "qwenimage21-txt2img": {
+        "title": "Qwen Image 2.1 text to image",
+        "requires_image": False,
+        "uses": ["prompt", "negative_prompt", "seed"],
+        "form": ["prompt", "negative_prompt", "seed", "steps", "cfg", "width", "height"],
+        "extra_form_properties": {
+            **QWEN_IMAGE_21_FORM_EXTRA,
+            "width": {"type": "integer", "minimum": 256, "maximum": 8192, "default": 1024,
+                      "description": "Output width. Qwen Image 2.1 is native up to 2048x2048; prefer multiples of 32."},
+            "height": {"type": "integer", "minimum": 256, "maximum": 8192, "default": 1024,
+                       "description": "Output height."},
+        },
+        "build": build_qwen_image_21_text2img,
     },
     "ideogram4": {
         "title": "Ideogram 4 text to image",

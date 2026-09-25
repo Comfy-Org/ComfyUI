@@ -116,6 +116,81 @@ class TestKleinEditReferences(unittest.TestCase):
         self.assertEqual(entry["uploads"]["ref_images"]["max"], 3)
 
 
+class TestQwenImage21Graphs(unittest.TestCase):
+    def test_txt2img_mirrors_the_template(self):
+        graph = wrapper_workflows.build_qwen_image_21_text2img(
+            prompt="a cat", negative_prompt="blurry", seed=7, width=1344, height=768)
+        self.assertEqual(graph["2"]["inputs"]["type"], "qwen_image")
+        self.assertEqual(graph["4"]["inputs"]["prompt"], "a cat")
+        self.assertEqual(graph["4"]["inputs"]["negative_prompt"], "blurry")
+        self.assertEqual((graph["5"]["inputs"]["width"], graph["5"]["inputs"]["height"]), (1344, 768))
+        sampler = graph["6"]["inputs"]
+        self.assertEqual((sampler["seed"], sampler["steps"], sampler["cfg"]), (7, 25, 1.0))
+        self.assertEqual((sampler["sampler_name"], sampler["scheduler"]), ("euler", "simple"))
+        self.assertEqual((sampler["positive"], sampler["negative"]), (["4", 0], ["4", 1]))
+        self.assertEqual(graph["8"]["class_type"], "SaveImage")
+
+    def test_edit_images_are_flat_autogrow_slots_image_first(self):
+        graph = wrapper_workflows.build_qwen_image_21_edit(
+            prompt="<image1> wears the shirt from <image2>", image="wrapper/a.png",
+            ref_images=["wrapper/b.png", "wrapper/c.png"])
+        encode = graph["4"]["inputs"]
+        self.assertEqual(encode["images.image_1"], ["10", 0])
+        self.assertEqual(encode["images.image_3"], ["12", 0])
+        self.assertNotIn("images", encode)
+        self.assertEqual([graph[n]["inputs"]["image"] for n in ("10", "11", "12")],
+                         ["wrapper/a.png", "wrapper/b.png", "wrapper/c.png"])
+        self.assertEqual(encode["vae"], ["3", 0])
+        self.assertEqual(encode["resolution"], 1024)
+        # no canvas: the encoder's latent, on image 1's size
+        self.assertNotIn("5", graph)
+        self.assertEqual(graph["6"]["inputs"]["latent_image"], ["4", 2])
+
+    def test_edit_canvas_uses_an_empty_latent(self):
+        graph = wrapper_workflows.build_qwen_image_21_edit(
+            prompt="x", ref_images="wrapper/a.png", width=1024, height=576)
+        self.assertEqual(graph["5"]["inputs"]["width"], 1024)
+        self.assertEqual(graph["6"]["inputs"]["latent_image"], ["5", 0])
+
+    def test_edit_without_an_image_is_refused(self):
+        with self.assertRaises(ValueError):
+            wrapper_workflows.build_qwen_image_21_edit(prompt="x")
+
+    def test_registered_like_flux2klein9b(self):
+        edit = wrapper_workflows.WORKFLOWS["qwenimage21"]
+        self.assertIs(edit["build"], wrapper_workflows.build_qwen_image_21_edit)
+        self.assertEqual(edit["image_fields"], ["image", "ref_images"])
+        # TextEncodeQwenImage21 takes 16 images
+        self.assertEqual(edit["uploads"]["image"]["max"] + edit["uploads"]["ref_images"]["max"], 16)
+        txt2img = wrapper_workflows.WORKFLOWS["qwenimage21-txt2img"]
+        self.assertFalse(txt2img["requires_image"])
+        self.assertIs(txt2img["build"], wrapper_workflows.build_qwen_image_21_text2img)
+
+    def test_models_come_from_the_qwen_image_21_repo(self):
+        for quant in ("int8", "bf16"):
+            models = wrapper_workflows.qwen_image_21_models(quant)
+            self.assertEqual([m["folder"] for m in models], ["diffusion_models", "text_encoders", "vae"])
+            for model in models:
+                self.assertEqual(model["url"], f"{wrapper_workflows.QWEN_IMAGE_21_BASE_URL}/{model['folder']}/{model['filename']}")
+
+    def test_openapi_documents_both_endpoints(self):
+        spec = wrapper_openapi.spec_with_workflows(wrapper_workflows.WORKFLOWS)
+        edit = spec["paths"]["/api/wrapper/qwenimage21/generate"]["post"]
+        schema = edit["requestBody"]["content"]["multipart/form-data"]["schema"]
+        self.assertEqual(schema["required"], ["prompt"])  # image or ref_images
+        self.assertIn("<image1>", schema["properties"]["prompt"]["description"])
+        self.assertEqual(schema["properties"]["quantization"]["enum"], ["int8", "bf16"])
+        self.assertEqual(schema["properties"]["steps"]["default"], 25)
+        self.assertEqual(schema["properties"]["cfg"]["default"], 1.0)
+        self.assertNotIn("megapixels", schema["properties"])
+        for prop in ("image", "ref_images", "resolution", "width", "height"):
+            self.assertIn(prop, schema["properties"])
+        txt2img = spec["paths"]["/api/wrapper/qwenimage21-txt2img/generate"]["post"]
+        schema = txt2img["requestBody"]["content"]["multipart/form-data"]["schema"]
+        self.assertNotIn("image", schema["properties"])
+        self.assertEqual(schema["properties"]["width"]["default"], 1024)
+
+
 class TestModelRequirements(unittest.TestCase):
     def test_three_models_with_folders_and_urls(self):
         self.assertEqual(len(FLUX2_KLEIN_9B_MODELS), 3)
@@ -816,6 +891,61 @@ class TestGraphValidation(unittest.TestCase):
         self.assertEqual(sorted(received["ref_images"]), ["ref_image_0", "ref_image_1"])
         self.assertEqual(sorted(received["ref_audios"]), ["ref_audio_0"])
         self.assertEqual(received.get("ref_videos"), {})
+
+    def test_qwen_image_21_graphs_pass_core_validation(self):
+        _prepare_env_for_comfy_import()
+        import nodes  # noqa: F401
+        import api_wrapper.routes  # noqa: F401
+        import folder_paths
+
+        async def _init():
+            await nodes.init_extra_nodes(init_custom_nodes=False, init_api_nodes=False)
+
+        asyncio.run(_init())
+
+        placeholder_paths = []
+        for model in wrapper_workflows.qwen_image_21_models("int8"):
+            path = os.path.join(folder_paths.get_folder_paths(model["folder"])[0], model["filename"])
+            if not os.path.exists(path):
+                with open(path, "wb") as f:
+                    f.write(b"placeholder")
+                placeholder_paths.append(path)
+        try:
+            import execution
+
+            for label, graph in (
+                ("txt2img", wrapper_workflows.build_qwen_image_21_text2img(prompt="a test prompt")),
+                ("edit", wrapper_workflows.build_qwen_image_21_edit(
+                    prompt="a test prompt", image=self.TEST_IMAGE, ref_images=[self.TEST_IMAGE])),
+                ("edit-canvas", wrapper_workflows.build_qwen_image_21_edit(
+                    prompt="a test prompt", image=self.TEST_IMAGE, width=1024, height=576)),
+            ):
+                valid, error, outputs, node_errors = asyncio.run(execution.validate_prompt(
+                    f"5c2d8e1f-{abs(hash(label)) % 100000:05d}-4a3b-9c8d-7e6f5a4b3c2d", graph, None))
+                self.assertTrue(valid, f"qwen {label} graph rejected: {error}\nnode_errors: {node_errors}")
+                self.assertTrue(outputs)
+        finally:
+            for path in placeholder_paths:
+                os.remove(path)
+
+    def test_qwen_image_21_edit_images_reach_the_node(self):
+        _prepare_env_for_comfy_import()
+        import nodes
+        from comfy_api.latest import _io
+
+        async def _init():
+            await nodes.init_extra_nodes(init_custom_nodes=False, init_api_nodes=False)
+
+        asyncio.run(_init())
+
+        import execution
+
+        graph = wrapper_workflows.build_qwen_image_21_edit(
+            prompt="<image1> <image2>", image="wrapper/a.png", ref_images=["wrapper/b.png"])
+        node_class = nodes.NODE_CLASS_MAPPINGS[graph["4"]["class_type"]]
+        received, _missing, v3_data = execution.get_input_data(graph["4"]["inputs"], node_class, "4")
+        received = _io.build_nested_inputs(received, v3_data)
+        self.assertEqual(sorted(received["images"]), ["image_1", "image_2"])
 
 
 if __name__ == "__main__":
