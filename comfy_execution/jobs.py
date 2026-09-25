@@ -418,6 +418,38 @@ def get_job(prompt_id: str, running: list, queued: list, history: dict) -> Optio
     return None
 
 
+def get_job_create_times(
+    prompt_ids: list[str],
+    running: list,
+    queued: list,
+    history: dict,
+) -> dict[str, int]:
+    """
+    Get the creation time (ms since epoch) of each given job that is still known.
+
+    A job is known while it is queued, running or in history.
+
+    Args:
+        prompt_ids: The prompt IDs to look up
+        running: List of currently running queue items
+        queued: List of pending queue items
+        history: Dict of history items keyed by prompt_id
+
+    Returns:
+        Dict of creation times keyed by prompt_id; jobs the server no longer knows are left out
+    """
+    extra_data_by_prompt = {item[1]: item[3] for item in [*running, *queued]}
+    for prompt_id, history_item in history.items():
+        extra_data_by_prompt[prompt_id] = history_item['prompt'][3]
+
+    create_times = {}
+    for prompt_id in prompt_ids:
+        create_time = (extra_data_by_prompt.get(prompt_id) or {}).get('create_time')
+        if isinstance(create_time, int):
+            create_times[prompt_id] = create_time
+    return create_times
+
+
 def get_all_jobs(
     running: list,
     queued: list,
