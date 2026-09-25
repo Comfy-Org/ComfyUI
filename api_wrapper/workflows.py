@@ -561,14 +561,22 @@ def build_minimax_h3_reference_to_video(*, prompt, seed=0, steps=MINIMAX_H3_DEFA
                                         duration=5.0, scheduler="beta", ref_image_size="match",
                                         filename_prefix="wrapper/minimaxh3_ref2va",
                                         ref_images=(), ref_videos=(), ref_video_audios=(),
-                                        ref_audios=(),
+                                        ref_audios=(), first_frame=None, last_frame=None,
                                         unet_name=MINIMAX_H3_REF2VA_UNET_INT8,
                                         clip_name=MINIMAX_H3_CLIP_NVFP4):
     """MiniMax H3 reference-to-video (ref2va): reference images/videos/audio +
     prompt -> joint audio+video MP4. The prompt refers to references by tag
     (<Picture i> / <Video k> / <Audio j>) in the order they were provided.
     Parity with the official ref2va workflow: up to 3 images, 1 reference video
-    (with its optional soundtrack), and 2 standalone audio refs."""
+    (with its optional soundtrack), and 2 standalone audio refs.
+
+    ``first_frame`` / ``last_frame`` pin exact pixels at the video's first and
+    last frame (MiniMaxH3AddGuide) on top of the references — the reference
+    guide's "keyframe completion". A shot can then continue from the previous
+    shot's final frame *and* hold its people to their character sheets in one
+    render, which image-to-video (no references) cannot. Measured on the 5090:
+    a pinned first frame opens as exactly as image-to-video does (33 dB PSNR to
+    the frame), where naming it only in the prompt re-imagines it (22 dB)."""
     length = minimax_h3_length(duration)
     # The node's reference inputs are Autogrow groups, and ComfyUI addresses an
     # Autogrow slot by its flat dotted id ("ref_images.ref_image_0"). A nested
@@ -592,13 +600,30 @@ def build_minimax_h3_reference_to_video(*, prompt, seed=0, steps=MINIMAX_H3_DEFA
                 next_id += 1
             ref_inputs[f"{group}.{slot}_{i}"] = [str(next_id), 0]
             next_id += 1
+    # Pinned frames: loaded, cover-cropped to the canvas (the guide node crops
+    # too, but the image-to-video path is cropped here, and one rule for both
+    # keeps a frame pinned either way identical), then anchored in order.
+    cond_ref = ["6", 0]
+    for image, frame_idx in ((first_frame, 0), (last_frame, -1)):
+        if not image:
+            continue
+        load, scale, guide = str(next_id), str(next_id + 1), str(next_id + 2)
+        loader_nodes[load] = {"class_type": "LoadImage", "inputs": {"image": image}}
+        loader_nodes[scale] = {"class_type": "ImageScale", "inputs": {
+            "image": [load, 0], "upscale_method": "lanczos",
+            "width": width, "height": height, "crop": "center"}}
+        loader_nodes[guide] = {"class_type": "MiniMaxH3AddGuide", "inputs": {
+            "positive": cond_ref, "vae": ["4", 0], "latent": ["6", 1],
+            "image": [scale, 0], "frame_idx": frame_idx}}
+        cond_ref = [guide, 0]
+        next_id += 3
     head = _minimax_h3_head(prompt, width, height, length, unet_name, clip_name,
                             MINIMAX_H3_VIDEO_VAE, MINIMAX_H3_AUDIO_VAE, {})
     head["6"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
         "clip": ["3", 0], "vae": ["4", 0], "audio_vae": ["5", 0],
         "prompt": prompt, "width": width, "height": height, "length": length,
         "ref_image_size": ref_image_size, **ref_inputs}}
-    tail = _minimax_h3_tail(["2", 0], ["6", 0], ["6", 1], seed, steps, scheduler,
+    tail = _minimax_h3_tail(["2", 0], cond_ref, ["6", 1], seed, steps, scheduler,
                             next_id, filename_prefix)
     return {**head, **loader_nodes, **tail}
 
@@ -679,6 +704,15 @@ MINIMAX_H3_FORM_EXTRA = {
 }
 MINIMAX_H3_REF_FORM_EXTRA = {
     **MINIMAX_H3_FORM_EXTRA,
+    "image": {"type": "string", "format": "binary",
+              "description": "Optional first frame: these exact pixels open the video "
+                             "(anchored with MiniMaxH3AddGuide, cover-cropped to the canvas), "
+                             "on top of the references -- keyframe completion. Send the same "
+                             "image as ref_images #1 too, so the prompt can name it as "
+                             "<Picture 1>, 'the first frame of [Shot 1]'."},
+    "last_frame": {"type": "string", "format": "binary",
+                   "description": "Optional last frame the video must end on, anchored the "
+                                  "same way at its final frame."},
     "ref_image_size": {"type": "string", "enum": ["match", "max"], "default": "match",
                         "description": "Reference image sizing: 'match' downscales refs to the generation's pixel area (faster); 'max' keeps a 2048px short edge for stronger identity fidelity (slower). Reference tokens ride through every sampling step, so 'max' with several large refs costs both time and memory on top of the canvas budget -- keep 'match' unless identity fidelity is the priority."},
 }
@@ -784,11 +818,14 @@ WORKFLOWS = {
                              "ref_videos": {"ext": "video", "max": 1},
                              "ref_video_audios": {"ext": "audio", "max": 1},
                              "ref_audios": {"ext": "audio", "max": 2},
+                             # Pinned first / last frame (keyframe completion).
+                             "image": {"ext": "image", "max": 1},
+                             "last_frame": {"ext": "image", "max": 1},
                              "llm_image": {"ext": "image", "max": 1}},
-                "upload_params": {"llm_image": None},
+                "upload_params": {"image": "first_frame", "llm_image": None},
                 "prompt_rewrite": True,
                 "uses": ["prompt", "seed"],
-                "form": ["prompt", "raw_prompt", "llm_image", "llm_model", "seed", "steps", "width", "height", "duration", "scheduler", "ref_image_size"],
+                "form": ["prompt", "raw_prompt", "image", "last_frame", "llm_image", "llm_model", "seed", "steps", "width", "height", "duration", "scheduler", "ref_image_size"],
                 "extra_form_properties": MINIMAX_H3_REF_FORM_EXTRA,
                 "quantization_options": ["fp8", "int8", "bf16", "nvfp4"],
                 "example_prompt": (

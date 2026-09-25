@@ -244,9 +244,11 @@ class TestOpenAPISpec(unittest.TestCase):
         self.assertEqual(schema["required"], [])
         for prop in ("prompt", "raw_prompt", "llm_image", "llm_model",
                      "ref_images", "ref_videos", "ref_video_audios", "ref_audios",
-                     "ref_image_size", "duration"):
+                     "ref_image_size", "duration", "image", "last_frame"):
             self.assertIn(prop, schema["properties"])
-        self.assertNotIn("image", schema["properties"])
+        # the pinned first frame is optional: only the prompt pair is "one of"
+        self.assertNotIn("image", schema["required"])
+        self.assertIn("first frame", schema["properties"]["image"]["description"])
         self.assertEqual(schema["properties"]["quantization"]["enum"], ["fp8", "int8", "bf16", "nvfp4"])
         # the image task requires an image upload and returns video
         op = spec["paths"]["/api/wrapper/minimaxh3/image/generate"]["post"]
@@ -394,6 +396,50 @@ class TestMiniMaxH3Graph(unittest.TestCase):
         graph2 = wrapper_workflows.build_minimax_h3_reference_to_video(prompt="x")
         self.assertEqual(graph2["7"]["class_type"], "BasicGuider")
         self.assertFalse([k for k in graph2["6"]["inputs"] if k.startswith("ref_") and k != "ref_image_size"])
+
+    def test_reference_to_video_pins_first_and_last_frames(self):
+        """Keyframe completion: the frames are anchored with MiniMaxH3AddGuide
+        on the reference conditioning, cover-cropped to the canvas, and the
+        sampler is guided by the last guide in the chain."""
+        graph = wrapper_workflows.build_minimax_h3_reference_to_video(
+            prompt="<Picture 1> <Picture 2>", width=864, height=480,
+            ref_images=["wrapper/anchor.png", "wrapper/sheet.png"],
+            first_frame="wrapper/anchor.png", last_frame="wrapper/end.png")
+        guides = {nid: n for nid, n in graph.items() if n["class_type"] == "MiniMaxH3AddGuide"}
+        self.assertEqual(sorted(g["inputs"]["frame_idx"] for g in guides.values()), [-1, 0])
+        first = next(nid for nid, g in guides.items() if g["inputs"]["frame_idx"] == 0)
+        last = next(nid for nid, g in guides.items() if g["inputs"]["frame_idx"] == -1)
+        self.assertEqual(guides[first]["inputs"]["positive"], ["6", 0])
+        self.assertEqual(guides[last]["inputs"]["positive"], [first, 0])
+        for guide in guides.values():
+            self.assertEqual(guide["inputs"]["latent"], ["6", 1])
+            self.assertEqual(guide["inputs"]["vae"], ["4", 0])
+            scale = graph[guide["inputs"]["image"][0]]
+            self.assertEqual(scale["class_type"], "ImageScale")
+            self.assertEqual((scale["inputs"]["width"], scale["inputs"]["height"], scale["inputs"]["crop"]),
+                             (864, 480, "center"))
+        self.assertEqual(graph[graph[guides[first]["inputs"]["image"][0]]["inputs"]["image"][0]]["inputs"],
+                         {"image": "wrapper/anchor.png"})
+        guider = next(n for n in graph.values() if n["class_type"] == "BasicGuider")
+        self.assertEqual(guider["inputs"]["conditioning"], [last, 0])
+        # the sampler still starts from the reference node's latent
+        sampler = next(n for n in graph.values() if n["class_type"] == "SamplerCustomAdvanced")
+        self.assertEqual(sampler["inputs"]["latent_image"], ["6", 1])
+        # ids never collide with the references' loaders
+        self.assertEqual(len(graph), len(set(graph)))
+        # no pins: the guider reads the reference node directly, as before
+        plain = wrapper_workflows.build_minimax_h3_reference_to_video(prompt="x", ref_images=["wrapper/a.png"])
+        self.assertFalse([n for n in plain.values() if n["class_type"] == "MiniMaxH3AddGuide"])
+        self.assertEqual(next(n for n in plain.values() if n["class_type"] == "BasicGuider")["inputs"]["conditioning"],
+                         ["6", 0])
+
+    def test_reference_task_accepts_the_pinned_frames(self):
+        task = wrapper_workflows.WORKFLOWS["minimaxh3"]["tasks"]["reference"]
+        self.assertEqual(task["uploads"]["image"], {"ext": "image", "max": 1})
+        self.assertEqual(task["uploads"]["last_frame"], {"ext": "image", "max": 1})
+        self.assertEqual(task["upload_params"]["image"], "first_frame")
+        self.assertIn("image", task["form"])
+        self.assertFalse(task["requires_image"])
 
     def test_decode_nodes_use_the_correct_vae(self):
         # The joint AV latent is a NestedTensor (video [B,24,T,H,W], audio
@@ -733,6 +779,9 @@ class TestGraphValidation(unittest.TestCase):
                     ref_images=["wrapper/test_input.png"],
                     ref_videos=["wrapper/test_input.mp4"],
                     ref_audios=["wrapper/test_input.wav"])),
+                ("ref2va-keyframes", wrapper_workflows.build_minimax_h3_reference_to_video(
+                    prompt="a test prompt", ref_images=["wrapper/test_input.png"],
+                    first_frame="wrapper/test_input.png", last_frame="wrapper/test_input.png")),
             ):
                 valid, error, outputs, node_errors = asyncio.run(execution.validate_prompt(
                     f"9b1a5e4d-{abs(hash(label)) % 100000:05d}-4d7e-8f90-4a5b6c7d8e9f", graph, None))
