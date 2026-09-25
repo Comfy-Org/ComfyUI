@@ -197,6 +197,7 @@ def normalize_queue_item(item: tuple, status: str) -> dict:
         'priority': priority,
         'create_time': create_time,
         'outputs_count': 0,
+        'previewable_outputs_count': 0,
         'workflow_id': workflow_id,
     })
 
@@ -215,6 +216,7 @@ def normalize_history_item(prompt_id: str, history_item: dict, include_outputs: 
 
     outputs = history_item.get('outputs', {})
     outputs_count, preview_output = get_outputs_summary(outputs)
+    previewable_outputs_count = count_previewable_outputs(outputs)
 
     execution_error = None
     execution_start_time = None
@@ -251,6 +253,7 @@ def normalize_history_item(prompt_id: str, history_item: dict, include_outputs: 
         'execution_end_time': execution_end_time,
         'execution_error': execution_error,
         'outputs_count': outputs_count,
+        'previewable_outputs_count': previewable_outputs_count,
         'preview_output': preview_output,
         'workflow_id': workflow_id,
     })
@@ -343,6 +346,33 @@ def get_outputs_summary(outputs: dict) -> tuple[int, Optional[dict]]:
                         fallback_preview = enriched
 
     return count, preview_output or fallback_preview or text_file_fallback or text_fallback
+
+
+def count_previewable_outputs(outputs: dict) -> int:
+    """
+    Count only outputs that would actually render in the expanded asset view,
+    i.e. items is_previewable() accepts (image/video/audio/3D/text). Kept
+    separate from get_outputs_summary()'s outputs_count, which counts every
+    output item regardless of media type, so a job with a non-previewable
+    saved file alongside real media (e.g. SaveLatent's .latent output next to
+    a SaveImage output) doesn't inflate the Media Assets badge beyond what
+    the expanded view shows.
+    """
+    count = 0
+    for node_outputs in outputs.values():
+        if not isinstance(node_outputs, dict):
+            continue
+        for media_type, items in node_outputs.items():
+            if media_type == 'animated' or not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    item = normalize_output_item(item)
+                    if item is None:
+                        continue
+                if is_previewable(media_type, item):
+                    count += 1
+    return count
 
 
 def apply_sorting(jobs: list[dict], sort_by: str, sort_order: str) -> list[dict]:

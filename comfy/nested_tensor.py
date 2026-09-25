@@ -83,6 +83,9 @@ class NestedTensor:
     def layout(self):
         return self.tensors[0].layout
 
+    def __repr__(self):
+        return f"{type(self).__name__}({self.tensors!r})"
+
 
 def cat_nested(tensors, *args, **kwargs):
     cated_tensors = []

@@ -3,11 +3,10 @@ import comfy.text_encoders.t5
 import comfy.text_encoders.sd3_clip
 import comfy.text_encoders.llama
 import comfy.model_management
-from transformers import T5TokenizerFast, LlamaTokenizerFast, Qwen2Tokenizer
+from transformers import T5TokenizerFast, Qwen2Tokenizer
+from .bpe_tokenizer import from_tekken_json
 import torch
 import os
-import json
-import base64
 
 class T5XXLTokenizer(sd1_clip.SDTokenizer):
     def __init__(self, embedding_directory=None, tokenizer_data={}):
@@ -75,45 +74,13 @@ def flux_clip(dtype_t5=None, t5_quantization_metadata=None):
 def load_mistral_tokenizer(data):
     if torch.is_tensor(data):
         data = data.numpy().tobytes()
+    return {"tokenizer_object": from_tekken_json(data)}
 
-    try:
-        from transformers.integrations.mistral import MistralConverter
-    except ModuleNotFoundError:
-        from transformers.models.pixtral.convert_pixtral_weights_to_hf import MistralConverter
-
-    mistral_vocab = json.loads(data)
-
-    special_tokens = {}
-    vocab = {}
-
-    max_vocab = mistral_vocab["config"]["default_vocab_size"]
-    max_vocab -= len(mistral_vocab["special_tokens"])
-
-    for w in mistral_vocab["vocab"]:
-        r = w["rank"]
-        if r >= max_vocab:
-            continue
-
-        vocab[base64.b64decode(w["token_bytes"])] = r
-
-    for w in mistral_vocab["special_tokens"]:
-        if "token_bytes" in w:
-            special_tokens[base64.b64decode(w["token_bytes"])] = w["rank"]
-        else:
-            special_tokens[w["token_str"]] = w["rank"]
-
-    all_special = []
-    for v in special_tokens:
-        all_special.append(v)
-
-    special_tokens.update(vocab)
-    vocab = special_tokens
-    return {"tokenizer_object": MistralConverter(vocab=vocab, additional_special_tokens=all_special).converted(), "legacy": False}
 
 class MistralTokenizerClass:
     @staticmethod
-    def from_pretrained(path, **kwargs):
-        return LlamaTokenizerFast(**kwargs)
+    def from_pretrained(path, tokenizer_object=None, **kwargs):
+        return tokenizer_object
 
 class Mistral3Tokenizer(sd1_clip.SDTokenizer):
     def __init__(self, embedding_directory=None, embedding_size=5120, embedding_key='mistral3_24b', tokenizer_data={}):
@@ -193,11 +160,13 @@ class KleinTokenizer(sd1_clip.SD1Tokenizer):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name=name, tokenizer=tokenizer)
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, system_prompt="", **kwargs):
         if llama_template is None:
             llama_text = self.llama_template.format(text)
         else:
             llama_text = llama_template.format(text)
+        if system_prompt:
+            llama_text = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n" + llama_text
 
         tokens = super().tokenize_with_weights(llama_text, return_word_ids=return_word_ids, disable_weights=True, **kwargs)
         return tokens

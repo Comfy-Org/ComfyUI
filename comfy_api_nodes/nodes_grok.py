@@ -36,6 +36,26 @@ _GROK_VIDEO_MODEL_API_IDS = {
     "grok-imagine-video-1.5": "grok-imagine-video-1.5",
 }
 
+_GROK_IMAGE_MODEL_API_IDS = {
+    "grok-imagine-image-2.0": "grok-imagine-image-2.0",
+}
+
+_GROK_IMAGE_QUALITY_MODELS = {"grok-imagine-image-2.0"}
+
+_GROK_IMAGE_QUALITY_OPTIONS = ["medium", "low"]
+
+_GROK_IMAGE_EDIT_MAX_IMAGES = {
+    "grok-imagine-image-2.0": 3,
+    "grok-imagine-image-pro": 1,
+    "grok-imagine-image-quality": 3,
+    "grok-imagine-image": 3,
+}
+
+_GROK_IMAGE_EDIT_ASPECT_RATIO_NEEDS_MULTIPLE = {
+    "grok-imagine-image-quality",
+    "grok-imagine-image",
+}
+
 _GROK_VOICE_OPTIONS = [
     "none",
     "ara",
@@ -106,19 +126,6 @@ def _normalize_grok_reference_prompt(prompt: str, total_images: int, voices: lis
     return prompt
 
 
-def _extract_grok_price(response) -> float | None:
-    if response.usage and response.usage.cost_in_usd_ticks is not None:
-        return response.usage.cost_in_usd_ticks / 10_000_000_000
-    return None
-
-
-def _extract_grok_video_price(response) -> float | None:
-    price = _extract_grok_price(response)
-    if price is not None:
-        return price * 1.43
-    return None
-
-
 class GrokImageNode(IO.ComfyNode):
 
     @classmethod
@@ -132,6 +139,7 @@ class GrokImageNode(IO.ComfyNode):
                 IO.Combo.Input(
                     "model",
                     options=[
+                        "grok-imagine-image-2.0",
                         "grok-imagine-image-quality",
                         "grok-imagine-image-pro",
                         "grok-imagine-image",
@@ -181,6 +189,12 @@ class GrokImageNode(IO.ComfyNode):
                     "actual results are nondeterministic regardless of seed.",
                 ),
                 IO.Combo.Input("resolution", options=["1K", "2K"], optional=True),
+                IO.Combo.Input(
+                    "quality",
+                    options=_GROK_IMAGE_QUALITY_OPTIONS,
+                    optional=True,
+                    tooltip="Quality level, supported only by the grok-imagine-image-2.0 model.",
+                ),
             ],
             outputs=[
                 IO.Image.Output(),
@@ -192,12 +206,15 @@ class GrokImageNode(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=IO.PriceBadge(
-                depends_on=IO.PriceBadgeDepends(widgets=["model", "number_of_images", "resolution"]),
+                depends_on=IO.PriceBadgeDepends(widgets=["model", "number_of_images", "resolution", "quality"]),
                 expr="""
                 (
-                  $rate := widgets.model = "grok-imagine-image-quality"
-                    ? (widgets.resolution = "1k" ? 0.05 : 0.07)
-                    : ($contains(widgets.model, "pro") ? 0.07 : 0.02);
+                  $is1k := widgets.resolution = "1k";
+                  $rate := widgets.model = "grok-imagine-image-2.0"
+                    ? (widgets.quality = "low" ? ($is1k ? 0.04 : 0.06) : ($is1k ? 0.06 : 0.08))
+                    : (widgets.model = "grok-imagine-image-quality"
+                        ? ($is1k ? 0.05 : 0.07)
+                        : ($contains(widgets.model, "pro") ? 0.07 : 0.02));
                   {"type":"usd","usd": $rate * widgets.number_of_images}
                 )
                 """,
@@ -213,18 +230,20 @@ class GrokImageNode(IO.ComfyNode):
         number_of_images: int,
         seed: int,
         resolution: str = "1K",
+        quality: str = "medium",
     ) -> IO.NodeOutput:
         validate_string(prompt, strip_whitespace=True, min_length=1)
         response = await sync_op(
             cls,
             ApiEndpoint(path="/proxy/xai/v1/images/generations", method="POST"),
             data=ImageGenerationRequest(
-                model=model,
+                model=_GROK_IMAGE_MODEL_API_IDS.get(model, model),
                 prompt=prompt,
                 aspect_ratio=aspect_ratio,
                 n=number_of_images,
                 seed=seed,
                 resolution=resolution.lower(),
+                quality=quality if model in _GROK_IMAGE_QUALITY_MODELS else None,
             ),
             response_model=ImageGenerationResponse,
         )
@@ -255,7 +274,9 @@ _GROK_IMAGE_EDIT_ASPECT_RATIO_OPTIONS = [
 ]
 
 
-def _grok_image_edit_model_inputs(*, max_ref_images: int, with_aspect_ratio: bool):
+def _grok_image_edit_model_inputs(
+    *, max_ref_images: int, with_aspect_ratio: bool, with_quality: bool = False, aspect_ratio_needs_multiple: bool = True
+):
     inputs = [
         IO.Autogrow.Input(
             "images",
@@ -281,12 +302,18 @@ def _grok_image_edit_model_inputs(*, max_ref_images: int, with_aspect_ratio: boo
             display_mode=IO.NumberDisplay.number,
         ),
     ]
+    if with_quality:
+        inputs.append(IO.Combo.Input("quality", options=_GROK_IMAGE_QUALITY_OPTIONS))
     if with_aspect_ratio:
         inputs.append(
             IO.Combo.Input(
                 "aspect_ratio",
                 options=_GROK_IMAGE_EDIT_ASPECT_RATIO_OPTIONS,
-                tooltip="Only allowed when multiple images are connected.",
+                tooltip=(
+                    "Only allowed when multiple images are connected."
+                    if aspect_ratio_needs_multiple
+                    else "Aspect ratio of the edited image."
+                ),
             )
         )
     return inputs
@@ -452,6 +479,15 @@ class GrokImageEditNodeV2(IO.ComfyNode):
                     "model",
                     options=[
                         IO.DynamicCombo.Option(
+                            "grok-imagine-image-2.0",
+                            _grok_image_edit_model_inputs(
+                                max_ref_images=3,
+                                with_aspect_ratio=True,
+                                with_quality=True,
+                                aspect_ratio_needs_multiple=False,
+                            ),
+                        ),
+                        IO.DynamicCombo.Option(
                             "grok-imagine-image-quality",
                             _grok_image_edit_model_inputs(max_ref_images=3, with_aspect_ratio=True),
                         ),
@@ -488,18 +524,23 @@ class GrokImageEditNodeV2(IO.ComfyNode):
             is_api_node=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(
-                    widgets=["model", "model.resolution", "model.number_of_images"],
+                    widgets=["model", "model.resolution", "model.number_of_images", "model.quality"],
                 ),
                 expr="""
                 (
-                  $isQualityModel := widgets.model = "grok-imagine-image-quality";
+                  $is20 := widgets.model = "grok-imagine-image-2.0";
                   $isPro := $contains(widgets.model, "pro");
                   $res := $lookup(widgets, "model.resolution");
                   $n := $lookup(widgets, "model.number_of_images");
-                  $rate := $isQualityModel
-                    ? ($res = "1k" ? 0.05 : 0.07)
-                    : ($isPro ? 0.07 : 0.02);
-                  $base := $isQualityModel ? 0.01 : 0.002;
+                  $is1k := $res = "1k";
+                  $rate := $is20
+                    ? ($lookup(widgets, "model.quality") = "low"
+                        ? ($is1k ? 0.04 : 0.06)
+                        : ($is1k ? 0.06 : 0.08))
+                    : (widgets.model = "grok-imagine-image-quality"
+                        ? ($is1k ? 0.05 : 0.07)
+                        : ($isPro ? 0.07 : 0.02));
+                  $base := ($is20 or widgets.model = "grok-imagine-image-quality") ? 0.01 : 0.002;
                   $output := $rate * $n;
                   $isPro
                     ? {"type":"usd","usd": $base + $output}
@@ -525,13 +566,15 @@ class GrokImageEditNodeV2(IO.ComfyNode):
 
         image_tensors: list[Input.Image] = [t for t in images_dict.values() if t is not None]
         n_images = sum(get_number_of_images(t) for t in image_tensors)
+        max_images = _GROK_IMAGE_EDIT_MAX_IMAGES.get(model_id, 3)
         if n_images < 1:
             raise ValueError("At least one image is required for editing.")
-        if model_id == "grok-imagine-image-pro" and n_images > 1:
-            raise ValueError("The pro model supports only 1 input image.")
-        if model_id != "grok-imagine-image-pro" and n_images > 3:
-            raise ValueError("A maximum of 3 input images is supported.")
-        if aspect_ratio != "auto" and n_images == 1:
+        if n_images > max_images:
+            raise ValueError(
+                f"The {model_id} model supports at most {max_images} input "
+                f"image{'s' if max_images > 1 else ''}; {n_images} are connected."
+            )
+        if aspect_ratio != "auto" and model_id in _GROK_IMAGE_EDIT_ASPECT_RATIO_NEEDS_MULTIPLE and n_images == 1:
             raise ValueError(
                 "Custom aspect ratio is only allowed when multiple images are connected to the image input."
             )
@@ -547,7 +590,7 @@ class GrokImageEditNodeV2(IO.ComfyNode):
             cls,
             ApiEndpoint(path="/proxy/xai/v1/images/edits", method="POST"),
             data=ImageEditRequest(
-                model=model_id,
+                model=_GROK_IMAGE_MODEL_API_IDS.get(model_id, model_id),
                 images=[
                     InputUrlObject(url=f"data:image/png;base64,{tensor_to_base64_string(i)}") for i in flat_tensors
                 ],
@@ -556,6 +599,7 @@ class GrokImageEditNodeV2(IO.ComfyNode):
                 n=number_of_images,
                 seed=seed,
                 aspect_ratio=None if aspect_ratio == "auto" else aspect_ratio,
+                quality=model.get("quality") if model_id in _GROK_IMAGE_QUALITY_MODELS else None,
             ),
             response_model=ImageGenerationResponse,
         )
@@ -690,7 +734,6 @@ class GrokVideoNode(IO.ComfyNode):
             ApiEndpoint(path=f"/proxy/xai/v1/videos/{initial_response.request_id}"),
             status_extractor=lambda r: r.status if r.status is not None else "complete",
             response_model=VideoStatusResponse,
-            price_extractor=_extract_grok_video_price if model == "grok-imagine-video-1.5" else _extract_grok_price,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.video.url))
 
@@ -768,7 +811,6 @@ class GrokVideoEditNode(IO.ComfyNode):
             ApiEndpoint(path=f"/proxy/xai/v1/videos/{initial_response.request_id}"),
             status_extractor=lambda r: r.status if r.status is not None else "complete",
             response_model=VideoStatusResponse,
-            price_extractor=_extract_grok_price,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.video.url))
 
@@ -965,7 +1007,6 @@ class GrokVideoReferenceNode(IO.ComfyNode):
             ApiEndpoint(path=f"/proxy/xai/v1/videos/{initial_response.request_id}"),
             status_extractor=lambda r: r.status if r.status is not None else "complete",
             response_model=VideoStatusResponse,
-            price_extractor=_extract_grok_video_price,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.video.url))
 
@@ -1070,7 +1111,6 @@ class GrokVideoExtendNode(IO.ComfyNode):
             ApiEndpoint(path=f"/proxy/xai/v1/videos/{initial_response.request_id}"),
             status_extractor=lambda r: r.status if r.status is not None else "complete",
             response_model=VideoStatusResponse,
-            price_extractor=_extract_grok_video_price,
         )
         return IO.NodeOutput(await download_url_to_video_output(response.video.url))
 

@@ -1,8 +1,10 @@
 import unittest
+import unittest.mock
 import torch
 import sys
 import os
 import json
+from types import SimpleNamespace
 
 # Add comfy to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -283,6 +285,111 @@ class TestMixedPrecisionOps(unittest.TestCase):
         saved = model.state_dict()
         saved_conf = json.loads(saved["layer.comfy_quant"].numpy().tobytes())
         self.assertTrue(saved_conf["convrot"])
+
+    def test_int8_disabled_on_unsupported_device_falls_back_to_full_precision(self):
+        """On a device that can't run comfy_kitchen's fast int8 matmul (e.g. MPS,
+        which lacks aten::_int_mm), pick_operations must mark int8 formats as
+        disabled so layers dequantize instead of taking the fast quantized path."""
+        import comfy.model_management as mm
+
+        orig_supports_int8 = mm.supports_int8_compute
+        mm.supports_int8_compute = lambda device=None: False
+        try:
+            model_config = SimpleNamespace(quant_config={"layer": {"format": "int8_tensorwise"}})
+            operations = ops.pick_operations(torch.bfloat16, torch.bfloat16, model_config=model_config)
+
+            torch.manual_seed(789)
+            weight = torch.randn(16, 256, dtype=torch.bfloat16)
+            bias = torch.randn(16, dtype=torch.bfloat16)
+            q_weight = QuantizedTensor.from_float(weight, "TensorWiseINT8Layout", per_channel=True)
+            state_dict = {
+                "layer.weight": q_weight._qdata,
+                "layer.bias": bias,
+                "layer.weight_scale": q_weight._params.scale,
+            }
+            layer_quant_config = {"layer": {"format": "int8_tensorwise"}}
+            state_dict, _ = comfy.utils.convert_old_quants(
+                state_dict,
+                metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
+            )
+
+            model = torch.nn.Module()
+            model.layer = operations.Linear(256, 16, device="cpu", dtype=torch.bfloat16)
+            model.load_state_dict(state_dict, strict=False)
+
+            self.assertIsInstance(model.layer.weight, QuantizedTensor)
+            # The layer must be forced onto the full-precision (dequantized)
+            # path since the fast int8 path isn't usable on this device.
+            self.assertTrue(model.layer._full_precision_mm)
+
+            # The weight's orig_dtype matches the compute dtype here (both bfloat16),
+            # so cast_bias_weight's dtype-change check alone won't dequantize it. Confirm
+            # the module still hands a real Tensor (not a QuantizedTensor) to the plain
+            # linear() call, since dispatching a QuantizedTensor there would route back
+            # into the disabled fast int8 matmul instead of the full-precision fallback.
+            seen_weight_types = []
+            orig_module_forward = model.layer._forward
+            def _capturing_forward(input, weight, bias, _orig=orig_module_forward):
+                seen_weight_types.append(type(weight))
+                return _orig(input, weight, bias)
+            model.layer._forward = _capturing_forward
+
+            input_tensor = torch.randn(4, 256, dtype=torch.bfloat16)
+            output = model.layer(input_tensor)
+            self.assertEqual(output.shape, (4, 16))
+            self.assertEqual(seen_weight_types, [torch.Tensor])
+        finally:
+            mm.supports_int8_compute = orig_supports_int8
+
+    def test_linear_input_act_respects_full_precision_mm_fallback(self):
+        """linear_input_act folds an activation into the INT8 GEMM's input quantizer,
+        bypassing Linear.forward entirely. On a device where the fast int8 kernel is
+        disabled (e.g. MPS, which lacks aten::_int_mm), it must honor _full_precision_mm
+        and dequantize instead, exactly like Linear.forward_comfy_cast_weights does
+        (see Comfy-Org/ComfyUI#16284)."""
+        operations = ops.mixed_precision_ops({}, compute_dtype=torch.bfloat16)
+
+        torch.manual_seed(456)
+        weight = torch.randn(32, 64, dtype=torch.bfloat16)
+        bias = torch.randn(32, dtype=torch.bfloat16)
+
+        layer = operations.Linear(64, 32, bias=True, device="cpu", dtype=torch.bfloat16)
+        layer.weight = torch.nn.Parameter(
+            QuantizedTensor.from_float(weight, "TensorWiseINT8Layout"), requires_grad=False
+        )
+        layer.bias = torch.nn.Parameter(bias, requires_grad=False)
+        layer.quant_format = "int8_tensorwise"
+        layer._full_precision_mm = True
+
+        x = torch.randn(4, 128, dtype=torch.bfloat16)
+
+        orig_int8_linear = ops.quant_ops.ck.int8_linear
+        ops.quant_ops.ck.int8_linear = unittest.mock.Mock(
+            side_effect=NotImplementedError("aten::_int_mm not implemented")
+        )
+        try:
+            output = ops.linear_input_act(layer, x, "swiglu")
+        finally:
+            ops.quant_ops.ck.int8_linear = orig_int8_linear
+
+        expected = torch.nn.functional.linear(
+            ops.INPUT_ACT_EAGER["swiglu"](x), layer.weight.dequantize(), bias
+        )
+        torch.testing.assert_close(output, expected)
+
+    def test_supports_int8_compute_treats_mps_mode_as_unsupported_when_device_is_none(self):
+        """Call sites (like pick_operations' default) may omit load_device. On an
+        MPS machine that must still report int8 as unsupported instead of
+        silently defaulting to True, matching supports_fp64's handling of the
+        same device=None case (see Comfy-Org/ComfyUI#16136)."""
+        import comfy.model_management as mm
+
+        orig_cpu_state = mm.cpu_state
+        mm.cpu_state = mm.CPUState.MPS
+        try:
+            self.assertFalse(mm.supports_int8_compute(None))
+        finally:
+            mm.cpu_state = orig_cpu_state
 
     def test_convrot_w4a4_loads_into_params(self):
         """ConvRot W4A4 checkpoints must load as the dedicated kitchen layout."""

@@ -17,7 +17,7 @@ class PreviewAny():
     OUTPUT_NODE = True
 
     CATEGORY = "utilities"
-    SEARCH_ALIASES = ["show output", "inspect", "debug", "print value", "show text"]
+    SEARCH_ALIASES = ["preview", "preview text", "show output", "inspect", "debug", "print value", "show text"]
     DESCRIPTION = "Preview any input value as text."
 
     def main(self, source=None):
@@ -29,7 +29,7 @@ class PreviewAny():
             value = str(source)
         elif source is not None:
             try:
-                value = json.dumps(source, indent=4)
+                value = json.dumps(source, indent=4, ensure_ascii=False)
             except Exception:
                 try:
                     value = str(source)
