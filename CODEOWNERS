@@ -1,5 +1,23 @@
-* @comfyanonymous @kosinkadink @guill @alexisrolland @rattus128 @kijai
+# Standard approval is available except on the contracts and controls below.
+# Last matching rule wins; exception rules omit the standard approver.
+* @Comfy-Org/core-engine-team @Comfy-Org/comfy-standard-approver
 
+# Custom-node registration, types, execution, and model extension contracts.
+/comfy_api/ @Comfy-Org/core-engine-team
+/comfy/comfy_types/ @Comfy-Org/core-engine-team
+/nodes.py @Comfy-Org/core-engine-team
+/execution.py @Comfy-Org/core-engine-team
+/comfy_execution/ @Comfy-Org/core-engine-team
+/folder_paths.py @Comfy-Org/core-engine-team
+/comfy/model_patcher.py @Comfy-Org/core-engine-team
+/comfy/patcher_extension.py @Comfy-Org/core-engine-team
+/comfy/hooks.py @Comfy-Org/core-engine-team
+
+# Public HTTP and WebSocket contracts.
+/server.py @Comfy-Org/core-engine-team
+/openapi.yaml @Comfy-Org/core-engine-team
+
+# Existing repository-control and release/build ownership.
 /CODEOWNERS @comfyanonymous
 /AGENTS.md @comfyanonymous
 /.ci/ @comfyanonymous
