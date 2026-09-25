@@ -1,0 +1,3 @@
+[comfy-event] perf.timing count=1204 cpu_ms=380 duration_ms=412 op=assets.scan.collect_paths outcome=ok
+[comfy-event] perf.timing bytes_total=73400320 count=12 cpu_ms=5100 duration_ms=5230 op=assets.scan.enrich_hash outcome=ok
+[comfy-event] perf.timing duration_ms=0 op=assets.scan.mark_missing outcome=cancelled

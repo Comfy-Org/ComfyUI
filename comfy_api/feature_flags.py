@@ -35,6 +35,11 @@ CLI_FEATURE_FLAG_REGISTRY: dict[str, FeatureFlagInfo] = {
         "default": True,
         "description": "Gate the local Run button behind sign-in when the graph contains partner nodes",
     },
+    "structured_log_events": {
+        "type": "bool",
+        "default": False,
+        "description": "Write machine-readable diagnostic event lines to stdout for launchers",
+    },
 }
 
 
