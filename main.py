@@ -275,10 +275,10 @@ if args.enable_dynamic_vram or (enables_dynamic_vram() and dynamic_vram_supporte
         logging.warning("Unsupported Pytorch detected. DynamicVRAM support requires Pytorch version 2.8 or later (2.12+ is recommended). Falling back to legacy ModelPatcher. VRAM estimates may be unreliable especially on Windows")
     else:
         try:
-            aimdo_initialized = comfy_aimdo.control.init_devices((d.index, int(args.vram_headroom * 1024 ** 3)) for d in comfy.model_management.get_all_torch_devices())
+            aimdo_initialized = comfy_aimdo.control.init_devices((d.index, int(args.vram_headroom * 1024 ** 3)) for d in comfy.model_management.get_core_torch_devices())
         except TypeError:
             # comfy-aimdo 0.4.9 protocol.
-            aimdo_initialized = comfy_aimdo.control.init_devices(d.index for d in comfy.model_management.get_all_torch_devices())
+            aimdo_initialized = comfy_aimdo.control.init_devices(d.index for d in comfy.model_management.get_core_torch_devices())
 
         if aimdo_initialized:
             if console_log_level == 'DEBUG':
