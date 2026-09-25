@@ -113,9 +113,9 @@ def test_nan_fingerprint_never_matches_across_prompts():
     assert keys_with_fingerprint(float("NaN"))["3"] != keys_with_fingerprint(float("NaN"))["3"]
 
 
-def test_fingerprint_that_does_not_serialize_still_reaches_descendants():
-    # json refuses ints past 4300 digits, so the digest fails for both
-    assert keys_with_fingerprint(10 ** 5000)["3"] != keys_with_fingerprint(10 ** 5000 + 1)["3"]
+def test_fingerprint_that_does_not_serialize_never_matches_across_prompts():
+    # json refuses ints past 4300 digits, so the digest fails
+    assert keys_with_fingerprint(10 ** 5000)["3"] != keys_with_fingerprint(10 ** 5000)["3"]
 
 
 def test_cycle_terminates():
