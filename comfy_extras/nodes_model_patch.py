@@ -13,6 +13,7 @@ import comfy.ldm.lumina.controlnet
 import comfy.ldm.supir.supir_modules
 import comfy.ldm.anima.lllite
 import comfy.ldm.minimax.controlnet
+import comfy.ldm.qwen_image21.model
 import comfy.ldm.wan.uni3c
 import comfy.ldm.lightricks.duration_head
 from comfy.ldm.wan.model_multitalk import WanMultiTalkAttentionBlock, MultiTalkAudioProjModel
@@ -230,6 +231,17 @@ def z_image_convert(sd):
 
     return out_sd
 
+def dit_patch_operations(sd):
+    # quantized files keep their layers quantized with bf16 compute, others follow the usual bf16/fp32 dtype pick
+    quant = comfy.utils.detect_layer_quantization(sd, "")
+    if quant is not None:
+        return torch.bfloat16, comfy.ops.mixed_precision_ops(quant, torch.bfloat16)
+    load_device = comfy.model_management.get_torch_device()
+    dtype = comfy.model_management.unet_dtype(model_params=-1, supported_dtypes=[torch.bfloat16, torch.float32], weight_dtype=comfy.utils.weight_dtype(sd))
+    manual_cast_dtype = comfy.model_management.unet_manual_cast(dtype, load_device, supported_dtypes=[torch.bfloat16, torch.float32])
+    return dtype, comfy.ops.pick_operations(dtype, manual_cast_dtype, load_device=load_device)
+
+
 class ModelPatchLoader:
     @classmethod
     def INPUT_TYPES(s):
@@ -270,22 +282,27 @@ class ModelPatchLoader:
                     if torch.count_nonzero(ref_weight) == 0:
                         config['broken'] = True
             model = comfy.ldm.lumina.controlnet.ZImage_Control(device=comfy.model_management.unet_offload_device(), dtype=dtype, operations=comfy.ops.manual_cast, **config)
+        elif 'control_img_in.weight' in sd and 'control_blocks.0.img_mlp.out.weight' in sd:  # Qwen Image 2.1 Fun ControlNet
+            dtype, operations = dit_patch_operations(sd)
+            inner_dim = sd["control_img_in.weight"].shape[0]
+            gate_up = sd.get("control_blocks.0.img_mlp.gate_up.weight", None)
+            hidden_dim = gate_up.shape[0] // 2 if gate_up is not None else sd["control_blocks.0.img_mlp.proj.weight"].shape[0]
+            num_blocks = 0
+            while "control_blocks.{}.after_proj.weight".format(num_blocks) in sd:
+                num_blocks += 1
+            model = comfy.ldm.qwen_image21.model.QwenImage21FunControl(
+                num_blocks=num_blocks,
+                control_in_dim=129,
+                inner_dim=inner_dim,
+                attention_head_dim=sd["control_blocks.0.attn.norm_q.weight"].shape[0],
+                mlp_ratio=hidden_dim // inner_dim,
+                fused_mlp=gate_up is not None,
+                operations=operations,
+                device=comfy.model_management.unet_offload_device(),
+                dtype=dtype,
+            )
         elif comfy.ldm.minimax.controlnet.is_minimax_h3_fun_state_dict(sd):
-            load_device = comfy.model_management.get_torch_device()
-            quant = comfy.utils.detect_layer_quantization(sd, "")
-            if quant is not None:
-                dtype = torch.bfloat16
-                operations = comfy.ops.mixed_precision_ops(quant, dtype)
-            else:
-                dtype = comfy.model_management.unet_dtype(
-                    model_params=-1,
-                    supported_dtypes=[torch.bfloat16, torch.float32],
-                    weight_dtype=comfy.utils.weight_dtype(sd),
-                )
-                manual_cast_dtype = comfy.model_management.unet_manual_cast(
-                    dtype, load_device, supported_dtypes=[torch.bfloat16, torch.float32])
-                operations = comfy.ops.pick_operations(dtype, manual_cast_dtype, load_device=load_device)
-
+            dtype, operations = dit_patch_operations(sd)
             num_blocks = 0
             while "control_blocks.{}.after_proj.weight".format(num_blocks) in sd:
                 num_blocks += 1
