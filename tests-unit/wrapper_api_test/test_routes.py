@@ -347,3 +347,37 @@ class TestPromptRecord(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestJobProvenance(unittest.TestCase):
+    """What a job ran with, for a caller that polls and never sees the headers."""
+
+    def test_raw_prompt_jobs_report_seed_models_and_settings(self):
+        provenance = wrapper_routes._job_provenance(
+            {"seed": 42, "unet_name": "h3_ref2va_int8.safetensors", "clip_name": "enc.safetensors",
+             "width": 864, "height": 480, "steps": 20, "prompt": "subject_definitions: ..."},
+            "raw_prompt used verbatim; no LLM rewrite", {"source": "raw_prompt", "mode": "Ref2VA"})
+        self.assertEqual(provenance["seed"], 42)
+        self.assertEqual(provenance["models"], ["h3_ref2va_int8.safetensors", "enc.safetensors"])
+        self.assertEqual(provenance["settings"], {"width": 864, "height": 480, "steps": 20})
+        self.assertEqual((provenance["prompt_source"], provenance["mode"]), ("raw_prompt", "Ref2VA"))
+        self.assertNotIn("prompt", provenance)  # the caller sent it; no need to echo it
+
+    def test_a_rewritten_prompt_is_kept(self):
+        provenance = wrapper_routes._job_provenance(
+            {"seed": 1, "prompt": "integrated_multimodal_description: [Shot 1] ..."}, None,
+            {"source": "mimo", "mode": "T2VA"})
+        self.assertEqual(provenance["prompt"], "integrated_multimodal_description: [Shot 1] ...")
+
+    def test_the_record_is_bounded_newest_first(self):
+        saved = dict(wrapper_routes._PROVENANCE)
+        try:
+            wrapper_routes._PROVENANCE.clear()
+            for i in range(wrapper_routes._PROVENANCE_MAX + 5):
+                wrapper_routes._remember_provenance(f"job-{i}", {"seed": i})
+            self.assertEqual(len(wrapper_routes._PROVENANCE), wrapper_routes._PROVENANCE_MAX)
+            self.assertNotIn("job-0", wrapper_routes._PROVENANCE)
+            self.assertIn(f"job-{wrapper_routes._PROVENANCE_MAX + 4}", wrapper_routes._PROVENANCE)
+        finally:
+            wrapper_routes._PROVENANCE.clear()
+            wrapper_routes._PROVENANCE.update(saved)

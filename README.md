@@ -189,7 +189,7 @@ docker run --rm -e HF_TOKEN=... -v /workspace:/workspace shivanshtalwar0/comfyui
 docker run --rm -v "$PWD/models:/opt/ComfyUI/models" shivanshtalwar0/comfyui prefetch minimaxh3:int8 --dry-run
 ```
 
-With no specs it fetches `minimaxh3:nvfp4 minimaxh3-ref:nvfp4 flux2klein9b` (override with `PREFETCH_MODELS`). That set is the FP8 H3 UNETs plus the 16 GB NVFP4 text encoder that a 32 GB Blackwell card needs, and the FLUX.2 [klein] stills model.
+With no specs it fetches `minimaxh3:int8 minimaxh3-ref:int8 flux2klein9b` (override with `PREFETCH_MODELS`). That set is the INT8 H3 UNETs (the weights the FloStudio RTX 5090 rig runs, so a shot looks the same on a pod as on the rig), the 16 GB NVFP4 text encoder that a 32 GB Blackwell card needs, and the FLUX.2 [klein] stills model. An H3 spec always comes with the encoder the wrapper loads at render time (the smallest on disk), never the 34 GB INT8 or 66 GB BF16 one.
 
 #### RunPod: no image pull
 

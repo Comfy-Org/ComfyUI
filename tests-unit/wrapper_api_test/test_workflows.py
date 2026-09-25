@@ -83,6 +83,39 @@ class TestWorkflowGraph(unittest.TestCase):
         self.assertEqual(noise["inputs"]["noise_seed"], 42)
 
 
+class TestKleinEditReferences(unittest.TestCase):
+    def test_several_references_chain_one_reference_latent_each(self):
+        graph = build_flux2_klein_9b_img2img(
+            prompt="the same man, at the bus stop", ref_images=["wrapper/face.png", "wrapper/stop.png"],
+            width=1024, height=576)
+        self.assertEqual(graph["4"]["inputs"]["image"], "wrapper/face.png")
+        self.assertEqual(graph["20"]["inputs"]["image"], "wrapper/stop.png")
+        # face -> stop, on both sides of the guidance
+        self.assertEqual(graph["23"]["inputs"], {"conditioning": ["10", 0], "latent": ["22", 0]})
+        self.assertEqual(graph["24"]["inputs"], {"conditioning": ["11", 0], "latent": ["22", 0]})
+        self.assertEqual(graph["12"]["inputs"]["positive"], ["23", 0])
+        self.assertEqual(graph["12"]["inputs"]["negative"], ["24", 0])
+        # the canvas is the one asked for, not the first reference's
+        self.assertEqual(graph["16"]["inputs"]["width"], 1024)
+        self.assertEqual(graph["14"]["inputs"]["height"], 576)
+        self.assertEqual(graph["5"]["inputs"]["upscale_method"], "lanczos")
+
+    def test_image_and_ref_images_combine_image_first(self):
+        graph = build_flux2_klein_9b_img2img(prompt="x", image="wrapper/a.png", ref_images="wrapper/b.png")
+        self.assertEqual(graph["4"]["inputs"]["image"], "wrapper/a.png")
+        self.assertEqual(graph["20"]["inputs"]["image"], "wrapper/b.png")
+        self.assertEqual(graph["16"]["inputs"]["width"], ["6", 0])  # no canvas: first image's size
+
+    def test_no_image_at_all_is_refused(self):
+        with self.assertRaises(ValueError):
+            build_flux2_klein_9b_img2img(prompt="x")
+
+    def test_either_upload_field_satisfies_the_edit(self):
+        entry = wrapper_workflows.WORKFLOWS["flux2klein9b"]
+        self.assertEqual(entry["image_fields"], ["image", "ref_images"])
+        self.assertEqual(entry["uploads"]["ref_images"]["max"], 3)
+
+
 class TestModelRequirements(unittest.TestCase):
     def test_three_models_with_folders_and_urls(self):
         self.assertEqual(len(FLUX2_KLEIN_9B_MODELS), 3)
@@ -186,8 +219,13 @@ class TestOpenAPISpec(unittest.TestCase):
         spec = wrapper_openapi.spec_with_workflows(workflows_module.WORKFLOWS)
         flux2 = spec["paths"]["/api/wrapper/flux2klein9b/generate"]["post"]
         flux2_schema = flux2["requestBody"]["content"]["multipart/form-data"]["schema"]
-        self.assertEqual(flux2_schema["required"], ["prompt", "image"])
+        # image OR ref_images: one-of, so neither is required on its own
+        self.assertEqual(flux2_schema["required"], ["prompt"])
         self.assertIn("megapixels", flux2_schema["properties"])
+        self.assertIn("ref_images", flux2_schema["properties"])
+        i2v = spec["paths"]["/api/wrapper/minimaxh3/image/generate"]["post"]
+        i2v_schema = i2v["requestBody"]["content"]["multipart/form-data"]["schema"]
+        self.assertIn("image", i2v_schema["required"])  # a single image field stays required
 
     def test_spec_emits_task_paths_and_video_response(self):
         from api_wrapper import workflows as workflows_module
@@ -314,8 +352,15 @@ class TestMiniMaxH3Graph(unittest.TestCase):
             prompt="x", first_frame="wrapper/a.png", last_frame="wrapper/b.png")
         self.assertEqual(graph["7"]["class_type"], "LoadImage")
         self.assertEqual(graph["8"]["class_type"], "LoadImage")
-        self.assertEqual(graph["6"]["inputs"]["first_frame"], ["7", 0])
-        self.assertEqual(graph["6"]["inputs"]["last_frame"], ["8", 0])
+        # each frame is cover-cropped to the canvas before the node sees it
+        self.assertEqual(graph["6"]["inputs"]["first_frame"], ["9", 0])
+        self.assertEqual(graph["6"]["inputs"]["last_frame"], ["10", 0])
+        for scale, loader in (("9", "7"), ("10", "8")):
+            self.assertEqual(graph[scale]["class_type"], "ImageScale")
+            self.assertEqual(graph[scale]["inputs"]["image"], [loader, 0])
+            self.assertEqual(graph[scale]["inputs"]["crop"], "center")
+            self.assertEqual((graph[scale]["inputs"]["width"], graph[scale]["inputs"]["height"]),
+                             (graph["6"]["inputs"]["width"], graph["6"]["inputs"]["height"]))
 
     def test_reference_to_video_wires_refs(self):
         graph = wrapper_workflows.build_minimax_h3_reference_to_video(
@@ -325,25 +370,30 @@ class TestMiniMaxH3Graph(unittest.TestCase):
             ref_audios=["wrapper/a1.wav", "wrapper/a2.wav"])
         self.assertEqual(graph["6"]["class_type"], "MiniMaxH3ReferenceToVideo")
         self.assertEqual(graph["6"]["inputs"]["ref_image_size"], "max")
-        self.assertEqual(graph["6"]["inputs"]["ref_images"],
-                         {"ref_image_0": ["7", 0], "ref_image_1": ["8", 0], "ref_image_2": ["9", 0]})
-        self.assertEqual(graph["6"]["inputs"]["ref_videos"], {"ref_video_0": ["10", 0]})
-        self.assertEqual(graph["6"]["inputs"]["ref_video_audios"], {"ref_video_audio_0": ["11", 0]})
-        self.assertEqual(graph["6"]["inputs"]["ref_audios"],
-                         {"ref_audio_0": ["12", 0], "ref_audio_1": ["13", 0]})
+        # Autogrow slots are addressed by flat dotted ids; a nested dict is
+        # dropped by execution (see test_reference_inputs_reach_the_node).
+        refs = {k: v for k, v in graph["6"]["inputs"].items() if k.startswith("ref_") and "." in k}
+        self.assertEqual(refs, {
+            "ref_images.ref_image_0": ["7", 0], "ref_images.ref_image_1": ["8", 0],
+            "ref_images.ref_image_2": ["9", 0], "ref_videos.ref_video_0": ["11", 0],
+            "ref_video_audios.ref_video_audio_0": ["12", 0],
+            "ref_audios.ref_audio_0": ["13", 0], "ref_audios.ref_audio_1": ["14", 0]})
+        self.assertNotIn("ref_images", graph["6"]["inputs"])
         self.assertEqual(graph["7"]["class_type"], "LoadImage")
         self.assertEqual(graph["10"]["class_type"], "LoadVideo")
-        self.assertEqual(graph["11"]["class_type"], "LoadAudio")  # video soundtrack
-        self.assertEqual(graph["12"]["class_type"], "LoadAudio")
+        # the slot takes frames, so the video goes through GetVideoComponents
+        self.assertEqual(graph["11"], {"class_type": "GetVideoComponents", "inputs": {"video": ["10", 0]}})
+        self.assertEqual(graph["12"]["class_type"], "LoadAudio")  # video soundtrack
+        self.assertEqual(graph["13"]["class_type"], "LoadAudio")
         # single-ref uploads (max=1) arrive as a bare filename string
         graph3 = wrapper_workflows.build_minimax_h3_reference_to_video(
             prompt="x", ref_videos="wrapper/v1.mp4", ref_video_audios="wrapper/v1.wav")
-        self.assertEqual(graph3["6"]["inputs"]["ref_videos"], {"ref_video_0": ["7", 0]})
-        self.assertEqual(graph3["6"]["inputs"]["ref_video_audios"], {"ref_video_audio_0": ["8", 0]})
+        self.assertEqual(graph3["6"]["inputs"]["ref_videos.ref_video_0"], ["8", 0])
+        self.assertEqual(graph3["6"]["inputs"]["ref_video_audios.ref_video_audio_0"], ["9", 0])
         # no refs -> no loader nodes, tail starts at 7
         graph2 = wrapper_workflows.build_minimax_h3_reference_to_video(prompt="x")
         self.assertEqual(graph2["7"]["class_type"], "BasicGuider")
-        self.assertEqual(graph2["6"]["inputs"].get("ref_images"), None)
+        self.assertFalse([k for k in graph2["6"]["inputs"] if k.startswith("ref_") and k != "ref_image_size"])
 
     def test_decode_nodes_use_the_correct_vae(self):
         # The joint AV latent is a NestedTensor (video [B,24,T,H,W], audio
@@ -691,6 +741,32 @@ class TestGraphValidation(unittest.TestCase):
         finally:
             for path in placeholder_paths:
                 os.remove(path)
+
+    def test_reference_inputs_reach_the_node(self):
+        """Validation passes whether or not the references are wired, so this
+        runs the resolution execution does before calling the node: what the
+        node receives as ref_images / ref_audios. A nested dict used to come
+        through as {} — every Ref2VA render was text-only."""
+        _prepare_env_for_comfy_import()
+        import nodes
+        from comfy_api.latest import _io
+
+        async def _init():
+            await nodes.init_extra_nodes(init_custom_nodes=False, init_api_nodes=False)
+
+        asyncio.run(_init())
+
+        import execution
+
+        graph = wrapper_workflows.build_minimax_h3_reference_to_video(
+            prompt="<Picture 1> <Picture 2> <Audio 1>",
+            ref_images=["wrapper/a.png", "wrapper/b.png"], ref_audios=["wrapper/c.wav"])
+        node_class = nodes.NODE_CLASS_MAPPINGS[graph["6"]["class_type"]]
+        received, _missing, v3_data = execution.get_input_data(graph["6"]["inputs"], node_class, "6")
+        received = _io.build_nested_inputs(received, v3_data)
+        self.assertEqual(sorted(received["ref_images"]), ["ref_image_0", "ref_image_1"])
+        self.assertEqual(sorted(received["ref_audios"]), ["ref_audio_0"])
+        self.assertEqual(received.get("ref_videos"), {})
 
 
 if __name__ == "__main__":

@@ -15,9 +15,13 @@ Specs name a workflow and, for MiniMax H3, a quantization:
     minimaxh3-ref[:quant]  reference-to-video (ref2va) UNET + the same encoder/VAEs
     flux2klein9b           FLUX.2 [klein] 9B stills (gated on Hugging Face: HF_TOKEN)
 
-Quantizations are the wrapper's: nvfp4 (fp8 UNET + 16 GB nvfp4 encoder, the
-Blackwell / RTX 5090 choice), int8, fp8, bf16. With no specs, PREFETCH_MODELS
-(space or comma separated) is used, else the FloStudio default set.
+Quantizations are the wrapper's: nvfp4 (fp8 UNET), int8, fp8, bf16; they pick
+the UNET. The text encoder is always the one the wrapper loads at render time,
+the smallest on disk, so the 16 GB nvfp4 one: fetching the 34 GB int8 or 66 GB
+bf16 encoder for an int8/bf16 UNET would only fill the volume. With no specs,
+PREFETCH_MODELS (space or comma separated) is used, else the FloStudio default
+set: int8 UNETs, the weights the RTX 5090 rig runs, so a shot looks the same
+whichever GPU renders it.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-DEFAULT_SPECS = ["minimaxh3:nvfp4", "minimaxh3-ref:nvfp4", "flux2klein9b"]
+DEFAULT_SPECS = ["minimaxh3:int8", "minimaxh3-ref:int8", "flux2klein9b"]
 
 
 def say(message: str, *, error: bool = False) -> None:
@@ -48,7 +52,10 @@ def models_for(spec: str) -> list[dict]:
     if name in ("minimaxh3", "minimaxh3-ref"):
         if quant not in wf.MINIMAX_H3_QUANT_MODELS:
             raise SystemExit(f"prefetch: unknown quantization {quant!r} (one of {', '.join(wf.MINIMAX_H3_QUANT_MODELS)})")
-        return wf.minimax_h3_models(quant, ref2va=name == "minimaxh3-ref")
+        # The encoder the wrapper's picker loads (smallest first), not the
+        # quantization's own: see the module docstring.
+        return wf.minimax_h3_models(quant, ref2va=name == "minimaxh3-ref",
+                                    clip_name=wf.MINIMAX_H3_CLIP_ORDER[0])
     if name == "flux2klein9b":
         return list(wf.FLUX2_KLEIN_9B_MODELS)
     raise SystemExit(f"prefetch: unknown spec {spec!r} (minimaxh3[:quant], minimaxh3-ref[:quant], flux2klein9b)")

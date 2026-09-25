@@ -99,8 +99,9 @@ IDEOGRAM4_EXAMPLE_PROMPT = """{
 }"""
 
 
-def build_flux2_klein_9b_img2img(*, prompt, image, negative_prompt="", seed=0,
-                                 steps=20, cfg=5.0, megapixels=1.0,
+def build_flux2_klein_9b_img2img(*, prompt, image=None, ref_images=(), negative_prompt="",
+                                 seed=0, steps=20, cfg=5.0, megapixels=1.0,
+                                 width=None, height=None,
                                  filename_prefix="wrapper/flux2_klein_9b",
                                  unet_name=FLUX2_KLEIN_9B_UNET):
     """Build the FLUX.2 [klein] 9B image edit graph (API format).
@@ -111,31 +112,58 @@ def build_flux2_klein_9b_img2img(*, prompt, image, negative_prompt="", seed=0,
     runs through the flux2 custom sampler stack (CFG guider, euler,
     flux2 scheduler, empty flux2 latent at the image size).
 
-    ``image`` is a file name relative to the ComfyUI input directory.
-    ``unet_name`` selects the diffusion model file (fp8 by default; pass the
-    converted nvfp4 file name for the fp4 path).
+    Several references (``image`` first, then ``ref_images``) chain one
+    reference latent each — FLUX.2's multi-reference edit — so a character
+    portrait and a location can shape one still. ``width``/``height`` set the
+    output canvas (a video's frame); without them it takes the first
+    reference's scaled size, as the blueprint does.
+
+    File names are relative to the ComfyUI input directory. ``unet_name``
+    selects the diffusion model file (fp8 by default; pass the converted
+    nvfp4 file name for the fp4 path).
     """
-    return {
+    refs = ([image] if image else []) + list(_ref_list(ref_images))
+    if not refs:
+        raise ValueError("the image edit needs at least one image")
+    canvas_w = ["6", 0] if width is None else width
+    canvas_h = ["6", 1] if height is None else height
+    graph = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": FLUX2_KLEIN_9B_CLIP, "type": "flux2", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": FLUX2_KLEIN_9B_VAE}},
-        "4": {"class_type": "LoadImage", "inputs": {"image": image}},
-        "5": {"class_type": "ImageScaleToTotalPixels", "inputs": {"image": ["4", 0], "upscale_method": "nearest-exact", "megapixels": megapixels, "resolution_steps": 1}},
+        "4": {"class_type": "LoadImage", "inputs": {"image": refs[0]}},
+        # lanczos, not nearest: the budget usually upscales a still, and a
+        # blocky reference is a blurred face in everything made from it.
+        "5": {"class_type": "ImageScaleToTotalPixels", "inputs": {"image": ["4", 0], "upscale_method": "lanczos", "megapixels": megapixels, "resolution_steps": 1}},
         "6": {"class_type": "GetImageSize", "inputs": {"image": ["5", 0]}},
         "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
         "8": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative_prompt}},
         "9": {"class_type": "VAEEncode", "inputs": {"pixels": ["5", 0], "vae": ["3", 0]}},
         "10": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["7", 0], "latent": ["9", 0]}},
         "11": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["8", 0], "latent": ["9", 0]}},
-        "12": {"class_type": "CFGGuider", "inputs": {"model": ["1", 0], "positive": ["10", 0], "negative": ["11", 0], "cfg": cfg}},
+    }
+    positive, negative = ["10", 0], ["11", 0]
+    next_id = 20
+    for ref in refs[1:]:
+        load, scale, encode, pos, neg = (str(next_id + i) for i in range(5))
+        graph[load] = {"class_type": "LoadImage", "inputs": {"image": ref}}
+        graph[scale] = {"class_type": "ImageScaleToTotalPixels", "inputs": {"image": [load, 0], "upscale_method": "lanczos", "megapixels": megapixels, "resolution_steps": 1}}
+        graph[encode] = {"class_type": "VAEEncode", "inputs": {"pixels": [scale, 0], "vae": ["3", 0]}}
+        graph[pos] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": positive, "latent": [encode, 0]}}
+        graph[neg] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": negative, "latent": [encode, 0]}}
+        positive, negative = [pos, 0], [neg, 0]
+        next_id += 5
+    graph.update({
+        "12": {"class_type": "CFGGuider", "inputs": {"model": ["1", 0], "positive": positive, "negative": negative, "cfg": cfg}},
         "13": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
-        "14": {"class_type": "Flux2Scheduler", "inputs": {"steps": steps, "width": ["6", 0], "height": ["6", 1]}},
+        "14": {"class_type": "Flux2Scheduler", "inputs": {"steps": steps, "width": canvas_w, "height": canvas_h}},
         "15": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
-        "16": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": ["6", 0], "height": ["6", 1], "batch_size": 1}},
+        "16": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": canvas_w, "height": canvas_h, "batch_size": 1}},
         "17": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["15", 0], "guider": ["12", 0], "sampler": ["13", 0], "sigmas": ["14", 0], "latent_image": ["16", 0]}},
         "18": {"class_type": "VAEDecode", "inputs": {"samples": ["17", 0], "vae": ["3", 0]}},
         "19": {"class_type": "SaveImage", "inputs": {"images": ["18", 0], "filename_prefix": filename_prefix}},
-    }
+    })
+    return graph
 
 
 def build_ideogram4_text2img(*, prompt, seed=0, steps=20, mu=0.0, std=1.75,
@@ -498,10 +526,21 @@ def build_minimax_h3_image_to_video(*, prompt, seed=0, steps=MINIMAX_H3_DEFAULT_
     cond_inputs = {}
     loader_nodes = {}
     next_id = 7
+    loaded = []
     for input_name, ref in (("first_frame", first_frame), ("last_frame", last_frame)):
         if ref is None:
             continue
         loader_nodes[str(next_id)] = {"class_type": "LoadImage", "inputs": {"image": ref}}
+        loaded.append((input_name, str(next_id)))
+        next_id += 1
+    for input_name, loader in loaded:
+        # Cover-crop to the canvas first. The node stretches a first frame to
+        # fit (and cover-crops a last one), so an off-aspect still — a 3:4
+        # photo in a 9:16 film, a 1:1 edit — squashed every face in the shot,
+        # and a pair from one source warped differently at each end.
+        loader_nodes[str(next_id)] = {"class_type": "ImageScale", "inputs": {
+            "image": [loader, 0], "upscale_method": "lanczos",
+            "width": width, "height": height, "crop": "center"}}
         cond_inputs[input_name] = [str(next_id), 0]
         next_id += 1
     return _minimax_h3_cond_and_tail(prompt, width, height, minimax_h3_length(duration),
@@ -531,25 +570,28 @@ def build_minimax_h3_reference_to_video(*, prompt, seed=0, steps=MINIMAX_H3_DEFA
     Parity with the official ref2va workflow: up to 3 images, 1 reference video
     (with its optional soundtrack), and 2 standalone audio refs."""
     length = minimax_h3_length(duration)
+    # The node's reference inputs are Autogrow groups, and ComfyUI addresses an
+    # Autogrow slot by its flat dotted id ("ref_images.ref_image_0"). A nested
+    # {"ref_images": {"ref_image_0": ...}} is not an input the node declares:
+    # execution drops it without a validation error and the node runs with
+    # ref_images={} — every reference silently ignored.
     ref_inputs = {}
     loader_nodes = {}
     next_id = 7
-    for i, ref in enumerate(_ref_list(ref_images)):
-        ref_inputs.setdefault("ref_images", {})[f"ref_image_{i}"] = [str(next_id), 0]
-        loader_nodes[str(next_id)] = {"class_type": "LoadImage", "inputs": {"image": ref}}
-        next_id += 1
-    for i, ref in enumerate(_ref_list(ref_videos)):
-        ref_inputs.setdefault("ref_videos", {})[f"ref_video_{i}"] = [str(next_id), 0]
-        loader_nodes[str(next_id)] = {"class_type": "LoadVideo", "inputs": {"file": ref}}
-        next_id += 1
-    for i, ref in enumerate(_ref_list(ref_video_audios)):
-        ref_inputs.setdefault("ref_video_audios", {})[f"ref_video_audio_{i}"] = [str(next_id), 0]
-        loader_nodes[str(next_id)] = {"class_type": "LoadAudio", "inputs": {"audio": ref}}
-        next_id += 1
-    for i, ref in enumerate(_ref_list(ref_audios)):
-        ref_inputs.setdefault("ref_audios", {})[f"ref_audio_{i}"] = [str(next_id), 0]
-        loader_nodes[str(next_id)] = {"class_type": "LoadAudio", "inputs": {"audio": ref}}
-        next_id += 1
+    for group, slot, loader, field, refs in (
+            ("ref_images", "ref_image", "LoadImage", "image", ref_images),
+            ("ref_videos", "ref_video", "LoadVideo", "file", ref_videos),
+            ("ref_video_audios", "ref_video_audio", "LoadAudio", "audio", ref_video_audios),
+            ("ref_audios", "ref_audio", "LoadAudio", "audio", ref_audios)):
+        for i, ref in enumerate(_ref_list(refs)):
+            loader_nodes[str(next_id)] = {"class_type": loader, "inputs": {field: ref}}
+            if loader == "LoadVideo":
+                # The slot takes frames (IMAGE); LoadVideo gives a VIDEO.
+                loader_nodes[str(next_id + 1)] = {"class_type": "GetVideoComponents",
+                                                  "inputs": {"video": [str(next_id), 0]}}
+                next_id += 1
+            ref_inputs[f"{group}.{slot}_{i}"] = [str(next_id), 0]
+            next_id += 1
     head = _minimax_h3_head(prompt, width, height, length, unet_name, clip_name,
                             MINIMAX_H3_VIDEO_VAE, MINIMAX_H3_AUDIO_VAE, {})
     head["6"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
@@ -660,9 +702,19 @@ WORKFLOWS = {
     "flux2klein9b": {
         "title": "FLUX.2 [klein] 9B image edit",
         "requires_image": True,
-        "uploads": {"image": {"ext": "image", "max": 1}},
+        # Either field satisfies requires_image: `image` (one) and/or up to
+        # three `ref_images`, each its own reference latent.
+        "image_fields": ["image", "ref_images"],
+        "uploads": {"image": {"ext": "image", "max": 1}, "ref_images": {"ext": "image", "max": 3}},
         "uses": ["prompt", "negative_prompt", "seed", "steps", "cfg", "megapixels"],
-        "form": ["prompt", "image", "negative_prompt", "seed", "steps", "cfg", "megapixels"],
+        "form": ["prompt", "image", "ref_images", "negative_prompt", "seed", "steps", "cfg",
+                 "megapixels", "width", "height"],
+        "extra_form_properties": {
+            "width": {"type": "integer", "minimum": 256, "maximum": 8192,
+                      "description": "Output width. Omit to take the first image's size."},
+            "height": {"type": "integer", "minimum": 256, "maximum": 8192,
+                       "description": "Output height. Omit to take the first image's size."},
+        },
         "build": build_flux2_klein_9b_img2img,
     },
     "flux2klein9b-txt2img": {

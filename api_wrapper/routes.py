@@ -148,6 +148,41 @@ def _header_value(text):
     return collapsed.encode("latin-1", "replace").decode("latin-1")
 
 
+#: What each recent job was actually rendered with, by job id: returned with an
+#: async submit's 504 and on /wrapper/jobs/{id}, because a caller that polls
+#: never sees the X-Wrapper-* headers of a synchronous reply. Bounded; the
+#: newest jobs win.
+_PROVENANCE: dict = {}
+_PROVENANCE_MAX = 512
+
+
+def _job_provenance(build_kwargs, note, prompt_record):
+    """The seed, checkpoint files, settings and prompt one job runs with."""
+    order = lambda key: (0 if "unet" in key else 1, key)
+    provenance = {
+        "seed": build_kwargs.get("seed"),
+        "models": [str(v) for k, v in sorted(build_kwargs.items(), key=lambda kv: order(kv[0]))
+                   if k.endswith("_name") and isinstance(v, str)],
+        "settings": {k: build_kwargs[k] for k in
+                     ("width", "height", "duration", "steps", "scheduler", "cfg", "megapixels")
+                     if k in build_kwargs},
+        "note": note,
+    }
+    if prompt_record is not None:
+        provenance["prompt_source"] = prompt_record.get("source")
+        provenance["mode"] = prompt_record.get("mode")
+        # A rewritten prompt exists nowhere else once the job's files are cleaned up.
+        if prompt_record.get("source") != "raw_prompt":
+            provenance["prompt"] = build_kwargs.get("prompt")
+    return provenance
+
+
+def _remember_provenance(job_id, provenance):
+    _PROVENANCE[job_id] = provenance
+    while len(_PROVENANCE) > _PROVENANCE_MAX:
+        _PROVENANCE.pop(next(iter(_PROVENANCE)))
+
+
 def _resolution_headers(build_kwargs, note):
     """Report what the setup actually resolved: the checkpoint file names it
     picked, the canvas/length it settled on, and any advisory note."""
@@ -159,7 +194,7 @@ def _resolution_headers(build_kwargs, note):
               if k.endswith("_name") and isinstance(v, str)]
     if models:
         headers["X-Wrapper-Models"] = _header_value(", ".join(models))
-    settings = [f"{k}={build_kwargs[k]}" for k in ("width", "height", "duration", "steps", "scheduler")
+    settings = [f"{k}={build_kwargs[k]}" for k in ("width", "height", "duration", "steps", "scheduler", "seed")
                 if k in build_kwargs]
     if settings:
         headers["X-Wrapper-Settings"] = _header_value(" ".join(settings))
@@ -444,6 +479,24 @@ async def _setup_ideogram4(fields, downloaded):
     }, note
 
 
+async def _setup_flux2klein9b_edit(fields, downloaded):
+    """Model setup for the FLUX.2 [klein] 9B image edit: the shared model
+    setup, plus an optional output canvas (both width and height, or neither)."""
+    build_kwargs, note = await _setup_flux2klein9b(fields, downloaded)
+    if "width" in fields or "height" in fields:
+        try:
+            width = int(fields["width"])
+            height = int(fields["height"])
+        except (KeyError, ValueError):
+            raise _SetupError("Invalid parameter value",
+                              "width and height must be sent together, as numbers.") from None
+        if not 256 <= width <= 8192 or not 256 <= height <= 8192:
+            raise _SetupError("Invalid size", "width/height must be between 256 and 8192.")
+        build_kwargs["width"] = width
+        build_kwargs["height"] = height
+    return build_kwargs, note
+
+
 async def _setup_flux2klein9b_txt2img(fields, downloaded):
     """Model setup for the FLUX.2 [klein] 9B text-to-image workflow: same
     models as the image-edit variant, plus width/height validation."""
@@ -550,7 +603,7 @@ async def _setup_minimax_h3_reference(fields, downloaded):
     return await _setup_minimax_h3(fields, downloaded, ref2va=True)
 
 
-_WORKFLOW_SETUPS = {"flux2klein9b": _setup_flux2klein9b,
+_WORKFLOW_SETUPS = {"flux2klein9b": _setup_flux2klein9b_edit,
                     "flux2klein9b-txt2img": _setup_flux2klein9b_txt2img,
                     "ideogram4": _setup_ideogram4,
                     "minimaxh3": {"text": _setup_minimax_h3_text,
@@ -618,8 +671,11 @@ def register_wrapper_routes(routes, prompt_server):
                         "Send 'prompt' (plain description of the video you want, rewritten into an "
                         "H3 prompt by the LLM) or 'raw_prompt' (a ready-made H3 prompt).")
             return _error_response("No prompt provided", required)
-        if task.get("requires_image") and not uploads.get("image"):
-            return _error_response("No image provided", "The 'image' form field with the input image is required.")
+        image_fields = task.get("image_fields", ["image"])
+        if task.get("requires_image") and not any(uploads.get(name) for name in image_fields):
+            return _error_response(
+                "No image provided",
+                f"Send the input image in {' or '.join(repr(name) for name in image_fields)}.")
 
         try:
             seed = int(fields["seed"]) if "seed" in fields else random.randrange(0, 2 ** 64)
@@ -732,6 +788,8 @@ def register_wrapper_routes(routes, prompt_server):
         valid = await execution.validate_prompt(prompt_id, graph, None)
         if not valid[0]:
             return _error_response("Workflow validation failed", str(valid[1]))
+        provenance = _job_provenance({**build_kwargs, "seed": seed}, note, prompt_record)
+        _remember_provenance(prompt_id, provenance)
 
         extra_data = {"create_time": int(time.time() * 1000)}
 
@@ -784,6 +842,8 @@ def register_wrapper_routes(routes, prompt_server):
                     "extra_info": {},
                 },
                 "job_id": prompt_id,
+                # The caller will poll rather than get this reply's headers.
+                "provenance": provenance,
             }, status=504 if timeout is not None else 500)
         status = history_entry.get("status") or {}
         status_str = status.get("status_str") if isinstance(status, dict) else status
@@ -963,6 +1023,8 @@ def register_wrapper_routes(routes, prompt_server):
                 image["filename"], image.get("subfolder", ""), image.get("type", "output")
             )
         job["images"] = images
+        if job_id in _PROVENANCE:
+            job["provenance"] = _PROVENANCE[job_id]  # additive, like progress
         # Additive: callers that predate it ignore the field. See api_wrapper/progress.py.
         progress = wrapper_progress.job_progress(job_id, job.get("status"), get_progress_state(), queued)
         if progress is not None:
