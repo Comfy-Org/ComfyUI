@@ -71,9 +71,11 @@ def _write_file(temp_dir, name: str, payload: bytes = b"payload") -> str:
     return str(file_path)
 
 
-def test_download_path_moves_last_access_time_but_not_updated_at(
+def test_touch_moves_last_access_time_but_not_updated_at(
     session, mock_create_session, temp_dir
 ):
+    # Resolve then touch, as the download route does; the route itself is covered by
+    # test_uncontended_download_records_the_access_time.
     path = _write_file(temp_dir, "download.bin")
     record = _seed_record(session, path, name="download.bin")
 
@@ -81,7 +83,7 @@ def test_download_path_moves_last_access_time_but_not_updated_at(
     touch_record_access_time(record.id)
 
     assert _last_access(session, record.id) is not None, (
-        "serving a download must record the access"
+        "touch_record_access_time must record the access"
     )
     assert _updated_at(session, record.id) == STALE, (
         "a read moves last_access_time only; it is not an explicit user edit"

@@ -133,3 +133,51 @@ def test_bounded_session_restores_the_pooled_busy_timeout(file_db):
 
     with db_module.create_write_session() as session:
         assert session.execute(text("PRAGMA busy_timeout")).scalar_one() == default
+
+
+@pytest.fixture
+def memory_db(monkeypatch):
+    monkeypatch.setattr(db_module.args, "database_url", "sqlite:///:memory:")
+    monkeypatch.setattr(db_module, "Session", None)
+    monkeypatch.setattr(db_module, "WriteSession", None)
+    db_module._init_memory_db(db_module.args.database_url)
+    yield
+    db_module.Session.kw["bind"].dispose()
+
+
+def _busy_timeout():
+    with db_module.create_session() as session:
+        return session.execute(text("PRAGMA busy_timeout")).scalar_one()
+
+
+def test_memory_db_bounded_sessions_leave_the_shared_busy_timeout_alone(memory_db):
+    # One connection serves the whole process. Interleaved save/restore pairs on it would
+    # leave the short timeout behind: A saves 5000, B saves 50, A restores 5000, B restores 50.
+    before = _busy_timeout()
+    first = db_module.create_bounded_write_session(50)
+    second = db_module.create_bounded_write_session(50)
+    first.__enter__()
+    second.__enter__()
+    first.__exit__(None, None, None)
+    second.__exit__(None, None, None)
+
+    assert _busy_timeout() == before
+
+
+def test_memory_db_touch_records_the_access_time(memory_db, tmp_path):
+    asset = tmp_path / "asset.png"
+    asset.write_bytes(b"png")
+    with db_module.create_write_session() as session:
+        content = create_content(session, str(asset), size_bytes=3, mtime_ns=1)
+        record_id = create_record(session, content.id, "asset.png").id
+        session.commit()
+    before = _busy_timeout()
+
+    threads = [threading.Thread(target=asset_management.touch_record_access_time, args=(record_id,)) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert _last_access_time(record_id) is not None
+    assert _busy_timeout() == before

@@ -180,6 +180,13 @@ def _is_memory_db(db_url):
     return db_url in ("sqlite:///:memory:", "sqlite://")
 
 
+def is_memory_db():
+    """True for an in-memory database: one connection shared by the whole process, where a
+    write session is a plain session. Callers that would otherwise use it from several
+    threads at once must serialize instead."""
+    return _is_memory_db(get_database_url())
+
+
 def init_db():
     db_url = get_database_url()
     logging.debug(f"Database URL: {db_url}")
@@ -351,7 +358,13 @@ def create_bounded_write_session(busy_timeout_ms: int):
     raises OperationalError("database is locked"). For writes that may be skipped rather
     than wait on a long writer such as a scan batch. The timeout is set on the driver
     connection before the session's BEGIN IMMEDIATE, and restored before it returns to
-    the pool."""
+    the pool. For an in-memory database this is a plain write session with the pragma left
+    alone: there is no separate writer to wait on, and the one connection is shared, so a
+    save and restore could race with another caller and leave the short timeout behind."""
+    if is_memory_db():
+        with WriteSession() as session:
+            yield session
+        return
     with WriteSession.kw["bind"].connect() as connection:
         driver = connection.connection.driver_connection
         previous = driver.execute("PRAGMA busy_timeout").fetchone()[0]
