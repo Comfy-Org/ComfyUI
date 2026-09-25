@@ -1126,6 +1126,8 @@ async def mark_missing_assets(request: web.Request) -> web.Response:
     Returns:
         200 OK with count of marked assets
         409 Conflict if a scan is currently running
+        500 Internal Server Error with PRUNE_FAILED if the marking failed, so a
+            prune that did not run is never reported as a completed one
     """
     try:
         marked = asset_seeder.mark_missing_outside_prefixes()
@@ -1133,5 +1135,11 @@ async def mark_missing_assets(request: web.Request) -> web.Response:
         return web.json_response(
             {"status": "scan_running", "marked": 0},
             status=409,
+        )
+    if marked is None:
+        return _build_error_response(
+            500,
+            "PRUNE_FAILED",
+            "Failed to mark missing assets.",
         )
     return web.json_response({"status": "completed", "marked": marked}, status=200)

@@ -15,7 +15,10 @@ from app.assets.scanner import (
 def _scan(session, root: Path) -> int:
     paths = [str(path) for path in root.iterdir()]
     specs, _, _ = build_asset_specs(paths, set(), enable_metadata_extraction=False)
-    return seed_asset_specs(session, specs)
+    created, error = seed_asset_specs(session, specs)
+    if error is not None:
+        raise error
+    return created
 
 
 def test_e2e_scan_seed_detect_prune(session, temp_dir: Path):
