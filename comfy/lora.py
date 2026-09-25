@@ -336,6 +336,8 @@ def model_lora_keys_unet(model, key_map={}):
                     key_map["{}".format(key_lora)] = to
                     # Support transformer prefix format
                     key_map["transformer.{}".format(key_lora)] = to
+                    # PEFT exports keep the transformer under base_model.model.
+                    key_map["base_model.model.{}".format(key_lora)] = to
                     key_map["lycoris_{}".format(key_lora.replace(".", "_"))] = to #SimpleTuner lycoris format
 
     if isinstance(model, comfy.model_base.Krea2):
