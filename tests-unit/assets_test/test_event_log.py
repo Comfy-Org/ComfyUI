@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from app.assets import event_log
-from app.assets.event_log import ALLOWED_FIELDS, TAG, EventLogError, emit, error_type
+from app.assets.event_log import ALLOWED_FIELDS, SITES, TAG, EventLogError, emit, error_type
+from app.assets.failures import REASONS
 
 # The line grammar below is the CONTRACT shared with the desktop launcher's log
 # tap: Comfy-Org/Comfy-Desktop `src/main/lib/assetsTap.ts` holds the equivalent
@@ -37,7 +38,14 @@ VALID_VALUES: dict[str, list[object]] = {
     "count": [1],
     "error_type": ["ValueError", "FileNotFoundError"],
     "hashing_enabled": [True, False],
-    "site": ["discovery", "enrich"],
+    "site": sorted(SITES),
+    "reason": sorted(REASONS),
+    "errno_name": ["EACCES", "ESTALE", "WSAESTALE", "none"],
+    "winerror": [-1, 0, 53, 65535],
+    "exc_fp": ["0123456789ab"],
+    "exc_class": ["OSError", "sqlalchemy.exc.OperationalError", "ext"],
+    "exc_site": ["assets.scanner.enrich_asset", "none"],
+    "exc_line": [0, 612],
 }
 
 
@@ -91,11 +99,11 @@ def go_to_production_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- the shared cross-repo fixture -------------------------------------------------
 
 
-def test_shared_fixture_file_holds_three_newline_terminated_lines():
+def test_shared_fixture_file_holds_four_newline_terminated_lines():
     raw = FIXTURE_PATH.read_text(encoding="utf-8")
 
     assert raw.endswith("\n")
-    assert len(raw.splitlines()) == 3
+    assert len(raw.splitlines()) == 4
 
 
 @pytest.mark.parametrize("line", fixture_lines())
@@ -184,7 +192,16 @@ def test_a_string_value_carrying_a_forbidden_character_raises(value):
         ("phase", "quick"),
         ("phase", None),
         ("stage", "scanning"),
-        ("site", "reference"),
+        ("site", "made_up"),
+        ("reason", "disk_on_fire"),
+        ("errno_name", "estale"),
+        ("winerror", 65536),
+        ("winerror", -2),
+        ("exc_fp", "0123456789AB"),
+        ("exc_fp", "0123456789a"),
+        ("exc_class", "my.module.Error!"),
+        ("exc_site", "1assets.scanner"),
+        ("exc_line", -1),
         ("error_type", "x" * 65),
         ("error_type", ""),
         ("error_type", 7),
@@ -201,6 +218,15 @@ def test_a_string_value_carrying_a_forbidden_character_raises(value):
         "none-phase",
         "bad-stage",
         "bad-site",
+        "bad-reason",
+        "lowercase-errno-name",
+        "winerror-too-large",
+        "winerror-below-sentinel",
+        "uppercase-fingerprint",
+        "short-fingerprint",
+        "punctuated-class",
+        "site-starting-with-digit",
+        "negative-line",
         "oversized-string",
         "empty-string",
         "non-string-error-type",

@@ -10,6 +10,7 @@ so the rows it never reached are selected again when the scan resumes.
 
 import logging
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, NamedTuple, Protocol, TypedDict
@@ -19,7 +20,8 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.assets import mode
-from app.assets.event_log import emit, error_type
+from app.assets.event_log import emit, emit_failure
+from app.assets.failures import classify_failure
 from app.assets.database.queries import (
     create_content_reporting_insert,
     is_live_path_conflict,
@@ -74,6 +76,8 @@ class _ScanProgress(Protocol):
     permission_denied: int
 
     def mark_emitted(self, key: str) -> bool: ...
+
+    def record_failure(self, site: str, exc: BaseException) -> None: ...
 
 
 class SeedAssetSpec(TypedDict):
@@ -167,32 +171,85 @@ def collect_models_files() -> list[str]:
     return out
 
 
+def _report_unreachable_root(
+    root: RootType, exc: OSError, progress: _ScanProgress | None
+) -> None:
+    """``scanner.root_unreachable`` at most once per root per scan, from whichever of the
+    reference check and the walk notices first."""
+    if progress is not None:
+        progress.record_failure("walk_root", exc)
+        if not progress.mark_emitted(f"root_unreachable:{root}"):
+            return
+    emit_failure("scanner.root_unreachable", exc, root=root)
+
+
 def observe_references_on_filesystem(
-    session: Session, prefixes: list[str], progress: _ScanProgress | None = None
+    session: Session,
+    prefixes: list[str],
+    progress: _ScanProgress | None = None,
+    root: RootType | None = None,
 ) -> tuple[list[_ReferenceObservation], set[str]]:
     """Stat every live row under ``prefixes`` without writing, so the caller can
     apply the result in a short write transaction. Also returns the paths whose
-    file still exists."""
+    file still exists.
+
+    With ``root``, a row whose file is gone is only observed as missing when the
+    prefix it lives under can still be stat'ed, so an unmounted disk or a removed
+    drive leaves its library alone instead of marking all of it missing. Temp is
+    synced without ``root``: it is deleted and recreated around startup, and its
+    references must be retired while it is absent.
+    """
     contents = [
         (content.id, content.path, content.size_bytes, content.mtime_ns)
         for content in live_contents_under_prefixes(session, prefixes)
     ]
     observations: list[_ReferenceObservation] = []
     survivors: set[str] = set()
+    root_failures: dict[str, OSError | None] = {}
+
+    def root_is_reachable(path: str) -> bool:
+        owners = [prefix for prefix in prefixes if is_path_under_prefixes(path, [prefix])]
+        if not owners:
+            # The query selected the row but no prefix claims it (a stored path that is
+            # not normalized, say). Not knowing its root must not mark it missing.
+            return False
+        prefix = max(owners, key=len)
+        if prefix not in root_failures:
+            try:
+                if not stat.S_ISDIR(os.stat(prefix, follow_symlinks=True).st_mode):
+                    # A file where the root should be is no more a library than a gap is.
+                    # "from None": this runs while handling the row's own error, which
+                    # must not become the root failure's cause.
+                    raise NotADirectoryError() from None
+                root_failures[prefix] = None
+            except OSError as exc:
+                root_failures[prefix] = exc
+                _log_scan_error("reference_root", exc)
+                if root is not None:
+                    _report_unreachable_root(root, exc, progress)
+        return root_failures[prefix] is None
+
     for content_id, path, size_bytes, mtime_ns in contents:
         try:
             stat_result = os.stat(path, follow_symlinks=True)
-        except FileNotFoundError:
-            observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
-        except PermissionError as e:
-            _log_scan_error("reference_stat", e)
-            if progress is not None:
-                progress.permission_denied += 1
-            logging.debug("Permission denied accessing %s", path)
         except OSError as e:
+            # Only a plain ENOENT under a reachable root means the file was deleted. Any
+            # other failure, such as an offline network share (which Windows reports as
+            # ENOENT with a network winerror), leaves the row alone for this scan.
+            if classify_failure(e).reason == "vanished":
+                if root is None or root_is_reachable(path):
+                    observations.append(
+                        _ReferenceObservation(content_id, size_bytes, mtime_ns, None)
+                    )
+                continue
             _log_scan_error("reference_stat", e)
             logging.debug("OSError checking %s: %s", path, e)
-            observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
+            if progress is not None:
+                if isinstance(e, PermissionError):
+                    progress.permission_denied += 1
+                progress.record_failure("reference", e)
+                if progress.mark_emitted("stat_failed:reference"):
+                    emit_failure("scanner.stat_failed", e, site="reference")
         else:
             survivors.add(os.path.abspath(path))
             if stat_result.st_mtime_ns != mtime_ns:
@@ -227,11 +284,11 @@ def apply_reference_observations(
 
 
 def _sync_prefixes_in_write_txn(
-    prefixes: list[str], progress: _ScanProgress | None
+    prefixes: list[str], progress: _ScanProgress | None, root: RootType | None = None
 ) -> set[str]:
     with create_session() as session:
         observations, survivors = observe_references_on_filesystem(
-            session, prefixes, progress
+            session, prefixes, progress, root
         )
     if observations:
         with create_write_session() as session:
@@ -252,14 +309,12 @@ def sync_root_safely(
     Returns survivors (existing paths) or empty set on failure.
     """
     try:
-        return _sync_prefixes_in_write_txn(get_scan_prefixes_for_root(root), progress)
+        return _sync_prefixes_in_write_txn(
+            get_scan_prefixes_for_root(root), progress, root
+        )
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
-        emit(
-            "scanner.fast_scan_failed",
-            root=root,
-            error_type=error_type(exc),
-        )
+        emit_failure("scanner.fast_scan_failed", exc, root=root)
         return set()
 
 
@@ -271,11 +326,7 @@ def sync_temp_references_safely(
         _sync_prefixes_in_write_txn(get_temp_prefixes(), progress)
     except Exception as exc:
         logging.exception("temp reference sync failed: %s", exc)
-        emit(
-            "scanner.temp_sync_failed",
-            root="temp",
-            error_type=error_type(exc),
-        )
+        emit_failure("scanner.temp_sync_failed", exc, root="temp")
 
 
 def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int | None:
@@ -291,10 +342,7 @@ def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int | None:
             return count
     except Exception as exc:
         logging.exception("marking missing assets failed: %s", exc)
-        emit(
-            "scanner.mark_missing_failed",
-            error_type=error_type(exc),
-        )
+        emit_failure("scanner.mark_missing_failed", exc)
         return None
 
 
@@ -310,15 +358,42 @@ def mark_contents_missing_outside_prefixes(
     return len(missing)
 
 
-def collect_paths_for_roots(roots: tuple[RootType, ...]) -> list[str]:
+def _walk_error_reporter(
+    root: RootType, progress: _ScanProgress | None
+) -> Callable[[str, OSError], None]:
+    def report_walk_error(site: str, exc: OSError) -> None:
+        _log_scan_error(site, exc)
+        if site == "walk_root":
+            _report_unreachable_root(root, exc, progress)
+            return
+        if progress is None:
+            return
+        progress.record_failure(site, exc)
+        if site == "walk_dir" and progress.mark_emitted(f"walk_failed:{root}"):
+            emit_failure("scanner.walk_failed", exc, root=root)
+
+    return report_walk_error
+
+
+def collect_paths_for_roots(
+    roots: tuple[RootType, ...], progress: _ScanProgress | None = None
+) -> list[str]:
     """Collect all file paths for the given roots."""
     paths: list[str] = []
     if "models" in roots:
         paths.extend(collect_models_files())
     if "input" in roots:
-        paths.extend(list_files_recursively(folder_paths.get_input_directory()))
+        paths.extend(
+            list_files_recursively(
+                folder_paths.get_input_directory(), _walk_error_reporter("input", progress)
+            )
+        )
     if "output" in roots:
-        paths.extend(list_files_recursively(folder_paths.get_output_directory()))
+        paths.extend(
+            list_files_recursively(
+                folder_paths.get_output_directory(), _walk_error_reporter("output", progress)
+            )
+        )
     return paths
 
 
@@ -358,8 +433,9 @@ def build_asset_specs(
             if progress is not None:
                 if isinstance(e, PermissionError):
                     progress.permission_denied += 1
+                progress.record_failure("discovery", e)
                 if progress.mark_emitted("stat_failed:discovery"):
-                    emit("scanner.stat_failed", site="discovery", error_type=error_type(e))
+                    emit_failure("scanner.stat_failed", e, site="discovery")
             continue
         if not stat_p.st_size:
             continue
@@ -410,7 +486,9 @@ class _SpecObservation(NamedTuple):
     snapshot: tuple[str, os.stat_result] | None
 
 
-def observe_asset_specs(specs: list[SeedAssetSpec]) -> dict[str, _SpecObservation | None]:
+def observe_asset_specs(
+    specs: list[SeedAssetSpec], progress: _ScanProgress | None = None
+) -> dict[str, _SpecObservation | None]:
     """Stat (and, in hashing mode, hash) each spec before the write transaction opens.
 
     ``None`` marks a path that vanished or could not be read.
@@ -422,12 +500,15 @@ def observe_asset_specs(specs: list[SeedAssetSpec]) -> dict[str, _SpecObservatio
         try:
             stat_result = os.stat(path, follow_symlinks=True)
             snapshot = snapshot_hash(path) if hashing_is_enabled else None
-        except FileNotFoundError:
-            logging.warning("Skipping vanished asset during scan: %s", path)
-            observed[path] = None
-            continue
         except OSError as e:
-            _log_scan_error("seed_observation", e)
+            if classify_failure(e).reason == "vanished":
+                logging.warning("Skipping vanished asset during scan: %s", path)
+            else:
+                _log_scan_error("seed_observation", e)
+                if progress is not None:
+                    progress.record_failure("seed_observation", e)
+                    if progress.mark_emitted("stat_failed:seed_observation"):
+                        emit_failure("scanner.stat_failed", e, site="seed_observation")
             observed[path] = None
             continue
         if snapshot is not None:
@@ -440,9 +521,14 @@ def seed_asset_specs(
     session: Session,
     specs: list[SeedAssetSpec],
     observed: dict[str, _SpecObservation | None] | None = None,
+    progress: _ScanProgress | None = None,
+    site: str = "batch_insert",
 ) -> tuple[int, Exception | None]:
+    """Seed each spec in its own savepoint. Returns the count created and the first
+    failure, for the caller to raise; with ``progress``, every failure is counted
+    under ``site``."""
     if observed is None:
-        observed = observe_asset_specs(specs)
+        observed = observe_asset_specs(specs, progress)
     created = 0
     first_error: Exception | None = None
     # Counted, not gated through _ScanProgress.mark_emitted like its neighbours, because this
@@ -499,6 +585,8 @@ def seed_asset_specs(
                     "Skipping asset whose row conflicts during scan: %s", path
                 )
                 continue
+            if progress is not None:
+                progress.record_failure(site, error)
             if first_error is None:
                 first_error = error
         except MemoryError:
@@ -506,6 +594,8 @@ def seed_asset_specs(
             # while the process is already out of memory.
             raise
         except Exception as error:
+            if progress is not None:
+                progress.record_failure(site, error)
             if first_error is None:
                 first_error = error
     if invalid_mtimes:
@@ -514,18 +604,23 @@ def seed_asset_specs(
 
 
 def insert_asset_specs(
-    specs: list[SeedAssetSpec], _tag_pool: set[str]
+    specs: list[SeedAssetSpec],
+    _tag_pool: set[str],
+    progress: _ScanProgress | None = None,
+    site: str = "batch_insert",
 ) -> tuple[int, Exception | None]:
     if not specs:
         return 0, None
-    observed = observe_asset_specs(specs)
+    observed = observe_asset_specs(specs, progress)
     with create_write_session() as sess:
-        created, first_error = seed_asset_specs(sess, specs, observed)
+        created, first_error = seed_asset_specs(sess, specs, observed, progress, site)
         try:
             sess.commit()
-        except Exception:
+        except Exception as commit_error:
             if first_error is None:
                 raise
+            if progress is not None:
+                progress.record_failure(site, commit_error)
             logging.exception("Failed to commit successful specs from failed asset batch")
             try:
                 sess.rollback()
@@ -594,6 +689,12 @@ def get_unenriched_assets_for_roots(
     ]
 
 
+def _report_metadata_failure(progress: _ScanProgress, exc: BaseException) -> None:
+    progress.record_failure("metadata", exc)
+    if progress.mark_emitted("metadata_failed"):
+        emit_failure("scanner.metadata_failed", exc)
+
+
 def enrich_asset(
     session,
     file_path: str,
@@ -625,20 +726,25 @@ def enrich_asset(
         if progress is not None:
             if isinstance(e, PermissionError):
                 progress.permission_denied += 1
+            progress.record_failure("enrich", e)
             if progress.mark_emitted("stat_failed:enrich"):
-                emit("scanner.stat_failed", site="enrich", error_type=error_type(e))
+                emit_failure("scanner.stat_failed", e, site="enrich")
         return False
 
     initial_mtime_ns = get_mtime_ns(stat_p)
     rel_fname = compute_loader_path(file_path)
     mime_type: str | None = None
     metadata = None
+    on_metadata_error = (
+        None if progress is None else lambda exc: _report_metadata_failure(progress, exc)
+    )
 
     if extract_metadata:
         metadata = extract_file_metadata(
             file_path,
             stat_result=stat_p,
             relative_filename=rel_fname,
+            on_error=on_metadata_error,
         )
         if metadata:
             mime_type = metadata.content_type
@@ -663,12 +769,13 @@ def enrich_asset(
             digest, verified_stat = snapshot
             stored_hash = to_stored_hash(digest)
         except Exception as exc:
-            emit_failure = progress is None
+            should_emit = progress is None
             if progress is not None:
                 progress.hash_failed += 1
-                emit_failure = progress.mark_emitted("hash_failed")
-            if emit_failure:
-                emit("scanner.hash_failed", error_type=error_type(exc))
+                progress.record_failure("hash", exc)
+                should_emit = progress.mark_emitted("hash_failed")
+            if should_emit:
+                emit_failure("scanner.hash_failed", exc)
             if isinstance(exc, OSError):
                 _log_scan_error("hashing", exc)
             else:
@@ -700,7 +807,9 @@ def enrich_asset(
     if extract_metadata and metadata:
         system_metadata = metadata.to_user_metadata()
         if mime_type and mime_type.startswith("image/"):
-            dims = extract_image_dimensions(file_path, mime_type=mime_type)
+            dims = extract_image_dimensions(
+                file_path, mime_type=mime_type, on_error=on_metadata_error
+            )
             if dims:
                 system_metadata.update(dims)
         record.system_metadata = {**(record.system_metadata or {}), **system_metadata}
@@ -767,8 +876,9 @@ def enrich_assets_batch(
             except Exception as exc:
                 if progress is not None:
                     progress.enrich_failed += 1
+                    progress.record_failure("enrich", exc)
                 if progress is None or progress.mark_emitted("enrich_failed"):
-                    emit("scanner.enrich_failed", error_type=error_type(exc))
+                    emit_failure("scanner.enrich_failed", exc)
                 logging.warning("Failed to enrich %s: %s", row.file_path, exc)
                 sess.rollback()
                 failed_ids.append(row.record_id)

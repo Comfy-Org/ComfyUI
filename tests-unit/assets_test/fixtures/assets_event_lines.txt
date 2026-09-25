@@ -1,3 +1,4 @@
 [assets-event] seeder.scan_completed created=12 elapsed_ms=8123 enrich_failed=0 enriched=4 hash_failed=2 permission_denied=0 phase=fast root=models skipped=3
 [assets-event] seeder.scan_started phase=enrich
 [assets-event] scanner.stat_failed error_type=PermissionError site=discovery
+[assets-event] scanner.failure_bucket count=5000 errno_name=ESTALE exc_class=OSError exc_fp=3f9a1c0b7d2e exc_line=184 exc_site=assets.scanner.observe_references_on_filesystem reason=network_unavailable site=reference winerror=-1

@@ -15,9 +15,12 @@ hashes cannot ride along.
 
 import logging
 import os
+import re
 import traceback
 from collections.abc import Callable
 from typing import Any
+
+from app.assets.failures import NO_WINERROR, REASONS, describe_failure
 
 TAG = "[assets-event]"
 
@@ -27,7 +30,20 @@ FORBIDDEN_STRING_CHARS = ("/", "\\", ":", " ", "=", '"', "\n", "\r")
 ROOTS = frozenset({"models", "input", "output", "user", "temp"})
 PHASES = frozenset({"fast", "enrich", "full"})
 STAGES = frozenset({"mark_missing", "pruning", "fast_scan", "enrich", "finalize"})
-STAT_SITES = frozenset({"discovery", "enrich"})
+SITES = frozenset({
+    "discovery",
+    "enrich",
+    "reference",
+    "seed_observation",
+    "walk_root",
+    "walk_dir",
+    "hash",
+    "metadata",
+    "batch_insert",
+    "watch_stat",
+    "watch_spec",
+    "watch_seed",
+})
 ALLOWED_EVENTS = frozenset({
     "assets.enabled",
     "seeder.scan_started",
@@ -47,6 +63,10 @@ ALLOWED_EVENTS = frozenset({
     "scanner.watch_stat_failed",
     "scanner.watch_spec_failed",
     "scanner.watch_seed_failed",
+    "scanner.failure_bucket",
+    "scanner.root_unreachable",
+    "scanner.walk_failed",
+    "scanner.metadata_failed",
 })
 
 
@@ -78,6 +98,23 @@ def _is_flag(value: Any) -> bool:
     return isinstance(value, bool)
 
 
+def _matches(pattern: str) -> Callable[[Any], bool]:
+    compiled = re.compile(pattern)
+
+    def validate(value: Any) -> bool:
+        return _is_safe_string(value) and compiled.fullmatch(value) is not None
+
+    return validate
+
+
+def _is_winerror(value: Any) -> bool:
+    return _is_count(value) and (value == NO_WINERROR or 0 <= value <= 0xFFFF)
+
+
+def _is_line(value: Any) -> bool:
+    return _is_count(value) and value >= 0
+
+
 ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "root": _one_of(ROOTS),
     "phase": _one_of(PHASES),
@@ -92,7 +129,16 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "count": _is_count,
     "error_type": _is_safe_string,
     "hashing_enabled": _is_flag,
-    "site": _one_of(STAT_SITES),
+    "site": _one_of(SITES),
+    "reason": _one_of(REASONS),
+    # A pattern rather than this interpreter's errno table, so a name emitted on one
+    # platform (WSAESTALE on Windows) validates everywhere; mirrors the launcher tap.
+    "errno_name": _matches(r"E[A-Z0-9]{1,23}|WSA[A-Z0-9_]{1,24}|none"),
+    "winerror": _is_winerror,
+    "exc_fp": _matches(r"[0-9a-f]{12}"),
+    "exc_class": _matches(r"[A-Za-z_][A-Za-z0-9_.]*"),
+    "exc_site": _matches(r"[A-Za-z_][A-Za-z0-9_.]*"),
+    "exc_line": _is_line,
 }
 
 _warned_call_sites: set[tuple[str, int]] = set()
@@ -118,9 +164,12 @@ def _strict_mode() -> bool:
 
 
 def _caller_call_site() -> tuple[str, int]:
-    """Identify emit()'s caller so a bad call site warns at most once."""
-    caller = traceback.extract_stack(limit=3)[0]
-    return (caller.filename, caller.lineno or 0)
+    """Identify the caller outside this module, so a bad call site warns at most once
+    whether it called emit() or emit_failure()."""
+    for frame in reversed(traceback.extract_stack(limit=6)):
+        if frame.filename != __file__:
+            return (frame.filename, frame.lineno or 0)
+    return (__file__, 0)
 
 
 def emit(event: str, *, root: str | None = None, **fields: Any) -> None:
@@ -165,3 +214,22 @@ def error_type(exc: BaseException) -> str:
     and friends embed the path that triggered them.
     """
     return type(exc).__name__
+
+
+def emit_failure(event: str, exc: BaseException, *, root: str | None = None, **fields: Any) -> None:
+    """emit() for a failure: ``error_type`` plus the classified reason and the
+    fingerprint of the code that raised ``exc``, none of it read from the message."""
+    failure = describe_failure(exc)
+    emit(
+        event,
+        root=root,
+        error_type=error_type(exc),
+        reason=failure.reason,
+        errno_name=failure.errno_name,
+        winerror=failure.winerror,
+        exc_fp=failure.exc_fp,
+        exc_class=failure.exc_class,
+        exc_site=failure.exc_site,
+        exc_line=failure.exc_line,
+        **fields,
+    )

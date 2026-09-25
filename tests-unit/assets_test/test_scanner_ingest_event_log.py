@@ -9,6 +9,7 @@ import pytest
 
 from app.assets import scanner
 from app.assets.event_log import TAG
+from app.assets.failures import FailureDescription
 from app.assets.scanner import UnenrichedContent
 from app.assets.seeder import _ScanState
 
@@ -18,6 +19,7 @@ EVENT_LINE_PATTERN = re.compile(
     r"(?P<fields>(?: [a-z_]+=[^ =]+)*)$"
 )
 EventFields = dict[str, bool | int | str]
+FAILURE_FIELDS = frozenset(FailureDescription._fields)
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +54,13 @@ def tagged_events(caplog: pytest.LogCaptureFixture) -> list[tuple[str, EventFiel
 def events_named(
     caplog: pytest.LogCaptureFixture, event_name: str
 ) -> list[EventFields]:
-    return [fields for event, fields in tagged_events(caplog) if event == event_name]
+    """The named events' fields, less the per-exception description emit_failure()
+    adds; tests of that description read tagged_events() directly."""
+    return [
+        {name: value for name, value in fields.items() if name not in FAILURE_FIELDS}
+        for event, fields in tagged_events(caplog)
+        if event == event_name
+    ]
 
 
 def tagged_lines(caplog: pytest.LogCaptureFixture) -> list[str]:

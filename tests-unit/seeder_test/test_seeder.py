@@ -1,3 +1,4 @@
+import errno
 import logging
 import re
 import threading
@@ -15,6 +16,7 @@ from app.assets import seeder as seeder_module
 from app.assets.database.models import Asset, Base
 from app.assets.database.queries import create_content, create_record, mark_content_missing
 from app.assets.event_log import TAG
+from app.assets.failures import FailureDescription
 from app.assets.scanner import SeedAssetSpec
 from app.assets.seeder import Progress, ScanPhase, State, _AssetSeeder, _ScanStage, _ScanState
 
@@ -24,6 +26,7 @@ EVENT_LINE_PATTERN = re.compile(
     r"(?P<fields>(?: [a-z_]+=[^ =]+)*)$"
 )
 EventFields = dict[str, bool | int | str]
+FAILURE_FIELDS = frozenset(FailureDescription._fields)
 
 # Hang detector: a checkpoint that parks the scan fails the test, not the suite.
 SCAN_JOIN_TIMEOUT = 5.0
@@ -68,7 +71,13 @@ def tagged_events(caplog: pytest.LogCaptureFixture) -> list[tuple[str, EventFiel
 def events_named(
     caplog: pytest.LogCaptureFixture, event_name: str
 ) -> list[EventFields]:
-    return [fields for event, fields in tagged_events(caplog) if event == event_name]
+    """The named events' fields, less the per-exception description emit_failure()
+    adds; tests of that description read tagged_events() directly."""
+    return [
+        {name: value for name, value in fields.items() if name not in FAILURE_FIELDS}
+        for event, fields in tagged_events(caplog)
+        if event == event_name
+    ]
 
 
 def _seed_spec(path: Path) -> SeedAssetSpec:
@@ -95,7 +104,7 @@ def _configure_fast_phase(
         seeder_module, "sync_root_safely", lambda _root, _progress: set()
     )
     monkeypatch.setattr(
-        seeder_module, "collect_paths_for_roots", lambda _roots: [str(path) for path in paths]
+        seeder_module, "collect_paths_for_roots", lambda _roots, **_kwargs: [str(path) for path in paths]
     )
     monkeypatch.setattr(
         seeder_module,
@@ -104,7 +113,7 @@ def _configure_fast_phase(
     )
     watch_session = Mock()
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(watch_session))
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda **_kwargs: None)
 
 
 def _run_faulting_fast_phase(
@@ -262,7 +271,7 @@ def test_enrich_phase_does_not_count_returned_ids_as_failures(
     )
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
     monkeypatch.setattr(seeder_module, "drain_pending_verifications", lambda _session: None)
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda **_kwargs: None)
     monkeypatch.setattr(seeder_module, "drain_transition_queue", lambda _session: None)
     monkeypatch.setattr(
         seeder_module,
@@ -338,6 +347,40 @@ def test_dependency_failure_emits_no_tagged_scan_lifecycle_lines(
     assert [
         event for event, _fields in tagged_events(caplog) if event.startswith("seeder.scan_")
     ] == []
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed"])
+def test_failure_buckets_are_emitted_once_after_the_scan_outcome(
+    outcome: str,
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    scan_seeder._roots = ("models",)
+    scan_seeder._phase = ScanPhase.FAST
+
+    def fast_phase(_roots) -> tuple[int, int, int]:
+        assert scan_seeder._scan_state is not None
+        for _ in range(3):
+            scan_seeder._scan_state.record_failure("discovery", OSError(errno.ESTALE, "x"))
+        if outcome == "failed":
+            raise RuntimeError("scan blew up")
+        return (0, 0, 0)
+
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", fast_phase)
+    monkeypatch.setattr(scan_seeder, "_check_pause_and_cancel", lambda _stage: False)
+
+    with caplog.at_level(logging.INFO):
+        scan_seeder._run_scan()
+
+    names = [event for event, _fields in tagged_events(caplog)]
+    assert names[-2:] == [f"seeder.scan_{outcome}", "scanner.failure_bucket"]
+    [bucket] = [fields for event, fields in tagged_events(caplog) if event == "scanner.failure_bucket"]
+    assert (bucket["site"], bucket["reason"], bucket["count"]) == (
+        "discovery",
+        "network_unavailable",
+        3,
+    )
 
 
 def test_scan_failure_emits_exception_type_without_message(
@@ -592,7 +635,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
         seeder_module, "sync_root_safely", lambda _root, _progress: set()
     )
     monkeypatch.setattr(
-        seeder_module, "collect_paths_for_roots", lambda roots: ["asset.safetensors"]
+        seeder_module, "collect_paths_for_roots", lambda roots, **_kwargs: ["asset.safetensors"]
     )
     monkeypatch.setattr(
         seeder_module,
@@ -604,12 +647,12 @@ def test_batch_insert_failure_emits_only_the_exception_type(
         ),
     )
 
-    def fail_insert(batch, batch_tags) -> int:
+    def fail_insert(batch, batch_tags, **_kwargs) -> int:
         raise PermissionError("/private/models/asset.safetensors")
 
     monkeypatch.setattr(seeder_module, "insert_asset_specs", fail_insert)
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda **_kwargs: None)
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_fast_phase(("models",))
