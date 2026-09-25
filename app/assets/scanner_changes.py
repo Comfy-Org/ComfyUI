@@ -8,7 +8,7 @@ so a restored file can never leave two live rows describing one location.
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from collections.abc import Callable, Iterable
 from typing import Literal
 
 import sqlalchemy as sa
@@ -107,9 +107,32 @@ def recover_missing_content(
     return "recovered"
 
 
+def path_prefix_matcher(prefixes: Iterable[str]) -> Callable[[str], bool]:
+    """Return ``path -> Path(path).is_relative_to(<any prefix>)``, with the prefixes
+    normalized once.
+
+    The startup prune tests every catalogued row against every owned prefix, and
+    ``Path.is_relative_to`` walks the path's parents on each call, so a pathlib
+    check there costs rows x prefixes x depth. A normcase'd, separator-bounded
+    string prefix keeps its component bounds and platform case rules.
+    """
+    exact: set[str] = set()
+    stems: list[str] = []
+    for prefix in prefixes:
+        base = os.path.normcase(os.path.abspath(prefix))
+        exact.add(base)
+        stems.append(base if base.endswith(os.sep) else base + os.sep)
+    stem_tuple = tuple(stems)
+
+    def matches(path: str) -> bool:
+        candidate = os.path.normcase(os.path.abspath(path))
+        return candidate in exact or candidate.startswith(stem_tuple)
+
+    return matches
+
+
 def is_path_under_prefixes(path: str, prefixes: list[str]) -> bool:
-    candidate = Path(os.path.abspath(path))
-    return any(candidate.is_relative_to(os.path.abspath(prefix)) for prefix in prefixes)
+    return path_prefix_matcher(prefixes)(path)
 
 
 def split_content(session: Session, content: AssetContent, stat_result: os.stat_result, hash_value: str | None) -> AssetContent:
