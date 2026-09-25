@@ -4,6 +4,7 @@ a hash to a servable path. Name and tag updates move ``updated_at`` only when
 the requested values differ. Other supplied metadata fields record a write.
 """
 
+import logging
 import mimetypes
 import os
 from typing import Sequence
@@ -33,7 +34,7 @@ from app.assets.services.schemas import (
     ReferenceData,
     UserMetadata,
 )
-from app.database.db import create_session
+from app.database.db import create_bounded_write_session, create_session
 
 
 def _record_to_detail_result(session, record) -> AssetDetailResult:
@@ -255,9 +256,6 @@ def resolve_asset_for_download(
         asset_mime = record.mime_type
         abs_path = content.path
 
-        update_record_access_time(session, reference_id)
-        session.commit()
-
         ctype = (
             asset_mime
             or mimetypes.guess_type(ref_name or abs_path)[0]
@@ -269,3 +267,22 @@ def resolve_asset_for_download(
             content_type=ctype,
             download_name=download_name,
         )
+
+
+# Long enough to ride out ordinary short writes; far below a scan batch's hold on the lock.
+ACCESS_TIME_BUSY_TIMEOUT_MS = 50
+
+
+def touch_record_access_time(reference_id: str) -> None:
+    """Record a download's access time if the write lock is free within
+    ACCESS_TIME_BUSY_TIMEOUT_MS; otherwise skip it. The access time is advisory, so a
+    download never waits on another writer for it, and this never raises."""
+    try:
+        with create_bounded_write_session(ACCESS_TIME_BUSY_TIMEOUT_MS) as session:
+            update_record_access_time(session, reference_id)
+            session.commit()
+    except Exception as e:
+        if "locked" in str(e) or "busy" in str(e):
+            logging.debug("Skipped access-time update for %s: database busy", reference_id)
+        else:
+            logging.warning("Access-time update failed for %s: %s", reference_id, e)

@@ -24,6 +24,7 @@ from app.assets.services.asset_management import (
     delete_asset_reference,
     get_asset_detail,
     resolve_asset_for_download,
+    touch_record_access_time,
     resolve_hash_to_path,
 )
 from app.assets.services.lookup import lookup_for_view
@@ -218,6 +219,7 @@ def test_content_read_updates_last_access_time(
     assert before is None
 
     resolve_asset_for_download(record_id)
+    touch_record_access_time(record_id)
 
     session.expire_all()
     after_record = get_record_by_id(session, record_id)

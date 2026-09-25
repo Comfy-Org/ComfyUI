@@ -19,6 +19,7 @@ from app.assets.scanner import enrich_asset
 from app.assets.scanner_changes import split_content
 from app.assets.services.asset_management import (
     resolve_asset_for_download,
+    touch_record_access_time,
     resolve_hash_to_path,
     update_asset_metadata,
 )
@@ -77,6 +78,7 @@ def test_download_path_moves_last_access_time_but_not_updated_at(
     record = _seed_record(session, path, name="download.bin")
 
     resolve_asset_for_download(record.id)
+    touch_record_access_time(record.id)
 
     assert _last_access(session, record.id) is not None, (
         "serving a download must record the access"

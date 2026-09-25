@@ -3,7 +3,7 @@ import os
 import shutil
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
 from filelock import FileLock, Timeout
@@ -343,3 +343,21 @@ def create_write_session():
     fails with "database is locked", indistinguishable from real contention. Rule out a
     nested session before investigating lock contention."""
     return WriteSession()
+
+
+@contextmanager
+def create_bounded_write_session(busy_timeout_ms: int):
+    """A create_write_session() that waits at most busy_timeout_ms for the write lock, then
+    raises OperationalError("database is locked"). For writes that may be skipped rather
+    than wait on a long writer such as a scan batch. The timeout is set on the driver
+    connection before the session's BEGIN IMMEDIATE, and restored before it returns to
+    the pool."""
+    with WriteSession.kw["bind"].connect() as connection:
+        driver = connection.connection.driver_connection
+        previous = driver.execute("PRAGMA busy_timeout").fetchone()[0]
+        driver.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+        try:
+            with WriteSession(bind=connection) as session:
+                yield session
+        finally:
+            driver.execute(f"PRAGMA busy_timeout = {int(previous)}")
