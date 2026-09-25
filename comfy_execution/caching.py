@@ -85,6 +85,7 @@ class CacheKeySetInputSignature(CacheKeySet):
         super().__init__(dynprompt, node_ids, is_changed_cache)
         self.dynprompt = dynprompt
         self.is_changed_cache = is_changed_cache
+        self.signatures = {}
 
     def include_node_id_in_input(self) -> bool:
         return False
@@ -100,17 +101,27 @@ class CacheKeySetInputSignature(CacheKeySet):
             self.subcache_keys[node_id] = (node_id, node["class_type"])
 
     async def get_node_signature(self, dynprompt, node_id):
-        signature = []
-        ancestors, order_mapping = self.get_ordered_ancestry(dynprompt, node_id)
-        signature.append(await self.get_immediate_node_signature(dynprompt, node_id, order_mapping))
-        for ancestor_id in ancestors:
-            signature.append(await self.get_immediate_node_signature(dynprompt, ancestor_id, order_mapping))
-        return to_hashable(signature)
+        # A node's signature is its own inputs with each link replaced by the
+        # ancestor's signature, each node signed once, ancestors first.
+        stack = [node_id]
+        while stack:
+            current = stack[-1]
+            if current in self.signatures:
+                stack.pop()
+                continue
+            pending = [ancestor_id for ancestor_id in self.get_link_ancestors(dynprompt, current)
+                       if ancestor_id not in self.signatures]
+            if pending:
+                stack.extend(pending)
+                continue
+            self.signatures[current] = await self.get_immediate_node_signature(dynprompt, current)
+            stack.pop()
+        return self.signatures[node_id]
 
-    async def get_immediate_node_signature(self, dynprompt, node_id, ancestor_order_mapping):
+    async def get_immediate_node_signature(self, dynprompt, node_id):
         if not dynprompt.has_node(node_id):
             # This node doesn't exist -- we can't cache it.
-            return [float("NaN")]
+            return to_hashable([float("NaN")])
         node = dynprompt.get_node(node_id)
         class_type = node["class_type"]
         class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
@@ -118,35 +129,21 @@ class CacheKeySetInputSignature(CacheKeySet):
         if self.include_node_id_in_input() or (hasattr(class_def, "NOT_IDEMPOTENT") and class_def.NOT_IDEMPOTENT) or include_unique_id_in_input(class_type):
             signature.append(node_id)
         inputs = node["inputs"]
+        links = []
         for key in sorted(inputs.keys()):
             if is_link(inputs[key]):
                 (ancestor_id, ancestor_socket) = inputs[key]
-                ancestor_index = ancestor_order_mapping[ancestor_id]
-                signature.append((key,("ANCESTOR", ancestor_index, ancestor_socket)))
+                links.append((key, self.signatures[ancestor_id], ancestor_socket))
             else:
                 signature.append((key, inputs[key]))
-        return signature
+        # frozenset: its hash is cached
+        return frozenset([("SELF", to_hashable(signature)), *links])
 
-    # This function returns a list of all ancestors of the given node. The order of the list is
-    # deterministic based on which specific inputs the ancestor is connected by.
-    def get_ordered_ancestry(self, dynprompt, node_id):
-        ancestors = []
-        order_mapping = {}
-        self.get_ordered_ancestry_internal(dynprompt, node_id, ancestors, order_mapping)
-        return ancestors, order_mapping
-
-    def get_ordered_ancestry_internal(self, dynprompt, node_id, ancestors, order_mapping):
+    def get_link_ancestors(self, dynprompt, node_id):
         if not dynprompt.has_node(node_id):
-            return
+            return []
         inputs = dynprompt.get_node(node_id)["inputs"]
-        input_keys = sorted(inputs.keys())
-        for key in input_keys:
-            if is_link(inputs[key]):
-                ancestor_id = inputs[key][0]
-                if ancestor_id not in order_mapping:
-                    ancestors.append(ancestor_id)
-                    order_mapping[ancestor_id] = len(ancestors) - 1
-                    self.get_ordered_ancestry_internal(dynprompt, ancestor_id, ancestors, order_mapping)
+        return [inputs[key][0] for key in sorted(inputs.keys()) if is_link(inputs[key])]
 
 class BasicCache:
     def __init__(self, key_class, enable_providers=False):
