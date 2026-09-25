@@ -721,8 +721,10 @@ def test_seedvr2_tile_side_tracks_free_memory_within_bounds():
 
 def test_seedvr2_tile_side_counts_resident_caches_without_offload():
     """With no room to pin the caches they stay on the GPU, and the chosen tile must still fit with them."""
+    assert _tile_side(8, offload=False) < _tile_side(8), "the resident caches must shrink the tile"
+    per_pixel = vae_mod.SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL + vae_mod.SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL
     for free in (8, 16, 32):
         side = _tile_side(free, offload=False)
         assert side <= _tile_side(free)
-        per_pixel = vae_mod.SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL + vae_mod.SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL
-        assert (side * 8) ** 2 * per_pixel + vae_mod.SEEDVR2_DECODE_FIXED_BYTES <= free * 1024 ** 3
+        predicted = (side * 8) ** 2 * per_pixel + vae_mod.SEEDVR2_DECODE_FIXED_BYTES
+        assert predicted <= free * 1024 ** 3 * vae_mod.SEEDVR2_TILE_MEM_HEADROOM
