@@ -85,6 +85,15 @@ class TaskAudioContent(BaseModel):
     role: str = Field("reference_audio")
 
 
+class TaskDraftTaskContentTask(BaseModel):
+    id: str = Field(...)
+
+
+class TaskDraftTaskContent(BaseModel):
+    type: str = Field("draft_task")
+    draft_task: TaskDraftTaskContentTask = Field(...)
+
+
 class Text2VideoTaskCreationRequest(BaseModel):
     model: str = Field(...)
     content: list[TaskTextContent] = Field(..., min_length=1)
@@ -99,7 +108,9 @@ class Image2VideoTaskCreationRequest(BaseModel):
 
 class Seedance2TaskCreationRequest(BaseModel):
     model: str = Field(...)
-    content: list[TaskTextContent | TaskImageContent | TaskVideoContent | TaskAudioContent] = Field(..., min_length=1)
+    content: list[
+        TaskTextContent | TaskImageContent | TaskVideoContent | TaskAudioContent | TaskDraftTaskContent
+    ] = Field(..., min_length=1)
     generate_audio: bool | None = Field(None)
     resolution: str | None = Field(None)
     ratio: str | None = Field(None)
@@ -108,6 +119,7 @@ class Seedance2TaskCreationRequest(BaseModel):
     watermark: bool | None = Field(None)
     output_format: str | None = Field(None)
     omni_reference_task_type: str | None = Field(None, description="One of: auto, reference, edit, extend.")
+    draft: bool | None = Field(None)
 
 
 class TaskCreationResponse(BaseModel):
