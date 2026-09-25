@@ -357,13 +357,16 @@ class Qwen3VL_4BConfig(Qwen3VL_8BConfig):
 @dataclass
 class Qwen3VL_32BConfig(Qwen3VL_8BConfig):
     # MiniMax H3 conditioning checkpoint: truncated to the first 50 of 64 layers,
-    # consumed as the unnormalized hidden state after layer 50 (no final norm, no lm_head)
+    # consumed as the unnormalized hidden state after layer 50 (no final norm, no lm_head).
+    # Qwen3-VL-32B does not tie its word embeddings, so there is no valid output
+    # projection left to sample from.
     hidden_size: int = 5120
     intermediate_size: int = 25600
     num_hidden_layers: int = 50
     num_attention_heads: int = 64
     lm_head: bool = False
     final_norm: bool = False
+    can_generate: bool = False
 
 @dataclass
 class Ovis25_2BConfig:
@@ -1130,6 +1133,12 @@ class BaseGenerate:
         return self.model.init_kv_cache(batch, max_cache_len, device, execution_dtype)
 
     def generate(self, embeds=None, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.9, min_p=0.0, repetition_penalty=1.0, seed=42, stop_tokens=None, initial_tokens=[], execution_dtype=None, min_tokens=0, presence_penalty=0.0, initial_input_ids=None, position_ids=None, deepstack_embeds=None, visual_pos_masks=None, embeds_info=None):
+        if not getattr(self.model.config, "can_generate", True):
+            raise RuntimeError(
+                "This checkpoint does not support text generation: it has neither an lm_head nor tied "
+                "word embeddings to sample from. It is a conditioning-only encoder and must not be used "
+                "with the TextGenerate node."
+            )
         device = embeds.device
 
         if stop_tokens is None:
