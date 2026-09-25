@@ -73,13 +73,13 @@ class TestRequestShape(RewriterTestCase):
         api = _MockAPI()
         prompt, model = self.run_rewrite(api)
         self.assertEqual(prompt, "rewritten prompt")
-        self.assertEqual(model, pr.MODEL_PRO)  # no image -> pro
+        self.assertEqual(model, pr.MODEL_FLASH)  # auto -> flash, image or not
 
         # both auth headers, so MIMO_BASE_URL can point at Xiaomi (api-key) or
         # any OpenAI-compatible gateway (Bearer)
         self.assertEqual(api.headers["Authorization"], "Bearer test-key")
         self.assertEqual(api.headers["api-key"], "test-key")
-        self.assertEqual(api.request["model"], pr.MODEL_PRO)
+        self.assertEqual(api.request["model"], pr.MODEL_FLASH)
         # thinking off by default keeps the rewrite off the critical path;
         # the object shape is what the MiMo API documents
         self.assertEqual(api.request["thinking"], {"type": "disabled"})
@@ -112,11 +112,11 @@ class TestRequestShape(RewriterTestCase):
             self.assertIn(label, user["content"])
         self.assertNotIn("<Picture 3>", user["content"])
 
-    def test_image_becomes_an_openai_image_url_part_and_selects_the_omni_model(self):
+    def test_image_becomes_an_openai_image_url_part_for_the_flash_model(self):
         api = _MockAPI()
         _, model = self.run_rewrite(api, image=pr.data_url_from_bytes(PNG, "frame.png"))
-        self.assertEqual(model, pr.MODEL_OMNI)  # auto routes images to mimo-v2.5
-        self.assertEqual(api.request["model"], pr.MODEL_OMNI)
+        self.assertEqual(model, pr.MODEL_FLASH)  # omnimodal, so it keeps the image
+        self.assertEqual(api.request["model"], pr.MODEL_FLASH)
 
         content = api.request["messages"][1]["content"]
         self.assertIsInstance(content, list)
@@ -142,36 +142,46 @@ class TestTextOnlyModelGuard(unittest.TestCase):
 
     def test_uploaded_image_with_a_text_only_model_is_refused(self):
         with self.assertRaises(pr.RewriteError) as ctx:
-            pr.resolve_model_and_image(pr.MODEL_PRO, self.image, image_is_explicit=True)
+            pr.resolve_model_and_image(pr.MODEL_V25_PRO, self.image, image_is_explicit=True)
         self.assertEqual(ctx.exception.status, 400)
         # the message has to name both ways out
-        self.assertIn(pr.MODEL_OMNI, ctx.exception.details)
+        self.assertIn(pr.MODEL_FLASH, ctx.exception.details)
         self.assertIn("auto", ctx.exception.details)
 
     def test_wrapper_supplied_image_is_dropped_not_refused(self):
         """The caller only picked the model; the keyframe became a context
         image on the wrapper's initiative, so it yields instead of erroring."""
         model, image, note = pr.resolve_model_and_image(
-            pr.MODEL_PRO, self.image, image_is_explicit=False)
-        self.assertEqual(model, pr.MODEL_PRO)
+            pr.MODEL_V25_PRO, self.image, image_is_explicit=False)
+        self.assertEqual(model, pr.MODEL_V25_PRO)
         self.assertIsNone(image)
         self.assertIn("text-only", note)
 
     def test_omnimodal_model_keeps_the_image(self):
-        for requested in (pr.MODEL_OMNI, pr.MODEL_AUTO, None):
+        expected = {pr.MODEL_FLASH: pr.MODEL_FLASH, pr.MODEL_AUTO: pr.MODEL_FLASH, None: pr.MODEL_FLASH,
+                    pr.MODEL_PRO: pr.MODEL_PRO, pr.MODEL_V25: pr.MODEL_V25}
+        for requested, resolved in expected.items():
             model, image, note = pr.resolve_model_and_image(
                 requested, self.image, image_is_explicit=True)
-            self.assertEqual(model, pr.MODEL_OMNI, requested)
+            self.assertEqual(model, resolved, requested)
             self.assertEqual(image, self.image)
             self.assertIsNone(note)
 
     def test_text_only_model_without_an_image_is_untouched(self):
-        model, image, note = pr.resolve_model_and_image(pr.MODEL_PRO, None, False)
-        self.assertEqual((model, image, note), (pr.MODEL_PRO, None, None))
+        model, image, note = pr.resolve_model_and_image(pr.MODEL_V25_PRO, None, False)
+        self.assertEqual((model, image, note), (pr.MODEL_V25_PRO, None, None))
 
     def test_capability_table(self):
-        self.assertFalse(pr.supports_images(pr.MODEL_PRO))
-        self.assertTrue(pr.supports_images(pr.MODEL_OMNI))
+        self.assertFalse(pr.supports_images(pr.MODEL_V25_PRO))
+        for model in (pr.MODEL_FLASH, pr.MODEL_PRO, pr.MODEL_V25):
+            self.assertTrue(pr.supports_images(model), model)
+
+    def test_every_listed_model_resolves_and_anything_else_is_refused(self):
+        for model in pr.MODEL_OPTIONS[1:]:
+            self.assertEqual(pr.resolve_model(model), model)
+        with self.assertRaises(pr.RewriteError) as ctx:
+            pr.resolve_model("mimo-v2.4")
+        self.assertIn(pr.MODEL_FLASH, ctx.exception.details)
 
 
 class TestOutputHandling(RewriterTestCase):

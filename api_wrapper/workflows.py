@@ -34,6 +34,36 @@ FLUX2_KLEIN_9B_UNET = "flux-2-klein-base-9b-fp8.safetensors"
 FLUX2_KLEIN_9B_CLIP = "qwen_3_8b_fp8mixed.safetensors"
 FLUX2_KLEIN_9B_VAE = "flux2-vae.safetensors"
 
+# Qwen Image 2.1 (Comfy-Org/Qwen-Image-2.1), text to image and image edit.
+QWEN_IMAGE_21_BASE_URL = "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main"
+QWEN_IMAGE_21_VAE = "qwen_image_2.1_vae_bf16.safetensors"
+# int8_convrot is what the official "Qwen Image 2.1" templates ship (7 GB UNET
+# + 9 GB encoder); bf16 is the full-precision pair (14 GB + 18 GB).
+QWEN_IMAGE_21_QUANT_MODELS = {
+    "int8": {"unet": "qwen_image_2.1_int8_convrot.safetensors", "clip": "qwen3vl_8b_int8_convrot.safetensors"},
+    "bf16": {"unet": "qwen_image_2.1_bf16.safetensors", "clip": "qwen3vl_8b_bf16.safetensors"},
+}
+QWEN_IMAGE_21_UNET = QWEN_IMAGE_21_QUANT_MODELS["int8"]["unet"]
+QWEN_IMAGE_21_CLIP = QWEN_IMAGE_21_QUANT_MODELS["int8"]["clip"]
+# The templates' KSampler: euler/simple, 25 steps, cfg 1 (the negative prompt
+# only matters once cfg is raised above 1).
+QWEN_IMAGE_21_DEFAULT_STEPS = 25
+QWEN_IMAGE_21_DEFAULT_CFG = 1.0
+
+
+def qwen_image_21_models(quantization):
+    """The UNET, text encoder and VAE a Qwen Image 2.1 job needs."""
+    q = QWEN_IMAGE_21_QUANT_MODELS[quantization]
+    return [
+        {"folder": "diffusion_models", "filename": q["unet"],
+         "url": f"{QWEN_IMAGE_21_BASE_URL}/diffusion_models/{q['unet']}"},
+        {"folder": "text_encoders", "filename": q["clip"],
+         "url": f"{QWEN_IMAGE_21_BASE_URL}/text_encoders/{q['clip']}"},
+        {"folder": "vae", "filename": QWEN_IMAGE_21_VAE,
+         "url": f"{QWEN_IMAGE_21_BASE_URL}/vae/{QWEN_IMAGE_21_VAE}"},
+    ]
+
+
 # Models required by the Ideogram 4 text-to-image workflow (fp8 + native nvfp4
 # variants). URL layout matches the Comfy-Org repos the shipped "Text to Image
 # (Ideogram v4)" blueprint points at.
@@ -99,8 +129,9 @@ IDEOGRAM4_EXAMPLE_PROMPT = """{
 }"""
 
 
-def build_flux2_klein_9b_img2img(*, prompt, image, negative_prompt="", seed=0,
-                                 steps=20, cfg=5.0, megapixels=1.0,
+def build_flux2_klein_9b_img2img(*, prompt, image=None, ref_images=(), negative_prompt="",
+                                 seed=0, steps=20, cfg=5.0, megapixels=1.0,
+                                 width=None, height=None,
                                  filename_prefix="wrapper/flux2_klein_9b",
                                  unet_name=FLUX2_KLEIN_9B_UNET):
     """Build the FLUX.2 [klein] 9B image edit graph (API format).
@@ -111,31 +142,58 @@ def build_flux2_klein_9b_img2img(*, prompt, image, negative_prompt="", seed=0,
     runs through the flux2 custom sampler stack (CFG guider, euler,
     flux2 scheduler, empty flux2 latent at the image size).
 
-    ``image`` is a file name relative to the ComfyUI input directory.
-    ``unet_name`` selects the diffusion model file (fp8 by default; pass the
-    converted nvfp4 file name for the fp4 path).
+    Several references (``image`` first, then ``ref_images``) chain one
+    reference latent each — FLUX.2's multi-reference edit — so a character
+    portrait and a location can shape one still. ``width``/``height`` set the
+    output canvas (a video's frame); without them it takes the first
+    reference's scaled size, as the blueprint does.
+
+    File names are relative to the ComfyUI input directory. ``unet_name``
+    selects the diffusion model file (fp8 by default; pass the converted
+    nvfp4 file name for the fp4 path).
     """
-    return {
+    refs = ([image] if image else []) + list(_ref_list(ref_images))
+    if not refs:
+        raise ValueError("the image edit needs at least one image")
+    canvas_w = ["6", 0] if width is None else width
+    canvas_h = ["6", 1] if height is None else height
+    graph = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": FLUX2_KLEIN_9B_CLIP, "type": "flux2", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": FLUX2_KLEIN_9B_VAE}},
-        "4": {"class_type": "LoadImage", "inputs": {"image": image}},
-        "5": {"class_type": "ImageScaleToTotalPixels", "inputs": {"image": ["4", 0], "upscale_method": "nearest-exact", "megapixels": megapixels, "resolution_steps": 1}},
+        "4": {"class_type": "LoadImage", "inputs": {"image": refs[0]}},
+        # lanczos, not nearest: the budget usually upscales a still, and a
+        # blocky reference is a blurred face in everything made from it.
+        "5": {"class_type": "ImageScaleToTotalPixels", "inputs": {"image": ["4", 0], "upscale_method": "lanczos", "megapixels": megapixels, "resolution_steps": 1}},
         "6": {"class_type": "GetImageSize", "inputs": {"image": ["5", 0]}},
         "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
         "8": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": negative_prompt}},
         "9": {"class_type": "VAEEncode", "inputs": {"pixels": ["5", 0], "vae": ["3", 0]}},
         "10": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["7", 0], "latent": ["9", 0]}},
         "11": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["8", 0], "latent": ["9", 0]}},
-        "12": {"class_type": "CFGGuider", "inputs": {"model": ["1", 0], "positive": ["10", 0], "negative": ["11", 0], "cfg": cfg}},
+    }
+    positive, negative = ["10", 0], ["11", 0]
+    next_id = 20
+    for ref in refs[1:]:
+        load, scale, encode, pos, neg = (str(next_id + i) for i in range(5))
+        graph[load] = {"class_type": "LoadImage", "inputs": {"image": ref}}
+        graph[scale] = {"class_type": "ImageScaleToTotalPixels", "inputs": {"image": [load, 0], "upscale_method": "lanczos", "megapixels": megapixels, "resolution_steps": 1}}
+        graph[encode] = {"class_type": "VAEEncode", "inputs": {"pixels": [scale, 0], "vae": ["3", 0]}}
+        graph[pos] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": positive, "latent": [encode, 0]}}
+        graph[neg] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": negative, "latent": [encode, 0]}}
+        positive, negative = [pos, 0], [neg, 0]
+        next_id += 5
+    graph.update({
+        "12": {"class_type": "CFGGuider", "inputs": {"model": ["1", 0], "positive": positive, "negative": negative, "cfg": cfg}},
         "13": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
-        "14": {"class_type": "Flux2Scheduler", "inputs": {"steps": steps, "width": ["6", 0], "height": ["6", 1]}},
+        "14": {"class_type": "Flux2Scheduler", "inputs": {"steps": steps, "width": canvas_w, "height": canvas_h}},
         "15": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
-        "16": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": ["6", 0], "height": ["6", 1], "batch_size": 1}},
+        "16": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": canvas_w, "height": canvas_h, "batch_size": 1}},
         "17": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["15", 0], "guider": ["12", 0], "sampler": ["13", 0], "sigmas": ["14", 0], "latent_image": ["16", 0]}},
         "18": {"class_type": "VAEDecode", "inputs": {"samples": ["17", 0], "vae": ["3", 0]}},
         "19": {"class_type": "SaveImage", "inputs": {"images": ["18", 0], "filename_prefix": filename_prefix}},
-    }
+    })
+    return graph
 
 
 def build_ideogram4_text2img(*, prompt, seed=0, steps=20, mu=0.0, std=1.75,
@@ -201,6 +259,81 @@ def build_flux2_klein_9b_text2img(*, prompt, negative_prompt="", seed=0,
         "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["3", 0]}},
         "13": {"class_type": "SaveImage", "inputs": {"images": ["12", 0], "filename_prefix": filename_prefix}},
     }
+
+
+def build_qwen_image_21_text2img(*, prompt, negative_prompt="", seed=0,
+                                 steps=QWEN_IMAGE_21_DEFAULT_STEPS, cfg=QWEN_IMAGE_21_DEFAULT_CFG,
+                                 width=1024, height=1024,
+                                 filename_prefix="wrapper/qwenimage21_txt2img",
+                                 unet_name=QWEN_IMAGE_21_UNET, clip_name=QWEN_IMAGE_21_CLIP):
+    """Build the Qwen Image 2.1 text-to-image graph (API format).
+
+    Mirrors the official "Qwen Image 2.1: Text to Image" template:
+    TextEncodeQwenImage21 gives the positive and negative conditioning, and a
+    plain KSampler (euler, simple) samples an empty latent at width/height.
+    """
+    return {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip_name, "type": "qwen_image", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": QWEN_IMAGE_21_VAE}},
+        "4": {"class_type": "TextEncodeQwenImage21", "inputs": {
+            "clip": ["2", 0], "prompt": prompt, "negative_prompt": negative_prompt, "resolution": 1024}},
+        "5": {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+        "6": {"class_type": "KSampler", "inputs": {
+            "model": ["1", 0], "seed": seed, "steps": steps, "cfg": cfg, "sampler_name": "euler",
+            "scheduler": "simple", "positive": ["4", 0], "negative": ["4", 1],
+            "latent_image": ["5", 0], "denoise": 1.0}},
+        "7": {"class_type": "VAEDecode", "inputs": {"samples": ["6", 0], "vae": ["3", 0]}},
+        "8": {"class_type": "SaveImage", "inputs": {"images": ["7", 0], "filename_prefix": filename_prefix}},
+    }
+
+
+def build_qwen_image_21_edit(*, prompt, image=None, ref_images=(), negative_prompt="",
+                             seed=0, steps=QWEN_IMAGE_21_DEFAULT_STEPS, cfg=QWEN_IMAGE_21_DEFAULT_CFG,
+                             resolution=1024, width=None, height=None,
+                             filename_prefix="wrapper/qwenimage21",
+                             unet_name=QWEN_IMAGE_21_UNET, clip_name=QWEN_IMAGE_21_CLIP):
+    """Build the Qwen Image 2.1 image edit graph (API format).
+
+    Mirrors the official "Qwen Image 2.1: Image Edit" template. Every image
+    (``image`` first, then ``ref_images``) goes to TextEncodeQwenImage21,
+    which shows it to the text encoder and splices its VAE latent into the
+    sequence; the prompt names them <image1>, <image2>, ... in that order, and
+    image 1 is the one edited. ``resolution`` is the images' pixel budget
+    (about resolution x resolution, 0 keeps their own size). The output takes
+    image 1's resized size unless ``width``/``height`` set a canvas, which
+    should stay close to it or the edit shifts.
+    """
+    refs = ([image] if image else []) + list(_ref_list(ref_images))
+    if not refs:
+        raise ValueError("the image edit needs at least one image")
+    graph = {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": unet_name, "weight_dtype": "default"}},
+        "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": clip_name, "type": "qwen_image", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": QWEN_IMAGE_21_VAE}},
+    }
+    # Autogrow slots are addressed by their flat dotted id ("images.image_1");
+    # a nested dict is dropped without a validation error.
+    images = {}
+    for i, ref in enumerate(refs, start=1):
+        graph[str(9 + i)] = {"class_type": "LoadImage", "inputs": {"image": ref}}
+        images[f"images.image_{i}"] = [str(9 + i), 0]
+    graph["4"] = {"class_type": "TextEncodeQwenImage21", "inputs": {
+        "clip": ["2", 0], "vae": ["3", 0], "prompt": prompt, "negative_prompt": negative_prompt,
+        "resolution": resolution, **images}}
+    latent = ["4", 2]
+    if width is not None:
+        graph["5"] = {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}}
+        latent = ["5", 0]
+    graph.update({
+        "6": {"class_type": "KSampler", "inputs": {
+            "model": ["1", 0], "seed": seed, "steps": steps, "cfg": cfg, "sampler_name": "euler",
+            "scheduler": "simple", "positive": ["4", 0], "negative": ["4", 1],
+            "latent_image": latent, "denoise": 1.0}},
+        "7": {"class_type": "VAEDecode", "inputs": {"samples": ["6", 0], "vae": ["3", 0]}},
+        "8": {"class_type": "SaveImage", "inputs": {"images": ["7", 0], "filename_prefix": filename_prefix}},
+    })
+    return graph
 
 
 # MiniMax H3 omni-modal video model files (Comfy-Org/MiniMax-H3). The fl2va
@@ -302,7 +435,6 @@ def minimax_h3_models(quantization, ref2va=False, unet_name=None, clip_name=None
     q = MINIMAX_H3_QUANT_MODELS[quantization]
     unet = unet_name or (q["ref2va"] if ref2va else q["unet"])
     clip = clip_name or q["clip"]
-    files = [unet, clip, MINIMAX_H3_VIDEO_VAE, MINIMAX_H3_AUDIO_VAE]
     return [
         {"folder": "diffusion_models", "filename": unet,
          "url": f"{MINIMAX_H3_BASE_URL}/diffusion_models/{unet}"},
@@ -499,10 +631,21 @@ def build_minimax_h3_image_to_video(*, prompt, seed=0, steps=MINIMAX_H3_DEFAULT_
     cond_inputs = {}
     loader_nodes = {}
     next_id = 7
+    loaded = []
     for input_name, ref in (("first_frame", first_frame), ("last_frame", last_frame)):
         if ref is None:
             continue
         loader_nodes[str(next_id)] = {"class_type": "LoadImage", "inputs": {"image": ref}}
+        loaded.append((input_name, str(next_id)))
+        next_id += 1
+    for input_name, loader in loaded:
+        # Cover-crop to the canvas first. The node stretches a first frame to
+        # fit (and cover-crops a last one), so an off-aspect still — a 3:4
+        # photo in a 9:16 film, a 1:1 edit — squashed every face in the shot,
+        # and a pair from one source warped differently at each end.
+        loader_nodes[str(next_id)] = {"class_type": "ImageScale", "inputs": {
+            "image": [loader, 0], "upscale_method": "lanczos",
+            "width": width, "height": height, "crop": "center"}}
         cond_inputs[input_name] = [str(next_id), 0]
         next_id += 1
     return _minimax_h3_cond_and_tail(prompt, width, height, minimax_h3_length(duration),
@@ -523,41 +666,69 @@ def build_minimax_h3_reference_to_video(*, prompt, seed=0, steps=MINIMAX_H3_DEFA
                                         duration=5.0, scheduler="beta", ref_image_size="match",
                                         filename_prefix="wrapper/minimaxh3_ref2va",
                                         ref_images=(), ref_videos=(), ref_video_audios=(),
-                                        ref_audios=(),
+                                        ref_audios=(), first_frame=None, last_frame=None,
                                         unet_name=MINIMAX_H3_REF2VA_UNET_INT8,
                                         clip_name=MINIMAX_H3_CLIP_NVFP4):
     """MiniMax H3 reference-to-video (ref2va): reference images/videos/audio +
     prompt -> joint audio+video MP4. The prompt refers to references by tag
     (<Picture i> / <Video k> / <Audio j>) in the order they were provided.
     Parity with the official ref2va workflow: up to 3 images, 1 reference video
-    (with its optional soundtrack), and 2 standalone audio refs."""
+    (with its optional soundtrack), and 2 standalone audio refs.
+
+    ``first_frame`` / ``last_frame`` pin exact pixels at the video's first and
+    last frame (MiniMaxH3AddGuide) on top of the references — the reference
+    guide's "keyframe completion". A shot can then continue from the previous
+    shot's final frame *and* hold its people to their character sheets in one
+    render, which image-to-video (no references) cannot. Measured on the 5090:
+    a pinned first frame opens as exactly as image-to-video does (33 dB PSNR to
+    the frame), where naming it only in the prompt re-imagines it (22 dB)."""
     length = minimax_h3_length(duration)
+    # The node's reference inputs are Autogrow groups, and ComfyUI addresses an
+    # Autogrow slot by its flat dotted id ("ref_images.ref_image_0"). A nested
+    # {"ref_images": {"ref_image_0": ...}} is not an input the node declares:
+    # execution drops it without a validation error and the node runs with
+    # ref_images={} — every reference silently ignored.
     ref_inputs = {}
     loader_nodes = {}
     next_id = 7
-    for i, ref in enumerate(_ref_list(ref_images)):
-        ref_inputs.setdefault("ref_images", {})[f"ref_image_{i}"] = [str(next_id), 0]
-        loader_nodes[str(next_id)] = {"class_type": "LoadImage", "inputs": {"image": ref}}
-        next_id += 1
-    for i, ref in enumerate(_ref_list(ref_videos)):
-        ref_inputs.setdefault("ref_videos", {})[f"ref_video_{i}"] = [str(next_id), 0]
-        loader_nodes[str(next_id)] = {"class_type": "LoadVideo", "inputs": {"file": ref}}
-        next_id += 1
-    for i, ref in enumerate(_ref_list(ref_video_audios)):
-        ref_inputs.setdefault("ref_video_audios", {})[f"ref_video_audio_{i}"] = [str(next_id), 0]
-        loader_nodes[str(next_id)] = {"class_type": "LoadAudio", "inputs": {"audio": ref}}
-        next_id += 1
-    for i, ref in enumerate(_ref_list(ref_audios)):
-        ref_inputs.setdefault("ref_audios", {})[f"ref_audio_{i}"] = [str(next_id), 0]
-        loader_nodes[str(next_id)] = {"class_type": "LoadAudio", "inputs": {"audio": ref}}
-        next_id += 1
+    for group, slot, loader, field, refs in (
+            ("ref_images", "ref_image", "LoadImage", "image", ref_images),
+            ("ref_videos", "ref_video", "LoadVideo", "file", ref_videos),
+            ("ref_video_audios", "ref_video_audio", "LoadAudio", "audio", ref_video_audios),
+            ("ref_audios", "ref_audio", "LoadAudio", "audio", ref_audios)):
+        for i, ref in enumerate(_ref_list(refs)):
+            loader_nodes[str(next_id)] = {"class_type": loader, "inputs": {field: ref}}
+            if loader == "LoadVideo":
+                # The slot takes frames (IMAGE); LoadVideo gives a VIDEO.
+                loader_nodes[str(next_id + 1)] = {"class_type": "GetVideoComponents",
+                                                  "inputs": {"video": [str(next_id), 0]}}
+                next_id += 1
+            ref_inputs[f"{group}.{slot}_{i}"] = [str(next_id), 0]
+            next_id += 1
+    # Pinned frames: loaded, cover-cropped to the canvas (the guide node crops
+    # too, but the image-to-video path is cropped here, and one rule for both
+    # keeps a frame pinned either way identical), then anchored in order.
+    cond_ref = ["6", 0]
+    for image, frame_idx in ((first_frame, 0), (last_frame, -1)):
+        if not image:
+            continue
+        load, scale, guide = str(next_id), str(next_id + 1), str(next_id + 2)
+        loader_nodes[load] = {"class_type": "LoadImage", "inputs": {"image": image}}
+        loader_nodes[scale] = {"class_type": "ImageScale", "inputs": {
+            "image": [load, 0], "upscale_method": "lanczos",
+            "width": width, "height": height, "crop": "center"}}
+        loader_nodes[guide] = {"class_type": "MiniMaxH3AddGuide", "inputs": {
+            "positive": cond_ref, "vae": ["4", 0], "latent": ["6", 1],
+            "image": [scale, 0], "frame_idx": frame_idx}}
+        cond_ref = [guide, 0]
+        next_id += 3
     head = _minimax_h3_head(prompt, width, height, length, unet_name, clip_name,
                             MINIMAX_H3_VIDEO_VAE, MINIMAX_H3_AUDIO_VAE, {})
     head["6"] = {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
         "clip": ["3", 0], "vae": ["4", 0], "audio_vae": ["5", 0],
         "prompt": prompt, "width": width, "height": height, "length": length,
         "ref_image_size": ref_image_size, **ref_inputs}}
-    tail = _minimax_h3_tail(["2", 0], ["6", 0], ["6", 1], seed, steps, scheduler,
+    tail = _minimax_h3_tail(["2", 0], cond_ref, ["6", 1], seed, steps, scheduler,
                             next_id, filename_prefix)
     return {**head, **loader_nodes, **tail}
 
@@ -585,11 +756,10 @@ MINIMAX_H3_PROMPT_FORM_EXTRA = {
                                  "visual grounding for free. Ignored when 'raw_prompt' is set."},
     "llm_model": {"type": "string", "enum": list(MINIMAX_H3_LLM_MODELS), "default": "auto",
                   "description": "Which Xiaomi MiMo model writes the H3 prompt. Leave it on 'auto' "
-                                 "unless you have a reason not to: mimo-v2.5-pro is text-only and the "
-                                 "API rejects any request carrying an image, while mimo-v2.5 is the "
-                                 "omnimodal build that can see one. 'auto' picks mimo-v2.5 whenever "
-                                 "there is a context image and mimo-v2.5-pro otherwise, for its "
-                                 "stronger reasoning. Pinning mimo-v2.5-pro together with an uploaded "
+                                 "unless you have a reason not to: it picks mimo-v2.6-flash, which "
+                                 "reads the context image when there is one. mimo-v2.6-pro and "
+                                 "mimo-v2.5 read images too, but mimo-v2.5-pro is text-only and the "
+                                 "API rejects any request carrying an image. Pinning mimo-v2.5-pro together with an uploaded "
                                  "llm_image is refused with a 400; the context image the wrapper adds "
                                  "on its own (your keyframe or first reference) is instead skipped, "
                                  "and the response says so. Requires MIMO_API_KEY on the server."},
@@ -639,8 +809,28 @@ MINIMAX_H3_FORM_EXTRA = {
 }
 MINIMAX_H3_REF_FORM_EXTRA = {
     **MINIMAX_H3_FORM_EXTRA,
+    "image": {"type": "string", "format": "binary",
+              "description": "Optional first frame: these exact pixels open the video "
+                             "(anchored with MiniMaxH3AddGuide, cover-cropped to the canvas), "
+                             "on top of the references -- keyframe completion. Send the same "
+                             "image as ref_images #1 too, so the prompt can name it as "
+                             "<Picture 1>, 'the first frame of [Shot 1]'."},
+    "last_frame": {"type": "string", "format": "binary",
+                   "description": "Optional last frame the video must end on, anchored the "
+                                  "same way at its final frame."},
     "ref_image_size": {"type": "string", "enum": ["match", "max"], "default": "match",
                         "description": "Reference image sizing: 'match' downscales refs to the generation's pixel area (faster); 'max' keeps a 2048px short edge for stronger identity fidelity (slower). Reference tokens ride through every sampling step, so 'max' with several large refs costs both time and memory on top of the canvas budget -- keep 'match' unless identity fidelity is the priority."},
+}
+
+
+QWEN_IMAGE_21_FORM_EXTRA = {
+    "steps": {"type": "integer", "minimum": 1, "maximum": 4096, "default": QWEN_IMAGE_21_DEFAULT_STEPS,
+              "description": "Sampling steps (euler). The official templates ship 25; Qwen's own pipeline uses about 40-50."},
+    "cfg": {"type": "number", "minimum": 0, "maximum": 100, "default": QWEN_IMAGE_21_DEFAULT_CFG,
+            "description": "CFG scale. 1 is the official setting and ignores negative_prompt; raise it only to use one."},
+    "quantization": {"type": "string", "enum": list(QWEN_IMAGE_21_QUANT_MODELS), "default": "int8",
+                     "description": "Weight precision of the UNET and text encoder: int8 (the templates' "
+                                    "int8_convrot, ~17 GB) or bf16 (~32 GB)."},
 }
 
 
@@ -661,9 +851,19 @@ WORKFLOWS = {
     "flux2klein9b": {
         "title": "FLUX.2 [klein] 9B image edit",
         "requires_image": True,
-        "uploads": {"image": {"ext": "image", "max": 1}},
+        # Either field satisfies requires_image: `image` (one) and/or up to
+        # three `ref_images`, each its own reference latent.
+        "image_fields": ["image", "ref_images"],
+        "uploads": {"image": {"ext": "image", "max": 1}, "ref_images": {"ext": "image", "max": 3}},
         "uses": ["prompt", "negative_prompt", "seed", "steps", "cfg", "megapixels"],
-        "form": ["prompt", "image", "negative_prompt", "seed", "steps", "cfg", "megapixels"],
+        "form": ["prompt", "image", "ref_images", "negative_prompt", "seed", "steps", "cfg",
+                 "megapixels", "width", "height"],
+        "extra_form_properties": {
+            "width": {"type": "integer", "minimum": 256, "maximum": 8192,
+                      "description": "Output width. Omit to take the first image's size."},
+            "height": {"type": "integer", "minimum": 256, "maximum": 8192,
+                       "description": "Output height. Omit to take the first image's size."},
+        },
         "build": build_flux2_klein_9b_img2img,
     },
     "flux2klein9b-txt2img": {
@@ -678,6 +878,49 @@ WORKFLOWS = {
                        "description": "Output height."},
         },
         "build": build_flux2_klein_9b_text2img,
+    },
+    "qwenimage21": {
+        "title": "Qwen Image 2.1 image edit",
+        "requires_image": True,
+        # Image 1 is `image` (else the first of `ref_images`); the node takes
+        # 16 images in all.
+        "image_fields": ["image", "ref_images"],
+        "uploads": {"image": {"ext": "image", "max": 1}, "ref_images": {"ext": "image", "max": 15}},
+        "uses": ["prompt", "negative_prompt", "seed"],
+        "form": ["prompt", "image", "ref_images", "negative_prompt", "seed", "steps", "cfg",
+                 "resolution", "width", "height"],
+        "extra_form_properties": {
+            **QWEN_IMAGE_21_FORM_EXTRA,
+            "prompt": {"type": "string",
+                       "description": "The edit instruction. The images are <image1>, <image2>, ... in upload "
+                                      "order (image, then ref_images) and <image1> is the one edited, e.g. "
+                                      "'Put the denim shirt from <image2> on the person in <image1>, keep "
+                                      "the pose, face and background.'"},
+            "resolution": {"type": "integer", "minimum": 0, "maximum": 4096, "default": 1024,
+                           "description": "Each image is resized to about resolution x resolution pixels "
+                                          "(aspect kept, multiples of 32) before encoding; 0 keeps its own "
+                                          "size. The output takes image 1's resized size."},
+            "width": {"type": "integer", "minimum": 256, "maximum": 8192,
+                      "description": "Output width, sent with height. Omit both to take image 1's size; a "
+                                     "canvas far from it shifts the edit."},
+            "height": {"type": "integer", "minimum": 256, "maximum": 8192,
+                       "description": "Output height, sent with width."},
+        },
+        "build": build_qwen_image_21_edit,
+    },
+    "qwenimage21-txt2img": {
+        "title": "Qwen Image 2.1 text to image",
+        "requires_image": False,
+        "uses": ["prompt", "negative_prompt", "seed"],
+        "form": ["prompt", "negative_prompt", "seed", "steps", "cfg", "width", "height"],
+        "extra_form_properties": {
+            **QWEN_IMAGE_21_FORM_EXTRA,
+            "width": {"type": "integer", "minimum": 256, "maximum": 8192, "default": 1024,
+                      "description": "Output width. Qwen Image 2.1 is native up to 2048x2048; prefer multiples of 32."},
+            "height": {"type": "integer", "minimum": 256, "maximum": 8192, "default": 1024,
+                       "description": "Output height."},
+        },
+        "build": build_qwen_image_21_text2img,
     },
     "ideogram4": {
         "title": "Ideogram 4 text to image",
@@ -734,11 +977,14 @@ WORKFLOWS = {
                              "ref_videos": {"ext": "video", "max": 1},
                              "ref_video_audios": {"ext": "audio", "max": 1},
                              "ref_audios": {"ext": "audio", "max": 2},
+                             # Pinned first / last frame (keyframe completion).
+                             "image": {"ext": "image", "max": 1},
+                             "last_frame": {"ext": "image", "max": 1},
                              "llm_image": {"ext": "image", "max": 1}},
-                "upload_params": {"llm_image": None},
+                "upload_params": {"image": "first_frame", "llm_image": None},
                 "prompt_rewrite": True,
                 "uses": ["prompt", "seed"],
-                "form": ["prompt", "raw_prompt", "llm_image", "llm_model", "seed", "steps", "width", "height", "duration", "scheduler", "ref_image_size"],
+                "form": ["prompt", "raw_prompt", "image", "last_frame", "llm_image", "llm_model", "seed", "steps", "width", "height", "duration", "scheduler", "ref_image_size"],
                 "extra_form_properties": MINIMAX_H3_REF_FORM_EXTRA,
                 "quantization_options": ["fp8", "int8", "bf16", "nvfp4"],
                 "example_prompt": (

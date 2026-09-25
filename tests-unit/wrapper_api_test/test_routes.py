@@ -197,6 +197,56 @@ class TestMiniMaxSetupContract(unittest.TestCase):
         self.assertEqual(kwargs["steps"], 20)
 
 
+class TestQwenImage21SetupContract(unittest.TestCase):
+    """Qwen Image 2.1 runs at the templates' 25 steps / cfg 1, not the shared
+    handler's 20 / 5, and each setup's kwargs build its graph."""
+
+    def setUp(self):
+        self._download_models = wrapper_routes._download_models
+        self.requested = []
+
+        async def no_download(models, downloaded):
+            self.requested.extend(m["filename"] for m in models)
+            return []
+
+        wrapper_routes._download_models = no_download
+
+    def tearDown(self):
+        wrapper_routes._download_models = self._download_models
+
+    def test_txt2img_defaults_are_the_templates(self):
+        kwargs, note = asyncio.run(wrapper_routes._setup_qwenimage21_txt2img({}, []))
+        self.assertIsNone(note)
+        self.assertEqual((kwargs["steps"], kwargs["cfg"]), (25, 1.0))
+        self.assertEqual((kwargs["width"], kwargs["height"]), (1024, 1024))
+        self.assertEqual(kwargs["unet_name"], wrapper_workflows.QWEN_IMAGE_21_UNET)
+        self.assertEqual(kwargs["clip_name"], wrapper_workflows.QWEN_IMAGE_21_CLIP)
+        self.assertIn(wrapper_workflows.QWEN_IMAGE_21_VAE, self.requested)
+        wrapper_workflows.build_qwen_image_21_text2img(prompt="x", **kwargs)
+
+    def test_edit_takes_resolution_canvas_and_bf16(self):
+        kwargs, _ = asyncio.run(wrapper_routes._setup_qwenimage21_edit(
+            {"quantization": "bf16", "steps": "40", "cfg": "4", "resolution": "0",
+             "width": "1024", "height": "576"}, []))
+        self.assertEqual((kwargs["steps"], kwargs["cfg"], kwargs["resolution"]), (40, 4.0, 0))
+        self.assertEqual((kwargs["width"], kwargs["height"]), (1024, 576))
+        self.assertEqual(kwargs["unet_name"], "qwen_image_2.1_bf16.safetensors")
+        self.assertEqual(kwargs["clip_name"], "qwen3vl_8b_bf16.safetensors")
+        wrapper_workflows.build_qwen_image_21_edit(prompt="x", image="wrapper/a.png", **kwargs)
+
+    def test_edit_canvas_is_both_or_neither(self):
+        kwargs, _ = asyncio.run(wrapper_routes._setup_qwenimage21_edit({}, []))
+        self.assertNotIn("width", kwargs)
+        with self.assertRaises(wrapper_routes._SetupError):
+            asyncio.run(wrapper_routes._setup_qwenimage21_edit({"width": "1024"}, []))
+
+    def test_bad_values_fail_before_any_download(self):
+        for fields in ({"quantization": "fp8"}, {"resolution": "5000"}, {"width": "10", "height": "10"}):
+            with self.assertRaises(wrapper_routes._SetupError):
+                asyncio.run(wrapper_routes._setup_qwenimage21_edit(fields, []))
+        self.assertEqual(self.requested, [])
+
+
 class TestPromptRewriteHook(unittest.TestCase):
     """The glue between an incoming request and the rewriter: which mode it
     reports, which labels it declares, and which upload it uses for visual
@@ -347,3 +397,37 @@ class TestPromptRecord(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestJobProvenance(unittest.TestCase):
+    """What a job ran with, for a caller that polls and never sees the headers."""
+
+    def test_raw_prompt_jobs_report_seed_models_and_settings(self):
+        provenance = wrapper_routes._job_provenance(
+            {"seed": 42, "unet_name": "h3_ref2va_int8.safetensors", "clip_name": "enc.safetensors",
+             "width": 864, "height": 480, "steps": 20, "prompt": "subject_definitions: ..."},
+            "raw_prompt used verbatim; no LLM rewrite", {"source": "raw_prompt", "mode": "Ref2VA"})
+        self.assertEqual(provenance["seed"], 42)
+        self.assertEqual(provenance["models"], ["h3_ref2va_int8.safetensors", "enc.safetensors"])
+        self.assertEqual(provenance["settings"], {"width": 864, "height": 480, "steps": 20})
+        self.assertEqual((provenance["prompt_source"], provenance["mode"]), ("raw_prompt", "Ref2VA"))
+        self.assertNotIn("prompt", provenance)  # the caller sent it; no need to echo it
+
+    def test_a_rewritten_prompt_is_kept(self):
+        provenance = wrapper_routes._job_provenance(
+            {"seed": 1, "prompt": "integrated_multimodal_description: [Shot 1] ..."}, None,
+            {"source": "mimo", "mode": "T2VA"})
+        self.assertEqual(provenance["prompt"], "integrated_multimodal_description: [Shot 1] ...")
+
+    def test_the_record_is_bounded_newest_first(self):
+        saved = dict(wrapper_routes._PROVENANCE)
+        try:
+            wrapper_routes._PROVENANCE.clear()
+            for i in range(wrapper_routes._PROVENANCE_MAX + 5):
+                wrapper_routes._remember_provenance(f"job-{i}", {"seed": i})
+            self.assertEqual(len(wrapper_routes._PROVENANCE), wrapper_routes._PROVENANCE_MAX)
+            self.assertNotIn("job-0", wrapper_routes._PROVENANCE)
+            self.assertIn(f"job-{wrapper_routes._PROVENANCE_MAX + 4}", wrapper_routes._PROVENANCE)
+        finally:
+            wrapper_routes._PROVENANCE.clear()
+            wrapper_routes._PROVENANCE.update(saved)

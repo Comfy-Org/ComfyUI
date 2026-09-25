@@ -1,3 +1,4 @@
+<div></div>
 <div align="center">
 
 # ComfyUI
@@ -82,7 +83,7 @@ See what ComfyUI can do with the [newer template workflows](https://comfy.org/wo
 
 A simplified REST API on top of the regular ComfyUI API (`api_wrapper/`). It hides the node graph and model setup: each workflow has a dedicated synchronous endpoint that returns the final artifact (image, video, audio, 3D asset, ...) directly as a downloadable file. Missing model files for the requested workflow are downloaded automatically on first use (requires starting ComfyUI with `--auto-download-models`; gated models need `HF_TOKEN`).
 
-- `POST /api/wrapper/{workflow}/generate` — multipart form with `prompt` and `image` (optional `negative_prompt`, `seed`, `steps`, `cfg`, `megapixels`, `timeout`, `free_vram`, `quantization`). Runs the workflow to completion and returns the final file as a download (`Content-Disposition: attachment`). By default the request waits as long as the job takes; set `timeout` (5–86400 seconds) if you prefer a cap — the timeout response includes the `job_id` to pick the result up via `/jobs/{job_id}`. `GET /api/wrapper/workflows` lists the available `{workflow}` names (currently `flux2klein9b`).
+- `POST /api/wrapper/{workflow}/generate` — multipart form with `prompt` and `image` (optional `negative_prompt`, `seed`, `steps`, `cfg`, `megapixels`, `timeout`, `free_vram`, `quantization`). Runs the workflow to completion and returns the final file as a download (`Content-Disposition: attachment`). By default the request waits as long as the job takes; set `timeout` (5–86400 seconds) if you prefer a cap — the timeout response includes the `job_id` to pick the result up via `/jobs/{job_id}`. `GET /api/wrapper/workflows` lists the available `{workflow}` names.
 - `GET /api/wrapper/jobs/{job_id}` — job status (`pending` / `in_progress` / `completed` / `failed` / `cancelled`) with output image URLs; also useful to pick up a generate call that timed out (the timeout response includes the `job_id`).
 - `GET /api/wrapper/jobs/{job_id}/image` — redirects to the generated image.
 - `DELETE /api/wrapper/jobs/{job_id}` — worker cleanup once you have stored the result (or after a failure/cancel): deletes the job's output files, the uploads saved for it and its history entry, and answers `{"deleted": {"outputs": n, "inputs": m, "history": true|false}, "refused": 0}`. Idempotent (unknown job → zeros), `409` while the job is pending/running, and it never deletes anything outside ComfyUI's output/input/temp directories (real paths are checked; symlinks pointing out are refused). Each job's uploads and outputs live in their own `wrapper/<job_id>/` folder under `input/` and `output/`.
@@ -104,7 +105,7 @@ curl -o result.png -X POST http://127.0.0.1:8188/api/wrapper/flux2klein9b/genera
 
 - `raw_prompt` — a ready-made H3 prompt, used verbatim. Skips the rewrite entirely and needs no API key, so existing callers keep working by renaming `prompt` to `raw_prompt`.
 - `llm_image` — an image given to the rewriter as visual context, so it describes what is actually in your footage. It never reaches H3 itself. When omitted, the task's own first image (the `image` first frame, or `ref_images` #1) is used, so image- and reference-driven jobs get visual grounding for free.
-- `llm_model` — `auto` (default) routes image-bearing rewrites to `mimo-v2.5`, the omnimodal build, and text-only ones to `mimo-v2.5-pro` for its stronger reasoning. **`mimo-v2.5-pro` cannot read images** — the API rejects any request carrying one (`HTTP 404: No endpoints found that support image input`), so pinning it alongside an uploaded `llm_image` returns a 400, while the context image the wrapper adds on its own is simply skipped and reported. Leave it on `auto` unless you have a reason not to.
+- `llm_model` — `auto` (default) sends every rewrite to `mimo-v2.6-flash`, an omnimodal model that reads the context image when there is one. `mimo-v2.6-pro`, `mimo-v2.5` and `mimo-v2.5-pro` can be pinned instead. **`mimo-v2.5-pro` cannot read images** — the API rejects any request carrying one (`HTTP 404: No endpoints found that support image input`), so pinning it alongside an uploaded `llm_image` returns a 400, while the context image the wrapper adds on its own is simply skipped and reported. Leave it on `auto` unless you have a reason not to.
 - `POST /api/wrapper/minimaxh3/prompt` turns a free-form prompt into an H3 prompt and returns it as JSON — no GPU work, no render. The task is inferred from what you attach (reference assets → ref2va, a keyframe → image-to-video, nothing → text-to-video), so a prompt on its own is a complete request; `POST /api/wrapper/minimaxh3/{task}/prompt` pins one. Iterate there, then send the result back to `/generate` as `raw_prompt`. Accepts multipart, form-urlencoded or JSON.
 
 ```bash
@@ -120,7 +121,7 @@ A rewrite takes 10–20 s (it is one call to a large model), so allow at least 6
 
 **Interactive docs:** with the server running, open `http://127.0.0.1:8188/api/wrapper/docs` in a browser to browse and try every endpoint (the "Try it out" button works — you can upload an image and generate right from the docs page). The raw OpenAPI spec is at `http://127.0.0.1:8188/api/wrapper/openapi.json` for code generation; swap the port if you started ComfyUI elsewhere.
 
-The first workflow shipped is `flux2klein9b`, a FLUX.2 [klein] 9B image edit: the input image is scaled to a megapixel budget, attached to the conditioning as a reference latent, and sampled with the flux2 custom sampler stack. `ideogram4` is a text-to-image workflow (no input image needed) using the Ideogram 4 dual-model CFG stack — it natively understands rich structured JSON prompts, e.g. `curl -F "prompt=$(cat prompt.json)"` with a JSON prompt describing composition, style and elements; the full example (with bounding boxes per element) is shown in the interactive docs. `minimaxh3` is an omni-modal video workflow with three task endpoints under `/api/wrapper/minimaxh3/{task}`: `text` (text-to-video), `image` (image-to-video, first/last frame uploads) and `reference` (ref2va: up to 9 reference images, 3 videos and 3 audio clips, referenced in the prompt as `<Picture i>` / `<Video k>` / `<Audio j>`); it returns a synchronized audio+video MP4. To add another workflow (e.g. a 3D model generator), add its graph builder to the `WORKFLOWS` registry in `api_wrapper/workflows.py`, a model-setup handler in `api_wrapper/routes.py`, and it immediately gets its own `/api/wrapper/{name}/generate` endpoint — output files (video/audio/3D) are detected automatically by their node output type. All endpoints are also available without the `/api` prefix.
+The first workflow shipped is `flux2klein9b`, a FLUX.2 [klein] 9B image edit: the input image is scaled to a megapixel budget, attached to the conditioning as a reference latent, and sampled with the flux2 custom sampler stack. `qwenimage21` is the Qwen Image 2.1 image edit and `qwenimage21-txt2img` its text-to-image variant, both built like the official Qwen Image 2.1 templates (int8_convrot UNET and text encoder, `quantization=bf16` for the full-precision pair; 25 steps, cfg 1): the edit takes `image` and/or up to 15 `ref_images`, named `<image1>`, `<image2>`, ... in the prompt, and edits image 1. `ideogram4` is a text-to-image workflow (no input image needed) using the Ideogram 4 dual-model CFG stack — it natively understands rich structured JSON prompts, e.g. `curl -F "prompt=$(cat prompt.json)"` with a JSON prompt describing composition, style and elements; the full example (with bounding boxes per element) is shown in the interactive docs. `minimaxh3` is an omni-modal video workflow with three task endpoints under `/api/wrapper/minimaxh3/{task}`: `text` (text-to-video), `image` (image-to-video, first/last frame uploads) and `reference` (ref2va: up to 9 reference images, 3 videos and 3 audio clips, referenced in the prompt as `<Picture i>` / `<Video k>` / `<Audio j>`); it returns a synchronized audio+video MP4. To add another workflow (e.g. a 3D model generator), add its graph builder to the `WORKFLOWS` registry in `api_wrapper/workflows.py`, a model-setup handler in `api_wrapper/routes.py`, and it immediately gets its own `/api/wrapper/{name}/generate` endpoint — output files (video/audio/3D) are detected automatically by their node output type. All endpoints are also available without the `/api` prefix.
 
 ### Authentication
 
@@ -139,18 +140,21 @@ curl -o result.png -X POST http://127.0.0.1:8188/api/wrapper/flux2klein9b/genera
 
 ### Docker image (local GPU box and RunPod)
 
-The worker is published to Docker Hub as **`shivanshtalwar0/comfyui`** by [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml):
+The worker is published to Docker Hub as **`shivanshtalwar0/comfyui`** by [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml), in two flavours built from the same [`Dockerfile`](Dockerfile):
 
-| Trigger | Tags pushed |
-|---|---|
-| push to `master` (source or Docker files changed) | `latest`, `sha-<short>` |
-| tag `vX.Y.Z` | `X.Y.Z`, `X.Y`, `sha-<short>` |
-| manual run (Actions → Docker image → Run workflow) | `<branch>`, `sha-<short>` |
-| pull request touching Docker files | nothing: build + smoke test only |
+- **full** (target `comfyui`, the default): torch + requirements baked in, a ~5.2 GB compressed pull. The local GPU box runs it.
+- **runpod** (target `runpod`): the same system packages and sources, no Python dependencies, a ~0.38 GB pull. The first pod on a network volume installs the Python env onto the volume and every later pod reuses it (see [RunPod variant](#runpod-variant-runpod)).
 
-Every build is smoke-tested before anything is pushed: torch has CUDA, `prefetch --dry-run` resolves every wrapper checkpoint, and the server boots (CPU mode) and answers `/api/wrapper/workflows` with 200 with the bearer token and 401 without it. Publishing needs the repository secret **`DOCKERHUB_TOKEN`** (a Docker Hub access token with Read & Write). `DOCKERHUB_USERNAME` / `DOCKERHUB_IMAGE` repository variables override the defaults.
+| Trigger | full image tags | runpod image tags |
+|---|---|---|
+| push to `master` (source or Docker files changed) | `latest`, `sha-<short>` | `runpod`, `runpod-sha-<short>` |
+| tag `vX.Y.Z` | `X.Y.Z`, `X.Y`, `sha-<short>` | `runpod-X.Y.Z`, `runpod-X.Y`, `runpod-sha-<short>` |
+| manual run (Actions → Docker image → Run workflow) | `<branch>`, `sha-<short>` | `runpod-<branch>`, `runpod-sha-<short>` |
+| pull request touching Docker files | nothing: build + smoke test only | nothing: build + smoke test only |
 
-The image is **CUDA only**: `python:3.12-slim` plus the PyTorch **cu128** wheels (Blackwell / RTX 5090 kernels, host driver ≥ 570). The build fails if any dependency leaves it with a CPU torch. Nothing model-sized is baked in. [`docker/entrypoint.sh`](docker/entrypoint.sh) configures everything from env, so the image runs the same with or without a compose file:
+Every build is smoke-tested before anything is pushed. Full image: torch has CUDA, `prefetch --dry-run` resolves every wrapper checkpoint, and the server boots (CPU mode) and answers `/api/wrapper/workflows` with 200 with the bearer token and 401 without it. Runpod image: no torch in the image, it refuses to start without a volume, a first container on a fresh docker volume builds the real CUDA env on it and passes the same 200/401 check, and a second container on that volume reuses the env (no rebuild) and comes up faster. The two flavours build in parallel jobs with separate registry build caches (`:buildcache`, `:buildcache-runpod`). Publishing needs the repository secret **`DOCKERHUB_TOKEN`** (a Docker Hub access token with Read & Write). `DOCKERHUB_USERNAME` / `DOCKERHUB_IMAGE` repository variables override the defaults.
+
+Both images are **CUDA only**: `python:3.12-slim` plus the PyTorch **cu128** wheels (Blackwell / RTX 5090 kernels, host driver ≥ 570). The full image's build fails if any dependency leaves it with a CPU torch; the runpod image's env build on the volume fails the same way. Nothing model-sized is baked in. [`docker/entrypoint.sh`](docker/entrypoint.sh) configures everything from env, so the image runs the same with or without a compose file:
 
 | Env | Default | Meaning |
 |---|---|---|
@@ -161,21 +165,63 @@ The image is **CUDA only**: `python:3.12-slim` plus the PyTorch **cu128** wheels
 | `AUTO_DOWNLOAD_MODELS` | `1` | Fetch a workflow's checkpoints on first use. |
 | `VRAM_HEADROOM_GB`, `CACHE_RAM_GB`, `ASYNC_OFFLOAD_STREAMS`, `FAST_DISK` | `2`, `2 8`, `0`, `1` | Memory tuning, as in `.env.example`. |
 | `COMFYUI_ARGS` | empty | Extra ComfyUI flags. |
+| `COMFY_HF_DOWNLOAD_MODE` | `direct` with a data dir, else `cache` | `direct` downloads Hugging Face weights next to the models dir and moves them in (one copy). `cache` keeps the HF cache plus a copy, which is useful when the HF cache is shared between projects. |
 | `MIMO_API_KEY`, `HF_TOKEN` | unset | H3 prompt rewrite; gated FLUX.2 [klein] weights. |
+| `COMFY_ENV_WAIT_SECONDS` | `1800` | Runpod image: how long a pod waits for another pod that is building the env before it gives up. |
+| `COMFY_ENV_LOCK_STALE_SECONDS` | `120` | Runpod image: an env lock whose heartbeat has not moved for this long belongs to a dead pod and is taken over. |
+| `COMFY_ENVS_DIR` | `<data dir>/envs` | Runpod image: where the envs live. |
 
 **Local GPU box**: `cp .env.example .env`, then `docker compose pull && docker compose up -d` (or `docker compose up -d --build` to build this tree). `COMFYUI_HOST_PORT=8282` publishes it where the FloStudio rig is reached over WireGuard.
 
-**RunPod (FloStudio burst pods)**: voxmin-backend creates the pods itself through the RunPod API. Set System Config → FloStudio → RunPod → image to `docker.io/shivanshtalwar0/comfyui:latest` (or a `sha-` tag), and attach a network volume. RunPod mounts it at `/workspace`, which the entrypoint uses for models, the HF cache and Triton kernels. The backend gives every pod its own `WRAPPER_AUTH_TOKEN` and reaches it on port 8188 through the RunPod proxy. Put `MIMO_API_KEY` / `HF_TOKEN` in the `runpod` ExternalApi row's `podEnv`.
+**RunPod (FloStudio burst pods)**: voxmin-backend creates the pods itself through the RunPod API, with a network volume attached at `/workspace` (Python env, models, HF cache, Triton kernels). The backend gives every pod its own `WRAPPER_AUTH_TOKEN` and reaches it on port 8188 through the RunPod proxy; put `MIMO_API_KEY` / `HF_TOKEN` in the `runpod` ExternalApi row's `podEnv`. The fastest way to start a pod is **not to pull an image at all** (see [RunPod: no image pull](#runpod-no-image-pull)): pulls from Docker Hub ran at about 10 Mbps on EU-RO-1 hosts, over 9 minutes for the full `:latest` image (~5.2 GB) and 4-5 minutes even for the slim `:runpod` one, while those same hosts fetched Python wheels at ~700 Mbps.
 
-**Fill a network volume once** so the first pod doesn't spend its boot downloading ~40 GB. Run this on a cheap CPU pod with the volume attached, or locally against the model dir:
+**Opening a pod's ComfyUI in a browser**: every route needs the pod's `WRAPPER_AUTH_TOKEN`, which a browser cannot send as a header. Whoever holds the token signs a short-lived login link instead, `https://<podId>-8188.proxy.runpod.net/?comfy_login=<exp>.<HMAC-SHA256(token, "comfy-login:<exp>")>` (at most 10 minutes ahead). Opening it sets an HttpOnly session cookie (12 h, signed the same way) and redirects to the clean URL; the UI, its API calls and its WebSocket then use the cookie, and the token itself never reaches the browser. voxmin-backend's admin pods panel builds these links ("Open ComfyUI"). See `middleware/wrapper_auth.py`.
+
+**Fill a network volume once** so the first pod doesn't spend its boot downloading ~40 GB of weights (and, with the runpod image, installing the Python env). Run this on a cheap CPU pod with the volume attached, or locally against the model dir:
 
 ```bash
+# runpod image: builds the Python env on the volume, then downloads the weights
+docker run --rm -e HF_TOKEN=... -v /workspace:/workspace shivanshtalwar0/comfyui:runpod prefetch
+docker run --rm -v /workspace:/workspace shivanshtalwar0/comfyui:runpod prefetch --env-only   # env only
+# full image: weights only
 docker run --rm -e HF_TOKEN=... -v /workspace:/workspace shivanshtalwar0/comfyui prefetch
-# specs: minimaxh3[:nvfp4|int8|fp8|bf16]  minimaxh3-ref[:quant]  flux2klein9b
+# specs: minimaxh3[:nvfp4|int8|fp8|bf16]  minimaxh3-ref[:quant]  flux2klein9b  qwenimage21[:int8|bf16]
 docker run --rm -v "$PWD/models:/opt/ComfyUI/models" shivanshtalwar0/comfyui prefetch minimaxh3:int8 --dry-run
 ```
 
-With no specs it fetches `minimaxh3:nvfp4 minimaxh3-ref:nvfp4 flux2klein9b` (override with `PREFETCH_MODELS`). That set is the FP8 H3 UNETs plus the 16 GB NVFP4 text encoder that a 32 GB Blackwell card needs, and the FLUX.2 [klein] stills model.
+With no specs it fetches `minimaxh3:int8 minimaxh3-ref:int8 flux2klein9b` (override with `PREFETCH_MODELS`). That set is the INT8 H3 UNETs (the weights the FloStudio RTX 5090 rig runs, so a shot looks the same on a pod as on the rig), the 16 GB NVFP4 text encoder that a 32 GB Blackwell card needs, and the FLUX.2 [klein] stills model. An H3 spec always comes with the encoder the wrapper loads at render time (the smallest on disk), never the 34 GB INT8 or 66 GB BF16 one.
+
+#### RunPod: no image pull
+
+RunPod keeps its own PyTorch image cached on its machines. A pod on `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404` (the image of RunPod's "Runpod Pytorch 2.8.0" template) was running 2 s after it was created, where ours took minutes to pull. That image already has Python 3.12, gcc/g++/make, git, ffmpeg and `uv`. So a FloStudio pod runs RunPod's image with [`docker/runpod-bootstrap.sh`](docker/runpod-bootstrap.sh) as its start command, and everything of ours lives on the network volume:
+
+```
+/workspace/code/ComfyUI-<commit>.tar.gz   this repository at COMFY_CODE_REF (~13 MB), fetched once per commit
+/workspace/envs/<key>.tar                 the Python env (torch cu128 + requirements.txt), archived once
+/workspace/envs/.lock-<key>/              present only while a pod is building <key>
+/workspace/models, huggingface, .triton   weights and caches, as with any image
+```
+
+On every boot the bootstrap unpacks the code to `/opt/ComfyUI` on the container disk (seconds) and hands over to `docker/entrypoint.sh`, which unpacks the env archive to `/opt/comfy-env/<key>` and starts ComfyUI. `COMFY_CODE_REF` must be a commit sha (a branch name would be cached under that name and never updated); voxmin-backend's `scripts/flo-runpod-template.mjs` puts the bootstrap, pinned to a commit, into a RunPod template that System Config → FloStudio → RunPod → template points at. Rolling out new code = re-running that script with the new commit.
+
+#### RunPod variant (`:runpod`)
+
+`docker.io/shivanshtalwar0/comfyui:runpod` is `python:3.12-slim` plus the apt packages (ffmpeg, git, and the gcc/g++/make that Triton's JIT needs at runtime), the `uv` binary and the ComfyUI sources: about **0.38 GB compressed** (1.1 GB unpacked) against **5.15 GB compressed** for the full image, 4.8 GB of which is the torch + requirements layers. It uses the same env archive on the volume as the bootstrap does.
+
+- **The key** (`docker/env-key`, exported as `COMFY_ENV_KEY`) is a hash of `requirements.txt`, the torch index, the base interpreter, the CPU arch and the OS release, printed by `docker/env-inputs.sh` (the hashed text is in `docker/env-inputs`). The slim image bakes it; code fetched by the bootstrap computes it at boot with the same script. Code-only changes reuse the env on the volume; a dependency change builds a new one next to it.
+- **Why an archive and not the env directory on the volume**: RunPod volumes are MooseFS, which streams a big file fast (~800 MB/s measured reading a checkpoint) but creates small files slowly. The CUDA env is ~7.7 GB in ~42k files; written in place onto the volume it was still being written after 16 minutes, and every import from it would pay a network round trip per file. So it is built on the container disk and published as one tar.
+- **First boot on a volume** (or after a dependency change): the pod builds the env on its container disk with `uv` (torch from the cu128 index first, then `requirements.txt`, bytecode precompiled), checks that torch is a CUDA build, writes the completion marker, and publishes `<key>.tar` to the volume under a temporary name renamed into place last. The container disk needs room for the env plus `uv`'s cache while it builds.
+- **Every later boot** unpacks the archive next to `/opt/comfy-env/<key>` and renames it into place. The log says which it was: `python env <key> unpacked from ... in <n>s, reusing it` or `... built in <n>s` (with the torch, requirements.txt and archive times). A restarted container reuses its unpacked env.
+- **Several pods at once**: only one builds. The lock is a directory (`mkdir` is atomic on a network filesystem, where `flock` may not be). The builder keeps a heartbeat file in it; the other pods wait (up to `COMFY_ENV_WAIT_SECONDS`) and then unpack the published archive. If the heartbeat stops moving for `COMFY_ENV_LOCK_STALE_SECONDS` (a pod killed mid-build), a waiting pod takes the lock over and builds again. Only the lock owner publishes, and only a finished archive.
+- **No volume, no start**: without `/workspace` (or `COMFYUI_DATA_DIR`) the runpod variant exits at once with an error. Use the full image anywhere without a volume. `prefetch` and any other command (`bash`, `uvicorn ...`) also run inside the env.
+
+A first boot also has to fit in voxmin-backend's FloStudio boot timeout (900 s by default), so build the env once on a new volume (`prefetch --env-only`, or a one-off pod) rather than letting a customer's pod do it.
+
+Envs and code archives are never deleted automatically, because a pod still running older code may need them. Once none does, free the space from a pod on the volume:
+
+```bash
+cd /workspace/envs && ls | grep -vx "$(cat /opt/ComfyUI/docker/env-key).tar" | xargs -r rm -rf
+```
 
 ## Features
 - A visual node graph for building and reusing image, video, audio, 3D, and text workflows without code.

@@ -83,6 +83,114 @@ class TestWorkflowGraph(unittest.TestCase):
         self.assertEqual(noise["inputs"]["noise_seed"], 42)
 
 
+class TestKleinEditReferences(unittest.TestCase):
+    def test_several_references_chain_one_reference_latent_each(self):
+        graph = build_flux2_klein_9b_img2img(
+            prompt="the same man, at the bus stop", ref_images=["wrapper/face.png", "wrapper/stop.png"],
+            width=1024, height=576)
+        self.assertEqual(graph["4"]["inputs"]["image"], "wrapper/face.png")
+        self.assertEqual(graph["20"]["inputs"]["image"], "wrapper/stop.png")
+        # face -> stop, on both sides of the guidance
+        self.assertEqual(graph["23"]["inputs"], {"conditioning": ["10", 0], "latent": ["22", 0]})
+        self.assertEqual(graph["24"]["inputs"], {"conditioning": ["11", 0], "latent": ["22", 0]})
+        self.assertEqual(graph["12"]["inputs"]["positive"], ["23", 0])
+        self.assertEqual(graph["12"]["inputs"]["negative"], ["24", 0])
+        # the canvas is the one asked for, not the first reference's
+        self.assertEqual(graph["16"]["inputs"]["width"], 1024)
+        self.assertEqual(graph["14"]["inputs"]["height"], 576)
+        self.assertEqual(graph["5"]["inputs"]["upscale_method"], "lanczos")
+
+    def test_image_and_ref_images_combine_image_first(self):
+        graph = build_flux2_klein_9b_img2img(prompt="x", image="wrapper/a.png", ref_images="wrapper/b.png")
+        self.assertEqual(graph["4"]["inputs"]["image"], "wrapper/a.png")
+        self.assertEqual(graph["20"]["inputs"]["image"], "wrapper/b.png")
+        self.assertEqual(graph["16"]["inputs"]["width"], ["6", 0])  # no canvas: first image's size
+
+    def test_no_image_at_all_is_refused(self):
+        with self.assertRaises(ValueError):
+            build_flux2_klein_9b_img2img(prompt="x")
+
+    def test_either_upload_field_satisfies_the_edit(self):
+        entry = wrapper_workflows.WORKFLOWS["flux2klein9b"]
+        self.assertEqual(entry["image_fields"], ["image", "ref_images"])
+        self.assertEqual(entry["uploads"]["ref_images"]["max"], 3)
+
+
+class TestQwenImage21Graphs(unittest.TestCase):
+    def test_txt2img_mirrors_the_template(self):
+        graph = wrapper_workflows.build_qwen_image_21_text2img(
+            prompt="a cat", negative_prompt="blurry", seed=7, width=1344, height=768)
+        self.assertEqual(graph["2"]["inputs"]["type"], "qwen_image")
+        self.assertEqual(graph["4"]["inputs"]["prompt"], "a cat")
+        self.assertEqual(graph["4"]["inputs"]["negative_prompt"], "blurry")
+        self.assertEqual((graph["5"]["inputs"]["width"], graph["5"]["inputs"]["height"]), (1344, 768))
+        sampler = graph["6"]["inputs"]
+        self.assertEqual((sampler["seed"], sampler["steps"], sampler["cfg"]), (7, 25, 1.0))
+        self.assertEqual((sampler["sampler_name"], sampler["scheduler"]), ("euler", "simple"))
+        self.assertEqual((sampler["positive"], sampler["negative"]), (["4", 0], ["4", 1]))
+        self.assertEqual(graph["8"]["class_type"], "SaveImage")
+
+    def test_edit_images_are_flat_autogrow_slots_image_first(self):
+        graph = wrapper_workflows.build_qwen_image_21_edit(
+            prompt="<image1> wears the shirt from <image2>", image="wrapper/a.png",
+            ref_images=["wrapper/b.png", "wrapper/c.png"])
+        encode = graph["4"]["inputs"]
+        self.assertEqual(encode["images.image_1"], ["10", 0])
+        self.assertEqual(encode["images.image_3"], ["12", 0])
+        self.assertNotIn("images", encode)
+        self.assertEqual([graph[n]["inputs"]["image"] for n in ("10", "11", "12")],
+                         ["wrapper/a.png", "wrapper/b.png", "wrapper/c.png"])
+        self.assertEqual(encode["vae"], ["3", 0])
+        self.assertEqual(encode["resolution"], 1024)
+        # no canvas: the encoder's latent, on image 1's size
+        self.assertNotIn("5", graph)
+        self.assertEqual(graph["6"]["inputs"]["latent_image"], ["4", 2])
+
+    def test_edit_canvas_uses_an_empty_latent(self):
+        graph = wrapper_workflows.build_qwen_image_21_edit(
+            prompt="x", ref_images="wrapper/a.png", width=1024, height=576)
+        self.assertEqual(graph["5"]["inputs"]["width"], 1024)
+        self.assertEqual(graph["6"]["inputs"]["latent_image"], ["5", 0])
+
+    def test_edit_without_an_image_is_refused(self):
+        with self.assertRaises(ValueError):
+            wrapper_workflows.build_qwen_image_21_edit(prompt="x")
+
+    def test_registered_like_flux2klein9b(self):
+        edit = wrapper_workflows.WORKFLOWS["qwenimage21"]
+        self.assertIs(edit["build"], wrapper_workflows.build_qwen_image_21_edit)
+        self.assertEqual(edit["image_fields"], ["image", "ref_images"])
+        # TextEncodeQwenImage21 takes 16 images
+        self.assertEqual(edit["uploads"]["image"]["max"] + edit["uploads"]["ref_images"]["max"], 16)
+        txt2img = wrapper_workflows.WORKFLOWS["qwenimage21-txt2img"]
+        self.assertFalse(txt2img["requires_image"])
+        self.assertIs(txt2img["build"], wrapper_workflows.build_qwen_image_21_text2img)
+
+    def test_models_come_from_the_qwen_image_21_repo(self):
+        for quant in ("int8", "bf16"):
+            models = wrapper_workflows.qwen_image_21_models(quant)
+            self.assertEqual([m["folder"] for m in models], ["diffusion_models", "text_encoders", "vae"])
+            for model in models:
+                self.assertEqual(model["url"], f"{wrapper_workflows.QWEN_IMAGE_21_BASE_URL}/{model['folder']}/{model['filename']}")
+
+    def test_openapi_documents_both_endpoints(self):
+        spec = wrapper_openapi.spec_with_workflows(wrapper_workflows.WORKFLOWS)
+        edit = spec["paths"]["/api/wrapper/qwenimage21/generate"]["post"]
+        schema = edit["requestBody"]["content"]["multipart/form-data"]["schema"]
+        self.assertEqual(schema["required"], ["prompt"])  # image or ref_images
+        self.assertIn("<image1>", schema["properties"]["prompt"]["description"])
+        self.assertEqual(schema["properties"]["quantization"]["enum"], ["int8", "bf16"])
+        self.assertEqual(schema["properties"]["steps"]["default"], 25)
+        self.assertEqual(schema["properties"]["cfg"]["default"], 1.0)
+        self.assertNotIn("megapixels", schema["properties"])
+        for prop in ("image", "ref_images", "resolution", "width", "height"):
+            self.assertIn(prop, schema["properties"])
+        txt2img = spec["paths"]["/api/wrapper/qwenimage21-txt2img/generate"]["post"]
+        schema = txt2img["requestBody"]["content"]["multipart/form-data"]["schema"]
+        self.assertNotIn("image", schema["properties"])
+        self.assertEqual(schema["properties"]["width"]["default"], 1024)
+
+
 class TestModelRequirements(unittest.TestCase):
     def test_three_models_with_folders_and_urls(self):
         self.assertEqual(len(FLUX2_KLEIN_9B_MODELS), 3)
@@ -186,8 +294,13 @@ class TestOpenAPISpec(unittest.TestCase):
         spec = wrapper_openapi.spec_with_workflows(workflows_module.WORKFLOWS)
         flux2 = spec["paths"]["/api/wrapper/flux2klein9b/generate"]["post"]
         flux2_schema = flux2["requestBody"]["content"]["multipart/form-data"]["schema"]
-        self.assertEqual(flux2_schema["required"], ["prompt", "image"])
+        # image OR ref_images: one-of, so neither is required on its own
+        self.assertEqual(flux2_schema["required"], ["prompt"])
         self.assertIn("megapixels", flux2_schema["properties"])
+        self.assertIn("ref_images", flux2_schema["properties"])
+        i2v = spec["paths"]["/api/wrapper/minimaxh3/image/generate"]["post"]
+        i2v_schema = i2v["requestBody"]["content"]["multipart/form-data"]["schema"]
+        self.assertIn("image", i2v_schema["required"])  # a single image field stays required
 
     def test_spec_emits_task_paths_and_video_response(self):
         from api_wrapper import workflows as workflows_module
@@ -206,9 +319,11 @@ class TestOpenAPISpec(unittest.TestCase):
         self.assertEqual(schema["required"], [])
         for prop in ("prompt", "raw_prompt", "llm_image", "llm_model",
                      "ref_images", "ref_videos", "ref_video_audios", "ref_audios",
-                     "ref_image_size", "duration"):
+                     "ref_image_size", "duration", "image", "last_frame"):
             self.assertIn(prop, schema["properties"])
-        self.assertNotIn("image", schema["properties"])
+        # the pinned first frame is optional: only the prompt pair is "one of"
+        self.assertNotIn("image", schema["required"])
+        self.assertIn("first frame", schema["properties"]["image"]["description"])
         self.assertEqual(schema["properties"]["quantization"]["enum"], ["fp8", "int8", "bf16", "nvfp4"])
         # the image task requires an image upload and returns video
         op = spec["paths"]["/api/wrapper/minimaxh3/image/generate"]["post"]
@@ -314,8 +429,15 @@ class TestMiniMaxH3Graph(unittest.TestCase):
             prompt="x", first_frame="wrapper/a.png", last_frame="wrapper/b.png")
         self.assertEqual(graph["7"]["class_type"], "LoadImage")
         self.assertEqual(graph["8"]["class_type"], "LoadImage")
-        self.assertEqual(graph["6"]["inputs"]["first_frame"], ["7", 0])
-        self.assertEqual(graph["6"]["inputs"]["last_frame"], ["8", 0])
+        # each frame is cover-cropped to the canvas before the node sees it
+        self.assertEqual(graph["6"]["inputs"]["first_frame"], ["9", 0])
+        self.assertEqual(graph["6"]["inputs"]["last_frame"], ["10", 0])
+        for scale, loader in (("9", "7"), ("10", "8")):
+            self.assertEqual(graph[scale]["class_type"], "ImageScale")
+            self.assertEqual(graph[scale]["inputs"]["image"], [loader, 0])
+            self.assertEqual(graph[scale]["inputs"]["crop"], "center")
+            self.assertEqual((graph[scale]["inputs"]["width"], graph[scale]["inputs"]["height"]),
+                             (graph["6"]["inputs"]["width"], graph["6"]["inputs"]["height"]))
 
     def test_reference_to_video_wires_refs(self):
         graph = wrapper_workflows.build_minimax_h3_reference_to_video(
@@ -325,25 +447,74 @@ class TestMiniMaxH3Graph(unittest.TestCase):
             ref_audios=["wrapper/a1.wav", "wrapper/a2.wav"])
         self.assertEqual(graph["6"]["class_type"], "MiniMaxH3ReferenceToVideo")
         self.assertEqual(graph["6"]["inputs"]["ref_image_size"], "max")
-        self.assertEqual(graph["6"]["inputs"]["ref_images"],
-                         {"ref_image_0": ["7", 0], "ref_image_1": ["8", 0], "ref_image_2": ["9", 0]})
-        self.assertEqual(graph["6"]["inputs"]["ref_videos"], {"ref_video_0": ["10", 0]})
-        self.assertEqual(graph["6"]["inputs"]["ref_video_audios"], {"ref_video_audio_0": ["11", 0]})
-        self.assertEqual(graph["6"]["inputs"]["ref_audios"],
-                         {"ref_audio_0": ["12", 0], "ref_audio_1": ["13", 0]})
+        # Autogrow slots are addressed by flat dotted ids; a nested dict is
+        # dropped by execution (see test_reference_inputs_reach_the_node).
+        refs = {k: v for k, v in graph["6"]["inputs"].items() if k.startswith("ref_") and "." in k}
+        self.assertEqual(refs, {
+            "ref_images.ref_image_0": ["7", 0], "ref_images.ref_image_1": ["8", 0],
+            "ref_images.ref_image_2": ["9", 0], "ref_videos.ref_video_0": ["11", 0],
+            "ref_video_audios.ref_video_audio_0": ["12", 0],
+            "ref_audios.ref_audio_0": ["13", 0], "ref_audios.ref_audio_1": ["14", 0]})
+        self.assertNotIn("ref_images", graph["6"]["inputs"])
         self.assertEqual(graph["7"]["class_type"], "LoadImage")
         self.assertEqual(graph["10"]["class_type"], "LoadVideo")
-        self.assertEqual(graph["11"]["class_type"], "LoadAudio")  # video soundtrack
-        self.assertEqual(graph["12"]["class_type"], "LoadAudio")
+        # the slot takes frames, so the video goes through GetVideoComponents
+        self.assertEqual(graph["11"], {"class_type": "GetVideoComponents", "inputs": {"video": ["10", 0]}})
+        self.assertEqual(graph["12"]["class_type"], "LoadAudio")  # video soundtrack
+        self.assertEqual(graph["13"]["class_type"], "LoadAudio")
         # single-ref uploads (max=1) arrive as a bare filename string
         graph3 = wrapper_workflows.build_minimax_h3_reference_to_video(
             prompt="x", ref_videos="wrapper/v1.mp4", ref_video_audios="wrapper/v1.wav")
-        self.assertEqual(graph3["6"]["inputs"]["ref_videos"], {"ref_video_0": ["7", 0]})
-        self.assertEqual(graph3["6"]["inputs"]["ref_video_audios"], {"ref_video_audio_0": ["8", 0]})
+        self.assertEqual(graph3["6"]["inputs"]["ref_videos.ref_video_0"], ["8", 0])
+        self.assertEqual(graph3["6"]["inputs"]["ref_video_audios.ref_video_audio_0"], ["9", 0])
         # no refs -> no loader nodes, tail starts at 7
         graph2 = wrapper_workflows.build_minimax_h3_reference_to_video(prompt="x")
         self.assertEqual(graph2["7"]["class_type"], "BasicGuider")
-        self.assertEqual(graph2["6"]["inputs"].get("ref_images"), None)
+        self.assertFalse([k for k in graph2["6"]["inputs"] if k.startswith("ref_") and k != "ref_image_size"])
+
+    def test_reference_to_video_pins_first_and_last_frames(self):
+        """Keyframe completion: the frames are anchored with MiniMaxH3AddGuide
+        on the reference conditioning, cover-cropped to the canvas, and the
+        sampler is guided by the last guide in the chain."""
+        graph = wrapper_workflows.build_minimax_h3_reference_to_video(
+            prompt="<Picture 1> <Picture 2>", width=864, height=480,
+            ref_images=["wrapper/anchor.png", "wrapper/sheet.png"],
+            first_frame="wrapper/anchor.png", last_frame="wrapper/end.png")
+        guides = {nid: n for nid, n in graph.items() if n["class_type"] == "MiniMaxH3AddGuide"}
+        self.assertEqual(sorted(g["inputs"]["frame_idx"] for g in guides.values()), [-1, 0])
+        first = next(nid for nid, g in guides.items() if g["inputs"]["frame_idx"] == 0)
+        last = next(nid for nid, g in guides.items() if g["inputs"]["frame_idx"] == -1)
+        self.assertEqual(guides[first]["inputs"]["positive"], ["6", 0])
+        self.assertEqual(guides[last]["inputs"]["positive"], [first, 0])
+        for guide in guides.values():
+            self.assertEqual(guide["inputs"]["latent"], ["6", 1])
+            self.assertEqual(guide["inputs"]["vae"], ["4", 0])
+            scale = graph[guide["inputs"]["image"][0]]
+            self.assertEqual(scale["class_type"], "ImageScale")
+            self.assertEqual((scale["inputs"]["width"], scale["inputs"]["height"], scale["inputs"]["crop"]),
+                             (864, 480, "center"))
+        self.assertEqual(graph[graph[guides[first]["inputs"]["image"][0]]["inputs"]["image"][0]]["inputs"],
+                         {"image": "wrapper/anchor.png"})
+        guider = next(n for n in graph.values() if n["class_type"] == "BasicGuider")
+        self.assertEqual(guider["inputs"]["conditioning"], [last, 0])
+        # the sampler still starts from the reference node's latent
+        sampler = next(n for n in graph.values() if n["class_type"] == "SamplerCustomAdvanced")
+        self.assertEqual(sampler["inputs"]["latent_image"], ["6", 1])
+        # ids never collide with the references' loaders
+        self.assertEqual(len(graph), len(set(graph)))
+        # no pins: the guider reads the reference node directly, as before
+        plain = wrapper_workflows.build_minimax_h3_reference_to_video(prompt="x", ref_images=["wrapper/a.png"])
+        self.assertFalse([n for n in plain.values() if n["class_type"] == "MiniMaxH3AddGuide"])
+        self.assertEqual(next(n for n in plain.values() if n["class_type"] == "BasicGuider")["inputs"]["conditioning"],
+                         ["6", 0])
+
+    def test_reference_task_accepts_the_pinned_frames(self):
+        task = wrapper_workflows.WORKFLOWS["minimaxh3"]["tasks"]["reference"]
+        self.assertEqual(task["uploads"]["image"], {"ext": "image", "max": 1})
+        self.assertEqual(task["uploads"]["last_frame"], {"ext": "image", "max": 1})
+        self.assertEqual(task["upload_params"]["image"], "first_frame")
+        self.assertIn("image", task["form"])
+        self.assertFalse(task["requires_image"])
 
     def test_decode_nodes_use_the_correct_vae(self):
         # The joint AV latent is a NestedTensor (video [B,24,T,H,W], audio
@@ -683,6 +854,9 @@ class TestGraphValidation(unittest.TestCase):
                     ref_images=["wrapper/test_input.png"],
                     ref_videos=["wrapper/test_input.mp4"],
                     ref_audios=["wrapper/test_input.wav"])),
+                ("ref2va-keyframes", wrapper_workflows.build_minimax_h3_reference_to_video(
+                    prompt="a test prompt", ref_images=["wrapper/test_input.png"],
+                    first_frame="wrapper/test_input.png", last_frame="wrapper/test_input.png")),
             ):
                 valid, error, outputs, node_errors = asyncio.run(execution.validate_prompt(
                     f"9b1a5e4d-{abs(hash(label)) % 100000:05d}-4d7e-8f90-4a5b6c7d8e9f", graph, None))
@@ -691,6 +865,87 @@ class TestGraphValidation(unittest.TestCase):
         finally:
             for path in placeholder_paths:
                 os.remove(path)
+
+    def test_reference_inputs_reach_the_node(self):
+        """Validation passes whether or not the references are wired, so this
+        runs the resolution execution does before calling the node: what the
+        node receives as ref_images / ref_audios. A nested dict used to come
+        through as {} — every Ref2VA render was text-only."""
+        _prepare_env_for_comfy_import()
+        import nodes
+        from comfy_api.latest import _io
+
+        async def _init():
+            await nodes.init_extra_nodes(init_custom_nodes=False, init_api_nodes=False)
+
+        asyncio.run(_init())
+
+        import execution
+
+        graph = wrapper_workflows.build_minimax_h3_reference_to_video(
+            prompt="<Picture 1> <Picture 2> <Audio 1>",
+            ref_images=["wrapper/a.png", "wrapper/b.png"], ref_audios=["wrapper/c.wav"])
+        node_class = nodes.NODE_CLASS_MAPPINGS[graph["6"]["class_type"]]
+        received, _missing, v3_data = execution.get_input_data(graph["6"]["inputs"], node_class, "6")
+        received = _io.build_nested_inputs(received, v3_data)
+        self.assertEqual(sorted(received["ref_images"]), ["ref_image_0", "ref_image_1"])
+        self.assertEqual(sorted(received["ref_audios"]), ["ref_audio_0"])
+        self.assertEqual(received.get("ref_videos"), {})
+
+    def test_qwen_image_21_graphs_pass_core_validation(self):
+        _prepare_env_for_comfy_import()
+        import nodes  # noqa: F401
+        import api_wrapper.routes  # noqa: F401
+        import folder_paths
+
+        async def _init():
+            await nodes.init_extra_nodes(init_custom_nodes=False, init_api_nodes=False)
+
+        asyncio.run(_init())
+
+        placeholder_paths = []
+        for model in wrapper_workflows.qwen_image_21_models("int8"):
+            path = os.path.join(folder_paths.get_folder_paths(model["folder"])[0], model["filename"])
+            if not os.path.exists(path):
+                with open(path, "wb") as f:
+                    f.write(b"placeholder")
+                placeholder_paths.append(path)
+        try:
+            import execution
+
+            for label, graph in (
+                ("txt2img", wrapper_workflows.build_qwen_image_21_text2img(prompt="a test prompt")),
+                ("edit", wrapper_workflows.build_qwen_image_21_edit(
+                    prompt="a test prompt", image=self.TEST_IMAGE, ref_images=[self.TEST_IMAGE])),
+                ("edit-canvas", wrapper_workflows.build_qwen_image_21_edit(
+                    prompt="a test prompt", image=self.TEST_IMAGE, width=1024, height=576)),
+            ):
+                valid, error, outputs, node_errors = asyncio.run(execution.validate_prompt(
+                    f"5c2d8e1f-{abs(hash(label)) % 100000:05d}-4a3b-9c8d-7e6f5a4b3c2d", graph, None))
+                self.assertTrue(valid, f"qwen {label} graph rejected: {error}\nnode_errors: {node_errors}")
+                self.assertTrue(outputs)
+        finally:
+            for path in placeholder_paths:
+                os.remove(path)
+
+    def test_qwen_image_21_edit_images_reach_the_node(self):
+        _prepare_env_for_comfy_import()
+        import nodes
+        from comfy_api.latest import _io
+
+        async def _init():
+            await nodes.init_extra_nodes(init_custom_nodes=False, init_api_nodes=False)
+
+        asyncio.run(_init())
+
+        import execution
+
+        graph = wrapper_workflows.build_qwen_image_21_edit(
+            prompt="<image1> <image2>", image="wrapper/a.png", ref_images=["wrapper/b.png"])
+        node_class = nodes.NODE_CLASS_MAPPINGS[graph["4"]["class_type"]]
+        received, _missing, v3_data = execution.get_input_data(graph["4"]["inputs"], node_class, "4")
+        received = _io.build_nested_inputs(received, v3_data)
+        self.assertEqual(sorted(received["images"]), ["image_1", "image_2"])
 
 
 if __name__ == "__main__":
