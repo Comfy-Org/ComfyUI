@@ -75,7 +75,7 @@ def run_hot_loop(clock: FakeClock, seconds: float, work_per_item: float = 0.0001
 
 def test_accurate_sleep_keeps_the_measured_duty_cycle(fake):
     clock = calibrated(fake, gil._SLEEP)
-    assert gil._interval == gil._INTERVAL
+    assert gil._interval == pytest.approx(gil._INTERVAL)
     assert run_hot_loop(clock, 10.0) == pytest.approx(1 / 6, abs=0.02)
 
 
@@ -86,11 +86,16 @@ def test_coarse_sleep_widens_the_interval_to_bound_the_duty_cycle(fake):
     assert run_hot_loop(clock, 30.0) == pytest.approx(1 / 6, abs=0.02)
 
 
-def test_sleep_too_coarse_to_be_worth_it_disables_yielding(fake):
-    clock = calibrated(fake, gil._MAX_SLEEP * 2)
-    assert gil._interval is None
-    assert run_hot_loop(clock, 1.0) == 0.0
-    assert clock.sleeps == 0
+def test_slightly_slow_sleep_scales_the_interval_continuously(fake):
+    clock = calibrated(fake, 0.0015)
+    assert gil._interval == pytest.approx(0.0075)
+    assert run_hot_loop(clock, 10.0) == pytest.approx(1 / 6, abs=0.02)
+
+
+def test_very_coarse_sleep_still_yields_at_the_same_duty_cycle(fake):
+    clock = calibrated(fake, 0.040)
+    assert gil._interval == pytest.approx(0.200)
+    assert run_hot_loop(clock, 60.0) == pytest.approx(1 / 6, abs=0.02)
 
 
 def test_threads_do_not_consume_each_others_interval(fake):

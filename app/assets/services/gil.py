@@ -4,11 +4,10 @@ Without this, the event loop must win the GIL back from the scan after every soc
 syscall, and a page load's requests queue behind the scan for seconds. time.sleep(0)
 is not enough: the scan thread usually retakes the GIL before the loop wakes.
 
-The duty cycle is one _SLEEP per _INTERVAL of work. Where a short sleep overruns (on
-Windows before Python 3.11 it waits a whole system timer tick, ~15.6ms by default),
-the interval is widened to keep the same duty cycle, and yielding is switched off if
-the sleep is too coarse to be worth it. The real sleep cost is measured once, on first
-use, so no platform check is needed.
+The interval scales with what one _SLEEP really costs, measured once on first use, so
+a thread sleeps one sixth of the time whatever the platform's sleep resolution. Only
+the window size changes: 1ms every 6ms here, but a ~15.8ms timer tick every ~95ms on
+Windows before Python 3.11. No platform check is needed.
 """
 
 import statistics
@@ -17,7 +16,6 @@ import time
 
 _INTERVAL = 0.005
 _SLEEP = 0.001
-_MAX_SLEEP = 0.020
 _CALIBRATION_SAMPLES = 5
 
 # Indirection so tests can drive the clock without patching the time module.
@@ -25,26 +23,21 @@ _clock = time.perf_counter
 _sleep = time.sleep
 
 _UNCALIBRATED = -1.0
-_interval: float | None = _UNCALIBRATED  # None: yielding disabled
+_interval = _UNCALIBRATED
 _calibration_lock = threading.Lock()
 _last = threading.local()
 
 
-def _calibrate() -> float | None:
+def _calibrate() -> float:
     samples = []
     for _ in range(_CALIBRATION_SAMPLES):
         start = _clock()
         _sleep(_SLEEP)
         samples.append(_clock() - start)
-    actual = statistics.median(samples)
-    if actual > _MAX_SLEEP:
-        return None
-    if actual <= 2 * _SLEEP:
-        return _INTERVAL
-    return _INTERVAL * actual / _SLEEP
+    return _INTERVAL * max(1.0, statistics.median(samples) / _SLEEP)
 
 
-def _yield_interval() -> float | None:
+def _yield_interval() -> float:
     global _interval
     if _interval == _UNCALIBRATED:
         with _calibration_lock:
@@ -56,8 +49,6 @@ def _yield_interval() -> float | None:
 def yield_gil() -> None:
     """Call once per item in a hot loop on a background thread; sleeps every interval."""
     interval = _yield_interval()
-    if interval is None:
-        return
     now = _clock()
     last = getattr(_last, "t", None)
     if last is None:
