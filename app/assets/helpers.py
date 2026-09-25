@@ -81,9 +81,13 @@ def cached_prefix_matcher(prefixes: tuple[str, ...]) -> Callable[[str], bool]:
     every scanned file against the same folders.
 
     Keyed on the raw prefixes: normalizing them in the key would bring back the per-call
-    cost this avoids. That is sound because the callers pass absolute paths (folder_paths
-    bases and the input, output and temp directories), and a folder-config change is just
-    a new key.
+    cost this avoids. A folder-config change is just a new key.
+
+    Precondition: the prefixes are absolute. That is not checked. main.py and
+    extra_model_paths make their folders absolute, but folder_paths' setters and
+    add_model_folder_path store whatever they are given, so a custom node can register a
+    relative one. A relative prefix is resolved against the working directory once, on
+    first use, and that resolution is then frozen for as long as the key is unchanged.
     """
     return path_prefix_matcher(prefixes)
 
