@@ -1639,7 +1639,7 @@ class KSamplerAdvanced:
                     "latent_image": ("LATENT", ),
                     "start_at_step": ("INT", {"default": 0, "min": 0, "max": 10000, "advanced": True}),
                     "end_at_step": ("INT", {"default": 10000, "min": 0, "max": 10000, "advanced": True}),
-                    "return_with_leftover_noise": (["disable", "enable"], {"advanced": True}),
+                    "return_with_leftover_noise": ("BOOLEAN", {"default": False, "tooltip": "If True, returns the sample with leftover noise.", "advanced": True}),
                      }
                 }
 
@@ -1650,7 +1650,7 @@ class KSamplerAdvanced:
 
     def sample(self, model, add_noise, noise_seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, start_at_step, end_at_step, return_with_leftover_noise, denoise=1.0):
         force_full_denoise = True
-        if return_with_leftover_noise == "enable":
+        if return_with_leftover_noise == True:
             force_full_denoise = False
         disable_noise = False
         if add_noise == "disable":

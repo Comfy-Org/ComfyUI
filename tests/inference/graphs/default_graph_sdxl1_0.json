@@ -33,7 +33,7 @@
         "scheduler": "normal",
         "start_at_step": 0,
         "end_at_step": 32,
-        "return_with_leftover_noise": "enable",
+        "return_with_leftover_noise": true,
         "model": [
           "4",
           0
@@ -86,7 +86,7 @@
         "scheduler": "normal",
         "start_at_step": 32,
         "end_at_step": 10000,
-        "return_with_leftover_noise": "disable",
+        "return_with_leftover_noise": false,
         "model": [
           "16",
           0

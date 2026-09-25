@@ -1276,7 +1276,7 @@
               {
                 "localized_name": "return_with_leftover_noise",
                 "name": "return_with_leftover_noise",
-                "type": "COMBO",
+                "type": "BOOLEAN",
                 "widget": {
                   "name": "return_with_leftover_noise"
                 },
@@ -1430,7 +1430,7 @@
               {
                 "localized_name": "return_with_leftover_noise",
                 "name": "return_with_leftover_noise",
-                "type": "COMBO",
+                "type": "BOOLEAN",
                 "widget": {
                   "name": "return_with_leftover_noise"
                 },
