@@ -1,15 +1,25 @@
 import sys
 import types
+import weakref
 from unittest.mock import Mock, call
 
-if "comfy_aimdo.storage" not in sys.modules:
-    sys.modules["comfy_aimdo.storage"] = types.ModuleType("comfy_aimdo.storage")
 import torch
+
+# Only stub comfy_aimdo.storage when it is genuinely unavailable.
+# Inserting an empty stub when the real package is installed would mask it
+# and break storage_test.py (comfy.storage.fast_storage -> AttributeError).
+if "comfy_aimdo.storage" not in sys.modules:
+    try:
+        import comfy_aimdo.storage  # noqa: F401
+    except ImportError:
+        sys.modules["comfy_aimdo.storage"] = types.ModuleType("comfy_aimdo.storage")
+
 if not torch.cuda.is_available():
     import comfy.cli_args
     comfy.cli_args.args.cpu = True
 
 import comfy.model_management as model_management
+
 
 
 class NPUDevice:
@@ -91,8 +101,6 @@ def test_npu_synchronize(monkeypatch):
 
 
 def test_free_memory_dynamic_model_partial_unload(monkeypatch):
-    import weakref
-    import torch
     device = torch.device("cuda:0")
     mock_model = Mock()
     mock_model.is_dynamic.return_value = True
@@ -127,8 +135,6 @@ def test_free_memory_dynamic_model_partial_unload(monkeypatch):
 
 
 def test_load_models_gpu_dynamic_reentry_headroom(monkeypatch):
-    import weakref
-    import torch
     device = torch.device("cuda:0")
     mock_model = Mock()
     mock_model.is_dynamic.return_value = True
