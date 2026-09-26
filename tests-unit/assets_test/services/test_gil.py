@@ -6,6 +6,9 @@ import pytest
 from app.assets.services import gil
 
 
+SHARE = gil._SLEEP / (gil._SLEEP + gil._RUN)
+
+
 class FakeClock:
     """Stands in for gil._clock / gil._sleep; a sleep advances the clock by `sleep_cost`."""
 
@@ -72,23 +75,23 @@ def run_hot_loop(clock: FakeClock, yield_gil, seconds: float, work_per_item: flo
 
 def test_accurate_sleep_keeps_the_measured_duty_cycle(fake):
     clock = started(fake, gil._SLEEP, gil._yield_fixed)
-    assert run_hot_loop(clock, gil._yield_fixed, 10.0) == pytest.approx(1 / 6, abs=0.02)
+    assert run_hot_loop(clock, gil._yield_fixed, 10.0) == pytest.approx(SHARE, abs=0.02)
 
 
 def test_coarse_sleep_widens_the_run_window_to_keep_the_duty_cycle(fake):
     # A 1ms sleep that really takes a 15ms timer tick, as on Windows before Python 3.11.
     clock = started(fake, 0.015, gil._yield_scaled)
-    assert run_hot_loop(clock, gil._yield_scaled, 30.0) == pytest.approx(1 / 6, abs=0.02)
+    assert run_hot_loop(clock, gil._yield_scaled, 30.0) == pytest.approx(SHARE, abs=0.02)
 
 
 def test_slightly_slow_sleep_scales_the_run_window_continuously(fake):
     clock = started(fake, 0.0015, gil._yield_scaled)
-    assert run_hot_loop(clock, gil._yield_scaled, 10.0) == pytest.approx(1 / 6, abs=0.02)
+    assert run_hot_loop(clock, gil._yield_scaled, 10.0) == pytest.approx(SHARE, abs=0.02)
 
 
 def test_very_coarse_sleep_still_yields_at_the_same_duty_cycle(fake):
     clock = started(fake, 0.040, gil._yield_scaled)
-    assert run_hot_loop(clock, gil._yield_scaled, 60.0) == pytest.approx(1 / 6, abs=0.02)
+    assert run_hot_loop(clock, gil._yield_scaled, 60.0) == pytest.approx(SHARE, abs=0.02)
 
 
 def test_threads_do_not_consume_each_others_run_window(fake):
@@ -129,7 +132,7 @@ def test_threads_do_not_consume_each_others_run_window(fake):
 def test_fixed_window_on_a_coarse_timer_sleeps_far_more_than_a_sixth(fake):
     # Why the scaled version exists: a 1ms sleep that really takes a 15ms tick.
     clock = started(fake, 0.015, gil._yield_fixed)
-    assert run_hot_loop(clock, gil._yield_fixed, 30.0) > 0.6
+    assert run_hot_loop(clock, gil._yield_fixed, 30.0) > 2 * SHARE
 
 
 def test_scaled_version_is_used_only_for_the_coarse_windows_timer():

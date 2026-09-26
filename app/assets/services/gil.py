@@ -4,15 +4,17 @@ Without this, the event loop must win the GIL back from the scan after every soc
 syscall, and a page load's requests queue behind the scan for seconds. time.sleep(0)
 is not enough: the scan thread usually retakes the GIL before the loop wakes.
 
-A thread sleeps _SLEEP after running _RUN, so it spends about one sixth of its time
-asleep. All state is per thread; nothing is shared.
+A thread sleeps _SLEEP after running _RUN, so it spends about a third of its time
+asleep. Measured on a 41k-file first scan, that is where page loads stopped getting
+faster (a shorter run bought nothing), for about 2% more scan time. All state is per
+thread; nothing is shared.
 """
 
 import sys
 import threading
 import time
 
-_RUN = 0.005
+_RUN = 0.002
 _SLEEP = 0.001
 
 # Indirection so tests can drive the clock without patching the time module.
