@@ -26,6 +26,7 @@ import comfy.ldm.minimax_music.dit
 import comfy.ldm.yue2.model
 import comfy.nested_tensor
 import comfy.ldm.lightricks.symmetric_patchifier
+import comfy.ldm.modules.attention
 import comfy.context_windows
 from comfy.ldm.modules.diffusionmodules.openaimodel import UNetModel, Timestep
 from comfy.ldm.cascade.stage_c import StageC
@@ -415,7 +416,7 @@ class BaseModel(torch.nn.Module):
     def scale_latent_inpaint(self, sigma, noise, latent_image, **kwargs):
         return self.model_sampling.noise_scaling(sigma.reshape([sigma.shape[0]] + [1] * (len(noise.shape) - 1)), noise, latent_image)
 
-    def memory_required(self, input_shape, cond_shapes={}):
+    def memory_required(self, input_shape, cond_shapes={}, memory_efficient_attention=None):
         input_shapes = [input_shape]
         for c in self.memory_usage_factor_conds:
             shape = cond_shapes.get(c, None)
@@ -429,7 +430,10 @@ class BaseModel(torch.nn.Module):
                 if len(shape) > 0:
                     input_shapes += shape
 
-        if comfy.model_management.xformers_enabled() or comfy.model_management.pytorch_attention_flash_attention():
+        if memory_efficient_attention is None:
+            memory_efficient_attention = comfy.ldm.modules.attention.optimized_attention_memory_efficient
+
+        if memory_efficient_attention:
             dtype = self.get_dtype_inference()
             #TODO: this needs to be tweaked
             area = sum(map(lambda input_shape: input_shape[0] * math.prod(input_shape[2:]), input_shapes))
@@ -2477,8 +2481,8 @@ class SenseNovaU15(BaseModel):
                 out["prefix_values"] = prefix_shape
         return out
 
-    def memory_required(self, input_shape, cond_shapes={}):
-        memory = super().memory_required(input_shape, cond_shapes)
+    def memory_required(self, input_shape, cond_shapes={}, memory_efficient_attention=None):
+        memory = super().memory_required(input_shape, cond_shapes, memory_efficient_attention)
         dtype_size = comfy.model_management.dtype_size(self.get_dtype_inference())
         return memory + sum(
             math.prod(shape) * dtype_size
@@ -2578,9 +2582,9 @@ class YuE2(BaseModel):
     def extra_conds_shapes(self, **kwargs):
         return {"c_crossattn": kwargs["cross_attn"].shape}
 
-    def memory_required(self, input_shape, cond_shapes={}):
+    def memory_required(self, input_shape, cond_shapes={}, memory_efficient_attention=None):
         context_size = sum(math.prod(shape) for shape in cond_shapes.get("c_crossattn", []))
-        return super().memory_required(input_shape, cond_shapes) + context_size * comfy.model_management.dtype_size(self.get_dtype_inference())
+        return super().memory_required(input_shape, cond_shapes, memory_efficient_attention) + context_size * comfy.model_management.dtype_size(self.get_dtype_inference())
 
 
 class MiniMaxMusic3(BaseModel):
