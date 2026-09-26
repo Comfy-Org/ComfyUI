@@ -13,9 +13,10 @@ from aiohttp import web
 
 from app.assets import mode
 from app.assets.lifecycle import record_hash_mode_transition_intent, run_shutdown, run_startup
-from app.database.db import dependencies_available
+from app.database.db import dependencies_available, missing_dependencies
 from app.user_manager import UserManager
 from comfy.cli_args import args
+from utils.install_util import get_missing_requirements_message
 
 # Modules that need the database dependencies are imported where they are used:
 # NoAssets must work in environments where those packages are not installed.
@@ -251,9 +252,10 @@ class AssetsEnabled:
 
 def default_asset_manager() -> AssetManager:
     if args.enable_assets and not dependencies_available():
-        logging.warning(
-            "Assets requested but database dependencies unavailable; asset endpoints "
-            "will answer 503. Please install the updated requirements.txt file."
+        missing = ", ".join(missing_dependencies()) or "see the import error above"
+        logging.error(
+            f"--enable-assets requires packages that could not be imported: {missing}. "
+            f"Assets are disabled.\n{get_missing_requirements_message()}"
         )
         return NoAssets(args)
     return AssetsEnabled(args) if args.enable_assets else NoAssets(args)

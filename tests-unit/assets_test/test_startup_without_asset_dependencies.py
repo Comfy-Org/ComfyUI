@@ -53,14 +53,16 @@ def test_starts_without_asset_dependencies_when_assets_disabled(tmp_path: Path) 
     assert not stale_temp_file.exists()
 
 
-def test_enable_assets_without_dependencies_names_the_missing_packages(tmp_path: Path) -> None:
+def test_enable_assets_without_dependencies_names_them_and_starts_with_assets_disabled(
+    tmp_path: Path,
+) -> None:
     result = run_quick_startup(tmp_path, "--enable-assets")
     output = result.stdout + result.stderr
 
-    assert result.returncode == 1, output
+    assert result.returncode == 0, output
     assert (
-        "--enable-assets requires packages that could not be imported: sqlalchemy, alembic, blake3"
-        in output
+        "--enable-assets requires packages that could not be imported: "
+        "sqlalchemy, alembic, blake3. Assets are disabled." in output
     )
     assert "-m pip install -r" in output
     assert "Traceback" not in output
