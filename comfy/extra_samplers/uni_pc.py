@@ -611,9 +611,6 @@ class UniPC:
 
         hh = -h[0] if self.predict_x0 else h[0]
         h_phi_1 = torch.expm1(hh) # h\phi_1(h) = e^h - 1
-        h_phi_k = h_phi_1 / hh - 1
-
-        factorial_i = 1
 
         if self.variant == 'bh1':
             B_h = hh
@@ -622,14 +619,23 @@ class UniPC:
         else:
             raise NotImplementedError()
 
+        # b is a recurrence of near-cancelling terms for small hh (high-shift flow
+        # schedules); float32 expm1 isn't precise enough for it to cancel correctly,
+        # so do it in float64 on the CPU and only move the resulting coefficients to
+        # the device (MPS has no float64, hence .cpu() before .double()).
+        hh64 = hh.detach().cpu().double()
+        h_phi_k64 = torch.expm1(hh64) / hh64 - 1
+        B_h64 = hh64 if self.variant == 'bh1' else torch.expm1(hh64)
+        factorial_i = 1
+
         for i in range(1, order + 1):
             R.append(torch.pow(rks, i - 1))
-            b.append(h_phi_k * factorial_i / B_h)
+            b.append(h_phi_k64 * factorial_i / B_h64)
             factorial_i *= (i + 1)
-            h_phi_k = h_phi_k / hh - 1 / factorial_i
+            h_phi_k64 = h_phi_k64 / hh64 - 1 / factorial_i
 
         R = torch.stack(R)
-        b = torch.tensor(b, device=x.device)
+        b = torch.tensor(b, device=x.device, dtype=hh.dtype)
 
         # now predictor
         use_predictor = len(D1s) > 0 and x_t is None
