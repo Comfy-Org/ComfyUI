@@ -72,7 +72,7 @@ from app.assets.services.cursor import (
     encode_cursor_from_time,
 )
 from app.assets.services.tagging import list_tag_histogram
-from app.database.db import create_session, is_memory_db
+from app.database.db import create_session
 
 ROUTES = web.RouteTableDef()
 USER_MANAGER: user_manager.UserManager | None = None
@@ -594,12 +594,8 @@ async def download_asset_content(request: web.Request) -> web.Response:
 
     try:
         reference_id = str(uuid.UUID(request.match_info["id"]))
-        if is_memory_db():
-            # One connection for the whole process: keep lookups serialized on the loop.
-            result = _resolve_download(reference_id)
-        else:
-            # The lookup waits on the database, which a scan holds for a whole batch at a time.
-            result = await asyncio.to_thread(_resolve_download, reference_id)
+        # The lookup waits on the database, which a scan holds for a whole batch at a time.
+        result = await asyncio.to_thread(_resolve_download, reference_id)
         abs_path = result.abs_path
         content_type = result.content_type
         filename = result.download_name

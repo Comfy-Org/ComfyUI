@@ -88,7 +88,6 @@ async def test_resolve_runs_off_the_event_loop_thread(aiohttp_client, monkeypatc
     monkeypatch.setattr(asset_routes, "USER_MANAGER", _StubUserManager())
     monkeypatch.setattr(asset_routes, "touch_record_access_time", lambda reference_id: None)
     monkeypatch.setattr(asset_routes, "resolve_asset_for_download", resolve)
-    monkeypatch.setattr(asset_routes, "is_memory_db", lambda: False)
     app = web.Application()
     app.add_routes(asset_routes.ROUTES)
     client = await aiohttp_client(app)
@@ -124,29 +123,3 @@ async def test_resolve_errors_keep_their_status(aiohttp_client, monkeypatch, err
 
     assert resp.status == status
     assert code in await resp.text()
-
-
-@pytest.mark.asyncio
-async def test_memory_db_resolves_inline(aiohttp_client, monkeypatch, tmp_path):
-    # An in-memory database is one shared connection, so lookups stay serialized on the loop.
-    path = tmp_path / "a.png"
-    path.write_bytes(PAYLOAD)
-    seen = []
-
-    def resolve(reference_id):
-        seen.append(threading.current_thread())
-        return DownloadResolutionResult(abs_path=str(path), content_type="image/png", download_name="a.png")
-
-    monkeypatch.setattr(asset_routes, "_ASSETS_ENABLED", True)
-    monkeypatch.setattr(asset_routes, "USER_MANAGER", _StubUserManager())
-    monkeypatch.setattr(asset_routes, "touch_record_access_time", lambda reference_id: None)
-    monkeypatch.setattr(asset_routes, "resolve_asset_for_download", resolve)
-    monkeypatch.setattr(asset_routes, "is_memory_db", lambda: True)
-    app = web.Application()
-    app.add_routes(asset_routes.ROUTES)
-    client = await aiohttp_client(app)
-
-    resp = await client.get(CONTENT_URL)
-
-    assert resp.status == 200
-    assert seen == [threading.main_thread()]

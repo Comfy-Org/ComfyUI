@@ -173,7 +173,7 @@ def test_memory_db_touch_records_the_access_time(memory_db, tmp_path):
         session.commit()
     before = _busy_timeout()
 
-    # Serial, as the route runs it in memory mode. touch swallows errors, so check each call.
+    # touch swallows errors, so check each call.
     for _ in range(3):
         with db_module.create_write_session() as session:
             session.execute(update(Asset).where(Asset.id == record_id).values(last_access_time=None))
