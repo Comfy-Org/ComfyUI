@@ -14,6 +14,7 @@ from comfy_execution.jobs import (
     apply_sorting,
     has_3d_extension,
     validate_job_id,
+    get_job,
 )
 
 
@@ -523,6 +524,56 @@ class TestNormalizeQueueItem:
         assert job['outputs_count'] == 0
         assert job['previewable_outputs_count'] == 0
         assert job['workflow_id'] == 'workflow-abc'
+
+
+class TestGetJobIncludesWorkflowForNonTerminalJobs:
+    """Regression test for https://github.com/Comfy-Org/ComfyUI/issues/14995
+
+    GET /api/jobs/{job_id} must include the 'workflow' field for running and
+    pending jobs, not just completed/failed/cancelled ones, since the frontend
+    caches this response by job id and never refetches once cached. Omitting
+    the field while a job is in progress permanently starves the frontend's
+    cache of the workflow, even after the job finishes and history would have
+    supplied it.
+    """
+
+    def _make_queue_item(self, prompt_id):
+        return (
+            10,  # priority
+            prompt_id,
+            {'nodes': {'1': {}}},  # prompt
+            {
+                'create_time': 1234567890,
+                'extra_pnginfo': {'workflow': {'id': 'workflow-abc'}},
+            },  # extra_data
+            ['node1'],  # outputs_to_execute
+        )
+
+    def test_running_job_detail_includes_workflow(self):
+        item = self._make_queue_item('prompt-running')
+        job = get_job('prompt-running', running=[item], queued=[], history={})
+
+        assert job['status'] == 'in_progress'
+        assert job['workflow'] == {
+            'prompt': {'nodes': {'1': {}}},
+            'extra_data': {
+                'create_time': 1234567890,
+                'extra_pnginfo': {'workflow': {'id': 'workflow-abc'}},
+            },
+        }
+
+    def test_pending_job_detail_includes_workflow(self):
+        item = self._make_queue_item('prompt-pending')
+        job = get_job('prompt-pending', running=[], queued=[item], history={})
+
+        assert job['status'] == 'pending'
+        assert job['workflow'] == {
+            'prompt': {'nodes': {'1': {}}},
+            'extra_data': {
+                'create_time': 1234567890,
+                'extra_pnginfo': {'workflow': {'id': 'workflow-abc'}},
+            },
+        }
 
 
 class TestNormalizeHistoryItem:
