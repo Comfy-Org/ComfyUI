@@ -227,11 +227,17 @@ class EncoderFCN3D(nn.Module):
 
 # ViT3D decoder
 
-def create_token_ids(patch_dims, device, dtype):
+def create_token_ids(patch_dims, device, dtype, full_dims=None, offset=None):
+    # full_dims/offset let a spatially tiled chunk compute positions relative to the
+    # full latent grid instead of restarting at -1..1 for every tile (see tiled_decode).
+    if full_dims is None:
+        full_dims = patch_dims
+    if offset is None:
+        offset = (0,) * len(patch_dims)
     coords_list = []
-    for dim_size in patch_dims:
-        coords = torch.arange(0.5, dim_size, dtype=dtype, device=device)
-        coords = coords / dim_size
+    for dim_size, full_size, off in zip(patch_dims, full_dims, offset):
+        coords = torch.arange(0.5, dim_size, dtype=dtype, device=device) + off
+        coords = coords / full_size
         coords = 2.0 * coords - 1.0
         coords_list.append(coords)
     coords = torch.stack(torch.meshgrid(*coords_list, indexing="ij"), dim=-1)
@@ -367,7 +373,7 @@ class ViT3DDecoder(nn.Module):
         self.norm_out = ops.LayerNorm(dim, elementwise_affine=True, eps=eps)
         self.proj_out = ops.Linear(dim, out_channels * patch_size_t * patch_size * patch_size)
 
-    def forward(self, x):
+    def forward(self, x, full_dims=None, offsets=None):
         B, C, latent_T, latent_H, latent_W = x.shape
 
         h = self.x_embedder(x.flatten(2).transpose(1, 2))  # [B, T*H*W, C]
@@ -377,7 +383,16 @@ class ViT3DDecoder(nn.Module):
 
         h = torch.cat([h, comfy.ops.cast_to_input(self.register_tokens, h).expand(B, -1, -1), torch.zeros_like(h[:, 0:1, :])], dim=1)
 
-        img_ids = create_token_ids((latent_T, latent_H, latent_W), x.device, x.dtype).expand(B, -1, -1)
+        # Each offset covers an equal share of the batch, matching how tiled_decode
+        # batches several spatially distinct tiles into one call.
+        if offsets is None:
+            offsets = [None]
+        b = B // len(offsets)
+        img_ids = torch.cat([
+            create_token_ids((latent_T, latent_H, latent_W), x.device, x.dtype,
+                              full_dims=full_dims, offset=offset).expand(b, -1, -1)
+            for offset in offsets
+        ], dim=0)
         suffix_ids = torch.zeros((B, num_suffix, 3), device=x.device, dtype=img_ids.dtype)
         img_ids = torch.cat([img_ids, suffix_ids], dim=1)
 
@@ -474,8 +489,8 @@ class MiniMaxH3VideoVAE(nn.Module):
     def _encode_moments(self, x):
         return self.quant_conv(self.encoder(x))
 
-    def _decode_pixels(self, z):
-        return self.decoder(self.post_quant_conv(z))
+    def _decode_pixels(self, z, full_dims=None, offsets=None):
+        return self.decoder(self.post_quant_conv(z), full_dims=full_dims, offsets=offsets)
 
     def _normalize_pixels(self, x):
         return x.add(1.0).mul_(0.5).sub_(self.pixel_mean.to(x)).div_(self.pixel_std.to(x))
@@ -587,17 +602,19 @@ class MiniMaxH3VideoVAE(nn.Module):
             result_rows.append(torch.cat(result_row, dim=-1))
         return torch.cat(result_rows, dim=-2)
 
-    def _decode_tile_row(self, z_row, x_idx, x_len):
+    def _decode_tile_row(self, z_row, x_idx, x_len, full_dims, zi):
         # a few tiles per decoder call (~7%); each extra tile holds ~100 MB of activations
         free = comfy.model_management.get_free_memory(z_row.device)
         batch = int(max(1, min(4, free // (128 * 2**20 * z_row.shape[0]))))
         slices = [z_row[..., j_pos // self.vae_ratio:(j_pos + j_len) // self.vae_ratio] for j_pos, j_len in zip(x_idx, x_len)]
+        offsets = [(0, zi, j_pos // self.vae_ratio) for j_pos in x_idx]
         for k in range(0, len(slices), batch):
             group = slices[k:k + batch]
-            yield from self._decode_pixels(torch.cat(group)).chunk(len(group))
+            yield from self._decode_pixels(torch.cat(group), full_dims=full_dims, offsets=offsets[k:k + batch]).chunk(len(group))
 
     def tiled_decode(self, z):
         height, width = z.shape[-2] * self.vae_ratio, z.shape[-1] * self.vae_ratio
+        full_dims = (z.shape[-3], z.shape[-2], z.shape[-1])
         y_idx, y_len, y_overlap = self.split_tiles(height)
         x_idx, x_len, x_overlap = self.split_tiles(width)
 
@@ -608,7 +625,7 @@ class MiniMaxH3VideoVAE(nn.Module):
         out_y = 0
         for i, (i_pos, i_len) in enumerate(zip(y_idx, y_len)):
             zi, zl = i_pos // self.vae_ratio, i_len // self.vae_ratio
-            tiles = self._decode_tile_row(z[..., zi:zi + zl, :], x_idx, x_len)
+            tiles = self._decode_tile_row(z[..., zi:zi + zl, :], x_idx, x_len, full_dims, zi)
             new_strip = None
             left_tail = None
             out_x = 0
