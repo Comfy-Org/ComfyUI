@@ -107,6 +107,8 @@ import comfy.ldm.flux.redux
 def load_lora_for_models(model, clip, lora, strength_model, strength_clip, lora_metadata=None):
     key_map = {}
     if model is not None:
+        if strength_model != 0:
+            comfy.lora._reject_unsupported_keyless_h3_adapter(model.model)
         key_map = comfy.lora.model_lora_keys_unet(model.model, key_map)
     if clip is not None:
         key_map = comfy.lora.model_lora_keys_clip(clip.cond_stage_model, key_map)
@@ -152,6 +154,8 @@ def load_bypass_lora_for_models(model, clip, lora, strength_model, strength_clip
     """
     key_map = {}
     if model is not None:
+        if strength_model != 0:
+            comfy.lora._reject_unsupported_keyless_h3_adapter(model.model)
         key_map = comfy.lora.model_lora_keys_unet(model.model, key_map)
     if clip is not None:
         key_map = comfy.lora.model_lora_keys_clip(clip.cond_stage_model, key_map)
