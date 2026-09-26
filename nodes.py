@@ -2519,6 +2519,7 @@ async def init_builtin_extra_nodes():
         "nodes_nag.py",
         "nodes_trellis2.py",
         "nodes_mesh_postprocess.py",
+        "nodes_light_3d.py",
         "nodes_sdpose.py",
         "nodes_math.py",
         "nodes_number_convert.py",
