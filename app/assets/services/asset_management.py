@@ -34,7 +34,7 @@ from app.assets.services.schemas import (
     ReferenceData,
     UserMetadata,
 )
-from app.database.db import create_bounded_write_session, create_session
+from app.database.db import _create_bounded_write_session, create_session
 
 
 def _record_to_detail_result(session, record) -> AssetDetailResult:
@@ -282,7 +282,7 @@ def _touch_record_access_time(reference_id: str) -> None:
     ACCESS_TIME_BUSY_TIMEOUT_MS; otherwise skip it. The access time is advisory, so a
     download never waits on another writer for it, and this never raises."""
     try:
-        with create_bounded_write_session(ACCESS_TIME_BUSY_TIMEOUT_MS) as session:
+        with _create_bounded_write_session(ACCESS_TIME_BUSY_TIMEOUT_MS) as session:
             update_record_access_time(session, reference_id)
             session.commit()
     except Exception as e:

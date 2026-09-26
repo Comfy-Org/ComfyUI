@@ -112,7 +112,7 @@ def test_bounded_session_restores_the_pooled_busy_timeout(file_db):
     with db_module.create_write_session() as session:
         default = session.execute(text("PRAGMA busy_timeout")).scalar_one()
 
-    with db_module.create_bounded_write_session(50) as session:
+    with db_module._create_bounded_write_session(50) as session:
         assert session.execute(text("PRAGMA busy_timeout")).scalar_one() == 50
 
     with db_module.create_write_session() as session:

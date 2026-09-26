@@ -353,7 +353,7 @@ def create_write_session():
 
 
 @contextmanager
-def create_bounded_write_session(busy_timeout_ms: int):
+def _create_bounded_write_session(busy_timeout_ms: int):
     """A create_write_session() that waits at most busy_timeout_ms for the write lock, then
     raises OperationalError("database is locked"). For writes that may be skipped rather
     than wait on a long writer such as a scan batch. The timeout is set on the driver
