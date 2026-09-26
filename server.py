@@ -162,7 +162,11 @@ def create_origin_only_middleware():
         if 'Sec-Fetch-Site' in request.headers:
             sec_fetch_site = request.headers['Sec-Fetch-Site']
             if sec_fetch_site == 'cross-site':
-                return web.Response(status=403)
+                #a cross-site navigation is a user following a link here (an identity provider
+                #redirect, a cloud console link), not the cross-site POST to loopback this is meant
+                #to stop. navigations can't read the response and GET/HEAD can't change state.
+                if request.method not in ('GET', 'HEAD') or request.headers.get('Sec-Fetch-Mode') != 'navigate':
+                    return web.Response(status=403)
         #this code is used to prevent the case where a random website can queue comfy workflows by making a POST to 127.0.0.1 which browsers don't prevent for some dumb reason.
         #in that case the Host and Origin hostnames won't match
         #I know the proper fix would be to add a cookie but this should take care of the problem in the meantime
