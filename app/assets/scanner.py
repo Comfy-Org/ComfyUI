@@ -27,13 +27,12 @@ from app.assets.database.queries import (
     create_record,
 )
 from app.assets.database.models import Asset, AssetContent
-from app.assets.helpers import sql_path_under_prefix, to_stored_hash
+from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix, to_stored_hash
 from app.assets.lifecycle import get_excluded_scan_roots
 from app.assets.scanner_changes import (
     clear_pending_verifications,
     detect_content_change,
     drain_pending_verifications,
-    is_path_under_prefixes,
     live_contents_under_prefixes,
     pending_recovery_count,
     recover_missing_content,
@@ -240,10 +239,6 @@ def _sync_prefixes_in_write_txn(
     return survivors
 
 
-def _is_under_prefixes(path: str, prefixes: list[str]) -> bool:
-    return is_path_under_prefixes(path, prefixes)
-
-
 def sync_root_safely(
     root: RootType, progress: _ScanProgress | None = None
 ) -> set[str]:
@@ -304,7 +299,8 @@ def mark_contents_missing_outside_prefixes(
     contents = session.scalars(
         sa.select(AssetContent).where(AssetContent.is_missing.is_(False))
     )
-    missing = [content for content in contents if not _is_under_prefixes(content.path, prefixes)]
+    is_owned = path_prefix_matcher(prefixes)
+    missing = [content for content in contents if not is_owned(content.path)]
     for content in missing:
         mark_content_missing(session, content.id)
     return len(missing)
