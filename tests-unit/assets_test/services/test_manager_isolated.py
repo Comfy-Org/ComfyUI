@@ -84,7 +84,7 @@ def threaded_create_session(
 @pytest.fixture
 def output_seeder(monkeypatch: pytest.MonkeyPatch) -> Iterator[_OutputSeeder]:
     seeder = asset_seeder.__class__()
-    monkeypatch.setattr(manager_module, "asset_seeder", seeder)
+    monkeypatch.setattr(seeder_module, "asset_seeder", seeder)
     yield seeder
     _ = seeder.shutdown()
 

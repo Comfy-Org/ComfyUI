@@ -1,3 +1,4 @@
+import importlib
 import logging
 import os
 import shutil
@@ -46,6 +47,17 @@ def dependencies_available():
     Temporary function to check if the dependencies are available
     """
     return _DB_AVAILABLE
+
+
+def missing_dependencies():
+    """Names of the database packages that fail to import."""
+    missing = []
+    for name in ("sqlalchemy", "alembic", "blake3"):
+        try:
+            importlib.import_module(name)
+        except ImportError:
+            missing.append(name)
+    return missing
 
 
 def can_create_session():

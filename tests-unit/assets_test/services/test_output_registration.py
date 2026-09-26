@@ -106,7 +106,7 @@ def test_executed_adapter_registration_failure_never_raises(mock_create_session)
         output_ui = _output_ui(path.name)
 
         with patch(
-            "app.assets.manager.ingest_register_executed_output",
+            "app.assets.services.ingest.register_executed_output",
             side_effect=RuntimeError("boom"),
         ):
             enriched = register_executed_outputs(
