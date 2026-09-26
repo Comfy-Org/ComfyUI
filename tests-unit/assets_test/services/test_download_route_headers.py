@@ -26,7 +26,6 @@ def asset_app(monkeypatch, tmp_path):
 
         monkeypatch.setattr(asset_routes, "_ASSETS_ENABLED", True)
         monkeypatch.setattr(asset_routes, "USER_MANAGER", _StubUserManager())
-        monkeypatch.setattr(asset_routes, "touch_record_access_time", lambda reference_id: None)
         monkeypatch.setattr(
             asset_routes,
             "resolve_asset_for_download",
@@ -86,7 +85,6 @@ async def test_resolve_runs_off_the_event_loop_thread(aiohttp_client, monkeypatc
 
     monkeypatch.setattr(asset_routes, "_ASSETS_ENABLED", True)
     monkeypatch.setattr(asset_routes, "USER_MANAGER", _StubUserManager())
-    monkeypatch.setattr(asset_routes, "touch_record_access_time", lambda reference_id: None)
     monkeypatch.setattr(asset_routes, "resolve_asset_for_download", resolve)
     app = web.Application()
     app.add_routes(asset_routes.ROUTES)
@@ -113,7 +111,6 @@ async def test_resolve_errors_keep_their_status(aiohttp_client, monkeypatch, err
 
     monkeypatch.setattr(asset_routes, "_ASSETS_ENABLED", True)
     monkeypatch.setattr(asset_routes, "USER_MANAGER", _StubUserManager())
-    monkeypatch.setattr(asset_routes, "touch_record_access_time", lambda reference_id: None)
     monkeypatch.setattr(asset_routes, "resolve_asset_for_download", resolve)
     app = web.Application()
     app.add_routes(asset_routes.ROUTES)

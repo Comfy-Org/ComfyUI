@@ -17,7 +17,6 @@ from app.assets.services.asset_management import (
     asset_exists,
     get_preview_file_paths,
     resolve_asset_for_download,
-    touch_record_access_time,
 )
 from app.assets.services.tagging import (
     apply_tags,
@@ -38,7 +37,6 @@ __all__ = [
     "asset_exists",
     "get_preview_file_paths",
     "resolve_asset_for_download",
-    "touch_record_access_time",
     "apply_tags",
     "remove_tags",
     "list_tags",

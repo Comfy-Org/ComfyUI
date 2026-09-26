@@ -24,7 +24,6 @@ from app.assets.services.asset_management import (
     delete_asset_reference,
     get_asset_detail,
     resolve_asset_for_download,
-    touch_record_access_time,
     resolve_hash_to_path,
 )
 from app.assets.services.lookup import lookup_for_view
@@ -198,11 +197,9 @@ def test_resolve_hash_to_path_unknown_hash(mock_create_session):
     assert resolve_hash_to_path("blake3:" + "f" * 64) is None
 
 
-def test_touch_after_resolve_updates_last_access_time(
+def test_content_read_updates_last_access_time(
     mock_create_session, session, temp_dir
 ):
-    # The two calls the download route makes, called directly. The route's own coupling of
-    # them is covered by test_uncontended_download_records_the_access_time.
     f = temp_dir / "read.bin"
     f.write_bytes(b"data")
     content = create_content(session, path=str(f))
@@ -221,7 +218,6 @@ def test_touch_after_resolve_updates_last_access_time(
     assert before is None
 
     resolve_asset_for_download(record_id)
-    touch_record_access_time(record_id)
 
     session.expire_all()
     after_record = get_record_by_id(session, record_id)

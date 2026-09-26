@@ -57,12 +57,10 @@ from app.assets.services import (
     list_tags,
     remove_tags,
     resolve_asset_for_download,
-    touch_record_access_time,
     update_asset_metadata,
     upload_from_temp_path,
 )
 from app.assets.services.path_utils import compute_asset_response_paths
-from app.assets.services.schemas import DownloadResolutionResult
 from app.assets.services.cursor import (
     InvalidCursorError,
     decode_cursor,
@@ -578,13 +576,6 @@ async def get_asset_route(request: web.Request) -> web.Response:
     return web.json_response(payload.model_dump(mode="json", exclude_none=True), status=200)
 
 
-def _resolve_download(reference_id: str) -> DownloadResolutionResult:
-    result = resolve_asset_for_download(reference_id=reference_id)
-    # Best-effort and bounded: a busy database skips the access time instead of delaying the download.
-    touch_record_access_time(reference_id)
-    return result
-
-
 @ROUTES.get(f"/api/assets/{{id:{UUID_RE}}}/content")
 @_require_assets_feature_enabled
 async def download_asset_content(request: web.Request) -> web.Response:
@@ -595,7 +586,7 @@ async def download_asset_content(request: web.Request) -> web.Response:
     try:
         reference_id = str(uuid.UUID(request.match_info["id"]))
         # The lookup waits on the database, which a scan holds for a whole batch at a time.
-        result = await asyncio.to_thread(_resolve_download, reference_id)
+        result = await asyncio.to_thread(resolve_asset_for_download, reference_id)
         abs_path = result.abs_path
         content_type = result.content_type
         filename = result.download_name

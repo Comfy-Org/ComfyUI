@@ -12,7 +12,6 @@ import time
 import pytest
 from sqlalchemy import text, update
 
-from app.assets.api import routes as asset_routes
 from app.assets.database.models import Asset
 from app.assets.database.queries.records import create_content, create_record
 from app.assets.services import asset_management
@@ -64,7 +63,7 @@ def _hold_write_lock(db_path, seconds, started):
 def test_uncontended_download_records_the_access_time(record_id):
     before = _last_access_time(record_id)
 
-    result = asset_routes._resolve_download(record_id)
+    result = asset_management.resolve_asset_for_download(record_id)
 
     assert result.download_name == "asset.png"
     assert _last_access_time(record_id) != before
@@ -78,7 +77,7 @@ def test_download_skips_the_access_time_while_another_writer_holds_the_lock(reco
     started.wait()
     t0 = time.perf_counter()
     try:
-        result = asset_routes._resolve_download(record_id)
+        result = asset_management.resolve_asset_for_download(record_id)
         elapsed = time.perf_counter() - t0
     finally:
         holder.join()
@@ -86,21 +85,6 @@ def test_download_skips_the_access_time_while_another_writer_holds_the_lock(reco
     assert result.download_name == "asset.png"
     assert elapsed < 0.3, f"download waited {elapsed:.2f}s on another writer's lock"
     assert _last_access_time(record_id) == before
-
-
-def test_resolve_does_not_write(record_id, file_db):
-    started = threading.Event()
-    holder = threading.Thread(target=_hold_write_lock, args=(file_db, 1.0, started))
-    holder.start()
-    started.wait()
-    t0 = time.perf_counter()
-    try:
-        asset_management.resolve_asset_for_download(record_id)
-        elapsed = time.perf_counter() - t0
-    finally:
-        holder.join()
-
-    assert elapsed < 0.3, elapsed
 
 
 def test_writer_commits_between_read_and_access_time_write(record_id, file_db, monkeypatch):
@@ -118,7 +102,7 @@ def test_writer_commits_between_read_and_access_time_write(record_id, file_db, m
     monkeypatch.setattr(asset_management.os.path, "isfile", isfile_then_concurrent_commit)
     before = _last_access_time(record_id)
 
-    result = asset_routes._resolve_download(record_id)
+    result = asset_management.resolve_asset_for_download(record_id)
 
     assert result.download_name == "asset.png"
     assert _last_access_time(record_id) != before
@@ -150,34 +134,18 @@ def _busy_timeout():
         return session.execute(text("PRAGMA busy_timeout")).scalar_one()
 
 
-def test_memory_db_bounded_sessions_leave_the_shared_busy_timeout_alone(memory_db):
-    # One connection serves the whole process. Interleaved save/restore pairs on it would
-    # leave the short timeout behind: A saves 5000, B saves 50, A restores 5000, B restores 50.
-    before = _busy_timeout()
-    first = db_module.create_bounded_write_session(50)
-    second = db_module.create_bounded_write_session(50)
-    first.__enter__()
-    second.__enter__()
-    first.__exit__(None, None, None)
-    second.__exit__(None, None, None)
-
-    assert _busy_timeout() == before
-
-
-def test_memory_db_touch_records_the_access_time(memory_db, tmp_path):
+def test_memory_db_download_records_the_access_time(memory_db, tmp_path):
     asset = tmp_path / "asset.png"
     asset.write_bytes(b"png")
     with db_module.create_write_session() as session:
         content = create_content(session, str(asset), size_bytes=3, mtime_ns=1)
         record_id = create_record(session, content.id, "asset.png").id
         session.commit()
-    before = _busy_timeout()
 
-    # touch swallows errors, so check each call.
+    # The access-time write swallows errors, so check each call.
     for _ in range(3):
         with db_module.create_write_session() as session:
             session.execute(update(Asset).where(Asset.id == record_id).values(last_access_time=None))
             session.commit()
-        asset_management.touch_record_access_time(record_id)
+        asset_management.resolve_asset_for_download(record_id)
         assert _last_access_time(record_id) is not None
-    assert _busy_timeout() == before

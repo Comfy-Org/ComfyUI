@@ -262,18 +262,22 @@ def resolve_asset_for_download(
             or "application/octet-stream"
         )
         download_name = ref_name or os.path.basename(abs_path)
-        return DownloadResolutionResult(
-            abs_path=abs_path,
-            content_type=ctype,
-            download_name=download_name,
-        )
+
+    # After the read session closes, so the write is bounded on its own and never holds up
+    # the lookup. Best-effort: a busy database skips the access time rather than wait.
+    _touch_record_access_time(reference_id)
+    return DownloadResolutionResult(
+        abs_path=abs_path,
+        content_type=ctype,
+        download_name=download_name,
+    )
 
 
 # Long enough to ride out ordinary short writes; far below a scan batch's hold on the lock.
 ACCESS_TIME_BUSY_TIMEOUT_MS = 50
 
 
-def touch_record_access_time(reference_id: str) -> None:
+def _touch_record_access_time(reference_id: str) -> None:
     """Record a download's access time if the write lock is free within
     ACCESS_TIME_BUSY_TIMEOUT_MS; otherwise skip it. The access time is advisory, so a
     download never waits on another writer for it, and this never raises."""
