@@ -5,11 +5,10 @@ syscall, and a page load's requests queue behind the scan for seconds. time.slee
 is not enough: the scan thread usually retakes the GIL before the loop wakes.
 
 A thread sleeps _SLEEP after running _RUN, so it spends about one sixth of its time
-asleep. A coarse timer sleeps longer than asked (a ~15.6ms tick on Windows before
-Python 3.11), so each thread scales its next run by how long its last sleep really
-took, keeping the same share asleep. All state is per thread; nothing is shared.
+asleep. All state is per thread; nothing is shared.
 """
 
+import sys
 import threading
 import time
 
@@ -23,8 +22,22 @@ _sleep = time.sleep
 _state = threading.local()
 
 
-def yield_gil() -> None:
+def _yield_fixed() -> None:
     """Call once per item in a hot loop on a background thread; sleeps every run window."""
+    now = _clock()
+    next_at = getattr(_state, "next_at", None)
+    if next_at is None:
+        _state.next_at = now + _RUN
+        return
+    if now < next_at:
+        return
+    _sleep(_SLEEP)
+    _state.next_at = _clock() + _RUN
+
+
+def _yield_scaled() -> None:
+    """For a coarse sleep timer: time.sleep(_SLEEP) really takes a whole timer tick, so
+    scale the next run by how long the last sleep took, keeping the same share asleep."""
     now = _clock()
     next_at = getattr(_state, "next_at", None)
     if next_at is None:
@@ -35,3 +48,9 @@ def yield_gil() -> None:
     _sleep(_SLEEP)
     after = _clock()
     _state.next_at = after + _RUN * max(1.0, (after - now) / _SLEEP)
+
+
+# Before Python 3.11, time.sleep on Windows rounds up to the ~15.6ms system timer tick.
+_COARSE_SLEEP = sys.platform == "win32" and sys.version_info < (3, 11)
+
+yield_gil = _yield_scaled if _COARSE_SLEEP else _yield_fixed
