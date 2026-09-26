@@ -45,6 +45,7 @@ from comfyui_version import __version__
 from app.frontend_management import FrontendManager, parse_version
 from comfy_api.internal import _ComfyNodeInternal
 from app.assets.event_log import emit
+from app.database.db import dependencies_available
 
 from app.user_manager import UserManager
 from app.model_manager import ModelFileManager
@@ -526,6 +527,8 @@ class PromptServer():
                     # system user in multi-user mode, which is what gates hash resolution.
                     # The returned id is deliberately unused (resolution is not owner-scoped).
                     self.user_manager.get_request_user_id(request)
+                    if not dependencies_available():
+                        return web.Response(status=404)
                     from app.assets.services.asset_management import resolve_hash_to_path
 
                     result = resolve_hash_to_path(filename)
