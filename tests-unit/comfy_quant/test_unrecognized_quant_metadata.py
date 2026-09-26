@@ -11,6 +11,7 @@ if not torch.cuda.is_available():
 
 from comfy import ops
 import comfy.memory_management
+import comfy.utils
 from comfy.model_base import BaseModel
 
 
@@ -59,6 +60,22 @@ class TestUnrecognizedQuantMetadata(unittest.TestCase):
                 model.load_model_weights(state_dict, assign=True)
         finally:
             comfy.memory_management.aimdo_enabled = old_aimdo_enabled
+
+    def test_stray_quant_scale_tensors_raise_in_convert_old_quants(self):
+        """Text encoders load through CLIP.load_sd(), which never reaches
+        BaseModel.load_model_weights, but does go through convert_old_quants()
+        (comfy/sd.py load_clip). A checkpoint with per-layer scales but no
+        scaled_fp8/comfy_quant/_quantization_metadata marker must fail there too."""
+        state_dict = {
+            "encoder.block.0.weight": torch.zeros(20, 20, dtype=torch.float8_e4m3fn),
+            "encoder.block.0.weight_scale": torch.tensor(700.0),
+        }
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"unrecognized quantization scale tensors.*encoder\.block\.0\.weight_scale",
+        ):
+            comfy.utils.convert_old_quants(state_dict, model_prefix="")
 
 
 if __name__ == "__main__":

@@ -1457,6 +1457,14 @@ def convert_old_quants(state_dict, model_prefix="", metadata={}):
         layers = quant_metadata["layers"]
         for k, v in layers.items():
             state_dict["{}.comfy_quant".format(k)] = torch.tensor(list(json.dumps(v).encode('utf-8')), dtype=torch.uint8)
+    else:
+        quant_scale_keys = [k for k in state_dict if k.startswith(model_prefix) and k.endswith((".weight_scale", ".weight_scale_2", ".input_scale"))]
+        if len(quant_scale_keys) > 0:
+            raise RuntimeError(
+                "This checkpoint contains {} unrecognized quantization scale tensors (e.g. {}) "
+                "but no usable quantization metadata, so it can't be loaded as a quantized model. "
+                "Loading it as unquantized would silently produce garbage output.".format(
+                    len(quant_scale_keys), quant_scale_keys[0]))
 
     return state_dict, metadata
 
