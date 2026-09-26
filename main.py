@@ -22,11 +22,12 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, init_db
+from app.database.db import dependencies_available, init_db, missing_dependencies
 from app.assets.lifecycle import cleanup_temp_filesystem
 from app.assets.manager import AssetManager, default_asset_manager
 import itertools
 import utils.extra_config
+from utils.install_util import get_missing_requirements_message
 from utils.mime_types import init_mime_types
 import faulthandler
 import logging
@@ -508,6 +509,14 @@ def start_comfyui(asyncio_loop=None):
         temp_dir = os.path.join(os.path.abspath(args.temp_directory), "temp")
         logging.info(f"Setting temp directory to: {temp_dir}")
         folder_paths.set_temp_directory(temp_dir)
+
+    if args.enable_assets and not dependencies_available():
+        missing = ", ".join(missing_dependencies()) or "see the import error above"
+        logging.error(
+            f"--enable-assets requires packages that could not be imported: {missing}\n"
+            f"{get_missing_requirements_message()}"
+        )
+        sys.exit(1)
 
     asset_manager: AssetManager = default_asset_manager()
     feature_flags.SERVER_FEATURE_FLAGS["assets"] = asset_manager.enabled

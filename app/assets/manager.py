@@ -4,25 +4,23 @@
 and chooses ``NoAssets`` when the requested mode cannot run.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from aiohttp import web
 
 from app.assets import mode
-from app.assets.api.routes import register_assets_routes
 from app.assets.lifecycle import record_hash_mode_transition_intent, run_shutdown, run_startup
-from app.assets.seeder import ScanPhase, asset_seeder
-from app.assets.services.ingest import (
-    register_cached_output as ingest_register_cached_output,
-    register_executed_output as ingest_register_executed_output,
-    register_file_in_place,
-)
-from app.assets.services.path_utils import get_known_subfolder_tags
-from app.assets.services.schemas import RegisteredAsset, UploadAssetView
 from app.database.db import dependencies_available
 from app.user_manager import UserManager
 from comfy.cli_args import args
+
+# Modules that need the database dependencies are imported where they are used:
+# NoAssets must work in environments where those packages are not installed.
+if TYPE_CHECKING:
+    from app.assets.services.schemas import RegisteredAsset, UploadAssetView
 
 
 class AssetManager(Protocol):
@@ -72,7 +70,10 @@ class _ArgsLike(Protocol):
 
 
 def _shutdown_assets() -> None:
-    asset_seeder.shutdown()
+    if dependencies_available():
+        from app.assets.seeder import asset_seeder
+
+        asset_seeder.shutdown()
     run_shutdown()
 
 
@@ -95,6 +96,11 @@ class NoAssets:
     def register_routes(
         self, app: web.Application, user_manager: UserManager | None
     ) -> None:
+        if not dependencies_available():
+            return
+        from app.assets.api.routes import register_assets_routes
+        from app.assets.seeder import asset_seeder
+
         register_assets_routes(app)
         asset_seeder.disable()
 
@@ -154,15 +160,23 @@ class AssetsEnabled:
     def register_routes(
         self, app: web.Application, user_manager: UserManager | None
     ) -> None:
+        from app.assets.api.routes import register_assets_routes
+
         register_assets_routes(app, user_manager)
 
     def ensure_scan_started(self) -> None:
+        from app.assets.seeder import asset_seeder
+
         asset_seeder.start(roots=("models", "input", "output"))
 
     def pause_background_scan(self) -> None:
+        from app.assets.seeder import asset_seeder
+
         asset_seeder.pause()
 
     def queue_output_scan(self) -> None:
+        from app.assets.seeder import ScanPhase, asset_seeder
+
         if not asset_seeder.is_disabled():
             # FULL, not ENRICH: only a walk finds outputs a node never declared. Do not downgrade without re-weighing the cost.
             asset_seeder.enqueue_scan(
@@ -172,6 +186,8 @@ class AssetsEnabled:
             )
 
     def resume_background_scan(self) -> None:
+        from app.assets.seeder import asset_seeder
+
         asset_seeder.resume()
 
     def register_upload(
@@ -183,6 +199,10 @@ class AssetsEnabled:
         *,
         content_written: bool,
     ) -> UploadAssetView | None:
+        from app.assets.services.ingest import register_file_in_place
+        from app.assets.services.path_utils import get_known_subfolder_tags
+        from app.assets.services.schemas import RegisteredAsset, UploadAssetView
+
         try:
             tag = upload_type if upload_type in ("input", "output") else "input"
             tags = [tag] + get_known_subfolder_tags(subfolder)
@@ -212,14 +232,20 @@ class AssetsEnabled:
     def register_executed_output(
         self, abs_path: str, job_id: str | None
     ) -> RegisteredAsset | None:
-        return ingest_register_executed_output(abs_path, job_id)
+        from app.assets.services.ingest import register_executed_output
+
+        return register_executed_output(abs_path, job_id)
 
     def register_cached_output(
         self, abs_path: str, job_id: str | None
     ) -> RegisteredAsset | None:
-        return ingest_register_cached_output(abs_path, job_id)
+        from app.assets.services.ingest import register_cached_output
+
+        return register_cached_output(abs_path, job_id)
 
     def set_event_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
+        from app.assets.seeder import asset_seeder
+
         asset_seeder.set_event_sink(sink)
 
 
