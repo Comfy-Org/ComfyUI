@@ -250,7 +250,7 @@ class AssetsEnabled:
         asset_seeder.set_event_sink(sink)
 
 
-def default_asset_manager() -> AssetManager:
+def default_asset_manager(database_ready: bool = True) -> AssetManager:
     if args.enable_assets and not dependencies_available():
         missing = ", ".join(missing_dependencies()) or "see the import error above"
         logging.error(
@@ -258,4 +258,4 @@ def default_asset_manager() -> AssetManager:
             f"Assets are disabled.\n{get_missing_requirements_message()}"
         )
         return NoAssets(args)
-    return AssetsEnabled(args) if args.enable_assets else NoAssets(args)
+    return AssetsEnabled(args) if args.enable_assets and database_ready else NoAssets(args)

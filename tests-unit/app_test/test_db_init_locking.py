@@ -76,7 +76,7 @@ def test_failed_init_releases_the_lock(stale_db, monkeypatch):
         contender.acquire(timeout=0)
     except Timeout:
         pytest.fail(
-            "a failed init stranded the lock; setup_database logs and CONTINUES when assets are "
+            "a failed init stranded the lock; init_database logs and CONTINUES when assets are "
             "disabled, so this process would block every other instance for its whole lifetime "
             "over a database it never opened"
         )
@@ -134,7 +134,7 @@ def test_legacy_database_copy_runs_under_file_lock(tmp_path, monkeypatch):
     assert copied == [(str(legacy_db) + ".bak", str(target_db))]
 
 
-def test_setup_database_routes_file_lock_to_lock_guidance(monkeypatch, caplog):
+def test_init_database_routes_file_lock_to_lock_guidance(monkeypatch, caplog):
     monkeypatch.setattr(main, "dependencies_available", lambda: True)
 
     def _raise_file_lock():
@@ -148,14 +148,15 @@ def test_setup_database_routes_file_lock_to_lock_guidance(monkeypatch, caplog):
     monkeypatch.setattr(main.args, "enable_assets", False)
 
     with caplog.at_level(logging.ERROR):
-        result = main.setup_database(None)
+        result = main.init_database()
 
-    assert result is None
+    assert result is False
     assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
     assert "Failed to initialize database." not in caplog.text
+    assert "Assets are disabled" not in caplog.text
 
 
-def test_setup_database_exits_for_file_lock_when_assets_are_enabled(monkeypatch, caplog):
+def test_init_database_disables_assets_for_file_lock_when_assets_are_enabled(monkeypatch, caplog):
     monkeypatch.setattr(main, "dependencies_available", lambda: True)
 
     def _raise_file_lock():
@@ -166,17 +167,23 @@ def test_setup_database_exits_for_file_lock_when_assets_are_enabled(monkeypatch,
         )
 
     monkeypatch.setattr(main, "init_db", _raise_file_lock)
+    monkeypatch.setattr(main, "get_db_path", lambda: "/data/comfyui.db")
     monkeypatch.setattr(main.args, "enable_assets", True)
 
-    with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as error:
-        main.setup_database(None)
+    with caplog.at_level(logging.ERROR):
+        result = main.init_database()
 
-    assert error.value.code == 1
+    assert result is False
+    assert not main.default_asset_manager(result).enabled
     assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text
+    assert (
+        "Assets are disabled for this session: another ComfyUI process is using "
+        "the database at /data/comfyui.db." in caplog.text
+    )
     assert "The --enable-assets flag requires a working database connection." not in caplog.text
 
 
-def test_setup_database_exits_for_driver_lock_when_assets_are_disabled(monkeypatch, caplog):
+def test_init_database_exits_for_driver_lock_when_assets_are_disabled(monkeypatch, caplog):
     monkeypatch.setattr(main, "dependencies_available", lambda: True)
 
     def _raise_driver_lock():
@@ -186,7 +193,7 @@ def test_setup_database_exits_for_driver_lock_when_assets_are_disabled(monkeypat
     monkeypatch.setattr(main.args, "enable_assets", False)
 
     with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as error:
-        main.setup_database(None)
+        main.init_database()
 
     assert error.value.code == 1
     assert "Database is locked. Another ComfyUI process is already using this database." in caplog.text

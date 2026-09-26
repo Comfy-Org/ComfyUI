@@ -22,7 +22,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, init_db
+from app.database.db import dependencies_available, get_db_path, init_db
 from app.assets.lifecycle import cleanup_temp_filesystem
 from app.assets.manager import AssetManager, default_asset_manager
 import itertools
@@ -462,41 +462,61 @@ def hijack_progress(server_instance):
     comfy.utils.set_progress_bar_global_hook(hook)
 
 
-def setup_database(asset_manager):
-    if not dependencies_available():
+def _handle_database_error(e):
+    if "database is locked" in str(e):
+        logging.error(
+            "Database is locked. Another ComfyUI process is already using this database.\n"
+            "To resolve this, specify a separate database file for this instance:\n"
+            "  --database-url sqlite:///path/to/another.db"
+        )
+        sys.exit(1)
+    if "Could not acquire lock on database" in str(e):
+        logging.error(
+            "Database is locked. Another ComfyUI process is already using this database.\n"
+            "To resolve this, specify a separate database file for this instance:\n"
+            "  --database-url sqlite:///path/to/another.db"
+        )
+        if args.enable_assets:
+            logging.error(
+                f"Assets are disabled for this session: another ComfyUI process is using "
+                f"the database at {get_db_path()}."
+            )
         return
+    if args.enable_assets:
+        logging.error(
+            f"Failed to initialize database: {e}\n"
+            "The --enable-assets flag requires a working database connection.\n"
+            "To resolve this, try one of the following:\n"
+            "  1. Install the latest requirements: pip install -r requirements.txt\n"
+            "  2. Specify an alternative database URL: --database-url sqlite:///path/to/your.db\n"
+            "  3. Use an in-memory database: --database-url sqlite:///:memory:"
+        )
+        sys.exit(1)
+    logging.error(f"Failed to initialize database. Please ensure you have installed the latest requirements. If the error persists, please report this as in future the database will be required: {e}")
+
+
+def init_database():
+    """Returns whether the database is ready. Runs before the asset mode is chosen, so a
+    database held by another process disables assets instead of failing startup."""
+    if not dependencies_available():
+        return False
 
     try:
         init_db()
+    except Exception as e:
+        _handle_database_error(e)
+        return False
+    return True
+
+
+def setup_database(asset_manager, database_ready):
+    if not database_ready:
+        return
+
+    try:
         asset_manager.startup()
     except Exception as e:
-        if "database is locked" in str(e):
-            logging.error(
-                "Database is locked. Another ComfyUI process is already using this database.\n"
-                "To resolve this, specify a separate database file for this instance:\n"
-                "  --database-url sqlite:///path/to/another.db"
-            )
-            sys.exit(1)
-        if "Could not acquire lock on database" in str(e):
-            logging.error(
-                "Database is locked. Another ComfyUI process is already using this database.\n"
-                "To resolve this, specify a separate database file for this instance:\n"
-                "  --database-url sqlite:///path/to/another.db"
-            )
-            if args.enable_assets:
-                sys.exit(1)
-            return
-        if args.enable_assets:
-            logging.error(
-                f"Failed to initialize database: {e}\n"
-                "The --enable-assets flag requires a working database connection.\n"
-                "To resolve this, try one of the following:\n"
-                "  1. Install the latest requirements: pip install -r requirements.txt\n"
-                "  2. Specify an alternative database URL: --database-url sqlite:///path/to/your.db\n"
-                "  3. Use an in-memory database: --database-url sqlite:///:memory:"
-            )
-            sys.exit(1)
-        logging.error(f"Failed to initialize database. Please ensure you have installed the latest requirements. If the error persists, please report this as in future the database will be required: {e}")
+        _handle_database_error(e)
 
 
 def start_comfyui(asyncio_loop=None):
@@ -509,7 +529,8 @@ def start_comfyui(asyncio_loop=None):
         logging.info(f"Setting temp directory to: {temp_dir}")
         folder_paths.set_temp_directory(temp_dir)
 
-    asset_manager: AssetManager = default_asset_manager()
+    database_ready = init_database()
+    asset_manager: AssetManager = default_asset_manager(database_ready)
     feature_flags.SERVER_FEATURE_FLAGS["assets"] = asset_manager.enabled
     if not asset_manager.enabled:
         cleanup_temp_filesystem()
@@ -535,7 +556,7 @@ def start_comfyui(asyncio_loop=None):
     hook_breaker_ac10a0.restore_functions()
 
     cuda_malloc_warning()
-    setup_database(asset_manager)
+    setup_database(asset_manager, database_ready)
 
     prompt_server.add_routes()
     hijack_progress(prompt_server)
