@@ -122,10 +122,20 @@ class TopologicalSort:
         self.externalBlockResults = {}
         self.unblockedEvent = asyncio.Event()
 
-    def get_input_info(self, unique_id, input_name):
+    def get_input_info(self, unique_id, input_name, valid_inputs=None):
         class_type = self.dynprompt.get_node(unique_id)["class_type"]
         class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-        return get_input_info(class_def, input_name)
+        return get_input_info(class_def, input_name, valid_inputs)
+
+    def get_finalized_inputs(self, unique_id, inputs):
+        class_type = self.dynprompt.get_node(unique_id)["class_type"]
+        class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
+        from comfy_api.internal import _ComfyNodeInternal
+        if not issubclass(class_def, _ComfyNodeInternal):
+            return None
+        from comfy_api.latest import _io
+        valid_inputs, _, _ = _io.get_finalized_class_inputs(class_def.INPUT_TYPES(), inputs)
+        return valid_inputs
 
     def make_input_strong_link(self, to_node_id, to_input):
         inputs = self.dynprompt.get_node(to_node_id)["inputs"]
@@ -159,13 +169,14 @@ class TopologicalSort:
             self.blocking[unique_id] = {}
 
             inputs = self.dynprompt.get_node(unique_id)["inputs"]
+            valid_inputs = self.get_finalized_inputs(unique_id, inputs)
             for input_name in inputs:
                 value = inputs[input_name]
                 if is_link(value):
                     from_node_id, from_socket = value
                     if subgraph_nodes is not None and from_node_id not in subgraph_nodes:
                         continue
-                    _, _, input_info = self.get_input_info(unique_id, input_name)
+                    _, _, input_info = self.get_input_info(unique_id, input_name, valid_inputs)
                     is_lazy = input_info is not None and "lazy" in input_info and input_info["lazy"]
                     if (include_lazy or not is_lazy):
                         if not self.is_cached(from_node_id):
