@@ -1261,7 +1261,11 @@ async def validate_prompt(prompt_id, prompt, partial_execution_list: Union[list[
                 )
             for output_id in dependent_outputs:
                 good_outputs.discard(output_id)
-            errors.append((dependent_outputs[0], [ex.error]))
+            # A loop error need not reach any output: an unpaired Start Loop
+            # whose subgraph terminates before one still has to be reported.
+            # The id is only carried so this reads like the per-output entries
+            # above; the summary below never looks at it.
+            errors.append((next(iter(dependent_outputs), None), [ex.error]))
 
     if len(good_outputs) == 0:
         errors_list = []
