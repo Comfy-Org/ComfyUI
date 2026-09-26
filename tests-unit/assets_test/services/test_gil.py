@@ -30,35 +30,32 @@ def fake(monkeypatch):
         clock = FakeClock(sleep_cost)
         monkeypatch.setattr(gil, "_clock", clock.clock)
         monkeypatch.setattr(gil, "_sleep", clock.sleep)
-        monkeypatch.setattr(gil, "_interval", gil._UNCALIBRATED)
-        monkeypatch.setattr(gil, "_last", threading.local())
+        monkeypatch.setattr(gil, "_state", threading.local())
         return clock
 
     return install
 
 
-def calibrated(fake, sleep_cost: float) -> FakeClock:
+def started(fake, sleep_cost: float) -> FakeClock:
     clock = fake(sleep_cost)
-    gil.yield_gil()  # calibrates, then starts this thread's interval
-    clock.sleeps = 0
-    clock.slept = 0.0
+    gil.yield_gil()  # starts this thread's first run window
     return clock
 
 
-def test_sleeps_only_once_the_interval_has_passed(fake):
-    clock = calibrated(fake, gil._SLEEP)
-    clock.now += gil._INTERVAL / 2
+def test_sleeps_only_once_the_run_window_has_passed(fake):
+    clock = started(fake, gil._SLEEP)
+    clock.now += gil._RUN / 2
     gil.yield_gil()
     assert clock.sleeps == 0
 
-    clock.now += gil._INTERVAL
+    clock.now += gil._RUN
     gil.yield_gil()
     assert clock.sleeps == 1
 
 
-def test_interval_restarts_after_each_sleep(fake):
-    clock = calibrated(fake, gil._SLEEP)
-    clock.now += gil._INTERVAL * 1.5
+def test_run_window_restarts_after_each_sleep(fake):
+    clock = started(fake, gil._SLEEP)
+    clock.now += gil._RUN * 1.5
     gil.yield_gil()
     gil.yield_gil()
     assert clock.sleeps == 1
@@ -74,32 +71,28 @@ def run_hot_loop(clock: FakeClock, seconds: float, work_per_item: float = 0.0001
 
 
 def test_accurate_sleep_keeps_the_measured_duty_cycle(fake):
-    clock = calibrated(fake, gil._SLEEP)
-    assert gil._interval == pytest.approx(gil._INTERVAL)
+    clock = started(fake, gil._SLEEP)
     assert run_hot_loop(clock, 10.0) == pytest.approx(1 / 6, abs=0.02)
 
 
-def test_coarse_sleep_widens_the_interval_to_bound_the_duty_cycle(fake):
+def test_coarse_sleep_widens_the_run_window_to_keep_the_duty_cycle(fake):
     # A 1ms sleep that really takes a 15ms timer tick, as on Windows before Python 3.11.
-    clock = calibrated(fake, 0.015)
-    assert gil._interval == pytest.approx(gil._INTERVAL * 15)
+    clock = started(fake, 0.015)
     assert run_hot_loop(clock, 30.0) == pytest.approx(1 / 6, abs=0.02)
 
 
-def test_slightly_slow_sleep_scales_the_interval_continuously(fake):
-    clock = calibrated(fake, 0.0015)
-    assert gil._interval == pytest.approx(0.0075)
+def test_slightly_slow_sleep_scales_the_run_window_continuously(fake):
+    clock = started(fake, 0.0015)
     assert run_hot_loop(clock, 10.0) == pytest.approx(1 / 6, abs=0.02)
 
 
 def test_very_coarse_sleep_still_yields_at_the_same_duty_cycle(fake):
-    clock = calibrated(fake, 0.040)
-    assert gil._interval == pytest.approx(0.200)
+    clock = started(fake, 0.040)
     assert run_hot_loop(clock, 60.0) == pytest.approx(1 / 6, abs=0.02)
 
 
-def test_threads_do_not_consume_each_others_interval(fake):
-    clock = calibrated(fake, gil._SLEEP)
+def test_threads_do_not_consume_each_others_run_window(fake):
+    clock = started(fake, gil._SLEEP)
     sleeps_seen: list[int] = []
 
     def worker(inbox: queue.Queue, done: queue.Queue) -> None:
@@ -123,10 +116,10 @@ def test_threads_do_not_consume_each_others_interval(fake):
         return sleeps_seen[-1]
 
     try:
-        assert call(0) == 0 and call(1) == 0  # each thread starts its own interval
-        clock.now += gil._INTERVAL * 1.5
-        assert call(0) == 1  # thread 0 yields and restarts only its own interval
-        assert call(1) == 1  # thread 1's interval is untouched, so it yields too
+        assert call(0) == 0 and call(1) == 0  # each thread starts its own run window
+        clock.now += gil._RUN * 1.5
+        assert call(0) == 1  # thread 0 yields and restarts only its own run window
+        assert call(1) == 1  # thread 1's run window is untouched, so it yields too
     finally:
         for t, inbox, _ in threads:
             inbox.put(False)

@@ -4,55 +4,34 @@ Without this, the event loop must win the GIL back from the scan after every soc
 syscall, and a page load's requests queue behind the scan for seconds. time.sleep(0)
 is not enough: the scan thread usually retakes the GIL before the loop wakes.
 
-The interval scales with what one _SLEEP really costs, measured once on first use, so
-a thread sleeps one sixth of the time whatever the platform's sleep resolution. Only
-the window size changes: 1ms every 6ms here, but a ~15.8ms timer tick every ~95ms on
-Windows before Python 3.11. No platform check is needed.
+A thread sleeps _SLEEP after running _RUN, so it spends about one sixth of its time
+asleep. A coarse timer sleeps longer than asked (a ~15.6ms tick on Windows before
+Python 3.11), so each thread scales its next run by how long its last sleep really
+took, keeping the same share asleep. All state is per thread; nothing is shared.
 """
 
-import statistics
 import threading
 import time
 
-_INTERVAL = 0.005
+_RUN = 0.005
 _SLEEP = 0.001
-_CALIBRATION_SAMPLES = 5
 
 # Indirection so tests can drive the clock without patching the time module.
 _clock = time.perf_counter
 _sleep = time.sleep
 
-_UNCALIBRATED = -1.0
-_interval = _UNCALIBRATED
-_calibration_lock = threading.Lock()
-_last = threading.local()
-
-
-def _calibrate() -> float:
-    samples = []
-    for _ in range(_CALIBRATION_SAMPLES):
-        start = _clock()
-        _sleep(_SLEEP)
-        samples.append(_clock() - start)
-    return _INTERVAL * max(1.0, statistics.median(samples) / _SLEEP)
-
-
-def _yield_interval() -> float:
-    global _interval
-    if _interval == _UNCALIBRATED:
-        with _calibration_lock:
-            if _interval == _UNCALIBRATED:
-                _interval = _calibrate()
-    return _interval
+_state = threading.local()
 
 
 def yield_gil() -> None:
-    """Call once per item in a hot loop on a background thread; sleeps every interval."""
-    interval = _yield_interval()
+    """Call once per item in a hot loop on a background thread; sleeps every run window."""
     now = _clock()
-    last = getattr(_last, "t", None)
-    if last is None:
-        _last.t = now
-    elif now - last >= interval:
-        _sleep(_SLEEP)
-        _last.t = _clock()
+    next_at = getattr(_state, "next_at", None)
+    if next_at is None:
+        _state.next_at = now + _RUN
+        return
+    if now < next_at:
+        return
+    _sleep(_SLEEP)
+    after = _clock()
+    _state.next_at = after + _RUN * max(1.0, (after - now) / _SLEEP)
