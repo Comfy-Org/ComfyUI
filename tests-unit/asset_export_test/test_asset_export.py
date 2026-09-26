@@ -703,4 +703,5 @@ async def test_the_oldest_finished_export_is_forgotten_past_the_cap(aiohttp_clie
 
     assert harness.manager.get_task(first.id) is None
     assert harness.manager.get_task(second.id) is second
-    assert os.path.isfile(harness.manager.export_path(first.export_name))
+    assert not os.path.exists(harness.manager.export_path(first.export_name))
+    assert os.path.isfile(harness.manager.export_path(second.export_name))

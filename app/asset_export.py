@@ -521,19 +521,28 @@ class AssetExportManager:
                 id=str(uuid.uuid4()), owner_id=owner_id, request=request, idempotency_key=key
             )
             self._tasks[task.id] = task
-            self._forget_oldest_finished()
+            forgotten = self._forget_oldest_finished()
+        if forgotten is not None and forgotten.export_name:
+            try:
+                os.remove(self.export_path(forgotten.export_name))
+            except OSError:
+                pass
         threading.Thread(
             target=self._run, args=(task,), name=f"asset-export-{task.id[:8]}", daemon=True
         ).start()
         return task
 
-    def _forget_oldest_finished(self) -> None:
-        """Cap the registry the way the prompt history is capped; the zip stays until restart."""
+    def _forget_oldest_finished(self) -> ExportTask | None:
+        """Cap the registry the way the prompt history is capped.
+
+        The forgotten export can no longer be fetched, so its zip is removed too.
+        """
         if len(self._tasks) <= MAX_TRACKED_EXPORTS:
-            return
+            return None
         oldest = next((t for t in self._tasks.values() if t.finished), None)
         if oldest is not None:
             del self._tasks[oldest.id]
+        return oldest
 
     def get_task(self, task_id: str) -> ExportTask | None:
         with self._lock:
