@@ -8,7 +8,6 @@ so a restored file can never leave two live rows describing one location.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Literal
 
 import sqlalchemy as sa
@@ -21,7 +20,7 @@ from app.assets.database.queries.records import (
     mark_content_missing,
     unset_content_missing,
 )
-from app.assets.helpers import sql_path_under_prefix, to_stored_hash
+from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix, to_stored_hash
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 from app.assets.services.snapshot_hash import snapshot_hash
 
@@ -108,8 +107,7 @@ def recover_missing_content(
 
 
 def is_path_under_prefixes(path: str, prefixes: list[str]) -> bool:
-    candidate = Path(os.path.abspath(path))
-    return any(candidate.is_relative_to(os.path.abspath(prefix)) for prefix in prefixes)
+    return path_prefix_matcher(prefixes)(path)
 
 
 def split_content(session: Session, content: AssetContent, stat_result: os.stat_result, hash_value: str | None) -> AssetContent:
