@@ -89,9 +89,10 @@ def test_slightly_slow_sleep_scales_the_run_window_continuously(fake):
     assert run_hot_loop(clock, gil._yield_scaled, 10.0) == pytest.approx(SHARE, abs=0.02)
 
 
-def test_very_coarse_sleep_still_yields_at_the_same_duty_cycle(fake):
+def test_sleep_longer_than_the_timer_tick_sleeps_more_rather_than_running_longer(fake):
+    # Past the tick the window stops growing, so the scan's share asleep rises instead.
     clock = started(fake, 0.040, gil._yield_scaled)
-    assert run_hot_loop(clock, gil._yield_scaled, 60.0) == pytest.approx(SHARE, abs=0.02)
+    assert run_hot_loop(clock, gil._yield_scaled, 60.0) > SHARE + 0.1
 
 
 def test_threads_do_not_consume_each_others_run_window(fake):
@@ -139,3 +140,12 @@ def test_scaled_version_is_used_only_for_the_coarse_windows_timer():
     coarse = gil.sys.platform == "win32" and gil.sys.version_info < (3, 11)
     assert gil._COARSE_SLEEP is coarse
     assert gil.yield_gil is (gil._yield_scaled if coarse else gil._yield_fixed)
+
+
+def test_contended_sleep_does_not_stretch_the_run_window_past_the_timer_tick(fake):
+    # A 1ms sleep that overshoots to 400ms under load must not buy an 800ms run window.
+    clock = started(fake, 0.400, gil._yield_scaled)
+    clock.now += gil._RUN
+    gil._yield_scaled()  # sleeps, taking 400ms
+    assert gil._state.next_at - clock.now <= gil._RUN * gil._MAX_SCALE + 1e-9
+

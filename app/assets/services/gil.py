@@ -16,6 +16,8 @@ import time
 
 _RUN = 0.002
 _SLEEP = 0.001
+# The coarse timer tick is ~15.6ms, so a 1ms sleep takes at most ~16x as long there.
+_MAX_SCALE = 16.0
 
 # Indirection so tests can drive the clock without patching the time module.
 _clock = time.perf_counter
@@ -49,7 +51,10 @@ def _yield_scaled() -> None:
         return
     _sleep(_SLEEP)
     after = _clock()
-    _state.next_at = after + _RUN * max(1.0, (after - now) / _SLEEP)
+    # Scale up to the timer tick this exists for, but no further: a sleep that overshoots
+    # because the machine is busy must not buy the scan a longer run.
+    scale = min(max(1.0, (after - now) / _SLEEP), _MAX_SCALE)
+    _state.next_at = after + _RUN * scale
 
 
 # Before Python 3.11, time.sleep on Windows rounds up to the ~15.6ms system timer tick.
