@@ -556,6 +556,11 @@ class VAE:
                 else:
                     self.latent_channels = sd["taesd_decoder.1.weight"].shape[1]
                 self.first_stage_model = comfy.taesd.taesd.TAESD(latent_channels=self.latent_channels)
+                if self.latent_channels == 64:  # Qwen Image 2.1 TAESD: 16x, RGBA
+                    self.downscale_ratio = 16
+                    self.upscale_ratio = 16
+                    self.output_channels = 4
+                    self.pad_channel_value = 1.0
             elif "vquantizer.codebook.weight" in sd: #VQGan: stage a of stable cascade
                 self.first_stage_model = StageA()
                 self.downscale_ratio = 4
