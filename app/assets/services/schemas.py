@@ -87,6 +87,16 @@ class DownloadResolutionResult:
 
 
 @dataclass(frozen=True)
+class ExportableAssetFile:
+    id: str
+    name: str
+    path: str
+    hash: str | None
+    job_id: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True)
 class RegisteredAsset:
     id: str
     content_id: str
