@@ -1,7 +1,6 @@
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 import torch.nn as nn
 
@@ -10,83 +9,12 @@ from comfy.cli_args import args as cli_args
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
-import comfy.ldm.seedvr.vae as vae_mod  # noqa: E402
 import comfy.ldm.seedvr.vae as seedvr_vae_mod  # noqa: E402
 import comfy.sd as sd_mod  # noqa: E402
-from comfy.ldm.seedvr.vae import MemoryState, tiled_vae  # noqa: E402
+from comfy.ldm.seedvr.vae import tiled_vae  # noqa: E402
 
 
 _LATENT_CHANNELS = seedvr_vae_mod.SEEDVR2_LATENT_CHANNELS
-
-
-def test_runtime_decode_zero_temporal_size_preserves_model_slicing():
-    class StubVAEModel(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.slicing_latent_min_size = 2
-            self.spatial_downsample_factor = 8
-            self.temporal_downsample_factor = 4
-            self.device = torch.device("cpu")
-            self.use_slicing = True
-            self._dummy = torch.nn.Parameter(torch.zeros(1, dtype=torch.float32))
-            self.decode_min_sizes = []
-            self.memory_states = []
-
-        def decode_(self, t_chunk):
-            self.decode_min_sizes.append(self.slicing_latent_min_size)
-            return vae_mod.VideoAutoencoderKL.slicing_decode(self, t_chunk)
-
-        def _decode(self, z, memory_state=MemoryState.DISABLED, memory_cache=None):
-            self.memory_states.append(memory_state)
-            b, c, d, h, w = z.shape
-            return torch.zeros((b, 3, d, h * 8, w * 8), dtype=z.dtype)
-
-    vae = StubVAEModel()
-    z = torch.zeros((1, _LATENT_CHANNELS, 5, 8, 8), dtype=torch.float32)
-
-    tiled_vae(
-        z,
-        vae,
-        tile_size=(64, 64),
-        tile_overlap=(0, 0),
-        temporal_size=0,
-        temporal_overlap=0,
-        encode=False,
-    )
-
-    assert vae.decode_min_sizes == [2]
-    assert vae.memory_states == [MemoryState.INITIALIZING, MemoryState.ACTIVE]
-    assert vae.slicing_latent_min_size == 2
-
-
-def test_zero_temporal_size_preserves_min_size_when_encode_raises():
-    class RaisingVAEModel(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.slicing_sample_min_size = 4
-            self.spatial_downsample_factor = 8
-            self.temporal_downsample_factor = 4
-            self.device = torch.device("cpu")
-            self._dummy = torch.nn.Parameter(torch.zeros(1, dtype=torch.float32))
-
-        def encode(self, t_chunk):
-            raise RuntimeError("simulated encode failure")
-
-    vae = RaisingVAEModel()
-    x = torch.zeros((1, 3, 12, 64, 64), dtype=torch.float32)
-
-    with pytest.raises(RuntimeError, match="simulated encode failure"):
-        tiled_vae(
-            x,
-            vae,
-            tile_size=(64, 64),
-            tile_overlap=(0, 0),
-            temporal_size=0,
-            temporal_overlap=0,
-            encode=True,
-        )
-
-    assert vae.slicing_sample_min_size == 4
 
 
 def test_tiled_vae_encode_uses_tensor_return_without_indexing():
@@ -113,8 +41,6 @@ def test_tiled_vae_encode_uses_tensor_return_without_indexing():
         vae,
         tile_size=(64, 64),
         tile_overlap=(0, 0),
-        temporal_size=0,
-        temporal_overlap=0,
         encode=True,
     )
 
@@ -166,85 +92,10 @@ def test_tiled_vae_preserves_input_dtype_on_single_tile():
         FloatOutputVAEModel(),
         tile_size=(64, 64),
         tile_overlap=(0, 0),
-        temporal_size=0,
-        temporal_overlap=0,
         encode=True,
     )
 
     assert out.dtype == torch.float16
-
-
-class _SlicingDecodeVAE(nn.Module):
-    def __init__(self, slicing_latent_min_size):
-        super().__init__()
-        self.slicing_latent_min_size = slicing_latent_min_size
-        self.spatial_downsample_factor = 8
-        self.temporal_downsample_factor = 4
-        self.device = torch.device("cpu")
-        self.use_slicing = True
-        self._dummy = nn.Parameter(torch.zeros(1, dtype=torch.float32))
-        self.decode_min_sizes = []
-        self.memory_states = []
-
-    def decode_(self, z):
-        self.decode_min_sizes.append(self.slicing_latent_min_size)
-        return vae_mod.VideoAutoencoderKL.slicing_decode(self, z)
-
-    def _decode(self, z, memory_state=MemoryState.DISABLED, memory_cache=None):
-        self.memory_states.append(memory_state)
-        x = z[:, :1].repeat(
-            1,
-            3,
-            1,
-            self.spatial_downsample_factor,
-            self.spatial_downsample_factor,
-        )
-        return x
-
-
-def test_decode_tiled_vae_maps_temporal_args_to_latent_slicing_min_size():
-    vae = _SlicingDecodeVAE(slicing_latent_min_size=2)
-    z = torch.arange(
-        _LATENT_CHANNELS * 5 * 8 * 8,
-        dtype=torch.float32,
-    ).reshape(1, _LATENT_CHANNELS, 5, 8, 8)
-
-    tiled_vae(
-        z,
-        vae,
-        tile_size=(64, 64),
-        tile_overlap=(0, 0),
-        temporal_size=12,
-        temporal_overlap=4,
-        encode=False,
-    )
-
-    assert vae.decode_min_sizes == [2]
-    assert vae.memory_states == [MemoryState.INITIALIZING, MemoryState.ACTIVE]
-    assert vae.slicing_latent_min_size == 2
-
-    wrapper = vae_mod.VideoAutoencoderKLWrapper.__new__(
-        vae_mod.VideoAutoencoderKLWrapper
-    )
-    nn.Module.__init__(wrapper)
-    seedvr2_tiling = {
-        "enable_tiling": True,
-        "tile_size": (64, 64),
-        "tile_overlap": (0, 0),
-        "temporal_size": 8,
-        "temporal_overlap": 7,
-    }
-
-    captured = {}
-
-    def _fake_tiled_vae(latent, model, **kwargs):
-        captured.update(kwargs)
-        return torch.zeros(1, 3, 1, 16, 16)
-
-    with patch.object(vae_mod, "tiled_vae", side_effect=_fake_tiled_vae):
-        wrapper.decode(torch.zeros(1, _LATENT_CHANNELS, 2, 2), seedvr2_tiling=seedvr2_tiling)
-
-    assert captured["temporal_overlap"] == 7
 
 
 def _force_oom(*a, **k):

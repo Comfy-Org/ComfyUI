@@ -40,39 +40,28 @@ def test_seedvr2_text_conditioning_accepts_cfg1_single_branch():
     torch.testing.assert_close(txt_shape, torch.tensor([[3]], device=context.device))
 
 
-def test_seedvr2_vae_decode_memory_covers_full_frame_lab_transfer():
-    wrapper = seedvr_vae.VideoAutoencoderKLWrapper.__new__(seedvr_vae.VideoAutoencoderKLWrapper)
-    latent_channels = seedvr_vae.SEEDVR2_LATENT_CHANNELS
-    estimate = wrapper.comfy_memory_used_decode((1, latent_channels, 26, 120, 160))
-    old_estimate = latent_channels * 120 * 160 * (4 * 8 * 8) * 2
-
-    assert estimate == 101 * 960 * 1280 * 160
-    assert estimate > 15 * 1024 ** 3
-    assert estimate > old_estimate * 100
-
-
 def test_seedvr2_vae_encode_preserves_compute_dtype(monkeypatch):
     wrapper = seedvr_vae.VideoAutoencoderKLWrapper.__new__(seedvr_vae.VideoAutoencoderKLWrapper)
     nn.Module.__init__(wrapper)
     wrapper._dummy = nn.Parameter(torch.empty(1, dtype=torch.float16))
     input_dtype = None
 
-    def encode(self, x):
+    def slicing_encode(self, x):
         nonlocal input_dtype
         input_dtype = x.dtype
         return x
 
-    monkeypatch.setattr(seedvr_vae.VideoAutoencoderKL, "encode", encode)
+    monkeypatch.setattr(seedvr_vae.VideoAutoencoderKLWrapper, "slicing_encode", slicing_encode)
 
     x = torch.zeros((1, 3, 1, 8, 8), dtype=torch.float32)
-    wrapper._encode_with_raw_latent(x)
+    wrapper.encode(x)
 
     assert input_dtype == torch.float32
 
 
 def test_seedvr2_vae_ops_cast_weights_to_compute_dtype():
-    attention = seedvr_vae.Attention(query_dim=4, heads=1, dim_head=4).to(torch.float16)
-    hidden_states = torch.zeros((1, 2, 4), dtype=torch.float32)
+    attention = seedvr_vae.Attention(query_dim=4, norm_num_groups=2, eps=1e-6).to(torch.float16)
+    hidden_states = torch.zeros((1, 4, 2, 2), dtype=torch.float32)
 
     output = attention(hidden_states)
 
