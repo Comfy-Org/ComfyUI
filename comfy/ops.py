@@ -19,6 +19,7 @@
 import torch
 import logging
 import contextlib
+import dataclasses
 import inspect
 import comfy.model_management
 from comfy.cli_args import args, PerformanceFeature
@@ -26,6 +27,7 @@ import comfy.float
 import json
 import comfy.memory_management
 import comfy.pinned_memory
+import comfy.rmsnorm
 import comfy.utils
 
 import comfy_aimdo.model_vbar
@@ -123,10 +125,12 @@ def materialize_meta_param(s, param_keys):
 
 
 # FIXME: add n=1 cache hit fast path
-def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blocking):
+def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blocking, return_faulted=False):
     offload_stream = None
     cast_buffer = None
     cast_buffer_offset = 0
+    if return_faulted:
+        fully_faulted = all(not getattr(s, param_key + "_function", []) for s in comfy_modules for param_key in ("weight", "bias"))
 
     def ensure_offload_stream(module, required_size, check_largest):
         nonlocal offload_stream
@@ -163,6 +167,8 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
     for s in comfy_modules:
         signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
         resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
+        if return_faulted and (signature is None or not resident):
+            fully_faulted = False
         prefetch = {
             "signature": signature,
             "resident": resident,
@@ -179,9 +185,10 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         needs_cast = False
 
         xfer_source = [ s.weight, s.bias ]
-        subset = "weights"
+        fast_disk = s._pin_state["fast_disk"]
+        subset = "weights-fast" if fast_disk else "weights"
         pin = comfy.pinned_memory.get_pin(s, subset=subset)
-        if pin is None and not args.fast_disk:
+        if pin is None and not fast_disk:
             loaded_pin = comfy.pinned_memory.get_pin(s, subset="weights-loaded")
             if loaded_pin is not None or signature is not None:
                 subset = "weights-loaded"
@@ -222,7 +229,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
             if pin is not None:
                 cast_maybe_lowvram_patch([pin], dest, offload_stream)
                 return
-            if signature is None or not args.fast_disk or args.high_ram:
+            if signature is None or not fast_disk or args.high_ram:
                 comfy.pinned_memory.pin_memory(m, subset=subset, size=size)
                 pin = comfy.pinned_memory.get_pin(m, subset=subset)
             cast_maybe_lowvram_patch(source, pin, offload_stream, xfer_dest2=dest)
@@ -237,14 +244,14 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
                 lowvram_dest = get_cast_buffer(lowvram_size)
                 lowvram_source.prepare(lowvram_dest, None, copy=False, commit=True)
 
-                subset = "patches"
+                subset = "patches-fast" if fast_disk else "patches"
                 pin = comfy.pinned_memory.get_pin(lowvram_source, subset=subset)
-                if pin is None:
+                if pin is None and not fast_disk:
                     loaded_pin = comfy.pinned_memory.get_pin(lowvram_source, subset="patches-loaded")
                     if loaded_pin is not None:
                         subset = "patches-loaded"
                         pin = loaded_pin
-                    elif signature is not None and not args.fast_disk:
+                    elif signature is not None:
                         subset = "patches-loaded"
                 handle_pin(lowvram_source, pin, lowvram_source, lowvram_dest, subset=subset, size=lowvram_size)
 
@@ -255,10 +262,12 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
         prefetch["needs_cast"] = needs_cast
         s._prefetch = prefetch
 
+    if return_faulted:
+        return offload_stream, fully_faulted
     return offload_stream
 
 
-def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant):
+def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, want_requant, return_weights=True):
 
     prefetch = getattr(s, "_prefetch", None)
 
@@ -298,7 +307,7 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
                 tensor = tensor.dequantize()
             return tensor
 
-        if orig.dtype != dtype or len(fns) > 0:
+        if (return_weights and orig.dtype != dtype) or len(fns) > 0:
             x = to_dequant(x, dtype)
         if not resident and lowvram_fn is not None:
             x = to_dequant(x, dtype if compute_dtype is None else compute_dtype)
@@ -325,7 +334,7 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
     if prefetch["signature"] is not None:
         prefetch["resident"] = True
 
-    return weight, bias
+    return (weight, bias) if return_weights else None
 
 
 def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, offloadable=False, compute_dtype=None, want_requant=False):
@@ -949,21 +958,61 @@ INPUT_ACT_EAGER = {
 }
 
 
-def linear_input_act(linear, x, input_act):
+def _eager_input_act(x, input_act, act_weight=None, act_eps=0.0):
+    if input_act is None:
+        return x
+    if input_act == "rms_norm":
+        return comfy.rmsnorm.rms_norm(x, act_weight, act_eps)
+    return INPUT_ACT_EAGER[input_act](x)
+
+
+def _fp16_linear_wanted(x):
+    """kitchen's fp16-accumulate GEMM replaces a plain linear when the user opted into
+        fp16 accumulation and the activation is fp16 on CUDA; weights come through cast_bias_weight."""
+    return (getattr(torch.backends.cuda.matmul, "allow_fp16_accumulation", False)
+            and x.dtype == torch.float16 and x.is_cuda)
+
+
+def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
+                     residual=None, residual_scale=None):
     """``linear(act(x))``, with ``act`` folded into an INT8 activation quantizer.
 
     An INT8 linear quantizes its input anyway, so an elementwise activation can
     ride along inside that kernel instead of writing a full-size intermediate to
     HBM and reading it straight back. Worth it for an MLP's down-projection,
-    where the intermediate is several times the hidden size.
+    where the intermediate is several times the hidden size, and for a pre-norm
+    block's ``linear(rms_norm(x))`` ("rms_norm", which reads the norm's weight
+    and eps from act_weight/act_eps).
+
+    With ``residual``/``residual_scale`` the result is the pre-norm block's
+    addcmul, ``residual + residual_scale * linear(act(x))``, fused into the
+    INT8 GEMM epilogue where supported.
 
     """
+    def _residual_out(out):
+        if residual is None:
+            return out
+        return torch.addcmul(residual, out, residual_scale)
+
     weight = linear.weight
+    full_precision_mm = getattr(linear, "_full_precision_mm", False)
     if (comfy.model_management.in_training
             or not isinstance(weight, QuantizedTensor)
             or weight._layout_cls != "TensorWiseINT8Layout"
-            or getattr(weight._params, "transposed", False)):
-        return linear(INPUT_ACT_EAGER[input_act](x))
+            or getattr(weight._params, "transposed", False)
+            or full_precision_mm):
+        if (not comfy.model_management.in_training
+                and not isinstance(weight, QuantizedTensor)
+                and not full_precision_mm
+                and _fp16_linear_wanted(x)):
+            weight, bias, offload_stream = cast_bias_weight(linear, x, offloadable=True)
+            try:
+                return quant_ops.ck.fp16_linear(
+                    _eager_input_act(x, input_act, act_weight, act_eps),
+                    weight, bias, residual=residual, residual_scale=residual_scale)
+            finally:
+                uncast_bias_weight(linear, weight, bias, offload_stream)
+        return _residual_out(linear(_eager_input_act(x, input_act, act_weight, act_eps)))
 
     # want_requant keeps a vbar-streamed layer on the INT8 path when a LoRA is
     # patched in on the fly; without it the cast hands back a dequantized weight.
@@ -973,13 +1022,18 @@ def linear_input_act(linear, x, input_act):
         if not isinstance(weight, QuantizedTensor):
             # A LoRA weight_function, or activations whose dtype differs from the
             # weight's, make the cast hand back a dequantized tensor.
-            return torch.nn.functional.linear(INPUT_ACT_EAGER[input_act](x), weight, bias)
+            return _residual_out(torch.nn.functional.linear(
+                _eager_input_act(x, input_act, act_weight, act_eps), weight, bias))
         qdata, scale = TensorWiseINT8Layout.get_plain_tensors(weight)
         return quant_ops.ck.int8_linear(
             x, qdata, scale, bias, x.dtype,
             convrot=getattr(weight._params, "convrot", False),
             convrot_groupsize=getattr(weight._params, "convrot_groupsize", 256),
             input_act=input_act,
+            input_act_weight=act_weight,
+            input_act_eps=act_eps,
+            residual=residual,
+            residual_scale=residual_scale,
         )
     finally:
         uncast_bias_weight(linear, weight, bias, offload_stream)
@@ -1281,6 +1335,16 @@ def _quantized_weight_state_dict(module, sd, prefix, extra_quant_conf=None, extr
     return sd
 
 
+class MixedPrecisionOp(CastWeightBiasOp):
+    quant_format = None
+
+    def can_use_quantized_matmul(self, disabled_formats):
+        return (self.quant_format in QUANT_ALGOS
+                and not self._full_precision_mm_config
+                and self.quant_format not in self._disabled_formats
+                and self.quant_format not in disabled_formats)
+
+
 def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_precision_mm=False, disabled=[]):
     class MixedPrecisionOps(manual_cast):
         _quant_config = quant_config
@@ -1288,7 +1352,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
         _full_precision_mm = full_precision_mm
         _disabled = disabled
 
-        class Linear(torch.nn.Module, CastWeightBiasOp):
+        class Linear(torch.nn.Module, MixedPrecisionOp):
             _disabled_formats = disabled
 
             def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=None):
@@ -1336,6 +1400,8 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         compute_dtype=compute_dtype,
                         want_requant=want_requant,
                     ) as (weight, bias):
+                        if self._full_precision_mm and isinstance(weight, QuantizedTensor):
+                            weight = weight.dequantize()
                         return self._forward(input, weight, bias)
 
                 with CastBiasWeightContext(
@@ -1438,7 +1504,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def _apply(self, fn, recurse=True):  # This is to get torch.compile + moving weights to another device working
                 return _quantized_apply(self, fn, recurse)
 
-        class MoEExperts(torch.nn.Module, CastWeightBiasOp):
+        class MoEExperts(torch.nn.Module, MixedPrecisionOp):
             """Container for E quantized expert weights, indexed via expert_weight(i).
 
             The bank lives on self.weight as a single 3D tensor — either a
@@ -1484,8 +1550,18 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def _apply(self, fn, recurse=True):
                 return _quantized_apply(self, fn, recurse)
 
-            def _load_from_state_dict(self, *args):
-                _load_quantized_module(self, super()._load_from_state_dict, *args, load_extra_params=False)
+            def _load_from_state_dict(self, state_dict, prefix, *args):
+                layer_conf = state_dict.get(f"{prefix}comfy_quant", None)
+                quant_format = json.loads(layer_conf.numpy().tobytes()).get("format") if layer_conf is not None else None
+                scale = state_dict.get(f"{prefix}weight_scale", None)
+                if quant_format == "asym_w4a8_int8" or (quant_format == "int8_tensorwise" and scale is not None and scale.ndim == 3):
+                    # per-row scaled layouts are 2-D only: keep the bank as [E * out, in] and slice rows per expert
+                    for name in ("weight", "weight_scale", "weight_s_rel", "weight_s_channel"):
+                        t = state_dict.get(f"{prefix}{name}", None)
+                        if t is not None and t.ndim > 1 and t.shape[0] == self.num_experts:
+                            state_dict[f"{prefix}{name}"] = t.reshape(self.num_experts * t.shape[1], *t.shape[2:])
+                    self._orig_shape = (self.num_experts * self.out_features, self.in_features)
+                _load_quantized_module(self, super()._load_from_state_dict, state_dict, prefix, *args, load_extra_params=False)
 
             def expert_weight(self, i: int):
                 """Expert i's weight (Tensor or per-expert QuantizedTensor view)."""
@@ -1493,12 +1569,38 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     return self._expert_qt_from(self.weight, i)
                 return self.weight[i]
 
+            def _cast_bank(self, input):
+                # A quantized bank stays quantized: the layouts dequantize one [out, in] matrix at a time, per expert.
+                if isinstance(self.weight, QuantizedTensor):
+                    return CastBiasWeightContext(self, input=None, dtype=self.weight.dtype, device=input.device, bias_dtype=input.dtype, offloadable=True)
+                return CastBiasWeightContext(self, input, offloadable=True)
+
+            def _dequantize_bank(self, weight, dtype):
+                # in expert chunks: the W4A8 dequantize kernel allocates over twice its output in temporaries
+                flat = QuantizedTensor(weight._qdata, weight._layout_cls, dataclasses.replace(weight._params, orig_dtype=dtype))
+                out = torch.empty((self.num_experts, self.out_features, self.in_features), dtype=dtype, device=weight.device)
+                step = max(1, (256 << 20) // (self.out_features * self.in_features * out.element_size()))
+                for first in range(0, self.num_experts, step):
+                    last = min(first + step, self.num_experts)
+                    out[first:last] = self._bank_rows(flat, first, last).dequantize().view(last - first, self.out_features, self.in_features)
+                return out
+
+            def _bank_rows(self, weight: QuantizedTensor, first: int, last: int) -> QuantizedTensor:
+                """Experts [first, last) of a flat [E * out, in] bank as one QuantizedTensor."""
+                params = weight._params
+                rows = slice(first * self.out_features, last * self.out_features)
+                per_row = {f.name: getattr(params, f.name)[rows] for f in dataclasses.fields(params) if torch.is_tensor(getattr(params, f.name)) and getattr(params, f.name).ndim >= 1 and getattr(params, f.name).shape[0] == weight._qdata.shape[0]}
+                return QuantizedTensor(weight._qdata[rows], weight._layout_cls, dataclasses.replace(params, orig_shape=((last - first) * self.out_features, self.in_features), **per_row))
+
             @contextlib.contextmanager
             def bank_resident(self, input):
                 """Cast the whole bank once; expert_linear inside reuses the cast.
                 Not re-entrant — do not nest calls on the same instance.
                 """
-                with CastBiasWeightContext(self, input, offloadable=True) as self._resident_bank:
+                with self._cast_bank(input) as (weight, bias):
+                    if self._full_precision_mm and isinstance(weight, QuantizedTensor) and weight._qdata.ndim == 2:  # flat per-row banks; 3-D banks dequantize per expert
+                        weight = self._dequantize_bank(weight, input.dtype)
+                    self._resident_bank = (weight, bias)
                     try:
                         yield self
                     finally:
@@ -1510,14 +1612,14 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 if resident is not None:
                     weight, bias = resident
                     return self._expert_linear_impl(input, weight, bias, i)
-                with CastBiasWeightContext(self, input, offloadable=True) as (weight, bias):
+                with self._cast_bank(input) as (weight, bias):
                     return self._expert_linear_impl(input, weight, bias, i)
 
             def _expert_linear_impl(self, input, weight, bias, i):
                 if isinstance(weight, QuantizedTensor):
                     qw = self._expert_qt_from(weight, i)
                 else:
-                    qw = weight[i]
+                    qw = cast_to_input(weight[i], input, copy=False)
                 b = cast_to_input(bias[i], input, copy=False) if bias is not None else None
 
                 if isinstance(qw, QuantizedTensor):
@@ -1529,12 +1631,13 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     if use_fast:
                         qin = QuantizedTensor.from_float(input, self.layout_type)
                         return torch.nn.functional.linear(qin, qw, b)
-                    out = input @ qw.dequantize().t()
-                    return out + b if b is not None else out
+                    qw = cast_to_input(qw.dequantize(), input, copy=False)
                 return torch.nn.functional.linear(input, qw, b)
 
             def _expert_qt_from(self, weight: QuantizedTensor, i: int) -> QuantizedTensor:
                 """Build a per-expert QuantizedTensor by indexing into a resident bank."""
+                if weight._qdata.ndim == 2:
+                    return self._bank_rows(weight, i, i + 1)
                 params = weight._params
                 kwargs = {
                     "scale": params.scale[i] if params.scale.dim() else params.scale,
@@ -1545,6 +1648,8 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     kwargs["block_scale"] = params.block_scale[i]
                 if hasattr(params, "quant_group_size"):
                     kwargs["quant_group_size"] = params.quant_group_size
+                if hasattr(params, "convrot"):
+                    kwargs["convrot"] = params.convrot
                 if hasattr(params, "convrot_groupsize"):
                     kwargs["convrot_groupsize"] = params.convrot_groupsize
                 if hasattr(params, "linear_dtype"):
@@ -1633,7 +1738,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                             self.norm_type, self.scale_grad_by_freq, self.sparse)
                     target_dtype = out_dtype if out_dtype is not None else weight._params.orig_dtype
                     x = x.to(dtype=target_dtype)
-                    if scale is not None and scale != 1.0:
+                    if scale is not None:
                         x = x * scale.to(dtype=target_dtype)
                     return x
 
@@ -1642,24 +1747,45 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 
     return MixedPrecisionOps
 
-def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_fp8=False, fp8_optimizations=False, model_config=None):
-    fp8_compute = comfy.model_management.supports_fp8_compute(load_device) # TODO: if we support more ops this needs to be more granular
-    nvfp4_compute = comfy.model_management.supports_nvfp4_compute(load_device)
-    mxfp8_compute = comfy.model_management.supports_mxfp8_compute(load_device)
+def get_disabled_quant_formats(device=None):
+    disabled = set()
+    if not comfy.model_management.supports_nvfp4_compute(device):
+        disabled.add("nvfp4")
+    if not comfy.model_management.supports_mxfp8_compute(device):
+        disabled.add("mxfp8")
+    if not comfy.model_management.supports_fp8_compute(device):
+        disabled.add("float8_e4m3fn")
+        disabled.add("float8_e5m2")
+    if not comfy.model_management.supports_int8_compute(device):
+        disabled.add("int8_tensorwise")
+        disabled.add("convrot_w4a4")
+        disabled.add("asym_w4a8_int8")
+    return disabled
 
+
+@contextlib.contextmanager
+def use_quantized_matmul(model, device):
+    disabled = get_disabled_quant_formats(device)
+    previous = []
+    try:
+        for module in model.modules():
+            if isinstance(module, MixedPrecisionOp) and module.can_use_quantized_matmul(disabled):
+                previous.append((module, module._full_precision_mm))
+                module._full_precision_mm = False
+        yield
+    finally:
+        for module, full_precision_mm in previous:
+            module._full_precision_mm = full_precision_mm
+
+
+def pick_operations(weight_dtype, compute_dtype, load_device=None, disable_fast_fp8=False, fp8_optimizations=False, model_config=None):
     if model_config and hasattr(model_config, 'quant_config') and model_config.quant_config:
         logging.info("Using mixed precision operations")
-        disabled = set()
-        if not nvfp4_compute:
-            disabled.add("nvfp4")
-        if not mxfp8_compute:
-            disabled.add("mxfp8")
-        if not fp8_compute:
-            disabled.add("float8_e4m3fn")
-            disabled.add("float8_e5m2")
+        disabled = get_disabled_quant_formats(load_device)
         logging.info("Native ops: {} {}".format(", ".join(QUANT_ALGOS.keys() - disabled), ", emulated ops: {}".format(", ".join(disabled)) if len(disabled) > 0 else ""))
         return mixed_precision_ops(model_config.quant_config, compute_dtype, disabled=disabled)
 
+    fp8_compute = comfy.model_management.supports_fp8_compute(load_device)
     if (
         fp8_compute and
         (fp8_optimizations or PerformanceFeature.Fp8MatrixMultiplication in args.fast) and

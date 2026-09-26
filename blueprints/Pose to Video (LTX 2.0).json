@@ -3870,7 +3870,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Video generation and editing/Conditioned",
+        "category": "Video generation/Conditioned",
         "description": "Generates video from pose reference frames using LTX-2, with optional synchronized audio."
       }
     ]

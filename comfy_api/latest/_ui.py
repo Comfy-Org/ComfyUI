@@ -9,11 +9,7 @@ from io import BytesIO
 import av
 import numpy as np
 import torch
-try:
-    import torchaudio
-    TORCH_AUDIO_AVAILABLE = True
-except:
-    TORCH_AUDIO_AVAILABLE = False
+import comfy.audio
 from PIL import Image as PILImage
 from PIL.PngImagePlugin import PngInfo
 
@@ -310,9 +306,7 @@ class AudioSaveHelper:
 
                 # Resample if necessary
                 if sample_rate != audio["sample_rate"]:
-                    if not TORCH_AUDIO_AVAILABLE:
-                        raise Exception("torchaudio is not available; cannot resample audio.")
-                    waveform = torchaudio.functional.resample(waveform, audio["sample_rate"], sample_rate)
+                    waveform = comfy.audio.resample(waveform, audio["sample_rate"], sample_rate)
 
             # Create output with specified format
             output_buffer = BytesIO()
@@ -457,13 +451,28 @@ class PreviewUI3D(_UIOutput):
 
 
 class PreviewUI3DAdvanced(_UIOutput):
-    def __init__(self, model_file, camera_info, model_3d_info):
+    def __init__(
+        self,
+        model_file,
+        camera_info,
+        model_3d_info,
+        folder_type: FolderType | None = None,
+        saved_result: SavedResult | None = None,
+    ):
         self.model_file = model_file
         self.camera_info = camera_info
         self.model_3d_info = model_3d_info
+        self.folder_type = folder_type
+        self.saved_result = saved_result
 
     def as_dict(self):
-        return {"result": [self.model_file, self.camera_info, self.model_3d_info]}
+        model_file = self.model_file
+        if self.folder_type is not None:
+            model_file = f"{model_file} [{FolderType(self.folder_type).value}]"
+        data = {"result": [model_file, self.camera_info, self.model_3d_info]}
+        if self.saved_result is not None:
+            data["3d"] = [self.saved_result]
+        return data
 
 
 class PreviewText(_UIOutput):

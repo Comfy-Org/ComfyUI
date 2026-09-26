@@ -7,9 +7,13 @@ import torch
 
 
 class VOXEL:
-    def __init__(self, data: torch.Tensor):
+    def __init__(self, data: torch.Tensor, voxel_colors=None, resolution=None):
         self.data = data
+        self.voxel_colors = voxel_colors
+        self.resolution = resolution # each 3d model has its own resolution
 
+    def _comfy_cache_tensors(self):
+        return self.data, self.voxel_colors
 
 class SPLAT:
     """A batch of 3D Gaussian splats in render-ready (activated, world-space) form.
@@ -28,15 +32,25 @@ class SPLAT:
         self.sh = sh                  # (B, N, K, 3) spherical-harmonic color coefficients
         self.counts = counts          # (B,) real lengths, or None
 
+    def _comfy_cache_tensors(self):
+        return self.positions, self.scales, self.rotations, self.opacities, self.sh, self.counts
+
 
 class MESH:
     def __init__(self, vertices: torch.Tensor, faces: torch.Tensor,
                  uvs: torch.Tensor | None = None,
                  vertex_colors: torch.Tensor | None = None,
                  texture: torch.Tensor | None = None,
+                 metallic_roughness: torch.Tensor | None = None,
                  vertex_counts: torch.Tensor | None = None,
                  face_counts: torch.Tensor | None = None,
-                 unlit: bool = False):
+                 unlit: bool = False,
+                 normals: torch.Tensor | None = None,
+                 tangents: torch.Tensor | None = None,
+                 normal_map: torch.Tensor | None = None,
+                 occlusion_in_mr: bool = False,
+                 material: dict | None = None,
+                 emissive: torch.Tensor | None = None):
 
         assert (vertex_counts is None) == (face_counts is None), \
             "vertex_counts and face_counts must be provided together (both or neither)"
@@ -44,13 +58,42 @@ class MESH:
         self.faces = faces                  # faces: (B, M, 3)
         self.uvs = uvs                      # uvs: (B, N, 2)
         self.vertex_colors = vertex_colors  # vertex_colors: (B, N, 3 or 4)
-        self.texture = texture              # texture: (B, H, W, 3)
+        # Optional per-vertex normals: (B, N, 3). When None, SaveGLB computes smooth
+        # area-weighted normals so viewers don't fall back to flat (per-face) shading.
+        self.normals = normals
+        self.texture = texture              # texture (baseColor): (B, H, W, 3)
+        # glTF metallicRoughness texture: (B, H, W, 3), R unused, G=roughness, B=metallic
+        self.metallic_roughness = metallic_roughness
         # When vertices/faces are zero-padded to a common N/M across the batch (variable-size mesh batch),
         # these hold the real per-item lengths (B,). None means rows are uniform and no slicing is needed.
         self.vertex_counts = vertex_counts
         self.face_counts = face_counts
         # Render flat / emissive (no scene lighting) when saved, e.g. for gaussian-splat-derived meshes.
         self.unlit = unlit
+        # Extra maps / material overrides attached by bake, normal/AO, and SetMeshMaterial nodes;
+        # consumed by SaveGLB. Declared here (with defaults) so consumers read them directly.
+        self.tangents = tangents            # (B, N, 4) per-vertex tangents for normal mapping
+        self.normal_map = normal_map        # tangent-space normal map: (B, H, W, 3)
+        self.occlusion_in_mr = occlusion_in_mr  # True = R channel of metallic_roughness holds AO (ORM)
+        self.material = material             # SetMeshMaterial scalar/factor overrides
+        self.emissive = emissive             # emissive map: (B, H, W, 3)
+
+    def _comfy_cache_tensors(self):
+        return (
+            self.vertices,
+            self.faces,
+            self.uvs,
+            self.vertex_colors,
+            self.texture,
+            self.metallic_roughness,
+            self.vertex_counts,
+            self.face_counts,
+            self.normals,
+            self.tangents,
+            self.normal_map,
+            self.material,
+            self.emissive,
+        )
 
 
 class File3D:
