@@ -3,7 +3,7 @@ import os
 import shutil
 import sqlite3
 import time
-from contextlib import closing, contextmanager
+from contextlib import closing
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
 from filelock import FileLock, Timeout
@@ -22,7 +22,7 @@ try:
     from sqlalchemy import create_engine, event
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import sessionmaker
-    from sqlalchemy.pool import QueuePool
+    from sqlalchemy.pool import StaticPool
 
     from app.database.models import Base
     import app.assets.database.models  # noqa: F401 — register models with Base.metadata
@@ -197,17 +197,10 @@ def _init_memory_db(db_url):
     connection gets its own separate database — tables created by Alembic's
     internal connection are lost immediately.
     """
-    # One connection holds the whole database, so hand it to one checkout at a time: sessions
-    # on different threads wait for it instead of sharing its transaction state. A session
-    # opened inside another on the same thread waits out pool_timeout and then raises.
-    shared = sqlite3.connect(":memory:", check_same_thread=False)
     engine = create_engine(
         db_url,
-        creator=lambda: shared,
-        poolclass=QueuePool,
-        pool_size=1,
-        max_overflow=0,
-        pool_timeout=60,
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
     )
 
     @event.listens_for(engine, "connect")
@@ -350,22 +343,3 @@ def create_write_session():
     fails with "database is locked", indistinguishable from real contention. Rule out a
     nested session before investigating lock contention."""
     return WriteSession()
-
-
-@contextmanager
-def _create_bounded_write_session(busy_timeout_ms: int):
-    """A create_write_session() that waits at most busy_timeout_ms for the write lock, then
-    raises OperationalError("database is locked"). For writes that may be skipped rather
-    than wait on a long writer such as a scan batch. The timeout is set on the driver
-    connection before the session's BEGIN IMMEDIATE, and restored before it returns to
-    the pool. An in-memory database has a single shared connection, and SQLite only waits
-    on a lock held by another connection, so there the timeout never comes into play."""
-    with WriteSession.kw["bind"].connect() as connection:
-        driver = connection.connection.driver_connection
-        previous = driver.execute("PRAGMA busy_timeout").fetchone()[0]
-        driver.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
-        try:
-            with WriteSession(bind=connection) as session:
-                yield session
-        finally:
-            driver.execute(f"PRAGMA busy_timeout = {int(previous)}")

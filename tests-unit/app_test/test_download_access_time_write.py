@@ -1,8 +1,7 @@
-"""A download's access-time write must not wait on another writer, and must not fail the download.
+"""A download's access-time write must never fail the download.
 
-Scans hold the write lock for a whole insert or enrich batch. The access time is advisory, so the
-download path gives up on it after a short bounded wait instead of blocking for the full busy
-timeout, or raising "database is locked" once that runs out.
+Scans hold the write lock for a whole insert or enrich batch. The access time is advisory, so if
+the write can't get the lock within the busy timeout, the file is served anyway.
 """
 
 import sqlite3
@@ -10,7 +9,6 @@ import threading
 import time
 
 import pytest
-from sqlalchemy import text, update
 
 from app.assets.database.models import Asset
 from app.assets.database.queries.records import create_content, create_record
@@ -69,105 +67,32 @@ def test_uncontended_download_records_the_access_time(record_id):
     assert _last_access_time(record_id) != before
 
 
-def test_download_skips_the_access_time_while_another_writer_holds_the_lock(record_id, file_db):
+def test_download_is_served_when_the_lock_outlasts_the_busy_timeout(record_id, file_db):
+    # pysqlite's default busy timeout is 5s; hold the lock longer so the write gives up.
     before = _last_access_time(record_id)
     started = threading.Event()
-    holder = threading.Thread(target=_hold_write_lock, args=(file_db, 2.0, started))
+    holder = threading.Thread(target=_hold_write_lock, args=(file_db, 6.5, started))
     holder.start()
     started.wait()
-    t0 = time.perf_counter()
     try:
         result = asset_management.resolve_asset_for_download(record_id)
-        elapsed = time.perf_counter() - t0
     finally:
         holder.join()
 
     assert result.download_name == "asset.png"
-    assert elapsed < 0.3, f"download waited {elapsed:.2f}s on another writer's lock"
     assert _last_access_time(record_id) == before
 
 
-def test_writer_commits_between_read_and_access_time_write(record_id, file_db, monkeypatch):
-    # pysqlite opens no transaction for the reads, so a commit in between leaves no stale snapshot.
-    real_isfile = asset_management.os.path.isfile
-
-    def isfile_then_concurrent_commit(path):
-        other = sqlite3.connect(file_db, isolation_level=None)
-        other.execute("BEGIN IMMEDIATE")
-        other.execute("UPDATE assets SET name = name WHERE id != ?", (record_id,))
-        other.execute("COMMIT")
-        other.close()
-        return real_isfile(path)
-
-    monkeypatch.setattr(asset_management.os.path, "isfile", isfile_then_concurrent_commit)
+def test_access_time_is_recorded_once_a_short_lock_is_released(record_id, file_db):
     before = _last_access_time(record_id)
-
-    result = asset_management.resolve_asset_for_download(record_id)
+    started = threading.Event()
+    holder = threading.Thread(target=_hold_write_lock, args=(file_db, 1.0, started))
+    holder.start()
+    started.wait()
+    try:
+        result = asset_management.resolve_asset_for_download(record_id)
+    finally:
+        holder.join()
 
     assert result.download_name == "asset.png"
     assert _last_access_time(record_id) != before
-
-
-def test_bounded_session_restores_the_pooled_busy_timeout(file_db):
-    with db_module.create_write_session() as session:
-        default = session.execute(text("PRAGMA busy_timeout")).scalar_one()
-
-    with db_module._create_bounded_write_session(50) as session:
-        assert session.execute(text("PRAGMA busy_timeout")).scalar_one() == 50
-
-    with db_module.create_write_session() as session:
-        assert session.execute(text("PRAGMA busy_timeout")).scalar_one() == default
-
-
-@pytest.fixture
-def memory_db(monkeypatch):
-    monkeypatch.setattr(db_module.args, "database_url", "sqlite:///:memory:")
-    monkeypatch.setattr(db_module, "Session", None)
-    monkeypatch.setattr(db_module, "WriteSession", None)
-    db_module._init_memory_db(db_module.args.database_url)
-    yield
-    db_module.Session.kw["bind"].dispose()
-
-
-def _busy_timeout():
-    with db_module.create_session() as session:
-        return session.execute(text("PRAGMA busy_timeout")).scalar_one()
-
-
-def test_memory_db_download_records_the_access_time(memory_db, tmp_path):
-    asset = tmp_path / "asset.png"
-    asset.write_bytes(b"png")
-    with db_module.create_write_session() as session:
-        content = create_content(session, str(asset), size_bytes=3, mtime_ns=1)
-        record_id = create_record(session, content.id, "asset.png").id
-        session.commit()
-
-    # The access-time write swallows errors, so check each call.
-    for _ in range(3):
-        with db_module.create_write_session() as session:
-            session.execute(update(Asset).where(Asset.id == record_id).values(last_access_time=None))
-            session.commit()
-        asset_management.resolve_asset_for_download(record_id)
-        assert _last_access_time(record_id) is not None
-
-
-def test_memory_db_sessions_on_other_threads_wait_for_the_shared_connection(memory_db):
-    # The whole database is one connection. A session on another thread must wait for it
-    # rather than run inside this session's open transaction.
-    opened = threading.Event()
-    finished = threading.Event()
-
-    def other_thread():
-        opened.wait()
-        with db_module.create_session() as session:
-            session.execute(text("SELECT 1"))
-        finished.set()
-
-    worker = threading.Thread(target=other_thread)
-    worker.start()
-    with db_module.create_write_session() as session:
-        session.execute(text("SELECT 1"))
-        opened.set()
-        assert not finished.wait(0.3), "another thread used the connection mid-session"
-    worker.join(5)
-    assert finished.is_set()

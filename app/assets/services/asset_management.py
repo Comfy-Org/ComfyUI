@@ -10,6 +10,7 @@ import os
 from typing import Sequence
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import OperationalError
 
 from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries import (
@@ -34,7 +35,7 @@ from app.assets.services.schemas import (
     ReferenceData,
     UserMetadata,
 )
-from app.database.db import _create_bounded_write_session, create_session
+from app.database.db import create_session
 
 
 def _record_to_detail_result(session, record) -> AssetDetailResult:
@@ -256,37 +257,24 @@ def resolve_asset_for_download(
         asset_mime = record.mime_type
         abs_path = content.path
 
+        # The access time is advisory: if a scan holds the write lock past the busy
+        # timeout, serve the file anyway rather than fail the download.
+        try:
+            update_record_access_time(session, reference_id)
+            session.commit()
+        except OperationalError as e:
+            session.rollback()
+            level = logging.DEBUG if "locked" in str(e) or "busy" in str(e) else logging.WARNING
+            logging.log(level, "Skipped access-time update for %s: %s", reference_id, e)
+
         ctype = (
             asset_mime
             or mimetypes.guess_type(ref_name or abs_path)[0]
             or "application/octet-stream"
         )
         download_name = ref_name or os.path.basename(abs_path)
-
-    # After the read session closes, so the write is bounded on its own and never holds up
-    # the lookup. Best-effort: a busy database skips the access time rather than wait.
-    _touch_record_access_time(reference_id)
-    return DownloadResolutionResult(
-        abs_path=abs_path,
-        content_type=ctype,
-        download_name=download_name,
-    )
-
-
-# Long enough to ride out ordinary short writes; far below a scan batch's hold on the lock.
-ACCESS_TIME_BUSY_TIMEOUT_MS = 50
-
-
-def _touch_record_access_time(reference_id: str) -> None:
-    """Record a download's access time if the write lock is free within
-    ACCESS_TIME_BUSY_TIMEOUT_MS; otherwise skip it. The access time is advisory, so a
-    download never waits on another writer for it, and this never raises."""
-    try:
-        with _create_bounded_write_session(ACCESS_TIME_BUSY_TIMEOUT_MS) as session:
-            update_record_access_time(session, reference_id)
-            session.commit()
-    except Exception as e:
-        if "locked" in str(e) or "busy" in str(e):
-            logging.debug("Skipped access-time update for %s: database busy", reference_id)
-        else:
-            logging.warning("Access-time update failed for %s: %s", reference_id, e)
+        return DownloadResolutionResult(
+            abs_path=abs_path,
+            content_type=ctype,
+            download_name=download_name,
+        )
