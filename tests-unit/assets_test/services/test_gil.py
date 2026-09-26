@@ -136,10 +136,21 @@ def test_fixed_window_on_a_coarse_timer_sleeps_far_more_than_a_sixth(fake):
     assert run_hot_loop(clock, gil._yield_fixed, 30.0) > 2 * SHARE
 
 
-def test_scaled_version_is_used_only_for_the_coarse_windows_timer():
+def test_the_version_matches_the_interpreter():
     coarse = gil.sys.platform == "win32" and gil.sys.version_info < (3, 11)
+    gil_on = getattr(gil.sys, "_is_gil_enabled", lambda: True)()
     assert gil._COARSE_SLEEP is coarse
-    assert gil.yield_gil is (gil._yield_scaled if coarse else gil._yield_fixed)
+    assert gil._GIL_ENABLED is gil_on
+    if not gil_on:
+        assert gil.yield_gil is gil._no_yield
+    else:
+        assert gil.yield_gil is (gil._yield_scaled if coarse else gil._yield_fixed)
+
+
+def test_no_yield_never_sleeps(fake):
+    clock = started(fake, gil._SLEEP, gil._no_yield)
+    run_hot_loop(clock, gil._no_yield, 1.0)
+    assert clock.sleeps == 0
 
 
 def test_contended_sleep_does_not_stretch_the_run_window_past_the_timer_tick(fake):
