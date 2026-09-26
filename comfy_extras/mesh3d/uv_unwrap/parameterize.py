@@ -10,9 +10,19 @@ import scipy.sparse.linalg as spla
 import torch
 from torch import Tensor
 
+import comfy.model_management
 from . import mesh as _mesh
 
 LSCM_BATCH_MAX_VERTS = 256      # charts above this solve per-chart sparse (lscm_chart)
+
+
+def _lscm_solve_on_gpu(device: "torch.device | None") -> bool:
+    """True if the dense batched normal-equations solve should run on device rather
+    than CPU. Excludes ROCm: hipBLAS's batched getrf (torch.linalg.solve's backing
+    call) raises HIPBLAS_STATUS_ALLOC_FAILED on these chart batches even with plenty
+    of free VRAM, and PyTorch reports a ROCm device's .type as "cuda", so the type
+    check alone can't tell AMD and NVIDIA apart."""
+    return device is not None and device.type == "cuda" and not comfy.model_management.is_amd()
 
 
 def solve_least_squares(A: sp.csr_matrix, b: np.ndarray) -> np.ndarray:
@@ -319,7 +329,7 @@ def lscm_charts_batch(
         np.put_along_axis(cval, pin_cols, pin_vals, axis=1)
 
         # normal equations + batched solve; the fp64 dense algebra goes to the GPU when available
-        use_gpu = device is not None and device.type == "cuda"
+        use_gpu = _lscm_solve_on_gpu(device)
         if use_gpu:
             A_t = torch.from_numpy(A).to(device)
             At = A_t.transpose(1, 2)
