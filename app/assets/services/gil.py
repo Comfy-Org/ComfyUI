@@ -16,7 +16,7 @@ import time
 
 _RUN = 0.002
 _SLEEP = 0.001
-# The coarse timer tick is ~15.6ms, so a 1ms sleep takes at most ~16x as long there.
+# The coarse timer tick is ~15.6ms, so a 1ms sleep typically takes about 16x as long there.
 _MAX_SCALE = 16.0
 
 # Indirection so tests can drive the clock without patching the time module.
@@ -60,18 +60,4 @@ def _yield_scaled() -> None:
 # Before Python 3.11, time.sleep on Windows rounds up to the ~15.6ms system timer tick.
 _COARSE_SLEEP = sys.platform == "win32" and sys.version_info < (3, 11)
 
-
-
-def _no_yield() -> None:
-    """Free-threaded Python: there is no GIL to hand back, so sleeping would only slow the scan."""
-
-
-# sys._is_gil_enabled exists from Python 3.13; earlier versions always have the GIL.
-_GIL_ENABLED = getattr(sys, "_is_gil_enabled", lambda: True)()
-
-if not _GIL_ENABLED:
-    yield_gil = _no_yield
-elif _COARSE_SLEEP:
-    yield_gil = _yield_scaled
-else:
-    yield_gil = _yield_fixed
+yield_gil = _yield_scaled if _COARSE_SLEEP else _yield_fixed
