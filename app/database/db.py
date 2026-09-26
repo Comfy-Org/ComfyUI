@@ -22,7 +22,7 @@ try:
     from sqlalchemy import create_engine, event
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import sessionmaker
-    from sqlalchemy.pool import StaticPool
+    from sqlalchemy.pool import QueuePool
 
     from app.database.models import Base
     import app.assets.database.models  # noqa: F401 — register models with Base.metadata
@@ -197,10 +197,17 @@ def _init_memory_db(db_url):
     connection gets its own separate database — tables created by Alembic's
     internal connection are lost immediately.
     """
+    # One connection holds the whole database, so hand it to one checkout at a time: sessions
+    # on different threads wait for it instead of sharing its transaction state. A session
+    # opened inside another on the same thread waits out pool_timeout and then raises.
+    shared = sqlite3.connect(":memory:", check_same_thread=False)
     engine = create_engine(
         db_url,
-        poolclass=StaticPool,
-        connect_args={"check_same_thread": False},
+        creator=lambda: shared,
+        poolclass=QueuePool,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=60,
     )
 
     @event.listens_for(engine, "connect")

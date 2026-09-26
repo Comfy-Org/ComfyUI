@@ -149,3 +149,25 @@ def test_memory_db_download_records_the_access_time(memory_db, tmp_path):
             session.commit()
         asset_management.resolve_asset_for_download(record_id)
         assert _last_access_time(record_id) is not None
+
+
+def test_memory_db_sessions_on_other_threads_wait_for_the_shared_connection(memory_db):
+    # The whole database is one connection. A session on another thread must wait for it
+    # rather than run inside this session's open transaction.
+    opened = threading.Event()
+    finished = threading.Event()
+
+    def other_thread():
+        opened.wait()
+        with db_module.create_session() as session:
+            session.execute(text("SELECT 1"))
+        finished.set()
+
+    worker = threading.Thread(target=other_thread)
+    worker.start()
+    with db_module.create_write_session() as session:
+        session.execute(text("SELECT 1"))
+        opened.set()
+        assert not finished.wait(0.3), "another thread used the connection mid-session"
+    worker.join(5)
+    assert finished.is_set()
