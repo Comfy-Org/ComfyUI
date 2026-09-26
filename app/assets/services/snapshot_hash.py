@@ -11,13 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-try:
-    from blake3 import blake3
-except ImportError as error:
-    blake3 = None
-    _BLAKE3_IMPORT_ERROR: ImportError | None = error
-else:
-    _BLAKE3_IMPORT_ERROR = None
+from blake3 import blake3
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,11 +34,6 @@ def _snapshot(stat_result: os.stat_result) -> _Snapshot:
 def snapshot_hash(
     path: str, chunk_size: int = 8 * 1024 * 1024
 ) -> tuple[str, os.stat_result] | None:
-    if blake3 is None:
-        raise ModuleNotFoundError(
-            f"blake3 is required for asset hashing but could not be imported: "
-            f"{_BLAKE3_IMPORT_ERROR}"
-        ) from _BLAKE3_IMPORT_ERROR
     try:
         pre_stat = _snapshot(os.stat(path))
         hasher = blake3()

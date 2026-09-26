@@ -8,6 +8,7 @@ so a restored file can never leave two live rows describing one location.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Literal
 
 import sqlalchemy as sa
@@ -20,7 +21,7 @@ from app.assets.database.queries.records import (
     mark_content_missing,
     unset_content_missing,
 )
-from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix, to_stored_hash
+from app.assets.helpers import sql_path_under_prefix, to_stored_hash
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 from app.assets.services.snapshot_hash import snapshot_hash
 
@@ -43,13 +44,8 @@ def pending_recovery_count() -> int:
 
 
 def recover_missing_content(
-    session: Session,
-    path: str,
-    snapshot: tuple[str, os.stat_result] | None,
-    hashing_is_enabled: bool,
+    session: Session, path: str, stat_result: os.stat_result, hashing_is_enabled: bool
 ) -> Literal["recovered", "no_match", "unstable"]:
-    """``snapshot`` is ``snapshot_hash(path)``, taken by the caller before its write
-    transaction opens so the file is never hashed while the write lock is held."""
     if not hashing_is_enabled:
         return "no_match"
     occupied = session.scalar(
@@ -59,6 +55,7 @@ def recover_missing_content(
     )
     if occupied is not None:
         return "no_match"
+    snapshot = snapshot_hash(path)
     if snapshot is None:
         if path not in _pending_recovery_paths:
             _pending_recovery_paths.append(path)
@@ -107,7 +104,8 @@ def recover_missing_content(
 
 
 def is_path_under_prefixes(path: str, prefixes: list[str]) -> bool:
-    return path_prefix_matcher(prefixes)(path)
+    candidate = Path(os.path.abspath(path))
+    return any(candidate.is_relative_to(os.path.abspath(prefix)) for prefix in prefixes)
 
 
 def split_content(session: Session, content: AssetContent, stat_result: os.stat_result, hash_value: str | None) -> AssetContent:
@@ -159,14 +157,10 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
     queued_count = min(len(_pending_verification_ids), limit or len(_pending_verification_ids))
     processed = 0
     for _ in range(queued_count):
-        # Commit the previous entry's writes so this entry's hash runs with no transaction open.
-        # That needs a create_session() session: on a write session the next read takes the lock.
-        session.commit()
         content_id = _pending_verification_ids.pop(0)
         content = session.get(AssetContent, content_id)
         if content is None or content.is_missing:
             continue
-        loaded = (content.hash, content.size_bytes, content.mtime_ns)
         try:
             os.stat(content.path, follow_symlinks=True)
         except FileNotFoundError:
@@ -187,10 +181,6 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
             continue
         digest, verified_stat = snapshot
         stored_hash = to_stored_hash(digest)
-        # Skip a row another writer retired or changed while the file was hashed.
-        content = session.get(AssetContent, content_id, populate_existing=True)
-        if content is None or content.is_missing or (content.hash, content.size_bytes, content.mtime_ns) != loaded:
-            continue
 
         if content.hash == stored_hash or content.hash is None:
             content.hash = stored_hash

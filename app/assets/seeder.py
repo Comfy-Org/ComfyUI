@@ -2,15 +2,15 @@
 exposing pause, resume, cancel and progress to the API. A run seeds
 newly-observed files first, then enriches records in batches, and settles any
 pending hash-mode transition at the start of the enrich phase so a server that
-receives no prompts still completes the switch. An enrichment pass ends when
-its ordered candidate cursor is exhausted.
+receives no prompts still completes the switch. A pass stops once batches stop
+making progress, bounding a scan over files that cannot be read.
 """
 
 import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, TypedDict
 
@@ -410,9 +410,7 @@ class _AssetSeeder:
             progress = (
                 _snapshot_progress(self._scan_state)
                 if self._scan_state is not None
-                else replace(self._last_progress)
-                if self._last_progress is not None
-                else None
+                else self._last_progress
             )
             return ScanStatus(
                 state=self._state,
@@ -441,7 +439,7 @@ class _AssetSeeder:
                 self._thread = None
         return joined
 
-    def mark_missing_outside_prefixes(self) -> int | None:
+    def mark_missing_outside_prefixes(self) -> int:
         """Mark references as missing when outside all known root prefixes.
 
         This is a non-destructive soft-delete operation. Assets and their
@@ -455,10 +453,7 @@ class _AssetSeeder:
         a full scan of all roots or during maintenance.
 
         Returns:
-            Number of references marked as missing, or None when the marking
-            itself failed. Zero and None are deliberately distinct: zero means
-            nothing was outside the known prefixes, None means the answer is
-            unknown, so callers must not report a failed prune as a clean one.
+            Number of references marked as missing
 
         Raises:
             ScanInProgressError: If a scan is currently running
@@ -479,8 +474,6 @@ class _AssetSeeder:
 
             all_prefixes = get_owned_prefixes()
             marked = mark_missing_outside_prefixes_safely(all_prefixes)
-            if marked is None:
-                return None
             emit(
                 "seeder.marked_missing",
                 count=marked,
@@ -631,21 +624,13 @@ class _AssetSeeder:
             if self._prune_first:
                 all_prefixes = get_owned_prefixes()
                 marked = mark_missing_outside_prefixes_safely(all_prefixes)
-                marked_count = 0 if marked is None else marked
-                if marked is None:
-                    self._add_error(
-                        "Marking missing assets failed; scan continued without pruning"
-                    )
-                else:
-                    emit(
-                        "seeder.marked_missing",
-                        count=marked_count,
-                        stage=_ScanStage.PRUNING.value,
-                    )
-                if marked_count > 0:
-                    logging.info(
-                        "Marked %d refs as missing before scan", marked_count
-                    )
+                emit(
+                    "seeder.marked_missing",
+                    count=marked,
+                    stage=_ScanStage.PRUNING.value,
+                )
+                if marked > 0:
+                    logging.info("Marked %d refs as missing before scan", marked)
                 sync_temp_references_safely(scan_state)
 
             if self._check_pause_and_cancel(_ScanStage.PRUNING):
@@ -863,26 +848,12 @@ class _AssetSeeder:
 
             batch = specs[i : i + batch_size]
             batch_tags = {t for spec in batch for t in spec["tags"]}
-            created = 0
             try:
-                created, batch_error = insert_asset_specs(batch, batch_tags)
+                created = insert_asset_specs(batch, batch_tags)
                 total_created += created
-                if batch_error is not None:
-                    raise batch_error
-            except MemoryError:
-                # Recording this as a batch failure would march the scan through
-                # every remaining batch while the process is out of memory.
-                raise
             except Exception as e:
-                self._add_error(
-                    f"Batch insert encountered an error at offset {i} "
-                    f"after creating {created}: {e}"
-                )
-                logging.exception(
-                    "Batch insert encountered an error at offset %d after creating %d",
-                    i,
-                    created,
-                )
+                self._add_error(f"Batch insert failed at offset {i}: {e}")
+                logging.exception("Batch insert failed at offset %d", i)
                 emit("seeder.batch_insert_failed", error_type=error_type(e))
 
             scanned = i + len(batch)
@@ -902,7 +873,9 @@ class _AssetSeeder:
                 last_progress_time = now
 
         self._update_progress(scanned=len(specs), created=total_created)
-        tick_watch_list()
+        with create_session() as session:
+            tick_watch_list(session)
+            session.commit()
         logging.info(
             "Fast scan complete: %.3fs total (created=%d, skipped=%d, total_paths=%d)",
             time.perf_counter() - t_fast_start,
@@ -922,8 +895,7 @@ class _AssetSeeder:
         scan_state = self._scan_state
         with create_session() as session:
             drain_pending_verifications(session)
-            session.commit()
-            tick_watch_list()
+            tick_watch_list(session)
             for _ in range(3):
                 drain_transition_queue(session)
                 session.commit()
@@ -938,7 +910,9 @@ class _AssetSeeder:
             {"roots": list(roots), "phase": "enrich"},
         )
 
-        last_seen_id: str | None = None
+        skip_ids: set[str] = set()
+        consecutive_empty = 0
+        max_consecutive_empty = 3
 
         while True:
             if self._check_pause_and_cancel(_ScanStage.ENRICH):
@@ -950,13 +924,16 @@ class _AssetSeeder:
                 roots,
                 compute_hashes=self._compute_hashes,
                 limit=batch_size,
-                last_seen_id=last_seen_id,
             )
+
+            # Filter out previously failed references
+            if skip_ids:
+                unenriched = [row for row in unenriched if row.record_id not in skip_ids]
 
             if not unenriched:
                 break
 
-            enriched, _failed_ids, consumed = enrich_assets_batch(
+            enriched, failed_ids = enrich_assets_batch(
                 unenriched,
                 extract_metadata=True,
                 compute_hash=self._compute_hashes,
@@ -964,8 +941,19 @@ class _AssetSeeder:
                 progress=scan_state,
             )
             total_enriched += enriched
-            if consumed > 0:
-                last_seen_id = unenriched[consumed - 1].record_id
+            skip_ids.update(failed_ids)
+
+            if enriched == 0:
+                consecutive_empty += 1
+                if consecutive_empty >= max_consecutive_empty:
+                    logging.warning(
+                        "Enrich phase stopping: %d consecutive batches with no progress (%d skipped)",
+                        consecutive_empty,
+                        len(skip_ids),
+                    )
+                    break
+            else:
+                consecutive_empty = 0
 
             now = time.perf_counter()
             if now - last_progress_time >= progress_interval:

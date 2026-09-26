@@ -2,7 +2,8 @@
 and files, recording a hash-mode transition, and handing the filesystem scan to
 the background seeder. Startup only enqueues transition work — draining it
 belongs to the seeder, so a large library cannot stall the server before it
-accepts requests.
+accepts requests. It also settles, before any of that, whether the database
+dependencies exist at all, disabling the asset routes when they do not.
 """
 
 from __future__ import annotations
