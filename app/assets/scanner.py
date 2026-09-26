@@ -46,6 +46,7 @@ from app.assets.scanner_admission import (
     tick_watch_list as tick_watch_list,
 )
 from app.assets.services.file_utils import get_mtime_ns, is_visible, list_files_recursively
+from app.assets.services.gil import yield_gil
 from app.assets.services.image_dimensions import extract_image_dimensions
 from app.assets.services.metadata_extract import ExtractedMetadata, extract_file_metadata
 from app.assets.services.path_utils import (
@@ -297,7 +298,9 @@ def mark_contents_missing_outside_prefixes(
     session: Session, prefixes: list[str]
 ) -> int:
     contents = session.scalars(
-        sa.select(AssetContent).where(AssetContent.is_missing.is_(False))
+        sa.select(AssetContent)
+        .where(AssetContent.is_missing.is_(False))
+        .execution_options(yield_per=500)
     )
     is_owned = path_prefix_matcher(prefixes)
     missing = [content for content in contents if not is_owned(content.path)]
@@ -364,6 +367,7 @@ def build_asset_specs(
     admitted_paths, _ = _two_stat_admit(candidates)
     candidate_stats = dict(candidates)
     for abs_p in admitted_paths:
+        yield_gil()
         stat_p = candidate_stats[abs_p]
         name, tags = get_name_and_tags_from_asset_path(abs_p)
         rel_fname = compute_loader_path(abs_p)
