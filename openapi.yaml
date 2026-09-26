@@ -1,4 +1,35 @@
 components:
+    responses:
+        SessionForbidden:
+            content:
+                application/json:
+                    schema:
+                        $ref: '#/components/schemas/ForbiddenError'
+            description: A refused request. For a web session, `code` is `workspace_access_denied` (the selected workspace is unknown, deleted, or the user is not a member; the three look the same), `origin_not_allowed` or `cross_site_request`; see the `WebSessionAuth` scheme. `FORBIDDEN` is the route's own authorization check failing, such as an unverified email. A credential this route does not take, or the session while `web_session_enabled` is off for the user, gets AuthTypeNotAllowedError instead.
+        SessionUnauthorized:
+            content:
+                application/json:
+                    schema:
+                        $ref: '#/components/schemas/ErrorResponse'
+            description: No valid credential, or an `Authorization` header, `X-API-Key` header or `?token=` next to the session cookie that could not be read, which is refused rather than answered with the session. `code` is `UNAUTHORIZED`.
+        SessionWorkspaceAccessDenied:
+            content:
+                application/json:
+                    schema:
+                        $ref: '#/components/schemas/ErrorResponse'
+            description: '`code` is `workspace_access_denied`: the selected workspace is unknown, deleted, or the user is not a member; the three look the same. This route also serves anonymous callers, so the session''s other refusals fall back to an anonymous request. See the `WebSessionAuth` scheme.'
+        SessionWorkspaceIDInvalid:
+            content:
+                application/json:
+                    schema:
+                        $ref: '#/components/schemas/ErrorResponse'
+            description: '`code` is `workspace_id_invalid`: the `X-Comfy-Workspace-ID` header or `workspace_id` query value is malformed, or conflicts with another value or with the workspace the credential resolves to. See the `WebSessionAuth` scheme.'
+        SessionWriteForbidden:
+            content:
+                application/json:
+                    schema:
+                        $ref: '#/components/schemas/ForbiddenError'
+            description: A refused request that changes data. For a web session, `code` is `csrf_invalid` (no `X-CSRF-Token`, or not the session's), `workspace_access_denied` (the selected workspace is unknown, deleted, or the user is not a member; the three look the same), `origin_not_allowed` or `cross_site_request`; see the `WebSessionAuth` scheme. `FORBIDDEN` is the route's own authorization check failing, such as an unverified email. A credential this route does not take, or the session while `web_session_enabled` is off for the user, gets AuthTypeNotAllowedError instead.
     schemas:
         Asset:
             description: Represents a user-owned asset (image, video, or other generated output).
@@ -9,6 +40,10 @@ components:
                     type: string
                 display_name:
                     description: Display name of the asset. Mirrors name for backwards compatibility.
+                    nullable: true
+                    type: string
+                file_path:
+                    description: Relative path in global-namespace-root form (e.g. "models/checkpoints/flux.safetensors")
                     nullable: true
                     type: string
                 hash:
@@ -148,6 +183,10 @@ components:
                     description: Display name of the asset. Mirrors name for backwards compatibility.
                     nullable: true
                     type: string
+                file_path:
+                    description: Relative path in global-namespace-root form (e.g. "models/checkpoints/flux.safetensors")
+                    nullable: true
+                    type: string
                 hash:
                     description: Blake3 hash of the asset content.
                     pattern: ^blake3:[a-f0-9]{64}$
@@ -188,6 +227,29 @@ components:
                 - id
                 - updated_at
             type: object
+        AuthTypeNotAllowedError:
+            description: 403 for a credential the route does not take. `accepted` names the ones it does, as `WWW-Authenticate` does.
+            properties:
+                accepted:
+                    items:
+                        type: string
+                    type: array
+                error:
+                    properties:
+                        message:
+                            type: string
+                        type:
+                            enum:
+                                - auth_type_not_allowed
+                            type: string
+                    required:
+                        - message
+                        - type
+                    type: object
+            required:
+                - error
+                - accepted
+            type: object
         ChurnkeyAuthResponse:
             description: |
                 Credentials the Churnkey embed requires to launch the cancel flow.
@@ -207,6 +269,16 @@ components:
                         - live
                         - test
                         - sandbox
+                    type: string
+                offer_subscription_id:
+                    description: |
+                        Stripe subscription a native Churnkey retention offer may apply to.
+                        Present only when the caller is in the native-offer rollout and owns
+                        a Personal workspace on an active paid monthly plan with no billing
+                        change in flight; absent otherwise, and the client then keeps offers
+                        disabled. Present in any mode. Not a signed authorization: the HMAC
+                        covers only the customer ID.
+                    minLength: 1
                     type: string
             required:
                 - customer_id
@@ -335,6 +407,11 @@ components:
         FeedbackResponse:
             description: Response after submitting feedback
             type: object
+        ForbiddenError:
+            description: 'A 403 body: ErrorResponse, or AuthTypeNotAllowedError for a credential the route does not take.'
+            oneOf:
+                - $ref: '#/components/schemas/ErrorResponse'
+                - $ref: '#/components/schemas/AuthTypeNotAllowedError'
         ForkWorkflowRequest:
             description: Request body for forking an existing workflow into the user's account.
             properties:
@@ -1607,6 +1684,42 @@ components:
             in: cookie
             name: session
             type: apiKey
+        WebSessionAuth:
+            description: |
+                Server-side web session, set by `POST /api/auth/session`. The media
+                routes, the short-link redirect and OAuth consent accept it. The
+                user-facing API groups accept it too, for users with the
+                `web_session_enabled` flag on; machine, admin and service-token routes
+                never do. A credential in a header always wins and never falls back to
+                the cookie.
+
+                Wherever the cookie is accepted, the request is checked before the
+                handler runs (403 with the `code` shown):
+                - `cross_site_request`: the browser labels it `Sec-Fetch-Site:
+                  cross-site`, other than a top-level GET navigation to the short-link
+                  redirect or OAuth consent.
+                - `origin_not_allowed`: an `Origin` that is not on the trusted-origins
+                  list, unless the call is labelled same-origin; a POST, PUT, PATCH or
+                  DELETE with no `Origin`; or, on API routes, a request without
+                  `X-Comfy-Client`, which SDK clients send with their name and version.
+                - `csrf_invalid`: a POST, PUT, PATCH or DELETE without the session's
+                  CSRF token in `X-CSRF-Token`.
+
+                With the flag on, `X-Comfy-Workspace-ID` (or `?workspace_id=` where a
+                header cannot go) selects the workspace; absent means the personal
+                workspace. A malformed or conflicting id is 400 `workspace_id_invalid`.
+                An unknown or deleted workspace, or one the user is not a member of, is
+                403 `workspace_access_denied`. Both are answered on routes that also
+                serve anonymous callers; there, the other refusals fall back to an
+                anonymous request.
+
+                A token or API key whose workspace selector names another workspace
+                than the one it resolves to is 400 `workspace_id_invalid` on these
+                routes, while the flag is on for its user. A service token, which has
+                no workspace, ignores the selector.
+            in: cookie
+            name: __Host-comfy_session
+            type: apiKey
 info:
     description: |
         API for ComfyUI - A powerful and modular UI for Stable Diffusion.
@@ -1706,6 +1819,11 @@ paths:
                   name: name_contains
                   schema:
                     type: string
+                - description: JSON object for filtering by metadata fields
+                  in: query
+                  name: metadata_filter
+                  schema:
+                    type: string
                 - description: Maximum number of assets to return (1-500)
                   in: query
                   name: limit
@@ -1790,12 +1908,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List user assets
             tags:
                 - file
@@ -1869,6 +1993,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "413":
                     content:
                         application/json:
@@ -1893,6 +2019,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Create a new asset
             tags:
                 - file
@@ -1911,12 +2041,16 @@ paths:
             responses:
                 "204":
                     description: Asset record deleted successfully
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -1935,6 +2069,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Delete asset
             tags:
                 - file
@@ -1956,12 +2094,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/Asset'
                     description: Asset details retrieved successfully
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -1974,6 +2116,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get asset details
             tags:
                 - file
@@ -2034,6 +2180,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -2049,6 +2197,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Update asset metadata
             tags:
                 - file
@@ -2175,6 +2327,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -2193,6 +2347,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Remove tags from asset
             tags:
                 - file
@@ -2241,6 +2399,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -2259,6 +2419,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Add tags to asset
             tags:
                 - file
@@ -2326,6 +2490,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -2344,6 +2510,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Create asset reference from existing hash
             tags:
                 - file
@@ -2372,11 +2542,9 @@ paths:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Invalid hash format
                 "401":
-                    content:
-                        application/json:
-                            schema:
-                                $ref: '#/components/schemas/ErrorResponse'
-                    description: Unauthorized
+                    description: No valid credential (see SessionUnauthorized). No body.
+                "403":
+                    description: A refused web session request, or the route's own authorization check failing (see SessionForbidden). A HEAD response has no body, so the code is not sent.
                 "404":
                     description: Asset not found
                 "500":
@@ -2385,6 +2553,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Check if asset exists by hash
             tags:
                 - file
@@ -2539,6 +2711,11 @@ paths:
                   name: name_contains
                   schema:
                     type: string
+                - description: JSON object for filtering by metadata fields
+                  in: query
+                  name: metadata_filter
+                  schema:
+                    type: string
                 - description: Maximum number of tags to return (1-1000, default 100)
                   in: query
                   name: limit
@@ -2572,12 +2749,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get tag histogram for filtered assets
             tags:
                 - file
@@ -2595,12 +2778,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ChurnkeyAuthResponse'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -2621,6 +2808,7 @@ paths:
                     description: Churnkey is not configured on the server
             security:
                 - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get Churnkey HMAC auth credentials
             tags:
                 - billing
@@ -2658,6 +2846,10 @@ paths:
                                     $ref: '#/components/schemas/ModelFolder'
                                 type: array
                     description: Success - List of model folders
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "403":
+                    $ref: '#/components/responses/SessionWorkspaceAccessDenied'
                 "500":
                     content:
                         application/json:
@@ -2667,6 +2859,7 @@ paths:
             security:
                 - ApiKeyAuth: []
                 - BearerAuth: []
+                - WebSessionAuth: []
                 - {}
             summary: Get available model folders
             tags:
@@ -2698,6 +2891,10 @@ paths:
                                     $ref: '#/components/schemas/ModelFile'
                                 type: array
                     description: Success - List of models in the folder
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "403":
+                    $ref: '#/components/responses/SessionWorkspaceAccessDenied'
                 "404":
                     content:
                         application/json:
@@ -2713,6 +2910,7 @@ paths:
             security:
                 - ApiKeyAuth: []
                 - BearerAuth: []
+                - WebSessionAuth: []
                 - {}
             summary: Get models in a specific folder
             tags:
@@ -2749,6 +2947,9 @@ paths:
                             schema:
                                 additionalProperties: true
                                 properties:
+                                    billing_web_url:
+                                        description: Origin of the billing-web deployment paired with this Cloud environment (e.g. https://billing.comfy.org). Absent when BILLING_WEB_URL is not configured on the server, so a client can tell "not configured" from "configured as empty".
+                                        type: string
                                     free_tier_balance:
                                         description: Free-tier job allowance for an authenticated non-paid (FREE-tier) user in the rollout. Absent for paid users and unauthenticated requests. Synthesized from config before a grant row exists so a brand-new user still sees their full allowance.
                                         properties:
@@ -2769,6 +2970,9 @@ paths:
                                     max_upload_size:
                                         description: Maximum upload size in bytes
                                         type: integer
+                                    stripe_publishable_key:
+                                        description: Stripe publishable key (pk_...) for the environment's Stripe account. Public by design (the secret key is never exposed here). Absent when STRIPE_PUBLISHABLE_KEY is not configured on the server, so a client can tell "not configured" from "configured as empty".
+                                        type: string
                                     supports_preview_metadata:
                                         description: Whether the server supports preview metadata
                                         type: boolean
@@ -2783,11 +2987,15 @@ paths:
                             description: Cache key includes auth headers so anonymous and authenticated responses are stored separately
                             schema:
                                 type: string
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "403":
+                    $ref: '#/components/responses/SessionWorkspaceAccessDenied'
             security:
                 - ApiKeyAuth: []
                 - BearerAuth: []
-                - CookieAuth: []
                 - {}
+                - WebSessionAuth: []
             summary: Get server feature flags
             tags:
                 - node
@@ -2820,12 +3028,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Submit user feedback
             tags:
                 - feedback
@@ -2868,12 +3082,22 @@ paths:
                                         type: string
                                 type: object
                     description: Success - Related mask layers returned
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "401":
+                    $ref: '#/components/responses/SessionUnauthorized'
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: File not found or not a mask file
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get related mask layer files
             tags:
                 - file
@@ -2989,12 +3213,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Manage execution history
             tags:
                 - workflow
@@ -3028,18 +3258,26 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/HistoryResponse'
                     description: Success - Execution history retrieved
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get execution history (v2)
             tags:
                 - workflow
@@ -3068,12 +3306,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/HistoryDetailResponse'
                     description: Success - History for prompt retrieved
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -3086,6 +3328,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get history for specific prompt
             tags:
                 - workflow
@@ -3119,18 +3365,26 @@ paths:
             responses:
                 "200":
                     description: Success - first active job cancelled, or no active job found
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Interrupt the first active job
             tags:
                 - queue
@@ -3157,6 +3411,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/JobStatusResponse'
                     description: Success - Job status returned
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
@@ -3181,6 +3437,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get job status (deprecated)
             tags:
                 - job
@@ -3282,12 +3542,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List jobs with pagination and filtering
             tags:
                 - workflow
@@ -3323,6 +3589,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/JobDetailResponse'
                     description: Success - Job details retrieved
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
@@ -3347,6 +3615,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get full job details
             tags:
                 - workflow
@@ -3403,6 +3675,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -3415,6 +3689,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List a job's output assets
             tags:
                 - workflow
@@ -3454,6 +3732,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -3466,6 +3746,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error - cancellation failed
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Cancel a job
             tags:
                 - workflow
@@ -3512,6 +3796,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -3524,6 +3810,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error - cancellation failed
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Cancel multiple jobs
             tags:
                 - workflow
@@ -3564,6 +3854,16 @@ paths:
                                     $ref: '#/components/schemas/NodeInfo'
                                 type: object
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
+                "401":
+                    $ref: '#/components/responses/SessionUnauthorized'
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get all node information
             tags:
                 - node
@@ -3578,18 +3878,26 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/PromptInfo'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get information about current prompt execution
             tags:
                 - workflow
@@ -3616,7 +3924,9 @@ paths:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/PromptErrorResponse'
-                    description: Invalid prompt
+                    description: Invalid prompt, or `code` `workspace_id_invalid` (see SessionWorkspaceIDInvalid).
+                "401":
+                    $ref: '#/components/responses/SessionUnauthorized'
                 "402":
                     content:
                         application/json:
@@ -3628,7 +3938,7 @@ paths:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/PromptErrorResponse'
-                    description: Workspace governance policy blocks one or more partner providers (error.type PARTNER_NODE_DISABLED; error.class_types lists the offending nodes, error.providers the disabled providers)
+                    description: Workspace governance policy blocks one or more partner providers (error.type PARTNER_NODE_DISABLED; error.class_types lists the offending nodes, error.providers the disabled providers), or a refused request with `code` and `message` (see SessionWriteForbidden).
                 "413":
                     content:
                         application/json:
@@ -3653,6 +3963,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/PromptErrorResponse'
                     description: Service unavailable
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Submit a workflow for execution
             tags:
                 - workflow
@@ -3679,12 +3993,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Invalid request parameters
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get queue information
             tags:
                 - queue
@@ -3727,12 +4047,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Manage queue operations
             tags:
                 - queue
@@ -3749,12 +4075,20 @@ paths:
                                 description: User settings as key-value pairs
                                 type: object
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get all user settings
             tags:
                 - settings
@@ -3794,6 +4128,12 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Update multiple settings
             tags:
                 - settings
@@ -3819,18 +4159,26 @@ paths:
                                         description: The setting value
                                 type: object
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Setting not found
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get a specific setting by id
             tags:
                 - settings
@@ -3877,6 +4225,12 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Update a specific setting by id
             tags:
                 - settings
@@ -3968,12 +4322,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List all tags
             tags:
                 - file
@@ -4047,12 +4407,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/TasksListResponse'
                     description: Success - Tasks retrieved
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "422":
                     content:
                         application/json:
@@ -4065,6 +4429,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List background tasks
             tags:
                 - task
@@ -4088,12 +4456,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/TaskResponse'
                     description: Success - Task details retrieved
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized - Authentication required
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -4106,6 +4478,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get task details
             tags:
                 - task
@@ -4172,12 +4548,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Upload an image file
             tags:
                 - file
@@ -4240,12 +4622,18 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Upload a mask image
             tags:
                 - file
@@ -4260,12 +4648,20 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/UserResponse'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get current user information
             tags:
                 - user
@@ -4306,16 +4702,24 @@ paths:
                     description: A list of user data files.
                 "400":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Bad request (e.g., invalid filename).
                 "401":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Unauthorized.
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         text/plain:
@@ -4328,6 +4732,10 @@ paths:
                             schema:
                                 type: string
                     description: General error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List user data files
             tags:
                 - user
@@ -4347,12 +4755,19 @@ paths:
             responses:
                 "204":
                     description: File deleted successfully (No Content).
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Unauthorized.
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         text/plain:
@@ -4365,6 +4780,10 @@ paths:
                             schema:
                                 type: string
                     description: Internal server error.
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Delete a user data file
             tags:
                 - user
@@ -4388,16 +4807,24 @@ paths:
                     description: Successfully retrieved the file.
                 "400":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Bad request (e.g., invalid filename).
                 "401":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Unauthorized.
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         text/plain:
@@ -4410,6 +4837,10 @@ paths:
                             schema:
                                 type: string
                     description: General error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get user data file
             tags:
                 - user
@@ -4459,18 +4890,27 @@ paths:
                     description: File uploaded successfully.
                 "400":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Missing or invalid 'file' parameter.
                 "401":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Unauthorized.
                 "403":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
@@ -4487,6 +4927,10 @@ paths:
                             schema:
                                 type: string
                     description: General error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Upload or update a user data file
             tags:
                 - user
@@ -4527,16 +4971,24 @@ paths:
                     description: File moved successfully.
                 "400":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Missing or invalid parameters.
                 "401":
                     content:
+                        application/json:
+                            schema:
+                                $ref: '#/components/schemas/ErrorResponse'
                         text/plain:
                             schema:
                                 type: string
                     description: Unauthorized.
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         text/plain:
@@ -4555,6 +5007,10 @@ paths:
                             schema:
                                 type: string
                     description: General error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Move or rename a user data file
             tags:
                 - user
@@ -4576,12 +5032,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowPublishInfo'
                     description: Publish info (publish_time is null if never published)
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -4594,6 +5054,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get publish info for a workflow file
             tags:
                 - workflows
@@ -4632,6 +5096,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -4644,6 +5110,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Publish a workflow file
             tags:
                 - workflows
@@ -4671,12 +5141,20 @@ paths:
                                     - migrated
                                 type: object
                     description: Userdata storage information
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: ComfyUI userdata storage info
             tags:
                 - user
@@ -4951,18 +5429,26 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowListResponse'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "500":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: List workflows
             tags:
                 - workflows
@@ -4982,12 +5468,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowResponse'
                     description: Workflow created successfully
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "422":
                     content:
                         application/json:
@@ -5000,6 +5490,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Create a new workflow
             tags:
                 - workflows
@@ -5017,12 +5511,16 @@ paths:
             responses:
                 "204":
                     description: Workflow deleted successfully
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -5035,6 +5533,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Delete workflow
             tags:
                 - workflows
@@ -5055,6 +5557,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowResponse'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
@@ -5079,6 +5583,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get workflow
             tags:
                 - workflows
@@ -5105,12 +5613,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowResponse'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionWriteForbidden'
                 "404":
                     content:
                         application/json:
@@ -5129,6 +5641,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Update workflow metadata
             tags:
                 - workflows
@@ -5150,6 +5666,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowVersionContentResponse'
                     description: Success
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
@@ -5174,6 +5692,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get workflow content
             tags:
                 - workflows
@@ -5201,6 +5723,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowResponse'
                     description: Workflow forked successfully
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
@@ -5231,6 +5755,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Fork a workflow
             tags:
                 - workflows
@@ -5258,6 +5786,8 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/WorkflowVersionResponse'
                     description: Version created successfully
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
@@ -5294,6 +5824,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Create a new version
             tags:
                 - workflows
@@ -5317,12 +5851,16 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/PublishedWorkflowDetail'
                     description: Published workflow details with asset statuses
+                "400":
+                    $ref: '#/components/responses/SessionWorkspaceIDInvalid'
                 "401":
                     content:
                         application/json:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Unauthorized
+                "403":
+                    $ref: '#/components/responses/SessionForbidden'
                 "404":
                     content:
                         application/json:
@@ -5341,6 +5879,10 @@ paths:
                             schema:
                                 $ref: '#/components/schemas/ErrorResponse'
                     description: Internal server error
+            security:
+                - ApiKeyAuth: []
+                - BearerAuth: []
+                - WebSessionAuth: []
             summary: Get a published workflow by share ID
             tags:
                 - workflows
