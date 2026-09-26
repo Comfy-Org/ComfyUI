@@ -2009,6 +2009,9 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
     return False
 
 def supports_fp8_compute(device=None):
+    if device is not None and not is_device_cuda(device):
+        return False
+
     if SUPPORT_FP8_OPS:
         return True
 
@@ -2036,6 +2039,9 @@ def supports_nvfp4_compute(device=None):
     if not is_nvidia():
         return False
 
+    if device is not None and not is_device_cuda(device):
+        return False
+
     props = torch.cuda.get_device_properties(device)
     if props.major < 10:
         return False
@@ -2047,6 +2053,9 @@ def supports_mxfp8_compute(device=None):
         return False
 
     if torch_version_numeric < (2, 10):
+        return False
+
+    if device is not None and not is_device_cuda(device):
         return False
 
     props = torch.cuda.get_device_properties(device)
