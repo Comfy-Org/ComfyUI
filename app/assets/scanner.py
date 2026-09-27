@@ -45,7 +45,14 @@ from app.assets.scanner_admission import (
     _two_stat_admit,
     tick_watch_list as tick_watch_list,
 )
-from app.assets.services.file_utils import get_mtime_ns, is_visible, list_files_recursively
+from app.assets.services.file_utils import (
+    DirListings,
+    ListingWalk,
+    get_mtime_ns,
+    is_visible,
+    list_files_recursively,
+    walk_listings,
+)
 from app.assets.services.gil import yield_gil
 from app.assets.services.image_dimensions import extract_image_dimensions
 from app.assets.services.metadata_extract import ExtractedMetadata, extract_file_metadata
@@ -319,6 +326,98 @@ def collect_paths_for_roots(roots: tuple[RootType, ...]) -> list[str]:
     if "output" in roots:
         paths.extend(list_files_recursively(folder_paths.get_output_directory()))
     return paths
+
+
+def rescans_output_by_listing(roots: tuple[RootType, ...]) -> bool:
+    """Whether this scan checks the catalog against directory listings rather than by
+    stat'ing every live row. Only output-only scans do: the rescan queued after each prompt.
+
+    The listing diff catches every add and delete, but nothing stats an already-cataloged
+    file, so an in-place overwrite (same path; new content, size or mtime) goes undetected
+    until the next scan that is not output-only, such as the startup scan. Core save nodes
+    never overwrite, and reported outputs are registered at save time, so this only
+    affects files written by something else.
+    """
+    return tuple(roots) == ("output",)
+
+
+def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservation]]:
+    """The live rows under ``root`` by path, read without touching the filesystem.
+
+    Each is observed as gone (``stat_result=None``): what apply_reference_observations
+    needs to retire it, should its path turn out not to be listed. Empty on failure, as
+    sync_root_safely is.
+    """
+    prefixes = get_scan_prefixes_for_root(root)
+    live: dict[str, list[_ReferenceObservation]] = {}
+    if not prefixes:
+        return live
+    stmt = sa.select(
+        AssetContent.id, AssetContent.path, AssetContent.size_bytes, AssetContent.mtime_ns
+    ).where(
+        AssetContent.is_missing.is_(False),
+        sa.or_(*(sql_path_under_prefix(AssetContent.path, p) for p in prefixes)),
+    )
+    try:
+        with create_session() as session:
+            for content_id, path, size_bytes, mtime_ns in session.execute(stmt):
+                live.setdefault(os.path.abspath(path), []).append(
+                    _ReferenceObservation(content_id, size_bytes, mtime_ns, None)
+                )
+    except Exception as exc:
+        logging.exception("fast DB scan failed for %s: %s", root, exc)
+        emit("scanner.fast_scan_failed", root=root, error_type=error_type(exc))
+        return {}
+    return live
+
+
+def unlisted_references(
+    live: dict[str, list[_ReferenceObservation]], listings: DirListings
+) -> tuple[list[_ReferenceObservation], int]:
+    """Split the live rows into (vanished, skipped count).
+
+    A row has vanished only when its parent directory was listed in this walk and its
+    name is absent from that listing. Every other row is skipped untouched: a hidden name
+    or path component, a directory that failed to list, and a path reachable only through
+    a symlink alias the walk did not take are all cases where the listing says nothing
+    about whether the file exists.
+    """
+    vanished: list[_ReferenceObservation] = []
+    skipped = 0
+    names_by_dir: dict[str, set[str]] = {}
+    for path, observations in live.items():
+        parent, name = os.path.split(path)
+        listing = listings.get(parent)
+        if listing is None or not is_visible(name):
+            skipped += len(observations)
+            continue
+        names = names_by_dir.get(parent)
+        if names is None:
+            names = names_by_dir[parent] = {*listing[1], *listing[2]}
+        if name not in names:
+            vanished.extend(observations)
+    return vanished, skipped
+
+
+def mark_unlisted_references_missing_safely(
+    root: RootType, observations: list[_ReferenceObservation]
+) -> None:
+    """Retire rows whose file the listing lacks, through the same guarded write
+    sync_root applies to a row whose file has vanished."""
+    if not observations:
+        return
+    try:
+        with create_write_session() as session:
+            apply_reference_observations(session, observations)
+            session.commit()
+    except Exception as exc:
+        logging.exception("fast DB scan failed for %s: %s", root, exc)
+        emit("scanner.fast_scan_failed", root=root, error_type=error_type(exc))
+
+
+def list_output_for_rescan() -> ListingWalk:
+    """Walk the output root, listing every directory."""
+    return walk_listings(folder_paths.get_output_directory())
 
 
 def build_asset_specs(

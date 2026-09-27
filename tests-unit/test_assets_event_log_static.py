@@ -53,6 +53,10 @@ EXPECTED_CALL_SITES: frozenset[CallSite] = frozenset(
         CallSite("app/assets/seeder.py", "_run_fast_phase", "seeder.batch_insert_failed"),
         # todo 11 - scanner failure paths
         CallSite("app/assets/scanner.py", "sync_root_safely", "scanner.fast_scan_failed"),
+        CallSite("app/assets/scanner.py", "live_references_safely", "scanner.fast_scan_failed"),
+        CallSite(
+            "app/assets/scanner.py", "mark_unlisted_references_missing_safely", "scanner.fast_scan_failed"
+        ),
         CallSite("app/assets/scanner.py", "sync_temp_references_safely", "scanner.temp_sync_failed"),
         CallSite(
             "app/assets/scanner.py", "mark_missing_outside_prefixes_safely", "scanner.mark_missing_failed"

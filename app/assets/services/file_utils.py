@@ -1,4 +1,5 @@
 import os
+from typing import NamedTuple
 
 
 def get_mtime_ns(stat_result: os.stat_result) -> int:
@@ -68,3 +69,64 @@ def list_files_recursively(base_dir: str) -> list[str]:
                 continue
             out.append(os.path.abspath(os.path.join(dirpath, name)))
     return out
+
+
+# dir path -> (st_mtime_ns, visible file names, visible subdir names)
+DirListings = dict[str, tuple[int, list[str], list[str]]]
+
+
+class ListingWalk(NamedTuple):
+    files: list[str]
+    listings: DirListings
+    dirs_listed: int
+
+
+def _list_visible_entries(dirpath: str) -> tuple[list[str], list[str]]:
+    """One directory's visible (file names, subdir names), classified as os.walk does:
+    anything whose is_dir() is false or raises, broken symlinks included, is a file."""
+    files: list[str] = []
+    subdirs: list[str] = []
+    with os.scandir(dirpath) as entries:
+        for entry in entries:
+            if not is_visible(entry.name):
+                continue
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                is_dir = False
+            (subdirs if is_dir else files).append(entry.name)
+    return files, subdirs
+
+
+def walk_listings(base_dir: str) -> ListingWalk:
+    """list_files_recursively, also returning every directory listing it read.
+
+    Same traversal as the os.walk version (visit order, symlink following, device/inode
+    cycle guard, hidden filtering), except each directory is stat'ed before it is listed.
+    ``listings`` holds exactly the directories this walk listed, keyed by normalized
+    absolute path, so it doubles as the record of which directories the walk can vouch for.
+    """
+    files: list[str] = []
+    listings: DirListings = {}
+    # No isdir() precheck, so each directory costs exactly one stat: a root that is
+    # missing or not a directory fails its stat or scandir below and yields nothing.
+    seen_dirs: set[tuple[int, int]] = set()
+    stack = [os.path.abspath(base_dir)]
+    while stack:
+        dirpath = stack.pop()
+        try:
+            st = os.stat(dirpath)
+        except OSError:
+            continue
+        dir_id = (st.st_dev, st.st_ino)
+        if dir_id in seen_dirs:
+            continue
+        try:
+            names, subdirs = _list_visible_entries(dirpath)
+        except OSError:
+            continue
+        seen_dirs.add(dir_id)
+        listings[dirpath] = (st.st_mtime_ns, names, subdirs)
+        files.extend(os.path.abspath(os.path.join(dirpath, name)) for name in names)
+        stack.extend(os.path.join(dirpath, name) for name in reversed(subdirs))
+    return ListingWalk(files, listings, len(listings))

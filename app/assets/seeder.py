@@ -24,8 +24,13 @@ from app.assets.scanner import (
     get_scan_prefixes_for_root,
     get_unenriched_assets_for_roots,
     insert_asset_specs,
+    list_output_for_rescan,
+    live_references_safely,
     mark_missing_outside_prefixes_safely,
+    mark_unlisted_references_missing_safely,
+    rescans_output_by_listing,
     sync_root_safely,
+    unlisted_references,
     sync_temp_references_safely,
     drain_pending_verifications,
     tick_watch_list,
@@ -796,6 +801,8 @@ class _AssetSeeder:
         total_created = 0
         skipped_existing = 0
 
+        by_listing = rescans_output_by_listing(roots)
+        live_references: dict[str, list] = {}
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()
         assert self._scan_state is not None
@@ -803,7 +810,11 @@ class _AssetSeeder:
         for r in roots:
             if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
                 return total_created, skipped_existing, 0
-            existing_paths.update(sync_root_safely(r, scan_state))
+            if by_listing:
+                live_references = live_references_safely(r)
+                existing_paths.update(live_references)
+            else:
+                existing_paths.update(sync_root_safely(r, scan_state))
         logging.debug(
             "Fast scan: sync_root phase took %.3fs (%d existing paths)",
             time.perf_counter() - t_sync,
@@ -814,12 +825,23 @@ class _AssetSeeder:
             return total_created, skipped_existing, 0
 
         t_collect = time.perf_counter()
-        paths = collect_paths_for_roots(roots)
+        walk = list_output_for_rescan() if by_listing else None
+        paths = walk.files if walk is not None else collect_paths_for_roots(roots)
         logging.debug(
             "Fast scan: collect_paths took %.3fs (%d paths found)",
             time.perf_counter() - t_collect,
             len(paths),
         )
+        if walk is not None:
+            vanished, unlisted = unlisted_references(live_references, walk.listings)
+            mark_unlisted_references_missing_safely("output", vanished)
+            logging.debug(
+                "Fast scan: output listing: %d dirs listed, %d rows retired, "
+                "%d rows skipped (parent not listed)",
+                walk.dirs_listed,
+                len(vanished),
+                unlisted,
+            )
         total_paths = len(paths)
         self._update_progress(total=total_paths)
 
