@@ -6,6 +6,8 @@ import folder_paths
 import comfy.utils
 import comfy.ops
 import comfy.model_management
+import comfy.model_prefetch
+import comfy.patcher_extension
 import comfy.storage
 import comfy.ldm.common_dit
 import comfy.latent_formats
@@ -445,13 +447,19 @@ class AnimaLLLiteApply:
         return (model_patched,)
 
 
+def in_sigma_range(transformer_options, sigma_range):
+    sigma = float(transformer_options["sigmas"].flatten()[0])
+    return sigma_range[1] <= sigma <= sigma_range[0]
+
+
 class DiffSynthCnetPatch:
-    def __init__(self, model_patch, vae, image, strength, mask=None):
+    def __init__(self, model_patch, vae, image, strength, mask=None, sigma_range=(float("inf"), 0.0)):
         self.model_patch = model_patch
         self.vae = vae
         self.image = image
         self.strength = strength
         self.mask = mask
+        self.sigma_range = sigma_range
         self.encoded_image = model_patch.model.process_input_latent_image(self.encode_latent_cond(image))
         self.encoded_image_size = (image.shape[1], image.shape[2])
 
@@ -468,6 +476,8 @@ class DiffSynthCnetPatch:
             return latent_image
 
     def __call__(self, kwargs):
+        if not in_sigma_range(kwargs["transformer_options"], self.sigma_range):
+            return kwargs
         x = kwargs.get("x")
         img = kwargs.get("img")
         block_index = kwargs.get("block_index")
@@ -492,8 +502,9 @@ class DiffSynthCnetPatch:
         return [self.model_patch]
 
 class ZImageControlPatch:
-    def __init__(self, model_patch, vae, image, strength, inpaint_image=None, mask=None):
+    def __init__(self, model_patch, vae, image, strength, inpaint_image=None, mask=None, sigma_range=(float("inf"), 0.0)):
         self.model_patch = model_patch
+        self.sigma_range = sigma_range
         self.vae = vae
         self.image = image
         self.inpaint_image = inpaint_image
@@ -544,6 +555,8 @@ class ZImageControlPatch:
             return latent_image
 
     def __call__(self, kwargs):
+        if not in_sigma_range(kwargs["transformer_options"], self.sigma_range):
+            return kwargs
         x = kwargs.get("x")
         img = kwargs.get("img")
         img_input = kwargs.get("img_input")
@@ -614,6 +627,141 @@ class ZImageControlPatch:
     def models(self):
         return [self.model_patch]
 
+class QwenImage21FunControlPatch:
+    def __init__(self, model_patch, vae, image, strength, inpaint_image=None, mask=None, sigma_range=(float("inf"), 0.0)):
+        self.model_patch = model_patch
+        self.vae = vae
+        self.image = image
+        self.inpaint_image = inpaint_image
+        self.mask = mask
+        self.strength = strength
+        self.sigma_range = sigma_range
+        self.active = False
+        self.injection_layers = None
+        self.control = None
+        self.stream = None
+        self.pristine = None
+
+    def prepare(self, h, w):
+        # 129 channels per target token: control latents | keep mask | masked-image latents, zeros where not given
+        if self.control is not None and self.control.shape[-2:] == (h, w):
+            return
+        width, height = w * self.vae.spacial_compression_encode(), h * self.vae.spacial_compression_encode()
+        latent_format = comfy.latent_formats.QwenImage21()
+        loaded_models = comfy.model_management.loaded_models(only_currently_used=True)
+        try:
+            control = torch.zeros(1, latent_format.latent_channels, h, w)
+            if self.image is not None:
+                image = comfy.utils.common_upscale(self.image[:1].movedim(-1, 1), width, height, "bicubic", "disabled")
+                control = latent_format.process_in(self.vae.encode(image.movedim(1, -1))).float().cpu()
+            regen = torch.ones(1, 1, height, width)
+            if self.mask is not None:
+                mask = self.mask.reshape(-1, 1, *self.mask.shape[-2:])[:1].float().cpu()
+                regen = (comfy.utils.common_upscale(mask, width, height, "bilinear", "disabled") >= 0.5).float()
+            inpaint = torch.zeros_like(control)
+            if self.inpaint_image is not None:
+                # regenerated pixels at mid-gray, the zero of the VAE's [-1, 1] input
+                image = comfy.utils.common_upscale(self.inpaint_image[:1].movedim(-1, 1), width, height, "bicubic", "disabled").float().cpu()
+                inpaint = latent_format.process_in(self.vae.encode((image * (1 - regen) + 0.5 * regen).movedim(1, -1))).float().cpu()
+            keep = 1 - torch.nn.functional.interpolate(regen, size=(h, w), mode="nearest")
+        finally:
+            comfy.model_management.load_models_gpu(loaded_models)
+        self.control = torch.cat([control, keep, inpaint], dim=1)
+
+    def diffusion_model_wrapper(self, executor, x, timestep, context, ref_latents, image_slots, transformer_options, **kwargs):
+        self.active = in_sigma_range(transformer_options, self.sigma_range)
+        if self.active:
+            with comfy.model_prefetch.pause_malloc_graph():
+                self.prepare(*x.shape[-2:])
+        else:
+            # outside the range the block patches are dropped so the model can use its prefix cache
+            dit = transformer_options.get("patches_replace", {}).get("dit", {})
+            dit = {k: p.previous if isinstance(p, QwenImage21FunControlBlockPatch) and p.control_patch is self else p for k, p in dit.items()}
+            dit = {k: p for k, p in dit.items() if p is not None}
+            transformer_options = {**transformer_options, "patches_replace": {**transformer_options["patches_replace"], "dit": dit}}
+        try:
+            return executor(x, timestep, context, ref_latents, image_slots, transformer_options, **kwargs)
+        finally:
+            self.stream = None
+            self.pristine = None
+
+    def before_block(self, block_index, args):
+        if self.active and block_index == self.injection_layers[0]:
+            # the base block updates its input in place
+            self.pristine = args["img"].clone()
+
+    def after_block(self, block_index, args, out):
+        if not self.active:
+            return out
+        model = self.model_patch.model
+        index = self.injection_layers.index(block_index)
+        if index == 0:
+            self.control = self.control.to(out["img"].device, out["img"].dtype)
+            self.stream = model.init_stream(self.pristine, self.control.flatten(2).transpose(1, 2), args["prefix_len"])
+            self.pristine = None
+        self.stream, skip = model.step(index, self.stream, args["mod"], args["pe"], args["attn_fn"], args["prefix_len"], args["transformer_options"])
+        out["img"].add_(skip, alpha=self.strength)
+        return out
+
+    def to(self, device_or_dtype):
+        if isinstance(device_or_dtype, torch.device):
+            if self.control is not None:
+                self.control = self.control.to(device_or_dtype)
+            self.stream = None
+        return self
+
+    def cleanup(self):
+        self.control = None
+        self.stream = None
+        self.pristine = None
+        self.active = False
+
+    def models(self):
+        return [self.model_patch]
+
+    def register(self, model):
+        # the control blocks pair with every (num_base / num_control)-th base block
+        num_base = len(model.get_model_object("diffusion_model").transformer_blocks)
+        self.injection_layers = list(range(0, num_base, num_base // len(self.model_patch.model.control_blocks)))
+        model.add_wrapper(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, self.diffusion_model_wrapper)
+        blocks_replace = model.model_options.get("transformer_options", {}).get("patches_replace", {}).get("dit", {})
+        for block_index in self.injection_layers:
+            previous = blocks_replace.get(("single_block", block_index))
+            model.set_model_patch_replace(QwenImage21FunControlBlockPatch(self, block_index, previous), "dit", "single_block", block_index)
+
+
+class QwenImage21FunControlBlockPatch:
+    def __init__(self, control_patch, block_index, previous):
+        self.control_patch = control_patch
+        self.block_index = block_index
+        self.previous = previous
+
+    def __call__(self, args, extra_args):
+        # control state stays outside the base block's allocation scope
+        with comfy.model_prefetch.pause_malloc_graph():
+            self.control_patch.before_block(self.block_index, args)
+        out = extra_args["original_block"](args) if self.previous is None else self.previous(args, extra_args)
+        with comfy.model_prefetch.pause_malloc_graph():
+            return self.control_patch.after_block(self.block_index, args, out)
+
+    def to(self, device_or_dtype):
+        self.control_patch.to(device_or_dtype)
+        if hasattr(self.previous, "to"):
+            self.previous = self.previous.to(device_or_dtype)
+        return self
+
+    def cleanup(self):
+        self.control_patch.cleanup()
+        if hasattr(self.previous, "cleanup"):
+            self.previous.cleanup()
+
+    def models(self):
+        models = self.control_patch.models()
+        if hasattr(self.previous, "models"):
+            models += self.previous.models()
+        return models
+
+
 class QwenImageDiffsynthControlnet:
     @classmethod
     def INPUT_TYPES(s):
@@ -623,19 +771,28 @@ class QwenImageDiffsynthControlnet:
                               "image": ("IMAGE",),
                               "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
                               },
-                "optional": {"mask": ("MASK",)}}
+                "optional": {"mask": ("MASK",),
+                             "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001, "advanced": True}),
+                             "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001, "advanced": True})}}
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "diffsynth_controlnet"
     EXPERIMENTAL = True
 
     CATEGORY = "model/patch/qwen"
 
-    def diffsynth_controlnet(self, model, model_patch, vae, image=None, strength=1.0, inpaint_image=None, mask=None):
+    def diffsynth_controlnet(self, model, model_patch, vae, image=None, strength=1.0, inpaint_image=None, mask=None, start_percent=0.0, end_percent=1.0):
+        if strength == 0 or (image is None and mask is None):
+            return (model,)
         model_patched = model.clone()
+        model_sampling = model.get_model_object("model_sampling")
+        sigma_range = (float(model_sampling.percent_to_sigma(start_percent)), float(model_sampling.percent_to_sigma(end_percent)))
         if image is not None:
             image = image[:, :, :, :3]
         if inpaint_image is not None:
             inpaint_image = inpaint_image[:, :, :, :3]
+        if isinstance(model_patch.model, comfy.ldm.qwen_image21.model.QwenImage21FunControl):
+            QwenImage21FunControlPatch(model_patch, vae, image, strength, inpaint_image=inpaint_image, mask=mask, sigma_range=sigma_range).register(model_patched)
+            return (model_patched,)
         if mask is not None:
             if mask.ndim == 3:
                 mask = mask.unsqueeze(1)
@@ -644,11 +801,11 @@ class QwenImageDiffsynthControlnet:
             mask = 1.0 - mask
 
         if isinstance(model_patch.model, comfy.ldm.lumina.controlnet.ZImage_Control):
-            patch = ZImageControlPatch(model_patch, vae, image, strength, inpaint_image=inpaint_image, mask=mask)
+            patch = ZImageControlPatch(model_patch, vae, image, strength, inpaint_image=inpaint_image, mask=mask, sigma_range=sigma_range)
             model_patched.set_model_noise_refiner_patch(patch)
             model_patched.set_model_double_block_patch(patch)
         else:
-            model_patched.set_model_double_block_patch(DiffSynthCnetPatch(model_patch, vae, image, strength, mask))
+            model_patched.set_model_double_block_patch(DiffSynthCnetPatch(model_patch, vae, image, strength, mask, sigma_range=sigma_range))
         return (model_patched,)
 
 class ZImageFunControlnet(QwenImageDiffsynthControlnet):
@@ -659,9 +816,13 @@ class ZImageFunControlnet(QwenImageDiffsynthControlnet):
                               "vae": ("VAE",),
                               "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
                               },
-                "optional": {"image": ("IMAGE",), "inpaint_image": ("IMAGE",), "mask": ("MASK",)}}
+                "optional": {"image": ("IMAGE",), "inpaint_image": ("IMAGE",), "mask": ("MASK",),
+                             "start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.001, "advanced": True}),
+                             "end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.001, "advanced": True})}}
 
-    CATEGORY = "model/patch/z-image"
+    CATEGORY = "model/patch"
+    SEARCH_ALIASES = ["z-image controlnet", "qwen image 2.1 controlnet", "controlnet union", "fun controlnet"]
+    DESCRIPTION = "Applies a Z-Image or Qwen Image 2.1 Fun ControlNet loaded with Load Model Patch."
 
 class WanUni3CCnetPatch:
     def __init__(self, model_patch, render_video, vae, latent_format, strength, sigma_start, sigma_end):
@@ -974,7 +1135,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ModelPatchLoader": "Load Model Patch",
     "QwenImageDiffsynthControlnet": "Apply Qwen Image DiffSynth ControlNet",
-    "ZImageFunControlnet": "Apply Z-Image Fun ControlNet",
+    "ZImageFunControlnet": "Apply Fun ControlNet",
     "WanUni3CControlnetApply": "Apply Wan Uni3C ControlNet",
     "USOStyleReference": "Apply USO Style Reference",
     "SUPIRApply": "Apply SUPIR Patch",
