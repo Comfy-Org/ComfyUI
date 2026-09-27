@@ -56,6 +56,7 @@ def test_enable_assets_starts_with_assets_disabled_when_another_process_holds_th
 
     assert result.returncode == 0, output
     assert "Another ComfyUI process is already using this database." in output
+    assert "Database lock held by a process that did not record itself" in output
     assert (
         "Assets are disabled for this session: another ComfyUI process is using the database at "
         f"{tmp_path / 'comfyui.db'}." in output

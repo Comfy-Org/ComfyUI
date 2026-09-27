@@ -1,10 +1,13 @@
 import importlib
+import json
 import logging
 import os
 import shutil
 import sqlite3
 import time
 from contextlib import closing
+from datetime import datetime
+import psutil
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
 from filelock import FileLock, Timeout
@@ -168,6 +171,45 @@ def _backup_database(source_path, destination_path):
 
 _db_lock = None
 
+
+def _lock_owner_path(db_path):
+    # filelock truncates the lock file itself on every attempt, so the holder is
+    # recorded beside it.
+    return db_path + ".lock.owner"
+
+
+def _record_lock_owner(db_path):
+    process = psutil.Process()
+    owner = {"pid": process.pid, "started": process.create_time(), "cmdline": process.cmdline()}
+    try:
+        with open(_lock_owner_path(db_path), "w", encoding="utf-8") as f:
+            json.dump(owner, f)
+    except OSError:
+        logging.debug("Could not record the database lock owner", exc_info=True)
+
+
+def _forget_lock_owner(db_path):
+    try:
+        os.remove(_lock_owner_path(db_path))
+    except OSError:
+        pass
+
+
+def _describe_lock_holder(db_path):
+    """One log line naming the process that holds the lock, if it recorded itself and is
+    still that same process (pid and start time), since a pid alone can be reused."""
+    try:
+        with open(_lock_owner_path(db_path), encoding="utf-8") as f:
+            owner = json.load(f)
+        pid, started = owner["pid"], owner["started"]
+        if abs(psutil.Process(pid).create_time() - started) < 1:
+            started_at = datetime.fromtimestamp(started).isoformat(timespec="seconds")
+            return f"Database lock held by pid {pid} (started {started_at}): {' '.join(owner['cmdline'])}"
+    except (OSError, ValueError, KeyError, TypeError, psutil.Error):
+        pass
+    return "Database lock held by a process that did not record itself"
+
+
 def _acquire_file_lock(db_path):
     """Acquire an OS-level file lock to prevent multi-process access.
 
@@ -180,11 +222,13 @@ def _acquire_file_lock(db_path):
     try:
         _db_lock.acquire(timeout=0)
     except Timeout:
+        logging.error(_describe_lock_holder(db_path))
         raise RuntimeError(
             f"Could not acquire lock on database '{db_path}'. "
             "Another ComfyUI process may already be using it. "
             "Use --database-url to specify a separate database file."
         )
+    _record_lock_owner(db_path)
 
 
 def _is_memory_db(db_url):
@@ -242,6 +286,7 @@ def _init_file_db(db_url):
         db_exists = os.path.exists(db_path)
         _migrate_and_bind(db_url, db_path, db_exists)
     except Exception:
+        _forget_lock_owner(db_path)
         _db_lock.release()
         raise
 
