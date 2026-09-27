@@ -24,7 +24,7 @@ def conditioning_set_values(conditioning, values={}, append=False):
 
 def conditioning_set_values_with_timestep_range(conditioning, values={}, start_percent=0.0, end_percent=1.0):
     """
-    Apply values to conditioning only during [start_percent, end_percent), keeping the
+    Apply values to conditioning only from start_percent to end_percent, keeping the
     original conditioning active outside that range. Respects existing per-entry ranges.
     """
     if start_percent > end_percent:
