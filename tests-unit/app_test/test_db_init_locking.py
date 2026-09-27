@@ -83,7 +83,8 @@ def test_failed_init_releases_the_lock(stale_db, monkeypatch):
     contender.release()
 
 
-def test_held_lock_blocks_before_any_migration_work(stale_db):
+def test_held_lock_blocks_before_any_migration_work(stale_db, monkeypatch):
+    monkeypatch.setattr(db_module, "_LOCK_WAIT_SECONDS", 0.1)
     holder = FileLock(stale_db + ".lock")
     holder.acquire(timeout=0)
     try:

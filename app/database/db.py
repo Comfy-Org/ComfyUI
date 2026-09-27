@@ -170,6 +170,7 @@ def _backup_database(source_path, destination_path):
 
 
 _db_lock = None
+_LOCK_WAIT_SECONDS = 5.0
 
 
 def _lock_owner_path(db_path):
@@ -222,11 +223,21 @@ def _acquire_file_lock(db_path):
     try:
         _db_lock.acquire(timeout=0)
     except Timeout:
-        logging.error(_describe_lock_holder(db_path))
-        raise RuntimeError(
-            f"Could not acquire lock on database '{db_path}'. "
-            "Another ComfyUI process may already be using it. "
-            "Use --database-url to specify a separate database file."
+        # A relaunch can start while the previous process is still exiting. Wait briefly
+        # for it to let go; the lock is never taken from a holder.
+        waiting_since = time.monotonic()
+        try:
+            _db_lock.acquire(timeout=_LOCK_WAIT_SECONDS)
+        except Timeout:
+            logging.error(_describe_lock_holder(db_path))
+            raise RuntimeError(
+                f"Could not acquire lock on database '{db_path}'. "
+                "Another ComfyUI process may already be using it. "
+                "Use --database-url to specify a separate database file."
+            )
+        logging.warning(
+            f"Database lock released after {time.monotonic() - waiting_since:.1f}s; "
+            "another ComfyUI was still shutting down"
         )
     _record_lock_owner(db_path)
 

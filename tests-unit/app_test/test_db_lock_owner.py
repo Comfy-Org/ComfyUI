@@ -22,9 +22,20 @@ HOLD_SCRIPT = (
 )
 
 
+RELEASE_SCRIPT = (
+    "import sys, time; "
+    "from filelock import FileLock; "
+    "lock = FileLock(sys.argv[1]); lock.acquire(timeout=0); "
+    "print('held', flush=True); "
+    "time.sleep(float(sys.argv[2])); "
+    "lock.release()"
+)
+
+
 @pytest.fixture(autouse=True)
 def restore_module_lock(monkeypatch):
     monkeypatch.setattr(db_module, "_db_lock", None)
+    monkeypatch.setattr(db_module, "_LOCK_WAIT_SECONDS", 0.5)
     yield
     if db_module._db_lock is not None:
         db_module._db_lock.release(force=True)
@@ -111,3 +122,34 @@ def test_failed_init_forgets_the_owner_record(tmp_path, monkeypatch):
         db_module._init_file_db(db_module.args.database_url)
 
     assert not Path(str(db_path) + ".lock.owner").exists()
+
+
+def test_waits_for_a_holder_that_is_shutting_down(tmp_path, monkeypatch, caplog):
+    db_path = str(tmp_path / "comfyui.db")
+    monkeypatch.setattr(db_module, "_LOCK_WAIT_SECONDS", 5.0)
+    holder = subprocess.Popen(
+        [sys.executable, "-c", RELEASE_SCRIPT, db_path + ".lock", "0.5"],
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "held"
+
+        with caplog.at_level(logging.WARNING):
+            db_module._acquire_file_lock(db_path)
+    finally:
+        holder.kill()
+        holder.wait()
+
+    assert "another ComfyUI was still shutting down" in caplog.text
+    assert "Database lock released after " in caplog.text
+    owner = json.loads(Path(db_path + ".lock.owner").read_text(encoding="utf-8"))
+    assert owner["pid"] == psutil.Process().pid
+
+
+def test_free_lock_is_taken_without_waiting(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        db_module._acquire_file_lock(str(tmp_path / "comfyui.db"))
+
+    assert "Database lock released after" not in caplog.text
