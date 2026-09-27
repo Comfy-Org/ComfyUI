@@ -166,9 +166,26 @@ def _lock_owner_path(db_path):
     return db_path + ".lock.owner"
 
 
+def _process_label(name, cmdline):
+    """The executable name plus the script or module it runs, e.g. "python main.py" or
+    "python -m pip". Argument values can hold credentials or private paths, so no other
+    part of the command line is kept."""
+    for i, arg in enumerate(cmdline[1:], start=1):
+        if arg == "-m" and i + 1 < len(cmdline):
+            return f"{name} -m {cmdline[i + 1]}"
+        if arg.endswith(".py"):
+            script = arg.replace("\\", "/").rsplit("/", 1)[-1]
+            return f"{name} {script}"
+    return name
+
+
 def _record_lock_owner(db_path):
     process = psutil.Process()
-    owner = {"pid": process.pid, "started": process.create_time(), "cmdline": process.cmdline()}
+    owner = {
+        "pid": process.pid,
+        "started": process.create_time(),
+        "process": _process_label(process.name(), process.cmdline()),
+    }
     try:
         with open(_lock_owner_path(db_path), "w", encoding="utf-8") as f:
             json.dump(owner, f)
@@ -192,7 +209,7 @@ def _describe_lock_holder(db_path):
         pid, started = owner["pid"], owner["started"]
         if abs(psutil.Process(pid).create_time() - started) < 1:
             started_at = datetime.fromtimestamp(started).isoformat(timespec="seconds")
-            return f"Database lock held by pid {pid} (started {started_at}): {' '.join(owner['cmdline'])}"
+            return f"Database lock held by pid {pid} (started {started_at}): {owner['process']}"
     except (OSError, ValueError, KeyError, TypeError, psutil.Error):
         pass
     return "Database lock held by a process that did not record itself"
