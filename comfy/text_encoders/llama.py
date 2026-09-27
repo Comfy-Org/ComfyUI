@@ -994,7 +994,7 @@ class Llama2_(nn.Module):
         for i, layer in enumerate(self.layers):
             if all_intermediate is not None:
                 if only_layers is None or (i in only_layers):
-                    all_intermediate.append(x.unsqueeze(1).clone())
+                    all_intermediate.append(x.unsqueeze(1).as_subclass(torch.Tensor).clone())
 
             past_kv = None
             if past_key_values is not None:
@@ -1031,7 +1031,7 @@ class Llama2_(nn.Module):
                 x[visual_pos_masks] = x[visual_pos_masks] + deepstack_embeds[i].to(x)
 
             if i == intermediate_output:
-                intermediate = x.clone()
+                intermediate = x.as_subclass(torch.Tensor).clone()
 
         comfy.model_prefetch.prefetch_queue_pop(
             prefetch_queue, x.device, None,
@@ -1043,7 +1043,7 @@ class Llama2_(nn.Module):
 
         if all_intermediate is not None:
             if only_layers is None or ((i + 1) in only_layers):
-                all_intermediate.append(x.unsqueeze(1).clone())
+                all_intermediate.append(x.unsqueeze(1).as_subclass(torch.Tensor).clone())
 
         if all_intermediate is not None:
             intermediate = torch.cat(all_intermediate, dim=1)
