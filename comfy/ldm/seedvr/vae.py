@@ -19,7 +19,6 @@ from comfy.ldm.seedvr.constants import (
     SEEDVR2_LATENT_CHANNELS,
     SEEDVR2_VAE_CACHE_QUANT_BYTES,
     SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL,
-    SEEDVR2_DECODE_BYTES_PER_OUTPUT_PIXEL,
     SEEDVR2_DECODE_FIXED_BYTES,
     SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL,
     SEEDVR2_DECODE_LAB_BYTES_PER_OUTPUT_PIXEL,
@@ -85,7 +84,8 @@ def _seedvr2_clamped_spatial_overlap(overlap, tile_size):
 
 def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), encode=True):
     """Spatial tiles, each through the model's own temporally sliced encode or decode, blended with
-    cosine ramps over the overlaps."""
+    cosine ramps over the overlaps in fp32 on the intermediate device, as comfy.utils.tiled_scale does:
+    kept on the GPU, the full-size blend buffer was 12 bytes per output pixel per frame (6 GiB at 4K/61f)."""
     _, _, d, h, w = x.shape
     sf_s, sf_t = vae_model.spatial_downsample_factor, vae_model.temporal_downsample_factor
     if encode:
@@ -103,14 +103,14 @@ def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), encode=
         target_d = max(1, d * sf_t - (sf_t - 1))
         target_h, target_w = h * sf_s, w * sf_s
     stride_h, stride_w = max(1, ti_h - ov_h), max(1, ti_w - ov_w)
-    storage_device = vae_model.device
+    storage_device = comfy.model_management.intermediate_device()
 
     def run(tile):
         tile = tile.contiguous()
         out = vae_model.encode(tile) if encode else vae_model.slicing_decode(tile)
         if out.ndim == 4:   # encode drops the time axis of a single-frame latent
             out = out.unsqueeze(2)
-        return out.to(storage_device)
+        return out.to(storage_device).float()
 
     ramp_cache = {}
     def get_ramp(steps):
@@ -134,7 +134,7 @@ def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), encode=
     if h <= ti_h and w <= ti_w:
         result = run(x)[:, :, :target_d, :target_h, :target_w]
         bar.update(1)
-        return result.to(device=x.device, dtype=x.dtype)
+        return result.to(dtype=x.dtype)
 
     result = count = None
     for y_idx, y_end, x_idx, x_end in tile_ranges:
@@ -174,7 +174,7 @@ def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), encode=
         bar.update(1)
 
     result.div_(count.clamp(min=1e-6))
-    return result.to(device=x.device, dtype=x.dtype)
+    return result.to(dtype=x.dtype)
 
 _NORM_LIMIT = float("inf")
 def get_norm_limit():
@@ -1419,16 +1419,11 @@ class VideoAutoencoderKLWrapper(nn.Module):
         return int(peak * _eager_factor(dtype, SEEDVR2_EAGER_ENCODE_FACTOR))
 
     def comfy_memory_used_decode(self, shape, dtype):
-        """Peak device memory of a decode, in bytes: one frame's area sets it, the clip barely moves it
+        """Peak device memory of a decode, in bytes: one frame's area sets it, not the clip length
         (the videos of a batch are decoded one at a time)."""
-        _, _, latent_t, latent_h, latent_w = self._latent_dims(shape)
+        _, _, _, latent_h, latent_w = self._latent_dims(shape)
         area = latent_h * self.spatial_downsample_factor * latent_w * self.spatial_downsample_factor
-        frames = max(1, (latent_t - 1) * self.temporal_downsample_factor + 1)
-        decode_peak = (
-            area * SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL
-            + frames * area * SEEDVR2_DECODE_BYTES_PER_OUTPUT_PIXEL
-            + SEEDVR2_DECODE_FIXED_BYTES
-        )
+        decode_peak = area * SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL + SEEDVR2_DECODE_FIXED_BYTES
         if not _offload_caches_for(area):
             decode_peak += area * SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL   # the temporal caches stay resident
         # The node's colour correction runs after the decode, one frame (LAB) or a free-memory

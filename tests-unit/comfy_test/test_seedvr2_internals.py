@@ -593,18 +593,10 @@ def _encode_estimate(frames, height, width, dtype=torch.float16, batch=1):
 
 
 def test_seedvr2_decode_estimate_is_flat_in_clip_length():
-    """Slicing bounds the working set, so a longer clip must not multiply the estimate.
-
-    Charging the peak per output pixel (frames included) made a 21-frame 1080p decode look like
-    6.5 GiB when it really needs about 27, and ComfyUI then frees too little and falls back to
-    tiling that costs roughly 1.75x per frame.
-    """
-    short = _decode_estimate(9, 1080, 1920)
-    long = _decode_estimate(81, 1080, 1920)
-    assert long > short, "the decoded frames themselves still accumulate"
-    assert long < short * 1.5, (
-        f"estimate grew {long / short:.1f}x for 9x the frames; it should track one frame's area"
-    )
+    """Slicing bounds the working set and the decoded frames go straight to sd.py's output buffer
+    off the GPU, so clip length must not move the estimate: charging it per frame sent long clips to
+    the reliable-estimate tiled path (about 1.75x slower) for memory they never use."""
+    assert _decode_estimate(241, 1080, 1920) == _decode_estimate(9, 1080, 1920)
 
 
 @pytest.mark.parametrize("frames, height, width, measured_gib", [

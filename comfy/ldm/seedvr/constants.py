@@ -22,9 +22,9 @@ SEEDVR2_VAE_CACHE_QUANT_BYTES = 64 * 1024 ** 2         # tails at or above this 
 SEEDVR2_CACHE_BYTES_PER_FRAME_PIXEL = 6200             # host-held caches and parked frames, per output-frame pixel.
 
 # VAE decode estimate: the free VRAM an untiled decode needs under cudaMallocAsync (ComfyUI's default),
-# fitted 3-7% above the measured floor from 480p to 4K.
-SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL = 3100            # working set, per output-frame pixel.
-SEEDVR2_DECODE_BYTES_PER_OUTPUT_PIXEL = 6              # decoded fp16 frames, per output pixel.
+# fitted 2-7% above the measured floor from 480p to 4K. Flat in clip length: the decoded frames go
+# to sd.py's output buffer off the GPU slice by slice (1088p: 5.33 GiB allocated at 61 and 121 frames).
+SEEDVR2_DECODE_BYTES_PER_FRAME_PIXEL = 3150            # working set, per output-frame pixel.
 SEEDVR2_DECODE_FIXED_BYTES = 384 * 1024 ** 2
 SEEDVR2_DECODE_LAB_BYTES_PER_OUTPUT_PIXEL = 160        # colour correction is per frame in the node.
 
