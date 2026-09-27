@@ -53,7 +53,7 @@ from app.assets.services.file_utils import (
     list_files_recursively,
     walk_listings,
 )
-from app.assets.services.gil import yield_gil
+from app.assets.services.gil import yield_gil, yield_gil_rescan
 from app.assets.services.image_dimensions import extract_image_dimensions
 from app.assets.services.metadata_extract import ExtractedMetadata, extract_file_metadata
 from app.assets.services.path_utils import (
@@ -361,6 +361,7 @@ def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservati
     try:
         with create_session() as session:
             for content_id, path, size_bytes, mtime_ns in session.execute(stmt):
+                yield_gil_rescan()
                 live.setdefault(os.path.abspath(path), []).append(
                     _ReferenceObservation(content_id, size_bytes, mtime_ns, None)
                 )
@@ -386,6 +387,7 @@ def unlisted_references(
     skipped = 0
     names_by_dir: dict[str, set[str]] = {}
     for path, observations in live.items():
+        yield_gil_rescan()
         parent, name = os.path.split(path)
         listing = listings.get(parent)
         if listing is None or not is_visible(name):

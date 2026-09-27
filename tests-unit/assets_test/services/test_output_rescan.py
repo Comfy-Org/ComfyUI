@@ -320,3 +320,18 @@ def test_every_dir_is_stated_and_listed_once_per_rescan(roots, caplog, dir_stats
         _scan_logged(caplog)
         assert dir_stats == {str(d): 1 for d in dirs}
         assert _listing_counts(caplog)[0] == len(dirs)
+
+
+def test_the_rescan_yields_the_gil_per_dir_entry_and_row(roots, monkeypatch):
+    dirs, files = _deep_tree(roots["output"])
+    _scan()
+    walk_yields: list[None] = []
+    row_yields: list[None] = []
+    monkeypatch.setattr(file_utils, "yield_gil_rescan", lambda: walk_yields.append(None))
+    monkeypatch.setattr(scanner, "yield_gil_rescan", lambda: row_yields.append(None))
+
+    _scan()
+
+    entries = len(files) + len(dirs) - 1  # every file, and every dir but the root
+    assert len(walk_yields) == len(dirs) + entries
+    assert len(row_yields) == 2 * len(files)  # reading the live rows, then diffing them

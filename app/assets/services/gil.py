@@ -15,6 +15,9 @@ import threading
 import time
 
 _RUN = 0.002
+# Output rescans repeat after prompts, so they pause less often: a 200k-file rescan kept
+# nearly all of the event-loop and prompt-start gain at 10ms, for far less extra time.
+_RESCAN_RUN = 0.010
 _SLEEP = 0.001
 # The coarse timer tick is ~15.6ms, so a 1ms sleep typically takes about 16x as long there.
 _MAX_SCALE = 16.0
@@ -26,26 +29,28 @@ _sleep = time.sleep
 _state = threading.local()
 
 
-def _yield_fixed() -> None:
+def _yield_fixed(run: float | None = None) -> None:
     """Call once per item in a hot loop on a background thread; sleeps every run window."""
+    run = _RUN if run is None else run
     now = _clock()
     next_at = getattr(_state, "next_at", None)
     if next_at is None:
-        _state.next_at = now + _RUN
+        _state.next_at = now + run
         return
     if now < next_at:
         return
     _sleep(_SLEEP)
-    _state.next_at = _clock() + _RUN
+    _state.next_at = _clock() + run
 
 
-def _yield_scaled() -> None:
+def _yield_scaled(run: float | None = None) -> None:
     """For a coarse sleep timer: time.sleep(_SLEEP) really takes a whole timer tick, so
     scale the next run by how long the last sleep took, keeping the same share asleep."""
+    run = _RUN if run is None else run
     now = _clock()
     next_at = getattr(_state, "next_at", None)
     if next_at is None:
-        _state.next_at = now + _RUN
+        _state.next_at = now + run
         return
     if now < next_at:
         return
@@ -54,10 +59,15 @@ def _yield_scaled() -> None:
     # Scale up to the timer tick this exists for, but no further: a sleep that overshoots
     # because the machine is busy must not buy the scan a longer run.
     scale = min(max(1.0, (after - now) / _SLEEP), _MAX_SCALE)
-    _state.next_at = after + _RUN * scale
+    _state.next_at = after + run * scale
 
 
 # Before Python 3.11, time.sleep on Windows rounds up to the ~15.6ms system timer tick.
 _COARSE_SLEEP = sys.platform == "win32" and sys.version_info < (3, 11)
 
 yield_gil = _yield_scaled if _COARSE_SLEEP else _yield_fixed
+
+
+def yield_gil_rescan() -> None:
+    """yield_gil for the output rescan's loops, with the longer _RESCAN_RUN window."""
+    yield_gil(_RESCAN_RUN)

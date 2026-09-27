@@ -1,6 +1,8 @@
 import os
 from typing import NamedTuple
 
+from app.assets.services.gil import yield_gil_rescan
+
 
 def get_mtime_ns(stat_result: os.stat_result) -> int:
     """Extract mtime in nanoseconds from a stat result."""
@@ -88,6 +90,7 @@ def _list_visible_entries(dirpath: str) -> tuple[list[str], list[str]]:
     subdirs: list[str] = []
     with os.scandir(dirpath) as entries:
         for entry in entries:
+            yield_gil_rescan()
             if not is_visible(entry.name):
                 continue
             try:
@@ -113,6 +116,7 @@ def walk_listings(base_dir: str) -> ListingWalk:
     seen_dirs: set[tuple[int, int]] = set()
     stack = [os.path.abspath(base_dir)]
     while stack:
+        yield_gil_rescan()
         dirpath = stack.pop()
         try:
             st = os.stat(dirpath)
