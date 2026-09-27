@@ -781,7 +781,7 @@ class QwenImageDiffsynthControlnet:
     CATEGORY = "model/patch/qwen"
 
     def diffsynth_controlnet(self, model, model_patch, vae, image=None, strength=1.0, inpaint_image=None, mask=None, start_percent=0.0, end_percent=1.0):
-        if strength == 0 or (image is None and mask is None):
+        if strength == 0 or (image is None and inpaint_image is None and mask is None):
             return (model,)
         model_patched = model.clone()
         model_sampling = model.get_model_object("model_sampling")
