@@ -604,7 +604,7 @@ class WanModel(torch.nn.Module):
             if self.img_emb is not None:
                 context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
                 context = torch.concat([context_clip, context], dim=1)
-            context_img_len = clip_fea.shape[-2]
+                context_img_len = clip_fea.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
         patches = transformer_options.get("patches", {})
@@ -945,7 +945,7 @@ class CameraWanModel(WanModel):
             if self.img_emb is not None:
                 context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
                 context = torch.concat([context_clip, context], dim=1)
-            context_img_len = clip_fea.shape[-2]
+                context_img_len = clip_fea.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
         patches = transformer_options.get("patches", {})
@@ -1760,7 +1760,7 @@ class SCAILWanModel(WanModel):
             if self.img_emb is not None:
                 context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
                 context = torch.cat([context_clip, context], dim=1)
-            context_img_len = clip_fea.shape[-2]
+                context_img_len = clip_fea.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
         patches = transformer_options.get("patches", {})
