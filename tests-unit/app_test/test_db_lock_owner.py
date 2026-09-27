@@ -54,13 +54,17 @@ def test_acquiring_the_lock_records_this_process_as_owner(tmp_path):
 
     owner = json.loads(Path(db_path + ".lock.owner").read_text(encoding="utf-8"))
     process = psutil.Process()
-    assert owner == {"pid": process.pid, "started": process.create_time(), "cmdline": process.cmdline()}
+    assert owner == {
+        "pid": process.pid,
+        "started": process.create_time(),
+        "process": db_module._process_label(process.name(), process.cmdline()),
+    }
 
 
 def test_lock_failure_names_the_recorded_holder(tmp_path, caplog):
     db_path = str(tmp_path / "comfyui.db")
     holder = subprocess.Popen(
-        [sys.executable, "-c", HOLD_SCRIPT, db_path],
+        [sys.executable, "-c", HOLD_SCRIPT, db_path, "--api-key=holder-secret-value"],
         cwd=REPO_ROOT,
         stdout=subprocess.PIPE,
         text=True,
@@ -71,8 +75,9 @@ def test_lock_failure_names_the_recorded_holder(tmp_path, caplog):
         expected = (
             f"Database lock held by pid {holder.pid} "
             f"(started {datetime.fromtimestamp(holder_process.create_time()).isoformat(timespec='seconds')}): "
-            f"{' '.join(holder_process.cmdline())}"
+            f"{holder_process.name()}"
         )
+        record = Path(db_path + ".lock.owner").read_text(encoding="utf-8")
 
         log = _expect_lock_failure(db_path, caplog)
     finally:
@@ -80,6 +85,23 @@ def test_lock_failure_names_the_recorded_holder(tmp_path, caplog):
         holder.wait()
 
     assert expected in log
+    for value in ("holder-secret-value", db_path, "HOLD_SCRIPT", "_acquire_file_lock"):
+        assert value not in record
+        assert value not in log
+
+
+@pytest.mark.parametrize(
+    ("cmdline", "label"),
+    [
+        (["/venv/bin/python", "/home/user/ComfyUI/main.py", "--api-key", "secret"], "python main.py"),
+        (["C:\\py\\python.exe", "-s", "ComfyUI\\main.py", "--listen"], "python main.py"),
+        (["/venv/bin/python", "-m", "pip", "install", "https://token@host/pkg"], "python -m pip"),
+        (["/venv/bin/python", "-c", "print('secret')"], "python"),
+        (["/venv/bin/python"], "python"),
+    ],
+)
+def test_process_label_keeps_no_argument_values(cmdline, label):
+    assert db_module._process_label("python", cmdline) == label
 
 
 def test_lock_failure_without_an_owner_record(tmp_path, caplog):
