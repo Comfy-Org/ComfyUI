@@ -183,9 +183,8 @@ def test_recovery_matches_prefixed_stored_hash(session, temp_dir):
 
     path.unlink()
     path.write_bytes(original_bytes)
-    stat = os.stat(str(path))
     result = recover_missing_content(
-        session, str(path), stat, hashing_is_enabled=True
+        session, str(path), snapshot_hash(str(path)), hashing_is_enabled=True
     )
 
     assert result == "recovered"

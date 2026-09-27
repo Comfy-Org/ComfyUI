@@ -6,6 +6,7 @@ import folder_paths
 import comfy.utils
 import comfy.ops
 import comfy.model_management
+import comfy.storage
 import comfy.ldm.common_dit
 import comfy.latent_formats
 import comfy.ldm.lumina.controlnet
@@ -288,7 +289,8 @@ class ModelPatchLoader:
             num_blocks = 0
             while "control_blocks.{}.after_proj.weight".format(num_blocks) in sd:
                 num_blocks += 1
-            injection_layers = tuple(range(0, num_blocks * 10, 10))
+            # spread evenly over the 50 base blocks: v1 has 5 (every 10), v2 has 10 (every 5)
+            injection_layers = tuple(range(0, 50, 50 // num_blocks))
             if metadata is not None and "control_blocks_places" in metadata:
                 injection_layers = tuple(json.loads(metadata["control_blocks_places"]))
                 if len(injection_layers) != num_blocks:
@@ -300,6 +302,7 @@ class ModelPatchLoader:
             model = comfy.ldm.minimax.controlnet.MiniMaxH3FunControl(
                 control_in_dim=49,
                 injection_layers=injection_layers,
+                inpaint_post_norm=metadata is not None and metadata.get("inpaint_masked_pixel_mode") == "post_norm",
                 hidden_size=sd["control_proj_in.weight"].shape[0],
                 num_attention_heads=qkv.shape[0] // (3 * head_dim),
                 attention_head_dim=head_dim,
@@ -376,7 +379,7 @@ class ModelPatchLoader:
             if denoise_encoder_sd:
                 model.denoise_encoder_sd = denoise_encoder_sd
 
-        model_patcher = comfy.model_patcher.CoreModelPatcher(model, load_device=comfy.model_management.get_torch_device(), offload_device=comfy.model_management.unet_offload_device())
+        model_patcher = comfy.model_patcher.CoreModelPatcher(model, load_device=comfy.model_management.get_torch_device(), offload_device=comfy.model_management.unet_offload_device(), fast_disk=comfy.storage.state_dict_fast_disk(sd))
         model.load_state_dict(sd, assign=model_patcher.is_dynamic())
         return (model_patcher,)
 

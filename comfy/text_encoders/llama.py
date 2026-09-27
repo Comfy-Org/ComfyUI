@@ -558,6 +558,29 @@ def precompute_freqs_cis(head_dim, position_ids, theta, rope_scale=None, rope_di
 
     return out
 
+def moe_experts_forward(x, topk_idx, topk_weight, num_experts, gate_up_proj, down_proj, activation):
+    num_tokens, top_k = topk_idx.shape
+    # group the (token, slot) assignments by expert: one host sync per call instead of two per expert
+    order = torch.argsort(topk_idx.reshape(-1))
+    counts = torch.bincount(topk_idx.reshape(-1), minlength=num_experts).tolist()
+    sorted_x = x[order // top_k]
+    weight = topk_weight.reshape(-1)[order].unsqueeze(1)
+    sorted_out = torch.empty_like(sorted_x)
+
+    start = 0
+    with gate_up_proj.bank_resident(x) as gate_up_bank, down_proj.bank_resident(x) as down_bank:
+        for expert_idx, n in enumerate(counts):
+            if n == 0:
+                continue
+            gated = activation(gate_up_bank.expert_linear(sorted_x[start:start + n], expert_idx))
+            sorted_out[start:start + n] = (down_bank.expert_linear(gated, expert_idx) * weight[start:start + n]).to(sorted_out.dtype)
+            start += n
+
+    out = torch.empty_like(sorted_out)
+    out[order] = sorted_out
+    return out.view(num_tokens, top_k, -1).sum(dim=1)
+
+
 def rope_matrix(freqs_cis):
     if torch.is_tensor(freqs_cis):
         return freqs_cis

@@ -14,11 +14,13 @@ class ZImageTokenizer(sd1_clip.SD1Tokenizer):
         super().__init__(embedding_directory=embedding_directory, tokenizer_data=tokenizer_data, name="qwen3_4b", tokenizer=Qwen3Tokenizer)
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, system_prompt="", **kwargs):
         if llama_template is None:
             llama_text = self.llama_template.format(text)
         else:
             llama_text = llama_template.format(text)
+        if system_prompt:
+            llama_text = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n" + llama_text
 
         tokens = super().tokenize_with_weights(llama_text, return_word_ids=return_word_ids, disable_weights=True, **kwargs)
         return tokens
