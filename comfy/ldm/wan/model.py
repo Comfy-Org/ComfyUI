@@ -821,7 +821,7 @@ class VaceWanModel(WanModel):
             if self.img_emb is not None:
                 context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
                 context = torch.concat([context_clip, context], dim=1)
-            context_img_len = clip_fea.shape[-2]
+                context_img_len = clip_fea.shape[-2]
 
         # vace blocks are t2v pretrained, they attend over text tokens only
         if context_img_len is None:
