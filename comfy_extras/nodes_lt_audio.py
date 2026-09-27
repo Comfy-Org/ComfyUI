@@ -8,19 +8,31 @@ from comfy_extras.nodes_audio import VAEEncodeAudio
 
 
 def _ltxv_audio_vae_names():
-    out = []
-    seen = set()
-    for key in ("vae", "checkpoints"):
-        for name in folder_paths.get_filename_list(key):
-            if name not in seen:
-                seen.add(name)
-                out.append(name)
-    return out
+    names = folder_paths.get_filename_list("checkpoints")
+    checkpoint_set = set(names)
+    seen = set(names)
+    for name in folder_paths.get_filename_list("vae"):
+        if name in checkpoint_set:
+            suffixed = f"{name} (vae)"
+            if suffixed not in seen:
+                seen.add(suffixed)
+                names.append(suffixed)
+        elif name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
 
 
 def _ltxv_audio_vae_path(name: str) -> str:
-    for key in ("vae", "checkpoints"):
-        p = folder_paths.get_full_path(key, name)
+    if name.endswith(" (vae)"):
+        p = folder_paths.get_full_path("vae", name[:-6])
+        if p is not None:
+            return p
+    else:
+        p = folder_paths.get_full_path("checkpoints", name)
+        if p is not None:
+            return p
+        p = folder_paths.get_full_path("vae", name)
         if p is not None:
             return p
     return folder_paths.get_full_path_or_raise("checkpoints", name)
