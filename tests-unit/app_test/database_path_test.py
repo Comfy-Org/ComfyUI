@@ -119,7 +119,6 @@ def test_prepare_file_database_creates_parent_directory(monkeypatch, tmp_path):
     db_path = tmp_path / "nested" / "comfyui.db"
 
     monkeypatch.setattr(db.args, "database_url", None)
-    monkeypatch.setattr(db, "copy_legacy_default_db", lambda path: None)
 
     db.prepare_file_db_path(str(db_path))
 
@@ -129,7 +128,6 @@ def test_prepare_file_database_creates_parent_directory(monkeypatch, tmp_path):
 def test_prepare_file_database_accepts_relative_database_path(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(db.args, "database_url", "sqlite:///relative.db")
-    monkeypatch.setattr(db, "copy_legacy_default_db", lambda path: None)
 
     db.prepare_file_db_path("relative.db")
 

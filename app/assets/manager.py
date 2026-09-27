@@ -1,3 +1,9 @@
+"""Selects and implements the enabled and disabled asset managers.
+
+``default_asset_manager`` checks database dependencies before enabling assets
+and chooses ``NoAssets`` when the requested mode cannot run.
+"""
+
 import logging
 from typing import Any, Callable, Protocol
 

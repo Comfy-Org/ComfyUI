@@ -1,5 +1,5 @@
-"""Owns every write to content rows, records and their tag links, plus the paged
-reads that list them. Inserts that can lose a race — a content row at a path, a
+"""Provides shared writes for content rows, records and tag links, plus the paged
+reads that list records. Inserts that can lose a race — a content row at a path, a
 tag, a tag link — run inside a savepoint and re-read the conflicting row, so a
 concurrent writer settles the call instead of raising, while a genuine
 constraint failure still surfaces. This is the sole writer of a content row's
@@ -47,7 +47,7 @@ class RecordPageSpec(NamedTuple):
 _LIVE_PATH_UNIQUE_INDEX = "uq_asset_contents_path_live"
 
 
-def _is_live_path_conflict(error: IntegrityError) -> bool:
+def is_live_path_conflict(error: IntegrityError) -> bool:
     orig = error.orig
     message = str(orig)
     postgres_names_the_index = getattr(getattr(orig, "diag", None), "constraint_name", None) == _LIVE_PATH_UNIQUE_INDEX
@@ -66,7 +66,7 @@ def create_content_reporting_insert(session: Session, path: str, hash: str | Non
             session.flush()
             return content, True
     except IntegrityError as error:
-        if not _is_live_path_conflict(error):
+        if not is_live_path_conflict(error):
             raise
         winner = session.execute(sa.select(AssetContent).where(AssetContent.path == path, AssetContent.is_missing.is_(False))).scalar_one()
         return winner, False
@@ -299,8 +299,9 @@ def rename_record(session: Session, id: str, name: str) -> Asset:
     record = session.get(Asset, id)
     if record is None:
         raise LookupError(id)
-    record.name = name
-    record.updated_at = get_utc_now()
+    if record.name != name:
+        record.name = name
+        record.updated_at = get_utc_now()
     session.flush()
     return record
 
