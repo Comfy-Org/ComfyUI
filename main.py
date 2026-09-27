@@ -386,6 +386,13 @@ def prompt_worker(q, server_instance, asset_manager):
                 else:
                     logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
 
+                # Resume once the queue is idle rather than on the next GC tick, which would
+                # leave a scan this prompt paused frozen for up to gc_collect_interval. The
+                # output rescan is still queued on the GC tick, at most once per interval.
+                if q.get_tasks_remaining() == 0:
+                    asset_manager.resume_background_scan()
+                    background_scan_paused = False
+
             flags = q.get_flags()
             free_memory = flags.get("free_memory", False)
 
