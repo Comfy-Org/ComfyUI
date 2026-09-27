@@ -109,6 +109,9 @@ if args.deterministic:
     torch.use_deterministic_algorithms(True, warn_only=True)
 
 directml_enabled = False
+# Used only if DXGI cannot be queried at all; matches the value ComfyUI shipped
+# before, so behaviour is unchanged in that case.
+_DIRECTML_FALLBACK_VRAM = 1024 * 1024 * 1024
 if args.directml is not None:
     logging.warning("WARNING: torch-directml barely works, is very slow, has not been updated in over 1 year and might be removed soon, please don't use it, there are better options.")
     import torch_directml
@@ -118,9 +121,37 @@ if args.directml is not None:
         directml_device = torch_directml.device()
     else:
         directml_device = torch_directml.device(device_index)
-    logging.info("Using directml with device: {}".format(torch_directml.device_name(device_index)))
+    # device_index is -1 when --directml was passed without an argument, which
+    # torch_directml.device_name() rejects; report the adapter we actually bound to.
+    logging.info("Using directml with device: {}".format(torch_directml.device_name(directml_device.index)))
     # torch_directml.disable_tiled_resources(True)
     lowvram_available = False #TODO: need to find a way to get free memory in directml before this can be enabled by default.
+
+
+def _directml_total_memory(dev):
+    """Dedicated VRAM for the DirectML device, in bytes.
+
+    torch-directml has no memory API worth using, so we ask DXGI for the
+    adapter's dedicated VRAM. That keeps ComfyUI's offload heuristics honest on
+    8 GB cards, which the old hardcoded 1 GiB did not: it made every model look
+    too large to keep resident and showed a wrong number in the UI.
+    """
+    from comfy.directml_memory import get_total_vram
+
+    dedicated = get_total_vram(dev)
+    if dedicated is None:
+        return _DIRECTML_FALLBACK_VRAM
+    return dedicated
+
+
+def _directml_free_memory(dev):
+    """Free memory for the DirectML device, in bytes.
+
+    DirectML gives no way to query what is currently allocated, so this reports
+    the dedicated VRAM as free. ComfyUI already tracks its own allocations when
+    deciding what to offload, and guessing low here would make it thrash.
+    """
+    return _directml_total_memory(dev), 0
 
 
 try:
@@ -323,7 +354,7 @@ def get_total_memory(dev=None, torch_total_too=False):
         mem_total_torch = mem_total
     else:
         if directml_enabled:
-            mem_total = 1024 * 1024 * 1024 #TODO
+            mem_total = _directml_total_memory(dev)
             mem_total_torch = mem_total
         elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
@@ -480,6 +511,13 @@ SUPPORT_FP8_OPS = args.supports_fp8_compute
 
 AMD_RDNA2_AND_OLDER_ARCH = ["gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036", "gfx1010", "gfx1011", "gfx1012", "gfx906", "gfx900", "gfx803"]
 AMD_ENABLE_MIOPEN_ENV = 'COMFYUI_ENABLE_MIOPEN'
+
+if args.disable_cudnn:
+    # Backends such as ZLUDA report themselves as CUDA and ship cuDNN DLLs, but
+    # have no working cuDNN implementation -- calls fail with
+    # CUDNN_STATUS_INTERNAL_ERROR partway through a sampling run.
+    torch.backends.cudnn.enabled = False
+    logging.info("Set: torch.backends.cudnn.enabled = False from --disable-cudnn.")
 
 try:
     if is_amd():
@@ -1809,8 +1847,8 @@ def get_free_memory(dev=None, torch_free_too=False):
         mem_free_torch = mem_free_total
     else:
         if directml_enabled:
-            mem_free_total = 1024 * 1024 * 1024 #TODO
-            mem_free_torch = mem_free_total
+            mem_free_torch, mem_free_total = _directml_free_memory(dev)
+            mem_free_total = mem_free_torch + mem_free_total
         elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
             mem_active = stats['active_bytes.all.current']
