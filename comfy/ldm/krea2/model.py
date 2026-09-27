@@ -18,7 +18,7 @@ import comfy.ldm.common_dit
 import comfy.utils
 from comfy.ldm.flux.layers import EmbedND, timestep_embedding
 from comfy.ldm.flux.math import apply_rope
-from comfy.ldm.modules.attention import optimized_attention_masked
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_masked
 
 
 class RMSNorm(nn.Module):
@@ -63,6 +63,7 @@ class Attention(nn.Module):
     def __init__(self, dim: int, heads: int, kvheads: Optional[int] = None, bias: bool = False,
                  device=None, dtype=None, operations=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.heads = heads
         self.kvheads = kvheads if kvheads is not None else heads
         self.headdim = dim // self.heads
@@ -94,8 +95,9 @@ class Attention(nn.Module):
             rep = self.heads // self.kvheads
             k = k.repeat_interleave(rep, dim=1)
             v = v.repeat_interleave(rep, dim=1)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
         out = optimized_attention_masked(q, k, v, self.heads, mask=mask, skip_reshape=True,
-                                         transformer_options=transformer_options)
+                                         preferred_attention=self.comfy_attention, transformer_options=transformer_options)
 
         if "block_index" in transformer_options and "attn1_output_patch" in transformer_patches:
             for p in transformer_patches["attn1_output_patch"]:
