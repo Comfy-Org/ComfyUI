@@ -136,6 +136,8 @@ def walk_listings(base_dir: str) -> ListingWalk:
             continue
         seen_dirs.add(dir_id)
         listings[dirpath] = (st.st_mtime_ns, names, subdirs)
-        files.extend(os.path.abspath(os.path.join(dirpath, name)) for name in names)
+        for name in names:
+            yield_gil_rescan()
+            files.append(os.path.abspath(os.path.join(dirpath, name)))
         stack.extend(os.path.join(dirpath, name) for name in reversed(subdirs))
     return ListingWalk(files, listings, len(listings))

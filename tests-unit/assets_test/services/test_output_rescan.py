@@ -369,5 +369,6 @@ def test_the_rescan_yields_the_gil_per_dir_entry_and_row(roots, monkeypatch):
     _scan()
 
     entries = len(files) + len(dirs) - 1  # every file, and every dir but the root
-    assert len(walk_yields) == len(dirs) + entries
+    # once per dir walked, per entry listed, and per file path built
+    assert len(walk_yields) == len(dirs) + entries + len(files)
     assert len(row_yields) == 2 * len(files)  # reading the live rows, then diffing them
