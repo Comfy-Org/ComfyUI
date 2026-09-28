@@ -389,13 +389,13 @@ def prompt_worker(q, server_instance, asset_manager):
             flags = q.get_flags()
             free_memory = flags.get("free_memory", False)
 
-            if flags.get("unload_models", free_memory):
-                comfy.model_management.unload_all_models()
+            if free_memory:
+                e.reset()
                 need_gc = True
                 last_gc_collect = 0
 
-            if free_memory:
-                e.reset()
+            if flags.get("unload_models", free_memory):
+                comfy.model_management.unload_all_models()
                 need_gc = True
                 last_gc_collect = 0
 
