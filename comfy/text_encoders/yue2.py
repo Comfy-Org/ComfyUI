@@ -113,7 +113,9 @@ class YuE2TEModel(torch.nn.Module):
         self.execution_device = device
 
     def get_dynamic_vram__units(self):
-        return self.model.get_dynamic_vram__units()
+        units, last_units = self.model.get_dynamic_vram__units()
+        # the sampling step is graphed as the embedding's unit
+        return [self.model.embed_tokens, *units], last_units
 
     def set_clip_options(self, options):
         self.execution_device = options.get("execution_device", self.execution_device)
@@ -158,53 +160,59 @@ class YuE2TEModel(torch.nn.Module):
         prefix_length = max(map(len, prefixes))
         logits, cache, mask = self._prefill(prefixes, prefix_length + max_tokens, dtype)
         fixed_kv = isinstance(cache[0], FixedKV)
-        decode_tokens = torch.empty((len(prefixes), 1), device=device, dtype=torch.long)
         positions = torch.tensor([[len(p)] for p in prefixes], device=device, dtype=torch.long)
         # Decoder inputs and rotary tensors must keep their addresses across graph replays.
-        decode_buffers = None
-        if fixed_kv:
-            decode_buffers = (torch.empty((len(prefixes), 1, self.config.hidden_size), device=device, dtype=dtype),
-                              rope_matrix(self.model.compute_freqs_cis(positions, device)))
+        decode_buffers = (torch.empty((len(prefixes), 1, self.config.hidden_size), device=device, dtype=dtype),
+                          rope_matrix(self.model.compute_freqs_cis(positions, device)))
         history = []
         end = ABC_END if phase == "abc" else MUSIC_END
+        progress = comfy.utils.ProgressBar(max_tokens)
         # Sampling stays on the device (EOD is masked in both phases, so it pads the penalty window)
         # and the host reads tokens back in batches instead of syncing on every step.
         penalty_window = sampling.pop("penalty_window")
         recent = torch.full((1, penalty_window), EOD, device=device, dtype=torch.long)
         tokens = torch.empty((max_tokens,), device=device, dtype=torch.long)
-        progress = comfy.utils.ProgressBar(max_tokens)
+        step_index = torch.zeros((), device=device, dtype=torch.long)
+
+        def head():
+            guided = logits if cfg_scale == 1.0 else logits[1:] + cfg_scale * (logits[:1] - logits[1:])
+            scores = distribution(guided, recent, step, phase, legacy_off=legacy_off, **sampling)
+            if sampling["temperature"] == 0:
+                next_id = scores.argmax(-1, keepdim=True)
+            else:
+                probabilities = scores.softmax(-1).to(rng_device)
+                next_id = torch.multinomial(probabilities, 1, generator=generator).to(device)
+            tokens.index_copy_(0, step_index.view(1), next_id.view(1))
+            recent.scatter_(1, (step_index % penalty_window).view(1, 1), next_id)
+            step_index.add_(1)
+            decode_buffers[0].copy_(self.model.embed_tokens(next_id.expand(len(prefixes), 1), out_dtype=dtype))
+
         try:
             for step in comfy.utils.model_trange(max_tokens, desc="YuE2 ABC sampling" if phase == "abc" else "YuE2 music sampling", unit="token"):
                 comfy.model_management.throw_exception_if_processing_interrupted()
-                guided = logits if cfg_scale == 1.0 else logits[1:] + cfg_scale * (logits[:1] - logits[1:])
-                scores = distribution(guided, recent, step, phase, legacy_off=legacy_off, **sampling)
-                if sampling["temperature"] == 0:
-                    next_id = scores.argmax(-1, keepdim=True)
-                else:
-                    probabilities = scores.softmax(-1).to(rng_device)
-                    next_id = torch.multinomial(probabilities, 1, generator=generator).to(device)
-                decode_tokens.copy_(next_id)
-                tokens[step] = next_id[0, 0]
-                recent[:, step % penalty_window] = next_id[0]
+                # Keep decode allocations stable.
+                if fixed_kv:
+                    comfy.model_prefetch.malloc_graph_begin(device)
+                # `step` is baked into the head graph, so capture only once the end token is no longer blocked.
+                head_queue = comfy.model_prefetch.make_prefetch_queue([self.model.embed_tokens], device, {"prefetch_dynamic_vbars": self.model.prefetch_dynamic_vbars})
+                comfy.model_prefetch.prefetch_queue_pop(head_queue, device, self.model.embed_tokens, dtype, core=head,
+                                                        enable_graph=step >= sampling["min_tokens"], generator=generator, malloc_scope="head")
+                comfy.model_prefetch.prefetch_queue_pop(head_queue, device, None, malloc_scope="head")
                 progress.update_absolute(step + 1)
+                output = self.model(None, embeds=decode_buffers[0], past_key_values=cache, dtype=dtype, position_ids=positions,
+                                    attention_mask=mask[:, :prefix_length + step + 1] if mask is not None and not fixed_kv else None,
+                                    decode_buffers=decode_buffers)
+                logits.copy_(self.model.lm_head(output[0][:, -1]))
+                cache = output[2]
+                del output
+                if fixed_kv:
+                    comfy.model_prefetch.malloc_graph_end()
+                positions.add_(1)
                 if (step + 1) % 16 == 0 or step + 1 == max_tokens:
                     for token in tokens[len(history):step + 1].tolist():
                         if token == end:
                             return history, False
                         history.append(token)
-                if step + 1 < max_tokens:
-                    # Keep decode allocations stable.
-                    if fixed_kv:
-                        comfy.model_prefetch.malloc_graph_begin(device)
-                    output = self.model(decode_tokens, past_key_values=cache, dtype=dtype, position_ids=positions,
-                                        attention_mask=mask[:, :prefix_length + step + 1] if mask is not None and not fixed_kv else None,
-                                        decode_buffers=decode_buffers)
-                    logits.copy_(self.model.lm_head(output[0][:, -1]))
-                    cache = output[2]
-                    del output
-                    if fixed_kv:
-                        comfy.model_prefetch.malloc_graph_end()
-                    positions.add_(1)
         finally:
             # Each phase has different KV buffers and may change the CFG batch size.
             comfy.model_prefetch.cleanup_prefetch_queues()
