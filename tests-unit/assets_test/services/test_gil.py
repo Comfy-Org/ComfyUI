@@ -151,14 +151,8 @@ def test_contended_sleep_does_not_stretch_the_run_window_past_the_timer_tick(fak
 
 
 
-def test_rescan_yield_pauses_after_every_rescan_run_window(fake):
-    clock = started(fake, gil._SLEEP, lambda: gil._yield_fixed(gil._RESCAN_RUN))
-    share = gil._SLEEP / (gil._SLEEP + gil._RESCAN_RUN)
-    assert run_hot_loop(clock, lambda: gil._yield_fixed(gil._RESCAN_RUN), 10.0) == pytest.approx(share, abs=0.01)
-
-
-def test_rescan_yield_uses_the_same_version_as_yield_gil(fake, monkeypatch):
-    windows: list[float | None] = []
-    monkeypatch.setattr(gil, "yield_gil", lambda run=None: windows.append(run))
-    gil.yield_gil_rescan()
-    assert windows == [gil._RESCAN_RUN]
+def test_a_longer_run_window_sleeps_proportionally_less(fake):
+    run = gil._RUN * 5
+    clock = started(fake, gil._SLEEP, lambda: gil._yield_fixed(run=run))
+    share = gil._SLEEP / (gil._SLEEP + run)
+    assert run_hot_loop(clock, lambda: gil._yield_fixed(run=run), 10.0) == pytest.approx(share, abs=0.01)
