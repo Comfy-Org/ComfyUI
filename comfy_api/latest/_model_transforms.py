@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Iterable
 
+from ._prompt_relay_transform import apply_prompt_relay
+
 _MISSING = object()
 
 
@@ -3959,6 +3961,26 @@ TRANSFORMS: dict[str, Transform] = {
                     0.0, 100.0, doc="Temporal-attention enhancement strength."),
             },
             _enhance_a_video,
+            experimental=True,
+        ),
+        Transform(
+            "prompt_relay",
+            "Apply bounded temporal prompt regions to Wan or LTX cross-attention.",
+            {
+                "latent": RefOf(
+                    "LATENT",
+                    doc="Video latent defining temporal and spatial token geometry."),
+                "token_starts": IntList(
+                    1024, doc="Inclusive token start for each local prompt."),
+                "token_ends": IntList(
+                    1024, doc="Exclusive token end for each local prompt."),
+                "pixel_lengths": IntList(
+                    1024, doc="Pixel-frame length of each prompt segment."),
+                "epsilon": Float(
+                    0.0001, 0.99, default=0.001,
+                    doc="Temporal penalty decay parameter."),
+            },
+            apply_prompt_relay,
             experimental=True,
         ),
         Transform(

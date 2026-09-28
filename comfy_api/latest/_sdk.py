@@ -1113,6 +1113,21 @@ class VaeRef(_TypedRef):
         return dict(await current_runtime().ops.apply(
             "vae.latent_layout", self, {}))
 
+    async def encode_audio(self, audio: "AudioRef") -> "LatentRef":
+        """Encode canonical AUDIO with an audio-capable VAE."""
+        return await current_runtime().ops.apply(
+            "vae.encode_audio", self, {"audio": audio})
+
+    async def empty_audio_latent(
+        self, video_frames: int, frame_rate: float,
+    ) -> "LatentRef":
+        """Create the empty audio latent aligned with a video duration."""
+        return await current_runtime().ops.apply(
+            "vae.empty_audio_latent", self, {
+                "video_frames": int(video_frames),
+                "frame_rate": float(frame_rate),
+            })
+
     async def decode(self, latent: "LatentRef") -> "ImageRef":
         return await current_runtime().ops.apply("vae.decode", self,
                                                  {"latent": latent})
@@ -1861,6 +1876,7 @@ class AssetsDomain(Protocol):
     async def digest(
         self, ref: AssetRef, algorithm: str = "sha256",
     ) -> str: ...
+    async def metadata(self, ref: AssetRef) -> dict[str, str]: ...
     async def read_range(
         self, ref: AssetRef, offset: int = 0,
         length: int = 8 * 1024 * 1024,
@@ -2552,6 +2568,24 @@ class _InProcessAssets:
             return value
 
         return await asyncio.to_thread(compute)
+
+    async def metadata(self, ref: AssetRef) -> dict[str, str]:
+        """Read bounded SafeTensors metadata without materializing weights."""
+        from safetensors import safe_open
+
+        path = await self.path(ref)
+        if not str(path).lower().endswith((".safetensors", ".sft")):
+            raise ValueError("asset metadata is limited to SafeTensors files")
+        with safe_open(path, framework="pt", device="cpu") as file:
+            value = file.metadata() or {}
+        if len(value) > 4096:
+            raise ValueError("asset metadata exceeds 4096 entries")
+        result = {}
+        for key, item in value.items():
+            if len(str(key).encode()) > 1024 or len(str(item).encode()) > 65536:
+                raise ValueError("asset metadata entry exceeds its size limit")
+            result[str(key)] = str(item)
+        return result
 
     async def read_range(
         self, ref: AssetRef, offset: int = 0,
@@ -8920,6 +8954,8 @@ class InProcessOps:
             "vae.decode_tiled": self._vae_decode_tiled,
             "vae.decode_tensor_tiled": self._vae_decode_tensor_tiled,
             "vae.encode": self._vae_encode,
+            "vae.encode_audio": self._vae_encode_audio,
+            "vae.empty_audio_latent": self._vae_empty_audio_latent,
             "vae.encode_for_inpaint": self._vae_encode_for_inpaint,
             "vae.encode_inpaint_conditioning":
                 self._vae_encode_inpaint_conditioning,
@@ -9389,6 +9425,63 @@ class InProcessOps:
         pixels = await rt.refs.resolve(image)
         return LatentRef._wrap(await rt.refs.create(  # type: ignore[return-value]
             "LATENT", {"samples": v.encode(pixels)}))
+
+    async def _vae_encode_audio(
+        self, vae: "VaeRef", audio: "AudioRef",
+    ) -> "LatentRef":
+        import torch
+
+        rt = current_runtime()
+        value = await rt.refs.resolve(vae)
+        audio_value = await rt.refs.resolve(audio)
+        if not isinstance(audio_value, dict):
+            raise TypeError("AUDIO must contain waveform and sample_rate")
+        waveform = audio_value.get("waveform")
+        sample_rate = audio_value.get("sample_rate")
+        if not isinstance(waveform, torch.Tensor) or waveform.ndim not in (2, 3):
+            raise ValueError("AUDIO waveform must be a 2D or 3D tensor")
+        if waveform.ndim == 2:
+            waveform = waveform.unsqueeze(0)
+        if hasattr(value, "first_stage_model"):
+            samples = value.encode(waveform.movedim(1, -1))
+        else:
+            samples = value.encode({"waveform": waveform, "sample_rate": sample_rate})
+        if not isinstance(samples, torch.Tensor) or samples.numel() == 0:
+            raise ValueError("audio VAE returned an empty latent")
+        return LatentRef._wrap(await rt.refs.create(
+            "LATENT", {"samples": samples, "type": "audio"}))  # type: ignore[return-value]
+
+    async def _vae_empty_audio_latent(
+        self, vae: "VaeRef", video_frames: int, frame_rate: float,
+    ) -> "LatentRef":
+        import torch
+        import comfy.model_management
+
+        if not 1 <= int(video_frames) <= 1000000:
+            raise ValueError("video_frames must be in [1, 1000000]")
+        if not 0.001 <= float(frame_rate) <= 1000.0:
+            raise ValueError("frame_rate must be in [0.001, 1000]")
+        rt = current_runtime()
+        value = await rt.refs.resolve(vae)
+        inner = getattr(value, "first_stage_model", value)
+        channels = getattr(value, "latent_channels", None)
+        frequency_bins = getattr(inner, "latent_frequency_bins", None)
+        length_fn = getattr(inner, "num_of_latents_from_frames", None)
+        if not (
+            isinstance(channels, int) and 1 <= channels <= 4096
+            and isinstance(frequency_bins, int) and 1 <= frequency_bins <= 16384
+            and callable(length_fn)
+        ):
+            raise ValueError("VAE does not publish an audio latent layout")
+        latent_frames = int(length_fn(int(video_frames), float(frame_rate)))
+        if not 1 <= latent_frames <= 1000000:
+            raise ValueError("audio VAE returned an invalid latent length")
+        samples = torch.zeros(
+            (1, channels, latent_frames, frequency_bins),
+            device=comfy.model_management.intermediate_device(),
+        )
+        return LatentRef._wrap(await rt.refs.create(
+            "LATENT", {"samples": samples, "type": "audio"}))  # type: ignore[return-value]
 
     async def _vae_encode_for_inpaint(
         self, vae: "VaeRef", image: "ImageRef", mask: "MaskRef",
