@@ -47,6 +47,9 @@ from comfy_api.internal import _ComfyNodeInternal
 from app.assets.event_log import emit
 from app.database.db import dependencies_available
 
+if dependencies_available():
+    from app.assets.services.asset_management import resolve_hash_to_path
+
 from app.user_manager import UserManager
 from app.model_manager import ModelFileManager
 from app.custom_node_manager import CustomNodeManager
@@ -529,8 +532,6 @@ class PromptServer():
                     self.user_manager.get_request_user_id(request)
                     if not dependencies_available():
                         return web.Response(status=404)
-                    from app.assets.services.asset_management import resolve_hash_to_path
-
                     result = resolve_hash_to_path(filename)
                     if result is None:
                         return web.Response(status=404)
