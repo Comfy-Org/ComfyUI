@@ -13,6 +13,7 @@ from app.assets.scanner import (
     build_asset_specs,
     enrich_asset,
     mark_contents_missing_outside_prefixes,
+    mark_missing_outside_prefixes_safely,
     seed_asset_specs,
     apply_reference_observations,
     observe_references_on_filesystem,
@@ -133,12 +134,13 @@ def test_seed_creates_content_and_record(session, temp_dir: Path):
     (input_root / "second.png").write_bytes(b"second")
 
     with patch("folder_paths.get_input_directory", return_value=str(input_root)):
-        created = seed_asset_specs(session, _build_seed_specs(input_root))
+        created, error = seed_asset_specs(session, _build_seed_specs(input_root))
     session.commit()
 
     contents = list(session.scalars(select(AssetContent).order_by(AssetContent.path)))
     records = list(session.scalars(select(Asset).order_by(Asset.name)))
 
+    assert error is None
     assert created == 2
     assert len(contents) == 2
     assert len(records) == 2
@@ -170,6 +172,16 @@ def test_prune_marks_missing_not_deletes(session, temp_dir: Path):
     assert content is not None and content.is_missing is True
     assert record is not None
     assert missing_tag is not None and missing_tag.origin == "automatic"
+
+
+def test_mark_missing_failure_returns_none():
+    with patch(
+        "app.assets.scanner.create_session",
+        side_effect=RuntimeError("database unavailable"),
+    ):
+        result = mark_missing_outside_prefixes_safely([])
+
+    assert result is None
 
 
 def test_unhashed_missing_content_gets_tagged(session, temp_dir: Path):

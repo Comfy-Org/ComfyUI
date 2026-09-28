@@ -153,3 +153,19 @@ async def test_from_hash_off_mode_returns_400(monkeypatch):
     response_body = response.body
     assert isinstance(response_body, bytes | bytearray)
     assert json.loads(response_body)["error"]["code"] == "FEATURE_DISABLED"
+
+
+@pytest.mark.asyncio
+async def test_prune_failure_returns_500_instead_of_completed(monkeypatch):
+    monkeypatch.setattr(
+        routes.asset_seeder, "mark_missing_outside_prefixes", lambda: None
+    )
+
+    response = await routes.mark_missing_assets.__wrapped__(
+        make_mocked_request("POST", "/api/assets/prune")
+    )
+
+    assert response.status == 500
+    response_body = response.body
+    assert isinstance(response_body, bytes | bytearray)
+    assert json.loads(response_body)["error"]["code"] == "PRUNE_FAILED"

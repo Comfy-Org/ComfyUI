@@ -81,9 +81,10 @@ def test_deleted_null_hash_row_recovers_via_scanner_after_restore(
     assert path.stat().st_mtime_ns == stat.st_mtime_ns, "setup: mtime must round-trip exactly"
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, error = seed_asset_specs(session, [_spec(path)])
     session.commit()
 
+    assert error is None
     assert created == 0, "the original row must recover — no fresh content row minted"
     recovered = session.get(AssetContent, content_id)
     assert recovered.is_missing is False
@@ -118,9 +119,10 @@ def test_different_bytes_restored_at_same_path_does_not_recover_old_row(
     path.write_bytes(b"a completely different, much longer payload than the original")
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, error = seed_asset_specs(session, [_spec(path)])
     session.commit()
 
+    assert error is None
     assert created == 1, "a genuinely different file must take the normal new-content path"
     assert session.get(AssetContent, content_id).is_missing is True, (
         "the old row must stay missing — recovering it here would hand the wrong record's "
@@ -158,9 +160,10 @@ def test_same_size_different_mtime_restored_at_same_path_does_not_recover_old_ro
     assert path.stat().st_size == stat.st_size, "setup: size must match so only mtime disambiguates"
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, error = seed_asset_specs(session, [_spec(path)])
     session.commit()
 
+    assert error is None
     assert created == 1, "a same-size-but-different-mtime restore must take the new-content path"
     assert session.get(AssetContent, content_id).is_missing is True, (
         "a matching size with a mismatched mtime is not proof the old row's bytes are back — "
@@ -190,9 +193,10 @@ def test_two_missing_null_hash_candidates_at_same_path_do_not_recover(
     session.commit()
 
     with patch("app.assets.scanner.mode.hashing_enabled", return_value=True):
-        created = seed_asset_specs(session, [_spec(path)])
+        created, error = seed_asset_specs(session, [_spec(path)])
     session.commit()
 
+    assert error is None
     assert created == 1, "ambiguous candidates must fall through to the normal new-content path"
     assert session.get(AssetContent, first_id).is_missing is True
     assert session.get(AssetContent, second_id).is_missing is True

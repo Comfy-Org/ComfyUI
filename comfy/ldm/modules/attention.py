@@ -956,6 +956,7 @@ def optimized_attention_for_device(device, mask=False, small_input=False):
 class CrossAttention(nn.Module):
     def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0., attn_precision=None, dtype=None, device=None, operations=ops):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         inner_dim = dim_head * heads
         context_dim = default(context_dim, query_dim)
         self.attn_precision = attn_precision
@@ -979,10 +980,11 @@ class CrossAttention(nn.Module):
         else:
             v = self.to_v(context)
 
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
         if mask is None:
-            out = optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            out = optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         else:
-            out = optimized_attention_masked(q, k, v, self.heads, mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            out = optimized_attention_masked(q, k, v, self.heads, mask, attn_precision=self.attn_precision, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.to_out(out)
 
 

@@ -1,7 +1,7 @@
 import torch
 from einops import rearrange, repeat
 import comfy
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 
 
 def calculate_x_ref_attn_map(visual_q, ref_k, ref_target_masks, split_num=8):
@@ -171,6 +171,7 @@ class SingleStreamAttention(torch.nn.Module):
     ) -> None:
         super().__init__()
         self.dim = dim
+        self.comfy_attention = ComfyAttention()
         self.encoder_hidden_states_dim = encoder_hidden_states_dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -203,11 +204,11 @@ class SingleStreamAttention(torch.nn.Module):
         encoder_k, encoder_v = kv.view(B * N_t, encoder_hidden_states.shape[1], 2, self.num_heads, self.head_dim).unbind(2)
 
         #print("q.shape", q.shape) #torch.Size([21, 1024, 40, 128])
-        x = optimized_attention(
-            q.transpose(1, 2),
-            encoder_k.transpose(1, 2),
-            encoder_v.transpose(1, 2),
-            heads=self.num_heads, skip_reshape=True, skip_output_reshape=True).transpose(1, 2)
+        q = AttentionTensorContainer(q.transpose(1, 2))
+        encoder_k = AttentionTensorContainer(encoder_k.transpose(1, 2))
+        encoder_v = AttentionTensorContainer(encoder_v.transpose(1, 2))
+        del kv
+        x = optimized_attention(q, encoder_k, encoder_v, heads=self.num_heads, preferred_attention=self.comfy_attention, skip_reshape=True, skip_output_reshape=True).transpose(1, 2)
 
         # linear transform
         x = self.proj(x.reshape(B * N_t, S, self.dim))
@@ -324,11 +325,11 @@ class SingleStreamMultiAttention(SingleStreamAttention):
         encoder_k = rearrange(encoder_k, "B H M K -> B M H K")
         encoder_v = rearrange(encoder_v, "B H M K -> B M H K")
 
-        x = optimized_attention(
-            q.transpose(1, 2),
-            encoder_k.transpose(1, 2),
-            encoder_v.transpose(1, 2),
-            heads=self.num_heads, skip_reshape=True, skip_output_reshape=True).transpose(1, 2)
+        q = AttentionTensorContainer(q.transpose(1, 2))
+        encoder_k = AttentionTensorContainer(encoder_k.transpose(1, 2))
+        encoder_v = AttentionTensorContainer(encoder_v.transpose(1, 2))
+        del encoder_kv
+        x = optimized_attention(q, encoder_k, encoder_v, heads=self.num_heads, preferred_attention=self.comfy_attention, skip_reshape=True, skip_output_reshape=True).transpose(1, 2)
 
         # Linear projection
         x = x.reshape(B, N, C)

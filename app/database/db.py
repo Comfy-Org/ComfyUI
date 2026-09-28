@@ -133,8 +133,6 @@ def prepare_file_db_path(db_path):
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
 
-    copy_legacy_default_db(db_path)
-
 
 _BACKUP_TIMEOUT_SECONDS = 5.0
 _SQLITE_BUSY, _SQLITE_LOCKED = 5, 6  # sqlite3 only exports these names from Python 3.11
@@ -222,14 +220,14 @@ def _init_file_db(db_url):
     """Initialize a file-backed SQLite database using Alembic migrations."""
     db_path = get_db_path()
     prepare_file_db_path(db_path)
-    db_exists = os.path.exists(db_path)
 
-    # Lock BEFORE any migration work — deliberately diverging from upstream master, whose
-    # "it would block Alembic" rationale is false (the lock guards a separate `<db>.lock`
-    # file). Only this order makes revision inspection, backup, upgrade and the failure-path
-    # restore mutually exclusive between processes.
+    # Lock before legacy import, migration inspection, backup, upgrade, and failure recovery.
+    # The separate `<db>.lock` file does not block Alembic; this ordering keeps the sequence
+    # process-exclusive.
     _acquire_file_lock(db_path)
     try:
+        copy_legacy_default_db(db_path)
+        db_exists = os.path.exists(db_path)
         _migrate_and_bind(db_url, db_path, db_exists)
     except Exception:
         _db_lock.release()
@@ -322,7 +320,9 @@ def _migrate_and_bind(db_url, db_path, db_exists):
                 f"The asset catalog was rebuilt from scratch by migration "
                 f"{_DESTRUCTIVE_REVISION}: manual tags, user metadata, previews, renames, "
                 f"API-created records and job_id links from the previous database were "
-                f"discarded. The database from before the upgrade was kept at {backup_path}."
+                f"discarded. Record deletions were also discarded, so files still on disk "
+                f"will be catalogued again. The database from before the upgrade was kept "
+                f"at {backup_path}."
             )
 
     conn.close()
