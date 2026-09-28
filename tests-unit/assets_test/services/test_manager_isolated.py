@@ -26,7 +26,7 @@ from app.assets.services.schemas import RegisteredAsset, UploadAssetView
 class _ArgsStub:
     enable_assets = True
     enable_asset_hashing = False
-    enable_assets_output_scan = True
+    enable_assets_output_scanning = True
 
 
 class _OutputSeeder(Protocol):

@@ -69,7 +69,7 @@ class AssetManager(Protocol):
 class _ArgsLike(Protocol):
     enable_assets: bool
     enable_asset_hashing: bool
-    enable_assets_output_scan: bool
+    enable_assets_output_scanning: bool
 
 
 def _shutdown_assets() -> None:

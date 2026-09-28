@@ -1,4 +1,3 @@
-import argparse
 import json
 from collections.abc import Callable, Generator, Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -21,7 +20,7 @@ from app.assets.database.queries.records import create_content, create_record
 from app.assets.manager import AssetsEnabled
 from app.assets.seeder import _AssetSeeder as AssetSeeder
 from app.database.models import Base
-from comfy.cli_args import ASSETS_OUTPUT_SCAN_DEFAULT, parse_bool, parser
+from comfy.cli_args import parser
 
 
 class _Args:
@@ -29,7 +28,7 @@ class _Args:
     enable_asset_hashing = False
 
     def __init__(self, output_scan: bool) -> None:
-        self.enable_assets_output_scan = output_scan
+        self.enable_assets_output_scanning = output_scan
 
 
 @pytest.fixture
@@ -89,20 +88,17 @@ def threaded_create_session(
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
-        ([], ASSETS_OUTPUT_SCAN_DEFAULT),
-        (["--enable-assets-output-scan"], True),
-        (["--enable-assets-output-scan", "true"], True),
-        (["--enable-assets-output-scan", "False"], False),
-        (["--enable-assets-output-scan=false"], False),
+        ([], False),
+        (["--enable-assets-output-scanning"], True),
     ],
 )
 def test_flag_parsing(argv: list[str], expected: bool) -> None:
-    assert parser.parse_args(argv).enable_assets_output_scan is expected
+    assert parser.parse_args(argv).enable_assets_output_scanning is expected
 
 
-def test_flag_rejects_non_boolean_value() -> None:
-    with pytest.raises(argparse.ArgumentTypeError):
-        parse_bool("sometimes")
+def test_flag_takes_no_value() -> None:
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--enable-assets-output-scanning", "false"])
 
 
 def test_scannable_roots_keeps_output_when_enabled() -> None:
