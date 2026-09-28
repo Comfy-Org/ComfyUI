@@ -376,27 +376,47 @@ def unlisted_references(
 ) -> tuple[list[_ReferenceObservation], int]:
     """Split the live rows into (vanished, skipped count).
 
-    A row has vanished only when its parent directory was listed in this walk and its
-    name is absent from that listing. Every other row is skipped untouched: a hidden name
-    or path component, a directory that failed to list, and a path reachable only through
-    a symlink alias the walk did not take are all cases where the listing says nothing
-    about whether the file exists.
+    A row has vanished when the nearest directory above it that this walk listed lacks
+    the next component of its path: its own name, or the directory it sat in, which has
+    since been removed with everything under it. Every other row is skipped untouched: a
+    hidden name or path component, a directory that failed to list, and a path reachable
+    only through a symlink alias the walk did not take are all cases where the listing
+    says nothing about whether the file exists.
     """
     vanished: list[_ReferenceObservation] = []
     skipped = 0
     names_by_dir: dict[str, set[str]] = {}
     for path, observations in live.items():
-        parent, name = os.path.split(path)
-        listing = listings.get(parent)
-        if listing is None or not is_visible(name):
+        listed = _listed_state(path, listings, names_by_dir)
+        if listed is None:
             skipped += len(observations)
-            continue
-        names = names_by_dir.get(parent)
-        if names is None:
-            names = names_by_dir[parent] = {*listing[1], *listing[2]}
-        if name not in names:
+        elif not listed:
             vanished.extend(observations)
     return vanished, skipped
+
+
+def _listed_state(path: str, listings: DirListings, names_by_dir: dict[str, set[str]]) -> bool | None:
+    """False when the nearest listed directory above ``path`` lacks the next component
+    of it, True when the parent's listing has the name, and None when no listing can
+    say: a hidden component, no listed ancestor, or an ancestor that still has the
+    directory this walk did not list."""
+    child, parent = path, os.path.dirname(path)
+    while parent not in listings:
+        if not is_visible(os.path.basename(child)):
+            return None
+        child, parent = parent, os.path.dirname(parent)
+        if parent == child:  # reached the filesystem root without meeting a listing
+            return None
+    name = os.path.basename(child)
+    if not is_visible(name):
+        return None
+    names = names_by_dir.get(parent)
+    if names is None:
+        listing = listings[parent]
+        names = names_by_dir[parent] = {*listing[1], *listing[2]}
+    if name not in names:
+        return False
+    return True if child == path else None
 
 
 def mark_unlisted_references_missing_safely(
