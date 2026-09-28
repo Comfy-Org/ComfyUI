@@ -26,7 +26,7 @@ INSTRUCTIONS = {
 }
 
 
-def distribution(logits, history, step, phase, temperature, top_p, top_k, repetition_penalty, penalty_window, min_tokens, legacy_off=False):
+def distribution(logits, recent, step, phase, temperature, top_p, top_k, repetition_penalty, min_tokens, legacy_off=False):
     scores = logits.clone() if legacy_off else logits.float().clone()
     end = ABC_END if phase == "abc" else MUSIC_END
     allowed = torch.full_like(scores, -torch.inf)
@@ -38,8 +38,7 @@ def distribution(logits, history, step, phase, temperature, top_p, top_k, repeti
     scores += allowed
     if step < min_tokens:
         scores[..., end] = -torch.inf
-    if repetition_penalty != 1.0 and history:
-        recent = torch.tensor([history[-penalty_window:]], dtype=torch.long, device=scores.device)
+    if repetition_penalty != 1.0:
         counts = torch.zeros_like(scores)
         counts.scatter_add_(-1, recent, torch.ones_like(recent, dtype=scores.dtype))
         penalty = repetition_penalty ** counts
@@ -168,25 +167,33 @@ class YuE2TEModel(torch.nn.Module):
                               rope_matrix(self.model.compute_freqs_cis(positions, device)))
         history = []
         end = ABC_END if phase == "abc" else MUSIC_END
+        # Sampling stays on the device (EOD is masked in both phases, so it pads the penalty window)
+        # and the host reads tokens back in batches instead of syncing on every step.
+        penalty_window = sampling.pop("penalty_window")
+        recent = torch.full((1, penalty_window), EOD, device=device, dtype=torch.long)
+        tokens = torch.empty((max_tokens,), device=device, dtype=torch.long)
         progress = comfy.utils.ProgressBar(max_tokens)
         try:
             for step in comfy.utils.model_trange(max_tokens, desc="YuE2 ABC sampling" if phase == "abc" else "YuE2 music sampling", unit="token"):
                 comfy.model_management.throw_exception_if_processing_interrupted()
                 guided = logits if cfg_scale == 1.0 else logits[1:] + cfg_scale * (logits[:1] - logits[1:])
-                scores = distribution(guided, history, step, phase, legacy_off=legacy_off, **sampling)
+                scores = distribution(guided, recent, step, phase, legacy_off=legacy_off, **sampling)
                 if sampling["temperature"] == 0:
                     next_id = scores.argmax(-1, keepdim=True)
                 else:
                     probabilities = scores.softmax(-1).to(rng_device)
                     next_id = torch.multinomial(probabilities, 1, generator=generator).to(device)
                 decode_tokens.copy_(next_id)
-                token = next_id.item()
+                tokens[step] = next_id[0, 0]
+                recent[:, step % penalty_window] = next_id[0]
                 progress.update_absolute(step + 1)
-                if token == end:
-                    return history, False
-                history.append(token)
+                if (step + 1) % 16 == 0 or step + 1 == max_tokens:
+                    for token in tokens[len(history):step + 1].tolist():
+                        if token == end:
+                            return history, False
+                        history.append(token)
                 if step + 1 < max_tokens:
-                    # Keep decode allocations stable; sampling has a changing history window.
+                    # Keep decode allocations stable.
                     if fixed_kv:
                         comfy.model_prefetch.malloc_graph_begin(device)
                     output = self.model(decode_tokens, past_key_values=cache, dtype=dtype, position_ids=positions,
