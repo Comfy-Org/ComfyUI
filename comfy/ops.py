@@ -1269,6 +1269,13 @@ def _load_quantized_module(module, super_load, state_dict, prefix, local_metadat
                     layer_conf.get("convrot_groupsize", params_conf.get("convrot_groupsize", 256))
                 ),
             }
+        elif module.quant_format == "awq_w4a16":
+            # uint4 weight (packed int8 [N,K/2]), per-group scale and zero [K/G,N]: W = (q - 8) * scale + zeros.
+            scale = pop_scale("weight_scale")
+            zeros = pop_scale("weight_zeros")
+            if scale is None or zeros is None:
+                raise ValueError(f"Missing AWQ W4A16 scale/zeros for layer {layer_name}")
+            scales = {"scale": scale, "zeros": zeros, "group_size": int(layer_conf.get("group_size", 64))}
         else:
             raise ValueError(f"Unsupported quantization format: {module.quant_format}")
 
@@ -1323,6 +1330,8 @@ def _quantized_weight_state_dict(module, sd, prefix, extra_quant_conf=None, extr
         elif module.quant_format == "asym_w4a8_int8":
             quant_conf["group_size"] = getattr(params, "group_size", 16)
             quant_conf["convrot_groupsize"] = getattr(params, "convrot_groupsize", 256)
+        elif module.quant_format == "awq_w4a16":
+            quant_conf["group_size"] = getattr(params, "group_size", 64)
         if extra_quant_conf:
             quant_conf.update(extra_quant_conf)
         sd[f"{prefix}comfy_quant"] = torch.tensor(list(json.dumps(quant_conf).encode("utf-8")), dtype=torch.uint8)

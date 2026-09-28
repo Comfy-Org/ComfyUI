@@ -14,6 +14,7 @@ try:
         TensorCoreConvRotW4A4Layout as _CKTensorCoreConvRotW4A4Layout,
         TensorWiseINT8Layout as _CKTensorWiseINT8Layout,
         AsymW4A8Int8Layout as _CKAsymW4A8Int8Layout,
+        TensorCoreAWQW4A16Layout as _CKAWQW4A16Layout,
         register_layout_op,
         register_layout_class,
         get_layout_class,
@@ -61,6 +62,9 @@ except ImportError as e:
         pass
 
     class _CKAsymW4A8Int8Layout:
+        pass
+
+    class _CKAWQW4A16Layout:
         pass
 
     def register_layout_class(name, cls):
@@ -207,6 +211,7 @@ register_layout_class("TensorCoreConvRotW4A4Layout", _CKTensorCoreConvRotW4A4Lay
 if _CK_MXFP8_AVAILABLE:
     register_layout_class("TensorCoreMXFP8Layout", TensorCoreMXFP8Layout)
 register_layout_class("AsymW4A8Int8Layout", _CKAsymW4A8Int8Layout)
+register_layout_class("TensorCoreAWQW4A16Layout", _CKAWQW4A16Layout)
 
 QUANT_ALGOS = {
     "float8_e4m3fn": {
@@ -253,6 +258,13 @@ QUANT_ALGOS["asym_w4a8_int8"] = {
     "storage_t": torch.int8,
     "parameters": {"weight_scale"},
     "comfy_tensor_layout": "AsymW4A8Int8Layout",
+    "quantize_input": False,
+}
+
+QUANT_ALGOS["awq_w4a16"] = {
+    "storage_t": torch.int8,
+    "parameters": {"weight_scale"},
+    "comfy_tensor_layout": "TensorCoreAWQW4A16Layout",
     "quantize_input": False,
 }
 

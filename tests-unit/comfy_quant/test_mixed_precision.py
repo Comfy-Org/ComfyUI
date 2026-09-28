@@ -444,5 +444,48 @@ class TestMixedPrecisionOps(unittest.TestCase):
         self.assertEqual(saved_conf["linear_dtype"], "int8")
         self.assertNotIn("quant_group_size", saved_conf)
 
+    def test_awq_w4a16_loads_into_params(self):
+        """AWQ W4A16 checkpoints load as the kitchen layout and keep their group size through a save."""
+        if "awq_w4a16" not in QUANT_ALGOS:
+            self.skipTest("comfy_kitchen does not provide AWQ W4A16")
+
+        torch.manual_seed(789)
+        n, k, group_size = 16, 64, 32
+        q = torch.randint(0, 16, (n, k), dtype=torch.int32)
+        qweight = (q[:, 0::2] | (q[:, 1::2] << 4)).to(torch.uint8).view(torch.int8)
+        wscales = torch.rand(k // group_size, n, dtype=torch.bfloat16) * 0.01
+        wzeros = torch.randn(k // group_size, n, dtype=torch.bfloat16) * 0.01
+        bias = torch.randn(n, dtype=torch.bfloat16)
+        state_dict = {
+            "layer.weight": qweight,
+            "layer.bias": bias,
+            "layer.weight_scale": wscales,
+            "layer.weight_zeros": wzeros,
+        }
+        layer_quant_config = {"layer": {"format": "awq_w4a16", "group_size": group_size}}
+        state_dict, _ = comfy.utils.convert_old_quants(
+            state_dict,
+            metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
+        )
+        model = torch.nn.Module()
+        model.layer = ops.mixed_precision_ops({}).Linear(k, n, device="cpu", dtype=torch.bfloat16)
+        model.load_state_dict(state_dict, strict=False)
+
+        self.assertIsInstance(model.layer.weight, QuantizedTensor)
+        self.assertEqual(model.layer.weight._layout_cls, "TensorCoreAWQW4A16Layout")
+        self.assertEqual(model.layer.weight._params.group_size, group_size)
+
+        weight = ((q.view(n, k // group_size, group_size).to(torch.bfloat16) - 8.0) * wscales.t().unsqueeze(-1)
+                  + wzeros.t().unsqueeze(-1)).view(n, k)
+        input_tensor = torch.randn(4, k, dtype=torch.bfloat16)
+        loaded_out = model.layer(input_tensor)
+        ref_out = torch.nn.functional.linear(input_tensor, weight, bias)
+        self.assertTrue(torch.allclose(loaded_out.float(), ref_out.float(), rtol=1e-2, atol=1e-2))
+
+        saved = model.state_dict()
+        saved_conf = json.loads(saved["layer.comfy_quant"].numpy().tobytes())
+        self.assertEqual(saved_conf, {"format": "awq_w4a16", "group_size": group_size})
+        self.assertTrue(torch.equal(saved["layer.weight_zeros"], wzeros))
+
 if __name__ == "__main__":
     unittest.main()
