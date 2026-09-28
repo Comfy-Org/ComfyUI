@@ -29,13 +29,14 @@ try:
 
     # comfy-kitchen picks its accelerated backend on import: the HIP backend registers
     # itself on a supported AMD device and takes dispatch priority there, CUDA on NVIDIA.
-    # Triton is an opt-in override, off by default on every platform.
-    if args.enable_triton_backend and not args.disable_triton_backend:
+    # Triton accelerated backend: enable if available unless explicitly disabled
+    if not args.disable_triton_backend:
         try:
             import triton
+            ck.registry.enable("triton")
             logging.info("Found triton %s. Enabling comfy-kitchen triton backend.", triton.__version__)
-        except ImportError as e:
-            logging.error(f"Failed to import triton, Error: {e}, the comfy-kitchen triton backend will not be available.")
+        except Exception as e:
+            logging.info("Triton not available (%s), keeping comfy-kitchen triton backend disabled.", e)
             ck.registry.disable("triton")
     else:
         ck.registry.disable("triton")
