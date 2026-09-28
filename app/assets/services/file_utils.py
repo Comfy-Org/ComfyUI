@@ -1,7 +1,12 @@
 import os
 from typing import NamedTuple
 
-from app.assets.services.gil import yield_gil_rescan
+from app.assets.services.gil import yield_gil
+
+# Output rescans repeat after prompts, so they pause less often than the first scan:
+# after every 10ms of work, which kept nearly all of the event-loop and prompt-start gain
+# on a 200k-file rescan for far less extra time than the default 2ms.
+RESCAN_YIELD_RUN = 0.010
 
 
 def get_mtime_ns(stat_result: os.stat_result) -> int:
@@ -92,7 +97,7 @@ def _list_visible_entries(dirpath: str) -> tuple[list[str], list[str]]:
     subdirs: list[str] = []
     with os.scandir(dirpath) as entries:
         for entry in entries:
-            yield_gil_rescan()
+            yield_gil(run=RESCAN_YIELD_RUN)
             if not is_visible(entry.name):
                 continue
             try:
@@ -121,7 +126,7 @@ def walk_listings(base_dir: str) -> ListingWalk:
     seen_dirs: set[tuple[int, int]] = set()
     stack = [os.path.abspath(base_dir)]
     while stack:
-        yield_gil_rescan()
+        yield_gil(run=RESCAN_YIELD_RUN)
         dirpath = stack.pop()
         try:
             st = os.stat(dirpath)
@@ -137,7 +142,7 @@ def walk_listings(base_dir: str) -> ListingWalk:
         seen_dirs.add(dir_id)
         listings[dirpath] = (st.st_mtime_ns, names, subdirs)
         for name in names:
-            yield_gil_rescan()
+            yield_gil(run=RESCAN_YIELD_RUN)
             files.append(os.path.abspath(os.path.join(dirpath, name)))
         stack.extend(os.path.join(dirpath, name) for name in reversed(subdirs))
     return ListingWalk(files, listings, len(listings))

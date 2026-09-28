@@ -46,6 +46,7 @@ from app.assets.scanner_admission import (
     tick_watch_list as tick_watch_list,
 )
 from app.assets.services.file_utils import (
+    RESCAN_YIELD_RUN,
     DirListings,
     ListingWalk,
     get_mtime_ns,
@@ -53,7 +54,7 @@ from app.assets.services.file_utils import (
     list_files_recursively,
     walk_listings,
 )
-from app.assets.services.gil import yield_gil, yield_gil_rescan
+from app.assets.services.gil import yield_gil
 from app.assets.services.image_dimensions import extract_image_dimensions
 from app.assets.services.metadata_extract import ExtractedMetadata, extract_file_metadata
 from app.assets.services.path_utils import (
@@ -361,7 +362,7 @@ def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservati
     try:
         with create_session() as session:
             for content_id, path, size_bytes, mtime_ns in session.execute(stmt):
-                yield_gil_rescan()
+                yield_gil(run=RESCAN_YIELD_RUN)
                 live.setdefault(os.path.abspath(path), []).append(
                     _ReferenceObservation(content_id, size_bytes, mtime_ns, None)
                 )
@@ -388,7 +389,7 @@ def unlisted_references(
     skipped = 0
     names_by_dir: dict[str, set[str]] = {}
     for path, observations in live.items():
-        yield_gil_rescan()
+        yield_gil(run=RESCAN_YIELD_RUN)
         listed = _listed_state(path, listings, names_by_dir)
         if listed is None:
             skipped += len(observations)

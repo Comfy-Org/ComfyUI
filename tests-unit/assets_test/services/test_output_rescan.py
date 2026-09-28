@@ -363,8 +363,8 @@ def test_the_rescan_yields_the_gil_per_dir_entry_and_row(roots, monkeypatch):
     _scan()
     walk_yields: list[None] = []
     row_yields: list[None] = []
-    monkeypatch.setattr(file_utils, "yield_gil_rescan", lambda: walk_yields.append(None))
-    monkeypatch.setattr(scanner, "yield_gil_rescan", lambda: row_yields.append(None))
+    monkeypatch.setattr(file_utils, "yield_gil", lambda run=None: run == file_utils.RESCAN_YIELD_RUN and walk_yields.append(None))
+    monkeypatch.setattr(scanner, "yield_gil", lambda run=None: run == file_utils.RESCAN_YIELD_RUN and row_yields.append(None))
 
     _scan()
 
