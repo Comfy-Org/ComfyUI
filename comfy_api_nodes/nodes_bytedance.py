@@ -44,6 +44,8 @@ from comfy_api_nodes.apis.bytedance import (
     TaskAudioContent,
     TaskAudioContentUrl,
     TaskCreationResponse,
+    TaskDraftTaskContent,
+    TaskDraftTaskContentTask,
     TaskImageContent,
     TaskImageContentUrl,
     TaskStatusResponse,
@@ -77,6 +79,7 @@ from comfy_api_nodes.util import (
     validate_audio_duration,
     validate_image_aspect_ratio,
     validate_image_dimensions,
+    validate_output_unlinked,
     validate_string,
     validate_video_dimensions,
     validate_video_duration,
@@ -112,6 +115,7 @@ BYTEPLUS_SEEDANCE2_TASK_STATUS_ENDPOINT = "/proxy/byteplus-seedance2/api/v3/cont
 
 SEEDANCE_MODELS = {
     "Seedance 2.5": "dreamina-seedance-2-5-260628",
+    "Seedance 2.5 Draft": "dreamina-seedance-2-5-260628",
     "Seedance 2.0": "dreamina-seedance-2-0-260128",
     "Seedance 2.0 Fast": "dreamina-seedance-2-0-fast-260128",
     "Seedance 2.0 Mini": "dreamina-seedance-2-0-mini",
@@ -119,6 +123,8 @@ SEEDANCE_MODELS = {
 
 SEEDANCE_MODEL_TOOLTIP = (
     "Seedance 2.5 for the newest model, videos up to 30 seconds and mp4/mov output; "
+    "Seedance 2.5 Draft for a quick 480p preview whose draft_task_id renders the 1080p final "
+    "in the Seedance 2.5 Draft to Final Video node; "
     "Seedance 2.0 for maximum quality and 4k; Fast for speed optimization; "
     "Mini for the fastest, lowest-cost generation."
 )
@@ -2114,7 +2120,9 @@ def _seedance2_text_inputs(resolutions: list[str], default_ratio: str = "16:9"):
     ]
 
 
-def _seedance25_text_inputs(with_ratio: bool = True, with_video_editing: bool = False, with_task_type: bool = False):
+def _seedance25_text_inputs(
+    with_ratio: bool = True, with_video_editing: bool = False, with_task_type: bool = False, draft: bool = False
+):
     return [
         IO.String.Input(
             "prompt",
@@ -2125,8 +2133,8 @@ def _seedance25_text_inputs(with_ratio: bool = True, with_video_editing: bool = 
         ),
         IO.Combo.Input(
             "resolution",
-            options=["480p", "720p", "1080p"],
-            default="720p",
+            options=["480p"] if draft else ["480p", "720p", "1080p"],
+            default="480p" if draft else "720p",
             tooltip="Resolution of the output video.",
         ),
         *(
@@ -2201,9 +2209,9 @@ def _seedance25_text_inputs(with_ratio: bool = True, with_video_editing: bool = 
     ]
 
 
-def _seedance25_reference_inputs(with_video_editing: bool = False, with_task_type: bool = False):
+def _seedance25_reference_inputs(with_video_editing: bool = False, with_task_type: bool = False, draft: bool = False):
     return [
-        *_seedance25_text_inputs(with_video_editing=with_video_editing, with_task_type=with_task_type),
+        *_seedance25_text_inputs(with_video_editing=with_video_editing, with_task_type=with_task_type, draft=draft),
         IO.Autogrow.Input(
             "reference_images",
             template=IO.Autogrow.TemplateNames(
@@ -2281,7 +2289,18 @@ def _seedance2_build_request(
         watermark=watermark,
         output_format=model.get("output_format"),
         omni_reference_task_type=None if task_type == "auto" else task_type,
+        draft=True if model["model"] == "Seedance 2.5 Draft" else None,
     )
+
+
+def _seedance2_validate_draft_output(cls: type[IO.ComfyNode], model: dict) -> None:
+    if model["model"] != "Seedance 2.5 Draft":
+        validate_output_unlinked(
+            cls,
+            1,
+            "Only the Seedance 2.5 Draft model produces a draft_task_id. Select it as the model, "
+            "or disconnect the draft_task_id output",
+        )
 
 
 _SEEDANCE2_PRICE_EXPR_TEMPLATE = """
@@ -2432,6 +2451,7 @@ class ByteDance2TextToVideoNode(IO.ComfyNode):
                     "model",
                     options=[
                         IO.DynamicCombo.Option("Seedance 2.5", _seedance25_text_inputs()),
+                        IO.DynamicCombo.Option("Seedance 2.5 Draft", _seedance25_text_inputs(draft=True)),
                         IO.DynamicCombo.Option("Seedance 2.0", _seedance2_text_inputs(["480p", "720p", "1080p", "4k"])),
                         IO.DynamicCombo.Option("Seedance 2.0 Fast", _seedance2_text_inputs(["480p", "720p"])),
                         IO.DynamicCombo.Option("Seedance 2.0 Mini", _seedance2_text_inputs(["480p", "720p"])),
@@ -2458,11 +2478,17 @@ class ByteDance2TextToVideoNode(IO.ComfyNode):
             ],
             outputs=[
                 IO.Video.Output(),
+                IO.String.Output(
+                    "draft_task_id",
+                    tooltip="Task ID of a Seedance 2.5 Draft run. Connect it to the Seedance 2.5 Draft to "
+                    "Final Video node to render the 1080p final.",
+                ),
             ],
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
                 IO.Hidden.api_key_comfy_org,
                 IO.Hidden.unique_id,
+                IO.Hidden.dynprompt,
             ],
             is_api_node=True,
             price_badge=_seedance2_price_badge(with_reference_videos=False),
@@ -2476,6 +2502,7 @@ class ByteDance2TextToVideoNode(IO.ComfyNode):
         watermark: bool,
     ) -> IO.NodeOutput:
         validate_string(model["prompt"], strip_whitespace=True, min_length=1)
+        _seedance2_validate_draft_output(cls, model)
         model_id = SEEDANCE_MODELS[model["model"]]
         initial_response = await sync_op(
             cls,
@@ -2491,7 +2518,7 @@ class ByteDance2TextToVideoNode(IO.ComfyNode):
             response_model=TaskCreationResponse,
         )
         response = await _seedance2_poll_video_task(cls, initial_response.id)
-        return IO.NodeOutput(await download_url_to_video_output(response.content.video_url))
+        return IO.NodeOutput(await download_url_to_video_output(response.content.video_url), initial_response.id)
 
 
 class ByteDance2FirstLastFrameNode(IO.ComfyNode):
@@ -2509,6 +2536,9 @@ class ByteDance2FirstLastFrameNode(IO.ComfyNode):
                     "model",
                     options=[
                         IO.DynamicCombo.Option("Seedance 2.5", _seedance25_text_inputs(with_ratio=False)),
+                        IO.DynamicCombo.Option(
+                            "Seedance 2.5 Draft", _seedance25_text_inputs(with_ratio=False, draft=True)
+                        ),
                         IO.DynamicCombo.Option(
                             "Seedance 2.0",
                             _seedance2_text_inputs(["480p", "720p", "1080p", "4k"], default_ratio="adaptive"),
@@ -2568,11 +2598,17 @@ class ByteDance2FirstLastFrameNode(IO.ComfyNode):
             ],
             outputs=[
                 IO.Video.Output(),
+                IO.String.Output(
+                    "draft_task_id",
+                    tooltip="Task ID of a Seedance 2.5 Draft run. Connect it to the Seedance 2.5 Draft to "
+                    "Final Video node to render the 1080p final.",
+                ),
             ],
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
                 IO.Hidden.api_key_comfy_org,
                 IO.Hidden.unique_id,
+                IO.Hidden.dynprompt,
             ],
             is_api_node=True,
             price_badge=_seedance2_price_badge(with_reference_videos=False),
@@ -2590,6 +2626,7 @@ class ByteDance2FirstLastFrameNode(IO.ComfyNode):
         last_frame_asset_id: str = "",
     ) -> IO.NodeOutput:
         validate_string(model["prompt"], strip_whitespace=True, min_length=1)
+        _seedance2_validate_draft_output(cls, model)
         model_id = SEEDANCE_MODELS[model["model"]]
 
         first_frame_asset_id = first_frame_asset_id.strip()
@@ -2682,7 +2719,7 @@ class ByteDance2FirstLastFrameNode(IO.ComfyNode):
             response_model=TaskCreationResponse,
         )
         response = await _seedance2_poll_video_task(cls, initial_response.id)
-        return IO.NodeOutput(await download_url_to_video_output(response.content.video_url))
+        return IO.NodeOutput(await download_url_to_video_output(response.content.video_url), initial_response.id)
 
 
 def _seedance2_reference_inputs(resolutions: list[str], default_ratio: str = "16:9"):
@@ -2776,6 +2813,9 @@ class ByteDance2ReferenceNodeV2(IO.ComfyNode):
                     options=[
                         IO.DynamicCombo.Option("Seedance 2.5", _seedance25_reference_inputs(with_task_type=True)),
                         IO.DynamicCombo.Option(
+                            "Seedance 2.5 Draft", _seedance25_reference_inputs(with_task_type=True, draft=True)
+                        ),
+                        IO.DynamicCombo.Option(
                             "Seedance 2.0",
                             _seedance2_reference_inputs(["480p", "720p", "1080p", "4k"], default_ratio="adaptive"),
                         ),
@@ -2810,11 +2850,17 @@ class ByteDance2ReferenceNodeV2(IO.ComfyNode):
             ],
             outputs=[
                 IO.Video.Output(),
+                IO.String.Output(
+                    "draft_task_id",
+                    tooltip="Task ID of a Seedance 2.5 Draft run. Connect it to the Seedance 2.5 Draft to "
+                    "Final Video node to render the 1080p final.",
+                ),
             ],
             hidden=[
                 IO.Hidden.auth_token_comfy_org,
                 IO.Hidden.api_key_comfy_org,
                 IO.Hidden.unique_id,
+                IO.Hidden.dynprompt,
             ],
             is_api_node=True,
             price_badge=_seedance2_price_badge(with_reference_videos=True),
@@ -2828,6 +2874,7 @@ class ByteDance2ReferenceNodeV2(IO.ComfyNode):
         watermark: bool,
     ) -> IO.NodeOutput:
         validate_string(model["prompt"], strip_whitespace=True, min_length=1)
+        _seedance2_validate_draft_output(cls, model)
 
         reference_images = model.get("reference_images", {})
         reference_videos = model.get("reference_videos", {})
@@ -3000,7 +3047,7 @@ class ByteDance2ReferenceNodeV2(IO.ComfyNode):
             initial_response.id,
             task_type=task_type,
         )
-        return IO.NodeOutput(await download_url_to_video_output(response.content.video_url))
+        return IO.NodeOutput(await download_url_to_video_output(response.content.video_url), initial_response.id)
 
 
 class ByteDance2ReferenceNode(ByteDance2ReferenceNodeV2):
@@ -3063,6 +3110,64 @@ class ByteDance2ReferenceNode(ByteDance2ReferenceNodeV2):
             is_deprecated=True,
             price_badge=_seedance2_price_badge(with_reference_videos=True, legacy_video_editing=True),
         )
+
+
+class ByteDance2DraftToFinalVideoNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="ByteDance2DraftToFinalVideoNode",
+            display_name="ByteDance Seedance 2.5 Draft to Final Video",
+            category="partner/video/ByteDance",
+            description="Render the 1080p final video of a Seedance 2.5 Draft. The final keeps the draft's "
+            "scene and motion, and reuses its prompt, references, duration, aspect ratio, and audio setting.",
+            inputs=[
+                IO.String.Input(
+                    "draft_task_id",
+                    default="",
+                    tooltip="The draft_task_id output of a Seedance 2.5 node run with the Seedance 2.5 Draft "
+                    "model, or a pasted draft task ID. Set that node's seed control to fixed, otherwise the "
+                    "next run generates a new draft instead of reusing the one you reviewed. A draft can be "
+                    "rendered for 7 days after it was created.",
+                ),
+                IO.Boolean.Input(
+                    "watermark",
+                    default=False,
+                    tooltip="Whether to add a watermark to the video.",
+                    advanced=True,
+                ),
+            ],
+            outputs=[
+                IO.Video.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr='{"type":"range_usd","min_usd":3.2864,"max_usd":29.3964,"format":{"approximate":true}}',
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, draft_task_id: str, watermark: bool) -> IO.NodeOutput:
+        validate_string(draft_task_id, strip_whitespace=True, field_name="draft_task_id", min_length=1)
+        initial_response = await sync_op(
+            cls,
+            ApiEndpoint(path=BYTEPLUS_TASK_ENDPOINT, method="POST"),
+            data=Seedance2TaskCreationRequest(
+                model=SEEDANCE_MODELS["Seedance 2.5"],
+                content=[TaskDraftTaskContent(draft_task=TaskDraftTaskContentTask(id=draft_task_id.strip()))],
+                resolution="1080p",
+                watermark=watermark,
+            ),
+            response_model=TaskCreationResponse,
+        )
+        response = await _seedance2_poll_video_task(cls, initial_response.id)
+        return IO.NodeOutput(await download_url_to_video_output(response.content.video_url))
 
 
 async def process_video_task(
@@ -3790,6 +3895,7 @@ class ByteDanceExtension(ComfyExtension):
             ByteDance2FirstLastFrameNode,
             ByteDance2ReferenceNode,
             ByteDance2ReferenceNodeV2,
+            ByteDance2DraftToFinalVideoNode,
             ByteDanceCreateImageAsset,
             ByteDanceCreateVideoAsset,
             ByteDanceSeedAudioNode,

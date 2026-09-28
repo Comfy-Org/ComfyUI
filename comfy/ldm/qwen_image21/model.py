@@ -145,7 +145,7 @@ class QwenImage21TransformerBlock(nn.Module):
         x = _gated_residual(x, self.attn(_modulated_norm(self.img_norm1, x, scale1, prefix_len, zero), pe, attn_fn, prefix_len, transformer_options), gate1, prefix_len)
         x = _gated_residual(x, self.img_mlp(_modulated_norm(self.img_norm2, x, scale2, prefix_len, zero)), gate2, prefix_len)
         if x.dtype == torch.float16:
-            x = x.clip(-65504, 65504)
+            x.clamp_(-65504, 65504)
         return x
 
 

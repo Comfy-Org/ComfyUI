@@ -958,6 +958,7 @@ class QwenImage21(LatentFormat):
     latent_channels = 64
     latent_dimensions = 2
     spacial_downscale_ratio = 16
+    taesd_decoder_name = "taeqi2_1_decoder"
 
     latent_rgb_factors = [
         [-0.0158, -0.0115, -0.0174], [ 0.0030,  0.0120,  0.0027], [ 0.0637,  0.0470, -0.0127], [ 0.0360,  0.0661, -0.0030],
