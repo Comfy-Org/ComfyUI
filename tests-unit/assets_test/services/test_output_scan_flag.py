@@ -20,18 +20,24 @@ from app.assets.database.queries.records import create_content, create_record
 from app.assets.manager import AssetsEnabled
 from app.assets.seeder import ScanPhase, _AssetSeeder as AssetSeeder
 from app.database.models import Base
-from comfy.cli_args import parser
+from comfy.cli_args import ASSETS_OUTPUT_SCANNING_DEFAULT, parser
 
 
 class _Args:
     enable_assets = True
 
-    def __init__(
-        self, output_scan: bool, hashing: bool = False, disable_output_scan: bool = False
-    ) -> None:
+    def __init__(self, output_scan: bool, hashing: bool = False) -> None:
         self.enable_assets_output_scanning = output_scan
-        self.disable_assets_output_scanning = disable_output_scan
+        self.disable_assets_output_scanning = not output_scan
         self.enable_asset_hashing = hashing
+
+
+class _Flags:
+    enable_asset_hashing = False
+
+    def __init__(self, enable: bool, disable: bool) -> None:
+        self.enable_assets_output_scanning = enable
+        self.disable_assets_output_scanning = disable
 
 
 @pytest.fixture
@@ -119,14 +125,14 @@ def test_flag_takes_no_value(flag: str) -> None:
 @pytest.mark.parametrize(
     ("enable", "disable", "expected"),
     [
-        (False, False, False),
+        (False, False, ASSETS_OUTPUT_SCANNING_DEFAULT),
         (True, False, True),
         (False, True, False),
         (True, True, False),
     ],
 )
 def test_disable_wins_over_enable(enable: bool, disable: bool, expected: bool) -> None:
-    mode.init(_Args(output_scan=enable, disable_output_scan=disable))
+    mode.init(_Flags(enable=enable, disable=disable))
     assert mode.output_scan_enabled() is expected
 
 

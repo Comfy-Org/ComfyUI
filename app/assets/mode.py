@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Protocol, TypeVar
 
+from comfy.cli_args import ASSETS_OUTPUT_SCANNING_DEFAULT
+
 
 class _ModeArguments(Protocol):
     enable_asset_hashing: bool
@@ -41,7 +43,11 @@ def hashing_enabled() -> bool:
 
 def output_scan_enabled() -> bool:
     args = _initialised_args()
-    return bool(args.enable_assets_output_scanning and not args.disable_assets_output_scanning)
+    if args.disable_assets_output_scanning:
+        return False
+    if args.enable_assets_output_scanning:
+        return True
+    return ASSETS_OUTPUT_SCANNING_DEFAULT
 
 
 def scannable_roots(roots: tuple[_RootT, ...]) -> tuple[_RootT, ...]:
