@@ -4,11 +4,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from comfy.cli_args import args
-
-if not torch.cuda.is_available():
-    args.cpu = True
-
 import comfy.model_management as mm
 import comfy.ops as ops
 from comfy.quant_ops import QuantizedTensor, TensorCoreFP8Layout
@@ -105,6 +100,31 @@ def test_quantized_cast_releases_buffer(monkeypatch, buffers):
     weight = ops.comfy.memory_management.interpret_gathered_like([template], buffer)[0]
     ops.uncast_bias_weight(None, weight, None, (buffers, weight, None))
     assert mm.get_cast_buffer(buffers, "cpu", size, object()).data_ptr() == buffer.data_ptr()
+
+
+def test_resident_weight_with_offloaded_bias_releases_buffer(monkeypatch, buffers):
+    monkeypatch.setattr(mm, "get_offload_stream", lambda device: buffers)
+    monkeypatch.setattr(mm, "current_stream", lambda device: buffers)
+    monkeypatch.setattr(ops.args, "cuda_malloc", False)
+    cast_to = mm.cast_to
+
+    def copy(weight, dtype=None, device=None, non_blocking=False, copy=False, stream=None, r=None):
+        if weight.device.type == "meta":
+            return r.fill_(3)
+        return cast_to(weight, dtype, device, non_blocking, copy, stream, r)
+
+    monkeypatch.setattr(mm, "cast_to", copy)
+    layer = SimpleNamespace(weight=torch.ones(128), bias=torch.empty(128, device="meta"),
+                            weight_function=[], bias_function=[])
+    # Only the remote bias copy is simulated; the resident-weight fast path is real.
+    first = ops.cast_bias_weight(layer, dtype=torch.float32, device=torch.device("cpu"), offloadable=True)
+    assert first[0] is layer.weight
+    assert torch.all(first[1] == 3)
+    ops.uncast_bias_weight(layer, *first)
+    second = ops.cast_bias_weight(layer, dtype=torch.float32, device=torch.device("cpu"), offloadable=True)
+    assert second[0] is layer.weight
+    assert second[1].data_ptr() == first[1].data_ptr()
+    ops.uncast_bias_weight(layer, *second)
 
 
 @pytest.mark.parametrize("bias", [False, True])
