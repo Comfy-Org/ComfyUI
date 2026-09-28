@@ -149,3 +149,10 @@ def test_contended_sleep_does_not_stretch_the_run_window_past_the_timer_tick(fak
     gil._yield_scaled()  # sleeps, taking 400ms
     assert gil._state.next_at - clock.now <= gil._RUN * gil._MAX_SCALE + 1e-9
 
+
+
+def test_a_longer_run_window_sleeps_proportionally_less(fake):
+    run = gil._RUN * 5
+    clock = started(fake, gil._SLEEP, lambda: gil._yield_fixed(run=run))
+    share = gil._SLEEP / (gil._SLEEP + run)
+    assert run_hot_loop(clock, lambda: gil._yield_fixed(run=run), 10.0) == pytest.approx(share, abs=0.01)
