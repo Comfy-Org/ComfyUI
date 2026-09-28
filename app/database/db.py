@@ -180,10 +180,7 @@ def _acquire_file_lock(db_path):
                 "Another ComfyUI process may already be using it. "
                 "Use --database-url to specify a separate database file."
             )
-        logging.warning(
-            f"Database lock released after {time.monotonic() - waiting_since:.1f}s; "
-            "another ComfyUI was still shutting down"
-        )
+        logging.info(f"Database lock acquired after waiting {time.monotonic() - waiting_since:.1f}s")
 
 
 def _is_memory_db(db_url):
