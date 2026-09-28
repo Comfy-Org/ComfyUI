@@ -26,8 +26,11 @@ from comfy.cli_args import parser
 class _Args:
     enable_assets = True
 
-    def __init__(self, output_scan: bool, hashing: bool = False) -> None:
+    def __init__(
+        self, output_scan: bool, hashing: bool = False, disable_output_scan: bool = False
+    ) -> None:
         self.enable_assets_output_scanning = output_scan
+        self.disable_assets_output_scanning = disable_output_scan
         self.enable_asset_hashing = hashing
 
 
@@ -88,17 +91,43 @@ def threaded_create_session(
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
-        ([], False),
-        (["--enable-assets-output-scanning"], True),
+        ([], (False, False)),
+        (["--enable-assets-output-scanning"], (True, False)),
+        (["--disable-assets-output-scanning"], (False, True)),
+        (
+            ["--enable-assets-output-scanning", "--disable-assets-output-scanning"],
+            (True, True),
+        ),
     ],
 )
-def test_flag_parsing(argv: list[str], expected: bool) -> None:
-    assert parser.parse_args(argv).enable_assets_output_scanning is expected
+def test_flag_parsing(argv: list[str], expected: tuple[bool, bool]) -> None:
+    parsed = parser.parse_args(argv)
+    assert (
+        parsed.enable_assets_output_scanning,
+        parsed.disable_assets_output_scanning,
+    ) == expected
 
 
-def test_flag_takes_no_value() -> None:
+@pytest.mark.parametrize(
+    "flag", ["--enable-assets-output-scanning", "--disable-assets-output-scanning"]
+)
+def test_flag_takes_no_value(flag: str) -> None:
     with pytest.raises(SystemExit):
-        parser.parse_args(["--enable-assets-output-scanning", "false"])
+        parser.parse_args([flag, "false"])
+
+
+@pytest.mark.parametrize(
+    ("enable", "disable", "expected"),
+    [
+        (False, False, False),
+        (True, False, True),
+        (False, True, False),
+        (True, True, False),
+    ],
+)
+def test_disable_wins_over_enable(enable: bool, disable: bool, expected: bool) -> None:
+    mode.init(_Args(output_scan=enable, disable_output_scan=disable))
+    assert mode.output_scan_enabled() is expected
 
 
 def test_scannable_roots_keeps_output_when_enabled() -> None:

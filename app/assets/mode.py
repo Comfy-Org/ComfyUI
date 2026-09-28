@@ -13,6 +13,7 @@ from typing import Protocol, TypeVar
 class _ModeArguments(Protocol):
     enable_asset_hashing: bool
     enable_assets_output_scanning: bool
+    disable_assets_output_scanning: bool
 
 
 _args: _ModeArguments | None = None
@@ -39,7 +40,8 @@ def hashing_enabled() -> bool:
 
 
 def output_scan_enabled() -> bool:
-    return bool(_initialised_args().enable_assets_output_scanning)
+    args = _initialised_args()
+    return bool(args.enable_assets_output_scanning and not args.disable_assets_output_scanning)
 
 
 def scannable_roots(roots: tuple[_RootT, ...]) -> tuple[_RootT, ...]:

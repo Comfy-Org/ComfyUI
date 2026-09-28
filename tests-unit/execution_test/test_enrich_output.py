@@ -24,6 +24,7 @@ class _ArgsStub:
     enable_assets = False
     enable_asset_hashing = False
     enable_assets_output_scanning = True
+    disable_assets_output_scanning = False
 
 
 class _Server:

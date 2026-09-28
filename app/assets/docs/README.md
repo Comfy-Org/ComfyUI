@@ -64,7 +64,7 @@ Missing rows and their asset records persist until explicitly deleted. Routine s
 
 ## Output scanning
 
-Output scanning is off by default; `--enable-assets-output-scanning` turns it on. The flag only has an effect when assets are enabled.
+Output scanning is off by default; `--enable-assets-output-scanning` turns it on and `--disable-assets-output-scanning` forces it off. If both are passed, disable wins. The flags only have an effect when assets are enabled.
 
 When output scanning is off, the output directory is not a scan root: the startup scan, the lazy scan and `POST /api/assets/seed` scan only `models` and `input`, and a completed prompt does not queue an output scan. What stays the same:
 
