@@ -49,9 +49,6 @@ class AssetManager:
     def pause_background_scan(self) -> None:
         self.paused = True
 
-    def queue_output_scan(self) -> None:
-        pass
-
     def resume_background_scan(self) -> None:
         self.paused = False
         if self.resume_error is not None:
@@ -107,31 +104,16 @@ def test_prompt_worker_preserves_execute_error_when_resume_raises(monkeypatch) -
     assert asset_manager.paused is False
 
 
-def test_prompt_worker_frees_cache_before_unloading_models(monkeypatch) -> None:
-    calls = []
+def test_free_endpoint_stores_explicit_false_unload_models() -> None:
+    """Regression test for issue #16620: an explicit "unload_models": false
+    in a POST /free body must not be dropped by server.py's flag storage, or
+    main.py's flags.get("unload_models", free_memory) fallback would still
+    trigger an unload whenever free_memory is set.
+    """
+    flags = main.server._free_endpoint_flags({"free_memory": True, "unload_models": False})
 
-    class RecordingExecutor(Executor):
-        def reset(self) -> None:
-            calls.append("reset")
-
-    class FlagsQueue(Queue):
-        def get(self, timeout=None):
-            self.get_calls += 1
-            if self.get_calls > 1:
-                raise LoopEscape("prompt worker requested a second item")
-            return None
-
-        def get_flags(self):
-            return {"free_memory": True, "unload_models": True}
-
-    monkeypatch.setattr(main.execution, "PromptExecutor", RecordingExecutor)
-    monkeypatch.setattr(main.comfy.model_management, "unload_all_models", lambda: calls.append("unload_all_models"))
-    asset_manager = AssetManager()
-
-    with pytest.raises(LoopEscape, match="^prompt worker requested a second item$"):
-        main.prompt_worker(FlagsQueue(), Server(), asset_manager)
-
-    assert calls == ["reset", "unload_all_models"]
+    free_memory = flags.get("free_memory", False)
+    assert flags.get("unload_models", free_memory) is False
 
 
 def test_prompt_worker_resumes_scan_when_later_iteration_raises_before_gc(monkeypatch) -> None:

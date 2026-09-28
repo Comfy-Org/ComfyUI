@@ -71,6 +71,13 @@ def _remove_sensitive_from_queue(queue: list) -> list:
     return [item[:5] for item in queue]
 
 
+def _free_endpoint_flags(json_data: dict) -> dict:
+    """Flags to store for a POST /free request, keeping only the keys the
+    caller actually sent so an explicit "unload_models": false isn't
+    indistinguishable from the key being absent."""
+    return {name: json_data[name] for name in ("unload_models", "free_memory") if name in json_data}
+
+
 async def send_socket_catch_exception(function, message):
     try:
         await function(message)
@@ -1195,10 +1202,8 @@ class PromptServer():
         @routes.post("/free")
         async def post_free(request):
             json_data = await request.json()
-            if "unload_models" in json_data:
-                self.prompt_queue.set_flag("unload_models", json_data["unload_models"])
-            if "free_memory" in json_data:
-                self.prompt_queue.set_flag("free_memory", json_data["free_memory"])
+            for name, value in _free_endpoint_flags(json_data).items():
+                self.prompt_queue.set_flag(name, value)
             return web.Response(status=200)
 
         @routes.post("/history")
