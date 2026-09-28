@@ -5,7 +5,7 @@ from einops import rearrange
 import torch.nn.functional as F
 import math
 from .model import WanModel, sinusoidal_embedding_1d
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 import comfy.model_management
 
 class CausalConv1d(nn.Module):
@@ -148,6 +148,7 @@ class FaceBlock(nn.Module):
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
+        self.comfy_attention = ComfyAttention()
 
         self.deterministic = False
         self.hidden_size = hidden_size
@@ -201,7 +202,11 @@ class FaceBlock(nn.Module):
 
         q = rearrange(q, "B (L S) H D -> (B L) S (H D)", L=T_comp)
 
-        attn = optimized_attention(q, k, v, heads=self.heads_num)
+        q = AttentionTensorContainer(q)
+        k = AttentionTensorContainer(k)
+        v = AttentionTensorContainer(v)
+        del kv
+        attn = optimized_attention(q, k, v, heads=self.heads_num, preferred_attention=self.comfy_attention)
 
         attn = rearrange(attn, "(B L) S C -> B (L S) C", L=T_comp)
 

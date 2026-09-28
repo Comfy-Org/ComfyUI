@@ -6,13 +6,14 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.flux.layers import EmbedND
 from comfy.ldm.flux.math import apply_rope1, rope
 import comfy.ldm.common_dit
 import comfy.model_management
 import comfy.ops
 import comfy.patcher_extension
+import comfy.quant_ops
 
 
 def sinusoidal_embedding_1d(dim, position):
@@ -40,6 +41,7 @@ class WanSelfAttention(nn.Module):
                  operation_settings={}):
         assert dim % num_heads == 0
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -90,6 +92,7 @@ class WanSelfAttention(nn.Module):
         x = optimized_attention(
             q, k, v,
             heads=self.num_heads,
+            preferred_attention=self.comfy_attention,
             transformer_options=transformer_options,
         )
 
@@ -115,7 +118,7 @@ class WanT2VCrossAttention(WanSelfAttention):
         v = AttentionTensorContainer(self.v(context))
 
         # compute attention
-        x = optimized_attention(q, k, v, heads=self.num_heads, transformer_options=transformer_options)
+        x = optimized_attention(q, k, v, heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
 
         x = self.o(x)
         return x
@@ -147,16 +150,16 @@ class WanI2VCrossAttention(WanSelfAttention):
 
         # compute query, key, value
         q = self.norm_q(self.q(x))
-        k_img = self.norm_k_img(self.k_img(context_img))
-        v_img = self.v_img(context_img)
+        k_img = AttentionTensorContainer(self.norm_k_img(self.k_img(context_img)))
+        v_img = AttentionTensorContainer(self.v_img(context_img))
         # Sageattn can cause Nans here, don't allow it as there is no speed difference anyway as img attention is tiny.
-        img_x = optimized_attention(q, k_img, v_img, heads=self.num_heads, transformer_options=transformer_options, low_precision_attention=False)
+        img_x = optimized_attention(AttentionTensorContainer(q), k_img, v_img, heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options, low_precision_attention=False)
         del k_img, v_img
         # compute attention
         q = AttentionTensorContainer(q)
         k = AttentionTensorContainer(self.norm_k(self.k(context)))
         v = AttentionTensorContainer(self.v(context))
-        x = optimized_attention(q, k, v, heads=self.num_heads, transformer_options=transformer_options)
+        x = optimized_attention(q, k, v, heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
 
         # output
         x = x + img_x
@@ -180,6 +183,13 @@ def repeat_e(e, x):
         return torch.repeat_interleave(e, repeats, dim=1)
     else:
         return torch.repeat_interleave(e, repeats + 1, dim=1)[:, :x.size(1)]
+
+
+def modulate(x, norm, shift, scale):
+    shift, scale = repeat_e(shift, x), repeat_e(scale, x)
+    if comfy.model_management.in_training or not x.is_cuda or x.numel() < 16 * 1024 * 1024:
+        return torch.addcmul(shift, norm(x), 1 + scale)
+    return comfy.quant_ops.ck.adaln(x, scale, shift, norm.eps)
 
 
 class WanFeedForward(nn.Sequential):
@@ -257,7 +267,7 @@ class WanAttentionBlock(nn.Module):
         # self-attention
         x = x.contiguous() # otherwise implicit in LayerNorm
         y = self.self_attn(
-            torch.addcmul(repeat_e(e[0], x), self.norm1(x), 1 + repeat_e(e[1], x)),
+            modulate(x, self.norm1, e[0], e[1]),
             freqs, transformer_options=transformer_options)
 
         x = torch.addcmul(x, y, repeat_e(e[2], x))
@@ -270,7 +280,7 @@ class WanAttentionBlock(nn.Module):
             for p in patches["attn2_patch"]:
                 x = p({"x": x, "transformer_options": transformer_options})
 
-        y = self.ffn(torch.addcmul(repeat_e(e[3], x), self.norm2(x), 1 + repeat_e(e[4], x)))
+        y = self.ffn(modulate(x, self.norm2, e[3], e[4]))
         x = torch.addcmul(x, y, repeat_e(e[5], x))
         return x
 
@@ -386,7 +396,7 @@ class Head(nn.Module):
         else:
             e = (comfy.model_management.cast_to(self.modulation, dtype=x.dtype, device=x.device).unsqueeze(0) + e.unsqueeze(2)).unbind(2)
 
-        x = (self.head(torch.addcmul(repeat_e(e[0], x), self.norm(x), 1 + repeat_e(e[1], x))))
+        x = self.head(modulate(x, self.norm, e[0], e[1]))
         return x
 
 
@@ -1477,7 +1487,10 @@ class WanT2VCrossAttentionGather(WanSelfAttention):
         # Handle video spatial structure
         q = q.reshape(k.shape[0], -1, n, d).transpose(1, 2)
 
-        x = optimized_attention(q, k, v, heads=self.num_heads, skip_reshape=True, skip_output_reshape=True, transformer_options=transformer_options)
+        q = AttentionTensorContainer(q)
+        k = AttentionTensorContainer(k)
+        v = AttentionTensorContainer(v)
+        x = optimized_attention(q, k, v, heads=self.num_heads, preferred_attention=self.comfy_attention, skip_reshape=True, skip_output_reshape=True, transformer_options=transformer_options)
 
         x = x.transpose(1, 2).reshape(b, -1, n * d)
         x = self.o(x)
@@ -1536,7 +1549,7 @@ class WanAttentionBlockAudio(WanAttentionBlock):
 
         # self-attention
         y = self.self_attn(
-            torch.addcmul(repeat_e(e[0], x), self.norm1(x), 1 + repeat_e(e[1], x)),
+            modulate(x, self.norm1, e[0], e[1]),
             freqs, transformer_options=transformer_options)
 
         x = torch.addcmul(x, y, repeat_e(e[2], x))
@@ -1545,7 +1558,7 @@ class WanAttentionBlockAudio(WanAttentionBlock):
         x = x + self.cross_attn(self.norm3(x), context, context_img_len=context_img_len, transformer_options=transformer_options)
         if audio is not None:
             x = self.audio_cross_attn_wrapper(x, audio, transformer_options=transformer_options)
-        y = self.ffn(torch.addcmul(repeat_e(e[3], x), self.norm2(x), 1 + repeat_e(e[4], x)))
+        y = self.ffn(modulate(x, self.norm2, e[3], e[4]))
         x = torch.addcmul(x, y, repeat_e(e[5], x))
         return x
 
