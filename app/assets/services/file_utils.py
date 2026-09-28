@@ -3,9 +3,8 @@ from typing import NamedTuple
 
 from app.assets.services.gil import yield_gil
 
-# Output rescans repeat after prompts, so they pause less often than the first scan:
-# after every 10ms of work, which kept nearly all of the event-loop and prompt-start gain
-# on a 200k-file rescan for far less extra time than the default 2ms.
+# Longer run window for output rescans: they repeat after prompts, so pausing every
+# 2ms would add up to a much slower rescan.
 RESCAN_YIELD_RUN = 0.010
 
 
