@@ -625,14 +625,6 @@ def _comfy_kitchen_int8_inputs(q, k, v, heads, mask, skip_reshape, enable_gqa):
     if not skip_reshape:
         q, k, v = _reshape_qkv_to_heads(q, k, v, b, heads, dim_head, enable_gqa, expand_kv=False)
         q, k, v = map(lambda t: t.transpose(1, 2), (q, k, v))
-    else:
-        # Callers that pre-shape q/k/v themselves may hand us views into a
-        # fused qkv buffer (e.g. MiniMax H3's single qkv_proj). Those views
-        # carry a per-token stride several times wider than heads * dim_head,
-        # which overflows the kernel's int32 stride indexing well before any
-        # real sequence length limit. .contiguous() is a no-op when the input
-        # already has a normal stride.
-        q, k, v = (t.contiguous() for t in (q, k, v))
 
     if mask is not None:
         if mask.ndim == 2:

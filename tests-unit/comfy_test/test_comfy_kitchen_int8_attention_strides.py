@@ -5,30 +5,39 @@ from comfy.cli_args import args
 if not torch.cuda.is_available():
     args.cpu = True
 
-from comfy.ldm.modules.attention import _comfy_kitchen_int8_inputs
+import comfy.ops
+import comfy.ldm.minimax.model as minimax_model
+from comfy.ldm.minimax.model import Attention, rope_rotation_table
 
 
-def _fused_qkv_views(seq_len, heads, head_dim):
-    """Mimics MiniMax H3's Attention.forward: q/k/v come from splitting the
-    output of a single fused qkv_proj, so each is a view whose per-token
-    stride spans all three of q, k, and v instead of just its own slice."""
-    inner = heads * head_dim
-    buf = torch.randn(seq_len, 3 * inner)
-    q, k, v = buf.split(inner, dim=-1)
-    q, k, v = (t.view(seq_len, heads, head_dim).transpose(0, 1).unsqueeze(0) for t in (q, k, v))
-    return q, k, v
+def test_attention_materializes_contiguous_qkv_for_kitchen_backend():
+    """MiniMax H3's qkv_proj is a single fused Linear, so q/k/v start as
+    views whose per-token stride spans all three of q, k, and v instead of
+    just their own slice. The in-place rope path (taken whenever rope_freqs
+    is given, i.e. always in production) never reallocates q/k, so that
+    inflated stride would otherwise reach the comfy_kitchen int8 backend and
+    overflow its int32 stride indexing."""
+    heads, head_dim, seq_len = 2, 8, 6
+    attn = Attention(hidden=heads * head_dim, heads=heads, head_dim=head_dim, eps=1e-6, operations=comfy.ops.disable_weight_init)
+    attn.requires_grad_(False)
 
+    x = torch.randn(seq_len, heads * head_dim)
+    rope_freqs = rope_rotation_table(torch.zeros(seq_len, head_dim), torch.float32)
 
-def test_skip_reshape_materializes_contiguous_qkv():
-    heads, head_dim, seq_len = 4, 8, 16
-    q, k, v = _fused_qkv_views(seq_len, heads, head_dim)
-    assert q.stride(2) == 3 * heads * head_dim
+    captured = {}
 
-    q_out, k_out, v_out, mask, b, dim_head = _comfy_kitchen_int8_inputs(
-        q, k, v, heads, mask=None, skip_reshape=True, enable_gqa=False
-    )
+    def fake_optimized_attention(q, k, v, heads_, **kwargs):
+        captured["q"], captured["k"], captured["v"] = q.peek(), k.peek(), v.peek()
+        return torch.zeros(v.peek().shape[0], v.peek().shape[2], heads_ * head_dim)
 
-    for name, original, materialized in (("q", q, q_out), ("k", k, k_out), ("v", v, v_out)):
-        assert materialized.is_contiguous(), f"{name} should be contiguous"
-        assert materialized.stride(2) == head_dim, f"{name} stride should not include the qkv fusion factor"
-        torch.testing.assert_close(materialized, original)
+    original = minimax_model.optimized_attention
+    minimax_model.optimized_attention = fake_optimized_attention
+    try:
+        with torch.no_grad():
+            attn.forward(x, rope_freqs=rope_freqs)
+    finally:
+        minimax_model.optimized_attention = original
+
+    for name, tensor in captured.items():
+        assert tensor.is_contiguous(), f"{name} should be contiguous"
+        assert tensor.stride(2) == head_dim, f"{name} stride should not include the qkv fusion factor"

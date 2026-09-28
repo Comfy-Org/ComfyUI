@@ -194,9 +194,14 @@ class Attention(nn.Module):
             q = self.q_norm(q.view(s, self.heads, self.head_dim))
             k = self.k_norm(k.view(s, self.heads, self.head_dim))
 
-        q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0))
-        k = AttentionTensorContainer(k.transpose(0, 1).unsqueeze(0))
-        v = AttentionTensorContainer(v.transpose(0, 1).unsqueeze(0))
+        # q, k, v are views into qkv_proj's fused output, so their per-token
+        # stride spans all three of q, k, and v instead of just their own
+        # slice. That inflated stride overflows the comfy_kitchen int8
+        # backend's int32 stride indexing well before any real sequence
+        # length limit, so materialize a normal-stride copy here.
+        q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0).contiguous())
+        k = AttentionTensorContainer(k.transpose(0, 1).unsqueeze(0).contiguous())
+        v = AttentionTensorContainer(v.transpose(0, 1).unsqueeze(0).contiguous())
         out = optimized_attention(q, k, v, self.heads, preferred_attention=self.comfy_attention, mask=None, skip_reshape=True, transformer_options=transformer_options)
         return self.out_proj(out.squeeze(0))
 
