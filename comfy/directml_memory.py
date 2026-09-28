@@ -11,6 +11,7 @@ only imported when DirectML is actually enabled, so the ctypes/DXGI path never
 costs anything for CUDA/ROCm/CPU users.
 """
 
+import ctypes
 import functools
 import sys
 
@@ -19,7 +20,9 @@ from comfy.cli_args import args
 
 def _dxgi_vram():
     """Return {adapter_index: dedicated_vram_bytes} for every DXGI adapter."""
-    import ctypes
+    # ctypes.wintypes exists only on Windows, so it is imported here rather than
+    # at module scope. This module is itself only imported when DirectML is
+    # enabled, which is Windows-only anyway.
     from ctypes import wintypes
 
     class GUID(ctypes.Structure):
@@ -109,13 +112,11 @@ def get_total_vram(device=None):
         return None
 
     # DirectML and DXGI enumerate adapters in the same order, so the indices
-    # line up. If they ever do not (hybrid-GPU laptops can order them
-    # differently), fall back to the largest discrete adapter rather than
-    # reporting nothing.
+    # line up. Do not substitute another adapter's capacity when the bound one
+    # is missing or reports nothing: on a mixed-GPU system that would let
+    # ComfyUI size its loads against a card it is not running on.
     index = getattr(device, "index", None)
     dedicated = per_adapter.get(0 if index is None else int(index))
-    if not dedicated:
-        dedicated = max(per_adapter.values())
     if not dedicated or dedicated <= 0:
         return None
 

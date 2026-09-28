@@ -126,6 +126,8 @@ if args.directml is not None:
     logging.info("Using directml with device: {}".format(torch_directml.device_name(directml_device.index)))
     # torch_directml.disable_tiled_resources(True)
     lowvram_available = False #TODO: need to find a way to get free memory in directml before this can be enabled by default.
+    # Imported here so the DXGI path is not loaded for CUDA/ROCm/CPU users.
+    from comfy.directml_memory import get_total_vram
 
 
 def _directml_total_memory(dev):
@@ -136,8 +138,6 @@ def _directml_total_memory(dev):
     8 GB cards, which the old hardcoded 1 GiB did not: it made every model look
     too large to keep resident and showed a wrong number in the UI.
     """
-    from comfy.directml_memory import get_total_vram
-
     dedicated = get_total_vram(dev)
     if dedicated is None:
         return _DIRECTML_FALLBACK_VRAM
@@ -145,13 +145,23 @@ def _directml_total_memory(dev):
 
 
 def _directml_free_memory(dev):
-    """Free memory for the DirectML device, in bytes.
+    """(free, shared) memory for the DirectML device, in bytes.
 
-    DirectML gives no way to query what is currently allocated, so this reports
-    the dedicated VRAM as free. ComfyUI already tracks its own allocations when
-    deciding what to offload, and guessing low here would make it thrash.
+    DirectML exposes no way to query what is currently allocated on the device,
+    so subtract what ComfyUI knows it has loaded. Reporting the full dedicated
+    VRAM as free -- as the previous constant did -- would let ComfyUI plan loads
+    that cannot fit, and DirectML answers an unsatisfiable allocation by
+    aborting the process.
     """
-    return _directml_total_memory(dev), 0
+    total = _directml_total_memory(dev)
+    loaded = 0
+    for loaded_model in current_loaded_models:
+        try:
+            loaded += loaded_model.model_loaded_memory()
+        except Exception:
+            # A model whose weakref has been collected, or one mid-unload.
+            continue
+    return max(total - loaded, 0), 0
 
 
 try:
