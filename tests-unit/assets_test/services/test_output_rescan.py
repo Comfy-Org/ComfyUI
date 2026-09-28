@@ -4,6 +4,7 @@ every live row. Run through the seeder's real fast phase on an in-memory catalog
 import logging
 import os
 import re
+import shutil
 import stat as stat_module
 from contextlib import contextmanager
 from pathlib import Path
@@ -174,7 +175,8 @@ def test_walk_listings_matches_the_os_walk_filtering(temp_dir: Path):
 
     walk = walk_listings(str(base))
 
-    assert walk.files == list_files_recursively(str(base))
+    # The one intended difference: a broken symlink is left out, so its row reads as gone.
+    assert walk.files == [p for p in list_files_recursively(str(base)) if p != str(base / "broken")]
     assert walk.dirs_listed == len(walk.listings) == 3  # base, sub, sub/deep
 
 
@@ -309,6 +311,40 @@ def test_deep_deletions_mark_exactly_those_rows_missing(roots, session, caplog):
     assert _live_paths(session) == {str(p) for p in files if p not in deleted}
     _listed, retired, skipped = _listing_counts(caplog)
     assert (retired, skipped) == (3, 0)
+
+
+def test_removing_a_whole_dir_retires_every_row_beneath_it(roots, session, caplog):
+    dirs, files = _deep_tree(roots["output"])
+    _scan()
+    shutil.rmtree(dirs[5])  # d05 and the 15 levels under it, one file each
+
+    _scan_logged(caplog)
+
+    gone = {str(p) for p in files[5:DEPTH + 1]}
+    assert _live_paths(session) == {str(p) for p in files} - gone
+    _listed, retired, skipped = _listing_counts(caplog)
+    assert (retired, skipped) == (len(gone), 0)
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError as e:  # Windows without the symlink privilege
+        pytest.skip(f"cannot create symlinks here: {e}")
+
+
+def test_symlink_whose_target_is_removed_is_retired(roots, temp_dir, session):
+    target = _write(temp_dir / "elsewhere" / "t.png")
+    link = roots["output"] / "linked.png"
+    _symlink_or_skip(link, target)
+    kept = _write(roots["output"] / "kept.png")
+    _scan()
+    assert _live_paths(session) == {str(link), str(kept)}
+
+    target.unlink()
+    _scan()
+
+    assert _live_paths(session) == {str(kept)}
 
 
 def test_every_dir_is_stated_and_listed_once_per_rescan(roots, caplog, dir_stats):

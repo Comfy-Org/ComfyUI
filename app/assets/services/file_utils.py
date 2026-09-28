@@ -85,7 +85,9 @@ class ListingWalk(NamedTuple):
 
 def _list_visible_entries(dirpath: str) -> tuple[list[str], list[str]]:
     """One directory's visible (file names, subdir names), classified as os.walk does:
-    anything whose is_dir() is false or raises, broken symlinks included, is a file."""
+    anything whose is_dir() is false or raises is a file. The exception is a symlink
+    whose target is gone: it is left out, so a row for it reads as vanished, as it did
+    when the rescan stat'ed every row through the link."""
     files: list[str] = []
     subdirs: list[str] = []
     with os.scandir(dirpath) as entries:
@@ -97,7 +99,10 @@ def _list_visible_entries(dirpath: str) -> tuple[list[str], list[str]]:
                 is_dir = entry.is_dir()
             except OSError:
                 is_dir = False
-            (subdirs if is_dir else files).append(entry.name)
+            if is_dir:
+                subdirs.append(entry.name)
+            elif not (entry.is_symlink() and not os.path.exists(entry.path)):
+                files.append(entry.name)
     return files, subdirs
 
 
