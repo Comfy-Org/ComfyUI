@@ -26,26 +26,27 @@ _sleep = time.sleep
 _state = threading.local()
 
 
-def _yield_fixed() -> None:
-    """Call once per item in a hot loop on a background thread; sleeps every run window."""
+def _yield_fixed(run: float = _RUN) -> None:
+    """Call once per item in a hot loop on a background thread; sleeps every ``run``
+    seconds of work. A caller that repeats often can pass a longer window to pause less."""
     now = _clock()
     next_at = getattr(_state, "next_at", None)
     if next_at is None:
-        _state.next_at = now + _RUN
+        _state.next_at = now + run
         return
     if now < next_at:
         return
     _sleep(_SLEEP)
-    _state.next_at = _clock() + _RUN
+    _state.next_at = _clock() + run
 
 
-def _yield_scaled() -> None:
+def _yield_scaled(run: float = _RUN) -> None:
     """For a coarse sleep timer: time.sleep(_SLEEP) really takes a whole timer tick, so
     scale the next run by how long the last sleep took, keeping the same share asleep."""
     now = _clock()
     next_at = getattr(_state, "next_at", None)
     if next_at is None:
-        _state.next_at = now + _RUN
+        _state.next_at = now + run
         return
     if now < next_at:
         return
@@ -54,7 +55,7 @@ def _yield_scaled() -> None:
     # Scale up to the timer tick this exists for, but no further: a sleep that overshoots
     # because the machine is busy must not buy the scan a longer run.
     scale = min(max(1.0, (after - now) / _SLEEP), _MAX_SCALE)
-    _state.next_at = after + _RUN * scale
+    _state.next_at = after + run * scale
 
 
 # Before Python 3.11, time.sleep on Windows rounds up to the ~15.6ms system timer tick.
