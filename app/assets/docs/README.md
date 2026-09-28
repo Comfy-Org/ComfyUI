@@ -72,11 +72,13 @@ When output scanning is off, the output directory is not a scan root: the startu
 - Output rows already in the database are kept. The pre-scan prune marks rows missing only outside the owned prefixes, and the output directory stays an owned prefix, so leaving output scanning off does not mark anything missing.
 - The asset routes list and serve output assets from the database as before.
 
-What the scanner no longer does for output: it does not catalogue files that no node declared, does not notice output files that were deleted or changed on disk, and does not hash output content in the enrichment pass (registration already records system metadata, so the hash is what is lost). Rows for vanished output files stay live until a scan with output scanning enabled runs. Deferred scanner work (pending verifications, the partial-write watch list, hash-mode transition retries) is no longer driven after every prompt; it runs on the next scan of any root. The one-time re-verification after hashing is switched on is not a root scan: it still covers every live row, output included.
+What the scanner no longer does for output: it does not catalogue files that no node declared, and does not notice output files that were deleted or changed on disk. Rows for vanished output files stay live until a scan with output scanning enabled runs.
+
+With `--enable-asset-hashing`, a completed prompt still queues an enrichment-only pass over the output root instead of the full scan. It hashes output rows that have no hash yet, reading each file once in the background, and does not walk the directory, add files or mark rows missing. That pass also runs the deferred scanner work (pending verifications, the partial-write watch list, hash-mode transition retries). With hashing off, nothing is queued after a prompt, and that deferred work runs on the next scan of any root. The one-time re-verification after hashing is switched on is not a root scan: it still covers every live row, output included.
 
 ## Hashing modes
 
-The `--enable-asset-hashing` flag defaults to off. It controls whether the scanner and output pipeline hash file contents, as described below. Output content is hashed by the scan that follows each prompt, so without `--enable-assets-output-scanning` new outputs stay unhashed.
+The `--enable-asset-hashing` flag defaults to off. It controls whether the scanner and output pipeline hash file contents, as described below. Output content is hashed by the pass queued after each prompt: the full output scan, or an enrichment-only pass when output scanning is off.
 
 With hashing off, the scanner uses modification time and byte size to detect changes. A modification-time change with an unchanged byte size is treated as the same file: the stored file facts refresh and the stored hash is cleared, because without hashing the digest can no longer be vouched for. A change to both modification time and size means new content. A size change without a modification-time change is undefined behaviour.
 

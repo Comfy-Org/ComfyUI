@@ -164,12 +164,21 @@ class AssetsEnabled:
         asset_seeder.pause()
 
     def queue_output_scan(self) -> None:
-        if not asset_seeder.is_disabled() and mode.output_scan_enabled():
+        if asset_seeder.is_disabled():
+            return
+        if mode.output_scan_enabled():
             # FULL, not ENRICH: only a walk finds outputs a node never declared. Do not downgrade without re-weighing the cost.
             asset_seeder.enqueue_scan(
                 roots=("output",),
                 phase=ScanPhase.FULL,
                 compute_hashes=self._args.enable_asset_hashing,
+            )
+        elif self._args.enable_asset_hashing:
+            # Registered outputs still need their hash; ENRICH neither walks output nor marks rows missing.
+            asset_seeder.enqueue_scan(
+                roots=("output",),
+                phase=ScanPhase.ENRICH,
+                compute_hashes=True,
             )
 
     def resume_background_scan(self) -> None:

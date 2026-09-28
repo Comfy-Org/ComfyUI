@@ -18,17 +18,17 @@ from app.assets.api import routes
 from app.assets.database.models import AssetContent
 from app.assets.database.queries.records import create_content, create_record
 from app.assets.manager import AssetsEnabled
-from app.assets.seeder import _AssetSeeder as AssetSeeder
+from app.assets.seeder import ScanPhase, _AssetSeeder as AssetSeeder
 from app.database.models import Base
 from comfy.cli_args import parser
 
 
 class _Args:
     enable_assets = True
-    enable_asset_hashing = False
 
-    def __init__(self, output_scan: bool) -> None:
+    def __init__(self, output_scan: bool, hashing: bool = False) -> None:
         self.enable_assets_output_scanning = output_scan
+        self.enable_asset_hashing = hashing
 
 
 @pytest.fixture
@@ -139,7 +139,7 @@ def test_lazy_scan_excludes_output(
     seeder_start.assert_called_once_with(roots=("models", "input"))
 
 
-def test_end_of_prompt_output_scan_not_queued(
+def test_end_of_prompt_queues_nothing_without_hashing(
     output_scan_off: _Args, fresh_seeder: AssetSeeder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     enqueue = MagicMock()
@@ -162,6 +162,52 @@ def test_end_of_prompt_output_scan_queued_when_enabled(
 
     enqueue.assert_called_once()
     assert enqueue.call_args.kwargs["roots"] == ("output",)
+
+
+def test_end_of_prompt_queues_enrich_only_pass_with_hashing(
+    fresh_seeder: AssetSeeder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _Args(output_scan=False, hashing=True)
+    mode.init(args)
+    enqueue = MagicMock()
+    monkeypatch.setattr(fresh_seeder, "enqueue_scan", enqueue)
+
+    AssetsEnabled(args).queue_output_scan()
+
+    enqueue.assert_called_once_with(
+        roots=("output",), phase=ScanPhase.ENRICH, compute_hashes=True
+    )
+
+
+def test_registered_output_gets_hashed_without_output_scanning(
+    fresh_seeder: AssetSeeder,
+    asset_roots: tuple[Path, Path],
+    threaded_create_session: Callable[[], AbstractContextManager[Session]],
+) -> None:
+    args = _Args(output_scan=False, hashing=True)
+    mode.init(args)
+    manager = AssetsEnabled(args)
+    output_dir, _ = asset_roots
+    produced = output_dir / "produced.png"
+    produced.write_bytes(b"prompt output")
+    undeclared = output_dir / "undeclared.png"
+    undeclared.write_bytes(b"written by a node that never declared it")
+    deleted = output_dir / "deleted.png"
+    with threaded_create_session() as session:
+        content = create_content(session, path=str(deleted))
+        create_record(session, content_id=content.id, name=deleted.name, tags=["output"])
+        session.commit()
+    assert manager.register_executed_output(str(produced), job_id="job") is not None
+
+    manager.queue_output_scan()
+    assert fresh_seeder.wait(timeout=5)
+    assert fresh_seeder.get_status().errors == []
+
+    with threaded_create_session() as session:
+        contents = {c.path: c for c in session.scalars(select(AssetContent))}
+    assert contents[str(produced)].hash is not None
+    assert str(undeclared) not in contents
+    assert contents[str(deleted)].is_missing is False
 
 
 @pytest.mark.asyncio
