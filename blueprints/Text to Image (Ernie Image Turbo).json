@@ -2101,7 +2101,7 @@
           }
         ],
         "extra": {},
-        "category": "Image generation and editing/Text to image",
+        "category": "Image generation/Text to image",
         "description": "Faster ERNIE Image Turbo variant (~8B DiT, distilled for fewer sampling steps): same strengths in Chinese/English on-image text and layout-heavy graphics as the base ERNIE Image lineup, with bundled encoders and VAE."
       }
     ]

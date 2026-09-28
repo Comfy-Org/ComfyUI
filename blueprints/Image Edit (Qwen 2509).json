@@ -1938,7 +1938,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Edit image",
+        "category": "Image editing/Edit image",
         "description": "Edits images from text instructions using Qwen-Image-Edit-2509 with optional Lightning LoRA for few-step sampling."
       }
     ]

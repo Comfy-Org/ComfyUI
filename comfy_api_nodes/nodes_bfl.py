@@ -13,6 +13,7 @@ from comfy_api_nodes.apis.bfl import (
     BFLFluxProGenerateResponse,
     BFLFluxProUltraGenerateRequest,
     BFLFluxStatusResponse,
+    BFLFluxVideoEditRequest,
     BFLFluxVideoUpscaleRequest,
     BFLFluxVTORequest,
     BFLStatus,
@@ -1153,6 +1154,7 @@ class Flux3VideoNodeBase(IO.ComfyNode):
 
 _FLUX3_VIDEO_ENDPOINT = ApiEndpoint(path="/proxy/bfl/v1/flux-3-video", method="POST")
 _FLUX_VIDEO_UPSCALE_ENDPOINT = ApiEndpoint(path="/proxy/bfl/v1/flux-tools/video-upscale-v1", method="POST")
+_FLUX_VIDEO_EDIT_ENDPOINT = ApiEndpoint(path="/proxy/bfl/v1/flux-tools/video-edit-v1", method="POST")
 _BFL_POLL_PROXY_PATH = "/proxy/bfl/v1/get_result"
 
 
@@ -1508,6 +1510,112 @@ class FluxVideoUpscaleNode(IO.ComfyNode):
         return await _bfl_video_execute(cls, _FLUX_VIDEO_UPSCALE_ENDPOINT, request, poll_via_proxy=True)
 
 
+_FLUX_VIDEO_EDIT_FPS = 24
+_FLUX_VIDEO_EDIT_MIN_FRAMES = 17
+_FLUX_VIDEO_EDIT_MAX_FRAMES = 361
+_FLUX_VIDEO_EDIT_MIN_DURATION = (_FLUX_VIDEO_EDIT_MIN_FRAMES - 0.5) / _FLUX_VIDEO_EDIT_FPS
+_FLUX_VIDEO_EDIT_MAX_DURATION = _FLUX_VIDEO_EDIT_MAX_FRAMES / _FLUX_VIDEO_EDIT_FPS
+_FLUX_VIDEO_EDIT_MIN_SIDE = 160
+_FLUX_VIDEO_EDIT_MAX_PROMPT_LENGTH = 4096
+_FLUX_VIDEO_EDIT_MAX_PIXELS = 1280 * 704
+
+
+class FluxVideoEditNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="FluxVideoEditNode",
+            display_name="Flux Video Edit",
+            category="partner/video/BFL",
+            description="Edits a clip from a written instruction: remove, add or replace objects, change "
+            "the setting, restyle the footage, change on-screen text, or replace the spoken dialogue. "
+            "Length, framing, camera motion and audio come from the source clip.",
+            inputs=[
+                IO.Video.Input(
+                    "video",
+                    tooltip="Source clip of 0.7 to 15 seconds, at least 160x160 pixels. The output is "
+                    "rendered at 24 fps and capped at about 0.9 megapixels per frame, so a larger source "
+                    "comes back smaller.",
+                ),
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="What to change, in plain language, up to 4096 characters. Anything you do "
+                    "not mention is meant to stay as it was. Replacement dialogue has to fit the time the "
+                    "original speech takes, and a silent clip stays silent.",
+                ),
+                IO.Boolean.Input(
+                    "auto_downscale",
+                    default=True,
+                    tooltip="Automatically downscale sources larger than 1280x704 pixels in area before "
+                    "upload. Aspect ratio is preserved; smaller videos are untouched.",
+                ),
+                IO.Int.Input(
+                    "safety_tolerance",
+                    default=4,
+                    min=0,
+                    max=4,
+                    advanced=True,
+                    tooltip="Moderation tolerance, 0 is the strictest.",
+                ),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=0xFFFFFFFF,
+                    control_after_generate=True,
+                    tooltip="Seed to determine if node should re-run; FLUX picks its own seed, so "
+                    "actual results are nondeterministic regardless of this value.",
+                ),
+            ],
+            outputs=[IO.Video.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr="""{"type":"usd","usd":0.0429,"format":{"suffix":"/second"}}""",
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        video: Input.Video,
+        prompt: str,
+        auto_downscale: bool,
+        safety_tolerance: int,
+        seed: int,
+    ) -> IO.NodeOutput:
+        validate_string(
+            prompt, field_name="prompt", min_length=1, max_length=_FLUX_VIDEO_EDIT_MAX_PROMPT_LENGTH
+        )
+        validate_video_duration(
+            video,
+            min_duration=_FLUX_VIDEO_EDIT_MIN_DURATION,
+            max_duration=_FLUX_VIDEO_EDIT_MAX_DURATION,
+        )
+        validate_video_dimensions(
+            video, min_width=_FLUX_VIDEO_EDIT_MIN_SIDE, min_height=_FLUX_VIDEO_EDIT_MIN_SIDE
+        )
+        if auto_downscale:
+            width, height = video.get_dimensions()
+            scale = math.sqrt(_FLUX_VIDEO_EDIT_MAX_PIXELS / (width * height))
+            if min(width, height) * scale >= _FLUX_VIDEO_EDIT_MIN_SIDE:
+                video = downscale_video_to_max_pixels(video, _FLUX_VIDEO_EDIT_MAX_PIXELS)
+        url = await upload_video_to_comfyapi(cls, video, wait_label="Uploading source video")
+        request = BFLFluxVideoEditRequest(
+            video=url,
+            prompt=prompt.strip(),
+            safety_tolerance=safety_tolerance,
+        )
+        return await _bfl_video_execute(cls, _FLUX_VIDEO_EDIT_ENDPOINT, request, poll_via_proxy=True)
+
+
 class BFLExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -1526,6 +1634,7 @@ class BFLExtension(ComfyExtension):
             Flux3ImageToVideoNode,
             Flux3VideoContinuationNode,
             FluxVideoUpscaleNode,
+            FluxVideoEditNode,
         ]
 
 

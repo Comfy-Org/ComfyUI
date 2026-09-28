@@ -25,6 +25,7 @@ import comfy.samplers
 import comfy.sample
 import comfy.sd
 import comfy.utils
+import comfy.latent_formats
 import comfy.controlnet
 from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator
 from comfy_api.internal import register_versions, ComfyAPIWithVersion
@@ -293,6 +294,9 @@ class ConditioningZeroOut:
             conditioning_scale = d.get("conditioning_scale", None)
             if conditioning_scale is not None:
                 d["conditioning_scale"] = torch.zeros_like(conditioning_scale)
+            direct_context = d.get("direct_context", None)
+            if direct_context is not None:
+                d["direct_context"] = torch.zeros_like(direct_context)
             n = [torch.zeros_like(t[0]), d]
             c.append(n)
         return (c, )
@@ -759,9 +763,10 @@ class LoraLoaderModelOnly(LoraLoader):
         return {"required": { "model": ("MODEL",),
                               "lora_name": (folder_paths.get_filename_list("loras"), ),
                               "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
-                              }}
+                            }}
     RETURN_TYPES = ("MODEL",)
     DESCRIPTION = "This LoRAs loader is used to modify the diffusion model, altering the way in which latents are denoised such as applying styles. Multiple LoRA nodes can be linked together."
+    SEARCH_ALIASES = ["lora", "load lora", "apply lora", "lora loader", "lora model"]
     FUNCTION = "load_lora_model_only"
 
     def load_lora_model_only(self, model, lora_name, strength_model):
@@ -769,7 +774,7 @@ class LoraLoaderModelOnly(LoraLoader):
 
 class VAELoader:
     video_taes = ["taehv", "lighttaew2_2", "lighttaew2_1", "lighttaehy1_5", "taeltx_2", "taeh3"]
-    image_taes = ["taesd", "taesdxl", "taesd3", "taef1", "taef2"]
+    image_taes = ["taesd", "taesdxl", "taesd3", "taef1", "taef2", "taeqi2_1"]
 
     @staticmethod
     def vae_list(s):
@@ -777,7 +782,7 @@ class VAELoader:
         approx_vaes = folder_paths.get_filename_list("vae_approx")
         have_img_encoder, have_img_decoder = set(), set()
         for v in approx_vaes:
-            parts = v.split("_", 1)
+            parts = v.rsplit("_", 1)
             if len(parts) != 2 or parts[0] not in s.image_taes:
                 for tae in s.video_taes:
                     if v.startswith(tae):
@@ -820,6 +825,10 @@ class VAELoader:
         elif name == "taef1":
             sd["vae_scale"] = torch.tensor(0.3611)
             sd["vae_shift"] = torch.tensor(0.1159)
+        elif name == "taeqi2_1":
+            latent_format = comfy.latent_formats.QwenImage21()
+            sd["vae_scale"] = 1.0 / latent_format.latents_std[0]
+            sd["vae_shift"] = latent_format.latents_mean[0]
         return sd
 
     @classmethod
@@ -1008,7 +1017,7 @@ class CLIPLoader:
     @classmethod
     def INPUT_TYPES(s):
         return {"required": { "clip_name": (folder_paths.get_filename_list("text_encoders"), ),
-                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart", "cosmos", "lumina2", "wan", "hidream", "chroma", "ace", "omnigen2", "qwen_image", "hunyuan_image", "flux2", "ovis", "longcat_image", "cogvideox", "lens", "pixeldit", "ideogram4", "boogu", "krea2", "joyimage", "mage", "minimax"], ),
+                              "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart", "cosmos", "lumina2", "wan", "hidream", "chroma", "ace", "omnigen2", "qwen_image", "hunyuan_image", "flux2", "ovis", "longcat_image", "cogvideox", "lens", "pixeldit", "ideogram4", "boogu", "krea2", "joyimage", "mage", "minimax", "yue2"], ),
                               },
                 "optional": {
                               "device": (["default", "cpu"], {"advanced": True}),
@@ -1247,8 +1256,8 @@ class EmptyLatentImage:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "width": ("INT", {"default": 512, "min": 16, "max": MAX_RESOLUTION, "step": 8, "tooltip": "The width of the latent images in pixels."}),
-                "height": ("INT", {"default": 512, "min": 16, "max": MAX_RESOLUTION, "step": 8, "tooltip": "The height of the latent images in pixels."}),
+                "width": ("INT", {"default": 1024, "min": 16, "max": MAX_RESOLUTION, "step": 8, "tooltip": "The width of the latent images in pixels."}),
+                "height": ("INT", {"default": 1024, "min": 16, "max": MAX_RESOLUTION, "step": 8, "tooltip": "The height of the latent images in pixels."}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096, "tooltip": "The number of latent images in the batch."})
             }
         }
@@ -1947,6 +1956,8 @@ class ImageInvert:
 
     def invert(self, image):
         s = 1.0 - image
+        if image.shape[-1] == 4:  # alpha stores transparency, not color
+            s[..., 3] = image[..., 3]
         return (s,)
 
 class ImageBatch:
@@ -2295,7 +2306,9 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     NODE_CLASS_MAPPINGS[name] = node_cls
                     node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
             if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS") and getattr(module, "NODE_DISPLAY_NAME_MAPPINGS") is not None:
-                NODE_DISPLAY_NAME_MAPPINGS.update(module.NODE_DISPLAY_NAME_MAPPINGS)
+                for name, display_name in module.NODE_DISPLAY_NAME_MAPPINGS.items():
+                    if name not in ignore:
+                        NODE_DISPLAY_NAME_MAPPINGS[name] = display_name
             return True
         # V3 Extension Definition
         elif hasattr(module, "comfy_entrypoint"):
@@ -2322,8 +2335,8 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     if schema.node_id not in ignore:
                         NODE_CLASS_MAPPINGS[schema.node_id] = node_cls
                         node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
-                    if schema.display_name is not None:
-                        NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
+                        if schema.display_name is not None:
+                            NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
                 return True
             except Exception as e:
                 logging.warning(f"Error while calling comfy_entrypoint in {module_path}: {e}")
@@ -2453,8 +2466,10 @@ async def init_builtin_extra_nodes():
         "nodes_lt_upsampler.py",
         "nodes_lt_audio.py",
         "nodes_minimax_music.py",
+        "nodes_yue2.py",
         "nodes_minimax_h3.py",
         "nodes_lt.py",
+        "nodes_lt_keyframes.py",
         "nodes_hooks.py",
         "nodes_multigpu.py",
         "nodes_load_3d.py",
@@ -2480,6 +2495,7 @@ async def init_builtin_extra_nodes():
         "nodes_seedvr.py",
         "nodes_context_windows.py",
         "nodes_qwen.py",
+        "nodes_ming.py",
         "nodes_mage.py",
         "nodes_joyimage.py",
         "nodes_boogu.py",
@@ -2487,6 +2503,7 @@ async def init_builtin_extra_nodes():
         "nodes_pid.py",
         "nodes_model_patch.py",
         "nodes_easycache.py",
+        "nodes_sparse_attention.py",
         "nodes_audio_encoder.py",
         "nodes_rope.py",
         "nodes_logic.py",
@@ -2521,7 +2538,9 @@ async def init_builtin_extra_nodes():
         "nodes_void.py",
         "nodes_wandancer.py",
         "nodes_hidream_o1.py",
+        "nodes_sensenova.py",
         "nodes_save_3d.py",
+        "nodes_mesh_io.py",
         "nodes_moge.py",
         "nodes_mediapipe.py",
         "nodes_gaussian_splat.py",
@@ -2529,7 +2548,9 @@ async def init_builtin_extra_nodes():
         "nodes_depth_anything_3.py",
         "nodes_seed.py",
         "nodes_text.py",
+        "nodes_loop.py",
         "nodes_sam3d_body.py",
+        "nodes_marigold.py",
     ]
 
     import_failed = []

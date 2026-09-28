@@ -8,6 +8,7 @@ import io
 import numpy as np
 from fractions import Fraction
 from comfy_api.input_impl.video_types import VideoFromFile, VideoFromComponents
+from comfy_api.latest._util.video_types import normalize_crop_rect
 from comfy_api.util.video_types import VideoComponents, VideoContainer, VideoCodec
 from comfy_api.input.basic_types import AudioInput
 from av.error import InvalidDataError
@@ -1469,3 +1470,106 @@ def test_save_to_transcode_skips_undecodable_audio():
         for path in (mixed, all_bad):
             if path:
                 os.unlink(path)
+
+
+def test_as_trimmed_strict_duration_gates_unavailable_length(simple_video_file):
+    video = VideoFromFile(simple_video_file)
+
+    assert video.as_trimmed(0.0, 10.0, strict_duration=True) is None
+
+    relaxed = video.as_trimmed(0.0, 10.0, strict_duration=False)
+    assert relaxed is not None
+    assert relaxed.get_duration() < 10.0
+    assert relaxed.get_duration() == pytest.approx(video.get_duration(), abs=EPSILON)
+
+
+def test_normalize_crop_rect_aligns_odd_origin_to_chroma_grid():
+    assert normalize_crop_rect(1, 1, 100, 100, 1920, 1080) == (0, 0, 100, 100)
+    assert normalize_crop_rect(3, 5, 10, 9, 64, 48) == (2, 4, 10, 8)
+    assert normalize_crop_rect(0, 0, 64, 48, 64, 48) is None
+
+
+def _create_marker_video(path, width=64, height=48, marker_x=2, frames=3, fps=8):
+    with av.open(path, mode="w") as container:
+        stream = container.add_stream("h264", rate=fps)
+        stream.width = width
+        stream.height = height
+        stream.pix_fmt = "yuv420p"
+        pixels = torch.zeros(height, width, 3, dtype=torch.uint8).numpy()
+        pixels[:, marker_x:marker_x + 2, :] = 255
+        for _ in range(frames):
+            frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
+            frame = frame.reformat(format="yuv420p")
+            container.mux(stream.encode(frame))
+        container.mux(stream.encode(None))
+
+
+def _brightest_column(images):
+    return images[0].float().mean(dim=(0, 2)).argmax().item()
+
+
+def test_cropped_decode_and_save_paths_select_same_pixels(tmp_path):
+    source = str(tmp_path / "marker.mp4")
+    _create_marker_video(source, marker_x=4)
+
+    cropped = VideoFromFile(source).as_cropped(3, 1, 16, 16)
+
+    components = cropped.get_components()
+    assert tuple(components.images.shape[1:3]) == (16, 16)
+    decode_column = _brightest_column(components.images)
+    assert decode_column in (2, 3)
+
+    saved = str(tmp_path / "cropped.mp4")
+    cropped.save_to(saved)
+    saved_components = VideoFromFile(saved).get_components()
+    assert tuple(saved_components.images.shape[1:3]) == (16, 16)
+    save_column = _brightest_column(saved_components.images)
+    assert save_column in (2, 3)
+
+    assert decode_column == save_column
+
+
+def test_as_cropped_components_releases_uncropped_storage():
+    images = torch.rand(2, 8, 8, 3)
+    video = VideoFromComponents(
+        VideoComponents(images=images, frame_rate=Fraction(8))
+    )
+
+    cropped = video.as_cropped(0, 0, 4, 4)
+    cropped_images = cropped.get_components().images
+
+    assert tuple(cropped_images.shape[1:3]) == (4, 4)
+    assert (
+        cropped_images.untyped_storage().data_ptr()
+        != images.untyped_storage().data_ptr()
+    )
+
+
+def test_video_encoder_options_applies_h264_preset():
+    from comfy_api.latest._input_impl.video_types import video_encoder_options
+
+    assert video_encoder_options(VideoCodec.H264, None, "ultrafast") == {
+        "preset": "ultrafast"
+    }
+    assert video_encoder_options(VideoCodec.H264, 23.0, "ultrafast") == {
+        "preset": "ultrafast",
+        "crf": "23.0",
+    }
+    assert video_encoder_options(VideoCodec.H264, 23.0, None) == {"crf": "23.0"}
+    assert video_encoder_options(VideoCodec.AV1, None, "ultrafast") == {}
+    assert video_encoder_options(VideoCodec.AV1, 0, "ultrafast") == {
+        "svtav1-params": "lossless=1"
+    }
+
+
+def test_save_to_preset_transcodes_playable_output(tmp_path):
+    source = create_test_video(width=32, height=32)
+    try:
+        out = str(tmp_path / "preset.mp4")
+        VideoFromFile(source).as_cropped(0, 0, 16, 16).save_to(
+            out, preset="ultrafast"
+        )
+        saved = VideoFromFile(out).get_components()
+        assert tuple(saved.images.shape[1:3]) == (16, 16)
+    finally:
+        os.unlink(source)

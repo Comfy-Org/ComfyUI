@@ -1104,7 +1104,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Text to image",
+        "category": "Image generation/Text to image",
         "description": "Generates images from text prompts using NetaYume Lumina, fine-tuned from Neta Lumina for anime-style and illustration generation."
       },
       {

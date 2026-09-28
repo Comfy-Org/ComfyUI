@@ -30,6 +30,11 @@ CLI_FEATURE_FLAG_REGISTRY: dict[str, FeatureFlagInfo] = {
         "default": False,
         "description": "Signal the frontend that telemetry collection is enabled",
     },
+    "partner_run_gate_enabled": {
+        "type": "bool",
+        "default": True,
+        "description": "Gate the local Run button behind sign-in when the graph contains partner nodes",
+    },
 }
 
 
@@ -104,10 +109,11 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "max_upload_size": args.max_upload_size * 1024 * 1024, # Convert MB to bytes
     "extension": {"manager": {"supports_v4": True}},
     "node_replacements": True,
+    # main.py replaces this at startup with the selected AssetManager's state, which is off without database dependencies.
     "assets": args.enable_assets,
 }
 
-# CLI-provided flags cannot overwrite core flags
+# CLI-provided flags cannot overwrite core flags. Startup code may: main.py sets "assets".
 _cli_flags = {k: v for k, v in _parse_cli_feature_flags().items() if k not in _CORE_FEATURE_FLAGS}
 
 SERVER_FEATURE_FLAGS: dict[str, Any] = {**_CORE_FEATURE_FLAGS, **_cli_flags}

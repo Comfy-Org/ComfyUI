@@ -2039,7 +2039,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Edit image",
+        "category": "Image editing/Edit image",
         "description": "Edits an image from text instructions using Flux.2 [dev], with guidance, schedulers, and optional Turbo LoRAs."
       }
     ]

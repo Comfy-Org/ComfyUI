@@ -45,7 +45,7 @@ class AnthropicThinkingConfig(BaseModel):
 
 class AnthropicOutputConfig(BaseModel):
     """Used with `thinking.type='adaptive'` on models like Opus 4.7."""
-    effort: Literal["low", "medium", "high"] | None = Field(None)
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = Field(None)
 
 
 class AnthropicMessagesRequest(BaseModel):

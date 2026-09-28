@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 import comfy.utils
 import comfy.patcher_extension
 import comfy.model_management
+import comfy.model_prefetch
 
 
 class MultiGPUThreadPool:
@@ -46,18 +47,21 @@ class MultiGPUThreadPool:
                     return
                 result_q.put((None, e))
             return
-        while True:
-            item = work_q.get()
-            if item is None:
-                break
-            fn, args, kwargs = item
-            try:
-                result = fn(*args, **kwargs)
-                result_q.put((result, None))
-            except comfy.model_management.InterruptProcessingException as e:
-                result_q.put((None, e))
-            except Exception as e:
-                result_q.put((None, e))
+        try:
+            while True:
+                item = work_q.get()
+                if item is None:
+                    break
+                fn, args, kwargs = item
+                try:
+                    result = fn(*args, **kwargs)
+                    result_q.put((result, None))
+                except comfy.model_management.InterruptProcessingException as e:
+                    result_q.put((None, e))
+                except Exception as e:
+                    result_q.put((None, e))
+        finally:
+            comfy.model_prefetch.cleanup_malloc_graph()
 
     def submit(self, device: torch.device, fn, *args, **kwargs):
         self._work_queues[device].put((fn, args, kwargs))

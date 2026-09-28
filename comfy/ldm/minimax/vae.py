@@ -10,7 +10,7 @@ import comfy.model_management
 import comfy.ops
 import comfy.quant_ops
 import comfy.rmsnorm
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE, optimized_attention
 
 ops = comfy.ops.disable_weight_init
 
@@ -38,22 +38,85 @@ LATENTS_STD = [
 
 # 3D causal CNN encoder
 
+def _kitchen_ndhwc(x):
+    # NDHWC when the kitchen pad kernel can feed it and the conv consumes it natively:
+    # cuDNN does, MIOpen converts back and loses more than the fused pad saves
+    ck = getattr(comfy.quant_ops, "ck", None)
+    return (ck is not None and hasattr(ck, "group_norm_silu_pad3d") and torch.version.hip is None
+            and x.is_cuda and x.dtype in (torch.float16, torch.bfloat16))
+
+
+def _fused_norm_pad(x, norm, spatial_pad, front):
+    # per-frame GroupNorm + SiLU + padding in one kitchen pass, NDHWC out
+    if not _kitchen_ndhwc(x) or x.shape[1] % 8:
+        return None
+    ck = comfy.quant_ops.ck
+    if norm is None:
+        return ck.group_norm_silu_pad3d(x, None, None, 1, 0.0, (*spatial_pad, front), silu=False)
+    # cast_bias_weight: works for offloaded (dynamic VRAM) layers
+    weight, bias, offload_stream = comfy.ops.cast_bias_weight(norm, x, offloadable=True)
+    try:
+        return ck.group_norm_silu_pad3d(x, weight, bias, norm.num_groups, norm.eps, (*spatial_pad, front), silu=True)
+    finally:
+        comfy.ops.uncast_bias_weight(norm, weight, bias, offload_stream)
+
+
+def _fp16_accum_conv(conv, x, weight, bias, residual):
+    # kitchen fp16-accumulate conv, same opt-in as the fp16 GEMMs
+    ck = comfy.quant_ops.ck
+    if not hasattr(ck, "fp16_conv3d") or not comfy.ops._fp16_linear_wanted(x):
+        return None
+    return ck.fp16_conv3d(x, weight, bias, residual, conv.stride)
+
+
 class CausalConv3d(ops.Conv3d):
     # Reflect spatial padding, causal (zeros, front-only) temporal padding.
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
         super().__init__(in_channels, out_channels, kernel_size=kernel_size, stride=stride)
         self.causal_padding = (padding,) * 3 if isinstance(padding, int) else tuple(padding)
 
-    def forward(self, x):
-        if sum(self.causal_padding) == 0:
-            return super().forward(x)
+    def forward(self, x, pre_norm=None, spatial_pad=None, residual=None):
+        # pre_norm, spatial_pad and residual fold into the kitchen pad pass and conv epilogue
+        pad_t, pad_h, pad_w = self.causal_padding
+        if spatial_pad is None:
+            spatial_pad = (pad_w, pad_w, pad_h, pad_h)
+        front = 0 if x.shape[2] == 1 else pad_t * 2
 
-        x = F.pad(x, (self.causal_padding[2], self.causal_padding[2], self.causal_padding[1], self.causal_padding[1], 0, 0),  mode="reflect")
-        if x.shape[2] == 1:
+        ndhwc = _kitchen_ndhwc(x)
+        if ndhwc and self.weight.is_cuda and not self.weight.is_contiguous(memory_format=torch.channels_last_3d):
+            self.weight.data = self.weight.data.contiguous(memory_format=torch.channels_last_3d)
+
+        if pre_norm is not None or front or any(spatial_pad):  # the 1x1 shortcut has nothing to fold
+            fused = _fused_norm_pad(x, pre_norm, spatial_pad, front)
+            if fused is not None:
+                x = fused
+            else:
+                if pre_norm is not None:
+                    x = F.silu(pre_norm(x), inplace=True)
+                if any(spatial_pad):
+                    x = F.pad(x, (*spatial_pad, 0, 0), mode="reflect")
+                if front:
+                    x = F.pad(x, (0, 0, 0, 0, front, 0), mode="constant")
+
+        if x.shape[2] == 1 and pad_t:
             # single frame: the causal front padding is all zeros truncate the temporal taps instead of convolving zero frames
-            return super().forward(x, autopad="causal_zero")
-        x = F.pad(x, (0, 0, 0, 0, self.causal_padding[0] * 2, 0), mode="constant")
-        return super().forward(x)
+            out = super().forward(x, autopad="causal_zero")
+        elif ndhwc:
+            # cast_bias_weight handles offloaded layers; channels_last keeps cuDNN's output NDHWC
+            weight, bias, offload_stream = comfy.ops.cast_bias_weight(self, x, offloadable=True)
+            try:
+                weight_cl = weight.contiguous(memory_format=torch.channels_last_3d)
+                out = _fp16_accum_conv(self, x, weight_cl, bias, residual)
+                if out is not None:
+                    return out
+                out = F.conv3d(x, weight_cl, bias, self.stride)
+            finally:
+                comfy.ops.uncast_bias_weight(self, weight, bias, offload_stream)
+        else:
+            out = super().forward(x)
+        if residual is not None:
+            out += residual
+        return out
 
 
 class TemporalIsolatedGroupNorm(ops.GroupNorm):
@@ -85,7 +148,7 @@ class Downsample3D(nn.Module):
 
     def forward(self, x):
         if self.space_stride == 2:
-            x = F.pad(x, (0, 1, 0, 1, 0, 0), mode="reflect")
+            return self.conv(x, spatial_pad=(0, 1, 0, 1))
         return self.conv(x)
 
 
@@ -104,11 +167,10 @@ class ResnetBlock3D(nn.Module):
             self.nin_shortcut = CausalConv3d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x):
-        h = self.conv1(F.silu(self.norm1(x), inplace=True))
-        h = self.conv2(F.silu(self.norm2(h), inplace=True))
+        h = self.conv1(x, pre_norm=self.norm1)
         if self.in_channels != self.out_channels:
             x = self.nin_shortcut(x)
-        return h.add_(x)
+        return self.conv2(h, pre_norm=self.norm2, residual=x)
 
 
 class EncoderFCN3D(nn.Module):
@@ -160,8 +222,7 @@ class EncoderFCN3D(nn.Module):
                 h = self.down[i_level].block[i_block](h)
             if hasattr(self.down[i_level], "downsample"):
                 h = self.down[i_level].downsample(h)
-        h = F.silu(self.norm_out(h))
-        return self.conv_out(h)
+        return self.conv_out(h, pre_norm=self.norm_out)
 
 
 # ViT3D decoder
@@ -206,9 +267,11 @@ class FeedForward(nn.Module):
         self.w1 = operations.Linear(dim, inner_dim * 2, bias=bias)
         self.w2 = operations.Linear(inner_dim, dim, bias=bias)
 
-    def forward(self, x):
-        gate, x = self.w1(x).chunk(2, dim=-1)
-        return self.w2(F.silu(gate).mul_(x))
+    def forward(self, x, pre_norm, residual, residual_scale):
+        # norm, gated silu and residual addcmul fold into the INT8 kernels
+        h = comfy.ops.linear_input_act(self.w1, x, "rms_norm", pre_norm.weight, pre_norm.eps)
+        return comfy.ops.linear_input_act(
+            self.w2, h, "swiglu", residual=residual, residual_scale=residual_scale)
 
 
 class Attention(nn.Module):
@@ -219,27 +282,41 @@ class Attention(nn.Module):
         inner_dim = dim_head * heads
         self.norm_q = ops.RMSNorm(dim_head, eps=eps, elementwise_affine=False)
         self.norm_k = ops.RMSNorm(dim_head, eps=eps, elementwise_affine=False)
+        # unit scale for the fused rms+rope kernel; the qk norms are not affine
+        self.register_buffer("qk_norm_scale", torch.ones(dim_head), persistent=False)
         self.to_qkv = operations.Linear(inner_dim, inner_dim * 3, bias=bias)
         self.to_out = operations.Linear(inner_dim, inner_dim, bias=bias)
 
-    def forward(self, x, rotary_pos_emb=None):
+    def forward(self, x, rotary_pos_emb, pre_norm, residual, residual_scale):
         batch_size, seq_len, _ = x.shape
 
-        qkv = self.to_qkv(x)
+        qkv = comfy.ops.linear_input_act(self.to_qkv, x, "rms_norm", pre_norm.weight, pre_norm.eps)
         qkv = qkv.view(batch_size, seq_len, -1, 3 * self.dim_head)
         query, key, value = torch.chunk(qkv, 3, dim=-1)
 
-        query = comfy.rmsnorm.rms_norm(query, self.norm_q.weight, self.norm_q.eps)
-        key = comfy.rmsnorm.rms_norm(key, self.norm_k.weight, self.norm_k.eps)
-
         if rotary_pos_emb is not None:
-            rot = rotary_pos_emb.shape[-3] * 2
-            query[..., :rot], key[..., :rot] = comfy.quant_ops.ck.apply_rope_split_half(
-                query[..., :rot], key[..., :rot], rotary_pos_emb)
+            # fused per-head RMSNorm + partial split-half rope, in place when autograd is off
+            rms_rope = (comfy.quant_ops.ck.rms_rope_split_half if torch.is_grad_enabled()
+                        else comfy.quant_ops.ck.rms_rope_split_half_)
+            # the eager fallback does no device alignment, so a CPU-resident (offloaded)
+            # buffer must be moved to the input's device before the fused call
+            query, key = rms_rope(
+                query, key, rotary_pos_emb, self.qk_norm_scale.to(query.device),
+                epsilon=self.norm_q.eps, rot_dim=rotary_pos_emb.shape[-3] * 2)
+        else:
+            query = comfy.rmsnorm.rms_norm(query, self.norm_q.weight, self.norm_q.eps)
+            key = comfy.rmsnorm.rms_norm(key, self.norm_k.weight, self.norm_k.eps)
 
-        out = optimized_attention(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2),
-                                  self.heads, skip_reshape=True).nan_to_num_(0.0)
-        return self.to_out(out)
+        query, key, value = (t.transpose(1, 2) for t in (query, key, value))
+        # an int8 decoder already accepts int8 numerics; fp16 keeps exact flash
+        if isinstance(self.to_qkv.weight, comfy.ops.QuantizedTensor) and COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE:
+            out = comfy.quant_ops.ck.int8_attention(query, key, value)
+            out = out.transpose(1, 2).reshape(batch_size, seq_len, -1)
+        else:
+            out = optimized_attention(query, key, value, self.heads, skip_reshape=True)
+        return comfy.ops.linear_input_act(
+            self.to_out, torch.nan_to_num(out), None,
+            residual=residual, residual_scale=residual_scale)
 
 
 class TransformerBlock(nn.Module):
@@ -253,9 +330,17 @@ class TransformerBlock(nn.Module):
         self.ff = FeedForward(dim=dim, bias=bias, operations=operations)
         self.scale2 = nn.Parameter(torch.empty(dim))
 
+    def _residual_scale(self, scale, x):
+        # cast_to_input always copies, defeating the kernels' identity-keyed caches
+        if scale.dtype == x.dtype and scale.device == x.device:
+            return scale
+        return comfy.ops.cast_to_input(scale, x)
+
     def forward(self, x, rotary_pos_emb=None):
-        x = x.addcmul_(self.attn(comfy.rmsnorm.rms_norm(x, self.norm1.weight, self.norm1.eps), rotary_pos_emb), comfy.ops.cast_to_input(self.scale1, x))
-        return x.addcmul_(self.ff(comfy.rmsnorm.rms_norm(x, self.norm2.weight, self.norm2.eps)), comfy.ops.cast_to_input(self.scale2, x))
+        x = self.attn(x, rotary_pos_emb, pre_norm=self.norm1,
+                      residual=x, residual_scale=self._residual_scale(self.scale1, x))
+        return self.ff(x, pre_norm=self.norm2,
+                       residual=x, residual_scale=self._residual_scale(self.scale2, x))
 
 
 class ViT3DDecoder(nn.Module):
@@ -502,41 +587,54 @@ class MiniMaxH3VideoVAE(nn.Module):
             result_rows.append(torch.cat(result_row, dim=-1))
         return torch.cat(result_rows, dim=-2)
 
+    def _decode_tile_row(self, z_row, x_idx, x_len):
+        # a few tiles per decoder call (~7%); each extra tile holds ~100 MB of activations
+        free = comfy.model_management.get_free_memory(z_row.device)
+        batch = int(max(1, min(4, free // (128 * 2**20 * z_row.shape[0]))))
+        slices = [z_row[..., j_pos // self.vae_ratio:(j_pos + j_len) // self.vae_ratio] for j_pos, j_len in zip(x_idx, x_len)]
+        for k in range(0, len(slices), batch):
+            group = slices[k:k + batch]
+            yield from self._decode_pixels(torch.cat(group)).chunk(len(group))
+
     def tiled_decode(self, z):
         height, width = z.shape[-2] * self.vae_ratio, z.shape[-1] * self.vae_ratio
         y_idx, y_len, y_overlap = self.split_tiles(height)
         x_idx, x_len, x_overlap = self.split_tiles(width)
 
-        # Blended tiles are written straight into a pre-allocated canvas.
+        # Blended tiles are written straight into a pre-allocated canvas. Tiles blend against
+        # their neighbours as already blended, so seams stay continuous where overlaps cross.
         canvas = None
-        row_tails = []
+        strip = None
         out_y = 0
         for i, (i_pos, i_len) in enumerate(zip(y_idx, y_len)):
             zi, zl = i_pos // self.vae_ratio, i_len // self.vae_ratio
-            new_tails = []
+            tiles = self._decode_tile_row(z[..., zi:zi + zl, :], x_idx, x_len)
+            new_strip = None
             left_tail = None
             out_x = 0
-            for j, (j_pos, j_len) in enumerate(zip(x_idx, x_len)):
-                zj, zw = j_pos // self.vae_ratio, j_len // self.vae_ratio
-                tile = self._decode_pixels(z[..., zi:zi + zl, zj:zj + zw])
-                if i < len(y_idx) - 1:
-                    new_tails.append(tile[..., -y_overlap[i]:, :].clone())
-                next_left_tail = tile[..., :, -x_overlap[j]:].clone() if j < len(x_idx) - 1 else None
+            # enumerate would retain the previous tile while the next batch decodes.
+            for j in range(len(x_idx)):
+                tile = next(tiles)
                 if i > 0:
-                    tile = self.blend(row_tails[j], tile, y_overlap[i - 1], dim=-2)
+                    tile = self.blend(strip[..., :, x_idx[j]:x_idx[j] + x_len[j]], tile, y_overlap[i - 1], dim=-2)
                 if j > 0:
                     tile = self.blend(left_tail, tile, x_overlap[j - 1], dim=-1)
-                left_tail = next_left_tail
-                if i < len(y_idx) - 1:
-                    tile = tile[..., :-y_overlap[i], :]
+                left_tail = tile[..., :, -x_overlap[j]:].clone() if j < len(x_idx) - 1 else None
                 if j < len(x_idx) - 1:
                     tile = tile[..., :, :-x_overlap[j]]
                 if canvas is None:
                     canvas = torch.empty(*tile.shape[:-2], height, width, dtype=tile.dtype, device=tile.device)
+                if i < len(y_idx) - 1:
+                    if new_strip is None:
+                        new_strip = torch.empty(*tile.shape[:-2], y_overlap[i], width, dtype=tile.dtype, device=tile.device)
+                    new_strip[..., :, out_x:out_x + tile.shape[-1]] = tile[..., -y_overlap[i]:, :]
+                    tile = tile[..., :-y_overlap[i], :]
                 canvas[..., out_y:out_y + tile.shape[-2], out_x:out_x + tile.shape[-1]].copy_(tile)
+                tile_height = tile.shape[-2]
                 out_x += tile.shape[-1]
-            row_tails = new_tails
-            out_y += tile.shape[-2]
+                del tile
+            strip = new_strip
+            out_y += tile_height
         return canvas
 
     # temporal chunking
@@ -664,7 +762,7 @@ class MiniMaxH3VideoVAE(nn.Module):
                 write_part(dec_overlap)
                 dec_overlap = None
 
-            del clip_dec, clip_z
+            del clip_dec, clip_z, clip_dec_chunk
 
         return dec
 
