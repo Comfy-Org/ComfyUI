@@ -54,7 +54,7 @@ stateDiagram-v2
     MissingUnhashed --> LiveUnhashed: size and mtime match at path (hashing off)
 ```
 
-A reappeared file that matches no missing candidate does not recover any of them; with hashing on, neither does one that matches more than one (with hashing off, the newest match recovers, as described below). The scanner creates a new content row for the file instead, and the missing candidates stay missing. The same old-missing-plus-new-content shape applies to a same-path edit or reuse: the old row is marked missing and a separate new row and record are created for the new bytes, never transformed in place.
+A reappeared file that matches no missing candidate does not recover any of them; with hashing on, neither does one that matches more than one (with hashing off, the newest match recovers, as described below). The scanner creates a new content row for the file instead, and the missing candidates stay missing. The same old-missing-plus-new-content shape applies to a same-path edit or reuse that change detection classifies as new content (see File edited in place): the old row is marked missing and a separate new row and record are created for the new bytes, never transformed in place.
 
 With hashing on, only a hash can recover a missing content row, with one narrow exception for rows that were never hashed. The scanner hashes the file now present at the missing path and recovers the row only when exactly one missing candidate for that path has the same hash. If no candidate matches, the scanner creates new content. If multiple candidates match, none recover. Recovery also never fires for a path a live content row already occupies: the file there belongs to that row, and ordinary change detection owns it.
 
