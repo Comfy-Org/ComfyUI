@@ -43,7 +43,7 @@ class FixedKVBias(FixedKV):
     tracker: dict = None
 
     def prepare(self, num_tokens):
-        if self.seqlen is not None:
+        if num_tokens == 1 and self.seqlen is not None:
             self.seqlen.fill_(self.index + num_tokens)
         if self.tracker["step"] == (self.index, num_tokens):
             return
