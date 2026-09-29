@@ -26,6 +26,7 @@ from app.assets.database.queries.records import (
     mark_content_missing,
 )
 from app.assets.scanner import SeedAssetSpec, insert_asset_specs, seed_asset_specs
+from app.assets.scanner_changes import recover_missing_content_by_stat
 from app.assets.scanner_admission import _WATCH_LIST
 
 ROOTS = ("input", "output")
@@ -424,3 +425,31 @@ def test_a_newer_recordless_row_does_not_win_over_the_users_record(session, temp
     assert (created, error) == (0, None)
     assert session.get(AssetContent, original.id).is_missing is False
     assert session.get(AssetContent, duplicate.id).is_missing is True
+
+
+def test_stat_recovery_runs_no_table_scan_in_the_write_transaction(session, temp_dir, db_engine):
+    """Recovery runs once per returning file inside the batch's write transaction, so a
+    table scan there makes the lock window grow with the catalog."""
+    path = temp_dir / "returning.png"
+    path.write_bytes(b"bytes")
+    _missing_row(session, path)
+    session.commit()
+    candidates = {str(path): [row.id for row in session.scalars(sa.select(AssetContent))]}
+    statements: list[tuple[str, object]] = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith(("SELECT", "UPDATE", "DELETE")):
+            statements.append((statement, parameters))
+
+    sa.event.listen(db_engine, "before_cursor_execute", capture)
+    try:
+        assert recover_missing_content_by_stat(session, str(path), path.stat(), candidates[str(path)]) == "recovered"
+        session.flush()
+    finally:
+        sa.event.remove(db_engine, "before_cursor_execute", capture)
+
+    assert statements
+    with db_engine.connect() as conn:
+        for statement, parameters in statements:
+            plan = conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {statement}", parameters).all()
+            assert not any("SCAN asset_contents" in row[-1] for row in plan), (statement, plan)

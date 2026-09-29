@@ -148,9 +148,10 @@ def recover_missing_content_by_stat(
     ]
     if not matches:
         return "no_match"
+    # "= 0", not "IS 0", so the partial live-path index serves it instead of a table scan.
     occupied = session.scalar(
         sa.select(AssetContent.id)
-        .where(AssetContent.path == path, AssetContent.is_missing.is_(False))
+        .where(AssetContent.path == path, AssetContent.is_missing == sa.false())
         .limit(1)
     )
     if occupied is not None:
