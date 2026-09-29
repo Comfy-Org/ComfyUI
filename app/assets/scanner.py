@@ -177,6 +177,17 @@ def _note_skipped_folders(prefixes: list[str], progress: _ScanProgress | None) -
                 progress.skipped_folders += 1
 
 
+def _unlistable_prefixes_inside(prefixes: list[str]) -> list[str]:
+    """Registered folders inside ``prefixes`` that can't be listed, such as output/checkpoints
+    as a link to an unplugged drive. Their rows are left out of the enclosing folder's sync
+    too, or it would stat them, find nothing, and retire them."""
+    inside = path_prefix_matcher(prefixes)
+    return [
+        p for p in dict.fromkeys(get_owned_prefixes())
+        if p not in prefixes and inside(p) and not _is_listable(p)
+    ]
+
+
 def get_owned_prefixes() -> list[str]:
     """Every directory an asset may live in; references outside these are marked missing."""
     scan_roots: tuple[RootType, ...] = ("models", "input", "output")
@@ -214,14 +225,17 @@ def collect_models_files() -> list[str]:
 
 
 def observe_references_on_filesystem(
-    session: Session, prefixes: list[str], progress: _ScanProgress | None = None
+    session: Session,
+    prefixes: list[str],
+    progress: _ScanProgress | None = None,
+    exclude: list[str] | None = None,
 ) -> tuple[list[_ReferenceObservation], set[str]]:
     """Stat every live row under ``prefixes`` without writing, so the caller can
     apply the result in a short write transaction. Also returns the paths whose
     file still exists."""
     contents = [
         (content.id, content.path, content.size_bytes, content.mtime_ns)
-        for content in live_contents_under_prefixes(session, prefixes)
+        for content in live_contents_under_prefixes(session, prefixes, exclude)
     ]
     observations: list[_ReferenceObservation] = []
     survivors: set[str] = set()
@@ -274,11 +288,11 @@ def apply_reference_observations(
 
 
 def _sync_prefixes_in_write_txn(
-    prefixes: list[str], progress: _ScanProgress | None
+    prefixes: list[str], progress: _ScanProgress | None, exclude: list[str] | None = None
 ) -> set[str]:
     with create_session() as session:
         observations, survivors = observe_references_on_filesystem(
-            session, prefixes, progress
+            session, prefixes, progress, exclude
         )
     if observations:
         with create_write_session() as session:
@@ -298,7 +312,9 @@ def sync_root_safely(
         prefixes = list(dict.fromkeys(get_scan_prefixes_for_root(root)))
         listable = [p for p in prefixes if _is_listable(p)]
         _note_skipped_folders([p for p in prefixes if p not in listable], progress)
-        return _sync_prefixes_in_write_txn(listable, progress)
+        return _sync_prefixes_in_write_txn(
+            listable, progress, _unlistable_prefixes_inside(listable)
+        )
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
         emit(
@@ -400,6 +416,10 @@ def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservati
     ).where(
         AssetContent.is_missing.is_(False),
         sa.or_(*(sql_path_under_prefix(AssetContent.path, p) for p in prefixes)),
+        *(
+            sa.not_(sql_path_under_prefix(AssetContent.path, p))
+            for p in _unlistable_prefixes_inside(prefixes)
+        ),
     )
     try:
         with create_session() as session:

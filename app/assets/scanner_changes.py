@@ -203,12 +203,16 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
     return processed
 
 
-def live_contents_under_prefixes(session: Session, prefixes: list[str]) -> Iterable[AssetContent]:
-    """Stream the live contents under the prefixes in batches; consume it inside the session."""
+def live_contents_under_prefixes(
+    session: Session, prefixes: list[str], exclude: list[str] | None = None
+) -> Iterable[AssetContent]:
+    """Stream the live contents under the prefixes, but not under ``exclude``, in batches;
+    consume it inside the session."""
     if not prefixes:
         return []
     stmt = sa.select(AssetContent).where(
         AssetContent.is_missing.is_(False),
         sa.or_(*(sql_path_under_prefix(AssetContent.path, prefix) for prefix in prefixes)),
+        *(sa.not_(sql_path_under_prefix(AssetContent.path, p)) for p in exclude or ()),
     )
     return session.scalars(stmt.execution_options(yield_per=500))

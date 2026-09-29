@@ -84,14 +84,15 @@ def _write(path: Path, payload: bytes = b"model-bytes") -> Path:
     return path
 
 
-def _startup_scan(caplog: pytest.LogCaptureFixture) -> dict:
-    """One startup scan (prune first, then a fast scan); returns its scan_completed fields."""
+def _startup_scan(caplog: pytest.LogCaptureFixture, roots=ALL_ROOTS) -> dict:
+    """One startup scan (prune first, then a fast scan); returns its scan_completed fields.
+    ``roots=("output",)`` is instead the rescan queued after each prompt."""
     seeder = seeder_module._AssetSeeder()
     seeder._state = seeder_module.State.RUNNING
     seeder._scan_state = seeder_module._ScanState()
-    seeder._roots = ALL_ROOTS
+    seeder._roots = roots
     seeder._phase = seeder_module.ScanPhase.FAST
-    seeder._prune_first = True
+    seeder._prune_first = roots == ALL_ROOTS
     seeder._run_gate.set()
     caplog.clear()
     with caplog.at_level(logging.INFO):
@@ -242,3 +243,50 @@ def test_a_registered_folder_that_was_never_created_is_neither_counted_nor_warne
 
     assert completed["skipped_folders_count"] == 0
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "classifiers" in r.getMessage()]
+
+
+
+def _register_output_checkpoints(layout: dict[str, Path]) -> Path:
+    """main.py registers output/checkpoints as a checkpoints folder."""
+    nested = layout["output"] / "checkpoints"
+    folder_paths.folder_names_and_paths["checkpoints"][0].append(str(nested))
+    return nested
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating symlinks needs a privilege on Windows")
+def test_a_linked_folder_inside_output_keeps_its_rows_when_the_link_target_is_gone(
+    layout, session, caplog, temp_dir
+):
+    """output lists fine, but output/checkpoints links to a drive that's gone: neither the
+    output sync nor the per-prompt output rescan may retire the rows behind the link."""
+    drive = temp_dir / "drive" / "checkpoints"
+    saved = _write(drive / "saved.safetensors")
+    nested = _register_output_checkpoints(layout)
+    nested.symlink_to(drive, target_is_directory=True)
+    _startup_scan(caplog)
+    before = _rows(session)[str(nested / saved.name)]
+    assert before[0][1] is False
+    unplugged = drive.parent.with_name("drive-away")
+    drive.parent.rename(unplugged)
+
+    assert _startup_scan(caplog)["skipped_folders_count"] == 1
+    assert _rows(session)[str(nested / saved.name)] == before
+    _startup_scan(caplog, roots=("output",))
+    assert _rows(session)[str(nested / saved.name)] == before
+
+    unplugged.rename(drive.parent)
+    assert _startup_scan(caplog)["created"] == 0
+    assert _rows(session)[str(nested / saved.name)] == before
+
+
+def test_a_registered_folder_deleted_from_inside_output_keeps_its_rows(layout, session, caplog):
+    """The same trade-off as any other registered folder whose path is absent."""
+    nested = _register_output_checkpoints(layout)
+    saved = _write(nested / "saved.safetensors")
+    _startup_scan(caplog)
+    before = _rows(session)[str(saved)]
+    shutil.rmtree(nested)
+
+    assert _startup_scan(caplog)["skipped_folders_count"] == 1
+    _startup_scan(caplog, roots=("output",))
+    assert _rows(session)[str(saved)] == before

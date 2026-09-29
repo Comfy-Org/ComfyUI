@@ -126,7 +126,7 @@ def test_permission_error_in_reference_sync_increments_scan_counter(
         raise PermissionError(secret_path)
 
     monkeypatch.setattr(scanner, "os", SimpleNamespace(stat=deny_stat, path=scanner.os.path))
-    monkeypatch.setattr(scanner, "live_contents_under_prefixes", lambda _session, _prefixes: [content])
+    monkeypatch.setattr(scanner, "live_contents_under_prefixes", lambda *_args: [content])
 
     scanner.observe_references_on_filesystem(Mock(), ["/private/assets"], progress=progress)
 
