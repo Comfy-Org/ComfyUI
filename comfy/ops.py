@@ -568,13 +568,23 @@ class disable_weight_init:
 
         def forward_comfy_cast_weights(self, input):
             with CastBiasWeightContext(self, input, offloadable=True) as (weight, bias):
+                if getattr(self, "_weight_cache_active", False):
+                    return self._forward(input, weight, bias)
                 return torch.nn.functional.linear(input, weight, bias)
+
+        def _forward(self, input, weight, bias):
+            return torch.nn.functional.linear(input, weight, bias)
+
+        def use_weight_cache(self, cache):
+            return _linear_weight_cache(self, cache, disable_weight_init.Linear._forward)
 
         def forward(self, *args, **kwargs):
             run_every_op()
             if self.comfy_cast_weights or len(self.weight_function) > 0 or len(self.bias_function) > 0:
                 return self.forward_comfy_cast_weights(*args, **kwargs)
             else:
+                if getattr(self, "_weight_cache_active", False):
+                    return self._forward(*args, weight=self.weight, bias=self.bias, **kwargs)
                 return super().forward(*args, **kwargs)
 
     class Conv1d(torch.nn.Conv1d, CastWeightBiasOp):
@@ -939,6 +949,7 @@ if CUBLAS_IS_AVAILABLE:
 # Mixed Precision Operations
 # ==============================================================================
 from . import quant_ops
+from comfy_kitchen.tensor.convrot_w4a4 import TensorCoreConvRotW4A4Layout, convrot_w4a4_linear
 from .quant_ops import (
     QuantizedTensor,
     QUANT_ALGOS,
@@ -946,6 +957,39 @@ from .quant_ops import (
     TensorWiseINT8Layout,
     get_layout_class,
 )
+
+
+@contextlib.contextmanager
+def _linear_weight_cache(linear, cache, default_forward):
+    if not isinstance(linear.weight, QuantizedTensor) or linear.weight.layout_cls is not TensorCoreConvRotW4A4Layout:
+        yield
+        return
+    # Preserve extension overrides and an already active scope.
+    if "_forward" in linear.__dict__ or type(linear)._forward is not default_forward:
+        yield
+        return
+    previous = linear._forward
+
+    def forward(input, weight, bias):
+        if (isinstance(weight, QuantizedTensor)
+                and weight.layout_cls is TensorCoreConvRotW4A4Layout
+                and not weight.params.transposed
+                and not isinstance(input, QuantizedTensor)
+                and not torch.compiler.is_compiling()):
+            qweight, scales = TensorCoreConvRotW4A4Layout.get_plain_tensors(weight)
+            params = weight.params
+            return convrot_w4a4_linear(input, qweight, scales, bias,
+                                      params.convrot_groupsize, params.quant_group_size,
+                                      params.linear_dtype, weight_cache=cache)
+        return previous(input, weight, bias)
+
+    linear._forward = forward
+    linear._weight_cache_active = True
+    try:
+        yield
+    finally:
+        del linear._forward
+        del linear._weight_cache_active
 
 def _swiglu_eager(x):
     gate, up = x.chunk(2, dim=-1)
@@ -1396,6 +1440,9 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
 
             def _forward(self, input, weight, bias):
                 return torch.nn.functional.linear(input, weight, bias)
+
+            def use_weight_cache(self, cache):
+                return _linear_weight_cache(self, cache, MixedPrecisionOps.Linear._forward)
 
             def forward_comfy_cast_weights(
                 self,

@@ -20,6 +20,8 @@ import comfy.hooks
 import comfy.context_windows
 import comfy.multigpu
 import comfy.utils
+import comfy.weight_cache
+from comfy.cli_args import args as cli_args
 from comfy.internal_logging import detail
 import scipy.stats
 import numpy
@@ -1259,7 +1261,14 @@ class CFGGuider:
                 self.model_patcher.pre_run()
                 for multigpu_patcher in multigpu_patchers:
                     multigpu_patcher.pre_run()
-                output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
+                cache_limit = max(0, cli_args.npu_w4a4_cache_mib) * 1024 ** 2
+                inference_bytes = 0
+                if cache_limit and not multigpu_patchers:
+                    inference_bytes, _ = comfy.sampler_helpers.estimate_memory(self.model_patcher, noise.shape, self.conds)
+                else:
+                    cache_limit = 0
+                with comfy.weight_cache.sampling_weight_cache(self.model_patcher, inference_bytes, cache_limit):
+                    output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
             finally:
                 thread_pool = self.model_options.pop("multigpu_thread_pool", None)
                 if thread_pool is not None:

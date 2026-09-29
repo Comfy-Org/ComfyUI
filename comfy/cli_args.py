@@ -172,6 +172,7 @@ vram_group.add_argument("--novram", action="store_true", help="When lowvram isn'
 vram_group.add_argument("--cpu", action="store_true", help="To use the CPU for everything (slow).")
 
 parser.add_argument("--reserve-vram", type=float, default=None, help="Set the amount of vram in GB you want to reserve for use by your OS/other software. By default some amount is reserved depending on your OS.")
+parser.add_argument("--npu-w4a4-cache-mib", type=int, default=0, help="Opt-in W4A4 unpack cache limit in MiB per sampling operation. Only for fully resident NPU models; reduced to preserve inference headroom. Default: disabled.")
 parser.add_argument("--vram-headroom", type=float, default=0, help="Set the amount of vram in GB for DynamicVRAM to maintain as extra headroom above default. ComfyUI will try and keep this much VRAM completely free and unused, even counting VRAM from other apps.")
 parser.add_argument("--disable-nvml-pressure", action="store_true", help="Use CUDA instead of NVML for DynamicVRAM memory pressure.")
 
