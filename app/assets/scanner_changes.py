@@ -15,7 +15,7 @@ from typing import Literal
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from app.assets.database.models import AssetContent
+from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import (
     create_content,
     create_record,
@@ -141,6 +141,10 @@ def recover_missing_content_by_stat(
         and candidate.is_missing
         and candidate.path == path
         and (candidate.size_bytes, candidate.mtime_ns) == (stat_result.st_size, mtime_ns)
+        # A row whose records were all deleted while it was missing would come back
+        # live with nothing to show it, and hold the path so no scan ever lists it.
+        and session.scalar(sa.select(Asset.id).where(Asset.content_id == candidate.id).limit(1))
+        is not None
     ]
     if not matches:
         return "no_match"

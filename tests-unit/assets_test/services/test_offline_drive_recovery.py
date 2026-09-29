@@ -385,3 +385,42 @@ def test_a_model_folder_pruned_while_unregistered_recovers_when_it_returns(
     assert back.recovered == 3
     assert _missing_count(session) == 0
     assert _records(session) == edits
+
+
+def test_a_row_whose_records_were_deleted_while_missing_does_not_recover(session, temp_dir):
+    path = temp_dir / "deleted-while-offline.png"
+    path.write_bytes(b"bytes")
+    orphan = _missing_row(session, path)
+    session.execute(sa.delete(AssetTag))
+    session.execute(sa.delete(Asset).where(Asset.content_id == orphan.id))
+    session.commit()
+
+    created, error = seed_asset_specs(session, [_spec(path)])
+    session.commit()
+
+    assert (created, error) == (1, None)
+    assert session.get(AssetContent, orphan.id).is_missing is True
+    live = session.scalar(
+        sa.select(AssetContent).where(AssetContent.path == str(path), AssetContent.is_missing.is_(False))
+    )
+    assert session.scalar(sa.select(Asset.id).where(Asset.content_id == live.id)) is not None
+
+
+def test_a_newer_recordless_row_does_not_win_over_the_users_record(session, temp_dir):
+    path = temp_dir / "deduplicated.png"
+    path.write_bytes(b"bytes")
+    original = _missing_row(session, path)
+    duplicate = _missing_row(session, path)
+    original.created_at = duplicate.created_at - timedelta(days=1)
+    session.execute(sa.delete(AssetTag).where(AssetTag.asset_id.in_(
+        sa.select(Asset.id).where(Asset.content_id == duplicate.id)
+    )))
+    session.execute(sa.delete(Asset).where(Asset.content_id == duplicate.id))
+    session.commit()
+
+    created, error = seed_asset_specs(session, [_spec(path)])
+    session.commit()
+
+    assert (created, error) == (0, None)
+    assert session.get(AssetContent, original.id).is_missing is False
+    assert session.get(AssetContent, duplicate.id).is_missing is True
