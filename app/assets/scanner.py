@@ -71,6 +71,8 @@ class _ScanProgress(Protocol):
     hash_failed: int
     enrich_failed: int
     permission_denied: int
+    dirs_listed: int
+    files_statted: int
 
     def mark_emitted(self, key: str) -> bool: ...
 
@@ -179,6 +181,8 @@ def observe_references_on_filesystem(
     observations: list[_ReferenceObservation] = []
     survivors: set[str] = set()
     for content_id, path, size_bytes, mtime_ns in contents:
+        if progress is not None:
+            progress.files_statted += 1
         try:
             stat_result = os.stat(path, follow_symlinks=True)
         except FileNotFoundError:
@@ -306,15 +310,21 @@ def mark_contents_missing_outside_prefixes(
     return len(missing)
 
 
-def collect_paths_for_roots(roots: tuple[RootType, ...]) -> list[str]:
-    """Collect all file paths for the given roots."""
+def collect_paths_for_roots(
+    roots: tuple[RootType, ...], progress: _ScanProgress | None = None
+) -> list[str]:
+    """Collect all file paths for the given roots.
+
+    ``progress.dirs_listed`` counts the input and output walks only: models come
+    from folder_paths' own cached listing, which this scan does not perform.
+    """
     paths: list[str] = []
     if "models" in roots:
         paths.extend(collect_models_files())
     if "input" in roots:
-        paths.extend(list_files_recursively(folder_paths.get_input_directory()))
+        paths.extend(list_files_recursively(folder_paths.get_input_directory(), progress))
     if "output" in roots:
-        paths.extend(list_files_recursively(folder_paths.get_output_directory()))
+        paths.extend(list_files_recursively(folder_paths.get_output_directory(), progress))
     return paths
 
 
@@ -345,6 +355,8 @@ def build_asset_specs(
         if abs_p in existing_paths:
             skipped += 1
             continue
+        if progress is not None:
+            progress.files_statted += 1
         try:
             stat_p = os.stat(abs_p, follow_symlinks=True)
         except FileNotFoundError:
@@ -362,6 +374,8 @@ def build_asset_specs(
         candidates.append((abs_p, stat_p))
 
     admitted_paths, _ = _two_stat_admit(candidates)
+    if progress is not None:
+        progress.files_statted += len(candidates)  # _two_stat_admit re-stats each once
     candidate_stats = dict(candidates)
     for abs_p in admitted_paths:
         stat_p = candidate_stats[abs_p]
@@ -406,7 +420,9 @@ class _SpecObservation(NamedTuple):
     snapshot: tuple[str, os.stat_result] | None
 
 
-def observe_asset_specs(specs: list[SeedAssetSpec]) -> dict[str, _SpecObservation | None]:
+def observe_asset_specs(
+    specs: list[SeedAssetSpec], progress: _ScanProgress | None = None
+) -> dict[str, _SpecObservation | None]:
     """Stat (and, in hashing mode, hash) each spec before the write transaction opens.
 
     ``None`` marks a path that vanished or could not be read.
@@ -415,6 +431,8 @@ def observe_asset_specs(specs: list[SeedAssetSpec]) -> dict[str, _SpecObservatio
     observed: dict[str, _SpecObservation | None] = {}
     for spec in specs:
         path = os.path.abspath(spec["abs_path"])
+        if progress is not None:
+            progress.files_statted += 1
         try:
             stat_result = os.stat(path, follow_symlinks=True)
             snapshot = snapshot_hash(path) if hashing_is_enabled else None
@@ -510,11 +528,13 @@ def seed_asset_specs(
 
 
 def insert_asset_specs(
-    specs: list[SeedAssetSpec], _tag_pool: set[str]
+    specs: list[SeedAssetSpec],
+    _tag_pool: set[str],
+    progress: _ScanProgress | None = None,
 ) -> tuple[int, Exception | None]:
     if not specs:
         return 0, None
-    observed = observe_asset_specs(specs)
+    observed = observe_asset_specs(specs, progress)
     with create_write_session() as sess:
         created, first_error = seed_asset_specs(sess, specs, observed)
         try:
@@ -612,6 +632,8 @@ def enrich_asset(
     Returns:
         Whether enrichment changed the B-schema record or content
     """
+    if progress is not None:
+        progress.files_statted += 1
     try:
         stat_p = os.stat(file_path, follow_symlinks=True)
     except FileNotFoundError:

@@ -1,4 +1,9 @@
 import os
+from typing import Protocol
+
+
+class _DirListingCounter(Protocol):
+    dirs_listed: int
 
 
 def get_mtime_ns(stat_result: os.stat_result) -> int:
@@ -41,8 +46,13 @@ def is_visible(name: str) -> bool:
     return not name.startswith(".")
 
 
-def list_files_recursively(base_dir: str) -> list[str]:
-    """Recursively list all files in a directory, following symlinks."""
+def list_files_recursively(
+    base_dir: str, counter: _DirListingCounter | None = None
+) -> list[str]:
+    """Recursively list all files in a directory, following symlinks.
+
+    ``counter.dirs_listed`` gains one per directory os.walk listed.
+    """
     out: list[str] = []
     base_abs = os.path.abspath(base_dir)
     if not os.path.isdir(base_abs):
@@ -52,6 +62,8 @@ def list_files_recursively(base_dir: str) -> list[str]:
     for dirpath, subdirs, filenames in os.walk(
         base_abs, topdown=True, followlinks=True
     ):
+        if counter is not None:
+            counter.dirs_listed += 1
         try:
             st = os.stat(dirpath)
             dir_id = (st.st_dev, st.st_ino)
