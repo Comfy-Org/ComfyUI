@@ -645,6 +645,9 @@ def enrich_asset(
     stored_hash: str | None = None
     verified_stat: os.stat_result | None = None
     hash_requested = compute_hash and content is not None and content.hash is None
+    if hash_requested and content is not None and content.mtime_ns != initial_mtime_ns:
+        # The stale-mtime check below would discard the hash; don't read the whole file first.
+        hash_requested = False
     if hash_requested:
         try:
             snapshot = snapshot_hash(file_path)

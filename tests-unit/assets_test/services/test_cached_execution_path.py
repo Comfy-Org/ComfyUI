@@ -14,6 +14,8 @@ from comfy_execution.asset_enrichment import (
 class _ArgsStub:
     enable_assets = True
     enable_asset_hashing = False
+    enable_assets_output_scanning = True
+    disable_assets_output_scanning = False
 
 
 def _write_output_file(name: str) -> Path:

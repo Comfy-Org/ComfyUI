@@ -16,6 +16,8 @@ class _ArgsStub:
     def __init__(self, enable_assets: bool = True) -> None:
         self.enable_assets = enable_assets
         self.enable_asset_hashing = False
+        self.enable_assets_output_scanning = True
+        self.disable_assets_output_scanning = False
 
 
 def _write_output_file(name: str, data: bytes) -> Path:

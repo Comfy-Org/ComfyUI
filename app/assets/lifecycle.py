@@ -14,6 +14,7 @@ import shutil
 import folder_paths
 from sqlalchemy import select
 
+from app.assets import mode
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import delete_record
 from app.assets.helpers import sql_path_under_prefix
@@ -95,13 +96,14 @@ def cleanup_temp_filesystem() -> bool:
 def start_asset_seeder() -> bool:
     from app.assets.seeder import asset_seeder
 
+    roots = mode.scannable_roots(("models", "input", "output"))
     started = asset_seeder.start(
-        roots=("models", "input", "output"),
+        roots=roots,
         prune_first=True,
         compute_hashes=args.enable_asset_hashing,
     )
     if started:
-        logging.info("Background asset scan initiated for models, input, output")
+        logging.info("Background asset scan initiated for %s", ", ".join(roots))
     return started
 
 

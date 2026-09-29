@@ -1035,11 +1035,14 @@ async def get_tags_refine(request: web.Request) -> web.Response:
 async def seed_assets(request: web.Request) -> web.Response:
     """Trigger asset seeding for specified roots (models, input, output).
 
+    The output root is dropped when output scanning is disabled.
+
     Query params:
         wait: If "true", block until scan completes (synchronous behavior for tests)
 
     Returns:
         202 Accepted if scan started
+        400 OUTPUT_SCAN_DISABLED if only output was requested and output scanning is disabled
         409 Conflict if scan already running
         200 OK with final stats if wait=true
     """
@@ -1049,9 +1052,14 @@ async def seed_assets(request: web.Request) -> web.Response:
     except Exception:
         roots = ["models", "input", "output"]
 
-    valid_roots = tuple(r for r in roots if r in ("models", "input", "output"))
-    if not valid_roots:
+    requested_roots = tuple(r for r in roots if r in ("models", "input", "output"))
+    if not requested_roots:
         return _build_error_response(400, "INVALID_BODY", "No valid roots specified")
+    valid_roots = mode.scannable_roots(requested_roots)
+    if not valid_roots:
+        return _build_error_response(
+            400, "OUTPUT_SCAN_DISABLED", "Output scanning is disabled on this server"
+        )
 
     wait_param = request.query.get("wait", "").lower()
     should_wait = wait_param in ("true", "1", "yes")

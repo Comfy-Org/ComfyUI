@@ -62,9 +62,23 @@ Hash-based recovery does not compare modification times; only the null-hash reco
 
 Missing rows and their asset records persist until explicitly deleted. Routine scans do not remove them.
 
+## Output scanning
+
+Output scanning is on by default. `--disable-assets-output-scanning` turns it off and wins if both flags are passed; `--enable-assets-output-scanning` turns it on, which is a no-op while the default is on. The default is `ASSETS_OUTPUT_SCANNING_DEFAULT` in `comfy/cli_args.py`. The flags only have an effect when assets are enabled.
+
+When output scanning is off, the output directory is not a scan root: the startup scan, the lazy scan and `POST /api/assets/seed` scan only `models` and `input`, and a completed prompt does not queue an output scan. What stays the same:
+
+- Outputs are still registered when the producing node finishes, and cached outputs still get their delivery record, because that path does not go through the scanner. Uploads tagged `output` are registered as before.
+- Output rows already in the database are kept. The pre-scan prune marks rows missing only outside the owned prefixes, and the output directory stays an owned prefix, so leaving output scanning off does not mark anything missing.
+- The asset routes list and serve output assets from the database as before.
+
+What the scanner no longer does for output: it does not catalogue files that no node declared, and does not notice output files that were deleted or changed on disk. Rows for vanished output files stay live until a scan with output scanning enabled runs.
+
+With `--enable-asset-hashing`, a completed prompt still queues an enrichment-only pass over the output root instead of the full scan. It hashes output rows that have no hash yet, reading each file once in the background, and does not walk the directory, add files or mark rows missing. That pass also runs the deferred scanner work (pending verifications, the partial-write watch list, hash-mode transition retries). With hashing off, nothing is queued after a prompt, and that deferred work runs on the next scan of any root. The one-time re-verification after hashing is switched on is not a root scan: it still covers every live row, output included.
+
 ## Hashing modes
 
-The `--enable-asset-hashing` flag defaults to off. It controls whether the scanner and output pipeline hash file contents, as described below.
+The `--enable-asset-hashing` flag defaults to off. It controls whether the scanner and output pipeline hash file contents, as described below. Output content is hashed by the pass queued after each prompt: the full output scan, or an enrichment-only pass when output scanning is off.
 
 With hashing off, the scanner uses modification time and byte size to detect changes. A modification-time change with an unchanged byte size is treated as the same file: the stored file facts refresh and the stored hash is cleared, because without hashing the digest can no longer be vouched for. A change to both modification time and size means new content. A size change without a modification-time change is undefined behaviour.
 

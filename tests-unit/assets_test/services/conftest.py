@@ -21,6 +21,8 @@ def autoclean_unit_test_assets():
 def initialised_hash_mode():
     class _HashingOff:
         enable_asset_hashing = False
+        enable_assets_output_scanning = True
+        disable_assets_output_scanning = False
 
     mode.init(_HashingOff())
     yield

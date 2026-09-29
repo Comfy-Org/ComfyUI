@@ -23,6 +23,8 @@ from app.assets.services.hash_mode_state import read_stored_mode
 
 class _Args:
     enable_assets = False
+    enable_assets_output_scanning = True
+    disable_assets_output_scanning = False
 
     def __init__(self, hashing: bool) -> None:
         self.enable_asset_hashing = hashing
