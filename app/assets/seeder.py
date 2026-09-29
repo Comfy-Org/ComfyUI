@@ -110,8 +110,12 @@ class _ScanState:
     hash_failed: int = 0
     enrich_failed: int = 0
     permission_denied: int = 0
+    # Directories the input/output walks listed; the models listing is not counted.
     dirs_listed: int = 0
+    # os.stat calls on files in the reference sync, discovery, admission, seed and
+    # enrich loops. Hashing's own stability stats and the watch list are not counted.
     files_statted: int = 0
+    # Time blocked at the pause gate.
     paused_s: float = 0.0
     cancel_stage: str | None = None
     _emitted_keys: set[str] = field(default_factory=set)

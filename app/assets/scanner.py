@@ -315,8 +315,9 @@ def collect_paths_for_roots(
 ) -> list[str]:
     """Collect all file paths for the given roots.
 
-    ``progress.dirs_listed`` counts the input and output walks only: models come
-    from folder_paths' own cached listing, which this scan does not perform.
+    ``progress.dirs_listed`` counts the input and output walks only. Models are
+    listed through folder_paths.get_filename_list, which walks the model folders
+    on a cache miss and re-checks their mtimes on a hit; none of that is counted.
     """
     paths: list[str] = []
     if "models" in roots:
