@@ -162,6 +162,9 @@ def _acquire_file_lock(db_path):
 
     Uses filelock for cross-platform support (macOS, Linux, Windows).
     The OS automatically releases the lock when the process exits, even on crashes.
+    If the lock is held, waits up to _LOCK_WAIT_SECONDS for it to be released, since a
+    relaunch can start while the previous process is still exiting. The lock is never
+    taken from a holder.
     """
     global _db_lock
     lock_path = db_path + ".lock"
@@ -169,9 +172,7 @@ def _acquire_file_lock(db_path):
     try:
         _db_lock.acquire(timeout=0)
     except Timeout:
-        # A relaunch can start while the previous process is still exiting. Wait briefly
-        # for it to let go; the lock is never taken from a holder.
-        waiting_since = time.monotonic()
+        logging.info(f"Database lock is held; waiting up to {_LOCK_WAIT_SECONDS:g}s for it to be released")
         try:
             _db_lock.acquire(timeout=_LOCK_WAIT_SECONDS)
         except Timeout:
@@ -180,7 +181,6 @@ def _acquire_file_lock(db_path):
                 "Another ComfyUI process may already be using it. "
                 "Use --database-url to specify a separate database file."
             )
-        logging.info(f"Database lock acquired after waiting {time.monotonic() - waiting_since:.1f}s")
 
 
 def _is_memory_db(db_url):
