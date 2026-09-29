@@ -77,8 +77,8 @@ def list_files_recursively(base_dir: str) -> list[str]:
     return out
 
 
-# dir path -> (st_mtime_ns, visible file names, visible subdir names)
-DirListings = dict[str, tuple[int, list[str], list[str]]]
+# dir path -> (visible file names, visible subdir names)
+DirListings = dict[str, tuple[list[str], list[str]]]
 
 
 class ListingWalk(NamedTuple):
@@ -139,7 +139,7 @@ def walk_listings(base_dir: str) -> ListingWalk:
         except OSError:
             continue
         seen_dirs.add(dir_id)
-        listings[dirpath] = (st.st_mtime_ns, names, subdirs)
+        listings[dirpath] = (names, subdirs)
         for name in names:
             yield_gil(run=RESCAN_YIELD_RUN)
             files.append(os.path.abspath(os.path.join(dirpath, name)))
