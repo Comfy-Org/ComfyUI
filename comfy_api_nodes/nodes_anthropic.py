@@ -51,6 +51,7 @@ _XHIGH_EFFORT_MODELS = {"Opus 5.5", "Opus 5", "Opus 4.8", "Fable 5.1", "Fable 5"
 _MAX_EFFORT_MODELS = _XHIGH_EFFORT_MODELS | {"Opus 4.6", "Sonnet 4.6"}
 _EXPLICIT_THINKING_OFF_MODELS = {"Sonnet 5.5": "between_tools", "Sonnet 5": "disabled"}
 _NO_TEMPERATURE_MODELS = {"Opus 5.5", "Opus 5", "Opus 4.8", "Fable 5.1", "Fable 5", "Sonnet 5.5", "Sonnet 5"}
+_LOW_MAX_TOKENS_MODELS = {"Opus 5.5", "Sonnet 5.5"}
 
 # Budget mode (Sonnet 4.5): effort -> reasoning budget in tokens. Must be < max_tokens.
 # Sized so even the "high" budget fits comfortably under the default max_tokens=32768.
@@ -78,7 +79,7 @@ def _claude_model_inputs(model_label: str):
         IO.Int.Input(
             "max_tokens",
             default=32768,
-            min=4096,
+            min=1024 if model_label in _LOW_MAX_TOKENS_MODELS else 4096,
             max=64000,
             tooltip="Maximum number of tokens to generate (includes reasoning tokens when enabled).",
             advanced=True,
