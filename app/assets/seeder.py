@@ -837,7 +837,7 @@ class _AssetSeeder:
             mark_unlisted_references_missing_safely("output", vanished)
             logging.debug(
                 "Fast scan: output listing: %d dirs listed, %d rows retired, "
-                "%d rows skipped (parent not listed)",
+                "%d rows skipped (no listing vouches for them)",
                 walk.dirs_listed,
                 len(vanished),
                 unlisted,

@@ -189,6 +189,27 @@ def _catalog_directly(session, path: Path) -> str:
     return content.id
 
 
+def test_row_whose_stored_spelling_differs_from_the_entry_stays_live(roots, session, monkeypatch):
+    # A node that saves to "Portraits/" reuses an existing "portraits/" on NTFS or APFS and
+    # reports its own spelling, so the row's path never matches the listing verbatim.
+    real = _write(roots["output"] / "portraits" / "img.png")
+    respelled = roots["output"] / "Portraits" / "img.png"
+    stat = real.stat()
+    content = create_content(session, str(respelled), None, stat.st_size, stat.st_mtime_ns)
+    create_record(session, content.id, respelled.name)
+    session.commit()
+    # Resolve either spelling, as a case-insensitive filesystem does, on any host.
+    real_exists = os.path.exists
+    monkeypatch.setattr(
+        os.path, "exists",
+        lambda p: real_exists(p) or real_exists(os.fspath(p).replace(str(respelled.parent), str(real.parent))),
+    )
+
+    _scan()
+
+    assert session.get(AssetContent, content.id).is_missing is False
+
+
 def test_rows_under_hidden_paths_stay_live(roots, session, caplog):
     output = roots["output"]
     _warm_catalog(output)

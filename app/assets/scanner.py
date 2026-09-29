@@ -337,6 +337,9 @@ def rescans_output_by_listing(roots: tuple[RootType, ...]) -> bool:
     until the next scan that is not output-only, such as the startup scan. Core save nodes
     never overwrite, and reported outputs are registered at save time, so this only
     affects files written by something else.
+
+    Rows under a hidden directory are left alone until such a scan too, and if the output
+    root itself cannot be listed (e.g. an unmounted drive) nothing is retired at all.
     """
     return tuple(roots) == ("output",)
 
@@ -388,7 +391,11 @@ def unlisted_references(
     names_by_dir: dict[str, set[str]] = {}
     for path, observations in live.items():
         listed = _listed_state(path, listings, names_by_dir)
-        if listed is None:
+        # A listing compares names exactly, but a case-insensitive filesystem (NTFS, APFS)
+        # or a Unicode-normalizing one (HFS+) resolves a stored path whose spelling differs
+        # from the directory entry. Confirm with a stat before retiring: rows the listing
+        # calls gone are normally few.
+        if listed is None or (listed is False and os.path.exists(path)):
             skipped += len(observations)
         elif not listed:
             vanished.extend(observations)
@@ -412,8 +419,8 @@ def _listed_state(path: str, listings: DirListings, names_by_dir: dict[str, set[
         return None
     names = names_by_dir.get(parent)
     if names is None:
-        listing = listings[parent]
-        names = names_by_dir[parent] = {*listing[1], *listing[2]}
+        files, subdirs = listings[parent]
+        names = names_by_dir[parent] = {*files, *subdirs}
     if name not in names:
         return False
     return True if child == path else None
