@@ -380,6 +380,7 @@ class ModelAttentionBackend(io.ComfyNode):
         return io.Schema(
             node_id="ModelAttentionBackend",
             display_name="Model Attention Backend",
+            search_aliases=["comfy kitchen", "attention", "pytorch", "kitchen attention"],
             category="model/patch",
             is_experimental=True,
             description="Selects the dense attention implementation for the model. When used with Block Sparse Attention, this backend is used whenever sparse attention is inactive or unsupported.",

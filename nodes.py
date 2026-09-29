@@ -25,6 +25,7 @@ import comfy.samplers
 import comfy.sample
 import comfy.sd
 import comfy.utils
+import comfy.latent_formats
 import comfy.controlnet
 from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator
 from comfy_api.internal import register_versions, ComfyAPIWithVersion
@@ -773,7 +774,7 @@ class LoraLoaderModelOnly(LoraLoader):
 
 class VAELoader:
     video_taes = ["taehv", "lighttaew2_2", "lighttaew2_1", "lighttaehy1_5", "taeltx_2", "taeh3"]
-    image_taes = ["taesd", "taesdxl", "taesd3", "taef1", "taef2"]
+    image_taes = ["taesd", "taesdxl", "taesd3", "taef1", "taef2", "taeqi2_1"]
 
     @staticmethod
     def vae_list(s):
@@ -781,7 +782,7 @@ class VAELoader:
         approx_vaes = folder_paths.get_filename_list("vae_approx")
         have_img_encoder, have_img_decoder = set(), set()
         for v in approx_vaes:
-            parts = v.split("_", 1)
+            parts = v.rsplit("_", 1)
             if len(parts) != 2 or parts[0] not in s.image_taes:
                 for tae in s.video_taes:
                     if v.startswith(tae):
@@ -824,6 +825,10 @@ class VAELoader:
         elif name == "taef1":
             sd["vae_scale"] = torch.tensor(0.3611)
             sd["vae_shift"] = torch.tensor(0.1159)
+        elif name == "taeqi2_1":
+            latent_format = comfy.latent_formats.QwenImage21()
+            sd["vae_scale"] = 1.0 / latent_format.latents_std[0]
+            sd["vae_shift"] = latent_format.latents_mean[0]
         return sd
 
     @classmethod

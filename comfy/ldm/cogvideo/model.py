@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 import comfy.patcher_extension
 import comfy.ldm.common_dit
 
@@ -241,6 +241,7 @@ class CogVideoXBlock(nn.Module):
                  eps=1e-5, ff_inner_dim=None, ff_bias=True,
                  device=None, dtype=None, operations=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -290,12 +291,15 @@ class CogVideoXBlock(nn.Module):
             k_img = apply_rotary_emb(k_img, image_rotary_emb)
             q = torch.cat([q[:, :text_seq_length], q_img.transpose(1, 2)], dim=1)
             k = torch.cat([k[:, :text_seq_length], k_img.transpose(1, 2)], dim=1)
+            del q_img, k_img
 
+        q, k, v = AttentionTensorContainer(q.reshape(b, s, n * d)), AttentionTensorContainer(k.reshape(b, s, n * d)), AttentionTensorContainer(v)
         attn_out = optimized_attention(
-            q.reshape(b, s, n * d),
-            k.reshape(b, s, n * d),
+            q,
+            k,
             v,
             heads=self.num_heads,
+            preferred_attention=self.comfy_attention,
             transformer_options=transformer_options,
         )
 

@@ -169,12 +169,16 @@ def _backup_database(source_path, destination_path):
 
 
 _db_lock = None
+_LOCK_WAIT_SECONDS = 5.0
 
 def _acquire_file_lock(db_path):
     """Acquire an OS-level file lock to prevent multi-process access.
 
     Uses filelock for cross-platform support (macOS, Linux, Windows).
     The OS automatically releases the lock when the process exits, even on crashes.
+    If the lock is held, waits up to _LOCK_WAIT_SECONDS for it to be released, since a
+    relaunch can start while the previous process is still exiting. The lock is never
+    taken from a holder.
     """
     global _db_lock
     lock_path = db_path + ".lock"
@@ -182,11 +186,15 @@ def _acquire_file_lock(db_path):
     try:
         _db_lock.acquire(timeout=0)
     except Timeout:
-        raise RuntimeError(
-            f"Could not acquire lock on database '{db_path}'. "
-            "Another ComfyUI process may already be using it. "
-            "Use --database-url to specify a separate database file."
-        )
+        logging.info(f"Database lock is held; waiting up to {_LOCK_WAIT_SECONDS:g}s for it to be released")
+        try:
+            _db_lock.acquire(timeout=_LOCK_WAIT_SECONDS)
+        except Timeout:
+            raise RuntimeError(
+                f"Could not acquire lock on database '{db_path}'. "
+                "Another ComfyUI process may already be using it. "
+                "Use --database-url to specify a separate database file."
+            )
 
 
 def _is_memory_db(db_url):
