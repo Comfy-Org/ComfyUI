@@ -119,7 +119,7 @@ def test_permission_error_in_reference_sync_increments_scan_counter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     secret_path = "/private/assets/unreadable.safetensors"
-    content = SimpleNamespace(id="content", path=secret_path)
+    content = SimpleNamespace(id="content", path=secret_path, size_bytes=1, mtime_ns=1)
     progress = _ScanState()
 
     def deny_stat(*_args, **_kwargs):
@@ -128,7 +128,7 @@ def test_permission_error_in_reference_sync_increments_scan_counter(
     monkeypatch.setattr(scanner, "os", SimpleNamespace(stat=deny_stat, path=scanner.os.path))
     monkeypatch.setattr(scanner, "live_contents_under_prefixes", lambda _session, _prefixes: [content])
 
-    scanner.sync_prefixes_with_filesystem(Mock(), ["/private/assets"], progress=progress)
+    scanner.observe_references_on_filesystem(Mock(), ["/private/assets"], progress=progress)
 
     assert progress.permission_denied == 1
 
@@ -390,8 +390,8 @@ def test_enrich_failures_emit_once_per_scan_and_reset_with_new_scan(
         first_result = scanner.enrich_assets_batch(rows, progress=_ScanState())
         second_result = scanner.enrich_assets_batch(rows[:1], progress=_ScanState())
 
-    assert first_result == (0, ["record-1", "record-2"])
-    assert second_result == (0, ["record-1"])
+    assert first_result == (0, ["record-1", "record-2"], 2)
+    assert second_result == (0, ["record-1"], 1)
     assert events_named(caplog, "scanner.enrich_failed") == [
         {"error_type": "FileNotFoundError"},
         {"error_type": "FileNotFoundError"},
@@ -413,10 +413,13 @@ def test_enrich_exception_counts_one_failure_per_raising_row(
     monkeypatch.setattr(scanner, "enrich_asset", fail_enrich)
     progress = _ScanState()
 
-    enriched, failed_ids = scanner.enrich_assets_batch(rows, progress=progress)
+    enriched, failed_ids, consumed = scanner.enrich_assets_batch(
+        rows, progress=progress
+    )
 
     assert enriched == 0
     assert failed_ids == ["record-1", "record-2"]
+    assert consumed == 2
     assert progress.enrich_failed == 2
 
 
@@ -429,8 +432,11 @@ def test_benign_enrich_no_op_is_skipped_without_counting_a_failure(
     monkeypatch.setattr(scanner, "create_session", lambda: nullcontext(Mock()))
     progress = _ScanState()
 
-    enriched, failed_ids = scanner.enrich_assets_batch(rows, progress=progress)
+    enriched, failed_ids, consumed = scanner.enrich_assets_batch(
+        rows, progress=progress
+    )
 
     assert enriched == 0
     assert failed_ids == ["record-1"]
+    assert consumed == 1
     assert progress.enrich_failed == 0

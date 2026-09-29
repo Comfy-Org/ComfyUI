@@ -1400,3 +1400,47 @@ def test_multipart_upload_persists_the_stat_hashing_verified(
             "the digest, not the pair, feeds hash-mode destination naming"
         )
         assert lookup_for_view(session, content.hash) is not None
+
+
+def test_reupload_reads_the_reused_file_before_the_claim_transaction(
+    mock_create_session, hashing_on, monkeypatch
+):
+    payload = b"claim-then-read-upload-bytes"
+    temp1 = _write_temp(payload)
+    temp2 = _write_temp(payload)
+    sessions = []
+
+    @contextmanager
+    def recording_create_session():
+        with mock_create_session() as session:
+            sessions.append(session)
+            yield session
+
+    in_transaction_while_reading = []
+    real_extract = ingest_module._extract_system_metadata_sync
+
+    def recording_extract(*args, **kwargs):
+        in_transaction_while_reading.append(
+            sessions[-1].connection().connection.driver_connection.in_transaction
+        )
+        return real_extract(*args, **kwargs)
+
+    stored_paths = []
+    try:
+        first = upload_from_temp_path(temp_path=temp1, name="claim.bin", tags=["output"], client_filename="claim.bin")
+        stored_paths.append(first.ref.file_path)
+        monkeypatch.setattr(ingest_module, "create_session", recording_create_session)
+        monkeypatch.setattr(ingest_module, "_extract_system_metadata_sync", recording_extract)
+
+        second = upload_from_temp_path(
+            temp_path=temp2, name="claim.bin", tags=["output"], client_filename="claim.bin"
+        )
+
+        assert second.ref.system_metadata["content_length"] == len(payload)
+        assert in_transaction_while_reading == [False]
+        with mock_create_session() as session:
+            assert session.scalar(select(func.count()).select_from(AssetContent)) == 1
+    finally:
+        for path in (temp1, temp2, *stored_paths):
+            if path and os.path.exists(path):
+                os.unlink(path)

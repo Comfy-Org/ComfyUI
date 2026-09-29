@@ -1,22 +1,35 @@
+"""Selects and implements the enabled and disabled asset managers.
+
+``default_asset_manager`` checks database dependencies before enabling assets
+and chooses ``NoAssets`` when the requested mode cannot run.
+"""
+
+from __future__ import annotations
+
 import logging
 from typing import Any, Callable, Protocol
 
 from aiohttp import web
 
 from app.assets import mode
-from app.assets.api.routes import register_assets_routes
 from app.assets.lifecycle import record_hash_mode_transition_intent, run_shutdown, run_startup
-from app.assets.seeder import ScanPhase, asset_seeder
-from app.assets.services.ingest import (
-    register_cached_output as ingest_register_cached_output,
-    register_executed_output as ingest_register_executed_output,
-    register_file_in_place,
-)
-from app.assets.services.path_utils import get_known_subfolder_tags
-from app.assets.services.schemas import RegisteredAsset, UploadAssetView
-from app.database.db import dependencies_available
+from app.database.db import dependencies_available, missing_dependencies
 from app.user_manager import UserManager
 from comfy.cli_args import args
+from utils.install_util import get_missing_requirements_message
+
+# These need the database packages. Without them only NoAssets is used, and it
+# does not touch these names.
+if dependencies_available():
+    from app.assets.api.routes import register_assets_routes
+    from app.assets.seeder import ScanPhase, asset_seeder
+    from app.assets.services.ingest import (
+        register_cached_output as ingest_register_cached_output,
+        register_executed_output as ingest_register_executed_output,
+        register_file_in_place,
+    )
+    from app.assets.services.path_utils import get_known_subfolder_tags
+    from app.assets.services.schemas import RegisteredAsset, UploadAssetView
 
 
 class AssetManager(Protocol):
@@ -66,7 +79,8 @@ class _ArgsLike(Protocol):
 
 
 def _shutdown_assets() -> None:
-    asset_seeder.shutdown()
+    if dependencies_available():
+        asset_seeder.shutdown()
     run_shutdown()
 
 
@@ -89,6 +103,8 @@ class NoAssets:
     def register_routes(
         self, app: web.Application, user_manager: UserManager | None
     ) -> None:
+        if not dependencies_available():
+            return
         register_assets_routes(app)
         asset_seeder.disable()
 
@@ -219,9 +235,10 @@ class AssetsEnabled:
 
 def default_asset_manager() -> AssetManager:
     if args.enable_assets and not dependencies_available():
-        logging.warning(
-            "Assets requested but database dependencies unavailable; asset endpoints "
-            "will answer 503. Please install the updated requirements.txt file."
+        missing = ", ".join(missing_dependencies()) or "see the import error above"
+        logging.error(
+            f"--enable-assets requires packages that could not be imported: {missing}. "
+            f"Assets are disabled.\n{get_missing_requirements_message()}"
         )
         return NoAssets(args)
     return AssetsEnabled(args) if args.enable_assets else NoAssets(args)

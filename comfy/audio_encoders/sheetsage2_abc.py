@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from bisect import bisect_left
 from collections import Counter
 from dataclasses import dataclass, replace
 from fractions import Fraction
@@ -52,10 +53,12 @@ def events_to_abc(events, duration, melody_only=True):
         previous = beats[-1]
         beats.append(BeatEvent(previous.time + period, previous.beat_id % previous.declared_numerator + 1,
                                previous.declared_numerator, previous.denominator))
-    intervals = {}
-    for field in ("key", "structure", "chord"):
+    intervals = {field: interval_rows(events, field, duration) for field in ("key", "structure", "chord")}
+    intervals["key"] = [[start, end, normalize_key_name(key)] for start, end, key in intervals["key"]]
+    intervals["chord"] = correct_chord_rows(intervals["chord"], intervals["key"])
+    for field, rows in intervals.items():
         intervals[field] = [[max(beats[0].time, start), min(beats[-1].time, end), value]
-                            for start, end, value in interval_rows(events, field, duration)
+                            for start, end, value in rows
                             if end > beats[0].time and start < beats[-1].time]
     if not intervals["key"]:
         raise AbcRebuildError("SheetSage2 did not decode a key for the ABC score.")
@@ -194,6 +197,31 @@ _LETTERS = "CDEFGAB"
 _SHARP_PITCH_NAMES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
 _FLAT_PITCH_NAMES = ("C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B")
+
+# SheetSage2 chord_spelling_sheetsage2.py, revision 55bfe14: canonical keys
+# and chord-tone offsets on the circle of fifths for the decoder's vocabulary.
+_KEY_TONICS = {
+    "major": ("C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"),
+    "minor": ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "Bb", "B"),
+}
+_NATURAL_FIFTHS = {"C": 1, "D": 3, "E": 5, "F": 0, "G": 2, "A": 4, "B": 6}
+_CHORD_TONE_FIFTHS = {
+    "maj": (0, 4, 1),
+    "min": (0, -3, 1),
+    "dim": (0, -3, -6),
+    "aug": (0, 4, 8),
+    "maj7": (0, 4, 1, 5),
+    "min7": (0, -3, 1, -2),
+    "7": (0, 4, 1, -2),
+    "hdim7": (0, -3, -6, -2),
+    "dim7": (0, -3, -6, -9),
+    "minmaj7": (0, -3, 1, 5),
+    "sus2": (0, 2, 1),
+    "sus4": (0, -1, 1),
+    "sus4(b7)": (0, -1, 1, -2),
+    "maj6": (0, 4, 1, 3),
+    "min6": (0, -3, 1, 3),
+}
 
 _ROOT_RE = re.compile(r"^(?P<letter>[A-G])(?P<accidental>#{0,2}|b{0,2})$")
 
@@ -441,6 +469,44 @@ def _pitch_class(root: str) -> tuple[int, str, str]:
     accidental = match.group("accidental")
     offset = accidental.count("#") - accidental.count("b")
     return (_NATURAL_PITCH_CLASS[letter] + offset) % 12, letter, accidental
+
+def normalize_key_name(key: str) -> str:
+    root, mode = key.split(":")
+    if mode not in _KEY_TONICS:
+        raise AbcRebuildError(f"Unsupported key mode {mode!r} in {key!r}")
+    return f"{_KEY_TONICS[mode][_pitch_class(root)[0]]}:{mode}"
+
+def correct_chord_spelling(chord: str, key: str) -> str:
+    if chord in NO_CHORDS:
+        return chord
+    root, descriptor = chord.split(":", 1)
+    quality = descriptor.split("/", 1)[0]
+    if quality not in _CHORD_TONE_FIFTHS:
+        raise ChordSymbolError(f"Unsupported chord quality {quality!r} in {chord!r}")
+    tonic, mode = key.split(":")
+    scale = (_pitch_class(tonic)[0] - (9 if mode == "minor" else 0)) % 12
+    _, key_letter, key_accidental = _pitch_class(_KEY_TONICS["major"][scale])
+    key_position = _NATURAL_FIFTHS[key_letter] + 7 * (key_accidental.count("#") - key_accidental.count("b"))
+    root_pc = _pitch_class(root)[0]
+    candidates = []
+    for letter in _LETTERS:
+        accidental = (root_pc - _NATURAL_PITCH_CLASS[letter] + 6) % 12 - 6
+        position = _NATURAL_FIFTHS[letter] + accidental * 7
+        distances = [max(abs(position + offset - (key_position + 2)) - 3, 0)
+                     for offset in _CHORD_TONE_FIFTHS[quality]]
+        # Weight the root twice and resolve ties in CDEFGAB order, as upstream.
+        score = sum(distances) + distances[0]
+        spelling = letter + ("#" * accidental if accidental >= 0 else "b" * -accidental)
+        candidates.append((score, spelling))
+    return f"{min(candidates, key=lambda candidate: candidate[0])[1]}:{descriptor}"
+
+def correct_chord_rows(chords, keys):
+    if not keys:
+        return [list(row) for row in chords]
+    boundaries = [end for _, end, _ in keys[:-1]]
+    # Midpoint ties use the key on the left; edge chords use the first/last key.
+    return [[start, end, correct_chord_spelling(chord, keys[bisect_left(boundaries, (start + end) / 2)][2])]
+            for start, end, chord in chords]
 
 def portable_pitch_name(root: str, *, preserve_double: bool = False) -> str:
     pitch_class, _, accidental = _pitch_class(root)

@@ -27,6 +27,7 @@ import comfy.text_encoders.qwen_image21
 import comfy.text_encoders.hunyuan_image
 import comfy.text_encoders.kandinsky5
 import comfy.text_encoders.z_image
+import comfy.text_encoders.ming_image
 import comfy.text_encoders.ideogram4
 import comfy.text_encoders.boogu
 import comfy.text_encoders.krea2
@@ -1242,6 +1243,24 @@ class ZImagePixelSpace(ZImage):
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.ZImagePixelSpace(self, device=device)
 
+class MingImage(ZImage):
+    unet_config = {
+        "image_model": "ming_image",
+    }
+
+    sampling_settings = {
+        "multiplier": 1.0,
+        "shift": 3.16,  # reference dynamic shift at the 1024 bucket
+    }
+
+    latent_format = latent_formats.MingImage
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.MingImage(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        return supported_models_base.ClipTarget(comfy.text_encoders.ming_image.MingImageTokenizer, comfy.text_encoders.ming_image.te())
+
 class PixelDiTT2I(supported_models_base.BASE):
     unet_config = {
         "image_model": "pixeldit_t2i",
@@ -1415,7 +1434,7 @@ class WAN21_Vace(WAN21_T2V):
         self.memory_usage_factor = 1.2 * self.memory_usage_factor
 
     def get_model(self, state_dict, prefix="", device=None):
-        out = model_base.WAN21_Vace(self, image_to_video=False, device=device)
+        out = model_base.WAN21_Vace(self, image_to_video=self.unet_config.get("vace_image_input", False), device=device)
         return out
 
 class WAN21_HuMo(WAN21_T2V):
@@ -2602,6 +2621,7 @@ models = [
     CosmosT2IPredict2,
     CosmosI2VPredict2,
     ZImagePixelSpace,
+    MingImage,
     ZImage,
     PiD,
     PixelDiTT2I,

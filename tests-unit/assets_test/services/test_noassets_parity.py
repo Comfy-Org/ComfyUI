@@ -189,7 +189,8 @@ def test_default_asset_manager_disables_assets_when_dependencies_are_unavailable
         asset_manager = manager.default_asset_manager()
 
     assert isinstance(asset_manager, NoAssets)
-    assert "asset endpoints will answer 503" in caplog.text
+    assert "--enable-assets requires packages that could not be imported" in caplog.text
+    assert "Assets are disabled." in caplog.text
     assert "requirements.txt" in caplog.text
 
 

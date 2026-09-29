@@ -1,7 +1,7 @@
 import nodes
 import node_helpers
 import torch
-import torchaudio
+import comfy.audio
 import comfy.ldm.lightricks.duration_head
 import comfy.model_management
 import comfy.model_sampling
@@ -1033,7 +1033,7 @@ class LTXVReferenceAudio(io.ComfyNode):
         sample_rate = reference_audio["sample_rate"]
         vae_sample_rate = getattr(audio_vae, "audio_sample_rate", 44100)
         if vae_sample_rate != sample_rate:
-            waveform = torchaudio.functional.resample(reference_audio["waveform"], sample_rate, vae_sample_rate)
+            waveform = comfy.audio.resample(reference_audio["waveform"], sample_rate, vae_sample_rate)
         else:
             waveform = reference_audio["waveform"]
 
