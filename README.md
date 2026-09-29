@@ -4,11 +4,12 @@
 
 **The most powerful and modular AI engine for content creation.**
 
-[![Website](https://img.shields.io/badge/ComfyOrg-4285F4?style=flat)](https://www.comfy.org/)
+[![Website](https://img.shields.io/badge/comfy.org-4285F4?style=flat)](https://www.comfy.org/)
 [![Discord](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fdiscord.com%2Fapi%2Finvites%2Fcomfyorg%3Fwith_counts%3Dtrue&query=%24.approximate_member_count&logo=discord&logoColor=white&label=Discord&color=green&suffix=%20total)](https://discord.com/invite/comfyorg)
 [![Twitter](https://img.shields.io/twitter/follow/ComfyUI)](https://x.com/ComfyUI)
 [![Matrix](https://img.shields.io/badge/Matrix-000000?style=flat&logo=matrix&logoColor=white)](https://app.element.io/#/room/%23comfyui_space%3Amatrix.org)
-[![Release](https://img.shields.io/github/v/release/Comfy-Org/ComfyUI?style=flat&sort=semver)](https://github.com/Comfy-Org/ComfyUI/releases)
+<br>
+[![Release](https://img.shields.io/github/v/release/Comfy-Org/ComfyUI?style=flat&sort=semver)](https://docs.comfy.org/changelog)
 [![Downloads](https://img.shields.io/github/downloads/Comfy-Org/ComfyUI/total?style=flat)](https://github.com/Comfy-Org/ComfyUI/releases)
 
 <img width="1590" height="795" alt="ComfyUI Screenshot" src="https://github.com/user-attachments/assets/36e065e0-bfae-4456-8c7f-8369d5ea48a2" />
@@ -41,16 +42,15 @@ ComfyUI is the AI creation engine for visual professionals who demand control ov
 
 ## Products
 
-| Product | What it is |
+| Product | Who it's for |
 | --- | --- |
-| [Comfy Desktop](https://www.comfy.org/download) | The desktop application. The easiest way to run ComfyUI locally. |
-| [Comfy Cloud](https://www.comfy.org/cloud) | Run ComfyUI without local hardware. |
-| [Developer Platform](https://www.comfy.org/platform) | Run workflows and models from your own applications. |
-| [Comfy Enterprise](https://www.comfy.org/enterprise) | Deployment, support, and scale for teams. |
-| [Comfy MCP](https://www.comfy.org/mcp) | Drive ComfyUI from MCP-compatible clients. |
-| [Comfy Agent](https://www.comfy.org/agent) | Agentic workflow generation. |
-| [Comfy CLI](https://www.comfy.org/cli) | Install, launch, and manage ComfyUI from the terminal. |
-| [Pricing](https://www.comfy.org/pricing) | Plans across Cloud and the Developer Platform. |
+| [Comfy Desktop](https://www.comfy.org/download) | Anyone who wants ComfyUI running locally from a normal installer, on Windows or macOS. The easiest way to start. |
+| [Developer Platform](https://www.comfy.org/platform) | Developers who want to take Comfy to production. Deploy a workflow as an API endpoint that scales, or call thousands of models through one API. |
+| [Comfy Cloud](https://www.comfy.org/cloud) | Running Comfy without local hardware. Good for experimentation and lightweight workflows. |
+| [Comfy Agent](https://www.comfy.org/agent) | Describing what you want inside ComfyUI and having it plan, build and run the workflow, editing the canvas alongside you. |
+| [Comfy MCP](https://www.comfy.org/mcp) | Driving ComfyUI from an MCP client, local or cloud: generate media, search models, nodes and templates, and run real workflows. |
+| [Comfy CLI](https://www.comfy.org/cli) | Driving the whole engine from a terminal. Built for CI jobs, scripting, and piping outputs somewhere else. |
+| [Comfy Enterprise](https://www.comfy.org/enterprise) | Organizations standardizing ComfyUI across teams: one approved reproducible build everywhere, dedicated GPU capacity and SLAs, commercial licensing and security review. |
 
 ## Install
 
@@ -61,6 +61,7 @@ Other paths:
 
 - **[Comfy Cloud](https://www.comfy.org/cloud)** if you would rather not run it locally at all.
 - **[comfy-cli](https://www.comfy.org/cli)** if you prefer a CLI: `pip install comfy-cli && comfy install`.
+- **[Developer Platform](https://www.comfy.org/platform)** if you are deploying a workflow as a production API endpoint rather than running the app yourself.
 - **Manual install**, below, when you need control over your Python and Torch versions.
 - **[Windows Portable](docs/installation.md#windows-portable)** for a self-contained build you can unzip and run.
 
