@@ -15,34 +15,58 @@
 
 </div>
 
-ComfyUI is a node graph engine for generative AI. You wire up the models, samplers and
-conditioning yourself, so every parameter stays under your control. It generates images,
-video, audio, 3D and text on Windows, Linux and macOS.
+ComfyUI is the AI creation engine for visual professionals who demand control over every model, every parameter, and every output. Its powerful and modular node graph interface empowers creatives to generate images, videos, 3D models, audio, and more...
 
-- Native support for current open source models, with [ready-to-run templates](https://comfy.org/workflows) for each. The template library is the maintained list; the engine gains new architectures most weeks.
-- Asynchronous weight streaming runs large models on as little as 4GB VRAM plus 8GB RAM while keeping the GPU saturated, alongside model offloading, quantized weights, async queueing, and re-execution of only the parts of a graph that changed.
-- Reusable subgraphs, [App Mode](https://docs.comfy.org/interface/app-mode) to expose a workflow as a simple UI, and a [local API](https://docs.comfy.org/development/comfyui-server/api-examples) for production pipelines.
-- Runs fully offline. The core downloads nothing unless you ask it to. [Partner nodes](https://docs.comfy.org/tutorials/partner-nodes/overview#partner-nodes) and [API nodes](https://docs.comfy.org/tutorials/api-nodes/overview) reach closed source models such as Nano Banana and Seedance; `--disable-api-nodes` turns them off.
-- Extend it with [custom nodes](https://docs.comfy.org/custom-nodes/overview), managed by [ComfyUI-Manager](https://docs.comfy.org/manager/overview) (`pip install -r manager_requirements.txt`, then run with `--enable-manager`).
+- ComfyUI natively supports the latest open-source state of the art models.
+- It is by far the most optimized inference engine for diffusion models in the world with a focus on local consumer hardware.
+- Can run even the biggest open source models on as low as 4GB vram + 8GB ram relatively quickly (saturating your GPU compute) using our state of the art asynchronous weight streaming technology.
+- [Partner nodes](https://docs.comfy.org/tutorials/partner-nodes/overview#partner-nodes) provide access to the best closed source models such as Nano Banana, Seedance, Hunyuan3D, etc.
+- It is available on Windows, Linux, and macOS, locally with our [desktop application](https://www.comfy.org/download), our [portable install](docs/installation.md#windows-portable) or on our [cloud](https://www.comfy.org/cloud).
+- The most sophisticated workflows can be exposed through a simple UI thanks to App Mode.
+- It integrates seamlessly into production pipelines with our API endpoints.
+
+## Features
+
+- A visual node graph for building and reusing image, video, audio, 3D, and text workflows without code.
+- Broad native model support. Browse the [workflow library](https://comfy.org/workflows/) for maintained, ready-to-run templates covering image generation and editing, video, audio, 3D, vision, and text.
+- Efficient local execution with asynchronous queueing, partial graph re-execution, smart VRAM and RAM management, model offloading, and support for quantized models.
+- Reusable subgraphs, workflow templates, [App Mode](https://docs.comfy.org/interface/app-mode), and a [local API](https://docs.comfy.org/development/comfyui-server/api-examples) for integrating workflows into applications.
+- Load complete checkpoints or separate diffusion models, VAEs, text encoders, LoRAs, ControlNets, adapters, and upscalers from supported model formats.
+- Built-in tools for inpainting, outpainting, reference conditioning, masks and compositing, model merging, upscaling, frame interpolation, segmentation, depth estimation, and media processing.
+- Save and load workflows as JSON, or recover complete workflows and seeds from supported generated media.
+- Runs fully offline: core does not download anything unless you request it. Use `--disable-api-nodes` to disable the optional paid [Comfy API nodes](https://docs.comfy.org/tutorials/api-nodes/overview) and force all built-in functionality to stay offline.
+- Extend ComfyUI with custom nodes, installed and updated through [ComfyUI-Manager](docs/installation.md#comfyui-manager).
+- Configure additional model locations with [`extra_model_paths.yaml`](extra_model_paths.yaml.example).
+- Support for saving and loading high bit depth images and videos: 16 bit PNG images, 32 bit EXR, 10 bit AVIF are supported and more, including HDR.
+
+## Products
+
+| Product | What it is |
+| --- | --- |
+| [Comfy Desktop](https://www.comfy.org/download) | The desktop application. The easiest way to run ComfyUI locally. |
+| [Comfy Cloud](https://www.comfy.org/cloud) | Run ComfyUI without local hardware. |
+| [Developer Platform](https://www.comfy.org/platform) | Run workflows and models from your own applications. |
+| [Comfy Enterprise](https://www.comfy.org/enterprise) | Deployment, support, and scale for teams. |
+| [Comfy MCP](https://www.comfy.org/mcp) | Drive ComfyUI from MCP-compatible clients. |
+| [Comfy Agent](https://www.comfy.org/agent) | Agentic workflow generation. |
+| [Comfy CLI](https://www.comfy.org/cli) | Install, launch, and manage ComfyUI from the terminal. |
+| [Pricing](https://www.comfy.org/pricing) | Plans across Cloud and the Developer Platform. |
 
 ## Install
 
-The [desktop app](https://www.comfy.org/download) is the easiest way in, and the right
-answer for most people on Windows and macOS.
+**[Comfy Desktop](https://www.comfy.org/download) is the recommended way to install
+ComfyUI.** It is the easiest and best way to get started, on Windows and macOS.
 
-| Path | Use it when |
-| --- | --- |
-| [Desktop app](https://docs.comfy.org/installation/desktop/overview) | You want a normal installer. Windows and macOS. |
-| [Windows portable](https://docs.comfy.org/installation/comfyui_portable_windows) | You want a self-contained build. NVIDIA, AMD, Intel or CPU only. |
-| [Manual install](https://docs.comfy.org/installation/manual_install) | Linux, or you need control over Python and PyTorch. |
-| [comfy-cli](https://docs.comfy.org/comfy-cli/getting-started) | You prefer a CLI: `pip install comfy-cli && comfy install`. |
-| [Comfy Cloud](https://www.comfy.org/cloud) | You have no local GPU. |
+Other paths:
 
-To run from this repo, first install PyTorch for your GPU using the
-[per-vendor commands](https://docs.comfy.org/installation/manual_install) (NVIDIA CUDA,
-AMD ROCm on Linux and Windows, Apple Silicon; Intel Arc is covered under
-[Intel GPU issues](https://docs.comfy.org/troubleshooting/overview#intel-gpu-issues)),
-then:
+- **[Comfy Cloud](https://www.comfy.org/cloud)** if you would rather not run it locally at all.
+- **[comfy-cli](https://www.comfy.org/cli)** if you prefer a CLI: `pip install comfy-cli && comfy install`.
+- **Manual install**, below, when you need control over your Python and Torch versions.
+- **[Windows Portable](docs/installation.md#windows-portable)** for a self-contained build you can unzip and run.
+
+### Manual install
+
+First install PyTorch for your GPU, then:
 
 ```bash
 git clone https://github.com/Comfy-Org/ComfyUI.git
@@ -51,49 +75,46 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Python 3.13 is best supported and 3.14 mostly works. PyTorch 2.7 is the floor, cu130 or
-newer is required on NVIDIA 20 series and above, and anything older than six months
-should be updated. Put checkpoints in `models/checkpoints` and VAEs in `models/vae`, or
-point ComfyUI at folders you already have via [`extra_model_paths.yaml`](extra_model_paths.yaml.example).
+Python 3.13 is very well supported and 3.14 works, though some custom nodes may have
+issues. torch 2.7 is minimally supported and cu130 or above is required on Nvidia 20
+series and above; if your pytorch is more than 6 months old, please update it.
 
-Ascend NPU, Cambricon MLU and Iluvatar Corex work through their vendor PyTorch builds:
-install [torch_npu](https://ascend.github.io/docs/sources/pytorch/install.html#pytorch),
-[torch_mlu](https://www.cambricon.com/docs/sdk_1.15.0/cambricon_pytorch_1.17.0/user_guide_1.9/index.html)
-or [Iluvatar](https://support.iluvatar.com/#/DocumentCentre?id=1&nameCenter=2&productId=520117912052801536),
-then follow the steps above.
+Put your checkpoints in `models/checkpoints` and your VAE in `models/vae`.
 
-## Documentation
-
-Full documentation lives at **[docs.comfy.org](https://docs.comfy.org)**, in English,
-Chinese, Japanese and Korean.
-
-| | |
-| --- | --- |
-| [Your first generation](https://docs.comfy.org/get_started/first_generation) | [Keyboard shortcuts](https://docs.comfy.org/interface/shortcuts) |
-| [Workflow templates](https://comfy.org/workflows) | [Startup flags](https://docs.comfy.org/development/comfyui-server/startup-flags) |
-| [Built-in node reference](https://docs.comfy.org/built-in-nodes/overview) | [Troubleshooting](https://docs.comfy.org/troubleshooting/overview) |
-| [Writing custom nodes](https://docs.comfy.org/custom-nodes/overview) | [Which GPU should I buy?](https://github.com/Comfy-Org/ComfyUI/wiki/Which-GPU-should-I-buy-for-ComfyUI) |
-
-A few things that are easy to miss:
-
-- Drag a generated PNG onto the canvas to [recover the whole workflow](https://docs.comfy.org/development/api-development/workflow-metadata), seeds included.
-- [Prompt syntax](https://docs.comfy.org/built-in-nodes/ClipTextEncode) covers weighting with `(good code:1.2)`, wildcards with `{day|night}` and `embedding:name` for textual inversions. Dynamic prompts also accept `// C-style comments`.
-- `--preview-method auto` enables live sampler previews. For higher quality, drop the [TAESD decoders](https://github.com/madebyollin/taesd/) into `models/vae_approx` and use `--preview-method taesd`.
-- For TLS, generate a cert with `openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 3650 -nodes -subj "/CN=localhost"`, then pass `--tls-keyfile key.pem --tls-certfile cert.pem`.
+**[docs/installation.md](docs/installation.md) has the full detail:** PyTorch commands
+for NVIDIA, AMD ROCm on Linux and Windows, Intel Arc, Apple Silicon, Ascend NPU,
+Cambricon MLU and Iluvatar Corex, plus ComfyUI-Manager setup, portable builds, previews
+and TLS.
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) for how to report issues, open pull requests,
-and how releases are cut.
-
-The UI lives in [ComfyUI_frontend](https://github.com/Comfy-Org/ComfyUI_frontend) and
-ships here as a [pip package](https://pypi.org/project/comfyui-frontend-package). File
-UI bugs there. To run a newer frontend than the one pinned in this repo, launch with
-`--front-end-version Comfy-Org/ComfyUI_frontend@latest`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to ask questions, report issues, open pull
+requests, and how releases are cut across core, Desktop and the frontend.
 
 ## Community
 
 Ask questions in [#help or #feedback on Discord](https://comfy.org/discord), or on
-[Matrix](https://app.element.io/#/room/%23comfyui_space%3Amatrix.org).
+[Matrix](https://app.element.io/#/room/%23comfyui_space%3Amatrix.org), which is like
+Discord but open source.
 
 _psst, we're hiring:_ [comfy.org/careers](https://www.comfy.org/careers)
+
+## References
+
+| Resource | Link |
+| --- | --- |
+| Documentation | https://docs.comfy.org |
+| Installing (this repo) | [docs/installation.md](docs/installation.md) |
+| Keyboard shortcuts | https://docs.comfy.org/interface/shortcuts |
+| Launch / startup flags | https://docs.comfy.org/development/comfyui-server/startup-flags |
+| Changelog | https://docs.comfy.org/changelog |
+| Workflow templates | https://comfy.org/workflows |
+| Built-in node reference | https://docs.comfy.org/built-in-nodes/overview |
+| Writing custom nodes | https://docs.comfy.org/custom-nodes/overview |
+| Prompt syntax: weighting, `{wildcards}`, `embedding:`, `//` comments | https://docs.comfy.org/built-in-nodes/ClipTextEncode |
+| Recovering a workflow from generated media | https://docs.comfy.org/development/api-development/workflow-metadata |
+| Troubleshooting | https://docs.comfy.org/troubleshooting/overview |
+| Which GPU should I buy? | https://github.com/Comfy-Org/ComfyUI/wiki/Which-GPU-should-I-buy-for-ComfyUI |
+| Blog | https://blog.comfy.org |
+| Discord | https://comfy.org/discord |
+| Frontend repository | https://github.com/Comfy-Org/ComfyUI_frontend |
