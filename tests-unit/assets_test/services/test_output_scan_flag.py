@@ -1,4 +1,5 @@
 import json
+import os
 from collections.abc import Callable, Generator, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
@@ -243,6 +244,33 @@ def test_registered_output_gets_hashed_without_output_scanning(
     assert contents[str(produced)].hash is not None
     assert str(undeclared) not in contents
     assert contents[str(deleted)].is_missing is False
+
+
+def test_hash_pass_skips_reading_an_output_changed_since_registration(
+    fresh_seeder: AssetSeeder,
+    asset_roots: tuple[Path, Path],
+    threaded_create_session: Callable[[], AbstractContextManager[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = _Args(output_scan=False, hashing=True)
+    mode.init(args)
+    manager = AssetsEnabled(args)
+    output_dir, _ = asset_roots
+    produced = output_dir / "edited.png"
+    produced.write_bytes(b"prompt output")
+    assert manager.register_executed_output(str(produced), job_id="job") is not None
+    stat_result = produced.stat()
+    os.utime(produced, ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns + 10**9))
+    hash_reads = MagicMock(side_effect=scanner.snapshot_hash)
+    monkeypatch.setattr(scanner, "snapshot_hash", hash_reads)
+
+    manager.queue_output_scan()
+    assert fresh_seeder.wait(timeout=5)
+
+    hash_reads.assert_not_called()
+    with threaded_create_session() as session:
+        contents = {c.path: c for c in session.scalars(select(AssetContent))}
+    assert contents[str(produced)].hash is None
 
 
 @pytest.mark.asyncio
