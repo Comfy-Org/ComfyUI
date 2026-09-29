@@ -2416,7 +2416,7 @@ paths:
                         schema:
                             properties:
                                 roots:
-                                    description: Root folder paths to scan (if omitted, scans all). The output root is skipped when output scanning is disabled.
+                                    description: Root folder paths to scan (if omitted, scans all). When output scanning is disabled the output root is dropped, and a request naming only output is rejected with 400 OUTPUT_SCAN_DISABLED.
                                     items:
                                         type: string
                                     type: array

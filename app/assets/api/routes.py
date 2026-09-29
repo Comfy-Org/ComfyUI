@@ -1042,6 +1042,7 @@ async def seed_assets(request: web.Request) -> web.Response:
 
     Returns:
         202 Accepted if scan started
+        400 OUTPUT_SCAN_DISABLED if only output was requested and output scanning is disabled
         409 Conflict if scan already running
         200 OK with final stats if wait=true
     """
