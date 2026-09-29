@@ -247,7 +247,7 @@ def test_rows_under_hidden_paths_stay_live(roots, session, caplog):
     assert (retired, skipped) == (0, 2)
 
 
-def test_dir_failing_to_list_leaves_its_rows_live_while_siblings_are_diffed(
+def test_dir_failing_to_list_stats_its_rows_while_siblings_are_diffed(
     roots, session, monkeypatch, caplog
 ):
     output = roots["output"]
@@ -270,14 +270,51 @@ def test_dir_failing_to_list_leaves_its_rows_live_while_siblings_are_diffed(
 
     for path in in_failing:
         (row,) = _rows(session, path)
-        assert row.is_missing is False
+        assert row.is_missing is (path == in_failing[0])
     (gone,) = _rows(session, in_sibling[0])
     assert gone.is_missing is True
     _listed, retired, skipped = _listing_counts(caplog)
-    assert (retired, skipped) == (1, len(in_failing))
+    assert (retired, skipped) == (2, len(in_failing) - 1)
 
 
-def test_row_under_an_unvisited_symlink_alias_stays_live(roots, session):
+def test_deleted_output_under_a_hidden_path_is_retired(roots, session):
+    # SaveImage accepts prefixes like "foo/.bar/img" (hidden dir) and "foo/.bar"
+    # (hidden file), and the node registers the result like any other output.
+    output = roots["output"]
+    _warm_catalog(output)
+    hidden = [_write(output / "foo" / ".bar" / "img.png"), _write(output / "foo" / ".bar_00001_.png")]
+    for path in hidden:
+        _catalog_directly(session, path)
+    _scan()
+    for path in hidden:
+        path.unlink()
+
+    _scan()
+
+    for path in hidden:
+        (row,) = _rows(session, path)
+        assert row.is_missing is True
+
+
+def test_unlistable_output_root_stats_every_row(roots, session, monkeypatch):
+    output = roots["output"]
+    files = _warm_catalog(output)
+    _scan()
+    files[0].unlink()
+    real_list = file_utils._list_visible_entries
+
+    def failing_root(dirpath: str):
+        if dirpath == str(output):
+            raise OSError("root unreadable")
+        return real_list(dirpath)
+
+    monkeypatch.setattr(file_utils, "_list_visible_entries", failing_root)
+    _scan()
+
+    assert _live_paths(session) == {str(p) for p in files[1:]}
+
+
+def test_row_under_an_unvisited_symlink_alias_is_stat_checked(roots, session):
     output = roots["output"]
     real = _write(output / "real" / "x.png")
     (output / "alias").symlink_to(output / "real")
@@ -295,6 +332,12 @@ def test_row_under_an_unvisited_symlink_alias_stays_live(roots, session):
 
     assert session.get(AssetContent, alias_id).is_missing is False
     assert _live_paths(session) == {str(visited), str(unvisited)}
+
+    real.unlink()
+    _scan()
+
+    assert session.get(AssetContent, alias_id).is_missing is True
+    assert _live_paths(session) == set()
 
 
 DEPTH = 20
