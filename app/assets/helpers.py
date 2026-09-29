@@ -37,17 +37,34 @@ def sql_path_under_prefix(
     and normalizes there. Normalizing the column in SQL is not an option anyway:
     it would need a per-row Python call and would defeat the index.
     """
-    base = os.path.abspath(prefix)
-    stem = base if base.endswith(os.sep) else base + os.sep
+    base, stem = _base_and_stem(prefix)
     return sa.or_(
         column == base,
         sa.func.substr(column, 1, len(stem)) == stem,
     )
 
 
+def _base_and_stem(prefix: str) -> tuple[str, str]:
+    base = os.path.abspath(prefix)
+    return base, base if base.endswith(os.sep) else base + os.sep
+
+
+def stored_path_under_prefixes(prefixes: list[str]) -> Callable[[str], bool]:
+    """The Python twin of sql_path_under_prefix OR'd over ``prefixes``: the same
+    case-sensitive string test on a stored path, for filtering rows already fetched.
+
+    Unlike path_prefix_matcher, it neither normalizes nor normcases the path.
+    """
+    pairs = [_base_and_stem(prefix) for prefix in prefixes]
+    bases = frozenset(base for base, _ in pairs)
+    stems = tuple(stem for _, stem in pairs)
+    return lambda path: path in bases or path.startswith(stems)
+
+
 # Each prefix adds two terms to one flat OR, and SQLite rejects an expression deeper than
 # 1000, so about 500 prefixes in one statement fail with "Expression tree is too large".
-# SQLAlchemy flattens nested ORs, so the prefixes are split across statements instead.
+# SQLAlchemy flattens nested ORs, so more prefixes than this are split across statements,
+# or filtered in Python with stored_path_under_prefixes.
 PREFIX_BATCH_SIZE = 200
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import ntpath
 import os
+import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,13 +27,39 @@ from app.assets.helpers import (
     PREFIX_BATCH_SIZE,
     sql_path_under_prefix,
     sql_path_under_prefix_batches,
+    stored_path_under_prefixes,
 )
 from app.assets.scanner import get_unenriched_assets_for_roots, live_references_safely
 from app.assets.scanner_changes import live_contents_under_prefixes
 
-from .path_prefix_cases import expected_prefix_case_paths, prefix_case_paths
+from .path_prefix_cases import anchor_case_paths, expected_prefix_case_paths, prefix_case_paths
 
 PREFIX_COUNTS = [1, PREFIX_BATCH_SIZE, PREFIX_BATCH_SIZE + 1, 499, 500, 2000]
+
+# SQLite before 3.32 allows 999 bound variables per statement, and each prefix binds four.
+OLD_SQLITE_VARIABLE_LIMIT = 999
+
+
+def _capped_engine(url: str) -> sa.Engine:
+    """An engine whose connections allow only as many bound variables as old SQLite."""
+    if not hasattr(sqlite3.Connection, "setlimit"):
+        pytest.skip("sqlite3.Connection.setlimit needs Python 3.11")
+    engine = sa.create_engine(url)
+
+    @sa.event.listens_for(engine, "connect")
+    def _cap_variables(dbapi_connection, _record):
+        dbapi_connection.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, OLD_SQLITE_VARIABLE_LIMIT)
+
+    Base.metadata.create_all(engine)
+    return engine
+
+
+@pytest.fixture
+def db_engine():
+    """Every test here runs under the old variable limit as well as the depth limit."""
+    engine = _capped_engine("sqlite:///:memory:")
+    yield engine
+    engine.dispose()
 
 
 @contextmanager
@@ -58,13 +85,39 @@ def _seed(session: Session, prefixes: list[str]) -> set[str]:
     return inside
 
 
-def test_batches_cover_every_prefix_in_order():
+def test_batches_split_the_prefixes_in_order():
     prefixes = [f"/p{i}" for i in range(2 * PREFIX_BATCH_SIZE + 1)]
+    slices = [prefixes[:PREFIX_BATCH_SIZE], prefixes[PREFIX_BATCH_SIZE:-1], prefixes[-1:]]
+    compile_kwargs = {"literal_binds": True}
 
     batches = sql_path_under_prefix_batches(AssetContent.path, prefixes)
 
-    assert len(batches) == 3
+    assert [str(b.compile(compile_kwargs=compile_kwargs)) for b in batches] == [
+        str(sa.or_(*(sql_path_under_prefix(AssetContent.path, p) for p in s)).compile(compile_kwargs=compile_kwargs))
+        for s in slices
+    ]
     assert sql_path_under_prefix_batches(AssetContent.path, []) == []
+
+
+def _stored_path_cases(root: str) -> list[str]:
+    paths = [os.path.abspath(path) for path, _ in prefix_case_paths(root)]
+    return paths + [path for path, _, _ in anchor_case_paths()] + ["/", root + os.sep]
+
+
+@pytest.mark.parametrize("prefix_kind", ["dir", "trailing_sep", "root", "double_anchor"])
+def test_stored_path_under_prefixes_agrees_with_the_sql_predicate(session, temp_dir, prefix_kind):
+    root = str(temp_dir / "root")
+    prefix = {"dir": root, "trailing_sep": root + os.sep, "root": "/", "double_anchor": "//server"}[prefix_kind]
+    paths = _stored_path_cases(root)
+    session.add_all(AssetContent(path=path, size_bytes=0) for path in dict.fromkeys(paths))
+    session.commit()
+
+    selected = set(
+        session.scalars(sa.select(AssetContent.path).where(sql_path_under_prefix(AssetContent.path, prefix)))
+    )
+
+    is_under = stored_path_under_prefixes([prefix])
+    assert {path for path in paths if is_under(path)} == selected
 
 
 @pytest.mark.parametrize("count", [1, 20, PREFIX_BATCH_SIZE])
@@ -80,15 +133,26 @@ def test_up_to_one_batch_compiles_to_the_single_statement_predicate(count):
     )
 
 
-def test_a_single_statement_over_500_prefixes_exceeds_sqlite_expression_depth(session, temp_dir):
-    """The limit the batching works around; if SQLite lifts it this test says so."""
+def test_a_single_statement_over_500_prefixes_exceeds_sqlite_limits(session, temp_dir):
+    """The limits the batching works around: expression depth on any SQLite, and first
+    the variable limit on old SQLite, which the capped engine here emulates."""
     prefixes = _folders(temp_dir, 500)
     stmt = sa.select(AssetContent.id).where(
         sa.or_(*(sql_path_under_prefix(AssetContent.path, p) for p in prefixes))
     )
 
-    with pytest.raises(sa.exc.OperationalError, match="Expression tree is too large"):
+    with pytest.raises(
+        sa.exc.OperationalError, match="Expression tree is too large|too many SQL variables"
+    ):
         session.execute(stmt).all()
+
+
+def test_the_variable_cap_is_in_force(session):
+    """Guards the cap above: without it, these tests would not cover old SQLite."""
+    too_many = sa.select(AssetContent.id).where(AssetContent.path.in_([str(i) for i in range(1000)]))
+
+    with pytest.raises(sa.exc.OperationalError, match="too many SQL variables"):
+        session.execute(too_many).all()
 
 
 @pytest.mark.parametrize("count", PREFIX_COUNTS)
@@ -228,6 +292,8 @@ def test_windows_paths_in_a_later_batch(session, monkeypatch):
 
     assert returned == {path for path, inside in stored.items() if inside}
     assert root in returned
+    is_under = stored_path_under_prefixes(prefixes)
+    assert {path for path in stored if is_under(path)} == returned
 
 
 # --- end to end: a real scan over hundreds of model folders ---
@@ -243,8 +309,7 @@ def model_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     The prefix count is what broke the scan. Fewer files keep the fast phase's
     per-file folder checks from dominating the test's runtime.
     """
-    engine = sa.create_engine(f"sqlite:///{tmp_path / 'assets.db'}")
-    Base.metadata.create_all(engine)
+    engine = _capped_engine(f"sqlite:///{tmp_path / 'assets.db'}")
     monkeypatch.setattr("app.database.db.Session", sessionmaker(bind=engine))
     monkeypatch.setattr("app.database.db.WriteSession", sessionmaker(bind=engine))
 

@@ -41,7 +41,7 @@ def _denied(_candidate_path: str):
 
 def _rendered_candidate_placeholder_count(failed_count: int) -> int:
     failed_ids = [f"{index:036d}" for index in range(failed_count)]
-    [statement] = scanner.build_unenriched_candidates_statements(
+    statement = scanner.build_unenriched_candidates_statement(
         prefixes=["/models"],
         compute_hashes=False,
         last_seen_id=failed_ids[-1],

@@ -12,6 +12,7 @@ import enum
 import logging
 import os
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Callable, Literal, NamedTuple, Protocol, TypedDict
 
@@ -28,7 +29,14 @@ from app.assets.database.queries import (
     create_record,
 )
 from app.assets.database.models import Asset, AssetContent
-from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix_batches, to_stored_hash
+from app.assets.helpers import (
+    PREFIX_BATCH_SIZE,
+    path_prefix_matcher,
+    sql_path_under_prefix,
+    sql_path_under_prefix_batches,
+    stored_path_under_prefixes,
+    to_stored_hash,
+)
 from app.assets.lifecycle import get_excluded_scan_roots
 from app.assets.scanner_changes import (
     clear_pending_verifications,
@@ -684,13 +692,10 @@ def insert_asset_specs(
         return created, first_error
 
 
-def build_unenriched_candidates_statements(
-    prefixes: list[str],
-    compute_hashes: bool,
-    last_seen_id: str | None,
-    limit: int = 1000,
-) -> list[sa.Select[tuple[str, str, str]]]:
-    """One keyset page per prefix batch; get_unenriched_assets_for_roots merges them."""
+def unenriched_candidates_query(
+    compute_hashes: bool, last_seen_id: str | None
+) -> sa.Select[tuple[str, str, str]]:
+    """Every unenriched live candidate after ``last_seen_id``, in id order."""
     query = (
         sa.select(AssetContent.id, Asset.id, AssetContent.path)
         .join(Asset, Asset.content_id == AssetContent.id)
@@ -707,10 +712,21 @@ def build_unenriched_candidates_statements(
         query = query.where(Asset.system_metadata.is_(None))
     if last_seen_id is not None:
         query = query.where(Asset.id > last_seen_id)
-    return [
-        query.where(under_prefixes).order_by(Asset.id.asc()).limit(limit)
-        for under_prefixes in sql_path_under_prefix_batches(AssetContent.path, prefixes)
-    ]
+    return query.order_by(Asset.id.asc())
+
+
+def build_unenriched_candidates_statement(
+    prefixes: list[str],
+    compute_hashes: bool,
+    last_seen_id: str | None,
+    limit: int = 1000,
+) -> sa.Select[tuple[str, str, str]]:
+    """The next page of candidates under at most PREFIX_BATCH_SIZE prefixes."""
+    return (
+        unenriched_candidates_query(compute_hashes, last_seen_id)
+        .where(sa.or_(*(sql_path_under_prefix(AssetContent.path, p) for p in prefixes)))
+        .limit(limit)
+    )
 
 
 def get_unenriched_assets_for_roots(
@@ -726,21 +742,29 @@ def get_unenriched_assets_for_roots(
     if not prefixes:
         return []
 
-    statements = build_unenriched_candidates_statements(
-        prefixes,
-        compute_hashes,
-        last_seen_id,
-        limit,
-    )
-    # The first `limit` rows by id across all batches are among each batch's first
-    # `limit`, so merging the pages gives the page a single statement would.
-    by_record_id: dict[str, UnenrichedContent] = {}
     with create_session() as sess:
-        for statement in statements:
-            for content_id, record_id, file_path in sess.execute(statement):
-                by_record_id[record_id] = UnenrichedContent(content_id, record_id, file_path)
+        if len(prefixes) <= PREFIX_BATCH_SIZE:
+            statement = build_unenriched_candidates_statement(
+                prefixes,
+                compute_hashes,
+                last_seen_id,
+                limit,
+            )
+            rows = sess.execute(statement).all()
+        else:
+            # Too many prefixes for one SQL predicate. Paging each batch separately
+            # would rescan to the end of the table on every page for any batch with
+            # few matches, so filter a single id-ordered pass here instead.
+            is_under = stored_path_under_prefixes(prefixes)
+            candidates = sess.execute(
+                unenriched_candidates_query(compute_hashes, last_seen_id).execution_options(yield_per=500)
+            )
+            rows = list(islice((row for row in candidates if is_under(row[2])), limit))
 
-    return [by_record_id[record_id] for record_id in sorted(by_record_id)[:limit]]
+    return [
+        UnenrichedContent(content_id, record_id, file_path)
+        for content_id, record_id, file_path in rows
+    ]
 
 
 def enrich_asset(
