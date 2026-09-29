@@ -31,6 +31,7 @@ from app.assets.helpers import (
 )
 from app.assets.scanner import get_unenriched_assets_for_roots, live_references_safely
 from app.assets.scanner_changes import live_contents_under_prefixes
+from app.database import db
 
 from .path_prefix_cases import anchor_case_paths, expected_prefix_case_paths, prefix_case_paths
 
@@ -346,9 +347,7 @@ def _full_scan(caplog: pytest.LogCaptureFixture) -> list[str]:
 
 
 def _live_model_paths() -> set[str]:
-    from app.database.db import create_session
-
-    with create_session() as session:
+    with db.create_session() as session:
         return set(
             session.scalars(sa.select(AssetContent.path).where(AssetContent.is_missing.is_(False)))
         )
