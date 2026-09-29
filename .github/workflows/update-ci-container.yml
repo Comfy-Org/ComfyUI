@@ -27,7 +27,7 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Checkout comfyui-ci-container
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: comfy-org/comfyui-ci-container
           token: ${{ secrets.CI_CONTAINER_PAT }}

@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout ComfyUI
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         repository: "Comfy-Org/ComfyUI"
         path: "ComfyUI"
