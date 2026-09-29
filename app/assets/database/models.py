@@ -58,6 +58,8 @@ class AssetContent(Base):
     records: Mapped[list[Asset]] = relationship(back_populates="content")
 
     __table_args__ = (
+        # Query live rows with is_missing == false() ("= 0"): SQLite won't use this partial
+        # index for is_(False) ("IS 0"), so a path lookup written that way scans the table.
         Index(
             "uq_asset_contents_path_live",
             "path",
