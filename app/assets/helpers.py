@@ -45,6 +45,26 @@ def sql_path_under_prefix(
     )
 
 
+# Each prefix adds two terms to one flat OR, and SQLite rejects an expression deeper than
+# 1000, so about 500 prefixes in one statement fail with "Expression tree is too large".
+# SQLAlchemy flattens nested ORs, so the prefixes are split across statements instead.
+PREFIX_BATCH_SIZE = 200
+
+
+def sql_path_under_prefix_batches(
+    column: ColumnElement[str], prefixes: list[str]
+) -> list[ColumnElement[bool]]:
+    """sql_path_under_prefix OR'd over each run of at most PREFIX_BATCH_SIZE prefixes.
+
+    Run one statement per predicate and merge. Nested or overlapping prefixes can put a
+    row in more than one batch, so the caller dedupes.
+    """
+    return [
+        sa.or_(*(sql_path_under_prefix(column, p) for p in prefixes[i:i + PREFIX_BATCH_SIZE]))
+        for i in range(0, len(prefixes), PREFIX_BATCH_SIZE)
+    ]
+
+
 def path_prefix_matcher(prefixes: Iterable[str]) -> Callable[[str], bool]:
     """Return ``path -> Path(path).is_relative_to(<any prefix>)``, with the prefixes
     normalized once.
