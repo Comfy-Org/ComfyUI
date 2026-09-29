@@ -541,6 +541,7 @@ class _AssetSeeder:
             self._run_gate.wait()  # Blocks until resume or cancel
             if self._scan_state is not None:
                 self._scan_state.paused_s += time.perf_counter() - t_paused
+        self._run_gate.wait()  # A pause landing after the check above still blocks here
         cancelled = self._is_cancelled()
         if cancelled:
             self._record_cancel_stage(stage)

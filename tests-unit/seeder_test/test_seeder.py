@@ -864,3 +864,15 @@ def test_files_statted_counts_the_seed_and_enrich_stats(
     )
 
     assert state.files_statted == 2
+
+
+def test_a_pause_landing_after_the_gate_check_still_blocks_the_checkpoint(
+    scan_seeder: _AssetSeeder,
+) -> None:
+    gate = Mock()
+    gate.is_set.return_value = True  # the pause lands just after this check
+    scan_seeder._run_gate = gate
+
+    assert scan_seeder._check_pause_and_cancel(_ScanStage.FAST_SCAN) is False
+
+    gate.wait.assert_called_once_with()
