@@ -14,6 +14,8 @@ _DB_AVAILABLE = False
 Session = None
 WriteSession = None
 
+# The packages the imports below need; keep in step with them.
+_DEPENDENCIES = ("sqlalchemy", "alembic", "blake3")
 
 try:
     from alembic import command
@@ -52,7 +54,7 @@ def dependencies_available():
 def missing_dependencies():
     """Names of the database packages that fail to import."""
     missing = []
-    for name in ("sqlalchemy", "alembic", "blake3"):
+    for name in _DEPENDENCIES:
         try:
             importlib.import_module(name)
         except ImportError:
