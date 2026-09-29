@@ -4,6 +4,7 @@ import nodes
 import asyncio
 import inspect
 from comfy_execution.graph_utils import is_link, ExecutionBlocker
+from comfy_execution.node_inputs import get_finalized_inputs, is_v3_node
 from comfy.comfy_types.node_typing import ComfyNodeABC, InputTypeDict, InputTypeOptions
 
 # NOTE: ExecutionBlocker code got moved to graph_utils.py to prevent torch being imported too soon during unit tests
@@ -118,14 +119,22 @@ class TopologicalSort:
         self.pendingNodes = {}
         self.blockCount = {} # Number of nodes this node is directly blocked by
         self.blocking = {} # Which nodes are blocked by this node
+        self.input_types = {}
         self.externalBlocks = 0
         self.externalBlockResults = {}
         self.unblockedEvent = asyncio.Event()
 
     def get_input_info(self, unique_id, input_name):
+        """Input schema for a node, with V3 dynamic inputs finalized once."""
         class_type = self.dynprompt.get_node(unique_id)["class_type"]
         class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-        return get_input_info(class_def, input_name)
+        if unique_id not in self.input_types:
+            valid_inputs = class_def.INPUT_TYPES()
+            if is_v3_node(class_def):
+                live_inputs = self.dynprompt.get_node(unique_id)["inputs"]
+                valid_inputs, _, _ = get_finalized_inputs(class_def, live_inputs, valid_inputs)
+            self.input_types[unique_id] = valid_inputs
+        return get_input_info(class_def, input_name, self.input_types[unique_id])
 
     def make_input_strong_link(self, to_node_id, to_input):
         inputs = self.dynprompt.get_node(to_node_id)["inputs"]
