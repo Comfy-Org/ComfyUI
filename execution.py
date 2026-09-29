@@ -13,6 +13,7 @@ import asyncio
 import torch
 
 from comfy.cli_args import args, get_console_log_level
+import comfy.benchmark
 import comfy.memory_management
 import comfy.model_management
 import comfy.model_patcher
@@ -543,9 +544,13 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 # TODO - How to handle this with async functions without contextvars (which requires Python 3.12)?
                 GraphBuilder.set_default_prefix(unique_id, call_index, 0)
 
+            _bench = comfy.benchmark.get_active()
+            _bench_t0 = time.perf_counter() if _bench is not None else None
             try:
                 output_data, output_ui, has_subgraph, has_pending_tasks = await get_output_data(prompt_id, unique_id, obj, input_data_all, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb, v3_data=v3_data)
             finally:
+                if _bench is not None:
+                    _bench.record_node(unique_id, class_type, (time.perf_counter() - _bench_t0) * 1000.0)
                 if comfy.memory_management.aimdo_enabled:
                     if get_console_log_level(args.verbose) == "DEBUG":
                         comfy_aimdo.control.analyze()
@@ -741,6 +746,11 @@ class PromptExecutor:
         self.status_messages = []
         self.add_message("execution_start", { "prompt_id": prompt_id}, broadcast=False)
 
+        # Benchmark capture is a no-op unless this run opted in (extra_data["benchmark"])
+        # or the global --benchmark flag is set. When off, this returns None and
+        # installs nothing (no wrappers, no sampler thread, no context).
+        benchmark_ctx = comfy.benchmark.start(prompt_id, extra_data)
+
         self._notify_prompt_lifecycle("start", prompt_id)
         ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
         ram_inactive_headroom = int(self.cache_args["ram_inactive"] * (1024 ** 3))
@@ -841,6 +851,7 @@ class PromptExecutor:
             comfy.memory_management.set_ram_cache_release_state(None, 0)
             self.prompt_model_tracker.end()
             self._notify_prompt_lifecycle("end", prompt_id)
+            comfy.benchmark.finish(benchmark_ctx, self)
 
 
 async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
