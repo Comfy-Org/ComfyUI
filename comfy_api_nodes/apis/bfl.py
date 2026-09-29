@@ -176,3 +176,11 @@ class BFLFluxVideoUpscaleRequest(BaseModel):
     creativity: int = Field(1, description="0 preserves the source precisely, 1 enhances detail.")
     prompt: str | None = Field(None)
     safety_tolerance: int = Field(2, ge=0, le=4)
+
+
+class BFLFluxVideoEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    video: str = Field(..., description="MP4 (URL or base64), at most 15 seconds and 50 MiB.")
+    prompt: str = Field(..., description="Edit instruction, 1 to 4096 characters once trimmed.")
+    safety_tolerance: int = Field(4, ge=0, le=4)

@@ -1,205 +1,386 @@
-"""Tests for enrich_output_with_assets in comfy_execution/asset_enrichment.py."""
+import copy
 import os
-import types
-import unittest
-from unittest.mock import MagicMock, patch
+import tempfile
+from collections import namedtuple
+from unittest.mock import patch
+
+import folder_paths
+import pytest
+
+from app.assets.manager import NoAssets
+from comfy_execution.asset_enrichment import (
+    emit_cached_output,
+    register_cached_outputs,
+    register_executed_outputs,
+)
+from test_inmemory_assets import AssetCall, InMemoryAssets
+
+_CacheEntry = namedtuple("_CacheEntry", ["ui", "outputs"])
+
+_BASE = os.path.join(tempfile.gettempdir(), "asset-enrichment-test-base")
 
 
-def _make_args(enable_assets: bool):
-    a = types.SimpleNamespace()
-    a.enable_assets = enable_assets
-    return a
+class _ArgsStub:
+    enable_assets = False
+    enable_asset_hashing = False
 
 
-def _make_register_result(ref_id="ref-id-2"):
-    result = MagicMock()
-    result.ref.id = ref_id
-    return result
+class _Server:
+    last_node_id: str | None = None
+    sockets_metadata: dict[str, dict[str, object]] = {}
+
+    def __init__(self, client_id: str | None = None) -> None:
+        self.client_id = client_id
+        self.sent: list[tuple] = []
+
+    def send_sync(self, event, data, sid=None):
+        self.sent.append((event, data, sid))
+
+    def queue_updated(self) -> None:
+        pass
 
 
-# Platform-appropriate absolute base. tempfile.gettempdir() returns C:\... on
-# Windows and /tmp on POSIX, so containment via commonpath behaves naturally.
-_DEFAULT_BASE = os.path.join(__import__("tempfile").gettempdir(), "asset-enrichment-test-base")
+@pytest.fixture
+def output_path_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(folder_paths, "get_directory_by_type", lambda _type: _BASE)
+    monkeypatch.setattr(os.path, "isfile", lambda _path: True)
 
 
-def _mocked_modules(*, enable_assets=True, register_file_in_place=None, directory=_DEFAULT_BASE):
+def _output(filename: str, *, subfolder: str = "", type_: str = "output") -> dict:
+    return {"images": [{"filename": filename, "subfolder": subfolder, "type": type_}]}
+
+
+def _wrapper(filename: str, node_id: str = "1") -> dict:
     return {
-        "comfy.cli_args": MagicMock(args=_make_args(enable_assets)),
-        "folder_paths": MagicMock(get_directory_by_type=MagicMock(return_value=directory)),
-        "app.assets.services.ingest": MagicMock(
-            register_file_in_place=register_file_in_place or MagicMock(return_value=_make_register_result()),
-            DependencyMissingError=type("DependencyMissingError", (Exception,), {}),
-        ),
+        "meta": {
+            "node_id": node_id,
+            "display_node": node_id,
+            "parent_node": None,
+            "real_node_id": node_id,
+        },
+        "output": _output(filename),
     }
 
 
-def _call(output_ui, *, enable_assets=True, file_exists=True, register_result=None, directory=_DEFAULT_BASE):
-    register_mock = MagicMock(return_value=register_result or _make_register_result())
-    mocked = _mocked_modules(
-        enable_assets=enable_assets,
-        register_file_in_place=register_mock,
-        directory=directory,
+def _find_ids(value) -> list:
+    found: list = []
+    if isinstance(value, dict):
+        for key, sub in value.items():
+            if key == "id":
+                found.append(sub)
+            found.extend(_find_ids(sub))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_find_ids(item))
+    return found
+
+
+# REQUIRED test names (invoked verbatim downstream). Do not rename.
+def test_executed_new_path_gets_fresh_id(output_path_environment) -> None:
+    manager = InMemoryAssets()
+    output_ui = _output("new.png")
+
+    enriched = register_executed_outputs(output_ui, "job-1", manager)
+
+    assert enriched["images"][0]["id"] == "asset-1"
+    assert "id" not in output_ui["images"][0]
+    assert manager.calls == [
+        AssetCall(
+            "register_executed_output", (os.path.join(_BASE, "new.png"), "job-1")
+        )
+    ]
+    deliveries = manager.deliveries_by_path[os.path.join(_BASE, "new.png")]
+    assert [(delivery.asset.id, delivery.asset.job_id) for delivery in deliveries] == [
+        ("asset-1", "job-1")
+    ]
+
+
+def test_executed_multiple_entries_register_each_output(output_path_environment) -> None:
+    manager = InMemoryAssets()
+    filenames = ["first.png", "second.png", "third.png"]
+    output_ui = {
+        "images": [
+            {"filename": filename, "subfolder": "batch", "type": "output"}
+            for filename in filenames
+        ]
+    }
+
+    register_executed_outputs(output_ui, "job-list", manager)
+
+    expected_paths = [os.path.join(_BASE, "batch", filename) for filename in filenames]
+    assert manager.calls == [
+        AssetCall("register_executed_output", (path, "job-list"))
+        for path in expected_paths
+    ]
+    assert [
+        (delivery.abs_path, delivery.asset.job_id, delivery.superseded)
+        for path in expected_paths
+        for delivery in manager.deliveries_by_path[path]
+    ] == [(path, "job-list", False) for path in expected_paths]
+
+
+def test_executed_mixed_types_use_their_own_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = InMemoryAssets()
+    output_root = f"{_BASE}-output"
+    temp_root = f"{_BASE}-temp"
+    roots = {"output": output_root, "temp": temp_root}
+    monkeypatch.setattr(
+        folder_paths,
+        "get_directory_by_type",
+        lambda output_type: roots[output_type],
+    )
+    monkeypatch.setattr(os.path, "isfile", lambda _path: True)
+    output_ui = {
+        "images": [
+            {"filename": "kept.png", "subfolder": "saved", "type": "output"},
+            {"filename": "preview.png", "subfolder": "staged", "type": "temp"},
+        ]
+    }
+
+    register_executed_outputs(output_ui, "job-mixed", manager)
+
+    assert manager.calls == [
+        AssetCall(
+            "register_executed_output",
+            (os.path.join(output_root, "saved", "kept.png"), "job-mixed"),
+        ),
+        AssetCall(
+            "register_executed_output",
+            (os.path.join(temp_root, "staged", "preview.png"), "job-mixed"),
+        ),
+    ]
+
+
+def test_executed_repeated_calls_keep_distinct_path_deliveries(
+    output_path_environment,
+) -> None:
+    manager = InMemoryAssets()
+    filenames = ["iteration-1.png", "iteration-2.png", "iteration-3.png"]
+
+    for filename in filenames:
+        register_executed_outputs(_output(filename), "loop-job", manager)
+
+    expected_paths = [os.path.join(_BASE, filename) for filename in filenames]
+    assert manager.calls == [
+        AssetCall("register_executed_output", (path, "loop-job"))
+        for path in expected_paths
+    ]
+    assert [
+        (delivery.abs_path, delivery.asset.job_id, delivery.superseded)
+        for path in expected_paths
+        for delivery in manager.deliveries_by_path[path]
+    ] == [(path, "loop-job", False) for path in expected_paths]
+
+
+def test_executed_empty_entry_list_is_noop(output_path_environment) -> None:
+    manager = InMemoryAssets()
+
+    enriched = register_executed_outputs({"images": []}, "job", manager)
+
+    assert enriched == {"images": []}
+    assert manager.calls == []
+    assert manager.deliveries_by_path == {}
+
+
+def test_executed_over_existing_path_gets_new_id_and_marks_old_missing(output_path_environment) -> None:
+    manager = InMemoryAssets()
+
+    first = register_executed_outputs(_output("same.png"), "job-1", manager)
+    old_id = first["images"][0]["id"]
+
+    second = register_executed_outputs(_output("same.png"), "job-2", manager)
+    new_id = second["images"][0]["id"]
+
+    deliveries = manager.deliveries_by_path[os.path.join(_BASE, "same.png")]
+    assert new_id != old_id
+    assert deliveries[0].superseded is True
+    assert deliveries[-1].asset.id == new_id
+
+
+def test_cached_replay_creates_delivery_with_current_job_id(output_path_environment) -> None:
+    manager = InMemoryAssets()
+
+    register_executed_outputs(_output("replay.png"), "seed-job", manager)
+    enriched = register_cached_outputs(_wrapper("replay.png"), "replay-job", manager)
+
+    replay_id = enriched["output"]["images"][0]["id"]
+    deliveries = manager.deliveries_by_path[os.path.join(_BASE, "replay.png")]
+    assert (replay_id, "replay-job") == (deliveries[-1].asset.id, deliveries[-1].asset.job_id)
+    assert replay_id != "asset-1"
+
+
+def test_cached_registration_happens_without_client(output_path_environment) -> None:
+    manager = InMemoryAssets()
+    server = _Server(client_id=None)
+    ui_outputs: dict = {}
+
+    register_executed_outputs(_output("noclient.png"), "seed-job", manager)
+    emit_cached_output(
+        server,
+        "node-1",
+        "node-1",
+        _CacheEntry(ui=_wrapper("noclient.png"), outputs=[]),
+        "job-x",
+        ui_outputs,
+        manager,
     )
 
-    # Only os.path.isfile is patched — abspath/join must run natively so the
-    # containment check sees real platform paths.
-    with patch.dict("sys.modules", mocked), \
-         patch("os.path.isfile", return_value=file_exists):
-        import importlib
-        import comfy_execution.asset_enrichment as mod
-        importlib.reload(mod)
-        return mod.enrich_output_with_assets(output_ui)
+    deliveries = manager.deliveries_by_path[os.path.join(_BASE, "noclient.png")]
+    assert any(delivery.asset.job_id == "job-x" for delivery in deliveries)
+    assert "node-1" in ui_outputs
+    assert ui_outputs["node-1"]["output"]["images"][0]["id"] is not None
+    assert server.sent == []
 
 
-class TestEnrichOutputWithAssets(unittest.TestCase):
+def test_cache_entry_contains_no_asset_ids(output_path_environment) -> None:
+    manager = InMemoryAssets()
+    output_ui = _output("keep.png")
 
-    def test_disabled_returns_unchanged(self):
-        output = {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}
-        result = _call(output, enable_assets=False)
-        self.assertNotIn("id", result["images"][0])
+    enriched = register_executed_outputs(output_ui, "job", manager)
 
-    def test_non_list_value_passed_through(self):
-        output = {"text": "hello"}
-        result = _call(output)
-        self.assertEqual(result["text"], "hello")
-
-    def test_entry_without_filename_unchanged(self):
-        output = {"latent": [{"subfolder": "", "type": "output"}]}
-        result = _call(output)
-        self.assertNotIn("id", result["latent"][0])
-
-    def test_entry_without_type_unchanged(self):
-        output = {"data": [{"filename": "a.png", "subfolder": ""}]}
-        result = _call(output)
-        self.assertNotIn("id", result["data"][0])
-
-    def test_file_not_on_disk_unchanged(self):
-        output = {"images": [{"filename": "missing.png", "subfolder": "", "type": "output"}]}
-        result = _call(output, file_exists=False)
-        self.assertNotIn("id", result["images"][0])
-
-    def test_unknown_type_returns_none_directory_unchanged(self):
-        output = {"images": [{"filename": "a.png", "subfolder": "", "type": "unknown"}]}
-        result = _call(output, directory=None)
-        self.assertNotIn("id", result["images"][0])
-
-    def test_register_injects_only_id(self):
-        reg = _make_register_result(ref_id="inline-ref")
-        output = {"images": [{"filename": "new.png", "subfolder": "", "type": "output"}]}
-        result = _call(output, register_result=reg)
-        img = result["images"][0]
-        self.assertEqual(img["id"], "inline-ref")
-        # Only id is injected — no asset_hash, name, preview_url, size
-        self.assertNotIn("asset_hash", img)
-        self.assertNotIn("name", img)
-        self.assertNotIn("preview_url", img)
-        self.assertNotIn("size", img)
-
-    def test_register_called_per_entry(self):
-        register_mock = MagicMock(return_value=_make_register_result())
-        mocked = _mocked_modules(register_file_in_place=register_mock)
-        output = {
-            "images": [
-                {"filename": "a.png", "subfolder": "", "type": "output"},
-                {"filename": "b.png", "subfolder": "", "type": "output"},
-            ]
-        }
-
-        with patch.dict("sys.modules", mocked), \
-             patch("os.path.isfile", return_value=True):
-            import importlib
-            import comfy_execution.asset_enrichment as mod
-            importlib.reload(mod)
-            mod.enrich_output_with_assets(output)
-
-        self.assertEqual(register_mock.call_count, 2)
-
-    def test_original_entry_not_mutated(self):
-        orig = {"filename": "a.png", "subfolder": "", "type": "output"}
-        output = {"images": [orig]}
-        _call(output)
-        self.assertNotIn("id", orig)
-
-    def test_enrichment_error_does_not_block_sibling_entries(self):
-        call_count = [0]
-        good_reg = _make_register_result(ref_id="good-ref")
-
-        def register_side_effect(abs_path, name, tags):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise RuntimeError("boom")
-            return good_reg
-
-        mocked = _mocked_modules(register_file_in_place=register_side_effect)
-
-        output = {
-            "images": [
-                {"filename": "bad.png", "subfolder": "", "type": "output"},
-                {"filename": "good.png", "subfolder": "", "type": "output"},
-            ]
-        }
-
-        with patch.dict("sys.modules", mocked), \
-             patch("os.path.isfile", return_value=True):
-            import importlib
-            import comfy_execution.asset_enrichment as mod
-            importlib.reload(mod)
-            result = mod.enrich_output_with_assets(output)
-
-        imgs = result["images"]
-        self.assertNotIn("id", imgs[0])
-        self.assertEqual(imgs[1]["id"], "good-ref")
-
-    def test_multiple_output_keys_all_enriched(self):
-        output = {
-            "images": [{"filename": "a.png", "subfolder": "", "type": "output"}],
-            "videos": [{"filename": "b.mp4", "subfolder": "", "type": "output"}],
-        }
-        result = _call(output)
-        self.assertIn("id", result["images"][0])
-        self.assertIn("id", result["videos"][0])
-
-    def test_none_entry_in_list_unchanged(self):
-        output = {"images": [None, {"filename": "a.png", "subfolder": "", "type": "output"}]}
-        result = _call(output)
-        self.assertIsNone(result["images"][0])
-        self.assertIn("id", result["images"][1])
-
-    def test_path_traversal_subfolder_skipped(self):
-        register_mock = MagicMock(return_value=_make_register_result())
-        mocked = _mocked_modules(register_file_in_place=register_mock)
-
-        output = {"images": [{"filename": "passwd", "subfolder": "../../etc", "type": "output"}]}
-
-        # Do NOT patch os.path.abspath — real resolution is required for the containment check.
-        with patch.dict("sys.modules", mocked), \
-             patch("os.path.isfile", return_value=True):
-            import importlib
-            import comfy_execution.asset_enrichment as mod
-            importlib.reload(mod)
-            result = mod.enrich_output_with_assets(output)
-
-        self.assertNotIn("id", result["images"][0])
-        register_mock.assert_not_called()
-
-    def test_absolute_filename_skipped(self):
-        register_mock = MagicMock(return_value=_make_register_result())
-        mocked = _mocked_modules(register_file_in_place=register_mock)
-
-        # Absolute filename — os.path.join discards earlier components when a later one is absolute.
-        absolute_filename = os.path.abspath(os.sep + "etc" + os.sep + "passwd")
-        output = {"images": [{"filename": absolute_filename, "subfolder": "", "type": "output"}]}
-
-        with patch.dict("sys.modules", mocked), \
-             patch("os.path.isfile", return_value=True):
-            import importlib
-            import comfy_execution.asset_enrichment as mod
-            importlib.reload(mod)
-            result = mod.enrich_output_with_assets(output)
-
-        self.assertNotIn("id", result["images"][0])
-        register_mock.assert_not_called()
+    cache_entry = _CacheEntry(
+        ui={"meta": {"node_id": "1"}, "output": output_ui}, outputs=[]
+    )
+    assert _find_ids(cache_entry.ui) == []
+    assert _find_ids(enriched) == ["asset-1"]
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_cached_ui_object_unmodified_after_emission(output_path_environment) -> None:
+    manager = InMemoryAssets()
+    server = _Server(client_id="client-1")
+    cached = _CacheEntry(ui=_wrapper("immut.png"), outputs=[])
+    snapshot = copy.deepcopy(cached.ui)
+
+    register_executed_outputs(_output("immut.png"), "seed-job", manager)
+    emit_cached_output(server, "1", "1", cached, "prompt-1", {}, manager)
+
+    assert cached.ui == snapshot
+
+
+def test_double_emission_yields_single_delivery(output_path_environment) -> None:
+    manager = InMemoryAssets()
+    server = _Server(client_id="client-1")
+    ui_outputs: dict = {}
+    cached = _CacheEntry(ui=_wrapper("dbl.png"), outputs=[])
+
+    register_executed_outputs(_output("dbl.png"), "seed-job", manager)
+    emit_cached_output(server, "1", "1", cached, "prompt-1", ui_outputs, manager)
+    emit_cached_output(server, "1", "1", cached, "prompt-1", ui_outputs, manager)
+
+    deliveries = manager.deliveries_by_path[os.path.join(_BASE, "dbl.png")]
+    assert len([delivery for delivery in deliveries if delivery.asset.job_id == "prompt-1"]) == 1
+
+
+def test_executed_disabled_returns_unenriched_copy(output_path_environment) -> None:
+    manager = NoAssets(_ArgsStub())
+    output_ui = _output("a.png")
+
+    with patch.object(
+        manager,
+        "register_executed_output",
+        wraps=manager.register_executed_output,
+    ) as register_executed_output:
+        enriched = register_executed_outputs(output_ui, "job", manager)
+
+    assert enriched is not output_ui
+    assert "id" not in enriched["images"][0]
+    register_executed_output.assert_not_called()
+
+
+def test_executed_missing_file_is_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = InMemoryAssets()
+    monkeypatch.setattr(folder_paths, "get_directory_by_type", lambda _type: _BASE)
+    monkeypatch.setattr(os.path, "isfile", lambda _path: False)
+
+    enriched = register_executed_outputs(_output("gone.png"), "job", manager)
+
+    assert "id" not in enriched["images"][0]
+    assert manager.calls == []
+
+
+def test_executed_path_escape_is_skipped(output_path_environment) -> None:
+    manager = InMemoryAssets()
+    output_ui = {"images": [{"filename": "passwd", "subfolder": "../../etc", "type": "output"}]}
+
+    enriched = register_executed_outputs(output_ui, "job", manager)
+
+    assert "id" not in enriched["images"][0]
+    assert manager.calls == []
+
+
+def test_executed_non_list_value_passes_through(output_path_environment) -> None:
+    manager = InMemoryAssets()
+
+    enriched = register_executed_outputs({"text": "hello"}, "job", manager)
+
+    assert enriched["text"] == "hello"
+
+
+def test_executed_registration_failure_never_raises(
+    output_path_environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = InMemoryAssets()
+
+    def boom(_abs_path: str, job_id: str | None) -> None:
+        raise RuntimeError("registration blew up")
+
+    monkeypatch.setattr(manager, "register_executed_output", boom)
+
+    enriched = register_executed_outputs(_output("boom.png"), "job", manager)
+
+    assert "id" not in enriched["images"][0]
+
+
+def test_cached_strips_legacy_ids_before_replay(output_path_environment) -> None:
+    manager = InMemoryAssets()
+    wrapper = _wrapper("legacy.png")
+    wrapper["output"]["images"][0]["id"] = "stale-id"
+
+    register_executed_outputs(_output("legacy.png"), "seed-job", manager)
+    enriched = register_cached_outputs(wrapper, "replay-job", manager)
+
+    assert enriched["output"]["images"][0]["id"] != "stale-id"
+    assert wrapper["output"]["images"][0]["id"] == "stale-id"
+
+
+def test_cached_none_wrapper_returns_none(output_path_environment) -> None:
+    manager = InMemoryAssets()
+
+    result = register_cached_outputs(None, "job", manager)
+
+    assert result is None
+    assert manager.calls == []
+
+
+def test_cached_missing_live_content_is_nonevent(output_path_environment) -> None:
+    manager = InMemoryAssets()
+
+    enriched = register_cached_outputs(_wrapper("orphan.png"), "job", manager)
+
+    assert "id" not in enriched["output"]["images"][0]
+    assert manager.deliveries_by_path == {}
+
+
+def test_emit_cached_sends_enriched_output_to_client(output_path_environment) -> None:
+    manager = InMemoryAssets()
+    server = _Server(client_id="client-1")
+    ui_outputs: dict = {}
+
+    register_executed_outputs(_output("send.png"), "seed-job", manager)
+    emit_cached_output(
+        server,
+        "1",
+        "1",
+        _CacheEntry(ui=_wrapper("send.png"), outputs=[]),
+        "prompt-1",
+        ui_outputs,
+        manager,
+    )
+
+    assert len(server.sent) == 1
+    event, payload, client_id = server.sent[0]
+    assert event == "executed"
+    assert client_id == "client-1"
+    assert payload["output"]["images"][0]["id"] is not None

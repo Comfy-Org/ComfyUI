@@ -23,6 +23,7 @@ import struct
 import ctypes
 import os
 import comfy.memory_management
+import comfy.storage
 import safetensors.torch
 import numpy as np
 from PIL import Image
@@ -200,6 +201,7 @@ def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
                     sd = pl_sd
             else:
                 sd = pl_sd
+    comfy.storage.annotate_state_dict(sd, ckpt)
     return (sd, metadata) if return_metadata else sd
 
 def save_torch_file(sd, ckpt, metadata=None):

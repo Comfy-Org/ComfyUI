@@ -1919,7 +1919,7 @@
         "extra": {
           "workflowRendererVersion": "LG"
         },
-        "category": "Image generation and editing/Outpaint image",
+        "category": "Image editing/Outpaint image",
         "description": "Outpaints beyond image boundaries using Qwen-Image's outpainting capabilities."
       },
       {

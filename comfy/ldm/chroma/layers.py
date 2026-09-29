@@ -4,6 +4,7 @@ from torch import Tensor, nn
 from comfy.ldm.flux.layers import (
     MLPEmbedder,
     ModulationOut,
+    modulated_norm,
 )
 
 # TODO: remove this in a few months
@@ -57,6 +58,6 @@ class LastLayer(nn.Module):
         shift, scale = vec
         shift = shift.squeeze(1)
         scale = scale.squeeze(1)
-        x = torch.addcmul(shift[:, None, :], 1 + scale[:, None, :], self.norm_final(x))
+        x = modulated_norm(x, self.norm_final, scale[:, None, :], shift[:, None, :])
         x = self.linear(x)
         return x
