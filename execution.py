@@ -692,6 +692,15 @@ class PromptExecutor:
         node_id = error["node_id"]
         class_type = prompt[node_id]["class_type"]
 
+        # Record the run outcome for benchmark capture (no-op when off).
+        _bench = comfy.benchmark.get_active()
+        if _bench is not None:
+            _bench.set_status(
+                "interrupted"
+                if isinstance(ex, comfy.model_management.InterruptProcessingException)
+                else "error"
+            )
+
         # First, send back the status to the frontend depending
         # on the exception type
         if isinstance(ex, comfy.model_management.InterruptProcessingException):
@@ -749,7 +758,7 @@ class PromptExecutor:
         # Benchmark capture is a no-op unless this run opted in (extra_data["benchmark"])
         # or the global --benchmark flag is set. When off, this returns None and
         # installs nothing (no wrappers, no sampler thread, no context).
-        benchmark_ctx = comfy.benchmark.start(prompt_id, extra_data)
+        benchmark_ctx = comfy.benchmark.start(prompt_id, extra_data, prompt)
 
         self._notify_prompt_lifecycle("start", prompt_id)
         ram_headroom = int(self.cache_args["ram"] * (1024 ** 3))
