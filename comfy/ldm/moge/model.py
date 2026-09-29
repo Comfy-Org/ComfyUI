@@ -16,6 +16,7 @@ import torch.nn.functional as F
 import comfy.ops
 import comfy.model_management
 import comfy.model_patcher
+import comfy.storage
 
 from comfy.image_encoders.dino2 import Dinov2Model
 
@@ -342,7 +343,7 @@ class MoGeModel:
         self.dtype = comfy.model_management.text_encoder_dtype(self.load_device)
 
         self.model = build_from_state_dict(state_dict, dtype=self.dtype, device=offload_device, operations=comfy.ops.manual_cast).eval()
-        self.patcher = comfy.model_patcher.CoreModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device)
+        self.patcher = comfy.model_patcher.CoreModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device, fast_disk=comfy.storage.state_dict_fast_disk(state_dict))
         if not hasattr(self.model, "encoder"):
             self.version = "v1"
         else:

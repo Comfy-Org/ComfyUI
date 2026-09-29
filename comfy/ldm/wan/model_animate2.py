@@ -14,9 +14,9 @@ import comfy.model_management
 import comfy.quant_ops
 import comfy.utils
 from comfy.ldm.flux.math import apply_rope1
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_attention
 
-from .model import WanAttentionBlock, WanModel, WanSelfAttention, repeat_e, sinusoidal_embedding_1d
+from .model import WanAttentionBlock, WanModel, WanSelfAttention, modulate, repeat_e, sinusoidal_embedding_1d
 
 
 class WanAnimate2SelfAttention(WanSelfAttention):
@@ -39,7 +39,7 @@ class WanAnimate2SelfAttention(WanSelfAttention):
     def forward_pose(self, x, freqs, transformer_options={}):
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         q, k, v = self.qkv(x, freqs)
-        out = optimized_attention(q.reshape(b, s, n * d), k.reshape(b, s, n * d), v.reshape(b, s, n * d), heads=self.num_heads, transformer_options=transformer_options)
+        out = optimized_attention(AttentionTensorContainer(q.reshape(b, s, n * d)), AttentionTensorContainer(k.reshape(b, s, n * d)), AttentionTensorContainer(v.reshape(b, s, n * d)), heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.o(self._attn1_patch(out, q, k, transformer_options)), k, v
 
     def forward_gen(self, x, freqs, k_pose, v_pose, f_gen, hw, buffers, ref_strength=1.0, transformer_options={}):
@@ -50,7 +50,7 @@ class WanAnimate2SelfAttention(WanSelfAttention):
             v[:, :hw] *= ref_strength  # frame 0 is the reference image's slot
 
         if k_pose is None:  # pose influence windowed out: plain self-attention, no per-frame loop
-            out = optimized_attention(q.reshape(b, s, n * d), k.reshape(b, s, n * d), v.reshape(b, s, n * d), heads=self.num_heads, transformer_options=transformer_options)
+            out = optimized_attention(AttentionTensorContainer(q.reshape(b, s, n * d)), AttentionTensorContainer(k.reshape(b, s, n * d)), AttentionTensorContainer(v.reshape(b, s, n * d)), heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
             return self.o(self._attn1_patch(out, q, k, transformer_options))
 
         # gen half is the same every frame; only the hw-token pose tail is rewritten
@@ -66,7 +66,7 @@ class WanAnimate2SelfAttention(WanSelfAttention):
                 kbuf[:, s:] = k_pose[:, (j - 1) * hw:j * hw]
                 vbuf[:, s:] = v_pose[:, (j - 1) * hw:j * hw]
                 kk, vv = kbuf, vbuf
-            out[:, j * hw:(j + 1) * hw] = optimized_attention(q_j, kk.reshape(b, kk.shape[1], n * d), vv.reshape(b, kk.shape[1], n * d), heads=self.num_heads, transformer_options=transformer_options)
+            out[:, j * hw:(j + 1) * hw] = optimized_attention(AttentionTensorContainer(q_j), AttentionTensorContainer(kk.reshape(b, kk.shape[1], n * d)), AttentionTensorContainer(vv.reshape(b, kk.shape[1], n * d)), heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.o(self._attn1_patch(out, q, k, transformer_options))
 
 
@@ -85,13 +85,13 @@ class WanAnimate2Block(WanAttentionBlock):
         x = x + self.cross_attn(self.norm3(x), context, context_img_len=context_img_len, transformer_options=transformer_options)
         for p in transformer_options.get("patches", {}).get("attn2_patch", []):
             x = p({"x": x, "transformer_options": transformer_options})
-        y = self.ffn(torch.addcmul(repeat_e(e[3], x), self.norm2(x), 1 + repeat_e(e[4], x)))
+        y = self.ffn(modulate(x, self.norm2, e[3], e[4]))
         return torch.addcmul(x, y, repeat_e(e[5], x))
 
     def forward_pose(self, x, e, freqs, context, context_img_len=257, transformer_options={}):
         e = self._modulation(e, x)
         x = x.contiguous()
-        y, k, v = self.self_attn.forward_pose(torch.addcmul(repeat_e(e[0], x), self.norm1(x), 1 + repeat_e(e[1], x)), freqs, transformer_options=transformer_options)
+        y, k, v = self.self_attn.forward_pose(modulate(x, self.norm1, e[0], e[1]), freqs, transformer_options=transformer_options)
         x = torch.addcmul(x, y, repeat_e(e[2], x))
         del y
         return self._cross_attn_ffn(x, e, context, context_img_len, transformer_options), k, v
@@ -99,12 +99,12 @@ class WanAnimate2Block(WanAttentionBlock):
     def kv_from_input(self, x_pose, e, freqs, transformer_options={}):
         e = self._modulation(e, x_pose)
         x_pose = x_pose.contiguous()
-        return self.self_attn.kv(torch.addcmul(repeat_e(e[0], x_pose), self.norm1(x_pose), 1 + repeat_e(e[1], x_pose)), freqs)
+        return self.self_attn.kv(modulate(x_pose, self.norm1, e[0], e[1]), freqs)
 
     def forward_gen(self, x, e, freqs, context, k_pose, v_pose, f_gen, hw, buffers, ref_strength=1.0, context_img_len=257, transformer_options={}):
         e = self._modulation(e, x)
         x = x.contiguous()
-        y = self.self_attn.forward_gen(torch.addcmul(repeat_e(e[0], x), self.norm1(x), 1 + repeat_e(e[1], x)), freqs, k_pose, v_pose, f_gen, hw, buffers, ref_strength=ref_strength, transformer_options=transformer_options)
+        y = self.self_attn.forward_gen(modulate(x, self.norm1, e[0], e[1]), freqs, k_pose, v_pose, f_gen, hw, buffers, ref_strength=ref_strength, transformer_options=transformer_options)
         x = torch.addcmul(x, y, repeat_e(e[2], x))
         del y
         return self._cross_attn_ffn(x, e, context, context_img_len, transformer_options)

@@ -1037,7 +1037,7 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
         self.llama_template_images = "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=False, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=False, system_prompt="", **kwargs):
         image = kwargs.get("image", None)
         if image is not None and len(images) == 0:
             images = [image[i:i + 1] for i in range(image.shape[0])]
@@ -1061,6 +1061,8 @@ class Qwen35ImageTokenizer(sd1_clip.SD1Tokenizer):
                     vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
                     template = template.replace(vision_block, vision_block * len(images), 1)
             llama_text = template.format(text)
+            if system_prompt:
+                llama_text = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n" + llama_text
             if not thinking:
                 llama_text += "<think>\n</think>\n"
 
