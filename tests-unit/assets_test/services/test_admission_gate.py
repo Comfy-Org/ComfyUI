@@ -347,3 +347,18 @@ def test_settled_entries_are_seeded_in_one_write_session_batch(temp_dir: Path):
     specs, _ = insert_asset_specs.call_args.args
     assert [spec["abs_path"] for spec in specs] == [str(path) for path in settled]
     assert [entry.path for entry in _WATCH_LIST] == [str(moving)]
+
+
+def test_two_stat_admit_counts_each_restat_including_a_vanished_file(temp_dir: Path, monkeypatch):
+    kept = temp_dir / "kept.bin"
+    gone = temp_dir / "gone.bin"
+    for path in (kept, gone):
+        path.write_bytes(b"x")
+    candidates = [(str(kept), kept.stat()), (str(gone), gone.stat())]
+    monkeypatch.setattr("app.assets.scanner_admission.time.sleep", lambda _: gone.unlink())
+    counter = SimpleNamespace(files_statted=0)
+
+    admitted, _watched = _two_stat_admit(candidates, counter)
+
+    assert admitted == [str(kept)]
+    assert counter.files_statted == 2

@@ -373,9 +373,7 @@ def build_asset_specs(
             continue
         candidates.append((abs_p, stat_p))
 
-    admitted_paths, _ = _two_stat_admit(candidates)
-    if progress is not None:
-        progress.files_statted += len(candidates)  # _two_stat_admit re-stats each once
+    admitted_paths, _ = _two_stat_admit(candidates, progress)
     candidate_stats = dict(candidates)
     for abs_p in admitted_paths:
         stat_p = candidate_stats[abs_p]

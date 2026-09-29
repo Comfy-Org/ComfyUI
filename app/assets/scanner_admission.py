@@ -13,7 +13,7 @@ import mimetypes
 import os
 import time
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Protocol
 
 from app.assets.event_log import emit, error_type
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
@@ -39,13 +39,21 @@ def _should_skip_extension(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in PARTIAL_DOWNLOAD_EXTENSIONS
 
 
-def _two_stat_admit(paths_with_stats: list[tuple[str, os.stat_result]]) -> tuple[list[str], list[str]]:
+class _StatCounter(Protocol):
+    files_statted: int
+
+
+def _two_stat_admit(
+    paths_with_stats: list[tuple[str, os.stat_result]], counter: _StatCounter | None = None
+) -> tuple[list[str], list[str]]:
     if not paths_with_stats:
         return [], []
     time.sleep(0.1)
     admitted: list[str] = []
     watched: list[str] = []
     for path, first_stat in paths_with_stats:
+        if counter is not None:
+            counter.files_statted += 1
         try:
             second_stat = os.stat(path)
         except FileNotFoundError:
