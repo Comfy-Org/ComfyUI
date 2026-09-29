@@ -199,11 +199,32 @@ def test_row_whose_stored_spelling_differs_from_the_entry_stays_live(roots, sess
     create_record(session, content.id, respelled.name)
     session.commit()
     # Resolve either spelling, as a case-insensitive filesystem does, on any host.
-    real_exists = os.path.exists
+    real_stat = os.stat
     monkeypatch.setattr(
-        os.path, "exists",
-        lambda p: real_exists(p) or real_exists(os.fspath(p).replace(str(respelled.parent), str(real.parent))),
+        os, "stat",
+        lambda p, *a, **k: real_stat(os.fspath(p).replace(str(respelled.parent), str(real.parent)), *a, **k),
     )
+
+    _scan()
+
+    assert session.get(AssetContent, content.id).is_missing is False
+
+
+def test_row_the_listing_misses_but_cannot_be_statted_stays_live(roots, session, monkeypatch):
+    real = _write(roots["output"] / "portraits" / "img.png")
+    respelled = roots["output"] / "Portraits" / "img.png"
+    stat = real.stat()
+    content = create_content(session, str(respelled), None, stat.st_size, stat.st_mtime_ns)
+    create_record(session, content.id, respelled.name)
+    session.commit()
+    real_stat = os.stat
+
+    def stat_denying_the_respelled_path(path, *args, **kwargs):
+        if os.fspath(path) == str(respelled):
+            raise PermissionError(13, "Permission denied", os.fspath(path))
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat_denying_the_respelled_path)
 
     _scan()
 
