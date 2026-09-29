@@ -344,3 +344,44 @@ def test_a_recovery_rolled_back_by_a_failed_commit_is_not_counted(session, temp_
             insert_asset_specs([_spec(path)], set(), progress)
 
     assert progress.recovered == 0
+
+
+@pytest.mark.parametrize("while_away", ["unregistered", "base_path_unresolved"])
+def test_a_model_folder_pruned_while_unregistered_recovers_when_it_returns(
+    temp_dir, session, monkeypatch, while_away
+):
+    """A folder a custom node registers late, or an extra_model_paths entry whose base
+    path did not resolve for one launch, is pruned at startup and seen again later."""
+    import folder_paths
+
+    models = temp_dir / "lazy_models" / "checkpoints"
+    models.mkdir(parents=True)
+    for i in range(3):
+        (models / f"ckpt_{i}.safetensors").write_bytes(b"weights" * (i + 1))
+    for name in ("input", "output", "temp"):
+        (temp_dir / name).mkdir()
+    monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir / "input"))
+    monkeypatch.setattr("folder_paths.get_output_directory", lambda: str(temp_dir / "output"))
+    monkeypatch.setattr("folder_paths.get_temp_directory", lambda: str(temp_dir / "temp"))
+
+    def register(path: Path | None) -> None:
+        paths = {} if path is None else {"checkpoints": ([str(path)], {".safetensors"})}
+        monkeypatch.setattr(folder_paths, "folder_names_and_paths", paths)
+        monkeypatch.setattr(folder_paths, "filename_list_cache", {})
+
+    register(models)
+    _scan(("models",))
+    edits = _customise(session)
+    assert len(edits) == 3
+
+    register(None if while_away == "unregistered" else temp_dir / "$UNSET_VAR" / "checkpoints")
+    assert scanner.mark_missing_outside_prefixes_safely(scanner.get_owned_prefixes()) == 3
+    _scan(("models",))
+    assert _missing_count(session) == 3
+
+    register(models)
+    back = _scan(("models",))
+
+    assert back.recovered == 3
+    assert _missing_count(session) == 0
+    assert _records(session) == edits
