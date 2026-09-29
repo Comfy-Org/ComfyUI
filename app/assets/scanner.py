@@ -339,9 +339,6 @@ def rescans_output_by_listing(roots: tuple[RootType, ...]) -> bool:
     until the next scan that is not output-only, such as the startup scan. Core save nodes
     never overwrite, and reported outputs are registered at save time, so this only
     affects files written by something else.
-
-    Rows under a hidden directory are left alone until such a scan too, and if the output
-    root itself cannot be listed (e.g. an unmounted drive) nothing is retired at all.
     """
     return tuple(roots) == ("output",)
 
@@ -382,12 +379,11 @@ def unlisted_references(
 ) -> tuple[list[_ReferenceObservation], int]:
     """Split the live rows into (vanished, skipped count).
 
-    A row has vanished when the nearest directory above it that this walk listed lacks
-    the next component of its path: its own name, or the directory it sat in, which has
-    since been removed with everything under it. Every other row is skipped untouched: a
-    hidden name or path component, a directory that failed to list, and a path reachable
-    only through a symlink alias the walk did not take are all cases where the listing
-    says nothing about whether the file exists.
+    A row its parent's listing names is present, with no further check. Every other row
+    is stat'ed, and has vanished only if the stat says the file is gone: that covers a
+    name the listing lacks, a removed directory, and the rows no listing can speak for
+    (a hidden path, a directory that failed to list, a symlink alias the walk did not
+    take). The skipped count is the rows that were stat'ed and kept.
     """
     vanished: list[_ReferenceObservation] = []
     skipped = 0
@@ -395,13 +391,14 @@ def unlisted_references(
     for path, observations in live.items():
         yield_gil(run=RESCAN_YIELD_RUN)
         verdict = _listing_verdict(path, listings, names_by_dir)
-        # A listing compares names exactly, but a case-insensitive filesystem (NTFS, APFS)
-        # or a Unicode-normalizing one (HFS+) resolves a stored path whose spelling differs
-        # from the directory entry. Confirm with a stat before retiring: rows the listing
-        # calls gone are normally few.
-        if verdict is ListingVerdict.ABSENT and _is_gone(path):
+        if verdict is ListingVerdict.LISTED:
+            continue
+        # Stat before retiring. A listing compares names exactly, but a case-insensitive
+        # (NTFS, APFS) or Unicode-normalizing (HFS+) filesystem resolves a stored path
+        # spelled differently from its entry. Rows that reach here are normally few.
+        if _is_gone(path):
             vanished.extend(observations)
-        elif verdict is not ListingVerdict.LISTED:
+        else:
             skipped += len(observations)
     return vanished, skipped
 
