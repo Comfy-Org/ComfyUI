@@ -3,6 +3,7 @@ permission denied) is skipped by the startup scan: the scan completes, every oth
 folder is catalogued, and the skipped folder's rows are neither retired nor duplicated.
 Run through the seeder's real scan loop and folder_paths listing on an in-memory catalog."""
 
+import errno
 import logging
 import os
 import shutil
@@ -178,6 +179,28 @@ def test_an_unreadable_model_folder_is_skipped_without_retiring_its_rows(
 
     assert completed["skipped_folders_count"] == 1
     assert completed["created"] == 0
+    _assert_unchanged(before, _rows(session), shared_files)
+
+
+def test_an_io_error_on_a_file_in_a_listable_folder_leaves_its_row_live(
+    layout, session, caplog, monkeypatch
+):
+    """The folder probe passes, but stat'ing the stored files fails (a flaky share, a
+    device error): that says nothing about whether they exist, so nothing is retired."""
+    shared_files, before = _seed(layout, session, caplog)
+    real_stat = os.stat
+    flaky = {str(path) for path in shared_files}
+
+    def flaky_stat(path, *args, **kwargs):
+        if str(path) in flaky:
+            raise OSError(errno.EIO, "Input/output error")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", flaky_stat)
+    completed = _startup_scan(caplog)
+    monkeypatch.setattr(os, "stat", real_stat)
+
+    assert completed["skipped_folders_count"] == 0
     _assert_unchanged(before, _rows(session), shared_files)
 
 

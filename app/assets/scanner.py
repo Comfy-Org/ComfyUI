@@ -228,7 +228,7 @@ def observe_references_on_filesystem(
     for content_id, path, size_bytes, mtime_ns in contents:
         try:
             stat_result = os.stat(path, follow_symlinks=True)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
         except PermissionError as e:
             _log_scan_error("reference_stat", e)
@@ -236,9 +236,10 @@ def observe_references_on_filesystem(
                 progress.permission_denied += 1
             logging.debug("Permission denied accessing %s", path)
         except OSError as e:
+            # An I/O error (a flaky network share, a stale handle) says nothing about
+            # whether the file still exists, so the row stays live, as _is_gone leaves it.
             _log_scan_error("reference_stat", e)
             logging.debug("OSError checking %s: %s", path, e)
-            observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
         else:
             survivors.add(os.path.abspath(path))
             if stat_result.st_mtime_ns != mtime_ns:
