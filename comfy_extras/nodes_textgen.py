@@ -1,4 +1,3 @@
-import re
 from comfy_api.latest import ComfyExtension, io
 from typing_extensions import override
 
@@ -40,16 +39,21 @@ class TextGenerate(io.ComfyNode):
                 io.DynamicCombo.Input("sampling_mode", options=sampling_options, display_name="Sampling Mode"),
                 io.Boolean.Input("thinking", optional=True, default=False, tooltip="Operate in thinking mode if the model supports it."),
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
+                io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth; 2-5 pins it. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
+                io.String.Input("system_prompt", force_input=True, optional=True, tooltip="Replaces the system prompt in the model's chat template. Ignored when the default template is not used."),
             ],
             outputs=[
                 io.String.Output(display_name="generated_text"),
+                io.String.Output(display_name="thinking"),
             ],
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="") -> io.NodeOutput:
 
-        tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio)
+        mtp = False if mtp == "off" else (True if mtp == "auto" else int(mtp))
+
+        tokens = clip.tokenize(prompt, image=image, skip_template=not use_default_template, min_length=1, thinking=thinking, video=video, audio=audio, system_prompt=system_prompt if use_default_template else "")
 
         # Get sampling parameters from dynamic combo
         do_sample = sampling_mode.get("sampling_mode") == "on"
@@ -71,12 +75,18 @@ class TextGenerate(io.ComfyNode):
             min_p=min_p,
             repetition_penalty=repetition_penalty,
             presence_penalty=presence_penalty,
-            seed=seed
+            seed=seed,
+            mtp=mtp
         )
 
         generated_text = clip.decode(generated_ids)
 
-        return io.NodeOutput(generated_text)
+        # Reasoning opens in the generated text or at the end of a raw prompt, and has no close when max_length cut it short.
+        reasoning, _, text = generated_text.partition("</think>")
+        if not reasoning.lstrip().startswith("<think>") and not prompt.rstrip().endswith("<think>"):
+            reasoning, text = "", generated_text
+
+        return io.NodeOutput(text.strip(), reasoning.replace("<think>", "", 1).strip())
 
 
 LTX2_T2V_SYSTEM_PROMPT = """You are a Creative Assistant. Given a user's raw input prompt describing a scene or concept, expand it into a detailed video generation prompt with specific visuals and integrated audio to guide a text-to-video model.
@@ -225,17 +235,17 @@ class TextGenerateLTX2Prompt(TextGenerate):
         )
 
     @classmethod
-    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None) -> io.NodeOutput:
+    def execute(cls, clip, prompt, max_length, sampling_mode, image=None, thinking=False, use_default_template=True, video=None, audio=None, mtp="auto", system_prompt="") -> io.NodeOutput:
         # Gemma 3 and Gemma 4 use different chat-turn markers and image tokens.
         # The Gemma 4 text encoder is the LTX 2.4 path; Gemma 3 is LTX 2.0.
         is_gemma4 = "gemma4" in getattr(clip.tokenizer, "clip_name", "")
 
         if is_gemma4:
             if image is not None:
-                system = LTX24_I2V_SYSTEM_PROMPT.strip()
+                system = system_prompt.strip() or LTX24_I2V_SYSTEM_PROMPT.strip()
                 user_text = f"User Raw Input Prompt: {prompt}."
             else:
-                system = LTX24_T2V_SYSTEM_PROMPT.strip()
+                system = system_prompt.strip() or LTX24_T2V_SYSTEM_PROMPT.strip()
                 user_text = f"user prompt: {prompt}"
             think_prefix = "<|think|>\n" if thinking else ""
             model_open = "" if thinking else "<|channel>final\n"
@@ -246,7 +256,7 @@ class TextGenerateLTX2Prompt(TextGenerate):
                 f"<|turn>model\n{model_open}"
             )
         else:
-            system = (LTX2_I2V_SYSTEM_PROMPT if image is not None else LTX2_T2V_SYSTEM_PROMPT).strip()
+            system = system_prompt.strip() or (LTX2_I2V_SYSTEM_PROMPT if image is not None else LTX2_T2V_SYSTEM_PROMPT).strip()
             media = "\n<image_soft_token>\n" if image is not None else ""
             formatted_prompt = (
                 f"<start_of_turn>system\n{system}<end_of_turn>\n"
@@ -254,12 +264,10 @@ class TextGenerateLTX2Prompt(TextGenerate):
                 f"<start_of_turn>model\n"
             )
 
-        out = super().execute(clip, formatted_prompt, max_length, sampling_mode, image=image, thinking=thinking, use_default_template=use_default_template, video=video, audio=audio)
+        out = super().execute(clip, formatted_prompt, max_length, sampling_mode, image=image, thinking=thinking, use_default_template=use_default_template, video=video, audio=audio, mtp=mtp)
 
-        # Drop reasoning, including a block left unclosed by max_length. Both system prompts ask
-        # for the original prompt back when there is nothing to give; empty conditions on nothing.
-        text = re.sub(r"<think>.*?(?:</think>|$)", "", out.args[0], flags=re.DOTALL).strip()
-        return io.NodeOutput(text or prompt)
+        # Both system prompts ask for the original prompt back when there is nothing to give; empty conditions on nothing.
+        return io.NodeOutput(out.args[0] or prompt, out.args[1])
 
 
 class TextgenExtension(ComfyExtension):

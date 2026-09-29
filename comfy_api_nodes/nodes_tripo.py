@@ -55,6 +55,7 @@ from comfy_api_nodes.util import (
     tensor_to_bytesio,
     upload_3d_model_to_comfyapi,
     upload_images_to_comfyapi,
+    validate_output_unlinked,
     validate_string,
 )
 
@@ -2482,6 +2483,16 @@ def p_series_request_fields(model: dict) -> dict:
     return fields
 
 
+def p_series_check_outputs(cls: type[IO.ComfyNode], quad: bool) -> None:
+    empty_name, filled_name = ("GLB", "FBX") if quad else ("FBX", "GLB")
+    validate_output_unlinked(
+        cls,
+        1 if quad else 2,
+        f"quad is {'enabled' if quad else 'disabled'}, so this node delivers {filled_name} only "
+        f"and its {empty_name} output is empty. Connect the {filled_name} output instead",
+    )
+
+
 async def p_series_generate(cls: type[IO.ComfyNode], path: str, request: TripoPSeriesRequest) -> IO.NodeOutput:
     response = await sync_op(
         cls,
@@ -2509,13 +2520,14 @@ class TripoPSeriesTextToModelNode(IO.ComfyNode):
             search_aliases=["tripo p2", "quad mesh", "low poly"],
             inputs=[p_series_model_input("text")],
             outputs=model_outputs(legacy=False),
-            hidden=hidden_inputs(),
+            hidden=[*hidden_inputs(), IO.Hidden.dynprompt],
             is_api_node=True,
             price_badge=p_series_price_badge(),
         )
 
     @classmethod
     async def execute(cls, model: dict) -> IO.NodeOutput:
+        p_series_check_outputs(cls, model["quad"])
         prompt = model["prompt"].strip()
         negative_prompt = (model.get("negative_prompt") or "").strip()
         validate_string(prompt, min_length=1, max_length=1024)
@@ -2542,13 +2554,14 @@ class TripoPSeriesImageToModelNode(IO.ComfyNode):
             search_aliases=["tripo p2", "quad mesh", "low poly"],
             inputs=[p_series_model_input("image")],
             outputs=model_outputs(legacy=False),
-            hidden=hidden_inputs(),
+            hidden=[*hidden_inputs(), IO.Hidden.dynprompt],
             is_api_node=True,
             price_badge=p_series_price_badge(),
         )
 
     @classmethod
     async def execute(cls, model: dict) -> IO.NodeOutput:
+        p_series_check_outputs(cls, model["quad"])
         fields = p_series_request_fields(model)
         request = TripoPSeriesImageToModelRequest(
             input=(await upload_images_to_comfyapi(cls, model["image"], max_images=1))[0],
@@ -2571,13 +2584,14 @@ class TripoPSeriesMultiviewToModelNode(IO.ComfyNode):
             search_aliases=["tripo p2", "quad mesh", "low poly"],
             inputs=[p_series_model_input("multiview")],
             outputs=model_outputs(legacy=False),
-            hidden=hidden_inputs(),
+            hidden=[*hidden_inputs(), IO.Hidden.dynprompt],
             is_api_node=True,
             price_badge=p_series_price_badge(),
         )
 
     @classmethod
     async def execute(cls, model: dict) -> IO.NodeOutput:
+        p_series_check_outputs(cls, model["quad"])
         views = {
             "front": model["image"],
             "left": model.get("image_left"),

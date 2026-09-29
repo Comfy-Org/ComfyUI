@@ -59,7 +59,6 @@ async def _v25_submit_and_poll(cls: type[IO.ComfyNode], route: str, data: BaseMo
         ApiEndpoint(f"/proxy/ltx/v2/{route}", "POST"),
         response_model=Ltx25SubmitResponse,
         data=data,
-        max_retries=1,
     )
     job = await poll_op(
         cls,

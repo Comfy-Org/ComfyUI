@@ -46,6 +46,22 @@ class _PauseMallocGraph:
 def pause_malloc_graph(sync=False):
     return _PauseMallocGraph(sync)
 
+class _MallocGraphScope:
+    def __init__(self, device):
+        self.device = device
+
+    def __enter__(self):
+        malloc_graph_begin(self.device)
+
+    def __exit__(self, exc_type, *args):
+        if exc_type is None:
+            malloc_graph_end()
+        else:
+            cleanup_malloc_graph()
+
+def malloc_graph_scope(device):
+    return _MallocGraphScope(device)
+
 def malloc_graph_begin(device):
     global MALLOC_GRAPH_USED
     if not malloc_graph_enabled(device):
@@ -85,6 +101,24 @@ def cleanup_malloc_graph():
             _drop_graph(module)
         MALLOC_GRAPH_ROGUES += graph.rogue_count
         del graph
+
+def pin_modules(comfy_modules, device, dtype=None):
+    registerable_size = 0
+    for s in comfy_modules:
+        registerable_size += comfy.memory_management.vram_aligned_size([s.weight, s.bias])
+        for param_key in ("weight", "bias"):
+            lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
+            if lowvram_fn is not None:
+                registerable_size += lowvram_fn.memory_required()
+
+    offload_stream, fully_faulted = comfy.ops.cast_modules_with_vbar(comfy_modules, None, device, None, True, return_faulted=True)
+    if not (comfy_modules and comfy_modules[0]._pin_state["fast_disk"]):
+        comfy.model_management.ensure_pin_registerable(registerable_size)
+    comfy.model_management.sync_stream(device, offload_stream)
+    if fully_faulted and dtype is not None:
+        for comfy_module in comfy_modules:
+            comfy.ops.resolve_cast_module_with_vbar(comfy_module, dtype, device, dtype, None, False, return_weights=False)
+    return offload_stream, fully_faulted
 
 def cleanup_prefetched_modules(module, comfy_modules):
     for s in comfy_modules:
@@ -201,21 +235,7 @@ def prefetch_queue_pop(queue, device, module, dtype=None, core=None, enable_grap
                 if hasattr(s, "_v"):
                     comfy_modules.append(s)
 
-        registerable_size = 0
-        for s in comfy_modules:
-            registerable_size += comfy.memory_management.vram_aligned_size([s.weight, s.bias])
-            for param_key in ("weight", "bias"):
-                lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
-                if lowvram_fn is not None:
-                    registerable_size += lowvram_fn.memory_required()
-
-        offload_stream, fully_faulted = comfy.ops.cast_modules_with_vbar(comfy_modules, None, device, None, True, return_faulted=True)
-        if not (comfy_modules and comfy_modules[0]._pin_state["fast_disk"]):
-            comfy.model_management.ensure_pin_registerable(registerable_size)
-        comfy.model_management.sync_stream(device, offload_stream)
-        if fully_faulted and dtype is not None:
-            for comfy_module in comfy_modules:
-                comfy.ops.resolve_cast_module_with_vbar(comfy_module, dtype, device, dtype, None, False, return_weights=False)
+        offload_stream, fully_faulted = pin_modules(comfy_modules, device, dtype)
         queue[0] = (offload_stream, (module, comfy_modules))
 
     if core is not None:

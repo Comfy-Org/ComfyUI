@@ -43,6 +43,8 @@ STARTING_POINT_ID_PATTERN = r"<starting_point_id:(.*)>"
 
 class SupportedOpenAIModel(str, Enum):
     gpt_6_astra = "gpt-6-astra"
+    gpt_6_sol = "gpt-6-sol"
+    gpt_6_luna = "gpt-6-luna"
     gpt_5_6_sol = "gpt-5.6-sol"
     gpt_5_6_terra = "gpt-5.6-terra"
     gpt_5_6_luna = "gpt-5.6-luna"
@@ -66,6 +68,8 @@ _GPT_5_EFFORTS = ("minimal", "low", "medium", "high")
 _GPT_5_6_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
 SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
     SupportedOpenAIModel.gpt_6_astra: ("low", "medium", "high", "xhigh", "max"),
+    SupportedOpenAIModel.gpt_6_sol: _GPT_5_6_EFFORTS,
+    SupportedOpenAIModel.gpt_6_luna: _GPT_5_6_EFFORTS,
     SupportedOpenAIModel.gpt_5_6_sol: _GPT_5_6_EFFORTS,
     SupportedOpenAIModel.gpt_5_6_terra: _GPT_5_6_EFFORTS,
     SupportedOpenAIModel.gpt_5_6_luna: _GPT_5_6_EFFORTS,
@@ -84,12 +88,15 @@ SUPPORTED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
 }
 
 
-async def validate_and_cast_response(response, timeout: int = None) -> torch.Tensor:
+async def validate_and_cast_response(
+    response, timeout: int = None, cls: type[IO.ComfyNode] = None
+) -> torch.Tensor:
     """Validates and casts a response to a torch.Tensor.
 
     Args:
         response: The response to validate and cast.
         timeout: Request timeout in seconds. Defaults to None (no timeout).
+        cls: The calling node class; required for relative `/proxy/` URLs so they can be expanded and authenticated.
 
     Returns:
         A torch.Tensor of shape (N, H, W, C) with all returned images; images whose
@@ -112,7 +119,7 @@ async def validate_and_cast_response(response, timeout: int = None) -> torch.Ten
             img_io = BytesIO(base64.b64decode(img_data.b64_json))
         elif img_data.url:
             img_io = BytesIO()
-            await download_url_to_bytesio(img_data.url, img_io, timeout=timeout)
+            await download_url_to_bytesio(img_data.url, img_io, timeout=timeout, cls=cls)
         else:
             raise ValueError("Invalid image payload – neither URL nor base64 data present.")
 
@@ -324,10 +331,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
             if size not in ("auto", "1024x1024", "1024x1536", "1536x1024"):
                 raise ValueError(f"Resolution {size} is only supported by GPT Image 2 model")
 
-        if model == "gpt-image-2":
-            if background == "transparent":
-                raise ValueError("Transparent background is not supported for GPT Image 2 model")
-        elif model not in ("gpt-image-1", "gpt-image-1.5"):
+        if model not in ("gpt-image-1", "gpt-image-1.5", "gpt-image-2"):
             raise ValueError(f"Unknown model: {model}")
 
         if image is not None:
@@ -370,6 +374,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 cls,
                 ApiEndpoint(path="/proxy/openai/images/edits", method="POST"),
                 response_model=OpenAIImageGenerationResponse,
+                asset_urls=True,
                 data=OpenAIImageEditRequest(
                     model=model,
                     prompt=prompt,
@@ -388,6 +393,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                 cls,
                 ApiEndpoint(path="/proxy/openai/images/generations", method="POST"),
                 response_model=OpenAIImageGenerationResponse,
+                asset_urls=True,
                 data=OpenAIImageGenerationRequest(
                     model=model,
                     prompt=prompt,
@@ -399,7 +405,7 @@ class OpenAIGPTImage1(IO.ComfyNode):
                     moderation="low",
                 ),
             )
-        return IO.NodeOutput(await validate_and_cast_response(response))
+        return IO.NodeOutput(await validate_and_cast_response(response, cls=cls))
 
 
 GPT_IMAGE_QUALITIES = ("low", "medium", "high")
@@ -527,7 +533,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                         ),
                         IO.DynamicCombo.Option(
                             "gpt-image-2",
-                            _gpt_image_2_model_inputs(("auto", "opaque"), GPT_IMAGE_QUALITIES),
+                            _gpt_image_2_model_inputs(("auto", "opaque", "transparent"), GPT_IMAGE_QUALITIES),
                         ),
                         IO.DynamicCombo.Option("gpt-image-1.5", _gpt_image_legacy_model_inputs()),
                         IO.DynamicCombo.Option("gpt-image-1", _gpt_image_legacy_model_inputs()),
@@ -735,6 +741,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                 cls,
                 ApiEndpoint(path="/proxy/openai/images/edits", method="POST"),
                 response_model=OpenAIImageGenerationResponse,
+                asset_urls=True,
                 data=OpenAIImageEditRequest(
                     model=model_id,
                     prompt=prompt,
@@ -752,6 +759,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                 cls,
                 ApiEndpoint(path="/proxy/openai/images/generations", method="POST"),
                 response_model=OpenAIImageGenerationResponse,
+                asset_urls=True,
                 data=OpenAIImageGenerationRequest(
                     model=model_id,
                     prompt=prompt,
@@ -762,7 +770,7 @@ class OpenAIGPTImageNodeV2(IO.ComfyNode):
                     moderation="low",
                 ),
             )
-        return IO.NodeOutput(await validate_and_cast_response(response))
+        return IO.NodeOutput(await validate_and_cast_response(response, cls=cls))
 
 
 class OpenAIChatNode(IO.ComfyNode):
@@ -829,6 +837,16 @@ class OpenAIChatNode(IO.ComfyNode):
                   $contains($m, "gpt-6-astra") ? {
                     "type": "list_usd",
                     "usd": [0.0143, 0.0715],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                  : $contains($m, "gpt-6-sol") ? {
+                    "type": "list_usd",
+                    "usd": [0.00286, 0.0143],
+                    "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
+                  }
+                  : $contains($m, "gpt-6-luna") ? {
+                    "type": "list_usd",
+                    "usd": [0.000143, 0.000715],
                     "format": { "approximate": true, "separator": "-", "suffix": " per 1K tokens" }
                   }
                   : $contains($m, "o4-mini") ? {
@@ -1121,7 +1139,7 @@ class OpenAIChatConfig(IO.ComfyNode):
                     default="default",
                     optional=True,
                     tooltip="How much the model reasons before answering. 'default' leaves the choice to the model. "
-                    "Supported levels differ per model: GPT-6 Astra low-max, GPT-5.6 none-max (no minimal), "
+                    "Supported levels differ per model: GPT-6 Astra low-max, GPT-6 Sol/Luna and GPT-5.6 none-max (no minimal), "
                     "GPT-5.5 none-xhigh, GPT-5.5 Pro medium-xhigh, GPT-5 minimal-high, o-series low-high; "
                     "GPT-4.1 has no reasoning. Unsupported levels are rejected before the request is sent.",
                 ),

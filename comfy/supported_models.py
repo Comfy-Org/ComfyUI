@@ -23,9 +23,11 @@ import comfy.text_encoders.wan
 import comfy.text_encoders.ace
 import comfy.text_encoders.omnigen2
 import comfy.text_encoders.qwen_image
+import comfy.text_encoders.qwen_image21
 import comfy.text_encoders.hunyuan_image
 import comfy.text_encoders.kandinsky5
 import comfy.text_encoders.z_image
+import comfy.text_encoders.ming_image
 import comfy.text_encoders.ideogram4
 import comfy.text_encoders.boogu
 import comfy.text_encoders.krea2
@@ -1241,6 +1243,24 @@ class ZImagePixelSpace(ZImage):
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.ZImagePixelSpace(self, device=device)
 
+class MingImage(ZImage):
+    unet_config = {
+        "image_model": "ming_image",
+    }
+
+    sampling_settings = {
+        "multiplier": 1.0,
+        "shift": 3.16,  # reference dynamic shift at the 1024 bucket
+    }
+
+    latent_format = latent_formats.MingImage
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.MingImage(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        return supported_models_base.ClipTarget(comfy.text_encoders.ming_image.MingImageTokenizer, comfy.text_encoders.ming_image.te())
+
 class PixelDiTT2I(supported_models_base.BASE):
     unet_config = {
         "image_model": "pixeldit_t2i",
@@ -1414,7 +1434,7 @@ class WAN21_Vace(WAN21_T2V):
         self.memory_usage_factor = 1.2 * self.memory_usage_factor
 
     def get_model(self, state_dict, prefix="", device=None):
-        out = model_base.WAN21_Vace(self, image_to_video=False, device=device)
+        out = model_base.WAN21_Vace(self, image_to_video=self.unet_config.get("vace_image_input", False), device=device)
         return out
 
 class WAN21_HuMo(WAN21_T2V):
@@ -2051,6 +2071,35 @@ class QwenImage(supported_models_base.BASE):
         hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen25_7b.transformer.".format(pref))
         return supported_models_base.ClipTarget(comfy.text_encoders.qwen_image.QwenImageTokenizer, comfy.text_encoders.qwen_image.te(**hunyuan_detect))
 
+class QwenImage21(supported_models_base.BASE):
+    unet_config = {
+        "image_model": "qwen_image21",
+    }
+
+    # scheduler mu at 1024x1024 (base 0.5 @ 256 tokens, max 0.9 @ 8192)
+    sampling_settings = {
+        "multiplier": 1.0,
+        "shift": 0.69,
+    }
+
+    memory_usage_factor = 6.0
+
+    unet_extra_config = {}
+    latent_format = latent_formats.QwenImage21
+
+    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+
+    vae_key_prefix = ["vae."]
+    text_encoder_key_prefix = ["text_encoders."]
+
+    def get_model(self, state_dict, prefix="", device=None):
+        return model_base.QwenImage21(self, device=device)
+
+    def clip_target(self, state_dict={}):
+        pref = self.text_encoder_key_prefix[0]
+        hunyuan_detect = comfy.text_encoders.hunyuan_video.llama_detect(state_dict, "{}qwen3vl_8b.transformer.".format(pref))
+        return supported_models_base.ClipTarget(comfy.text_encoders.qwen_image21.QwenImage21Tokenizer, comfy.text_encoders.qwen_image21.te(**hunyuan_detect))
+
 class JoyImage(supported_models_base.BASE):
     unet_config = {
         "image_model": "joyimage",
@@ -2572,6 +2621,7 @@ models = [
     CosmosT2IPredict2,
     CosmosI2VPredict2,
     ZImagePixelSpace,
+    MingImage,
     ZImage,
     PiD,
     PixelDiTT2I,
@@ -2610,6 +2660,7 @@ models = [
     Boogu,
     MageFlow,
     QwenImage,
+    QwenImage21,
     JoyImage,
     Ideogram4,
     Krea2,

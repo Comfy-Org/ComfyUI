@@ -1,8 +1,7 @@
 """Serves the per-asset operations behind the API: reading an asset's detail,
 updating its name, tags, metadata and preview, deleting a record, and resolving
-a hash to a servable path. An update moves ``updated_at`` only when it actually
-changed something, so a call that requests what is already true is not recorded
-as a user edit.
+a hash to a servable path. Name and tag updates move ``updated_at`` only when
+the requested values differ. Other supplied metadata fields record a write.
 """
 
 import mimetypes

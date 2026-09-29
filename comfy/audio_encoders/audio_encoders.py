@@ -4,14 +4,15 @@ from .sheetsage2 import SheetSage2
 from .sheetsage2_abc import events_to_abc
 import comfy.model_management
 import comfy.ops
+import comfy.storage
 import comfy.utils
 import logging
-import torchaudio
+import comfy.audio
 import torch
 
 
 class AudioEncoderModel():
-    def __init__(self, config):
+    def __init__(self, config, fast_disk=False):
         self.load_device = comfy.model_management.text_encoder_device()
         offload_device = comfy.model_management.text_encoder_offload_device()
         self.dtype = comfy.model_management.text_encoder_dtype(self.load_device)
@@ -33,7 +34,7 @@ class AudioEncoderModel():
         elif model_type == "sheetsage2":
             self.model = SheetSage2(**model_config)
         self.model.eval()
-        self.patcher = comfy.model_patcher.CoreModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device)
+        self.patcher = comfy.model_patcher.CoreModelPatcher(self.model, load_device=self.load_device, offload_device=offload_device, fast_disk=fast_disk)
         comfy.model_management.archive_model_dtypes(self.model)
 
     def load_sd(self, sd):
@@ -44,7 +45,7 @@ class AudioEncoderModel():
 
     def encode_audio(self, audio, sample_rate):
         comfy.model_management.load_model_gpu(self.patcher)
-        audio = torchaudio.functional.resample(audio, sample_rate, self.model_sample_rate)
+        audio = comfy.audio.resample(audio, sample_rate, self.model_sample_rate)
         out, all_layers = self.model(audio.to(self.load_device))
         outputs = {}
         outputs["encoded_audio"] = out
@@ -55,7 +56,7 @@ class AudioEncoderModel():
 
 class SheetSage2AudioEncoder(AudioEncoderModel):
     def generate_abc(self, audio, sample_rate, melody_only=True):
-        audio = torchaudio.functional.resample(audio.float().mean(dim=1), sample_rate, self.model_sample_rate)
+        audio = comfy.audio.resample(audio.float().mean(dim=1), sample_rate, self.model_sample_rate)
         comfy.model_management.load_model_gpu(self.patcher)
         scores = []
         for waveform in audio:
@@ -102,7 +103,8 @@ def load_audio_encoder_from_sd(sd, prefix=""):
     else:
         raise RuntimeError("ERROR: audio encoder not supported.")
 
-    audio_encoder = SheetSage2AudioEncoder(config) if config["model_type"] == "sheetsage2" else AudioEncoderModel(config)
+    fast_disk = comfy.storage.state_dict_fast_disk(sd)
+    audio_encoder = SheetSage2AudioEncoder(config, fast_disk=fast_disk) if config["model_type"] == "sheetsage2" else AudioEncoderModel(config, fast_disk=fast_disk)
     m, u = audio_encoder.load_sd(sd)
     if len(m) > 0:
         logging.warning("missing audio encoder: {}".format(m))

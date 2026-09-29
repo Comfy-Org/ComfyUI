@@ -27,7 +27,7 @@ class Gemma3_Tokenizer():
     def state_dict(self):
         return {"spiece_model": self.tokenizer.serialize_model()}
 
-    def tokenize_with_weights(self, text, return_word_ids=False, image=None, llama_template=None, skip_template=True, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, image=None, llama_template=None, skip_template=True, system_prompt="", **kwargs):
         self.llama_template = "<start_of_turn>system\nYou are a helpful assistant.<end_of_turn>\n<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n"
         self.llama_template_images = "<start_of_turn>system\nYou are a helpful assistant.<end_of_turn>\n<start_of_turn>user\n\n<image_soft_token>{}<end_of_turn>\n\n<start_of_turn>model\n"
 
@@ -57,6 +57,8 @@ class Gemma3_Tokenizer():
                     llama_text = self.llama_template.format(text)
             else:
                 llama_text = llama_template.format(text)
+            if system_prompt:  # replaces the default system turn
+                llama_text = "<start_of_turn>system\n" + system_prompt + "<end_of_turn>\n" + llama_text[llama_text.index("<start_of_turn>user"):]
 
         text_tokens = super().tokenize_with_weights(llama_text, return_word_ids)
 
@@ -102,7 +104,7 @@ class Gemma3_12BModel(sd1_clip.SDClipModel):
         self.dtypes.add(dtype)
         super().__init__(device=device, layer=layer, layer_idx=layer_idx, textmodel_json_config={}, dtype=dtype, special_tokens={"start": 2, "pad": 0}, layer_norm_hidden_state=False, model_class=comfy.text_encoders.llama.Gemma3_12B, enable_attention_masks=attention_mask, return_attention_masks=attention_mask, model_options=model_options)
 
-    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty):
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty, mtp=True):
         tokens_only = [[t[0] for t in b] for b in tokens]
         embeds, _, _, _ = self.process_tokens(tokens_only, self.execution_device)
         return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, stop_tokens=[106], presence_penalty=presence_penalty)  # 106 is <end_of_turn>
@@ -205,7 +207,7 @@ class LTXAVTEModel(torch.nn.Module):
 
         return out.to(device=out_device, dtype=torch.float), pooled, extra
 
-    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty):
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty, mtp=True):
         return self.gemma3_12b.generate(tokens[self.text_encoder_key], do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty)
 
     def load_sd(self, sd):

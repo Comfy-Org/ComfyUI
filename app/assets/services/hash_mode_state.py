@@ -120,6 +120,9 @@ def drain_transition_queue(session: Session) -> None:
 
     pending_count = len(_PENDING_QUEUE)
     for _ in range(pending_count):
+        # Commit the previous entry's writes so this entry's hash runs with no transaction open.
+        # That needs a create_session() session: on a write session the next read takes the lock.
+        session.commit()
         entry = _PENDING_QUEUE.popleft()
         _PENDING_PATHS.discard(entry.path)
         path = entry.path
