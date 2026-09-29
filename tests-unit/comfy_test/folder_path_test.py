@@ -1,7 +1,9 @@
 ### 🗻 This file is created through the spirit of Mount Fuji at its peak
 # TODO(yoland): clean up this after I get back down
+import errno
 import pytest
 import os
+import shutil
 import tempfile
 from unittest.mock import patch
 from importlib import reload
@@ -88,6 +90,39 @@ def test_recursive_search(temp_dir):
     files, dirs = folder_paths.recursive_search(temp_dir)
     assert set(files) == {"file1.txt", os.path.join("subdir", "file2.txt")}
     assert len(dirs) == 2  # temp_dir and subdir
+
+def test_get_filename_list_survives_a_listed_folder_vanishing(temp_dir, clear_folder_paths):
+    kept = os.path.join(temp_dir, "kept")
+    gone = os.path.join(temp_dir, "gone")
+    for path, name in ((kept, "a.safetensors"), (gone, "b.safetensors")):
+        os.makedirs(path)
+        open(os.path.join(path, name), "w").close()
+    folder_paths.folder_names_and_paths["test_folder"] = ([kept, gone], {".safetensors"})
+    assert folder_paths.get_filename_list("test_folder") == ["a.safetensors", "b.safetensors"]
+
+    shutil.rmtree(gone)
+
+    assert folder_paths.get_filename_list("test_folder") == ["a.safetensors"]
+
+
+@pytest.mark.parametrize("unreadable", ["root", "subdir"])
+def test_recursive_search_skips_a_dir_whose_mtime_raises_oserror(temp_dir, monkeypatch, unreadable):
+    """Not only FileNotFoundError: e.g. WinError 433 (device gone) or 1921 (junction loop)."""
+    subdir = os.path.join(temp_dir, "subdir")
+    os.makedirs(subdir)
+    open(os.path.join(subdir, "file.txt"), "w").close()
+    target = temp_dir if unreadable == "root" else subdir
+    real_getmtime = os.path.getmtime
+
+    def getmtime(path):
+        if path == target:
+            raise OSError(errno.EINVAL, "A device which does not exist was specified", path)
+        return real_getmtime(path)
+
+    monkeypatch.setattr(os.path, "getmtime", getmtime)
+    files, dirs = folder_paths.recursive_search(temp_dir)
+    assert files == [os.path.join("subdir", "file.txt")]
+    assert target not in dirs
 
 def test_filter_files_extensions():
     files = ["file1.txt", "file2.jpg", "file3.png", "file4.txt"]

@@ -405,7 +405,7 @@ def recursive_search(directory: str, excluded_dir_names: list[str] | None=None) 
     # Attempt to add the initial directory to dirs with error handling
     try:
         dirs[directory] = os.path.getmtime(directory)
-    except FileNotFoundError:
+    except OSError:
         logging.warning(f"Warning: Unable to access {directory}. Skipping this path.")
 
     logging.debug("recursive file list on directory {}".format(directory))
@@ -427,7 +427,7 @@ def recursive_search(directory: str, excluded_dir_names: list[str] | None=None) 
             path: str = os.path.join(dirpath, d)
             try:
                 dirs[path] = os.path.getmtime(path)
-            except FileNotFoundError:
+            except OSError:
                 logging.warning(f"Warning: Unable to access {path}. Skipping this path.")
                 continue
     logging.debug("found {} files".format(len(result)))
@@ -496,7 +496,10 @@ def cached_filename_list_(folder_name: str) -> tuple[list[str], dict[str, float]
     for x in out[1]:
         time_modified = out[1][x]
         folder = x
-        if os.path.getmtime(folder) != time_modified:
+        try:
+            if os.path.getmtime(folder) != time_modified:
+                return None
+        except OSError:  # the folder is gone or unreachable; relist without it
             return None
 
     folders = folder_names_and_paths[folder_name]

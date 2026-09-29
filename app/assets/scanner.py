@@ -81,6 +81,7 @@ class _ScanProgress(Protocol):
     hash_failed: int
     enrich_failed: int
     permission_denied: int
+    skipped_roots: int
 
     def mark_emitted(self, key: str) -> bool: ...
 
@@ -138,6 +139,17 @@ def get_scan_prefixes_for_root(root: RootType) -> list[str]:
     if root == "output":
         return [os.path.abspath(folder_paths.get_output_directory())]
     return []
+
+
+def _is_listable(prefix: str) -> bool:
+    """Whether a scan folder can be listed. One that can't (moved, on an unplugged drive,
+    permission denied) is skipped, not treated as empty, so its rows aren't marked missing."""
+    try:
+        with os.scandir(prefix):
+            return True
+    except OSError as e:
+        logging.warning("Asset scan: skipping %s, it can't be listed: %s", prefix, e)
+        return False
 
 
 def get_owned_prefixes() -> list[str]:
@@ -257,7 +269,11 @@ def sync_root_safely(
     Returns survivors (existing paths) or empty set on failure.
     """
     try:
-        return _sync_prefixes_in_write_txn(get_scan_prefixes_for_root(root), progress)
+        prefixes = get_scan_prefixes_for_root(root)
+        listable = [p for p in prefixes if _is_listable(p)]
+        if progress is not None:
+            progress.skipped_roots += len(set(prefixes) - set(listable))
+        return _sync_prefixes_in_write_txn(listable, progress)
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
         emit(
