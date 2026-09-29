@@ -12,6 +12,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import folder_paths
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session as SASession, sessionmaker
@@ -353,8 +354,6 @@ def test_a_model_folder_pruned_while_unregistered_recovers_when_it_returns(
 ):
     """A folder a custom node registers late, or an extra_model_paths entry whose base
     path did not resolve for one launch, is pruned at startup and seen again later."""
-    import folder_paths
-
     models = temp_dir / "lazy_models" / "checkpoints"
     models.mkdir(parents=True)
     for i in range(3):
