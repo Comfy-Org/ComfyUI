@@ -57,12 +57,30 @@ Launch with the CLI flag:
 python main.py --benchmark
 ```
 
-This captures **every** run **and additionally** writes a JSON report to
-`output/benchmarks/<timestamp>.json`. Per-run `extra_data["benchmark"]` still
-works independently; the global flag simply forces capture on for all runs and
-turns on the JSON sink.
+This forces capture on for **every** run. Per-run `extra_data["benchmark"]`
+still works independently.
 
-### 2c. The gate
+### 2c. Per-run JSON sink (poll-friendly channel)
+
+Whenever capture is active — **either** the per-run `extra_data["benchmark"]`
+opt-in **or** the global `--benchmark` flag — the same event payload is written
+to a file keyed by prompt id:
+
+```
+output/benchmarks/<prompt_id>.json
+```
+
+One file per run, named deterministically by `prompt_id` (the id is sanitized
+for filesystem safety). This exists so orchestrators that poll (e.g. the Desktop
+runner over `/api/jobs`, with no websocket tap) can fetch a specific run's record
+without listening to the event stream. The websocket `benchmark` event is still
+emitted, unchanged — this is an additional, reliable file channel, not a
+replacement.
+
+The zero-overhead-when-off guarantee is unaffected: when a run does not opt in,
+no directory is created and no file is written.
+
+### 2d. The gate
 
 A single function decides everything:
 
@@ -79,8 +97,14 @@ when the gate is `False`. This is the zero-overhead guarantee, verified by
 
 ## 3. Event schema (contract)
 
-Event name on the message stream: **`benchmark`** (via `PromptExecutor.add_message`,
-`broadcast=False`). The payload is also the exact shape written to the JSON file.
+The payload is delivered through **two channels**, both carrying the identical
+shape below:
+
+1. **Websocket event** named **`benchmark`** (via `PromptExecutor.add_message`,
+   `broadcast=False`).
+2. **Per-run file** at `output/benchmarks/<prompt_id>.json`, written whenever
+   capture is active for that run (see §2c). Poll-friendly for consumers without
+   a websocket tap.
 
 | Field | Type | Filled by | Notes |
 |-------|------|-----------|-------|

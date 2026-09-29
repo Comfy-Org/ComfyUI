@@ -229,8 +229,16 @@ def test_event_schema_shape(fake_sampler):
     json.dumps(event)
 
 
-def test_json_report_written(fake_sampler, monkeypatch, tmp_path):
-    monkeypatch.setattr(args, "benchmark", True)  # soak mode -> write JSON
+class _Spy:
+    def __init__(self):
+        self.events = []
+
+    def add_message(self, event, data, broadcast):
+        self.events.append((event, data))
+
+
+def test_json_report_written_under_global_flag(fake_sampler, monkeypatch, tmp_path):
+    monkeypatch.setattr(args, "benchmark", True)  # soak mode
     import folder_paths
     monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(tmp_path))
 
@@ -238,23 +246,51 @@ def test_json_report_written(fake_sampler, monkeypatch, tmp_path):
     assert ctx is not None and ctx.write_json is True
     ctx.record_node("1", "CheckpointLoaderSimple", 42.0)
 
-    class Spy:
-        def __init__(self):
-            self.events = []
-
-        def add_message(self, event, data, broadcast):
-            self.events.append((event, data))
-
-    spy = Spy()
+    spy = _Spy()
     event = benchmark.finish(ctx, spy)
 
-    # Emitted on the event stream.
+    # ws event still emitted (unchanged channel).
     assert spy.events and spy.events[0][0] == "benchmark"
     assert spy.events[0][1] == event
 
-    # Written to disk under output/benchmarks/.
-    files = list((tmp_path / "benchmarks").glob("*.json"))
-    assert len(files) == 1
-    on_disk = json.loads(files[0].read_text(encoding="utf-8"))
+    # Per-run file keyed by prompt_id.
+    path = tmp_path / "benchmarks" / "prompt-5.json"
+    assert path.exists()
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
     assert on_disk["prompt_id"] == "prompt-5"
     assert on_disk["collector_id"] == "comfyui-core"
+
+
+def test_json_report_written_per_run_optin(fake_sampler, monkeypatch, tmp_path):
+    """extra_data opt-in (no global flag) must also produce the per-run file."""
+    assert getattr(args, "benchmark", False) is False  # global flag OFF
+    import folder_paths
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(tmp_path))
+
+    ctx = benchmark.start("run-abc-123", {"benchmark": True})
+    assert ctx is not None and ctx.write_json is True
+    ctx.record_node("1", "KSampler", 10.0)
+
+    spy = _Spy()
+    benchmark.finish(ctx, spy)
+
+    # File named exactly <prompt_id>.json so a poller can fetch it deterministically.
+    path = tmp_path / "benchmarks" / "run-abc-123.json"
+    assert path.exists()
+    assert spy.events and spy.events[0][0] == "benchmark"  # ws still emitted
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["prompt_id"] == "run-abc-123"
+
+
+def test_no_json_file_when_off(monkeypatch, tmp_path):
+    """Off-path: no capture, no file work at all."""
+    assert getattr(args, "benchmark", False) is False
+    import folder_paths
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(tmp_path))
+
+    ctx = benchmark.start("prompt-off", {})
+    assert ctx is None
+    assert benchmark.finish(ctx, _Spy()) is None
+
+    # Nothing should have been created under output/benchmarks/.
+    assert not (tmp_path / "benchmarks").exists()

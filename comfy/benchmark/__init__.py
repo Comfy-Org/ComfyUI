@@ -8,8 +8,12 @@ node in ``execution.execute``.
 
 Activation (both opt-in, off by default):
   1. Per-run:  a truthy ``extra_data["benchmark"]`` on the ``/prompt`` submission.
-  2. Global:   the ``--benchmark`` CLI flag -> capture every run *and* also write
-               a JSON report to ``output/benchmarks/<timestamp>.json`` (soak mode).
+  2. Global:   the ``--benchmark`` CLI flag -> capture every run (soak mode).
+
+Whenever capture is active (either activation), the event payload is also written
+to a per-run file ``output/benchmarks/<prompt_id>.json`` so orchestrators that
+poll (no websocket tap) can fetch a specific run's record deterministically. No
+file work happens when capture is off.
 
 The emitted ``benchmark`` event is the canonical corpus record shape. Its schema
 is versioned via ``capture_schema_version`` and documented in ``SPIKE.md`` -- that
@@ -69,14 +73,11 @@ def start(prompt_id: str, extra_data: dict) -> Optional["BenchmarkContext"]:
     if not should_capture(extra_data):
         return None  # zero-overhead path: nothing is created, nothing runs.
 
-    write_json = False
-    try:
-        from comfy.cli_args import args
-        write_json = bool(getattr(args, "benchmark", False))
-    except Exception:
-        pass
-
-    ctx = BenchmarkContext(prompt_id=prompt_id, write_json=write_json)
+    # A per-run JSON sink is written whenever capture is active (either the
+    # per-run extra_data["benchmark"] opt-in or the global --benchmark flag), so
+    # orchestrators that poll (e.g. the Desktop /api/jobs runner) can read a
+    # run's record without tapping the websocket. Keyed by prompt_id.
+    ctx = BenchmarkContext(prompt_id=prompt_id, write_json=True)
     try:
         ctx.start()
     except Exception:
@@ -93,7 +94,7 @@ def start(prompt_id: str, extra_data: dict) -> Optional["BenchmarkContext"]:
 
 
 def finish(ctx: Optional["BenchmarkContext"], executor) -> Optional[dict]:
-    """Finalize capture: emit the versioned event and, in soak mode, write JSON.
+    """Finalize capture: emit the versioned event and write the per-run JSON file.
 
     ``executor`` is the ``PromptExecutor`` whose ``add_message`` reuses the
     existing message/event stream. Safe to call with ``ctx is None``.
@@ -126,14 +127,20 @@ def finish(ctx: Optional["BenchmarkContext"], executor) -> Optional[dict]:
         _active = None
 
 
+def _safe_filename(name: str) -> str:
+    """Make a prompt_id safe to use as a filename (prompt_ids are normally UUIDs)."""
+    keep = "-_."
+    cleaned = "".join(c if (c.isalnum() or c in keep) else "_" for c in str(name))
+    return cleaned or "run"
+
+
 def _write_json_report(event: dict) -> str:
+    """Write one file per run, keyed by prompt_id: output/benchmarks/<prompt_id>.json."""
     import folder_paths
     out_dir = os.path.join(folder_paths.get_output_directory(), "benchmarks")
     os.makedirs(out_dir, exist_ok=True)
-    ts = event.get("timestamp", "").replace(":", "-") or datetime.datetime.now(
-        datetime.timezone.utc
-    ).strftime("%Y-%m-%dT%H-%M-%SZ")
-    path = os.path.join(out_dir, f"{ts}.json")
+    name = _safe_filename(event.get("prompt_id", "") or "run")
+    path = os.path.join(out_dir, f"{name}.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(event, f, indent=2)
     logging.info("benchmark: wrote report %s", path)
