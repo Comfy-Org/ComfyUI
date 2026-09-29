@@ -232,6 +232,8 @@ def test_scan_completed_reports_per_scan_failure_counts(
         hash_failed=2,
         enrich_failed=3,
         permission_denied=1,
+        missing_marked=10,
+        recovered=7,
     )
     clock = iter((10.0, 10.5))
     monkeypatch.setattr(seeder_module.time, "perf_counter", lambda: next(clock))
@@ -246,6 +248,8 @@ def test_scan_completed_reports_per_scan_failure_counts(
     assert completed[0]["hash_failed"] == 2
     assert completed[0]["enrich_failed"] == 3
     assert completed[0]["permission_denied"] == 1
+    assert completed[0]["missing_marked_count"] == 10
+    assert completed[0]["recovered_count"] == 7
 
 
 def test_enrich_phase_does_not_count_returned_ids_as_failures(
