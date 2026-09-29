@@ -159,7 +159,7 @@ class Qwen3VLTokenizer(sd1_clip.SD1Tokenizer):
         self.llama_template = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
         self.llama_template_images = "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
 
-    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=False, skip_template=False, **kwargs):
+    def tokenize_with_weights(self, text, return_word_ids=False, llama_template=None, images=[], prevent_empty_text=False, thinking=False, skip_template=False, system_prompt="", **kwargs):
         image = kwargs.get("image", None)
         if image is not None and len(images) == 0:
             images = [image[i:i + 1] for i in range(image.shape[0])]
@@ -181,6 +181,8 @@ class Qwen3VLTokenizer(sd1_clip.SD1Tokenizer):
                     vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
                     template = template.replace(vision_block, vision_block * len(images), 1)
             llama_text = template.format(text)
+            if system_prompt:  # replaces any system turn the template carries
+                llama_text = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n" + llama_text[llama_text.index("<|im_start|>user"):]
             if not thinking:  # Qwen3 convention: empty think block suppresses reasoning
                 llama_text += "<think>\n\n</think>\n\n"
 

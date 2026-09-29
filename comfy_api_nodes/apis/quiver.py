@@ -6,8 +6,9 @@ class QuiverImageObject(BaseModel):
 
 
 class QuiverTextToSVGRequest(BaseModel):
-    model: str = Field(default="arrow-preview")
+    model: str = Field(...)
     prompt: str = Field(...)
+    reasoning_effort: str | None = Field(default=None)
     instructions: str | None = Field(default=None)
     references: list[QuiverImageObject] | None = Field(default=None, max_length=4)
     temperature: float | None = Field(default=None, ge=0, le=2)
@@ -16,8 +17,9 @@ class QuiverTextToSVGRequest(BaseModel):
 
 
 class QuiverImageToSVGRequest(BaseModel):
-    model: str = Field(default="arrow-preview")
+    model: str = Field(...)
     image: QuiverImageObject = Field(...)
+    reasoning_effort: str | None = Field(default=None)
     auto_crop: bool | None = Field(default=None)
     target_size: int | None = Field(default=None, ge=128, le=4096)
     temperature: float | None = Field(default=None, ge=0, le=2)

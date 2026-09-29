@@ -1,7 +1,7 @@
 """Answers questions about tag usage: which tags exist with how many assets, and
-how those counts narrow once a filter is applied. Both queries reuse the record
-listing's own joins and filter clauses, so the counts a client sees always
-describe the same assets the listing endpoint would return for that filter,
+how those counts narrow once a filter is applied. The unfiltered query counts
+all catalogued records. The filtered query reuses the record listing's joins and
+filter clauses, so its counts describe the assets the listing endpoint returns,
 records with missing content included.
 """
 
