@@ -25,7 +25,7 @@ from app.assets.database.queries.records import (
     ensure_tag_link,
     mark_content_missing,
 )
-from app.assets.scanner import SeedAssetSpec, seed_asset_specs
+from app.assets.scanner import SeedAssetSpec, insert_asset_specs, seed_asset_specs
 from app.assets.scanner_admission import _WATCH_LIST
 
 ROOTS = ("input", "output")
@@ -250,7 +250,7 @@ def test_hashing_on_recovers_through_the_hash_path(drive, session):
     with patch(
         "app.assets.scanner.recover_missing_content_by_stat"
     ) as by_stat, patch(
-        "app.assets.scanner.missing_contents_by_path"
+        "app.assets.scanner.missing_content_ids_by_path"
     ) as prefetch:
         back = _scan()
 
@@ -321,3 +321,26 @@ def test_stat_recovery_skips_a_path_a_live_row_already_occupies(session, temp_di
     assert (created, error) == (0, None)
     assert session.get(AssetContent, missing.id).is_missing is True
     assert session.get(AssetContent, live.id).is_missing is False
+
+
+def test_a_recovery_rolled_back_by_a_failed_commit_is_not_counted(session, temp_dir, db_engine):
+    path = temp_dir / "rolled-back.png"
+    path.write_bytes(b"bytes")
+    _missing_row(session, path)
+    session.commit()
+    progress = seeder_module._ScanState()
+
+    @contextmanager
+    def failing_write_session():
+        with SASession(db_engine) as sess:
+            def fail():
+                raise RuntimeError("disk full")
+
+            sess.commit = fail
+            yield sess
+
+    with patch("app.assets.scanner.create_write_session", failing_write_session):
+        with pytest.raises(RuntimeError):
+            insert_asset_specs([_spec(path)], set(), progress)
+
+    assert progress.recovered == 0

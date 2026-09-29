@@ -115,6 +115,8 @@ class _ScanState:
     hash_failed: int = 0
     enrich_failed: int = 0
     permission_denied: int = 0
+    # Rows the fast scan marked missing because their file was not found. Pruning reports
+    # its own count, and temp retirement is routine, so neither is included.
     missing_marked: int = 0
     recovered: int = 0
     cancel_stage: str | None = None

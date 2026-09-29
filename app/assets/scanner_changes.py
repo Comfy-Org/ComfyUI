@@ -109,17 +109,18 @@ def recover_missing_content(
     return "recovered"
 
 
-def missing_contents_by_path(session: Session, paths: list[str]) -> dict[str, list[AssetContent]]:
-    """The missing rows at ``paths``, loaded in chunks: no index serves a missing row's path."""
-    by_path: dict[str, list[AssetContent]] = {}
+def missing_content_ids_by_path(session: Session, paths: list[str]) -> dict[str, list[str]]:
+    """The ids of the missing rows at ``paths``. No index serves a missing row's path, so
+    callers run this before their write transaction opens."""
+    by_path: dict[str, list[str]] = {}
     for start in range(0, len(paths), 500):
         chunk = paths[start : start + 500]
-        for content in session.scalars(
-            sa.select(AssetContent).where(
+        for content_id, path in session.execute(
+            sa.select(AssetContent.id, AssetContent.path).where(
                 AssetContent.is_missing.is_(True), AssetContent.path.in_(chunk)
             )
         ):
-            by_path.setdefault(content.path, []).append(content)
+            by_path.setdefault(path, []).append(content_id)
     return by_path
 
 
@@ -127,15 +128,18 @@ def recover_missing_content_by_stat(
     session: Session,
     path: str,
     stat_result: os.stat_result,
-    candidates: list[AssetContent],
+    candidate_ids: list[str],
 ) -> Literal["recovered", "no_match"]:
     """Hashing-off recovery: size and modification time are the identity a hashing-off
     scan checks on a live row, so a returning file that matches them restores its row."""
     mtime_ns = get_mtime_ns(stat_result)
+    candidates = [session.get(AssetContent, content_id) for content_id in candidate_ids]
     matches = [
         candidate
         for candidate in candidates
-        if candidate.is_missing
+        if candidate is not None
+        and candidate.is_missing
+        and candidate.path == path
         and (candidate.size_bytes, candidate.mtime_ns) == (stat_result.st_size, mtime_ns)
     ]
     if not matches:

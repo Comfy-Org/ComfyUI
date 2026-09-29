@@ -35,7 +35,7 @@ from app.assets.scanner_changes import (
     detect_content_change,
     drain_pending_verifications,
     live_contents_under_prefixes,
-    missing_contents_by_path,
+    missing_content_ids_by_path,
     pending_recovery_count,
     recover_missing_content,
     recover_missing_content_by_stat,
@@ -568,6 +568,13 @@ def build_asset_specs(
     return specs, tag_pool, skipped
 
 
+@dataclass
+class SeedCounts:
+    """What one seed_asset_specs call did besides creating records."""
+
+    recovered: int = 0
+
+
 class _SpecObservation(NamedTuple):
     """A spec's file as seen before the write transaction opens.
 
@@ -608,18 +615,16 @@ def seed_asset_specs(
     session: Session,
     specs: list[SeedAssetSpec],
     observed: dict[str, _SpecObservation | None] | None = None,
-    progress: _ScanProgress | None = None,
+    counts: SeedCounts | None = None,
+    missing_ids_by_path: dict[str, list[str]] | None = None,
 ) -> tuple[int, Exception | None]:
+    """``missing_ids_by_path`` is only used with hashing off. insert_asset_specs reads it
+    before its write transaction opens; when omitted, it is read here."""
     if observed is None:
         observed = observe_asset_specs(specs)
     hashing_is_enabled = mode.hashing_enabled()
-    missing_by_path = (
-        {}
-        if hashing_is_enabled
-        else missing_contents_by_path(
-            session, [path for path, seen in observed.items() if seen is not None]
-        )
-    )
+    if not hashing_is_enabled and missing_ids_by_path is None:
+        missing_ids_by_path = missing_content_ids_by_path(session, _observed_paths(observed))
     created = 0
     first_error: Exception | None = None
     # Counted, not gated through _ScanProgress.mark_emitted like its neighbours, because this
@@ -646,10 +651,10 @@ def seed_asset_specs(
                     )
                 else:
                     recovery = recover_missing_content_by_stat(
-                        session, path, stat_result, missing_by_path.get(path, [])
+                        session, path, stat_result, (missing_ids_by_path or {}).get(path, [])
                     )
-                if recovery == "recovered" and progress is not None:
-                    progress.recovered += 1
+                if recovery == "recovered" and counts is not None:
+                    counts.recovered += 1
                 if recovery != "no_match":
                     continue
                 content, _inserted = create_content_reporting_insert(
@@ -694,6 +699,10 @@ def seed_asset_specs(
     return created, first_error
 
 
+def _observed_paths(observed: dict[str, _SpecObservation | None]) -> list[str]:
+    return [path for path, observation in observed.items() if observation is not None]
+
+
 def insert_asset_specs(
     specs: list[SeedAssetSpec],
     _tag_pool: set[str],
@@ -702,8 +711,15 @@ def insert_asset_specs(
     if not specs:
         return 0, None
     observed = observe_asset_specs(specs)
+    missing_ids_by_path = None
+    if not mode.hashing_enabled():
+        with create_session() as sess:
+            missing_ids_by_path = missing_content_ids_by_path(sess, _observed_paths(observed))
+    counts = SeedCounts()
     with create_write_session() as sess:
-        created, first_error = seed_asset_specs(sess, specs, observed, progress)
+        created, first_error = seed_asset_specs(
+            sess, specs, observed, counts, missing_ids_by_path
+        )
         try:
             sess.commit()
         except Exception:
@@ -715,6 +731,8 @@ def insert_asset_specs(
             except Exception:
                 logging.exception("Failed to roll back asset batch after commit failure")
             return 0, first_error
+        if progress is not None:
+            progress.recovered += counts.recovered
         return created, first_error
 
 
