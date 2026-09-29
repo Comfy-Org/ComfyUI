@@ -52,7 +52,8 @@ def isolated_state(db_engine):
 
 @pytest.fixture
 def layout(temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
-    """checkpoints in the install and in an extra_model_paths-style shared folder."""
+    """checkpoints in the install and in an extra_model_paths-style shared folder, plus a
+    registered folder that was never created, as stock installs have."""
     dirs = {
         "checkpoints": temp_dir / "models" / "checkpoints",
         "shared": temp_dir / "shared" / "models" / "checkpoints",
@@ -67,6 +68,7 @@ def layout(temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     monkeypatch.setattr(folder_paths, "folder_names_and_paths", {
         "checkpoints": ([str(dirs["checkpoints"]), str(dirs["shared"])], exts),
         "loras": ([str(dirs["loras"])], exts),
+        "classifiers": ([str(temp_dir / "models" / "classifiers")], exts),
     })
     monkeypatch.setattr(folder_paths, "filename_list_cache", {})
     monkeypatch.setattr(folder_paths, "get_input_directory", lambda: str(dirs["input"]))
@@ -116,7 +118,7 @@ def _seed(layout: dict[str, Path], session, caplog) -> tuple[list[Path], dict]:
     shared_files = [_write(layout["shared"] / f"shared_{i}.safetensors") for i in range(3)]
     _write(layout["checkpoints"] / "local.safetensors")
     _write(layout["input"] / "photo.png", b"png")
-    assert _startup_scan(caplog)["skipped_roots_count"] == 0
+    assert _startup_scan(caplog)["skipped_folders_count"] == 0
     before = _rows(session)
     assert len(before) == 5
     assert not any(missing for rows in before.values() for _id, missing in rows)
@@ -142,7 +144,7 @@ def test_a_missing_model_folder_is_skipped_without_retiring_its_rows(
 
     completed = _startup_scan(caplog)
 
-    assert completed["skipped_roots_count"] == 1
+    assert completed["skipped_folders_count"] == 1
     assert completed["created"] == 2
     after = _rows(session)
     _assert_unchanged(before, after, shared_files)
@@ -154,7 +156,7 @@ def test_a_missing_model_folder_is_skipped_without_retiring_its_rows(
     away.rename(layout["shared"])
     completed = _startup_scan(caplog)
 
-    assert completed["skipped_roots_count"] == 0
+    assert completed["skipped_folders_count"] == 0
     assert completed["created"] == 0
     assert _rows(session) == after
 
@@ -174,7 +176,7 @@ def test_an_unreadable_model_folder_is_skipped_without_retiring_its_rows(
     finally:
         layout["shared"].chmod(mode)
 
-    assert completed["skipped_roots_count"] == 1
+    assert completed["skipped_folders_count"] == 1
     assert completed["created"] == 0
     _assert_unchanged(before, _rows(session), shared_files)
 
@@ -186,19 +188,34 @@ def test_a_deleted_file_in_a_listable_folder_is_still_marked_missing(layout, ses
 
     completed = _startup_scan(caplog)
 
-    assert completed["skipped_roots_count"] == 0
+    assert completed["skipped_folders_count"] == 0
     after = _rows(session)
     assert after[str(shared_files[0])] == [(before[str(shared_files[0])][0][0], True)]
     _assert_unchanged(before, after, shared_files[1:])
 
 
 def test_a_whole_model_root_that_cant_be_listed_still_scans_input(layout, session, caplog):
-    shutil.rmtree(layout["checkpoints"].parent.parent / "shared")
-    for name in ("checkpoints", "loras"):
+    shared_files, before = _seed(layout, session, caplog)
+    local = layout["checkpoints"] / "local.safetensors"
+    for name in ("checkpoints", "shared", "loras"):
         shutil.rmtree(layout[name])
-    photo = _write(layout["input"] / "photo.png", b"png")
+    photo = _write(layout["input"] / "new.png", b"png2")
 
     completed = _startup_scan(caplog)
 
-    assert completed["skipped_roots_count"] == 3
-    assert list(_rows(session)) == [str(photo)]
+    # loras and classifiers hold no rows, so only the two checkpoints folders count.
+    assert completed["skipped_folders_count"] == 2
+    after = _rows(session)
+    _assert_unchanged(before, after, [*shared_files, local])
+    assert after[str(photo)][0][1] is False
+
+
+def test_a_registered_folder_that_was_never_created_is_neither_counted_nor_warned(
+    layout, session, caplog
+):
+    _seed(layout, session, caplog)
+
+    completed = _startup_scan(caplog)
+
+    assert completed["skipped_folders_count"] == 0
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "classifiers" in r.getMessage()]

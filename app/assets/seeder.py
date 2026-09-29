@@ -115,7 +115,7 @@ class _ScanState:
     hash_failed: int = 0
     enrich_failed: int = 0
     permission_denied: int = 0
-    skipped_roots: int = 0
+    skipped_folders: int = 0
     cancel_stage: str | None = None
     _emitted_keys: set[str] = field(default_factory=set)
 
@@ -728,7 +728,7 @@ class _AssetSeeder:
                 hash_failed=scan_state.hash_failed,
                 enrich_failed=scan_state.enrich_failed,
                 permission_denied=scan_state.permission_denied,
-                skipped_roots_count=scan_state.skipped_roots,
+                skipped_folders_count=scan_state.skipped_folders,
                 root=root,
             )
 

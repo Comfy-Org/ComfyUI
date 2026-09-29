@@ -34,7 +34,7 @@ VALID_VALUES: dict[str, list[object]] = {
     "hash_failed": [2],
     "enrich_failed": [0],
     "permission_denied": [0],
-    "skipped_roots_count": [0, 1],
+    "skipped_folders_count": [0, 1],
     "count": [1],
     "error_type": ["ValueError", "FileNotFoundError"],
     "hashing_enabled": [True, False],

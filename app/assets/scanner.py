@@ -81,7 +81,7 @@ class _ScanProgress(Protocol):
     hash_failed: int
     enrich_failed: int
     permission_denied: int
-    skipped_roots: int
+    skipped_folders: int
 
     def mark_emitted(self, key: str) -> bool: ...
 
@@ -148,8 +148,33 @@ def _is_listable(prefix: str) -> bool:
         with os.scandir(prefix):
             return True
     except OSError as e:
-        logging.warning("Asset scan: skipping %s, it can't be listed: %s", prefix, e)
+        logging.debug("Asset scan: %s can't be listed: %s", prefix, e)
         return False
+
+
+def _note_skipped_folders(prefixes: list[str], progress: _ScanProgress | None) -> None:
+    """Warn about and count the skipped folders that hold live rows. A registered folder
+    that was never created (e.g. models/classifiers on a stock install) has nothing to keep."""
+    if not prefixes:
+        return
+    with create_session() as session:
+        for prefix in prefixes:
+            has_rows = session.execute(
+                sa.select(AssetContent.id)
+                .where(
+                    AssetContent.is_missing.is_(False),
+                    sql_path_under_prefix(AssetContent.path, prefix),
+                )
+                .limit(1)
+            ).first()
+            if has_rows is None:
+                continue
+            logging.warning(
+                "Asset scan: skipping %s, it can't be listed; its assets are left as they are",
+                prefix,
+            )
+            if progress is not None:
+                progress.skipped_folders += 1
 
 
 def get_owned_prefixes() -> list[str]:
@@ -269,10 +294,9 @@ def sync_root_safely(
     Returns survivors (existing paths) or empty set on failure.
     """
     try:
-        prefixes = get_scan_prefixes_for_root(root)
+        prefixes = list(dict.fromkeys(get_scan_prefixes_for_root(root)))
         listable = [p for p in prefixes if _is_listable(p)]
-        if progress is not None:
-            progress.skipped_roots += len(set(prefixes) - set(listable))
+        _note_skipped_folders([p for p in prefixes if p not in listable], progress)
         return _sync_prefixes_in_write_txn(listable, progress)
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
