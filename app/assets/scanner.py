@@ -395,11 +395,23 @@ def unlisted_references(
         # or a Unicode-normalizing one (HFS+) resolves a stored path whose spelling differs
         # from the directory entry. Confirm with a stat before retiring: rows the listing
         # calls gone are normally few.
-        if listed is None or (listed is False and os.path.exists(path)):
+        if listed is None or (listed is False and not _is_gone(path)):
             skipped += len(observations)
         elif not listed:
             vanished.extend(observations)
     return vanished, skipped
+
+
+def _is_gone(path: str) -> bool:
+    """True only when stat says the path does not exist. Any other error (permissions,
+    I/O) leaves it undecided, and the row stays live, as the per-row stat left it."""
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _listed_state(path: str, listings: DirListings, names_by_dir: dict[str, set[str]]) -> bool | None:
