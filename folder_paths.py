@@ -427,7 +427,7 @@ def recursive_search(directory: str, excluded_dir_names: list[str] | None=None) 
             path: str = os.path.join(dirpath, d)
             try:
                 dirs[path] = os.path.getmtime(path)
-            except OSError:
+            except FileNotFoundError:
                 logging.warning(f"Warning: Unable to access {path}. Skipping this path.")
                 continue
     logging.debug("found {} files".format(len(result)))

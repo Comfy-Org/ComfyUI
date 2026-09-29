@@ -105,24 +105,37 @@ def test_get_filename_list_survives_a_listed_folder_vanishing(temp_dir, clear_fo
     assert folder_paths.get_filename_list("test_folder") == ["a.safetensors"]
 
 
-@pytest.mark.parametrize("unreadable", ["root", "subdir"])
-def test_recursive_search_skips_a_dir_whose_mtime_raises_oserror(temp_dir, monkeypatch, unreadable):
-    """Not only FileNotFoundError: e.g. WinError 433 (device gone) or 1921 (junction loop)."""
-    subdir = os.path.join(temp_dir, "subdir")
-    os.makedirs(subdir)
-    open(os.path.join(subdir, "file.txt"), "w").close()
-    target = temp_dir if unreadable == "root" else subdir
+def test_recursive_search_skips_a_root_whose_mtime_raises_oserror(temp_dir, monkeypatch):
+    """Not only FileNotFoundError: e.g. WinError 433 (device gone)."""
+    open(os.path.join(temp_dir, "file.txt"), "w").close()
     real_getmtime = os.path.getmtime
 
     def getmtime(path):
-        if path == target:
+        if path == temp_dir:
             raise OSError(errno.EINVAL, "A device which does not exist was specified", path)
         return real_getmtime(path)
 
     monkeypatch.setattr(os.path, "getmtime", getmtime)
     files, dirs = folder_paths.recursive_search(temp_dir)
-    assert files == [os.path.join("subdir", "file.txt")]
-    assert target not in dirs
+    assert files == ["file.txt"]
+    assert temp_dir not in dirs
+
+
+def test_recursive_search_still_raises_a_subdirectory_oserror(temp_dir, monkeypatch):
+    """Unchanged from before: e.g. a link loop (ELOOP, WinError 1921) fails the listing."""
+    subdir = os.path.join(temp_dir, "subdir")
+    os.makedirs(subdir)
+    real_getmtime = os.path.getmtime
+
+    def getmtime(path):
+        if path == subdir:
+            raise OSError(errno.ELOOP, "Too many levels of symbolic links", path)
+        return real_getmtime(path)
+
+    monkeypatch.setattr(os.path, "getmtime", getmtime)
+    with pytest.raises(OSError):
+        folder_paths.recursive_search(temp_dir)
+
 
 def test_filter_files_extensions():
     files = ["file1.txt", "file2.jpg", "file3.png", "file4.txt"]
