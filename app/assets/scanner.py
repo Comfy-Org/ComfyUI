@@ -8,6 +8,7 @@ can end a batch early, and the cursor holds at the last row the batch attempted,
 so the rows it never reached are selected again when the scan resumes.
 """
 
+import enum
 import logging
 import os
 from dataclasses import dataclass
@@ -390,15 +391,15 @@ def unlisted_references(
     skipped = 0
     names_by_dir: dict[str, set[str]] = {}
     for path, observations in live.items():
-        listed = _listed_state(path, listings, names_by_dir)
+        verdict = _listing_verdict(path, listings, names_by_dir)
         # A listing compares names exactly, but a case-insensitive filesystem (NTFS, APFS)
         # or a Unicode-normalizing one (HFS+) resolves a stored path whose spelling differs
         # from the directory entry. Confirm with a stat before retiring: rows the listing
         # calls gone are normally few.
-        if listed is None or (listed is False and not _is_gone(path)):
-            skipped += len(observations)
-        elif not listed:
+        if verdict is ListingVerdict.ABSENT and _is_gone(path):
             vanished.extend(observations)
+        elif verdict is not ListingVerdict.LISTED:
+            skipped += len(observations)
     return vanished, skipped
 
 
@@ -414,28 +415,36 @@ def _is_gone(path: str) -> bool:
     return False
 
 
-def _listed_state(path: str, listings: DirListings, names_by_dir: dict[str, set[str]]) -> bool | None:
-    """False when the nearest listed directory above ``path`` lacks the next component
-    of it, True when the parent's listing has the name, and None when no listing can
-    say: a hidden component, no listed ancestor, or an ancestor that still has the
-    directory this walk did not list."""
+class ListingVerdict(enum.Enum):
+    """What this rescan's directory listings say about a cataloged path."""
+
+    LISTED = "listed"  # its parent's listing has the name
+    ABSENT = "absent"  # the nearest listed directory above it lacks the next component
+    UNKNOWN = "unknown"  # no listing can say: hidden, no listed ancestor, or not walked
+
+
+def _listing_verdict(
+    path: str, listings: DirListings, names_by_dir: dict[str, set[str]]
+) -> ListingVerdict:
+    """Classify ``path`` against the listings; see ListingVerdict. An ancestor that
+    still has the directory this walk did not list is UNKNOWN, not LISTED."""
     child, parent = path, os.path.dirname(path)
     while parent not in listings:
         if not is_visible(os.path.basename(child)):
-            return None
+            return ListingVerdict.UNKNOWN
         child, parent = parent, os.path.dirname(parent)
         if parent == child:  # reached the filesystem root without meeting a listing
-            return None
+            return ListingVerdict.UNKNOWN
     name = os.path.basename(child)
     if not is_visible(name):
-        return None
+        return ListingVerdict.UNKNOWN
     names = names_by_dir.get(parent)
     if names is None:
         files, subdirs = listings[parent]
         names = names_by_dir[parent] = {*files, *subdirs}
     if name not in names:
-        return False
-    return True if child == path else None
+        return ListingVerdict.ABSENT
+    return ListingVerdict.LISTED if child == path else ListingVerdict.UNKNOWN
 
 
 def mark_unlisted_references_missing_safely(
