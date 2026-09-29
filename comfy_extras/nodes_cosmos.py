@@ -13,6 +13,7 @@ class EmptyCosmosLatentVideo(io.ComfyNode):
     def define_schema(cls) -> io.Schema:
         return io.Schema(
             node_id="EmptyCosmosLatentVideo",
+            display_name="Empty Cosmos Latent Video",
             category="model/latent/cosmos",
             inputs=[
                 io.Int.Input("width", default=1280, min=16, max=nodes.MAX_RESOLUTION, step=16),

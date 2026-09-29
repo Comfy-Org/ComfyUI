@@ -35,7 +35,6 @@ async def _upload_image_to_krea_assets(cls: type[IO.ComfyNode], image: Input.Ima
         response_model=KreaAssetResponse,
         files=[("file", (img_io.name, img_io, "image/png"))],
         content_type="multipart/form-data",
-        max_retries=1,
         wait_label="Uploading reference",
     )
     return response.image_url

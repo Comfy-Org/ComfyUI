@@ -5,9 +5,10 @@ They cover keyframe placement, conditioning metadata, guide conversion, and free
 
 from __future__ import annotations
 
+import sys
 from contextlib import contextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -132,15 +133,39 @@ _nodes_lt_stub.get_keyframe_idxs = _get_keyframe_idxs
 _nodes_lt_stub._append_guide_attention_entry = _append_guide_attention_entry
 _nodes_lt_stub.LTXVAddGuide = _StubAddGuide
 
-with patch.dict(
-    "sys.modules",
-    {
+def _import_keyframes_against_stub():
+    """Import the module under test with comfy_extras.nodes_lt stubbed, then put it back.
+
+    Only the stubbed keys are restored, not the whole of sys.modules: patch.dict
+    restores the entire dict on exit, which evicts every module imported inside the
+    block and forces a later re-import. Re-importing torch internals raises on
+    duplicate TORCH_LIBRARY registration, which broke running this file alongside
+    nodes_lt_test.py.
+    """
+    stubs = {
         "nodes": mock_nodes,
         "server": mock_server,
         "comfy_extras.nodes_lt": _nodes_lt_stub,
-    },
-):
-    import comfy_extras.nodes_lt_keyframes as keyframes
+    }
+    saved = {name: sys.modules.get(name) for name in stubs}
+    sys.modules.update(stubs)
+    try:
+        import comfy_extras.nodes_lt_keyframes as module
+
+        return module
+    finally:
+        for name, original in saved.items():
+            if original is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = original
+        # The imported module stays bound to the stubs above, so drop it from the cache
+        # rather than let a later import pick up a stub-backed copy. The reference
+        # returned to this module keeps working.
+        sys.modules.pop("comfy_extras.nodes_lt_keyframes", None)
+
+
+keyframes = _import_keyframes_against_stub()
 
 
 def _zeros(shape):

@@ -1,4 +1,4 @@
-"""Building blocks for MoGe: residual conv stack, resamplers, MLP, DINOv2 encoder, v1 head."""
+"""Building blocks for MoGe: residual conv stack, resamplers, MLP, DINOv2 encoder, v1 head, v3 sparse refiner."""
 
 
 from typing import List, Optional, Sequence, Tuple, Union
@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 import comfy.ops
 from comfy.image_encoders.dino2 import Dinov2Model
+from comfy.ldm.trellis2.flexgemm import sparse_pool3d_mean, sparse_submanifold_conv3d, sparse_upsample3d_nearest
 
 from .geometry import normalized_view_plane_uv
 
@@ -201,3 +202,130 @@ class HeadV1(nn.Module):
         x = F.interpolate(x, (img_h, img_w), mode="bilinear", align_corners=False)
         x = _concat_view_plane_uv(x, aspect)
         return [block(x) for block in self.output_block]
+
+
+class SubmanifoldConv3d(nn.Module):
+    """3x3x3 submanifold sparse conv. Weight is stored (C_out, K, K, K, C_in), as FlexGEMM writes it.
+
+    Kernel spatial axis i indexes coords column i + 1, matching FlexGEMM's neighbor map.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3, dtype=None, device=None):
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(out_channels, kernel_size, kernel_size, kernel_size, in_channels, dtype=dtype, device=device))
+        self.bias = nn.Parameter(torch.empty(out_channels, dtype=dtype, device=device))
+
+    def forward(self, feats, coords, spatial, neighbor_cache=None):
+        weight = comfy.ops.cast_to(self.weight, feats.dtype, feats.device)
+        bias = comfy.ops.cast_to(self.bias, feats.dtype, feats.device)
+        return sparse_submanifold_conv3d(feats, coords, spatial, weight, bias, neighbor_cache, (1, 1, 1))
+
+
+class SparseResBlock3d(nn.Module):
+    def __init__(self, channels: int, dtype=None, device=None, operations=comfy.ops.manual_cast):
+        super().__init__()
+        self.norm1 = operations.LayerNorm(channels, eps=1e-6, dtype=dtype, device=device)
+        self.conv1 = SubmanifoldConv3d(channels, channels, dtype=dtype, device=device)
+        self.conv2 = SubmanifoldConv3d(channels, channels, dtype=dtype, device=device)
+
+    def forward(self, feats, coords, spatial, neighbor_cache=None):
+        h = F.silu(self.norm1(feats))
+        h, neighbor_cache = self.conv1(h, coords, spatial, neighbor_cache)
+        h = F.silu(h)
+        h, neighbor_cache = self.conv2(h, coords, spatial, neighbor_cache)
+        return h + feats, neighbor_cache
+
+
+class PoolDown(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, factor: int, dtype=None, device=None, operations=comfy.ops.manual_cast):
+        super().__init__()
+        self.factor = factor
+        self.linear = operations.Linear(in_channels, out_channels, dtype=dtype, device=device)
+
+    def forward(self, feats, coords, spatial):
+        feats, coords, spatial, pool_index = sparse_pool3d_mean(feats, coords, spatial, self.factor)
+        return self.linear(feats), coords, spatial, pool_index
+
+
+class NearestUp(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, dtype=None, device=None, operations=comfy.ops.manual_cast):
+        super().__init__()
+        self.linear = operations.Linear(in_channels, out_channels, dtype=dtype, device=device)
+
+    def forward(self, feats, pool_index):
+        return sparse_upsample3d_nearest(self.linear(feats), pool_index)
+
+
+class Sparse3DUNet(nn.Module):
+    """MoGe v3 refiner: sparse 3D UNet over the voxelized point map, conditioned on the ViT feature map.
+
+    Takes the sparse volume as (feats, coords, spatial) where coords are (batch, row, col, z_bin),
+    and returns one residual per input voxel.
+    """
+
+    def __init__(self, encoder_channels: int, in_channels: int = 3, out_channels: int = 1,
+                 model_channels: Sequence[int] = (32, 64, 128, 256, 512), blocks_per_level: int = 1,
+                 factor: int = 2, dtype=None, device=None, operations=comfy.ops.manual_cast):
+        super().__init__()
+        self.factor = factor
+        kwargs = {"dtype": dtype, "device": device, "operations": operations}
+        # (shallow, deep) channel pair per resolution transition
+        pairs = list(zip(model_channels[:-1], model_channels[1:]))
+
+        def stage(channels):
+            return nn.ModuleList([SparseResBlock3d(channels, **kwargs) for _ in range(blocks_per_level)])
+
+        self.input_proj = operations.Linear(in_channels, model_channels[0], dtype=dtype, device=device)
+        self.encoder_fuse = operations.Linear(encoder_channels, model_channels[-1], dtype=dtype, device=device)
+        self.fuse_proj = nn.Sequential(
+            operations.Linear(model_channels[-1] * 2, model_channels[-1], dtype=dtype, device=device),
+            nn.SiLU(),
+            operations.Linear(model_channels[-1], model_channels[-1], dtype=dtype, device=device),
+        )
+
+        self.down_stages = nn.ModuleList([stage(ch) for ch in model_channels])
+        self.downsample_blocks = nn.ModuleList([PoolDown(lo, hi, factor, **kwargs) for lo, hi in pairs])
+        self.bottleneck_stage = stage(model_channels[-1])
+        # The decoder runs deepest-first, so it walks the transitions in reverse.
+        self.upsample_blocks = nn.ModuleList([NearestUp(hi, lo, **kwargs) for lo, hi in reversed(pairs)])
+        self.up_stages = nn.ModuleList([stage(lo) for lo, _ in reversed(pairs)])
+        self.out_proj = operations.Linear(model_channels[0], out_channels, dtype=dtype, device=device)
+
+    def forward(self, feats, coords, spatial, encoder_feature):
+        num_levels = len(self.down_stages)
+        num_transitions = len(self.downsample_blocks)
+        # Coords at level k are identical on the down and up passes, so the submanifold
+        # neighbor map built on the way down is still valid on the way back up.
+        conv_caches: List[Optional[torch.Tensor]] = [None] * num_levels
+        pool_indices: List[Optional[torch.Tensor]] = [None] * num_transitions
+        skips: List[Optional[Tuple[torch.Tensor, torch.Tensor, tuple]]] = [None] * num_transitions
+
+        feats = self.input_proj(feats)
+
+        for i, blocks in enumerate(self.down_stages):
+            cache = conv_caches[i]
+            for block in blocks:
+                feats, cache = block(feats, coords, spatial, cache)
+            conv_caches[i] = cache
+            if i < num_transitions:
+                skips[i] = (feats, coords, spatial)
+                feats, coords, spatial, pool_indices[i] = self.downsample_blocks[i](feats, coords, spatial)
+
+        conditioning = encoder_feature[coords[:, 0].long(), :, coords[:, 1].long(), coords[:, 2].long()]
+        feats = self.fuse_proj(torch.cat([feats, self.encoder_fuse(conditioning)], dim=-1))
+
+        cache = conv_caches[num_levels - 1]
+        for block in self.bottleneck_stage:
+            feats, cache = block(feats, coords, spatial, cache)
+        conv_caches[num_levels - 1] = cache
+
+        for i, (upsample, blocks) in enumerate(zip(self.upsample_blocks, self.up_stages)):
+            level = num_levels - 2 - i
+            skip_feats, coords, spatial = skips[level]
+            feats = upsample(feats, pool_indices[level]) + skip_feats
+            cache = conv_caches[level]
+            for block in blocks:
+                feats, cache = block(feats, coords, spatial, cache)
+            conv_caches[level] = cache
+
+        return self.out_proj(feats)

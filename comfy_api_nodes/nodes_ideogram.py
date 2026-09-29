@@ -356,7 +356,6 @@ class IdeogramV3(IO.ComfyNode):
                 data=edit_request,
                 files=files,
                 content_type="multipart/form-data",
-                max_retries=1,
             )
 
         elif image is not None or mask is not None:
@@ -400,7 +399,6 @@ class IdeogramV3(IO.ComfyNode):
                 data=gen_request,
                 files=files if files else None,
                 content_type="multipart/form-data",
-                max_retries=1,
             )
 
         if not response.data or len(response.data) == 0:
@@ -514,7 +512,6 @@ class IdeogramV4(IO.ComfyNode):
                 resolution=resolution.split(" ")[0] if resolution != "Auto" else None,
                 rendering_speed=rendering_speed,
             ),
-            max_retries=1,
         )
 
         if not response.data or len(response.data) == 0:
@@ -649,7 +646,6 @@ class IdeogramPImage(IO.ComfyNode):
             ApiEndpoint(path="/proxy/ideogram/text-to-image/p-image-ideogram", method="POST"),
             response_model=IdeogramGenerateResponse,
             data=request,
-            max_retries=1,
         )
         if not response.data:
             raise Exception("No images were generated in the response")

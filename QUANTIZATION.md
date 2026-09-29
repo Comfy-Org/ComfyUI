@@ -152,6 +152,27 @@ Example:
 
 To create compatible checkpoints, use any quantization tool provided the output follows the checkpoint format described above and uses a layout defined in `QUANT_ALGOS`.
 
+### Diffusion attention preferences
+
+A diffusion attention module can have a `<module path>.comfy_attention.config` entry whose
+uint8 tensor contains UTF-8 JSON:
+
+```json
+{"attention": "comfy_kitchen_int8"}
+```
+
+Use the module that performs attention, such as `transformer_blocks.0.attn` for
+Qwen Image 2.1 or `blocks.0.attn` for MiniMax H3.
+
+Only `comfy_kitchen_int8` is supported. Invalid targets and other method names
+are ignored with a warning during loading, leaving normal attention selection.
+Kitchen INT8 support is checked when each preference is loaded
+for the primary device; unsupported devices keep normal attention selection.
+Explicit attention overrides retain priority.
+The `ComfyAttention` child module loads and saves its own metadata through normal
+state-dict loading and saving. Preferences do not enable weight
+quantization. Text encoder and VAE loaders do not apply these preferences.
+
 ### Weight Quantization
 
 Weight quantization is straightforward - compute the scaling factor directly from the weight tensor using the absolute maximum method described earlier. Each layer's weights are quantized independently and stored with their corresponding `weight_scale` parameter.

@@ -1,4 +1,5 @@
 import unittest
+import unittest.mock
 import torch
 import sys
 import os
@@ -339,6 +340,42 @@ class TestMixedPrecisionOps(unittest.TestCase):
             self.assertEqual(seen_weight_types, [torch.Tensor])
         finally:
             mm.supports_int8_compute = orig_supports_int8
+
+    def test_linear_input_act_respects_full_precision_mm_fallback(self):
+        """linear_input_act folds an activation into the INT8 GEMM's input quantizer,
+        bypassing Linear.forward entirely. On a device where the fast int8 kernel is
+        disabled (e.g. MPS, which lacks aten::_int_mm), it must honor _full_precision_mm
+        and dequantize instead, exactly like Linear.forward_comfy_cast_weights does
+        (see Comfy-Org/ComfyUI#16284)."""
+        operations = ops.mixed_precision_ops({}, compute_dtype=torch.bfloat16)
+
+        torch.manual_seed(456)
+        weight = torch.randn(32, 64, dtype=torch.bfloat16)
+        bias = torch.randn(32, dtype=torch.bfloat16)
+
+        layer = operations.Linear(64, 32, bias=True, device="cpu", dtype=torch.bfloat16)
+        layer.weight = torch.nn.Parameter(
+            QuantizedTensor.from_float(weight, "TensorWiseINT8Layout"), requires_grad=False
+        )
+        layer.bias = torch.nn.Parameter(bias, requires_grad=False)
+        layer.quant_format = "int8_tensorwise"
+        layer._full_precision_mm = True
+
+        x = torch.randn(4, 128, dtype=torch.bfloat16)
+
+        orig_int8_linear = ops.quant_ops.ck.int8_linear
+        ops.quant_ops.ck.int8_linear = unittest.mock.Mock(
+            side_effect=NotImplementedError("aten::_int_mm not implemented")
+        )
+        try:
+            output = ops.linear_input_act(layer, x, "swiglu")
+        finally:
+            ops.quant_ops.ck.int8_linear = orig_int8_linear
+
+        expected = torch.nn.functional.linear(
+            ops.INPUT_ACT_EAGER["swiglu"](x), layer.weight.dequantize(), bias
+        )
+        torch.testing.assert_close(output, expected)
 
     def test_supports_int8_compute_treats_mps_mode_as_unsupported_when_device_is_none(self):
         """Call sites (like pick_operations' default) may omit load_device. On an

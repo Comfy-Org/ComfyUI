@@ -394,7 +394,9 @@ class VideoFromFile(VideoInput):
                     duration_from_start = min(raw_duration, -self.__start_time)
                 else:
                     duration_from_start = raw_duration - self.__start_time
-                duration_seconds = min(self.__duration, duration_from_start)
+                duration_seconds = (
+                    min(self.__duration, duration_from_start) if self.__duration else duration_from_start
+                )
                 estimated_frames = int(round(duration_seconds * float(video_stream.average_rate)))
                 if estimated_frames > 0:
                     return estimated_frames
@@ -403,7 +405,7 @@ class VideoFromFile(VideoInput):
             start_time, duration = self.get_active_trim_window()
             frame_count = 1
             start_pts = int(start_time / video_stream.time_base)
-            end_pts = int((start_time + duration) / video_stream.time_base)
+            end_pts = int((start_time + duration) / video_stream.time_base) if duration else None
             container.seek(start_pts, stream=video_stream)
             frame_iterator = (
                 container.decode(video_stream)
@@ -416,7 +418,7 @@ class VideoFromFile(VideoInput):
             else:
                 raise ValueError(f"Could not determine frame count for file '{self.__file}'\nNo frames exist for start_time {self.__start_time}")
             for frame in frame_iterator:
-                if frame.pts >= end_pts:
+                if end_pts is not None and frame.pts >= end_pts:
                     break
                 frame_count += 1
             return frame_count
@@ -709,6 +711,10 @@ class VideoFromFile(VideoInput):
         crf: float | None = None,
         color_space: str | None = None,
         preset: str | None = None,
+        preserve_source_timestamps: bool = True,
+        frame_rate: Fraction | None = None,
+        audio_sample_rate: int | None = None,
+        audio_layout: str | None = None,
     ):
         """Re-encode one frame at a time; peak memory does not scale with video length."""
         open_kwargs, output_format, output_codec = video_output_config(path, format, codec)
@@ -730,7 +736,7 @@ class VideoFromFile(VideoInput):
         source_color_space = video_stream_color_space(video_stream)
         preserve_source_color = source_color_space is not None
         pix_fmt = "yuv420p10le" if bit_depth >= 10 else "yuv420p"
-        rate = Fraction(video_stream.average_rate) if video_stream.average_rate else Fraction(1)
+        rate = frame_rate or (Fraction(video_stream.average_rate) if video_stream.average_rate else Fraction(1))
 
         resampler = None
         sample_rate = 0
@@ -748,10 +754,9 @@ class VideoFromFile(VideoInput):
                     logging.warning("Audio stream parameters could not be determined; ignoring audio.")
                     audio_stream = None
         if audio_stream is not None:
-            if output_format == VideoContainer.WEBM:
-                sample_rate = 48000
+            sample_rate = 48000 if output_format == VideoContainer.WEBM else audio_sample_rate or sample_rate
             audio_time_base = Fraction(1, sample_rate)
-            layout = {1: "mono", 2: "stereo", 6: "5.1"}.get(channels, "stereo")
+            layout = audio_layout or {1: "mono", 2: "stereo", 6: "5.1"}.get(channels, "stereo")
             resampler = av.audio.resampler.AudioResampler(format="fltp", layout=layout, rate=sample_rate)
             if duration:
                 duration_cap = math.ceil(duration * sample_rate)
@@ -879,9 +884,6 @@ class VideoFromFile(VideoInput):
                             # Add metadata before writing any streams
                             write_output_metadata(container, output, metadata)
                             out_video = output.add_stream(VIDEO_ENCODERS[output_codec], rate=rate)
-                            # no B-frames: reordering makes mp4 sample durations follow decode order,
-                            # so irregular-VFR spans and trim windows land wrong
-                            out_video.codec_context.max_b_frames = 0
                             out_video.width = out_width
                             out_video.height = out_height
                             out_video.pix_fmt = pix_fmt
@@ -890,8 +892,10 @@ class VideoFromFile(VideoInput):
                                 copy_color_properties(video_stream, out_video.codec_context)
                             elif color_space is not None:
                                 set_video_color_properties(out_video.codec_context, color_space)
-                            # source pts pass through (rebased to 0), so variable frame rate survives
-                            out_video.codec_context.time_base = video_stream.time_base
+                            # Preserve source timing; B-frame reordering shortens irregular-VFR spans.
+                            if preserve_source_timestamps:
+                                out_video.codec_context.max_b_frames = 0
+                                out_video.codec_context.time_base = video_stream.time_base
                             if audio_stream is not None:
                                 audio_codec = "libopus" if output_format == VideoContainer.WEBM else "aac"
                                 out_audio = output.add_stream(audio_codec, rate=sample_rate, layout=layout)
@@ -1210,3 +1214,360 @@ class VideoFromComponents(VideoInput):
             return None
         #TODO Consider tracking duration and trimming at time of save?
         return VideoFromFile(self.get_stream_source(), start_time=start_time, duration=duration)
+
+
+class VideoFromList(VideoInput):
+    def __init__(
+        self,
+        videos: list[VideoInput],
+        complete_audio: AudioInput | None = None,
+        codec: VideoCodec = VideoCodec.AUTO,
+    ):
+        self.videos = []
+        inherited_audio = None
+        for video in videos:
+            if isinstance(video, VideoFromList):
+                if video.complete_audio is not None:
+                    inherited_audio = video.complete_audio
+                self.videos.extend(video.videos)
+            elif not isinstance(video, VideoFromFile):
+                buffer = io.BytesIO()
+                video.save_to(buffer, format=VideoContainer.MKV, codec=codec)
+                self.videos.append(VideoFromFile(buffer))
+            else:
+                self.videos.append(video)
+        if not self.videos:
+            raise ValueError("Concatenate Video requires at least one input")
+        self.complete_audio = complete_audio if complete_audio is not None else inherited_audio
+        self.__buffer = None
+
+    def get_components(self) -> VideoComponents:
+        components = [video.get_components() for video in self.videos]
+        frame_rate = components[0].frame_rate
+        if any(component.frame_rate != frame_rate for component in components[1:]):
+            raise ValueError("Cannot materialize accumulated videos with different frame rates")
+        try:
+            images = torch.cat([component.images for component in components])
+        except RuntimeError as error:
+            raise ValueError("Accumulated videos have incompatible frame dimensions") from error
+
+        if self.complete_audio is not None:
+            sample_rate = int(self.complete_audio["sample_rate"])
+            audio = AudioInput({
+                "waveform": self.complete_audio["waveform"][..., :round(len(images) / frame_rate * sample_rate)],
+                "sample_rate": sample_rate,
+            })
+        elif any(component.audio is not None for component in components):
+            if any(component.audio is None for component in components):
+                raise ValueError("Cannot materialize accumulated videos with missing audio segments")
+            sample_rate = int(components[0].audio["sample_rate"])
+            channels = components[0].audio["waveform"].shape[1]
+            if any(
+                int(component.audio["sample_rate"]) != sample_rate
+                or component.audio["waveform"].shape[1] != channels
+                for component in components[1:]
+            ):
+                raise ValueError("Cannot materialize accumulated videos with incompatible audio")
+            audio = AudioInput({
+                "waveform": torch.cat(
+                    [component.audio["waveform"] for component in components], dim=-1
+                )[..., :round(len(images) / frame_rate * sample_rate)],
+                "sample_rate": sample_rate,
+            })
+        else:
+            audio = None
+
+        alphas = [component.alpha for component in components]
+        alpha = torch.cat(alphas) if all(value is not None for value in alphas) else None
+        return VideoComponents(
+            images=images,
+            audio=audio,
+            frame_rate=frame_rate,
+            metadata=components[0].metadata,
+            alpha=alpha,
+        )
+
+    def get_dimensions(self):
+        dimensions = [video.get_dimensions() for video in self.videos]
+        mismatches = [
+            f"chunk {index} is {width}x{height}"
+            for index, (width, height) in enumerate(dimensions[1:], 1)
+            if (width, height) != dimensions[0]
+        ]
+        if mismatches:
+            width, height = dimensions[0]
+            raise ValueError(
+                f"Accumulated videos have incompatible frame dimensions: chunk 0 is {width}x{height}; "
+                + "; ".join(mismatches)
+            )
+        return dimensions[0]
+
+    def get_bit_depth(self):
+        return self.videos[0].get_bit_depth()
+
+    def get_color_space(self):
+        return self.videos[0].get_color_space()
+
+    def get_duration(self):
+        return sum(video.get_duration() for video in self.videos)
+
+    def get_frame_count(self):
+        return sum(video.get_frame_count() for video in self.videos)
+
+    def get_frame_rate(self):
+        return self.videos[0].get_frame_rate()
+
+    def save_to(self, path, format=VideoContainer.AUTO, codec=VideoCodec.AUTO, metadata=None,
+                bit_depth=None, crf=None, color_space=None, preset=None):
+        open_kwargs, output_format, output_codec = video_output_config(path, format, codec)
+        requested_codec = VideoCodec(codec)
+        output = None
+        output_video = None
+        output_audio = None
+        audio_resampler = None
+        audio_pts = 0
+        signature = None
+        video_offset = Fraction()
+
+        def mux_audio_frames(frames, end_pts):
+            nonlocal audio_pts
+            for frame in frames:
+                remaining = end_pts - audio_pts
+                if remaining <= 0:
+                    return
+                if frame.samples > remaining:
+                    frame = av.AudioFrame.from_ndarray(
+                        frame.to_ndarray()[..., :remaining], format="fltp", layout=audio_layout
+                    )
+                    frame.sample_rate = output_audio.rate
+                frame.pts = audio_pts
+                frame.time_base = Fraction(1, frame.sample_rate)
+                audio_pts += frame.samples
+                output.mux(output_audio.encode(frame))
+
+        def write_audio_frames(frames, end_pts):
+            for frame in frames:
+                mux_audio_frames(audio_resampler.resample(frame), end_pts)
+
+        def video_packets(container, stream):
+            pending = []
+            for packet in container.demux(stream):
+                if packet.dts is None:
+                    if packet.pts is not None:
+                        pending.append(packet)
+                    continue
+                if pending:
+                    dts = packet.dts
+                    for leading in reversed(pending):
+                        dts -= leading.duration or packet.duration or 1
+                        leading.dts = dts
+                    yield from pending
+                    pending.clear()
+                yield packet
+            if pending:
+                if all(first.pts <= second.pts for first, second in zip(pending, pending[1:])):
+                    for packet in pending:
+                        packet.dts = packet.pts
+                else:
+                    dts = 0
+                    for packet in reversed(pending):
+                        dts -= packet.duration or 1
+                        packet.dts = dts
+                yield from pending
+
+        def encoded_signature(container):
+            video_stream = container.streams.video[0]
+            audio_stream = None if self.complete_audio is not None else last_decodable_audio_stream(container)
+            return (
+                video_stream.codec.canonical_name,
+                video_stream.codec_context.extradata,
+                video_stream.width,
+                video_stream.height,
+                video_stream_bit_depth(video_stream),
+                video_stream_color_space(video_stream),
+                audio_stream.sample_rate if audio_stream else None,
+                audio_stream.layout.name if audio_stream else None,
+            )
+
+        source_signatures = []
+        shared_encode = crf is not None or color_space is not None
+        for video in self.videos:
+            with av.open(video.get_stream_source()) as container:
+                current_signature = encoded_signature(container)
+                source_signatures.append(current_signature)
+                video_stream = container.streams.video[0]
+                shared_encode |= (
+                    (requested_codec != VideoCodec.AUTO and current_signature[0] != requested_codec.value)
+                    or (bit_depth is not None and current_signature[4] != bit_depth)
+                    or (output_format == VideoContainer.WEBM and video_stream.codec.canonical_name not in WEBM_STREAM_CODECS["video"])
+                    or video.get_active_trim_window() != (0.0, 0.0)
+                    or video.get_dimensions() != (video_stream.width, video_stream.height)
+                )
+        shared_encode |= any(
+            current_signature != source_signatures[0]
+            for current_signature in source_signatures[1:]
+        )
+        target_codec = requested_codec if requested_codec != VideoCodec.AUTO else output_codec
+        target_bit_depth = bit_depth if bit_depth is not None else source_signatures[0][4]
+        target_color_space = color_space if color_space is not None else source_signatures[0][5]
+        target_frame_rate = Fraction(self.videos[0].get_frame_rate())
+        target_audio_rate = source_signatures[0][6]
+        target_audio_layout = source_signatures[0][7]
+
+        try:
+            for index, video in enumerate(self.videos):
+                container = av.open(video.get_stream_source())
+                current_signature = encoded_signature(container)
+                if shared_encode:
+                    scratch = io.BytesIO()
+                    try:
+                        video._save_transcoded(
+                            container,
+                            scratch,
+                            format=output_format,
+                            codec=target_codec,
+                            metadata=None,
+                            bit_depth=target_bit_depth,
+                            crf=crf,
+                            color_space=target_color_space,
+                            preset=preset,
+                            preserve_source_timestamps=False,
+                            frame_rate=target_frame_rate,
+                            audio_sample_rate=target_audio_rate,
+                            audio_layout=target_audio_layout,
+                        )
+                    finally:
+                        container.close()
+                    scratch.seek(0)
+                    container = av.open(scratch)
+                    current_signature = encoded_signature(container)
+                    if signature is not None and current_signature != signature:
+                        container.close()
+                        fields = ("codec", "extradata", "width", "height", "bit depth", "color space", "audio rate", "audio layout")
+                        differences = "; ".join(
+                            f"{field}: expected {expected!r}, got {actual!r}"
+                            for field, expected, actual in zip(fields, signature, current_signature)
+                            if expected != actual
+                        )
+                        raise ValueError(f"Video chunk {index} could not be encoded compatibly: {differences}")
+                with container:
+                    video_stream = container.streams.video[0]
+                    audio_stream = None if self.complete_audio is not None else last_decodable_audio_stream(container)
+                    if index == 0:
+                        signature = current_signature
+                        output = av.open(path, **open_kwargs)
+                        write_output_metadata(container, output, metadata)
+                        output_video = output.add_stream_from_template(video_stream, opaque=True)
+                        if self.complete_audio is not None:
+                            source_rate = int(self.complete_audio["sample_rate"])
+                            channels = self.complete_audio["waveform"].shape[1]
+                            layout = {1: "mono", 2: "stereo", 6: "5.1"}.get(channels, "stereo")
+                        elif audio_stream is not None:
+                            source_rate = audio_stream.sample_rate
+                            layout = audio_stream.layout.name
+                        else:
+                            source_rate = layout = None
+                        if layout is not None:
+                            target_rate = 48000 if output_format == VideoContainer.WEBM else source_rate
+                            audio_layout = layout
+                            output_audio = output.add_stream(
+                                "libopus" if output_format == VideoContainer.WEBM else "aac",
+                                rate=target_rate,
+                                layout=layout,
+                            )
+                            audio_resampler = av.AudioResampler(format="fltp", layout=layout, rate=target_rate)
+                    hevc_filter = isobmff_hevc_filter(output, video_stream, output_video)
+                    video_end = video_offset
+                    origin = None
+                    for packet in video_packets(container, video_stream):
+                        time_base = packet.time_base
+                        if origin is None:
+                            origin = Fraction(packet.pts if packet.pts is not None else packet.dts) * time_base
+                        if packet.pts is not None:
+                            packet.pts = int((Fraction(packet.pts) * time_base - origin + video_offset) / time_base)
+                            video_end = max(video_end, Fraction(packet.pts + (packet.duration or 0)) * time_base)
+                        packet.dts = int((Fraction(packet.dts) * time_base - origin + video_offset) / time_base)
+                        packet.stream = output_video
+                        for packet in filter_hevc_packet(hevc_filter, packet) if hevc_filter else (packet,):
+                            packet.stream = output_video
+                            output.mux(packet)
+                    video_offset = video_end
+                    if audio_stream is not None:
+                        container.seek(0)
+                        write_audio_frames(
+                            itertools.chain.from_iterable(packet.decode() for packet in container.demux(audio_stream)),
+                            round(float(video_offset) * output_audio.rate),
+                        )
+
+            if output_audio is not None:
+                if self.complete_audio is not None:
+                    source_rate = int(self.complete_audio["sample_rate"])
+                    waveform = self.complete_audio["waveform"][0, :, : round(source_rate * float(video_offset))]
+                    frame = av.AudioFrame.from_ndarray(
+                        waveform.float().cpu().contiguous().numpy(), format="fltp", layout=audio_layout
+                    )
+                    frame.sample_rate = source_rate
+                    write_audio_frames((frame,), round(float(video_offset) * output_audio.rate))
+                mux_audio_frames(audio_resampler.resample(None), round(float(video_offset) * output_audio.rate))
+                output.mux(output_audio.encode(None))
+        except BaseException:
+            if output is not None:
+                output.close()
+            if isinstance(path, (str, os.PathLike)) and os.path.exists(path):
+                os.remove(path)
+            raise
+        else:
+            if output is not None:
+                output.close()
+
+    def get_stream_source(self):
+        if self.__buffer is None:
+            self.__buffer = io.BytesIO()
+            self.save_to(self.__buffer, format=VideoContainer.MP4)
+        self.__buffer.seek(0)
+        return self.__buffer
+
+    def as_trimmed(self, start_time=None, duration=None, strict_duration=False):
+        total_duration = self.get_duration()
+        start_time = float(start_time or 0)
+        if start_time < 0:
+            start_time = max(total_duration + start_time, 0)
+        available = total_duration - start_time
+        if available < 0 or duration is not None and duration < 0:
+            return None
+        if strict_duration and duration and duration > available:
+            return None
+        duration = min(float(duration), available) if duration else available
+
+        selected = []
+        offset = start_time
+        remaining = duration
+        for video in self.videos:
+            video_duration = video.get_duration()
+            if offset >= video_duration:
+                offset -= video_duration
+                continue
+            selected.append(video.as_trimmed(offset, min(video_duration - offset, remaining), False))
+            remaining -= video_duration - offset
+            if remaining <= 0:
+                break
+            offset = 0
+        if not selected:
+            return None
+
+        audio = self.complete_audio
+        if audio is not None:
+            sample_rate = int(audio["sample_rate"])
+            start_sample = round(start_time * sample_rate)
+            end_sample = start_sample + round(duration * sample_rate)
+            audio = AudioInput({
+                "waveform": audio["waveform"][..., start_sample:end_sample],
+                "sample_rate": sample_rate,
+            })
+        return VideoFromList(selected, audio)
+
+    def as_cropped(self, x=0, y=0, width=0, height=0):
+        return VideoFromList(
+            [video.as_cropped(x, y, width, height) for video in self.videos],
+            self.complete_audio,
+        )

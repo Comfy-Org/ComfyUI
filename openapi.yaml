@@ -11,10 +11,6 @@ components:
                     description: Display name of the asset. Mirrors name for backwards compatibility.
                     nullable: true
                     type: string
-                file_path:
-                    description: Relative path in global-namespace-root form (e.g. "models/checkpoints/flux.safetensors")
-                    nullable: true
-                    type: string
                 hash:
                     description: Blake3 hash of the asset content.
                     pattern: ^blake3:[a-f0-9]{64}$
@@ -150,10 +146,6 @@ components:
             properties:
                 display_name:
                     description: Display name of the asset. Mirrors name for backwards compatibility.
-                    nullable: true
-                    type: string
-                file_path:
-                    description: Relative path in global-namespace-root form (e.g. "models/checkpoints/flux.safetensors")
                     nullable: true
                     type: string
                 hash:
@@ -1714,11 +1706,6 @@ paths:
                   name: name_contains
                   schema:
                     type: string
-                - description: JSON object for filtering by metadata fields
-                  in: query
-                  name: metadata_filter
-                  schema:
-                    type: string
                 - description: Maximum number of assets to return (1-500)
                   in: query
                   name: limit
@@ -2550,11 +2537,6 @@ paths:
                 - description: Filter assets where name contains this substring (case-insensitive)
                   in: query
                   name: name_contains
-                  schema:
-                    type: string
-                - description: JSON object for filtering by metadata fields
-                  in: query
-                  name: metadata_filter
                   schema:
                     type: string
                 - description: Maximum number of tags to return (1-1000, default 100)
