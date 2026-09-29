@@ -425,6 +425,7 @@ class MiniMaxH3VideoVAE(nn.Module):
         tile_size=256,
         tile_overlap_min=64,
         tiling=True,
+        num_layers=36,
         operations=ops,
     ):
         super().__init__()
@@ -461,6 +462,7 @@ class MiniMaxH3VideoVAE(nn.Module):
             patch_size_t=self.vae_ratio_t,
             in_channels=z_channels,
             out_channels=out_ch,
+            num_layers=num_layers,
             operations=operations,
         )
 
