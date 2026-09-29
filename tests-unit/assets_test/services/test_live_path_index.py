@@ -95,10 +95,13 @@ def test_register_file_in_place(mock_create_session, db_engine, output_file):
         ingest.register_file_in_place(path, "in-place.png", ["output"])
 
 
-def test_upload_onto_an_existing_destination(mock_create_session, db_engine, temp_dir):
+def test_upload_onto_an_existing_destination(mock_create_session, db_engine):
     def upload():
-        # The upload removes the temp file's directory along with it.
-        temp = Path(tempfile.mkdtemp(dir=temp_dir)) / "upload.tmp"
+        # Staged where the upload route stages it: the move into input/ is an os.replace,
+        # which fails across drives. The upload removes this directory along with the file.
+        uploads = Path(folder_paths.get_temp_directory()) / "uploads"
+        uploads.mkdir(parents=True, exist_ok=True)
+        temp = Path(tempfile.mkdtemp(dir=uploads)) / "upload.tmp"
         temp.write_bytes(b"upload bytes")
         return ingest.upload_from_temp_path(str(temp), name="live-index-upload.png", tags=["input"])
 
