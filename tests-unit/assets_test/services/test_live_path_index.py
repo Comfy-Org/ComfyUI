@@ -3,6 +3,7 @@ uq_asset_contents_path_live. Written as ``is_missing IS 0`` it is not, and the l
 asset_contents, which inside a write transaction holds the lock for as long as the scan runs."""
 
 import os
+import re
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -26,6 +27,9 @@ from app.assets.services.hash_mode_state import (
     enqueue_transition_work,
 )
 
+# SQLite before 3.36 words it "SCAN TABLE asset_contents".
+_CONTENT_SCAN = re.compile(r"\bSCAN (TABLE )?asset_contents\b")
+
 
 @contextmanager
 def no_content_scans(db_engine):
@@ -47,7 +51,7 @@ def no_content_scans(db_engine):
     with db_engine.connect() as conn:
         for statement, parameters in statements:
             plan = conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {statement}", parameters).all()
-            assert not any("SCAN asset_contents" in row[-1] for row in plan), (statement, plan)
+            assert not any(_CONTENT_SCAN.search(row[-1]) for row in plan), (statement, plan)
 
 
 def _output_file(name: str) -> str:
