@@ -1566,7 +1566,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                 layer_conf = state_dict.get(f"{prefix}comfy_quant", None)
                 quant_format = json.loads(layer_conf.numpy().tobytes()).get("format") if layer_conf is not None else None
                 scale = state_dict.get(f"{prefix}weight_scale", None)
-                if quant_format == "asym_w4a8_int8" or (quant_format == "int8_tensorwise" and scale is not None and scale.ndim == 3):
+                if quant_format in _GROUPED_INT8_FORMATS or (quant_format == "int8_tensorwise" and scale is not None and scale.ndim == 3):
                     # per-row scaled layouts are 2-D only: keep the bank as [E * out, in] and slice rows per expert
                     for name in ("weight", "weight_scale", "weight_s_rel", "weight_s_channel"):
                         t = state_dict.get(f"{prefix}{name}", None)
@@ -1641,7 +1641,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                         and input.dim() == 2
                     )
                     if use_fast:
-                        qin = QuantizedTensor.from_float(input, self.layout_type)
+                        qin = QuantizedTensor.from_float(input, self.layout_type) if QUANT_ALGOS[self.quant_format].get("quantize_input", True) else input
                         return torch.nn.functional.linear(qin, qw, b)
                     qw = cast_to_input(qw.dequantize(), input, copy=False)
                 return torch.nn.functional.linear(input, qw, b)
