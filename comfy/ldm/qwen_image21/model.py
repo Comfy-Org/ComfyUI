@@ -163,6 +163,36 @@ class LastLayer(nn.Module):
         return comfy.quant_ops.ck.adaln(x, scale, torch.zeros_like(scale[:1]), self.norm.eps)
 
 
+class QwenImage21FunControlBlock(QwenImage21TransformerBlock):
+    def __init__(self, dim, num_attention_heads, attention_head_dim, mlp_ratio=3, eps=1e-6, fused_mlp=True, first=False, dtype=None, device=None, operations=None):
+        super().__init__(dim, num_attention_heads, attention_head_dim, mlp_ratio, eps, fused_mlp, dtype=dtype, device=device, operations=operations)
+        if first:
+            self.before_proj = operations.Linear(dim, dim, dtype=dtype, device=device)
+        self.after_proj = operations.Linear(dim, dim, dtype=dtype, device=device)
+
+
+class QwenImage21FunControl(nn.Module):
+    # VACE-style branch: a stream of block copies started from the embedded joint sequence, each skip added after one base block
+    def __init__(self, num_blocks=16, control_in_dim=129, inner_dim=4096, attention_head_dim=128, mlp_ratio=3, eps=1e-6, fused_mlp=True, dtype=None, device=None, operations=None):
+        super().__init__()
+        self.control_img_in = operations.Linear(control_in_dim, inner_dim, dtype=dtype, device=device)
+        self.control_blocks = nn.ModuleList([
+            QwenImage21FunControlBlock(inner_dim, inner_dim // attention_head_dim, attention_head_dim, mlp_ratio, eps, fused_mlp, first=i == 0, dtype=dtype, device=device, operations=operations)
+            for i in range(num_blocks)
+        ])
+
+    def init_stream(self, x, control, prefix_len):
+        # control latents fill the target rows, text and reference rows stay zero
+        joint = torch.zeros_like(x)
+        joint[:, prefix_len:] = self.control_img_in(control)
+        return self.control_blocks[0].before_proj(joint) + x
+
+    def step(self, index, c, mod, pe, attn_fn, prefix_len, transformer_options={}):
+        block = self.control_blocks[index]
+        c = block(c, mod, pe, attn_fn, prefix_len, transformer_options)
+        return c, block.after_proj(c)
+
+
 def block_causal_attention(segments, transformer_options={}, cache=None, block_index=0, prefix_len=0):
     # segments: (start, end, mask); text segments get a causal mask, image blocks attend to everything before their end
     def attn(q, k, v, heads, preferred_attention=None):
@@ -359,7 +389,8 @@ class QwenImage21Transformer2DModel(nn.Module):
             if ("single_block", i) in blocks_replace:
                 def block_wrap(args):
                     return {"img": block(args["img"], mod, args["pe"], attn_fn, prefix_len, args["transformer_options"])}
-                hidden_states = blocks_replace[("single_block", i)]({"img": hidden_states, "vec": temb, "pe": pe, "transformer_options": transformer_options}, {"original_block": block_wrap})["img"]
+                args = {"img": hidden_states, "vec": temb, "pe": pe, "mod": mod, "attn_fn": attn_fn, "prefix_len": prefix_len, "transformer_options": transformer_options}
+                hidden_states = blocks_replace[("single_block", i)](args, {"original_block": block_wrap})["img"]
             else:
                 hidden_states = block(hidden_states, mod, pe, attn_fn, prefix_len, transformer_options)
             for p in patches.get("single_block", []):
