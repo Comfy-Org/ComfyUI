@@ -1,8 +1,9 @@
 """Reconciles catalogued content against what is actually on disk: retiring rows
 whose file is gone, splitting a row whose bytes changed, and recovering one
-whose file came back. Recovery fires only when the returning file's hash
-identifies exactly one missing row and no live row already occupies that path,
-so a restored file can never leave two live rows describing one location.
+whose file came back. Recovery never fires for a path a live row already
+occupies, so a restored file can never leave two live rows describing one
+location. With hashing on, the returning file's hash must identify exactly one
+missing row; with hashing off, its size and modification time must match.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from app.assets.database.queries.records import (
     unset_content_missing,
 )
 from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix, to_stored_hash
+from app.assets.services.file_utils import get_mtime_ns
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 from app.assets.services.snapshot_hash import snapshot_hash
 
@@ -104,6 +106,51 @@ def recover_missing_content(
     candidate.hash = stored_hash
     candidate.size_bytes = verified_stat.st_size
     candidate.mtime_ns = verified_stat.st_mtime_ns
+    return "recovered"
+
+
+def missing_contents_by_path(session: Session, paths: list[str]) -> dict[str, list[AssetContent]]:
+    """The missing rows at ``paths``, loaded in chunks: no index serves a missing row's path."""
+    by_path: dict[str, list[AssetContent]] = {}
+    for start in range(0, len(paths), 500):
+        chunk = paths[start : start + 500]
+        for content in session.scalars(
+            sa.select(AssetContent).where(
+                AssetContent.is_missing.is_(True), AssetContent.path.in_(chunk)
+            )
+        ):
+            by_path.setdefault(content.path, []).append(content)
+    return by_path
+
+
+def recover_missing_content_by_stat(
+    session: Session,
+    path: str,
+    stat_result: os.stat_result,
+    candidates: list[AssetContent],
+) -> Literal["recovered", "no_match"]:
+    """Hashing-off recovery: size and modification time are the identity a hashing-off
+    scan checks on a live row, so a returning file that matches them restores its row."""
+    mtime_ns = get_mtime_ns(stat_result)
+    matches = [
+        candidate
+        for candidate in candidates
+        if candidate.is_missing
+        and (candidate.size_bytes, candidate.mtime_ns) == (stat_result.st_size, mtime_ns)
+    ]
+    if not matches:
+        return "no_match"
+    occupied = session.scalar(
+        sa.select(AssetContent.id)
+        .where(AssetContent.path == path, AssetContent.is_missing.is_(False))
+        .limit(1)
+    )
+    if occupied is not None:
+        return "no_match"
+    # Several match only when earlier offline cycles left copies of one file behind;
+    # the newest is the one that was live last.
+    recovered = max(matches, key=lambda candidate: (candidate.created_at, candidate.id))
+    unset_content_missing(session, recovered.id)
     return "recovered"
 
 

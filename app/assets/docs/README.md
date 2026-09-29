@@ -50,15 +50,19 @@ stateDiagram-v2
 
     MissingHashed --> LiveHashed: hash match at path (hashing on)
     MissingUnhashed --> LiveHashed: size and mtime match at path (hashing on)
+    MissingHashed --> LiveHashed: size and mtime match at path (hashing off)
+    MissingUnhashed --> LiveUnhashed: size and mtime match at path (hashing off)
 ```
 
 A reappeared file that matches no missing candidate, or more than one, does not recover any of them. The scanner creates a new content row for the file instead, and the missing candidates stay missing. The same old-missing-plus-new-content shape applies to a same-path edit or reuse: the old row is marked missing and a separate new row and record are created for the new bytes, never transformed in place.
 
-Only a hash can recover a missing content row, with one narrow exception for rows that were never hashed. The scanner hashes the file now present at the missing path and recovers the row only when exactly one missing candidate for that path has the same hash. If no candidate matches, the scanner creates new content. If multiple candidates match, none recover. Recovery also never fires for a path a live content row already occupies: the file there belongs to that row, and ordinary change detection owns it.
+With hashing on, only a hash can recover a missing content row, with one narrow exception for rows that were never hashed. The scanner hashes the file now present at the missing path and recovers the row only when exactly one missing candidate for that path has the same hash. If no candidate matches, the scanner creates new content. If multiple candidates match, none recover. Recovery also never fires for a path a live content row already occupies: the file there belongs to that row, and ordinary change detection owns it.
 
 A missing row can have a null hash, for example a file deleted before it was ever hashed while every server was down during an off-to-on hashing transition. Such a row can never satisfy the hash comparison, so it has its own narrower recovery condition: it recovers only when it is the single missing null-hash candidate at that path, and its recorded byte size and modification time exactly match the reappeared file's verified stat. The freshly computed hash is set on the row as part of recovery. The stat facts are the only recorded identity a never-hashed row has, so a same-path reappearance that does not preserve them creates new content instead, and the old row stays missing rather than risk recovering the wrong record.
 
-Hash-based recovery does not compare modification times; only the null-hash recovery described above requires the recorded byte size and modification time to match exactly. With hashing disabled, recovery is unavailable.
+Hash-based recovery does not compare modification times; only the null-hash recovery described above requires the recorded byte size and modification time to match exactly.
+
+With hashing off, byte size and modification time are the identity the scanner checks on every live row, so they also decide recovery. A file that reappears at a path no live row occupies recovers the missing row at that path whose recorded byte size and modification time exactly match the file's stat, keeping any stored hash. This is what brings a library back, with its record ids, names, tags, metadata and job links, after its drive was offline for a scan. If more than one missing row matches, the newest one recovers: that is the row that was live most recently, and the older ones stay missing. A file whose size or modification time changed while it was away (for example, copied back without preserving timestamps) creates new content, as with the null-hash rule. A different file with the same size and modification time recovers the old row, the same blind spot hashing-off change detection has for a live row.
 
 Missing rows and their asset records persist until explicitly deleted. Routine scans do not remove them.
 
@@ -87,7 +91,7 @@ From-hash lookup is disabled while hashing is off.
 
 ### File removed outside the API
 
-Mark the content missing and keep every asset record visible. The usual hash-based recovery applies if a file later appears at the same path.
+Mark the content missing and keep every asset record visible. The usual recovery (by hash, or by size and modification time with hashing off) applies if a file later appears at the same path.
 
 ### File edited in place
 
@@ -319,7 +323,7 @@ A file lock prevents more than one server process from opening the same database
 
 ### Ambiguous recovery
 
-If more than one missing content row matches a recreated file's hash, recover none of them.
+If more than one missing content row matches a recreated file's hash, recover none of them. With hashing off, the newest of several rows matching the file's size and modification time recovers (see Missing content).
 
 ### Database replacement while running
 

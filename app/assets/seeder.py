@@ -115,6 +115,8 @@ class _ScanState:
     hash_failed: int = 0
     enrich_failed: int = 0
     permission_denied: int = 0
+    missing_marked: int = 0
+    recovered: int = 0
     cancel_stage: str | None = None
     _emitted_keys: set[str] = field(default_factory=set)
 
@@ -727,6 +729,8 @@ class _AssetSeeder:
                 hash_failed=scan_state.hash_failed,
                 enrich_failed=scan_state.enrich_failed,
                 permission_denied=scan_state.permission_denied,
+                missing_marked_count=scan_state.missing_marked,
+                recovered_count=scan_state.recovered,
                 root=root,
             )
 
@@ -791,6 +795,17 @@ class _AssetSeeder:
                                 pending["phase"].value,
                             )
 
+    @staticmethod
+    def _emit_marked_missing(root: RootType, marked: int) -> None:
+        """Report the rows a scan marked missing because their file was not found."""
+        if marked > 0:
+            emit(
+                "seeder.marked_missing",
+                count=marked,
+                stage=_ScanStage.FAST_SCAN.value,
+                root=root,
+            )
+
     def _run_fast_phase(self, roots: tuple[RootType, ...]) -> tuple[int, int, int]:
         """Run phase 1: fast scan to create stub records.
 
@@ -814,7 +829,9 @@ class _AssetSeeder:
                 live_references = live_references_safely(r)
                 existing_paths.update(live_references)
             else:
+                marked_before = scan_state.missing_marked
                 existing_paths.update(sync_root_safely(r, scan_state))
+                self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
         logging.debug(
             "Fast scan: sync_root phase took %.3fs (%d existing paths)",
             time.perf_counter() - t_sync,
@@ -834,7 +851,9 @@ class _AssetSeeder:
         )
         if walk is not None:
             vanished, unlisted = unlisted_references(live_references, walk.listings)
-            mark_unlisted_references_missing_safely("output", vanished)
+            marked_before = scan_state.missing_marked
+            mark_unlisted_references_missing_safely("output", vanished, scan_state)
+            self._emit_marked_missing("output", scan_state.missing_marked - marked_before)
             logging.debug(
                 "Fast scan: output listing: %d dirs listed, %d rows retired, "
                 "%d rows skipped (not listed, still on disk)",
@@ -887,7 +906,7 @@ class _AssetSeeder:
             batch_tags = {t for spec in batch for t in spec["tags"]}
             created = 0
             try:
-                created, batch_error = insert_asset_specs(batch, batch_tags)
+                created, batch_error = insert_asset_specs(batch, batch_tags, scan_state)
                 total_created += created
                 if batch_error is not None:
                     raise batch_error

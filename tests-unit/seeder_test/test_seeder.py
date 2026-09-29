@@ -215,8 +215,10 @@ def test_multi_root_scan_emits_one_started_and_completed_without_root(
         "enrich_failed": 0,
         "enriched": 4,
         "hash_failed": 0,
+        "missing_marked_count": 0,
         "permission_denied": 0,
         "phase": "full",
+        "recovered_count": 0,
         "skipped": 2,
     }
 
@@ -604,7 +606,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
         ),
     )
 
-    def fail_insert(batch, batch_tags) -> int:
+    def fail_insert(batch, batch_tags, progress=None) -> int:
         raise PermissionError("/private/models/asset.safetensors")
 
     monkeypatch.setattr(seeder_module, "insert_asset_specs", fail_insert)
