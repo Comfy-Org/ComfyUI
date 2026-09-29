@@ -8,6 +8,7 @@ so a restored file can never leave two live rows describing one location.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from typing import Literal
 
 import sqlalchemy as sa
@@ -202,14 +203,12 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
     return processed
 
 
-def live_contents_under_prefixes(session: Session, prefixes: list[str]) -> list[AssetContent]:
+def live_contents_under_prefixes(session: Session, prefixes: list[str]) -> Iterable[AssetContent]:
+    """Stream the live contents under the prefixes in batches; consume it inside the session."""
     if not prefixes:
         return []
-    return list(
-        session.scalars(
-            sa.select(AssetContent).where(
-                AssetContent.is_missing.is_(False),
-                sa.or_(*(sql_path_under_prefix(AssetContent.path, prefix) for prefix in prefixes)),
-            )
-        )
+    stmt = sa.select(AssetContent).where(
+        AssetContent.is_missing.is_(False),
+        sa.or_(*(sql_path_under_prefix(AssetContent.path, prefix) for prefix in prefixes)),
     )
+    return session.scalars(stmt.execution_options(yield_per=500))
