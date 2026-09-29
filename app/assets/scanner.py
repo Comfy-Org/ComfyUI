@@ -12,7 +12,6 @@ import enum
 import logging
 import os
 from dataclasses import dataclass
-from itertools import islice
 from pathlib import Path
 from typing import Callable, Literal, NamedTuple, Protocol, TypedDict
 
@@ -759,7 +758,13 @@ def get_unenriched_assets_for_roots(
             candidates = sess.execute(
                 unenriched_candidates_query(compute_hashes, last_seen_id).execution_options(yield_per=500)
             )
-            rows = list(islice((row for row in candidates if is_under(row[2])), limit))
+            rows = []
+            for row in candidates:
+                if len(rows) >= limit:
+                    break
+                yield_gil()
+                if is_under(row[2]):
+                    rows.append(row)
 
     return [
         UnenrichedContent(content_id, record_id, file_path)
