@@ -112,8 +112,8 @@ class _ScanState:
     permission_denied: int = 0
     # Directories the input/output walks listed; the models listing is not counted.
     dirs_listed: int = 0
-    # os.stat calls on files in the reference sync, discovery, admission, seed and
-    # enrich loops. Hashing's own stability stats and the watch list are not counted.
+    # os.stat calls on files in the reference sync, discovery, admission, seed, watch-list
+    # and enrich loops. Hashing's own stability stats are not counted.
     files_statted: int = 0
     # Time blocked at the pause gate.
     paused_s: float = 0.0
@@ -541,11 +541,12 @@ class _AssetSeeder:
         """
         if not self._run_gate.is_set():
             self._emit_event("assets.seed.paused", {})
+        # Re-checked so a pause landing just after the check above still blocks, and is timed.
+        if not self._run_gate.is_set():
             t_paused = time.perf_counter()
             self._run_gate.wait()  # Blocks until resume or cancel
             if self._scan_state is not None:
                 self._scan_state.paused_s += time.perf_counter() - t_paused
-        self._run_gate.wait()  # A pause landing after the check above still blocks here
         cancelled = self._is_cancelled()
         if cancelled:
             self._record_cancel_stage(stage)
@@ -920,7 +921,7 @@ class _AssetSeeder:
                 last_progress_time = now
 
         self._update_progress(scanned=len(specs), created=total_created)
-        tick_watch_list()
+        tick_watch_list(scan_state)
         logging.info(
             "Fast scan complete: %.3fs total (created=%d, skipped=%d, total_paths=%d)",
             time.perf_counter() - t_fast_start,
@@ -941,7 +942,7 @@ class _AssetSeeder:
         with create_session() as session:
             drain_pending_verifications(session)
             session.commit()
-            tick_watch_list()
+            tick_watch_list(scan_state)
             for _ in range(3):
                 drain_transition_queue(session)
                 session.commit()

@@ -150,7 +150,7 @@ def test_seed_failure_does_not_stop_watch_list_drain(
     _WATCH_LIST[:] = [_WatchEntry(str(path), path.stat()) for path in paths]
     batches: list[list[str]] = []
 
-    def insert_with_one_failure(specs, _tag_pool) -> tuple[int, Exception | None]:
+    def insert_with_one_failure(specs, _tag_pool, _progress=None) -> tuple[int, Exception | None]:
         batches.append([spec["abs_path"] for spec in specs])
         return 1, RuntimeError("forced watch seed failure")
 
@@ -344,7 +344,7 @@ def test_settled_entries_are_seeded_in_one_write_session_batch(temp_dir: Path):
         tick_watch_list()
 
     insert_asset_specs.assert_called_once()
-    specs, _ = insert_asset_specs.call_args.args
+    specs = insert_asset_specs.call_args.args[0]
     assert [spec["abs_path"] for spec in specs] == [str(path) for path in settled]
     assert [entry.path for entry in _WATCH_LIST] == [str(moving)]
 
@@ -361,4 +361,19 @@ def test_two_stat_admit_counts_each_restat_including_a_vanished_file(temp_dir: P
     admitted, _watched = _two_stat_admit(candidates, counter)
 
     assert admitted == [str(kept)]
+    assert counter.files_statted == 2
+
+
+def test_tick_watch_list_counts_each_watched_stat(temp_dir: Path):
+    watched = temp_dir / "watched.part.bin"
+    watched.write_bytes(b"x")
+    scanner_admission._WATCH_LIST[:] = [
+        scanner_admission._WatchEntry(str(watched), watched.stat()),
+        scanner_admission._WatchEntry(str(temp_dir / "gone.bin"), watched.stat()),
+    ]
+    counter = SimpleNamespace(files_statted=0)
+
+    with patch("app.assets.scanner.insert_asset_specs", return_value=(0, None)):
+        tick_watch_list(counter)
+
     assert counter.files_statted == 2

@@ -13,10 +13,13 @@ import mimetypes
 import os
 import time
 from dataclasses import dataclass
-from typing import Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol
 
 from app.assets.event_log import emit, error_type
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
+
+if TYPE_CHECKING:
+    from app.assets.scanner import _ScanProgress
 
 PARTIAL_DOWNLOAD_EXTENSIONS = frozenset({
     ".part", ".partial", ".crdownload", ".download", ".tmp", ".aria2", ".!qb", ".opdownload",
@@ -74,7 +77,7 @@ def _two_stat_admit(
     return admitted, watched
 
 
-def tick_watch_list() -> None:
+def tick_watch_list(progress: _ScanProgress | None = None) -> None:
     from app.assets.scanner import insert_asset_specs, SeedAssetSpec
 
     remaining: list[_WatchEntry] = []
@@ -83,6 +86,8 @@ def tick_watch_list() -> None:
     try:
         for entry in unvisited:
             try:
+                if progress is not None:
+                    progress.files_statted += 1
                 current = os.stat(entry.path)
             except OSError as exc:
                 logging.warning("Dropping watched asset after stat failed: %s", entry.path)
@@ -114,7 +119,7 @@ def tick_watch_list() -> None:
             entry.ticks += 1
             if entry.ticks < _WATCH_SCAN_RETRIES:
                 remaining.append(entry)
-        _created, seed_error = insert_asset_specs(settled, set())
+        _created, seed_error = insert_asset_specs(settled, set(), progress)
         if seed_error is not None:
             # The batch reports only its first error, so failed entries can't be named here;
             # like any settled entry, they leave the watch list either way.

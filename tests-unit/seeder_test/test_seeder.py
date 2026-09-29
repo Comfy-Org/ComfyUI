@@ -107,7 +107,7 @@ def _configure_fast_phase(
     )
     watch_session = Mock()
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(watch_session))
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _progress=None: None)
 
 
 def _run_faulting_fast_phase(
@@ -271,7 +271,7 @@ def test_enrich_phase_does_not_count_returned_ids_as_failures(
     )
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
     monkeypatch.setattr(seeder_module, "drain_pending_verifications", lambda _session: None)
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _progress=None: None)
     monkeypatch.setattr(seeder_module, "drain_transition_queue", lambda _session: None)
     monkeypatch.setattr(
         seeder_module,
@@ -620,7 +620,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
 
     monkeypatch.setattr(seeder_module, "insert_asset_specs", fail_insert)
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
-    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda: None)
+    monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _progress=None: None)
 
     with caplog.at_level(logging.INFO):
         scan_seeder._run_fast_phase(("models",))
@@ -870,9 +870,12 @@ def test_a_pause_landing_after_the_gate_check_still_blocks_the_checkpoint(
     scan_seeder: _AssetSeeder,
 ) -> None:
     gate = Mock()
-    gate.is_set.return_value = True  # the pause lands just after this check
+    gate.is_set.side_effect = [True, False]  # the pause lands just after the first check
+    gate.wait.side_effect = lambda: time.sleep(0.02)
     scan_seeder._run_gate = gate
 
     assert scan_seeder._check_pause_and_cancel(_ScanStage.FAST_SCAN) is False
 
     gate.wait.assert_called_once_with()
+    assert scan_seeder._scan_state is not None
+    assert scan_seeder._scan_state.paused_s >= 0.02
