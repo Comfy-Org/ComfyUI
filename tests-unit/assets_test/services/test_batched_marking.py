@@ -374,7 +374,9 @@ def test_the_set_mark_matches_marking_row_by_row(session):
                 mark_content_missing(per_row, content.id)
         per_row.commit()
 
-        assert sorted(paths[i] for i in marked) == ["/c/none.png", "/c/one.png", "/c/tagged.png", "/c/two.png"]
+        # create_content stores os.path.abspath(path), so compare in that form (a drive letter on Windows).
+        expected = sorted(os.path.abspath(f"/c/{name}.png") for name in ("none", "one", "tagged", "two"))
+        assert sorted(paths[i] for i in marked) == expected
         assert _link_state(session) == _link_state(per_row)
         assert session.get(Tag, "missing") is not None
 
