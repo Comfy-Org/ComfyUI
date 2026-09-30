@@ -134,7 +134,10 @@ def _gated_residual(x, y, gate, prefix_len):
     g_prefix, g_target = gate
     if comfy.model_management.in_training:
         if prefix_len:
-            return torch.cat((torch.addcmul(x[:, :prefix_len], y[:, :prefix_len], g_prefix), torch.addcmul(x[:, prefix_len:], y[:, prefix_len:], g_target)), dim=1)
+            return torch.cat((
+                torch.addcmul(x[:, :prefix_len], y[:, :prefix_len], g_prefix),
+                torch.addcmul(x[:, prefix_len:], y[:, prefix_len:], g_target),
+            ), dim=1)
         return torch.addcmul(x, y, g_target)
     x[:, prefix_len:].addcmul_(y[:, prefix_len:], g_target)
     if prefix_len:
