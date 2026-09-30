@@ -157,7 +157,16 @@ def get_temp_prefixes() -> list[str]:
 def collect_models_files() -> list[str]:
     out: list[str] = []
     for folder_name, bases, _exts in get_comfy_models_folders():
-        rel_files = folder_paths.get_filename_list(folder_name) or []
+        try:
+            rel_files = folder_paths.get_filename_list(folder_name) or []
+        except OSError:
+            # The cached listing raises on every call once a folder it recorded has gone
+            # away; a fresh listing skips that folder and lists the rest.
+            try:
+                rel_files = folder_paths.get_filename_list_(folder_name)[0]
+            except OSError as e:
+                logging.warning("Asset scan: skipping model category %s, it can't be listed: %s", folder_name, e)
+                continue
         for rel_path in rel_files:
             if not all(is_visible(part) for part in Path(rel_path).parts):
                 continue

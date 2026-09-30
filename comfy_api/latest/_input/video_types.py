@@ -37,7 +37,7 @@ class VideoInput(ABC):
         Abstract method to save the video input to a file.
 
         bit_depth selects the encoded bit depth; None keeps the video's native depth.
-        crf selects the H.264 or AV1 constant rate factor; None uses the encoder default.
+        crf selects the H.264 or AV1 constant rate factor; None uses 18 for H.264 or 24 for AV1 when encoding.
         preset selects the H.264 encoder speed/compression trade-off (e.g. "ultrafast");
         None uses the encoder default. Ignored for other codecs.
         color_space="sRGB" selects SDR BT.709/sRGB, "HDR" selects BT.2020/HLG, and "HDR PQ"
