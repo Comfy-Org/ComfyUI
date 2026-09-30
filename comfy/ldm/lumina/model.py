@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import comfy_aimdo.model_vbar
 import comfy.ldm.common_dit
 import comfy.model_management
 import comfy.ops
@@ -39,13 +40,30 @@ def _int8_convrot_linear(linear) -> bool:
     )
 
 
+def _vbar_resident(modules) -> bool:
+    """Return whether the VBAR weights of ``modules`` are already in VRAM.
+
+    Faulting only maps the pages; nothing is copied. The pins are dropped
+    again so the regular cast path stays in charge of the weights.
+    """
+    for s in modules:
+        signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
+        resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
+        if signature is not None:
+            comfy_aimdo.model_vbar.vbar_unpin(s._v)
+        if not resident:
+            return False
+    return True
+
+
 @contextlib.contextmanager
 def _cast_together(modules, x):
     """Allow the weights of several modules to be cast and used at the same time.
 
-    Per-module casts of streamed weights reuse the same offload buffer, so
-    streamed VBAR weights that were not prefetched are cast as one group.
-    Legacy offloaded weights have no such grouping and skip the fusion.
+    The fused ops need all their weights at once, so streamed weights would be
+    copied up front instead of overlapping with compute. Weights that are not
+    already in VRAM (or prefetched) therefore skip the fusion, as do legacy
+    offloaded weights.
     """
     device = x.device
     if comfy.model_management.is_device_cpu(device) or any(
@@ -54,6 +72,9 @@ def _cast_together(modules, x):
         yield False
         return
     pending = [s for s in modules if hasattr(s, "_v") and not hasattr(s, "_prefetch")]
+    if not _vbar_resident(pending):
+        yield False
+        return
     offload_stream = None
     if pending:
         offload_stream, _ = comfy.model_prefetch.pin_modules(pending, device)
@@ -103,7 +124,7 @@ def _fused_swiglu_ffn_postnorm(x, feed_forward, norm):
     if not _fused_swiglu_supported(feed_forward):
         return None
     ff = feed_forward
-    with _cast_together((ff.w1, ff.w3, ff.w2), x) as supported:
+    with _cast_together((ff.w1, ff.w3, ff.w2, norm), x) as supported:
         if not supported:
             return None
         normed = norm(x)
@@ -491,62 +512,49 @@ class JointTransformerBlock(nn.Module):
             gate_mlp = gate_mlp.tanh()
             gate_msa_t = gate_msa.unsqueeze(1)
             gate_mlp_t = gate_mlp.unsqueeze(1)
+            # The fused ops apply one modulation row to every token, so they
+            # can't handle per-token-range modulation.
+            fuse = timestep_zero_index is None
 
-            if timestep_zero_index is None and not comfy.model_management.in_training:
-                qkv = _fused_rms_modulated_linear(
-                    x, self.attention.qkv, self.attention_norm1, scale_msa,
+            qkv = _fused_rms_modulated_linear(
+                x, self.attention.qkv, self.attention_norm1, scale_msa,
+            ) if fuse else None
+            if qkv is not None:
+                attn_out = self.attention(
+                    x, x_mask, freqs_cis, transformer_options=transformer_options, qkv=qkv,
                 )
-                if qkv is not None:
-                    attn_out = clamp_fp16(self.attention(
-                        x, x_mask, freqs_cis, transformer_options=transformer_options, qkv=qkv,
-                    ))
-                    fused_x = _fused_rms_gated_residual(
-                        attn_out, self.attention_norm2, x, gate_msa,
-                    )
-                    if fused_x is not None:
-                        x = fused_x
-                    else:
-                        x = x + apply_gate(gate_msa_t, self.attention_norm2(attn_out))
-                else:
-                    x = x + apply_gate(gate_msa_t, self.attention_norm2(
-                        clamp_fp16(self.attention(
-                            modulate(self.attention_norm1(x), scale_msa, timestep_zero_index=timestep_zero_index),
-                            x_mask,
-                            freqs_cis,
-                            transformer_options=transformer_options,
-                        ))
-                    ))
-
-                ffn_out = _fused_swiglu_ffn(x, self.feed_forward, self.ffn_norm1, scale_mlp)
-                if ffn_out is not None:
-                    ffn_out = clamp_fp16(ffn_out)
-                    fused_x = _fused_rms_gated_residual(
-                        ffn_out, self.ffn_norm2, x, gate_mlp,
-                    )
-                    if fused_x is not None:
-                        x = fused_x
-                    else:
-                        x = x + apply_gate(gate_mlp_t, self.ffn_norm2(ffn_out))
-                else:
-                    x = x + apply_gate(gate_mlp_t, self.ffn_norm2(
-                        clamp_fp16(self.feed_forward(
-                            modulate(self.ffn_norm1(x), scale_mlp, timestep_zero_index=timestep_zero_index),
-                        ))
-                    ))
             else:
-                x = x + apply_gate(gate_msa_t, self.attention_norm2(
-                    clamp_fp16(self.attention(
-                        modulate(self.attention_norm1(x), scale_msa, timestep_zero_index=timestep_zero_index),
-                        x_mask,
-                        freqs_cis,
-                        transformer_options=transformer_options,
-                    ))
-                ), timestep_zero_index=timestep_zero_index)
-                x = x + apply_gate(gate_mlp_t, self.ffn_norm2(
-                    clamp_fp16(self.feed_forward(
-                        modulate(self.ffn_norm1(x), scale_mlp, timestep_zero_index=timestep_zero_index),
-                    ))
-                ), timestep_zero_index=timestep_zero_index)
+                attn_out = self.attention(
+                    modulate(self.attention_norm1(x), scale_msa, timestep_zero_index=timestep_zero_index),
+                    x_mask,
+                    freqs_cis,
+                    transformer_options=transformer_options,
+                )
+            attn_out = clamp_fp16(attn_out)
+            fused_x = _fused_rms_gated_residual(
+                attn_out, self.attention_norm2, x, gate_msa,
+            ) if qkv is not None else None
+            if fused_x is not None:
+                x = fused_x
+            else:
+                x = x + apply_gate(gate_msa_t, self.attention_norm2(attn_out), timestep_zero_index=timestep_zero_index)
+
+            ffn_out = _fused_swiglu_ffn(
+                x, self.feed_forward, self.ffn_norm1, scale_mlp,
+            ) if fuse else None
+            ffn_fused = ffn_out is not None
+            if not ffn_fused:
+                ffn_out = self.feed_forward(
+                    modulate(self.ffn_norm1(x), scale_mlp, timestep_zero_index=timestep_zero_index),
+                )
+            ffn_out = clamp_fp16(ffn_out)
+            fused_x = _fused_rms_gated_residual(
+                ffn_out, self.ffn_norm2, x, gate_mlp,
+            ) if ffn_fused else None
+            if fused_x is not None:
+                x = fused_x
+            else:
+                x = x + apply_gate(gate_mlp_t, self.ffn_norm2(ffn_out), timestep_zero_index=timestep_zero_index)
         else:
             assert adaln_input is None
             x = x + self.attention_norm2(
@@ -558,14 +566,9 @@ class JointTransformerBlock(nn.Module):
                 ))
             )
             ffn_out = _fused_swiglu_ffn_postnorm(x, self.feed_forward, self.ffn_norm1)
-            if ffn_out is not None:
-                x = x + self.ffn_norm2(ffn_out)
-            else:
-                x = x + self.ffn_norm2(
-                    self.feed_forward(
-                        self.ffn_norm1(x),
-                    )
-                )
+            if ffn_out is None:
+                ffn_out = self.feed_forward(self.ffn_norm1(x))
+            x = x + self.ffn_norm2(ffn_out)
         return x
 
 
