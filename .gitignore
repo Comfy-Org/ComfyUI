@@ -1,6 +1,5 @@
 __pycache__/
 *.py[cod]
-/fonts/
 /output/
 /input/
 !/input/example.png
