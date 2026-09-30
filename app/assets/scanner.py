@@ -411,13 +411,14 @@ def unlisted_references(
     take). The skipped count is the rows that were stat'ed and kept.
 
     No listings means the walk couldn't list its root (a missing or unreadable output
-    folder, an unplugged drive), and then every row is kept: stat'ing them would retire
-    them all.
+    folder, an unplugged drive). Then every row is kept and counted as skipped, unstat'ed:
+    stat'ing them would retire them all.
     """
     if not listings:
-        if live:
-            logging.warning("Asset scan: the output folder can't be listed; keeping its %d rows", len(live))
-        return [], sum(len(observations) for observations in live.values())
+        kept = sum(len(observations) for observations in live.values())
+        if kept:
+            logging.warning("Asset scan: the output folder can't be listed; keeping its %d rows", kept)
+        return [], kept
     vanished: list[_ReferenceObservation] = []
     skipped = 0
     names_by_dir: dict[str, set[str]] = {}
