@@ -4,8 +4,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import comfy.controlnet
 import comfy.model_management as mm
 import comfy.ops as ops
+from comfy.ldm.lumina.model import JointAttention
 from comfy.quant_ops import QuantizedTensor, TensorCoreFP8Layout
 
 
@@ -79,6 +81,14 @@ def test_training_does_not_consume_existing_inference_buffer(monkeypatch, buffer
 
 @pytest.mark.parametrize("stage", ["interpret", "weight_copy", "bias_copy", "weight_function", "bias_function"])
 def test_failed_cast_releases_buffer(monkeypatch, simulated_cast, buffers, stage):
+    waited = []
+
+    def wait_stream(stream):
+        assert mm.STREAM_CAST_BUFFERS[buffers].in_use
+        waited.append(stream)
+
+    monkeypatch.setattr(buffers, "wait_stream", wait_stream)
+
     def fail(*args, **kwargs):
         raise RuntimeError("injected cast failure")
 
@@ -98,6 +108,9 @@ def test_failed_cast_releases_buffer(monkeypatch, simulated_cast, buffers, stage
             with ops.CastBiasWeightContext(simulated_cast, dtype=torch.float32, device=torch.device("cuda:0"), offloadable=True):
                 pytest.fail("cast should not return")
     cached = mm.STREAM_CAST_BUFFERS[buffers]
+    # Weight/bias functions run after the normal copy-to-compute stream wait.
+    expected_waits = 2 if stage.endswith("function") else 1
+    assert waited == [buffers] * expected_waits
     assert not cached.in_use
     with ops.CastBiasWeightContext(simulated_cast, dtype=torch.float32, device=torch.device("cuda:0"), offloadable=True) as (weight, bias):
         assert weight.untyped_storage().data_ptr() == cached.tensor.data_ptr()
@@ -116,6 +129,64 @@ def test_overlapping_contexts_release_on_error(monkeypatch, simulated_cast, buff
         with ops.CastBiasWeightContext(simulated_cast, dtype=torch.float32, device=torch.device("cuda:0"), offloadable=True):
             with ops.CastBiasWeightContext(other, dtype=torch.float32, device=torch.device("cuda:0"), offloadable=True):
                 fail(None)
+    assert not mm.STREAM_CAST_BUFFERS[buffers].in_use
+
+
+def test_failed_cleanup_preserves_cast_error_and_occupied_buffer(monkeypatch, simulated_cast, buffers, caplog):
+    def fail_copy(*args, **kwargs):
+        raise RuntimeError("original copy failure")
+
+    def fail_wait(stream):
+        raise RuntimeError("stream dependency failure")
+
+    monkeypatch.setattr(mm, "cast_to", fail_copy)
+    monkeypatch.setattr(buffers, "wait_stream", fail_wait)
+    with pytest.raises(RuntimeError, match="original copy failure"):
+        ops.cast_bias_weight(simulated_cast, dtype=torch.float32, device=torch.device("cuda:0"), offloadable=True)
+    cached = mm.STREAM_CAST_BUFFERS[buffers]
+    assert cached.in_use
+    temporary = mm.get_cast_buffer(buffers, "cpu", cached.tensor.numel(), object())
+    assert temporary.data_ptr() != cached.tensor.data_ptr()
+    assert "Failed to release cast buffer" in caplog.text
+
+
+@pytest.fixture
+def caller_cast(monkeypatch, simulated_cast):
+    original = ops.cast_bias_weight
+
+    def cast(layer, input=None, **kwargs):
+        return original(layer, dtype=torch.float32, device=torch.device("cuda:0"), **kwargs)
+
+    monkeypatch.setattr(ops, "cast_bias_weight", cast)
+    return simulated_cast
+
+
+def test_control_lora_releases_on_operation_error(monkeypatch, caller_cast, buffers):
+    layer = comfy.controlnet.ControlLoraOps.Conv2d(1, 1, 1)
+    layer.weight = torch.nn.Parameter(torch.ones(1, 1, 1, 1), requires_grad=False)
+    layer.bias = None
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected convolution failure")
+
+    monkeypatch.setattr(torch.nn.functional, "conv2d", fail)
+    with pytest.raises(RuntimeError, match="injected convolution failure"):
+        layer(torch.ones(1, 1, 2, 2))
+    assert not mm.STREAM_CAST_BUFFERS[buffers].in_use
+
+
+@pytest.mark.parametrize("fail_second_cast", [False, True])
+def test_joint_attention_releases_on_error(monkeypatch, caller_cast, buffers, fail_second_cast):
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected attention failure")
+
+    q = SimpleNamespace(weight=torch.ones(8), bias=None, eps=1e-6, weight_function=[], bias_function=[])
+    k = SimpleNamespace(weight=torch.full((8,), 2.0), bias=None, weight_function=[fail] if fail_second_cast else [], bias_function=[])
+    layer = SimpleNamespace(qkv=lambda x: torch.ones(1, 2, 24), n_local_heads=1,
+                            n_local_kv_heads=1, head_dim=8, qk_norm=True, q_norm=q, k_norm=k)
+    monkeypatch.setattr(ops.comfy.quant_ops.ck, "rms_rope", fail)
+    with pytest.raises(RuntimeError, match="injected attention failure"):
+        JointAttention.forward(layer, torch.ones(1, 2, 8), None, None)
     assert not mm.STREAM_CAST_BUFFERS[buffers].in_use
 
 

@@ -19,13 +19,14 @@ def _audio_logits(model, x, audio_start, audio_end, eos_token=None):
     else:
         weight = module.weight.to(x)
 
-    logits = torch.nn.functional.linear(input, weight[audio_start:audio_end], None)[:, -1]
-    eos_logits = None
-    if eos_token is not None:
-        eos_logits = torch.nn.functional.linear(input, weight[eos_token:eos_token + 1], None)[:, -1]
-
-    comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
-    return logits, eos_logits
+    try:
+        logits = torch.nn.functional.linear(input, weight[audio_start:audio_end], None)[:, -1]
+        eos_logits = None
+        if eos_token is not None:
+            eos_logits = torch.nn.functional.linear(input, weight[eos_token:eos_token + 1], None)[:, -1]
+        return logits, eos_logits
+    finally:
+        comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
 
 
 def _sample_audio_token(model, x, cfg_scale, temperature, top_p, top_k, min_p, generator, audio_start_id, audio_end_id, eos_token_id):

@@ -187,11 +187,9 @@ class Attention(nn.Module):
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             v = self.v_norm(v)
             if self.is_selfattn and rope_emb is not None:  # only apply to self-attention!
-                q_scale, _, q_offload_stream = comfy.ops.cast_bias_weight(self.q_norm, q, offloadable=True)
-                k_scale, _, k_offload_stream = comfy.ops.cast_bias_weight(self.k_norm, k, offloadable=True)
-                q, k = comfy.quant_ops.ck.rms_rope_split_half(q, k, rope_emb, q_scale, k_scale, self.q_norm.eps)
-                comfy.ops.uncast_bias_weight(self.q_norm, q_scale, None, q_offload_stream)
-                comfy.ops.uncast_bias_weight(self.k_norm, k_scale, None, k_offload_stream)
+                with comfy.ops.CastBiasWeightContext(self.q_norm, q, offloadable=True) as (q_scale, _), \
+                        comfy.ops.CastBiasWeightContext(self.k_norm, k, offloadable=True) as (k_scale, _):
+                    q, k = comfy.quant_ops.ck.rms_rope_split_half(q, k, rope_emb, q_scale, k_scale, self.q_norm.eps)
             else:
                 q = self.q_norm(q)
                 k = self.k_norm(k)
