@@ -5,6 +5,10 @@ server by attaching an aiohttp middleware to ``PromptServer.instance.app``.
 It announces itself here so that, when ``--require-auth`` is set, core can
 refuse to start if no provider is actually active.
 
+This is a misconfiguration guard, not a security boundary: it catches an auth
+node that is missing, disabled or broken. Custom nodes run in-process with full
+privileges, so installed nodes must still be trusted.
+
 Usage from a custom node pack, at import time::
 
     from server import PromptServer
@@ -52,21 +56,24 @@ def get_auth_providers() -> tuple[AuthProvider, ...]:
 
 
 def verify_auth_provider(app_middlewares: Sequence[Any]) -> AuthProvider:
-    """Return an active provider, or raise ``AuthRequiredError``.
+    """Return the active provider, or raise ``AuthRequiredError``.
 
-    A provider is active only if its middleware is attached to the app.
+    A provider is active only if its middleware is the first (outermost)
+    middleware of the app, so no other middleware can answer a request first.
     """
     if not _providers:
         raise AuthRequiredError(
             "--require-auth is set but no auth provider registered. "
             "Install and configure an auth custom node (and make sure custom nodes are not disabled)."
         )
+    first = app_middlewares[0] if len(app_middlewares) > 0 else None
     for provider in _providers:
-        if any(m is provider.middleware for m in app_middlewares):
+        if first is not None and first is provider.middleware:
             return provider
     names = ", ".join(p.name for p in _providers)
     raise AuthRequiredError(
-        f"--require-auth is set but no registered auth provider ({names}) has its middleware attached to the server."
+        f"--require-auth is set but no registered auth provider ({names}) is the first middleware of the server. "
+        "Another custom node may have inserted a middleware ahead of it."
     )
 
 

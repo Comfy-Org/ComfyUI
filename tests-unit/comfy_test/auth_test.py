@@ -42,7 +42,20 @@ def test_verify_fails_when_middleware_not_attached():
         comfy.auth.verify_auth_provider(app.middlewares)
 
 
-def test_verify_passes_when_attached():
+def test_verify_fails_when_not_first():
+    app = web.Application(middlewares=[other_middleware, auth_middleware])
+    comfy.auth.register_auth_provider("test-auth", auth_middleware)
+    with pytest.raises(comfy.auth.AuthRequiredError, match="first middleware"):
+        comfy.auth.verify_auth_provider(app.middlewares)
+
+
+def test_verify_fails_with_no_middlewares():
+    comfy.auth.register_auth_provider("test-auth", auth_middleware)
+    with pytest.raises(comfy.auth.AuthRequiredError):
+        comfy.auth.verify_auth_provider(web.Application().middlewares)
+
+
+def test_verify_passes_when_first():
     app = web.Application(middlewares=[other_middleware])
     app.middlewares.insert(0, auth_middleware)
     comfy.auth.register_auth_provider("test-auth", auth_middleware)
