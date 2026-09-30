@@ -1130,8 +1130,8 @@ async def mark_missing_assets(request: web.Request) -> web.Response:
         500 Internal Server Error with PRUNE_FAILED if the marking failed, so a
             prune that did not run is never reported as a completed one
 
-    The prune runs on a worker thread, so the event loop keeps serving meanwhile. It
-    waits while a prompt runs, so the response can take as long as the prompt.
+    The prune runs on a worker thread, so the event loop keeps serving meanwhile. A
+    prompt that starts while it runs pauses it, so the response can wait for the prompt.
     """
     try:
         marked = await asyncio.to_thread(asset_seeder.mark_missing_outside_prefixes)

@@ -571,3 +571,81 @@ async def test_a_cancelled_prune_is_not_reported_as_completed(monkeypatch):
 
     assert response.status == 200
     assert json.loads(response.body) == {"status": "cancelled", "marked": 256}
+
+
+def test_a_cancel_after_the_last_batch_reports_a_completed_prune(session, catalog, temp_dir, monkeypatch):
+    _rows(session, temp_dir, 600)
+    instance = _standalone_seeder(monkeypatch)
+    real = scanner.mark_contents_missing
+
+    def mark(sess, ids):
+        marked = real(sess, ids)
+        if len(catalog) == 3:
+            instance.cancel()
+        return marked
+
+    with patch("app.assets.scanner.mark_contents_missing", mark), \
+         patch("app.assets.scanner.get_owned_prefixes", return_value=[]):
+        assert instance.mark_missing_outside_prefixes() == 600
+
+
+def test_the_standalone_prune_starts_the_scan_queued_while_it_ran(session, catalog, temp_dir, monkeypatch):
+    """A prompt that ends during the prune queues its output rescan, which cannot start
+    while the prune holds the seeder."""
+    _rows(session, temp_dir, 10)
+    instance = _standalone_seeder(monkeypatch)
+    started: list[dict] = []
+
+    def start(**kwargs) -> bool:
+        if instance._state is not State.IDLE:
+            return False
+        started.append(kwargs)
+        return True
+
+    monkeypatch.setattr(instance, "start", start)
+
+    real = scanner.mark_contents_missing
+
+    def mark(sess, ids):
+        # A prompt ends and queues its output rescan; the seeder is busy with the prune.
+        assert instance.enqueue_scan(roots=("output",), phase=seeder_module.ScanPhase.FULL) is False
+        return real(sess, ids)
+
+    with patch("app.assets.scanner.mark_contents_missing", mark), \
+         patch("app.assets.scanner.get_owned_prefixes", return_value=[]):
+        assert instance.mark_missing_outside_prefixes() == 10
+
+    assert [kwargs["roots"] for kwargs in started] == [("output",)]
+    assert instance._pending_scan is None
+
+
+def test_an_output_rescan_rechecks_rows_after_a_pause_during_its_stats(session, catalog, temp_dir, monkeypatch):
+    """The output-only rescan reads the live rows, walks and stats before it marks; a
+    prompt that ran meanwhile may have written a file back."""
+    output = temp_dir / "output"
+    output.mkdir()
+    monkeypatch.setattr("folder_paths.get_output_directory", lambda: str(output))
+    monkeypatch.setattr(scanner, "get_comfy_models_folders", lambda: [])
+    ids = _rows(session, output, 5, files=True)
+    returning = session.get(AssetContent, ids[0])
+    for content_id in ids:
+        os.remove(session.get(AssetContent, content_id).path)
+
+    instance = seeder_module._AssetSeeder()
+    instance._scan_state = seeder_module._ScanState()
+    instance._phase = seeder_module.ScanPhase.FAST
+    instance._run_gate.set()
+    real_unlisted = seeder_module.unlisted_references
+
+    def prompt_during_the_stats(live, listings):
+        vanished = real_unlisted(live, listings)
+        instance._pause_generation += 1
+        Path(returning.path).write_bytes(b"bytes-0")
+        os.utime(returning.path, ns=(returning.mtime_ns, returning.mtime_ns))
+        return vanished
+
+    monkeypatch.setattr(seeder_module, "unlisted_references", prompt_during_the_stats)
+    instance._run_fast_phase(("output",))
+
+    assert instance._scan_state.missing_marked == 4
+    assert _live_ids(session) == {returning.id}

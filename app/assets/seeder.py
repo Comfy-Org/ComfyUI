@@ -483,8 +483,9 @@ class _AssetSeeder:
             nothing was outside the known prefixes, None means the answer is
             unknown, so callers must not report a failed prune as a clean one.
 
-        Runs on the caller's thread, in batches that wait while a prompt runs, as a
-        scan does. The API calls it from a worker thread.
+        Runs on the caller's thread, in batches. A prompt that starts while it runs
+        pauses it between batches, as it does a scan; one already running when it
+        starts does not. The API calls it from a worker thread.
 
         Raises:
             ScanInProgressError: If a scan is currently running
@@ -507,9 +508,16 @@ class _AssetSeeder:
                 return 0
 
             all_prefixes = get_owned_prefixes()
-            marked = mark_missing_outside_prefixes_safely(
-                all_prefixes, self._between_write_batches(_ScanStage.MARK_MISSING)
-            )
+            gate = self._between_write_batches(_ScanStage.MARK_MISSING)
+            stopped = False
+
+            def between_batches() -> BatchGate:
+                nonlocal stopped
+                decision = gate()
+                stopped = decision is BatchGate.STOP
+                return decision
+
+            marked = mark_missing_outside_prefixes_safely(all_prefixes, between_batches)
             if marked is None:
                 return None
             emit(
@@ -517,15 +525,16 @@ class _AssetSeeder:
                 count=marked,
                 stage=_ScanStage.MARK_MISSING.value,
             )
-            if self._is_cancelled():
+            if stopped:
                 logging.info("Marking missing assets cancelled after marking %d", marked)
                 raise PruneCancelledError(marked)
             if marked > 0:
                 logging.info("Marked %d references as missing", marked)
             return marked
         finally:
+            # A prompt that ended while this ran queued its output rescan; start it now.
             with self._lock:
-                self._reset_to_idle()
+                self._finish_and_start_pending()
 
     def _reset_to_idle(self) -> None:
         """Reset state to IDLE, preserving last progress. Caller must hold _lock."""
@@ -826,23 +835,28 @@ class _AssetSeeder:
                         )
             finally:
                 with self._lock:
-                    start_paused = self._state is State.PAUSED
-                    self._reset_to_idle()
-                    pending = self._pending_scan
-                    if pending is not None:
-                        self._pending_scan = None
-                        if not self.start(
-                            roots=pending["roots"],
-                            phase=pending["phase"],
-                            prune_first=False,
-                            compute_hashes=pending["compute_hashes"],
-                            _start_paused=start_paused,
-                        ):
-                            logging.warning(
-                                "Pending scan could not start (roots=%s, phase=%s)",
-                                pending["roots"],
-                                pending["phase"].value,
-                            )
+                    self._finish_and_start_pending()
+
+    def _finish_and_start_pending(self) -> None:
+        """Reset to IDLE, then start the scan queued while this run held the seeder,
+        paused if this run was. Caller must hold _lock."""
+        start_paused = self._state is State.PAUSED
+        self._reset_to_idle()
+        pending = self._pending_scan
+        if pending is not None:
+            self._pending_scan = None
+            if not self.start(
+                roots=pending["roots"],
+                phase=pending["phase"],
+                prune_first=False,
+                compute_hashes=pending["compute_hashes"],
+                _start_paused=start_paused,
+            ):
+                logging.warning(
+                    "Pending scan could not start (roots=%s, phase=%s)",
+                    pending["roots"],
+                    pending["phase"].value,
+                )
 
     @staticmethod
     def _emit_marked_missing(root: RootType, marked: int) -> None:
@@ -866,6 +880,9 @@ class _AssetSeeder:
         skipped_existing = 0
 
         by_listing = rescans_output_by_listing(roots)
+        # Taken before the live rows are read, so a pause during the walk or the stats
+        # that follow makes the marking recheck the rows it is about to retire.
+        listing_gate = self._between_write_batches(_ScanStage.FAST_SCAN)
         live_references: dict[str, list] = {}
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()
@@ -909,7 +926,7 @@ class _AssetSeeder:
                 "output",
                 vanished,
                 scan_state,
-                self._between_write_batches(_ScanStage.FAST_SCAN),
+                listing_gate,
             )
             self._emit_marked_missing("output", scan_state.missing_marked - marked_before)
             logging.debug(
