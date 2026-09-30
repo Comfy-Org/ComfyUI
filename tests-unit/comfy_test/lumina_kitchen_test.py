@@ -139,6 +139,12 @@ def _make_block(modulation):
     with torch.no_grad():
         for param in block.parameters():
             param.copy_(torch.randn_like(param) * 0.1 + (1.0 if param.ndim == 1 else 0.0))
+    for module in block.modules():
+        # weight_function / bias_function default to lists shared by every comfy
+        # op, which other tests may append to; give the block its own.
+        if hasattr(module, "weight_function"):
+            module.weight_function = []
+            module.bias_function = []
     return block
 
 
