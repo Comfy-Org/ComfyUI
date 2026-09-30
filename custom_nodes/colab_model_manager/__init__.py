@@ -1,10 +1,12 @@
-# Sidebar tab for installing the models listed in colab/models.json with colab/downloader.py.
-# colab/install.py links this folder into custom_nodes/ on Colab. Each catalog entry is
+# Sidebar tab for installing the models listed in colab/models.json with colab/downloader.py. Each catalog entry is
 #   {"name": "SDXL VAE", "folder": "vae", "url": "https://huggingface.co/...", "filename": "sdxl_vae.safetensors"}
 # where folder is relative to ComfyUI's models directory. The catalog is reread on every request.
 #
-# The CIVITAI_API_KEY and HUG_TOKEN environment variables are used as API keys, Colab
-# secrets can't be read from the ComfyUI process.
+# API keys come from the CIVITAI_API_KEY and HUG_TOKEN environment variables, Colab secrets
+# can't be read from the ComfyUI process.
+#
+# Needs aria2c on PATH and aria2p installed, colab/install.py installs both on Colab.
+# Locally on Windows: winget install aria2.aria2 and pip install aria2p.
 
 import asyncio
 import json
@@ -16,7 +18,7 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
-COLAB_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+COLAB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "colab")
 CATALOG = os.path.join(COLAB_DIR, "models.json")
 sys.path.append(COLAB_DIR)
 from downloader import Downloader  # noqa: E402
@@ -24,8 +26,7 @@ from downloader import Downloader  # noqa: E402
 WEB_DIRECTORY = "./js"
 NODE_CLASS_MAPPINGS = {}
 
-downloader = Downloader(folder_paths.models_dir, civitai_api_key=os.environ.get("CIVITAI_API_KEY"),
-                        huggingface_api_key=os.environ.get("HUG_TOKEN"))
+downloader = Downloader(folder_paths.models_dir)
 downloads = {}  # model name -> aria2p.Download started from the sidebar
 
 

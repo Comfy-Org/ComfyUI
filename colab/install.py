@@ -57,11 +57,6 @@ def main():
     for path in nodes:
         if os.path.isfile(os.path.join(path, "install.py")):
             run(sys.executable, "install.py", cwd=path)
-
-    # The model manager sidebar lives in the repo, so link it in instead of fetching it from the registry.
-    model_manager = os.path.join(CUSTOM_NODES, "colab_model_manager")
-    if not os.path.lexists(model_manager):
-        os.symlink(os.path.join(COLAB_DIR, "model_manager"), model_manager)
     print(f"Done. Start with: python {os.path.join(ROOT, 'main.py')} --enable-manager")
 
 
