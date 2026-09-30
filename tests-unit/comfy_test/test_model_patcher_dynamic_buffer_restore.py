@@ -1,3 +1,5 @@
+from unittest import mock
+
 import torch
 import torch.nn as nn
 
@@ -9,7 +11,7 @@ if not torch.cuda.is_available():
 import comfy.model_patcher
 
 
-def test_restore_loaded_backups_restores_buffer_to_its_own_module():
+def test_restore_loaded_backups_restores_buffer_to_its_own_module(monkeypatch):
     """Regression test for #16490.
 
     ModelPatcherDynamic.load() backs up every buffer by its dotted attribute
@@ -23,16 +25,19 @@ def test_restore_loaded_backups_restores_buffer_to_its_own_module():
             super().__init__()
             self.register_buffer("sigmas", sigmas)
 
+    monkeypatch.setattr(comfy.model_patcher.comfy_aimdo.host_buffer, "HostBuffer", mock.MagicMock())
+    cpu = torch.device("cpu")
     model = nn.Module()
     model.model_loaded_weight_memory = 0
     old_sampling = Sampling(torch.tensor([1.0, 2.0, 3.0]))
     model.model_sampling = old_sampling
-
-    patcher = object.__new__(comfy.model_patcher.ModelPatcherDynamic)
-    patcher.model = model
-    patcher.backup = {}
     original_sigmas = old_sampling.sigmas
-    patcher.backup_buffers = {"model_sampling.sigmas": (old_sampling, original_sigmas)}
+
+    # CPU construction reroutes to ModelPatcher, so build the dynamic patcher directly.
+    patcher = object.__new__(comfy.model_patcher.ModelPatcherDynamic)
+    comfy.model_patcher.ModelPatcher.__init__(patcher, model, cpu, cpu)
+    comfy.model_patcher.ModelPatcherDynamic.__init__(patcher, model, cpu, cpu)
+    patcher.load(device_to=cpu)
 
     # Simulate an object patch swapping in a different module at the same path
     # (e.g. ModelSamplingDiscrete replacing the checkpoint's own model_sampling).
