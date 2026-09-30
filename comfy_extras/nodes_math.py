@@ -64,7 +64,7 @@ class MathExpressionNode(io.ComfyNode):
         autogrow = io.Autogrow.TemplateNames(
             input=io.MultiType.Input("value", [io.Float, io.Int, io.Boolean], optional=True),
             names=list(string.ascii_lowercase),
-            min=1,
+            min=1,  # optional template, so nothing is required; min only sets how many slots the frontend renders
         )
         return io.Schema(
             node_id="ComfyMathExpression",
