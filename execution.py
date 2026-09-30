@@ -293,7 +293,7 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                 f = make_locked_method_func(type_obj, func, class_clone)
                 # in case of dynamic inputs, restructure inputs to expected nested dict
                 if v3_data is not None:
-                    inputs = _io.build_nested_inputs(inputs, v3_data)
+                    inputs = _io.build_nested_inputs(inputs, v3_data, input_is_list=input_is_list)
             # V1
             else:
                 f = getattr(obj, func)
@@ -880,7 +880,17 @@ async def validate_inputs(prompt_id, prompt, item, validated, visiting=None):
     if issubclass(obj_class, _ComfyNodeInternal):
         obj_class: _io._ComfyNodeBaseInternal
         class_inputs = obj_class.INPUT_TYPES()
-        class_inputs, _, v3_data = _io.get_finalized_class_inputs(class_inputs, inputs)
+        try:
+            class_inputs, _, v3_data = _io.get_finalized_class_inputs(class_inputs, inputs)
+        except _io.DynamicInputError as ex:
+            errors.append({
+                "type": "invalid_dynamic_input",
+                "message": "Invalid dynamic input",
+                "details": str(ex),
+                "extra_info": {"input_name": ex.input_name},
+            })
+            validated[unique_id] = (False, errors, unique_id)
+            return validated[unique_id]
         validate_function_name = "validate_inputs"
         validate_function = first_real_override(obj_class, validate_function_name)
     else:
