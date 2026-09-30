@@ -43,7 +43,7 @@ from app.assets.database.queries.records import (
     get_preview_file_paths_by_ids,
     list_records_page,
 )
-from app.assets.seeder import PruneCancelledError, ScanInProgressError, asset_seeder
+from app.assets.seeder import ScanInProgressError, asset_seeder
 from app.assets.services import (
     DependencyMissingError,
     HashMismatchError,
@@ -1126,24 +1126,16 @@ async def mark_missing_assets(request: web.Request) -> web.Response:
     Returns:
         200 OK with count of marked assets
         409 Conflict if a scan is currently running
-        200 OK with status "cancelled" and the count marked before a cancel
         500 Internal Server Error with PRUNE_FAILED if the marking failed, so a
             prune that did not run is never reported as a completed one
-
-    The prune runs on a worker thread, so the event loop keeps serving meanwhile. A
-    prompt that starts while it runs pauses it, so the response can wait for the prompt.
     """
     try:
+        # Off the event loop: a large prune takes seconds to minutes.
         marked = await asyncio.to_thread(asset_seeder.mark_missing_outside_prefixes)
     except ScanInProgressError:
         return web.json_response(
             {"status": "scan_running", "marked": 0},
             status=409,
-        )
-    except PruneCancelledError as cancelled:
-        return web.json_response(
-            {"status": "cancelled", "marked": cancelled.marked},
-            status=200,
         )
     if marked is None:
         return _build_error_response(

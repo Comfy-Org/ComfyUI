@@ -2402,7 +2402,6 @@ paths:
                                         description: Number of assets marked as missing
                                         type: integer
                                     status:
-                                        description: '"completed", or "cancelled" when a cancel stopped the prune part way; the assets it marked before that stay marked'
                                         type: string
                                 type: object
                     description: Prune result

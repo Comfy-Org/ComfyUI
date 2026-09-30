@@ -1,7 +1,7 @@
 """The prune and the offline marking write in short batches rather than one long
 transaction, so a foreground write gets the lock between batches. These tests pin the
-batch boundaries, the pause gate between batches, the rechecks a later batch makes
-against what changed since the rows were read, and the set-based mark."""
+batch boundaries, what a failure or a stop leaves behind, the pause between batches,
+what a batch does with rows another writer changed, and the set-based mark."""
 
 import asyncio
 import json
@@ -31,9 +31,8 @@ from app.assets.database.queries.records import (
     mark_content_missing,
     mark_contents_missing,
 )
-from app.assets.scanner import BatchGate, _BatchedWrite
 from app.assets.scanner_admission import _WATCH_LIST
-from app.assets.seeder import PruneCancelledError, State, _AssetSeeder
+from app.assets.seeder import State
 
 
 @pytest.fixture
@@ -46,8 +45,6 @@ def db_engine():
 
 @pytest.fixture(autouse=True)
 def no_yield(monkeypatch):
-    """Batches split by row count alone unless a test sets a time budget."""
-    monkeypatch.setattr(scanner, "WRITE_BATCH_SECONDS", 3600.0)
     monkeypatch.setattr(scanner, "WRITE_YIELD_MIN_SECONDS", 0.0)
     monkeypatch.setattr(scanner, "WRITE_YIELD_MAX_SECONDS", 0.0)
 
@@ -99,9 +96,8 @@ def _live_ids(session) -> set[str]:
     return set(session.scalars(sa.select(AssetContent.id).where(AssetContent.is_missing == sa.false())))
 
 
-def _prune(owned: list[str], between_batches=scanner.no_gate) -> int | None:
-    with patch("app.assets.scanner.get_owned_prefixes", return_value=owned):
-        return scanner.mark_missing_outside_prefixes_safely(owned, between_batches)
+def _prune(owned: list[str]) -> int | None:
+    return scanner.mark_missing_outside_prefixes_safely(owned)
 
 
 @pytest.mark.parametrize("count, batches", [(0, 0), (1, 1), (256, 1), (257, 2), (600, 3)])
@@ -111,15 +107,6 @@ def test_prune_commits_one_batch_per_256_rows(session, catalog, temp_dir, count,
     assert _prune([]) == count
     assert len(catalog) == batches
     assert _live_ids(session) == set()
-
-
-def test_a_batch_that_runs_past_its_time_budget_commits_early(session, catalog, temp_dir, monkeypatch):
-    monkeypatch.setattr(scanner, "WRITE_BATCH_SECONDS", 0.0)
-    _rows(session, temp_dir, 100)
-
-    assert _prune([]) == 100
-    # With no time budget each batch takes a single chunk.
-    assert len(catalog) == -(-100 // scanner.WRITE_CHUNK_ROWS)
 
 
 def test_rows_under_an_owned_prefix_are_not_pruned(session, catalog, temp_dir):
@@ -133,24 +120,6 @@ def test_rows_under_an_owned_prefix_are_not_pruned(session, catalog, temp_dir):
     assert _live_ids(session) == kept
 
 
-def test_a_folder_registered_during_the_prune_keeps_its_rows(session, catalog, temp_dir):
-    """A prompt run during a pause can register a folder (a custom node's models path);
-    the batches after it must not retire that folder's rows."""
-    ids = _rows(session, temp_dir, 600)
-    owned_now: list[str] = []
-
-    def between_batches() -> BatchGate:
-        if len(catalog) == 1:
-            owned_now.append(str(temp_dir))
-        return BatchGate.GO
-
-    with patch("app.assets.scanner.get_owned_prefixes", side_effect=lambda: list(owned_now)):
-        marked = scanner.mark_missing_outside_prefixes_safely([], between_batches)
-
-    assert marked == scanner.WRITE_BATCH_ROWS
-    assert len(_live_ids(session)) == len(ids) - scanner.WRITE_BATCH_ROWS
-
-
 def test_a_row_re_registered_between_batches_is_left_to_its_new_owner(session, catalog, temp_dir):
     """register_executed_output retires the live row at a path and inserts a new one.
     Doing that between two batches must leave exactly the new row live."""
@@ -158,13 +127,12 @@ def test_a_row_re_registered_between_batches_is_left_to_its_new_owner(session, c
     last = session.get(AssetContent, ids[-1])
     replacement: list[str] = []
 
-    def between_batches() -> BatchGate:
-        if len(catalog) == 1:
-            mark_content_missing(session, last.id)
-            new = create_content(session, path=last.path, size_bytes=2, mtime_ns=2)
-            session.commit()
-            replacement.append(new.id)
-        return BatchGate.GO
+    def between_batches() -> bool:
+        mark_content_missing(session, last.id)
+        new = create_content(session, path=last.path, size_bytes=2, mtime_ns=2)
+        session.commit()
+        replacement.append(new.id)
+        return False
 
     marked = scanner.mark_missing_outside_prefixes_safely([], between_batches)
 
@@ -196,7 +164,7 @@ def test_a_foreground_write_gets_the_lock_between_batches(tmp_path, monkeypatch)
 
     foreground: list[bool] = []
 
-    def between_batches() -> BatchGate:
+    def between_batches() -> bool:
         other = sqlite3.connect(db, timeout=0, isolation_level=None)
         try:
             other.execute("BEGIN IMMEDIATE")
@@ -207,14 +175,13 @@ def test_a_foreground_write_gets_the_lock_between_batches(tmp_path, monkeypatch)
             foreground.append(False)
         finally:
             other.close()
-        return BatchGate.GO
+        return False
 
     monkeypatch.setattr(scanner, "create_session", lambda: SASession(read_engine))
     monkeypatch.setattr(scanner, "create_write_session", sessionmaker(bind=write_engine))
-    with patch("app.assets.scanner.get_owned_prefixes", return_value=[]):
-        assert scanner.mark_missing_outside_prefixes_safely([], between_batches) == 600
+    assert scanner.mark_missing_outside_prefixes_safely([], between_batches) == 600
 
-    assert foreground == [True, True, True]
+    assert foreground == [True, True]
 
 
 def test_a_failed_batch_keeps_the_batches_before_it(session, catalog, temp_dir):
@@ -258,116 +225,66 @@ def _gone_observations(session, temp_dir: Path, count: int) -> list[scanner._Ref
         content = session.get(AssetContent, content_id)
         os.remove(content.path)
         observations.append(
-            scanner._ReferenceObservation(content.id, content.path, content.size_bytes, content.mtime_ns, None)
+            scanner._ReferenceObservation(content.id, content.size_bytes, content.mtime_ns, None)
         )
     return observations
 
 
-@pytest.mark.parametrize("pause_between", [True, False])
-def test_a_file_written_back_during_a_pause_keeps_its_row(session, catalog, temp_dir, pause_between):
-    """Rows observed gone are stat'ed again after a pause: a prompt may have written
-    the file back. Without a pause the observation stands, as it did before batching."""
-    observations = _gone_observations(session, temp_dir, 300)
-    returning = observations[-1]
-
-    def between_batches() -> BatchGate:
-        if len(catalog) == 1:
-            Path(returning.path).write_bytes(b"written back")
-            return BatchGate.RESUMED if pause_between else BatchGate.GO
-        return BatchGate.GO
-
-    run = _BatchedWrite()
-    scanner.apply_reference_observations_in_batches(observations, between_batches, run)
-
-    live = _live_ids(session)
-    if pause_between:
-        assert live == {returning.content_id}
-        assert run.written == 299
-    else:
-        assert live == set()
-        assert run.written == 300
-
-
 def test_stop_between_batches_leaves_the_rest_live(session, catalog, temp_dir):
     observations = _gone_observations(session, temp_dir, 600)
-    run = _BatchedWrite()
 
-    def between_batches() -> BatchGate:
-        return BatchGate.STOP if catalog else BatchGate.GO
+    committed: list[int] = []
+    scanner._write_in_batches(observations, scanner.apply_reference_observations, lambda: True, committed)
 
-    scanner.apply_reference_observations_in_batches(observations, between_batches, run)
-
-    assert (run.written, run.stopped) == (scanner.WRITE_BATCH_ROWS, True)
+    assert committed == [scanner.WRITE_BATCH_ROWS]
     assert len(_live_ids(session)) == 600 - scanner.WRITE_BATCH_ROWS
 
 
-def _standalone_seeder(monkeypatch) -> _AssetSeeder:
-    instance = _AssetSeeder()
-    monkeypatch.setattr(seeder_module, "dependencies_available", lambda: True)
-    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
-    return instance
-
-
-def test_the_standalone_prune_waits_while_a_prompt_runs(session, catalog, temp_dir, monkeypatch):
-    _rows(session, temp_dir, 600)
-    instance = _standalone_seeder(monkeypatch)
+def test_a_scan_waits_between_batches_while_a_prompt_runs(session, catalog, temp_dir, monkeypatch):
+    output = temp_dir / "output"
+    output.mkdir()
+    monkeypatch.setattr("folder_paths.get_output_directory", lambda: str(output))
+    _rows(session, output, 600)
+    instance = seeder_module._AssetSeeder()
+    instance._state = State.RUNNING
+    instance._scan_state = seeder_module._ScanState()
+    instance._run_gate.set()
     real = scanner.mark_contents_missing
-    first_batch_done = threading.Event()
+    first_batch = threading.Event()
 
     def mark(sess, ids):
-        marked = real(sess, ids)
-        if len(catalog) == 1 and not first_batch_done.is_set():
-            assert instance.pause()  # a prompt starts
-            first_batch_done.set()
-        return marked
+        if not first_batch.is_set():
+            assert instance.pause()  # a prompt starts during the first batch
+            first_batch.set()
+        return real(sess, ids)
 
-    result: list[int | None] = []
-    with patch("app.assets.scanner.mark_contents_missing", mark), \
-         patch("app.assets.scanner.get_owned_prefixes", return_value=[]):
-        worker = threading.Thread(target=lambda: result.append(instance.mark_missing_outside_prefixes()))
+    def sync():
+        scanner.sync_root_safely(
+            "output",
+            instance._scan_state,
+            lambda: instance._check_pause_and_cancel(seeder_module._ScanStage.FAST_SCAN),
+        )
+
+    with patch("app.assets.scanner.mark_contents_missing", mark):
+        worker = threading.Thread(target=sync)
         worker.start()
-        assert first_batch_done.wait(5)
+        assert first_batch.wait(5)
         time.sleep(0.2)
         assert len(catalog) == 1  # no batch while paused
         assert instance.resume()
         worker.join(5)
 
-    assert result == [600]
     assert len(catalog) == 3
-    assert instance._state is State.IDLE
-
-
-def test_a_cancelled_standalone_prune_reports_what_it_marked(session, catalog, temp_dir, monkeypatch):
-    _rows(session, temp_dir, 600)
-    instance = _standalone_seeder(monkeypatch)
-    real = scanner.mark_contents_missing
-
-    def mark(sess, ids):
-        marked = real(sess, ids)
-        if len(catalog) == 1:
-            instance.cancel()
-        return marked
-
-    with patch("app.assets.scanner.mark_contents_missing", mark), \
-         patch("app.assets.scanner.get_owned_prefixes", return_value=[]):
-        with pytest.raises(PruneCancelledError) as cancelled:
-            instance.mark_missing_outside_prefixes()
-
-    assert cancelled.value.marked == scanner.WRITE_BATCH_ROWS
-    assert len(_live_ids(session)) == 600 - scanner.WRITE_BATCH_ROWS
-    assert instance._state is State.IDLE
-    # A later prune is not left cancelled.
-    with patch("app.assets.scanner.get_owned_prefixes", return_value=[]):
-        assert instance.mark_missing_outside_prefixes() == 600 - scanner.WRITE_BATCH_ROWS
+    assert instance._scan_state.missing_marked == 600
 
 
 def test_offline_rows_retired_across_batches_recover_when_the_drive_returns(
     session, catalog, temp_dir, monkeypatch
 ):
     """#16646's hashing-off recovery with the marking split over several batches: files
-    that come back while the marking is part way through are recovered by the walk that
-    follows (the rows already retired) or never retired (the rows not yet reached, after
-    a pause), and every record keeps its id."""
+    that come back while the marking is part way through are retired by the batches
+    that follow, then recovered by the walk that follows in the same scan, every record
+    keeping its id."""
     output = temp_dir / "output"
     (temp_dir / "input").mkdir()
     output.mkdir()
@@ -389,8 +306,7 @@ def test_offline_rows_retired_across_batches_recover_when_the_drive_returns(
     def mark(sess, content_ids):
         marked = real(sess, content_ids)
         if len(catalog) == 1:
-            # The drive comes back while a prompt runs, after the first batch.
-            instance._pause_generation += 1
+            # The drive comes back after the first batch.
             for name in os.listdir(parked):
                 os.rename(parked / name, output / name)
         return marked
@@ -399,8 +315,8 @@ def test_offline_rows_retired_across_batches_recover_when_the_drive_returns(
         instance._run_fast_phase(("input", "output"))
 
     session.expire_all()
-    assert instance._scan_state.missing_marked == scanner.WRITE_BATCH_ROWS
-    assert instance._scan_state.recovered == scanner.WRITE_BATCH_ROWS
+    assert instance._scan_state.missing_marked == 700
+    assert instance._scan_state.recovered == 700
     assert _live_ids(session) == set(ids)
     assert {record.id: record.content_id for record in session.scalars(sa.select(Asset))} == records
     live_paths = session.scalars(sa.select(AssetContent.path).where(AssetContent.is_missing == sa.false())).all()
@@ -510,9 +426,7 @@ def test_the_batched_writes_run_no_table_scan_inside_their_transactions(session,
             Path(content.path).write_bytes(b"a different size")
         os.utime(content.path, ns=(10**18, 10**18))
         observations.append(
-            scanner._ReferenceObservation(
-                content.id, content.path, content.size_bytes, content.mtime_ns, os.stat(content.path)
-            )
+            scanner._ReferenceObservation(content.id, content.size_bytes, content.mtime_ns, os.stat(content.path))
         )
     statements: list[tuple[str, object]] = []
 
@@ -522,10 +436,9 @@ def test_the_batched_writes_run_no_table_scan_inside_their_transactions(session,
 
     event.listen(db_engine, "before_cursor_execute", capture)
     try:
-        scanner.apply_reference_observations_in_batches(observations, scanner.no_gate, _BatchedWrite())
+        scanner._write_in_batches(observations, scanner.apply_reference_observations, lambda: False, [])
         _rows(session, pruned_dir, 50)
-        with patch("app.assets.scanner.get_owned_prefixes", return_value=[str(gone_dir), str(changed_dir)]):
-            assert scanner.mark_missing_outside_prefixes_safely([str(gone_dir), str(changed_dir)]) == 50
+        assert scanner.mark_missing_outside_prefixes_safely([str(gone_dir), str(changed_dir)]) == 50
     finally:
         event.remove(db_engine, "before_cursor_execute", capture)
 
@@ -560,92 +473,3 @@ async def test_the_prune_endpoint_keeps_the_event_loop_serving(monkeypatch):
     assert json.loads(response.body) == {"status": "completed", "marked": 3}
     assert ticks >= 20
 
-
-@pytest.mark.asyncio
-async def test_a_cancelled_prune_is_not_reported_as_completed(monkeypatch):
-    def cancelled_prune() -> int:
-        raise PruneCancelledError(256)
-
-    monkeypatch.setattr(routes.asset_seeder, "mark_missing_outside_prefixes", cancelled_prune)
-    response = await routes.mark_missing_assets.__wrapped__(make_mocked_request("POST", "/api/assets/prune"))
-
-    assert response.status == 200
-    assert json.loads(response.body) == {"status": "cancelled", "marked": 256}
-
-
-def test_a_cancel_after_the_last_batch_reports_a_completed_prune(session, catalog, temp_dir, monkeypatch):
-    _rows(session, temp_dir, 600)
-    instance = _standalone_seeder(monkeypatch)
-    real = scanner.mark_contents_missing
-
-    def mark(sess, ids):
-        marked = real(sess, ids)
-        if len(catalog) == 3:
-            instance.cancel()
-        return marked
-
-    with patch("app.assets.scanner.mark_contents_missing", mark), \
-         patch("app.assets.scanner.get_owned_prefixes", return_value=[]):
-        assert instance.mark_missing_outside_prefixes() == 600
-
-
-def test_the_standalone_prune_starts_the_scan_queued_while_it_ran(session, catalog, temp_dir, monkeypatch):
-    """A prompt that ends during the prune queues its output rescan, which cannot start
-    while the prune holds the seeder."""
-    _rows(session, temp_dir, 10)
-    instance = _standalone_seeder(monkeypatch)
-    started: list[dict] = []
-
-    def start(**kwargs) -> bool:
-        if instance._state is not State.IDLE:
-            return False
-        started.append(kwargs)
-        return True
-
-    monkeypatch.setattr(instance, "start", start)
-
-    real = scanner.mark_contents_missing
-
-    def mark(sess, ids):
-        # A prompt ends and queues its output rescan; the seeder is busy with the prune.
-        assert instance.enqueue_scan(roots=("output",), phase=seeder_module.ScanPhase.FULL) is False
-        return real(sess, ids)
-
-    with patch("app.assets.scanner.mark_contents_missing", mark), \
-         patch("app.assets.scanner.get_owned_prefixes", return_value=[]):
-        assert instance.mark_missing_outside_prefixes() == 10
-
-    assert [kwargs["roots"] for kwargs in started] == [("output",)]
-    assert instance._pending_scan is None
-
-
-def test_an_output_rescan_rechecks_rows_after_a_pause_during_its_stats(session, catalog, temp_dir, monkeypatch):
-    """The output-only rescan reads the live rows, walks and stats before it marks; a
-    prompt that ran meanwhile may have written a file back."""
-    output = temp_dir / "output"
-    output.mkdir()
-    monkeypatch.setattr("folder_paths.get_output_directory", lambda: str(output))
-    monkeypatch.setattr(scanner, "get_comfy_models_folders", lambda: [])
-    ids = _rows(session, output, 5, files=True)
-    returning = session.get(AssetContent, ids[0])
-    for content_id in ids:
-        os.remove(session.get(AssetContent, content_id).path)
-
-    instance = seeder_module._AssetSeeder()
-    instance._scan_state = seeder_module._ScanState()
-    instance._phase = seeder_module.ScanPhase.FAST
-    instance._run_gate.set()
-    real_unlisted = seeder_module.unlisted_references
-
-    def prompt_during_the_stats(live, listings):
-        vanished = real_unlisted(live, listings)
-        instance._pause_generation += 1
-        Path(returning.path).write_bytes(b"bytes-0")
-        os.utime(returning.path, ns=(returning.mtime_ns, returning.mtime_ns))
-        return vanished
-
-    monkeypatch.setattr(seeder_module, "unlisted_references", prompt_during_the_stats)
-    instance._run_fast_phase(("output",))
-
-    assert instance._scan_state.missing_marked == 4
-    assert _live_ids(session) == {returning.id}
