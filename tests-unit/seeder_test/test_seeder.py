@@ -372,7 +372,7 @@ def test_scan_failure_emits_exception_type_without_message(
         scan_seeder._run_scan()
 
     assert events_named(caplog, "seeder.scan_failed") == [
-        {"error_type": "FileNotFoundError", "phase": "enrich", "root": "models"}
+        {"error_kind": "other", "error_type": "FileNotFoundError", "phase": "enrich", "root": "models"}
     ]
     tagged = "\n".join(record.getMessage() for record in caplog.records if TAG in record.getMessage())
     assert "/private/models/secret.safetensors" not in tagged
@@ -560,7 +560,7 @@ def test_standalone_mark_missing_failure_returns_none_and_emits_no_success_event
 
     assert result is None
     assert events_named(caplog, "scanner.mark_missing_failed") == [
-        {"error_type": "RuntimeError"}
+        {"error_kind": "other", "error_type": "RuntimeError"}
     ]
     assert events_named(caplog, "seeder.marked_missing") == []
 
@@ -885,3 +885,29 @@ def test_a_pause_landing_after_the_gate_check_still_blocks_the_checkpoint(
     gate.wait.assert_called_once_with()
     assert scan_seeder._scan_state is not None
     assert scan_seeder._scan_state.paused_s >= 0.02
+
+
+def test_scan_failure_classifies_a_real_sqlite_expression_tree_error(
+    scan_seeder: _AssetSeeder,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = create_engine("sqlite:///:memory:")
+    secret_path = "/private/models/secret.safetensors"
+
+    def fail_scan(_roots):
+        # One bound path per term; SQLite rejects the expression past depth 1000.
+        clause = " OR ".join(["? = 1"] * 1100)
+        with engine.connect() as connection:
+            connection.exec_driver_sql(f"SELECT 1 WHERE {clause}", tuple([secret_path] * 1100))
+
+    monkeypatch.setattr(scan_seeder, "_run_fast_phase", fail_scan)
+
+    with caplog.at_level(logging.INFO):
+        scan_seeder._run_scan()
+
+    [failed] = events_named(caplog, "seeder.scan_failed")
+    assert failed["error_type"] == "OperationalError"
+    assert failed["error_kind"] == "expression_tree_too_large"
+    tagged = "\n".join(record.getMessage() for record in caplog.records if TAG in record.getMessage())
+    assert secret_path not in tagged

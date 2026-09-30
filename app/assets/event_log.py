@@ -13,8 +13,10 @@ logfmt delimiter or line break — so file names, paths, asset ids and content
 hashes cannot ride along.
 """
 
+import errno
 import logging
 import os
+import sqlite3
 import traceback
 from collections.abc import Callable
 from typing import Any
@@ -28,6 +30,17 @@ ROOTS = frozenset({"models", "input", "output", "user", "temp"})
 PHASES = frozenset({"fast", "enrich", "full"})
 STAGES = frozenset({"mark_missing", "pruning", "fast_scan", "enrich", "finalize"})
 STAT_SITES = frozenset({"discovery", "enrich"})
+ERROR_KINDS = frozenset({
+    "expression_tree_too_large",
+    "too_many_variables",
+    "database_locked",
+    "disk_full",
+    "disk_io",
+    "unable_to_open",
+    "database_corrupt",
+    "permission_denied",
+    "other",
+})
 ALLOWED_EVENTS = frozenset({
     "assets.enabled",
     "seeder.scan_started",
@@ -97,6 +110,7 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "recovered_count": _is_count,
     "count": _is_count,
     "error_type": _is_safe_string,
+    "error_kind": _one_of(ERROR_KINDS),
     "hashing_enabled": _is_flag,
     "site": _one_of(STAT_SITES),
 }
@@ -171,3 +185,41 @@ def error_type(exc: BaseException) -> str:
     and friends embed the path that triggered them.
     """
     return type(exc).__name__
+
+
+# SQLite's own fixed messages, matched as substrings of the driver exception's first
+# argument. That argument never carries the SQL or its bound parameters (paths).
+_SQLITE_MESSAGE_KINDS = (
+    ("expression tree is too large", "expression_tree_too_large"),
+    ("too many sql variables", "too_many_variables"),
+    ("database is locked", "database_locked"),
+    ("database table is locked", "database_locked"),
+    ("database or disk is full", "disk_full"),
+    ("disk i/o error", "disk_io"),
+    ("unable to open database file", "unable_to_open"),
+    ("database disk image is malformed", "database_corrupt"),
+)
+_ERRNO_KINDS = {
+    errno.ENOSPC: "disk_full",
+    errno.EIO: "disk_io",
+    errno.EACCES: "permission_denied",
+    errno.EPERM: "permission_denied",
+}
+
+
+def error_kind(exc: BaseException) -> str:
+    """Classify a failure into :data:`ERROR_KINDS`, without ever emitting its text.
+
+    SQLAlchemy wraps the driver's exception as ``exc.orig``; its str() would carry the
+    statement and bound parameters, so only the driver's own message is inspected.
+    """
+    orig = getattr(exc, "orig", None)
+    source = orig if isinstance(orig, BaseException) else exc
+    if isinstance(source, sqlite3.Error) and source.args and isinstance(source.args[0], str):
+        message = source.args[0].lower()
+        for needle, kind in _SQLITE_MESSAGE_KINDS:
+            if needle in message:
+                return kind
+    if isinstance(source, OSError):
+        return _ERRNO_KINDS.get(source.errno, "other")
+    return "other"

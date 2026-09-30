@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Callable, TypedDict
 
-from app.assets.event_log import emit, error_type
+from app.assets.event_log import emit, error_kind, error_type
 from app.assets.scanner import (
     RootType,
     build_asset_specs,
@@ -776,6 +776,7 @@ class _AssetSeeder:
                 "seeder.scan_failed",
                 phase=phase.value,
                 error_type=error_type(e),
+                error_kind=error_kind(e),
                 root=root,
             )
             self._emit_event("assets.seed.error", {"message": str(e)})

@@ -20,7 +20,7 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.assets import mode
-from app.assets.event_log import emit, error_type
+from app.assets.event_log import emit, error_kind, error_type
 from app.assets.database.queries import (
     create_content_reporting_insert,
     is_live_path_conflict,
@@ -290,6 +290,7 @@ def sync_root_safely(
             "scanner.fast_scan_failed",
             root=root,
             error_type=error_type(exc),
+            error_kind=error_kind(exc),
         )
         return set()
     if progress is not None:
@@ -309,6 +310,7 @@ def sync_temp_references_safely(
             "scanner.temp_sync_failed",
             root="temp",
             error_type=error_type(exc),
+            error_kind=error_kind(exc),
         )
 
 
@@ -328,6 +330,7 @@ def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int | None:
         emit(
             "scanner.mark_missing_failed",
             error_type=error_type(exc),
+            error_kind=error_kind(exc),
         )
         return None
 
@@ -405,7 +408,12 @@ def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservati
                 )
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
-        emit("scanner.fast_scan_failed", root=root, error_type=error_type(exc))
+        emit(
+            "scanner.fast_scan_failed",
+            root=root,
+            error_type=error_type(exc),
+            error_kind=error_kind(exc),
+        )
         return {}
     return live
 
@@ -502,7 +510,12 @@ def mark_unlisted_references_missing_safely(
             session.commit()
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
-        emit("scanner.fast_scan_failed", root=root, error_type=error_type(exc))
+        emit(
+            "scanner.fast_scan_failed",
+            root=root,
+            error_type=error_type(exc),
+            error_kind=error_kind(exc),
+        )
         return
     if progress is not None:
         progress.missing_marked += marked

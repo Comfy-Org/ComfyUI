@@ -86,9 +86,16 @@ def run_hash_failure(session: Mock, path: Path, progress: _ScanState) -> bool:
         pytest.param(
             lambda: scanner.sync_root_safely("models"),
             "scanner.fast_scan_failed",
-            {"error_type": "FileNotFoundError", "root": "models"},
+            {"error_kind": "other", "error_type": "FileNotFoundError", "root": "models"},
             set(),
             id="fast-scan",
+        ),
+        pytest.param(
+            lambda: scanner.sync_temp_references_safely(),
+            "scanner.temp_sync_failed",
+            {"error_kind": "other", "error_type": "FileNotFoundError", "root": "temp"},
+            None,
+            id="temp-sync",
         ),
     ],
 )
