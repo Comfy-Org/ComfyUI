@@ -52,6 +52,9 @@ if __name__ == "__main__":
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
         logging.warning("On windows we are currently forcing single GPU mode in ComfyUI due to a Nvidia related issue, if you want to disable this use: --cuda-device all")
 
+    if args.disable_api_nodes:
+        logging.warning("--disable-api-nodes is deprecated and will be removed in a future version. It currently behaves like --offline. Use --offline to keep the frontend offline, or --disable-partner-nodes to only disable partner nodes.")
+
 faulthandler.enable(file=sys.stderr, all_threads=args.debug_hang)
 if __name__ == "__main__" and args.debug_hang:
     dumping_traceback = False
@@ -525,7 +528,7 @@ def start_comfyui(asyncio_loop=None):
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
         init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
-        init_api_nodes=not args.disable_api_nodes
+        init_api_nodes=not args.disable_partner_nodes
     ))
 
     # Re-apply Comfy's cuDNN benchmark policy after custom-node imports. Benchmark

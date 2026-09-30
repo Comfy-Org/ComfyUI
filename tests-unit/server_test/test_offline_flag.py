@@ -1,4 +1,4 @@
-"""Tests for --offline and --disable-api-nodes"""
+"""Tests for --offline, --disable-partner-nodes and the deprecated --disable-api-nodes"""
 
 import subprocess
 import sys
@@ -17,30 +17,32 @@ async def pong(request):
 
 
 def parse_args(*argv):
-    code = "import comfy.options; comfy.options.enable_args_parsing(); from comfy.cli_args import args; print(args.offline, args.disable_api_nodes)"
+    code = (
+        "import comfy.options; comfy.options.enable_args_parsing(); from comfy.cli_args import args; "
+        "print(args.offline, args.disable_partner_nodes, args.disable_api_nodes)"
+    )
     out = subprocess.run([sys.executable, "-c", code, *argv], capture_output=True, text=True, check=True)
-    return out.stdout.split()[-2:]
+    return out.stdout.split()[-3:]
 
 
 @pytest.mark.parametrize("argv,expected", [
-    ([], ["False", "False"]),
-    (["--disable-api-nodes"], ["False", "True"]),
-    (["--offline"], ["True", "True"]),
-    (["--offline", "--disable-api-nodes"], ["True", "True"]),
+    ([], ["False", "False", "False"]),
+    (["--disable-partner-nodes"], ["False", "True", "False"]),
+    (["--offline"], ["True", "True", "False"]),
+    (["--disable-api-nodes"], ["True", "True", "True"]),
+    (["--disable-partner-nodes", "--offline"], ["True", "True", "False"]),
 ])
 def test_arg_parsing(argv, expected):
     assert parse_args(*argv) == expected
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("offline,disable_api_nodes,expect_csp", [
-    (False, False, False),
-    (False, True, False),
-    (True, True, True),
+@pytest.mark.parametrize("offline,expect_csp", [
+    (False, False),
+    (True, True),
 ])
-async def test_csp_header(monkeypatch, offline, disable_api_nodes, expect_csp):
+async def test_csp_header(monkeypatch, offline, expect_csp):
     monkeypatch.setattr(args, "offline", offline)
-    monkeypatch.setattr(args, "disable_api_nodes", disable_api_nodes)
     prompt_server = server.PromptServer(None, MagicMock(enabled=False))
     prompt_server.app.router.add_get("/ping", pong)
     async with TestClient(TestServer(prompt_server.app)) as client:

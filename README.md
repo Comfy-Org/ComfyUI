@@ -78,7 +78,7 @@ See what ComfyUI can do with the [newer template workflows](https://comfy.org/wo
 - Load complete checkpoints or separate diffusion models, VAEs, text encoders, LoRAs, ControlNets, adapters, and upscalers from supported model formats.
 - Built-in tools for inpainting, outpainting, reference conditioning, masks and compositing, model merging, upscaling, frame interpolation, segmentation, depth estimation, and media processing.
 - Save and load workflows as JSON, or recover complete workflows and seeds from supported generated media.
-- Runs fully offline: core does not download anything unless you request it. Use `--offline` to disable the optional paid [Comfy API nodes](https://docs.comfy.org/tutorials/api-nodes/overview) and force all built-in functionality to stay offline, or `--disable-api-nodes` to only disable the API nodes.
+- Runs fully offline: core does not download anything unless you request it. Use `--offline` to disable the optional paid [Comfy API nodes](https://docs.comfy.org/tutorials/api-nodes/overview) and force all built-in functionality to stay offline, or `--disable-partner-nodes` to only disable the API nodes.
 - Extend ComfyUI with custom nodes
 - Configure additional model locations with [`extra_model_paths.yaml`](extra_model_paths.yaml.example).
 - Support for saving and loading high bit depth images and videos: 16 bit PNG images, 32 bit EXR, 10 bit AVIF are supported and more.
