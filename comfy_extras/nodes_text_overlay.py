@@ -5,6 +5,7 @@ import torch
 from PIL import Image as PILImage, ImageColor, ImageDraw, ImageFont
 from typing_extensions import override
 
+import folder_paths
 from comfy_api.latest import ComfyExtension, IO
 
 
@@ -22,7 +23,7 @@ class TextOverlay(IO.ComfyNode):
             inputs=[
                 IO.Image.Input("images"),
                 IO.String.Input("text", multiline=True, default=""),
-                IO.Combo.Input("font", options=sorted([f for f in os.listdir(FONTS_DIR) if f.endswith(".ttf") or f.endswith(".otf")])),
+                IO.Combo.Input("font", options=folder_paths.get_filename_list("fonts")),
                 IO.Float.Input("font_size", default=5.0, min=0.5, max=50.0, step=0.5, tooltip="Font size as a percentage of the image height."),
                 IO.Color.Input("color", default="#ffffff", tooltip="Color of the text."),
                 IO.Combo.Input("position", options=["top", "bottom"], default="top"),

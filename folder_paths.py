@@ -66,6 +66,8 @@ folder_names_and_paths["optical_flow"] = ([os.path.join(models_dir, "optical_flo
 
 folder_names_and_paths["detection"] = ([os.path.join(models_dir, "detection")], supported_pt_extensions)
 
+folder_names_and_paths["fonts"] = ([os.path.join(base_path, "fonts")], {".ttf", ".otf"})
+
 output_directory = os.path.join(base_path, "output")
 temp_directory = os.path.join(base_path, "temp")
 input_directory = os.path.join(base_path, "input")
