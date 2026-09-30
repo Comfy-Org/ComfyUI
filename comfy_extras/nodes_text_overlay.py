@@ -42,7 +42,7 @@ class TextOverlay(IO.ComfyNode):
         # Render the overlay once and composite it across all frames in the batch
         height = images.shape[1]
         width = images.shape[2]
-        overlay_rgb, overlay_alpha = cls.render_overlay_text(width, height, text, position, align, font, font_size, text_rgba, outline_rgba)
+        overlay_rgb, overlay_alpha = cls.render_overlay_text(width, height, text, position, align, font_size, text_rgba, outline_rgba, font_filename=font)
         overlay_rgb = overlay_rgb.to(device=images.device, dtype=images.dtype)
         overlay_alpha = overlay_alpha.to(device=images.device, dtype=images.dtype)
 
@@ -67,7 +67,7 @@ class TextOverlay(IO.ComfyNode):
         return parsed
 
     @classmethod
-    def render_overlay_text(cls, width, height, text, position, align, font, font_size, text_rgba, outline_rgba):
+    def render_overlay_text(cls, width, height, text, position, align, font_size, text_rgba, outline_rgba, font_filename = None):
         line_spacing = 1.2
         margin_percent = 1.0
         min_font_percent = 2.0
@@ -87,8 +87,8 @@ class TextOverlay(IO.ComfyNode):
         floor = min(size, max(min_font_pixels, int(round(min_font_percent / 100.0 * height))))
 
         while True:
-            if font:
-                font = ImageFont.truetype(folder_paths.get_full_path_or_raise("fonts", font), size)
+            if font_filename:
+                font = ImageFont.truetype(folder_paths.get_full_path_or_raise("fonts", font_filename), size)
             else:
                 font = ImageFont.load_default(size=size)
 

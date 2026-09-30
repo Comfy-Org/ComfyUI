@@ -24,7 +24,7 @@ def overlay(images, text=TEXT, outline=True):
 
 def rendered_overlay(text=TEXT, outline=True):
     return TextOverlay.render_overlay_text(
-        SIZE, SIZE, text, "top", "left", None, 20.0, (255, 255, 255, 255), (0, 0, 0, 255) if outline else (0, 0, 0, 0)
+        SIZE, SIZE, text, "top", "left", 20.0, (255, 255, 255, 255), (0, 0, 0, 255) if outline else (0, 0, 0, 0), font_filename=None
     )
 
 
