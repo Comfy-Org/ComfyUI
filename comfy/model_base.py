@@ -2221,6 +2221,12 @@ class MiniMaxH3(BaseModel):
         if cross_attn is not None and latent_shapes is not None and len(latent_shapes) > 1:
             # packed layout built once per sampling run, h/w rounded up to the DiT's 2x2 patch
             vs = latent_shapes[0]
+            if len(vs) < 5:
+                raise ValueError(
+                    "MiniMaxH3 expects a video+audio latent whose video stream is 5D "
+                    "(batch, channels, frames, height, width), got {}. Check that the latent "
+                    "input comes from an H3 empty latent or VAE encode, an audio-only latent "
+                    "cannot be sampled with this model.".format(tuple(vs)))
             payload["layout"] = comfy.ldm.minimax.model.PackedLayout(
                 cross_attn.shape[1], vs[2], (vs[3] + 1) // 2 * 2, (vs[4] + 1) // 2 * 2,
                 latent_shapes[1][-1], keyframes=payload.get("keyframes"),
