@@ -19,12 +19,12 @@ def image(channels, value=0.25, alpha=1.0):
 
 
 def overlay(images, text=TEXT, outline=True):
-    return TextOverlay.execute(images, text, 20.0, "#ffffff", "top", "left", outline).result[0]
+    return TextOverlay.execute(images, text, None, 20.0, "#ffffff", "top", "left", outline).result[0]
 
 
 def rendered_overlay(text=TEXT, outline=True):
     return TextOverlay.render_overlay_text(
-        SIZE, SIZE, text, "top", "left", 20.0, (255, 255, 255, 255), (0, 0, 0, 255) if outline else (0, 0, 0, 0)
+        SIZE, SIZE, text, "top", "left", None, 20.0, (255, 255, 255, 255), (0, 0, 0, 255) if outline else (0, 0, 0, 0)
     )
 
 
