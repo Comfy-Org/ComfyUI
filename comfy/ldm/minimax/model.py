@@ -733,6 +733,12 @@ class MiniMaxH3Model(nn.Module):
                 h[a:b] = audio_embed[aoff:aoff + n]
                 aoff += n
 
+        # Packing owns the embeddings now; do not retain their backing storage
+        # throughout the transformer blocks.
+        del video_embed, audio_embed, text_states
+        del all_video_rows, all_audio_rows, video_rows, audio_rows
+        del cond_video_rows, cond_audio_rows, img_update, audio_update
+
         t_vals = torch.tensor(unique_t, dtype=torch.float32, device=device)
         if self.use_adaln_curves:
             # adaln projections consume interpolated coordinates of the time-embedding curve
