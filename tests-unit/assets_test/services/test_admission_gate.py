@@ -135,7 +135,7 @@ def test_stat_error_drops_entry_and_allows_other_watch_entries_to_commit(
     )
     assert any(
         record.getMessage()
-        == "[assets-event] scanner.watch_stat_failed error_type=PermissionError"
+        == "[assets-event] scanner.watch_stat_failed error_kind=other error_type=PermissionError"
         for record in caplog.records
     )
 
@@ -169,7 +169,7 @@ def test_seed_failure_does_not_stop_watch_list_drain(
     )
     assert any(
         record.getMessage()
-        == "[assets-event] scanner.watch_seed_failed error_type=RuntimeError"
+        == "[assets-event] scanner.watch_seed_failed error_kind=other error_type=RuntimeError"
         for record in caplog.records
     )
 

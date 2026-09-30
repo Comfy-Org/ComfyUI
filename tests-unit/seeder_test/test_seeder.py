@@ -632,7 +632,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
         scan_seeder._run_fast_phase(("models",))
 
     assert events_named(caplog, "seeder.batch_insert_failed") == [
-        {"error_type": "PermissionError"}
+        {"error_kind": "other", "error_type": "PermissionError"}
     ]
     tagged = "\n".join(record.getMessage() for record in caplog.records if TAG in record.getMessage())
     assert "/private/models/asset.safetensors" not in tagged
@@ -708,7 +708,7 @@ def test_salvage_commit_failure_reports_the_original_batch_fault(
         "No space left on device"
     ]
     assert events_named(caplog, "seeder.batch_insert_failed") == [
-        {"error_type": "OSError"}
+        {"error_kind": "other", "error_type": "OSError"}
     ]
     caller_logs = [
         record

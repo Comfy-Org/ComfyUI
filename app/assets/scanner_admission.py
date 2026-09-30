@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Protocol
 
-from app.assets.event_log import emit, error_type
+from app.assets.event_log import emit, error_kind, error_type
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 
 if TYPE_CHECKING:
@@ -91,7 +91,11 @@ def tick_watch_list(progress: _ScanProgress | None = None) -> None:
                 current = os.stat(entry.path)
             except OSError as exc:
                 logging.warning("Dropping watched asset after stat failed: %s", entry.path)
-                emit("scanner.watch_stat_failed", error_type=error_type(exc))
+                emit(
+                    "scanner.watch_stat_failed",
+                    error_type=error_type(exc),
+                    error_kind=error_kind(exc),
+                )
                 continue
             if (current.st_mtime_ns, current.st_size) == (entry.last_stat.st_mtime_ns, entry.last_stat.st_size):
                 try:
@@ -124,7 +128,11 @@ def tick_watch_list(progress: _ScanProgress | None = None) -> None:
             # The batch reports only its first error, so failed entries can't be named here;
             # like any settled entry, they leave the watch list either way.
             logging.warning("Seeding settled watched assets failed for at least one entry")
-            emit("scanner.watch_seed_failed", error_type=error_type(seed_error))
+            emit(
+                "scanner.watch_seed_failed",
+                error_type=error_type(seed_error),
+                error_kind=error_kind(seed_error),
+            )
     finally:
         # Skipping this write wedges the list: drained entries stay on it and are re-attempted
         # every tick, while entries past the fault never reach the increment _WATCH_SCAN_RETRIES

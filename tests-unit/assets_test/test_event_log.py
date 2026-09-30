@@ -1,17 +1,15 @@
 """Tests for the structured assets event log lines (``app/assets/event_log.py``)."""
 
+import errno
 import logging
 import re
+import sqlite3
 from pathlib import Path
 
 import pytest
-
-from app.assets import event_log
-import errno
-import sqlite3
-
 from sqlalchemy.exc import OperationalError
 
+from app.assets import event_log
 from app.assets.event_log import ALLOWED_FIELDS, ERROR_KINDS, TAG, EventLogError, emit, error_kind, error_type
 
 # The line grammar below is the CONTRACT shared with the desktop launcher's log
@@ -191,6 +189,51 @@ def _wrapped(driver_error: BaseException) -> OperationalError:
 )
 def test_error_kind_classifies_without_reading_the_wrapped_statement(exc, kind):
     assert error_kind(exc) == kind
+
+
+def _with_code(exc: sqlite3.Error, code: int) -> sqlite3.Error:
+    exc.sqlite_errorcode = code  # set by the driver itself on Python 3.11+
+    return exc
+
+
+def _windows_error(winerror: int) -> PermissionError:
+    exc = PermissionError(errno.EACCES, "Permission denied")
+    exc.winerror = winerror  # set by the OS layer on Windows only
+    return exc
+
+
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [
+        (_wrapped(_with_code(sqlite3.OperationalError("unexpected wording"), 261)), "database_locked"),
+        (_wrapped(_with_code(sqlite3.OperationalError("unexpected wording"), 13)), "disk_full"),
+        (_wrapped(_with_code(sqlite3.DatabaseError("unexpected wording"), 26)), "database_corrupt"),
+        (_wrapped(_with_code(sqlite3.OperationalError("Expression tree is too large"), 1)), "expression_tree_too_large"),
+        (_wrapped(sqlite3.DatabaseError("file is not a database")), "database_corrupt"),
+        (_windows_error(32), "file_locked"),
+        (_windows_error(33), "file_locked"),
+        (_windows_error(5), "permission_denied"),
+    ],
+    ids=[
+        "busy-extended-code", "full-code", "notadb-code", "generic-code-falls-back-to-message",
+        "notadb-message", "sharing-violation", "lock-violation", "access-denied",
+    ],
+)
+def test_error_kind_prefers_the_sqlite_code_and_windows_error(exc, kind):
+    assert error_kind(exc) == kind
+
+
+def test_error_kind_classifies_a_real_non_database_file(tmp_path: Path):
+    not_a_db = tmp_path / "assets.db"
+    not_a_db.write_bytes(b"this is not sqlite" * 100)
+    connection = sqlite3.connect(not_a_db)
+    try:
+        with pytest.raises(sqlite3.DatabaseError) as raised:
+            connection.execute("SELECT * FROM sqlite_master")
+    finally:
+        connection.close()
+
+    assert error_kind(raised.value) == "database_corrupt"
 
 
 def test_error_kind_never_carries_the_statement_or_params(caplog):

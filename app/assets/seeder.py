@@ -949,7 +949,11 @@ class _AssetSeeder:
                     i,
                     created,
                 )
-                emit("seeder.batch_insert_failed", error_type=error_type(e))
+                emit(
+                    "seeder.batch_insert_failed",
+                    error_type=error_type(e),
+                    error_kind=error_kind(e),
+                )
 
             scanned = i + len(batch)
             now = time.perf_counter()
