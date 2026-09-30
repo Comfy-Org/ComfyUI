@@ -29,7 +29,9 @@ def main():
             raise RuntimeError(f"{name} was not installed from the Comfy Registry, reinstall it with ComfyUI-Manager.")
         with open(os.path.join(path, "pyproject.toml"), "rb") as f:
             project = tomllib.load(f)["project"]
-        lock.append(f"{project['name']} {project['version']}")
+        # The registry stores versions as full semver, "1.23" is published as "1.23.0".
+        version = project["version"] + ".0" * (2 - project["version"].count("."))
+        lock.append(f"{project['name']} {version}")
 
         node_requirements = os.path.join(path, "requirements.txt")
         if not os.path.isfile(node_requirements):
