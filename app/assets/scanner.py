@@ -565,7 +565,12 @@ def build_asset_specs(
                 if isinstance(e, PermissionError):
                     progress.permission_denied += 1
                 if progress.mark_emitted("stat_failed:discovery"):
-                    emit("scanner.stat_failed", site="discovery", error_type=error_type(e))
+                    emit(
+                        "scanner.stat_failed",
+                        site="discovery",
+                        error_type=error_type(e),
+                        error_kind=error_kind(e),
+                    )
             continue
         if not stat_p.st_size:
             continue
@@ -872,7 +877,12 @@ def enrich_asset(
             if isinstance(e, PermissionError):
                 progress.permission_denied += 1
             if progress.mark_emitted("stat_failed:enrich"):
-                emit("scanner.stat_failed", site="enrich", error_type=error_type(e))
+                emit(
+                    "scanner.stat_failed",
+                    site="enrich",
+                    error_type=error_type(e),
+                    error_kind=error_kind(e),
+                )
         return False
 
     initial_mtime_ns = get_mtime_ns(stat_p)

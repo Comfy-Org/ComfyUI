@@ -210,13 +210,16 @@ def _windows_error(winerror: int) -> PermissionError:
         (_wrapped(_with_code(sqlite3.DatabaseError("unexpected wording"), 26)), "database_corrupt"),
         (_wrapped(_with_code(sqlite3.OperationalError("Expression tree is too large"), 1)), "expression_tree_too_large"),
         (_wrapped(sqlite3.DatabaseError("file is not a database")), "database_corrupt"),
+        (_wrapped(_with_code(sqlite3.OperationalError("unexpected wording"), 8)), "read_only"),
+        (_wrapped(sqlite3.OperationalError("attempt to write a readonly database")), "read_only"),
+        (OSError(errno.EROFS, "Read-only file system"), "read_only"),
         (_windows_error(32), "file_locked"),
         (_windows_error(33), "file_locked"),
         (_windows_error(5), "permission_denied"),
     ],
     ids=[
         "busy-extended-code", "full-code", "notadb-code", "generic-code-falls-back-to-message",
-        "notadb-message", "sharing-violation", "lock-violation", "access-denied",
+        "notadb-message", "readonly-code", "readonly-message", "erofs", "sharing-violation", "lock-violation", "access-denied",
     ],
 )
 def test_error_kind_prefers_the_sqlite_code_and_windows_error(exc, kind):
@@ -384,3 +387,16 @@ def test_production_mode_still_emits_valid_events_after_a_dropped_one(caplog, mo
 
     tagged = [r.getMessage() for r in caplog.records if r.getMessage().startswith(TAG)]
     assert tagged == ["[assets-event] seeder.scan_started phase=fast"]
+
+
+def test_error_kind_classifies_a_real_read_only_database(tmp_path: Path):
+    db_path = tmp_path / "assets.db"
+    sqlite3.connect(db_path).execute("CREATE TABLE t (x)").connection.close()
+    connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        with pytest.raises(sqlite3.OperationalError) as raised:
+            connection.execute("INSERT INTO t VALUES (1)")
+    finally:
+        connection.close()
+
+    assert error_kind(raised.value) == "read_only"

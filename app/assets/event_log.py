@@ -40,6 +40,7 @@ ERROR_KINDS = frozenset({
     "database_corrupt",
     "permission_denied",
     "file_locked",
+    "read_only",
     "other",
 })
 ALLOWED_EVENTS = frozenset({
@@ -192,6 +193,7 @@ def error_type(exc: BaseException) -> str:
 _SQLITE_CODE_KINDS = {
     5: "database_locked",  # SQLITE_BUSY
     6: "database_locked",  # SQLITE_LOCKED
+    8: "read_only",  # SQLITE_READONLY
     10: "disk_io",  # SQLITE_IOERR
     11: "database_corrupt",  # SQLITE_CORRUPT
     13: "disk_full",  # SQLITE_FULL
@@ -212,6 +214,7 @@ _SQLITE_MESSAGE_KINDS = (
     ("unable to open database file", "unable_to_open"),
     ("database disk image is malformed", "database_corrupt"),
     ("file is not a database", "database_corrupt"),
+    ("attempt to write a readonly database", "read_only"),
 )
 # Windows reports a file held open by another process (ERROR_SHARING_VIOLATION,
 # ERROR_LOCK_VIOLATION) as EACCES; tell it apart from a real permission problem.
@@ -221,6 +224,7 @@ _ERRNO_KINDS = {
     errno.EIO: "disk_io",
     errno.EACCES: "permission_denied",
     errno.EPERM: "permission_denied",
+    errno.EROFS: "read_only",
 }
 
 
