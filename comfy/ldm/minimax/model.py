@@ -207,8 +207,9 @@ class MLP(nn.Module):
         self.fc1 = operations.Linear(hidden, ffn * 2, bias=False, dtype=dtype, device=device)
         self.fc2 = operations.Linear(ffn, hidden, bias=False, dtype=dtype, device=device)
 
-    def forward(self, x):
-        return comfy.ops.linear_input_act(self.fc2, self.fc1(x), "swiglu")
+    def forward(self, x, residual=None, gate=None, rows=None):
+        return comfy.ops.linear_input_act(self.fc2, self.fc1(x), "swiglu",
+                                         residual=residual, residual_scale=gate, residual_indices=rows)
 
 
 class AdalnProj(nn.Module):
@@ -295,7 +296,12 @@ class DiTBlock(nn.Module):
         h = _mod_scale_shift(self.norm1(x), shift_msa, scale_msa, mod_segments)
         x = _mod_gate(x, gate_msa, attention(h, rope_freqs=rope_freqs, transformer_options=transformer_options), mod_segments)
         h = _mod_scale_shift(self.norm2(x), shift_mlp, scale_mlp, mod_segments)
-        return _mod_gate(x, gate_mlp, self.mlp(h), mod_segments)
+        if comfy.model_management.in_training or self.mlp._forward_hooks or self.mlp._forward_pre_hooks:
+            return _mod_gate(x, gate_mlp, self.mlp(h), mod_segments)
+        rows = torch.empty(x.shape[0], dtype=torch.int32, device=x.device)
+        for a, b, row in mod_segments:
+            rows[a:b] = row
+        return self.mlp(h, residual=x, gate=gate_mlp, rows=rows)
 
 
 class FinalLayer(nn.Module):

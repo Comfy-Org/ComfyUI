@@ -974,7 +974,7 @@ def _fp16_linear_wanted(x):
 
 
 def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
-                     residual=None, residual_scale=None):
+                     residual=None, residual_scale=None, residual_indices=None):
     """``linear(act(x))``, with ``act`` folded into an INT8 activation quantizer.
 
     An INT8 linear quantizes its input anyway, so an elementwise activation can
@@ -986,16 +986,20 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
 
     With ``residual``/``residual_scale`` the result is the pre-norm block's
     addcmul, ``residual + residual_scale * linear(act(x))``, fused into the
-    INT8 GEMM epilogue where supported.
+    INT8 GEMM epilogue where supported. ``residual_indices`` selects one
+    residual-scale table row per input row without materializing [M,N].
 
     """
     def _residual_out(out):
         if residual is None:
             return out
-        return torch.addcmul(residual, out, residual_scale)
+        scale = residual_scale if residual_indices is None else residual_scale[residual_indices.long()].to(out.dtype)
+        return torch.addcmul(residual, out, scale)
 
     weight = linear.weight
     full_precision_mm = getattr(linear, "_full_precision_mm", False)
+    if residual_indices is not None and (linear._forward_hooks or linear._forward_pre_hooks):
+        return _residual_out(linear(_eager_input_act(x, input_act, act_weight, act_eps)))
     if (comfy.model_management.in_training
             or not isinstance(weight, QuantizedTensor)
             or weight._layout_cls != "TensorWiseINT8Layout"
@@ -1004,6 +1008,7 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
         if (not comfy.model_management.in_training
                 and not isinstance(weight, QuantizedTensor)
                 and not full_precision_mm
+                and residual_indices is None
                 and _fp16_linear_wanted(x)):
             weight, bias, offload_stream = cast_bias_weight(linear, x, offloadable=True)
             try:
@@ -1025,6 +1030,19 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
             return _residual_out(torch.nn.functional.linear(
                 _eager_input_act(x, input_act, act_weight, act_eps), weight, bias))
         qdata, scale = TensorWiseINT8Layout.get_plain_tensors(weight)
+        if residual_indices is not None:
+            if (bias is None and x.dtype == torch.bfloat16
+                    and weight._params.convrot and weight._params.convrot_groupsize == 256
+                    and input_act in (None, "swiglu")):
+                return quant_ops.ck.int8_linear_indexed_gate(
+                    x, qdata.contiguous(), scale.reshape(-1).expand(qdata.shape[0]).contiguous(),
+                    residual_scale.to(x.dtype).contiguous(), residual_indices, residual,
+                    input_act=input_act)
+            return _residual_out(quant_ops.ck.int8_linear(
+                x, qdata, scale, bias, x.dtype,
+                convrot=weight._params.convrot,
+                convrot_groupsize=weight._params.convrot_groupsize,
+                input_act=input_act, input_act_weight=act_weight, input_act_eps=act_eps))
         return quant_ops.ck.int8_linear(
             x, qdata, scale, bias, x.dtype,
             convrot=getattr(weight._params, "convrot", False),
