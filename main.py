@@ -35,6 +35,7 @@ import sys
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
+import comfy.auth
 
 if __name__ == "__main__":
     #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
@@ -533,6 +534,14 @@ def start_comfyui(asyncio_loop=None):
     comfy.model_management.set_cudnn_benchmark()
 
     hook_breaker_ac10a0.restore_functions()
+
+    if args.require_auth:
+        try:
+            provider = comfy.auth.verify_auth_provider(prompt_server.app.middlewares)
+        except comfy.auth.AuthRequiredError as e:
+            logging.critical("Refusing to start: %s", e)
+            sys.exit(1)
+        logging.info("--require-auth: auth provider '%s' is active.", provider.name)
 
     cuda_malloc_warning()
     setup_database(asset_manager)
