@@ -9,8 +9,6 @@ import folder_paths
 from comfy_api.latest import ComfyExtension, IO
 
 
-FONTS_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "../fonts")
-
 class TextOverlay(IO.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -92,7 +90,7 @@ class TextOverlay(IO.ComfyNode):
 
         while True:
             if font:
-                font = ImageFont.truetype(os.path.join(FONTS_DIR, font), size)
+                font = ImageFont.truetype(folder_paths.get_full_path_or_raise("fonts", font), size)
             else:
                 font = ImageFont.load_default(size=size)
 
