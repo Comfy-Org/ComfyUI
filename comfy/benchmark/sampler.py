@@ -8,6 +8,14 @@ interval, and is joined at the end of the run. All device probing is defensive:
 a missing tool (e.g. ``nvidia-smi`` not on PATH) degrades to ``None`` fields
 rather than raising into the hot path.
 
+GPU sampling prefers a persistent **NVML** handle (via a *soft* ``pynvml``
+import) so each sample is a microsecond-cost in-process call. This avoids the
+observer effect of spawning an ``nvidia-smi`` subprocess several times a second
+*concurrently with the generation it is trying to measure*. When ``pynvml`` is
+not importable, it transparently falls back to the ``nvidia-smi`` subprocess, so
+``pynvml`` remains a **soft** (optional) dependency -- no new hard dep is added.
+See ``SPIKE.md`` for the fidelity tradeoff.
+
 Schema v2 extends each series point with GPU temperature / clocks / power-limit
 (one nvidia-smi call per sample, same overhead profile), adds a one-shot idle
 ``baseline`` sample, and enriches the device snapshot (CUDA/cuDNN versions,
@@ -45,6 +53,61 @@ _SMI_SAMPLE_FIELDS = [
 # Heuristic throttle thresholds (best-effort; documented in SPIKE.md).
 _THROTTLE_TEMP_C = 83.0          # NVIDIA consumer thermal-throttle neighborhood.
 _THROTTLE_POWER_FRACTION = 0.98  # sustained draw this close to the cap == capped.
+
+# -- pynvml soft-dependency (persistent NVML handle) -----------------------
+# Cached across the process so the NVML library is initialized and the device-0
+# handle opened exactly once, then reused for every sample. Values:
+#   _pynvml is None   -> not yet probed
+#   _pynvml is False  -> probed, unavailable (soft-import failed / NVML init err)
+#   _pynvml is module -> available; _pynvml_handle holds the device handle
+_pynvml = None
+_pynvml_handle = None
+_pynvml_lock = threading.Lock()
+
+
+def _get_pynvml_handle():
+    """Return ``(pynvml_module, device_handle)`` if NVML is usable, else ``(None, None)``.
+
+    Soft-imports ``pynvml`` and initializes NVML **once**, caching a persistent
+    device-0 handle. Querying that handle costs microseconds, versus spawning an
+    ``nvidia-smi`` subprocess on every sample. Fully defensive: any failure is
+    remembered so we don't retry the import/init on every sample, and the caller
+    falls back to ``nvidia-smi``.
+    """
+    global _pynvml, _pynvml_handle
+    if _pynvml is False:
+        return None, None
+    if _pynvml is not None and _pynvml_handle is not None:
+        return _pynvml, _pynvml_handle
+    with _pynvml_lock:
+        if _pynvml is False:
+            return None, None
+        if _pynvml is not None and _pynvml_handle is not None:
+            return _pynvml, _pynvml_handle
+        try:
+            import pynvml  # soft dep; absence -> nvidia-smi fallback below.
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            _pynvml = pynvml
+            _pynvml_handle = handle
+            logging.info("benchmark: using pynvml (NVML) for GPU sampling")
+            return _pynvml, _pynvml_handle
+        except Exception:
+            _pynvml = False
+            _pynvml_handle = None
+            return None, None
+
+
+def _nvml_str(v: Any) -> Optional[str]:
+    """Decode an NVML value that may be ``bytes`` (older pynvml) to ``str``."""
+    if v is None:
+        return None
+    if isinstance(v, bytes):
+        try:
+            return v.decode("utf-8", "replace") or None
+        except Exception:
+            return None
+    return str(v) or None
 
 
 def _bytes_to_mb(n: Optional[float]) -> Optional[float]:
@@ -131,12 +194,83 @@ def _to_int(v: Optional[str]) -> Optional[int]:
     return int(f) if f is not None else None
 
 
+def _query_gpu_nvml(pynvml, handle) -> Optional[dict[str, Any]]:
+    """Per-sample GPU probe via the persistent NVML handle (microsecond cost).
+
+    Mirrors the ``nvidia-smi`` field set. Each metric is probed independently and
+    defensively so one unsupported query never blanks the rest. Returns ``None``
+    if the probe yields nothing usable, letting the caller fall back to
+    ``nvidia-smi``.
+    """
+    out: dict[str, Any] = {
+        "vram_used_mb": None,
+        "vram_util_percent": None,
+        "power_w": None,
+        "temperature_c": None,
+        "sm_clock_mhz": None,
+        "mem_clock_mhz": None,
+        "power_limit_w": None,
+    }
+    try:
+        try:
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            out["vram_used_mb"] = _bytes_to_mb(mem.used)
+        except Exception:
+            pass
+        try:
+            # NVML ``gpu`` utilization mirrors nvidia-smi ``utilization.gpu``,
+            # which v1 mapped onto ``vram_util_percent`` -- keep that mapping.
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            out["vram_util_percent"] = float(util.gpu)
+        except Exception:
+            pass
+        try:
+            out["power_w"] = round(pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0, 3)  # mW -> W
+        except Exception:
+            pass
+        try:
+            out["temperature_c"] = float(
+                pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            )
+        except Exception:
+            pass
+        try:
+            out["sm_clock_mhz"] = float(
+                pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)
+            )
+        except Exception:
+            pass
+        try:
+            out["mem_clock_mhz"] = float(
+                pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM)
+            )
+        except Exception:
+            pass
+        try:
+            out["power_limit_w"] = round(
+                pynvml.nvmlDeviceGetEnforcedPowerLimit(handle) / 1000.0, 3
+            )
+        except Exception:
+            try:
+                out["power_limit_w"] = round(
+                    pynvml.nvmlDeviceGetPowerManagementLimit(handle) / 1000.0, 3
+                )
+            except Exception:
+                pass
+        if all(v is None for v in out.values()):
+            return None  # nothing usable -> let caller fall back to nvidia-smi.
+        return out
+    except Exception:
+        return None
+
+
 def _query_gpu(backend: str) -> dict[str, Any]:
     """One-shot GPU metric probe shared by the sampler thread and the baseline.
 
     Returns the full v2 metric set with ``None`` for anything unavailable. On
-    CUDA this is a single nvidia-smi call; on MPS only ``vram_used_mb`` is known;
-    otherwise everything is ``None``.
+    CUDA this prefers a persistent NVML handle (``pynvml``) and falls back to a
+    single ``nvidia-smi`` call when ``pynvml`` is absent; on MPS only
+    ``vram_used_mb`` is known; otherwise everything is ``None``.
     """
     out: dict[str, Any] = {
         "vram_used_mb": None,
@@ -148,6 +282,12 @@ def _query_gpu(backend: str) -> dict[str, Any]:
         "power_limit_w": None,
     }
     if backend == BACKEND_CUDA:
+        pynvml, handle = _get_pynvml_handle()
+        if pynvml is not None and handle is not None:
+            vals = _query_gpu_nvml(pynvml, handle)
+            if vals is not None:
+                return vals
+        # pynvml absent or its probe failed -> fall back to nvidia-smi subprocess.
         vals = _nvidia_smi_query(_SMI_SAMPLE_FIELDS)
         if vals is None:
             return out
@@ -259,6 +399,15 @@ class HardwareSampler(threading.Thread):
     # -- summaries ---------------------------------------------------------
     def _probe_total_vram_mb(self) -> Optional[float]:
         if self.backend == BACKEND_CUDA:
+            pynvml, handle = _get_pynvml_handle()
+            if pynvml is not None and handle is not None:
+                try:
+                    mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    total = _bytes_to_mb(mem.total)
+                    if total is not None:
+                        return total
+                except Exception:
+                    pass
             vals = _nvidia_smi_query(["memory.total"])
             if vals:
                 return _to_float(vals[0])
@@ -447,16 +596,51 @@ def env_snapshot(backend: Optional[str] = None) -> dict[str, Any]:
     snap.update(_device_runtime_snapshot())
 
     if backend == BACKEND_CUDA:
-        vals = _nvidia_smi_query([
-            "name", "driver_version", "memory.total",
-            "pcie.link.gen.current", "pcie.link.width.current",
-        ])
-        if vals:
-            snap["gpu_model"] = vals[0] if len(vals) > 0 and vals[0] else None
-            snap["driver_version"] = vals[1] if len(vals) > 1 and vals[1] else None
-            snap["total_vram_mb"] = _to_float(vals[2] if len(vals) > 2 else None)
-            snap["pcie_gen"] = _to_int(vals[3] if len(vals) > 3 else None)
-            snap["pcie_width"] = _to_int(vals[4] if len(vals) > 4 else None)
+        # Prefer the persistent NVML handle (no subprocess); fill any gaps from
+        # a single nvidia-smi call. env_snapshot is one-shot (finalize), so this
+        # is about consistency with the sampler path, not the observer effect.
+        pynvml, handle = _get_pynvml_handle()
+        if pynvml is not None and handle is not None:
+            try:
+                snap["gpu_model"] = _nvml_str(pynvml.nvmlDeviceGetName(handle))
+            except Exception:
+                pass
+            try:
+                snap["driver_version"] = _nvml_str(pynvml.nvmlSystemGetDriverVersion())
+            except Exception:
+                pass
+            try:
+                snap["total_vram_mb"] = _bytes_to_mb(
+                    pynvml.nvmlDeviceGetMemoryInfo(handle).total
+                )
+            except Exception:
+                pass
+            try:
+                snap["pcie_gen"] = int(pynvml.nvmlDeviceGetCurrPcieLinkGeneration(handle))
+            except Exception:
+                pass
+            try:
+                snap["pcie_width"] = int(pynvml.nvmlDeviceGetCurrPcieLinkWidth(handle))
+            except Exception:
+                pass
+        # nvidia-smi fallback for anything NVML did not fill (or when absent).
+        if any(snap[k] is None for k in
+               ("gpu_model", "driver_version", "total_vram_mb", "pcie_gen", "pcie_width")):
+            vals = _nvidia_smi_query([
+                "name", "driver_version", "memory.total",
+                "pcie.link.gen.current", "pcie.link.width.current",
+            ])
+            if vals:
+                if snap["gpu_model"] is None:
+                    snap["gpu_model"] = vals[0] if len(vals) > 0 and vals[0] else None
+                if snap["driver_version"] is None:
+                    snap["driver_version"] = vals[1] if len(vals) > 1 and vals[1] else None
+                if snap["total_vram_mb"] is None:
+                    snap["total_vram_mb"] = _to_float(vals[2] if len(vals) > 2 else None)
+                if snap["pcie_gen"] is None:
+                    snap["pcie_gen"] = _to_int(vals[3] if len(vals) > 3 else None)
+                if snap["pcie_width"] is None:
+                    snap["pcie_width"] = _to_int(vals[4] if len(vals) > 4 else None)
         if snap["gpu_model"] is None:
             try:
                 import torch
