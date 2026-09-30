@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import torch
 from PIL import Image as PILImage, ImageColor, ImageDraw, ImageFont
@@ -5,6 +7,8 @@ from typing_extensions import override
 
 from comfy_api.latest import ComfyExtension, IO
 
+
+FONTS_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "../fonts")
 
 class TextOverlay(IO.ComfyNode):
     @classmethod
@@ -18,6 +22,7 @@ class TextOverlay(IO.ComfyNode):
             inputs=[
                 IO.Image.Input("images"),
                 IO.String.Input("text", multiline=True, default=""),
+                IO.Combo.Input("font", options=sorted([f for f in os.listdir(FONTS_DIR) if f.endswith(".ttf") or f.endswith(".otf")])),
                 IO.Float.Input("font_size", default=5.0, min=0.5, max=50.0, step=0.5, tooltip="Font size as a percentage of the image height."),
                 IO.Color.Input("color", default="#ffffff", tooltip="Color of the text."),
                 IO.Combo.Input("position", options=["top", "bottom"], default="top"),
@@ -28,7 +33,7 @@ class TextOverlay(IO.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, images, text, font_size, color, position, align, outline) -> IO.NodeOutput:
+    def execute(cls, images, text, font, font_size, color, position, align, outline) -> IO.NodeOutput:
         if text.strip() == "":
             return IO.NodeOutput(images)
 
@@ -40,7 +45,7 @@ class TextOverlay(IO.ComfyNode):
         # Render the overlay once and composite it across all frames in the batch
         height = images.shape[1]
         width = images.shape[2]
-        overlay_rgb, overlay_alpha = cls.render_overlay_text(width, height, text, position, align, font_size, text_rgba, outline_rgba)
+        overlay_rgb, overlay_alpha = cls.render_overlay_text(width, height, text, position, align, font, font_size, text_rgba, outline_rgba)
         overlay_rgb = overlay_rgb.to(device=images.device, dtype=images.dtype)
         overlay_alpha = overlay_alpha.to(device=images.device, dtype=images.dtype)
 
@@ -65,7 +70,7 @@ class TextOverlay(IO.ComfyNode):
         return parsed
 
     @classmethod
-    def render_overlay_text(cls, width, height, text, position, align, font_size, text_rgba, outline_rgba):
+    def render_overlay_text(cls, width, height, text, position, align, font, font_size, text_rgba, outline_rgba):
         line_spacing = 1.2
         margin_percent = 1.0
         min_font_percent = 2.0
@@ -85,7 +90,11 @@ class TextOverlay(IO.ComfyNode):
         floor = min(size, max(min_font_pixels, int(round(min_font_percent / 100.0 * height))))
 
         while True:
-            font = ImageFont.load_default(size=size)
+            if font:
+                font = ImageFont.truetype(os.path.join(FONTS_DIR, font), size)
+            else:
+                font = ImageFont.load_default(size=size)
+
             stroke = max(1, int(round(size * outline_thickness_factor))) if outline_rgba[3] > 0 else 0
             block = "\n".join(cls.wrap_text(text, font, max_width))
             # convert line spacing to pixel spacing
