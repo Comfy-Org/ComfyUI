@@ -4,5 +4,29 @@
     "folder": "vae",
     "url": "https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors",
     "filename": "sdxl_vae.safetensors"
+  },
+  {
+    "name": "Krea 2 Darkbrush LoRA",
+    "folder": "loras",
+    "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/loras/krea2_darkbrush.safetensors",
+    "filename": "krea2_darkbrush.safetensors"
+  },
+  {
+    "name": "Qwen Image VAE",
+    "folder": "vae",
+    "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors",
+    "filename": "qwen_image_vae.safetensors"
+  },
+  {
+    "name": "Qwen3-VL 4B FP8 Text Encoder",
+    "folder": "text_encoders",
+    "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+    "filename": "qwen3vl_4b_fp8_scaled.safetensors"
+  },
+  {
+    "name": "Krea 2 Turbo FP8",
+    "folder": "diffusion_models",
+    "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/diffusion_models/krea2_turbo_fp8_scaled.safetensors",
+    "filename": "krea2_turbo_fp8_scaled.safetensors"
   }
 ]

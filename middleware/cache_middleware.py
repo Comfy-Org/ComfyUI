@@ -6,6 +6,7 @@ from typing import Callable, Awaitable
 # Time in seconds
 ONE_HOUR: int = 3600
 ONE_DAY: int = 86400
+ONE_YEAR: int = 31536000
 IMG_EXTENSIONS = (
     ".jpg",
     ".jpeg",
@@ -32,7 +33,11 @@ async def cache_control(
     )
 
     if request.path.endswith(".js") or request.path.endswith(".css") or is_entry_point:
-        response.headers.setdefault("Cache-Control", "no-store")
+        # Frontend build assets have content-hashed filenames, so they never change in place
+        if request.path.startswith("/assets/") and response.status == 200:
+            response.headers.setdefault("Cache-Control", f"public, max-age={ONE_YEAR}, immutable")
+        else:
+            response.headers.setdefault("Cache-Control", "no-store")
         return response
 
     # Early return for non-image files - no cache headers needed

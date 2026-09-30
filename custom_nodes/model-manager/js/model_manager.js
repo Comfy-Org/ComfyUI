@@ -23,11 +23,29 @@ function render(el) {
         <div style="display:flex;flex-direction:column;gap:8px;padding:8px;height:100%;box-sizing:border-box">
             <input class="filter" placeholder="Filter models" style="padding:6px;background:var(--comfy-input-bg);color:var(--input-text);border:1px solid var(--border-color);border-radius:4px">
             <button class="install" style="padding:6px;cursor:pointer">Install selected</button>
+            <div style="display:flex;gap:8px">
+                <button class="upload" style="flex:1;padding:6px;cursor:pointer">Upload models.json</button>
+                <button class="reset" style="padding:6px;cursor:pointer" title="Go back to the default model list">Reset</button>
+            </div>
+            <input class="file" type="file" accept=".json,application/json" hidden>
+            <details>
+                <summary style="cursor:pointer">Add model by URL</summary>
+                <form class="add" style="display:flex;flex-direction:column;gap:8px;padding-top:8px">
+                    <input name="url" required placeholder="Hugging Face or Civitai URL" style="padding:6px;background:var(--comfy-input-bg);color:var(--input-text);border:1px solid var(--border-color);border-radius:4px">
+                    <select name="folder" required style="padding:6px;background:var(--comfy-input-bg);color:var(--input-text);border:1px solid var(--border-color);border-radius:4px"></select>
+                    <input name="filename" placeholder="Filename (default: from URL)" style="padding:6px;background:var(--comfy-input-bg);color:var(--input-text);border:1px solid var(--border-color);border-radius:4px">
+                    <button style="padding:6px;cursor:pointer">Add and install</button>
+                </form>
+            </details>
             <div class="error" style="color:var(--error-text)"></div>
             <div class="models" style="overflow-y:auto;flex:1"></div>
         </div>`;
     const filter = el.querySelector(".filter");
     const install = el.querySelector(".install");
+    const upload = el.querySelector(".upload");
+    const reset = el.querySelector(".reset");
+    const file = el.querySelector(".file");
+    const add = el.querySelector(".add");
     const error = el.querySelector(".error");
     const list = el.querySelector(".models");
 
@@ -70,7 +88,7 @@ function render(el) {
     }
 
     async function refresh() {
-        const resp = await api.fetchApi("/colab_models");
+        const resp = await api.fetchApi("/model-manager/models");
         if (!resp.ok) {
             error.textContent = `Failed to load models: ${resp.status} ${resp.statusText}`;
             return;
@@ -86,10 +104,42 @@ function render(el) {
     install.onclick = async () => {
         if (!selected.size) return;
         install.disabled = true;
-        const resp = await api.fetchApi("/colab_models/install", { method: "POST", body: JSON.stringify([...selected]) });
+        const resp = await api.fetchApi("/model-manager/install", { method: "POST", body: JSON.stringify([...selected]) });
         error.textContent = resp.ok ? "" : `Install failed: ${resp.status} ${resp.statusText}`;
         selected.clear();
         install.disabled = false;
+        refresh();
+    };
+
+    async function setCatalog(options) {
+        const resp = await api.fetchApi("/model-manager/catalog", options);
+        error.textContent = resp.ok ? "" : await resp.text();
+        selected.clear();
+        refresh();
+    }
+
+    upload.onclick = () => file.click();
+    file.onchange = async () => {
+        const body = await file.files[0].text();
+        file.value = "";
+        setCatalog({ method: "POST", body });
+    };
+    reset.onclick = () => setCatalog({ method: "DELETE" });
+
+    api.fetchApi("/experiment/models").then((resp) => resp.json()).then((folders) => {
+        add.folder.replaceChildren(...folders.map((f) => new Option(f.name, f.name)));
+    });
+    add.onsubmit = async (event) => {
+        event.preventDefault();
+        const resp = await api.fetchApi("/model-manager/add", {
+            method: "POST",
+            body: JSON.stringify({ url: add.url.value, folder: add.folder.value, filename: add.filename.value.trim() }),
+        });
+        error.textContent = resp.ok ? "" : await resp.text();
+        if (resp.ok) {
+            add.url.value = "";
+            add.filename.value = "";
+        }
         refresh();
     };
 
@@ -98,10 +148,10 @@ function render(el) {
 }
 
 app.registerExtension({
-    name: "colab.ModelManager",
+    name: "model-manager",
     setup() {
         app.extensionManager.registerSidebarTab({
-            id: "colab-models",
+            id: "model-manager",
             icon: "pi pi-download",
             title: "Models",
             tooltip: "Install models",

@@ -23,8 +23,8 @@ def main():
     ]
     for name in sorted(os.listdir(CUSTOM_NODES)):
         path = os.path.join(CUSTOM_NODES, name)
-        # colab_model_manager is part of this repo, not a registry node.
-        if not os.path.isdir(path) or name in ("__pycache__", "colab_model_manager"):
+        # model-manager is part of this repo, not a registry node.
+        if not os.path.isdir(path) or name in ("__pycache__", "model-manager"):
             continue
         if not os.path.isfile(os.path.join(path, ".tracking")):
             raise RuntimeError(f"{name} was not installed from the Comfy Registry, reinstall it with ComfyUI-Manager.")
