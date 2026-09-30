@@ -25,7 +25,7 @@ COLAB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path
 CATALOG = os.path.join(COLAB_DIR, "models.json")
 USER_CATALOG = os.path.join(folder_paths.get_user_directory(), "model-manager", "models.json")
 sys.path.append(COLAB_DIR)
-from downloader import Downloader  # noqa: E402
+from downloader import Downloader, is_civitai  # noqa: E402
 
 WEB_DIRECTORY = "./js"
 NODE_CLASS_MAPPINGS = {}
@@ -107,7 +107,7 @@ async def add_model(request):
     # Hugging Face /blob/ links are the file's web page, /resolve/ is the file itself.
     if "huggingface.co/" in url:
         url = url.replace("/blob/", "/resolve/", 1)
-    filename = body.get("filename") or ("" if "civitai.com" in url else os.path.basename(urlparse(url).path))
+    filename = body.get("filename") or ("" if is_civitai(url) else os.path.basename(urlparse(url).path))
     if not filename:
         return web.Response(status=400, text="Civitai links don't include the filename, enter one.")
     model = {"name": filename, "folder": body["folder"], "url": url, "filename": filename}

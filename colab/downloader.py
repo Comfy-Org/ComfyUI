@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Literal, Optional, IO, List
-from urllib.parse import urlparse, urlunparse, parse_qs
+from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
 
 import aria2p
 
@@ -46,6 +46,11 @@ def parse_url(url: str):
     params_dict = parse_qs(parsed.query, keep_blank_values=True)
 
     return base_url, params_dict
+
+
+# Civitai serves the same API from several domains, e.g. civitai.com and civitai.red.
+def is_civitai(url: str) -> bool:
+    return (urlparse(url).hostname or "").split(".")[-2:-1] == ["civitai"]
 
 
 # Civitai's Cloudflare blocks aria2 on the redirect, so resolve the final link with curl first.
@@ -293,7 +298,7 @@ class Downloader:
             url = url.rstrip("/")
             if "huggingface.co" in url:
                 download_configs.append(self._build_hf_download_config(url, rename))
-            elif "civitai.com" in url:
+            elif is_civitai(url):
                 download_configs.append(self._build_civit_ai_download_config(url, rename))
             else:
                 print(f"Unrecognized URL format, skipping: {url}")
@@ -374,11 +379,10 @@ class Downloader:
 
     def _build_civit_ai_download_config(self, url: str, rename: Optional[str]) -> DownloadConfig:
         base_url, params = parse_url(url)
-        bearer_token = self.civitai_api_key
-        if "token" in params:
-            bearer_token = params["token"][0]
+        params.setdefault("token", [self.civitai_api_key])
 
-        resolved_url = resolve_url(f"{base_url}?token={bearer_token}")
+        # Keep the other query parameters, fileId picks a specific file of the model version.
+        resolved_url = resolve_url(f"{base_url}?{urlencode(params, doseq=True)}")
 
         return DownloadConfig(
             url=resolved_url,
