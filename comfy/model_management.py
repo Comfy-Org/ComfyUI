@@ -1426,6 +1426,11 @@ def get_cast_buffer(offload_stream, device, size, ref):
     else:
         wf_context = nullcontext()
 
+    if in_training:
+        # Autograd may keep this storage after forward has released the cast.
+        with wf_context:
+            return torch.empty((size), dtype=torch.int8, device=device)
+
     cached = STREAM_CAST_BUFFERS.get(offload_stream, None)
     if cached is not None and cached.in_use:
         # Another cast on this stream still needs the cached weights.

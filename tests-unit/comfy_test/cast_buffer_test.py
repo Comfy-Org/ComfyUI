@@ -30,6 +30,95 @@ def test_live_cast_is_not_overwritten(buffers):
     assert first.data_ptr() != second.data_ptr()
 
 
+@pytest.fixture
+def simulated_cast(monkeypatch, buffers):
+    get_buffer = mm.get_cast_buffer
+    monkeypatch.setattr(mm, "get_offload_stream", lambda device: buffers)
+    monkeypatch.setattr(mm, "current_stream", lambda device: buffers)
+    monkeypatch.setattr(mm, "get_cast_buffer", lambda stream, device, size, ref: get_buffer(stream, "cpu", size, ref))
+    monkeypatch.setattr(mm, "device_supports_non_blocking", lambda device: False)
+    monkeypatch.setattr(ops.args, "cuda_malloc", False)
+
+    def copy(weight, dtype=None, device=None, non_blocking=False, copy=False, stream=None, r=None):
+        if r is None:
+            r = torch.empty_like(weight, dtype=dtype, device="cpu")
+        return r.copy_(weight)
+
+    monkeypatch.setattr(mm, "cast_to", copy)
+    return SimpleNamespace(weight=torch.arange(1, 9, dtype=torch.float32), bias=torch.ones(8),
+                           weight_function=[], bias_function=[])
+
+
+def test_training_preserves_saved_weight_after_forward(monkeypatch, simulated_cast):
+    monkeypatch.setattr(mm, "in_training", True)
+    x = torch.ones(8, requires_grad=True)
+    weights = []
+    outputs = []
+    for offset in (0, 10):
+        layer = SimpleNamespace(weight=simulated_cast.weight + offset, bias=None,
+                                weight_function=[], bias_function=[])
+        with ops.CastBiasWeightContext(layer, dtype=torch.float32, device=torch.device("cuda:0"), offloadable=True) as (weight, _):
+            weights.append(weight)
+            outputs.append(x * weight)
+    sum(output.sum() for output in outputs).backward()
+    torch.testing.assert_close(x.grad, simulated_cast.weight * 2 + 10, rtol=0, atol=0)
+    assert weights[0].data_ptr() != weights[1].data_ptr()
+    assert not mm.STREAM_CAST_BUFFERS
+
+
+def test_training_does_not_consume_existing_inference_buffer(monkeypatch, buffers):
+    first = mm.get_cast_buffer(buffers, "cpu", 128, object())
+    mm.release_cast_buffer(buffers, first)
+    with monkeypatch.context() as patch:
+        patch.setattr(mm, "in_training", True)
+        temporary = mm.get_cast_buffer(buffers, "cpu", 128, object())
+        assert temporary.data_ptr() != first.data_ptr()
+        mm.release_cast_buffer(buffers, temporary)
+    assert mm.get_cast_buffer(buffers, "cpu", 128, object()).data_ptr() == first.data_ptr()
+
+
+@pytest.mark.parametrize("stage", ["interpret", "weight_copy", "bias_copy", "weight_function", "bias_function"])
+def test_failed_cast_releases_buffer(monkeypatch, simulated_cast, buffers, stage):
+    def fail(*args, **kwargs):
+        raise RuntimeError("injected cast failure")
+
+    copy = mm.cast_to
+    with monkeypatch.context() as patch:
+        if stage == "interpret":
+            patch.setattr(ops.comfy.memory_management, "interpret_gathered_like", fail)
+        elif stage.endswith("copy"):
+            def failing_copy(weight, *args, **kwargs):
+                if weight is (simulated_cast.weight if stage == "weight_copy" else simulated_cast.bias):
+                    fail()
+                return copy(weight, *args, **kwargs)
+            patch.setattr(mm, "cast_to", failing_copy)
+        else:
+            patch.setattr(simulated_cast, stage, [fail])
+        with pytest.raises(RuntimeError, match="injected cast failure"):
+            with ops.CastBiasWeightContext(simulated_cast, dtype=torch.float32, device=torch.device("cuda:0"), offloadable=True):
+                pytest.fail("cast should not return")
+    cached = mm.STREAM_CAST_BUFFERS[buffers]
+    assert not cached.in_use
+    with ops.CastBiasWeightContext(simulated_cast, dtype=torch.float32, device=torch.device("cuda:0"), offloadable=True) as (weight, bias):
+        assert weight.untyped_storage().data_ptr() == cached.tensor.data_ptr()
+        assert torch.equal(weight, simulated_cast.weight)
+        assert torch.equal(bias, simulated_cast.bias)
+
+
+@pytest.mark.parametrize("second_cast_fails", [False, True])
+def test_overlapping_contexts_release_on_error(monkeypatch, simulated_cast, buffers, second_cast_fails):
+    def fail(weight):
+        raise RuntimeError("injected operation failure")
+
+    other = SimpleNamespace(weight=simulated_cast.weight + 10, bias=None,
+                            weight_function=[fail] if second_cast_fails else [], bias_function=[])
+    with pytest.raises(RuntimeError, match="injected operation failure"):
+        with ops.CastBiasWeightContext(simulated_cast, dtype=torch.float32, device=torch.device("cuda:0"), offloadable=True):
+            with ops.CastBiasWeightContext(other, dtype=torch.float32, device=torch.device("cuda:0"), offloadable=True):
+                fail(None)
+    assert not mm.STREAM_CAST_BUFFERS[buffers].in_use
+
+
 def test_temporary_release_does_not_release_cached_buffer(buffers):
     first = mm.get_cast_buffer(buffers, "cpu", 128, object())
     second = mm.get_cast_buffer(buffers, "cpu", 128, object())
