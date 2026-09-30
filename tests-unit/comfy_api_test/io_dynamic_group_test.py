@@ -1,7 +1,7 @@
 import pytest
 
 from comfy_api.latest import io
-from comfy_api.latest._io import build_nested_inputs, create_input_dict_v1, get_finalized_class_inputs
+from comfy_api.latest._io import DynamicSlot, build_nested_inputs, create_input_dict_v1, get_finalized_class_inputs
 
 
 def _reconstruct(group, values, *, lazy=False):
@@ -230,6 +230,34 @@ def test_group_inside_dynamic_combo_preserves_other_inputs(lazy):
         },
         "fixed": "untouched",
     }
+
+
+@pytest.mark.parametrize("kind", ["combo", "slot"])
+@pytest.mark.parametrize("lazy", [False, True])
+def test_list_mode_padding_is_limited_to_group_fields(kind, lazy):
+    inputs = [
+        io.Float.Input("optional", optional=True),
+        io.DynamicGroup.Input("rows", template=[io.Float.Input("x")], max=2),
+    ]
+    if kind == "combo":
+        container = io.DynamicCombo.Input("mode", options=[io.DynamicCombo.Option("on", inputs)])
+        selection = "on"
+    else:
+        container = DynamicSlot.Input(io.Float.Input("mode"), inputs=inputs)
+        selection = 1.0
+    values = {"mode": selection, "mode.rows.1.x": 0.5}
+    _, _, metadata = get_finalized_class_inputs(create_input_dict_v1([container]), values)
+    metadata["create_dynamic_tuple"] = lazy
+    result = build_nested_inputs({key: [value] for key, value in values.items()}, metadata, input_is_list=True)
+
+    assert result == {"mode": {
+        "mode": ([selection], "mode") if lazy else [selection],
+        "optional": (None, "mode.optional") if lazy else None,
+        "rows": [
+            {"x": ([None], "mode.rows.0.x") if lazy else [None]},
+            {"x": ([0.5], "mode.rows.1.x") if lazy else [0.5]},
+        ],
+    }}
 
 
 @pytest.mark.parametrize("lazy", [False, True])

@@ -2084,6 +2084,7 @@ class DynamicPathsDefaultValue:
 def build_nested_inputs(values: dict[str, Any], v3_data: V3Data, *, input_is_list: bool = False):
     paths = v3_data.get("dynamic_paths", None)
     default_value_dict = v3_data.get("dynamic_paths_default_value", {})
+    list_paths = v3_data.get("list_paths", set())
     if paths is None:
         return values
     values = values.copy()
@@ -2108,7 +2109,7 @@ def build_nested_inputs(values: dict[str, Any], v3_data: V3Data, *, input_is_lis
                     value = []
                 elif value is None and default_option == DynamicPathsDefaultValue.EMPTY_DICT:
                     value = {}
-                elif missing and input_is_list:
+                elif missing and input_is_list and ".".join(parts[:-2]) in list_paths:
                     value = [None]
                 if create_tuple and default_option != DynamicPathsDefaultValue.EMPTY_LIST:
                     value = (value, key)
@@ -2117,7 +2118,7 @@ def build_nested_inputs(values: dict[str, Any], v3_data: V3Data, *, input_is_lis
                 current = current.setdefault(p, {})
 
     values.update(result)
-    for list_path in v3_data.get("list_paths", set()):
+    for list_path in list_paths:
         parts = list_path.split(".")
         container = values
         for part in parts[:-1]:
