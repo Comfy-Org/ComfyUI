@@ -12,7 +12,7 @@
 [![Release](https://img.shields.io/github/v/release/Comfy-Org/ComfyUI?style=flat&sort=semver)](https://docs.comfy.org/changelog)
 [![Downloads](https://img.shields.io/github/downloads/Comfy-Org/ComfyUI/total?style=flat)](https://github.com/Comfy-Org/ComfyUI/releases)
 
-<img width="1024" height="720" alt="DefaultComfyWorkflow" src="https://github.com/user-attachments/assets/f8c4087d-3982-4057-b17d-2f7216f09ae7" />
+<img width="1280" height="900" alt="DefaultComfyWorkflow" src="https://github.com/user-attachments/assets/fa80aa40-c99d-4b66-879a-b2db0088f82d" />
 
 </div>
 
