@@ -671,9 +671,11 @@ def _attention_comfy_kitchen_int8_containers(q, k, v, heads, mask=None, attn_pre
         attn_mask=mask,
     )
     del q, k, v
-    out = comfy_kitchen.int8_attention_from_prequantized(quantized)
+    out = comfy_kitchen.int8_attention_from_prequantized(
+        quantized, output_layout="BHSD" if skip_output_reshape else "BSHD"
+    )
     if not skip_output_reshape:
-        out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+        out = out.reshape(b, -1, heads * dim_head)
     return out
 
 
