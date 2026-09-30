@@ -16,6 +16,8 @@ from typing import Any, Callable, TypedDict
 
 from app.assets.event_log import emit, error_type
 from app.assets.scanner import (
+    BatchGate,
+    BetweenBatches,
     RootType,
     build_asset_specs,
     collect_paths_for_roots,
@@ -41,6 +43,15 @@ from app.database.db import create_session, dependencies_available
 
 class ScanInProgressError(Exception):
     """Raised when an operation cannot proceed because a scan is running."""
+
+
+class PruneCancelledError(Exception):
+    """Raised when a standalone prune is cancelled part way. The batches it committed
+    stay committed; ``marked`` counts them."""
+
+    def __init__(self, marked: int) -> None:
+        super().__init__(f"prune cancelled after marking {marked}")
+        self.marked = marked
 
 
 class State(Enum):
@@ -163,6 +174,8 @@ class _AssetSeeder:
         self._cancel_event = threading.Event()
         self._run_gate = threading.Event()
         self._run_gate.set()  # Start unpaused (set = running, clear = paused)
+        # Bumped by every pause, so a batched write can tell a prompt ran since its last batch.
+        self._pause_generation = 0
         self._roots: tuple[RootType, ...] = ()
         self._phase: ScanPhase = ScanPhase.FULL
         self._compute_hashes: bool = False
@@ -332,6 +345,7 @@ class _AssetSeeder:
                 return False
             logging.info("Asset seeder pausing")
             self._state = State.PAUSED
+            self._pause_generation += 1
             self._run_gate.clear()
             return True
 
@@ -469,8 +483,12 @@ class _AssetSeeder:
             nothing was outside the known prefixes, None means the answer is
             unknown, so callers must not report a failed prune as a clean one.
 
+        Runs on the caller's thread, in batches that wait while a prompt runs, as a
+        scan does. The API calls it from a worker thread.
+
         Raises:
             ScanInProgressError: If a scan is currently running
+            PruneCancelledError: If cancelled part way
         """
         with self._lock:
             if self._state != State.IDLE:
@@ -478,6 +496,8 @@ class _AssetSeeder:
                     "Cannot mark missing assets while scan is running"
                 )
             self._state = State.RUNNING
+            self._cancel_event.clear()
+            self._run_gate.set()
 
         try:
             if not dependencies_available():
@@ -487,7 +507,9 @@ class _AssetSeeder:
                 return 0
 
             all_prefixes = get_owned_prefixes()
-            marked = mark_missing_outside_prefixes_safely(all_prefixes)
+            marked = mark_missing_outside_prefixes_safely(
+                all_prefixes, self._between_write_batches(_ScanStage.MARK_MISSING)
+            )
             if marked is None:
                 return None
             emit(
@@ -495,6 +517,9 @@ class _AssetSeeder:
                 count=marked,
                 stage=_ScanStage.MARK_MISSING.value,
             )
+            if self._is_cancelled():
+                logging.info("Marking missing assets cancelled after marking %d", marked)
+                raise PruneCancelledError(marked)
             if marked > 0:
                 logging.info("Marked %d references as missing", marked)
             return marked
@@ -548,6 +573,24 @@ class _AssetSeeder:
         if cancelled:
             self._record_cancel_stage(stage)
         return cancelled
+
+    def _between_write_batches(self, stage: _ScanStage) -> BetweenBatches:
+        """The gate a batched write passes between batches: it blocks while paused, as
+        every other checkpoint does, and says whether a pause happened since the last
+        batch, so the write can recheck what it observed before the prompt ran."""
+        with self._lock:
+            last_seen = self._pause_generation
+
+        def between_batches() -> BatchGate:
+            nonlocal last_seen
+            if self._check_pause_and_cancel(stage):
+                return BatchGate.STOP
+            with self._lock:
+                resumed = self._pause_generation != last_seen
+                last_seen = self._pause_generation
+            return BatchGate.RESUMED if resumed else BatchGate.GO
+
+        return between_batches
 
     def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Emit a WebSocket event if server is available."""
@@ -639,7 +682,9 @@ class _AssetSeeder:
 
             if self._prune_first:
                 all_prefixes = get_owned_prefixes()
-                marked = mark_missing_outside_prefixes_safely(all_prefixes)
+                marked = mark_missing_outside_prefixes_safely(
+                    all_prefixes, self._between_write_batches(_ScanStage.PRUNING)
+                )
                 marked_count = 0 if marked is None else marked
                 if marked is None:
                     self._add_error(
@@ -655,7 +700,9 @@ class _AssetSeeder:
                     logging.info(
                         "Marked %d refs as missing before scan", marked_count
                     )
-                sync_temp_references_safely(scan_state)
+                sync_temp_references_safely(
+                    scan_state, self._between_write_batches(_ScanStage.PRUNING)
+                )
 
             if self._check_pause_and_cancel(_ScanStage.PRUNING):
                 logging.info("Asset scan cancelled after pruning phase")
@@ -832,7 +879,11 @@ class _AssetSeeder:
                 existing_paths.update(live_references)
             else:
                 marked_before = scan_state.missing_marked
-                existing_paths.update(sync_root_safely(r, scan_state))
+                existing_paths.update(
+                    sync_root_safely(
+                        r, scan_state, self._between_write_batches(_ScanStage.FAST_SCAN)
+                    )
+                )
                 self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
         logging.debug(
             "Fast scan: sync_root phase took %.3fs (%d existing paths)",
@@ -854,7 +905,12 @@ class _AssetSeeder:
         if walk is not None:
             vanished, unlisted = unlisted_references(live_references, walk.listings)
             marked_before = scan_state.missing_marked
-            mark_unlisted_references_missing_safely("output", vanished, scan_state)
+            mark_unlisted_references_missing_safely(
+                "output",
+                vanished,
+                scan_state,
+                self._between_write_batches(_ScanStage.FAST_SCAN),
+            )
             self._emit_marked_missing("output", scan_state.missing_marked - marked_before)
             logging.debug(
                 "Fast scan: output listing: %d dirs listed, %d rows retired, "

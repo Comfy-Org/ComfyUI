@@ -325,6 +325,32 @@ def mark_content_missing(session: Session, content_id: str) -> None:
     session.flush()
 
 
+def mark_contents_missing(session: Session, content_ids: Sequence[str]) -> list[str]:
+    """mark_content_missing for many rows in a few statements; returns the ids it marked.
+    A row that is gone or already missing is skipped."""
+    if not content_ids:
+        return []
+    # "= 0", not "IS 0": the id lookup is by primary key either way, but keep the one form.
+    live = list(session.scalars(sa.select(AssetContent.id).where(AssetContent.id.in_(content_ids), AssetContent.is_missing == sa.false())))
+    if not live:
+        return []
+    session.execute(sa.update(AssetContent).where(AssetContent.id.in_(live)).values(is_missing=True))
+    ensure_tag(session, "missing")
+    unlinked = sa.select(Asset.id, sa.literal("missing"), sa.literal("automatic"), sa.literal(get_utc_now(), sa.DateTime())).where(
+        Asset.content_id.in_(live),
+        ~sa.exists().where(AssetTag.asset_id == Asset.id, AssetTag.tag_name == "missing"),
+    )
+    try:
+        with session.begin_nested():
+            session.execute(sa.insert(AssetTag).from_select(["asset_id", "tag_name", "origin", "added_at"], unlinked))
+    except IntegrityError:
+        # A concurrent writer linked one of them first; settle each link the race-safe way.
+        for record_id in session.scalars(sa.select(Asset.id).where(Asset.content_id.in_(live))):
+            ensure_tag_link(session, asset_id=record_id, tag_name="missing", origin="automatic")
+    session.flush()
+    return live
+
+
 def unset_content_missing(session: Session, content_id: str) -> None:
     content = session.get(AssetContent, content_id)
     if content is None:
