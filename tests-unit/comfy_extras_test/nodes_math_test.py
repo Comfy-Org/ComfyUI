@@ -222,6 +222,11 @@ class TestMathExpressionSchema:
         assert "values.a" in class_inputs["optional"]
         assert build_nested_inputs(live_inputs, v3_data)["values"] == {}
 
+    def test_two_value_slots_offered_without_requiring_them(self):
+        template = MathExpressionNode.GET_NODE_INFO_V1()["input"]["required"]["values"][1]["template"]
+        assert template["min"] == 1
+        assert "value" in template["input"]["optional"]
+
     def test_later_value_input_without_first(self):
         live_inputs = {"expression": "b * 2", "values.b": 21}
         class_inputs, _, v3_data = get_finalized_class_inputs(

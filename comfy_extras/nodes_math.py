@@ -62,9 +62,9 @@ class MathExpressionNode(io.ComfyNode):
     @classmethod
     def define_schema(cls) -> io.Schema:
         autogrow = io.Autogrow.TemplateNames(
-            input=io.MultiType.Input("value", [io.Float, io.Int, io.Boolean]),
+            input=io.MultiType.Input("value", [io.Float, io.Int, io.Boolean], optional=True),
             names=list(string.ascii_lowercase),
-            min=0,
+            min=1,
         )
         return io.Schema(
             node_id="ComfyMathExpression",
@@ -72,7 +72,7 @@ class MathExpressionNode(io.ComfyNode):
             category="utilities",
             search_aliases=["math", "expression", "formula", "calculate", "calculator", "eval"],
             inputs=[
-                io.String.Input("expression", default="a", multiline=True),
+                io.String.Input("expression", default="a + b", multiline=True),
                 io.Autogrow.Input("values", template=autogrow),
             ],
             outputs=[
