@@ -45,6 +45,7 @@ def isolated_state(db_engine):
             yield sess
 
     _WATCH_LIST.clear()
+    scanner._unlistable_root_warned = False
     with patch("app.assets.scanner.create_session", _create_session), \
          patch("app.assets.seeder.create_session", _create_session), \
          patch("app.database.db.WriteSession", sessionmaker(bind=db_engine)):
@@ -318,6 +319,27 @@ def test_unlistable_output_root_keeps_every_row(roots, session, monkeypatch, cap
     monkeypatch.setattr(file_utils, "_list_visible_entries", real_list)
     _scan()
     assert _live_paths(session) == {str(p) for p in files[1:]}
+
+
+def test_an_unlistable_output_root_warns_once_per_outage(roots, session, monkeypatch, caplog):
+    output = roots["output"]
+    _warm_catalog(output)
+    _scan()
+    parked = output.with_name("output-away")
+
+    def warnings() -> int:
+        return sum("can't be listed" in r.getMessage() for r in caplog.records)
+
+    output.rename(parked)
+    _scan_logged(caplog)
+    _scan()
+    assert warnings() == 1
+
+    parked.rename(output)
+    _scan()
+    output.rename(parked)
+    _scan_logged(caplog)
+    assert warnings() == 1
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")

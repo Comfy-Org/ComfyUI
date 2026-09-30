@@ -399,6 +399,11 @@ def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservati
     return live
 
 
+# Whether the current run of unlistable-root rescans has warned, so a missing output
+# folder logs once rather than after every prompt.
+_unlistable_root_warned = False
+
+
 def unlisted_references(
     live: dict[str, list[_ReferenceObservation]], listings: DirListings
 ) -> tuple[list[_ReferenceObservation], int]:
@@ -411,14 +416,17 @@ def unlisted_references(
     take). The skipped count is the rows that were stat'ed and kept.
 
     No listings means the walk couldn't list its root (a missing or unreadable output
-    folder, an unplugged drive). Then every row is kept and counted as skipped, unstat'ed:
-    stat'ing them would retire them all.
+    folder). Then every row is kept and counted as skipped, unstat'ed: stat'ing them
+    would retire them all.
     """
+    global _unlistable_root_warned
     if not listings:
         kept = sum(len(observations) for observations in live.values())
-        if kept:
+        if kept and not _unlistable_root_warned:
+            _unlistable_root_warned = True
             logging.warning("Asset scan: the output folder can't be listed; keeping its %d rows", kept)
         return [], kept
+    _unlistable_root_warned = False
     vanished: list[_ReferenceObservation] = []
     skipped = 0
     names_by_dir: dict[str, set[str]] = {}
