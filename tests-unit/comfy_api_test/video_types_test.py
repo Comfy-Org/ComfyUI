@@ -1549,14 +1549,15 @@ def test_video_encoder_options_applies_h264_preset():
     from comfy_api.latest._input_impl.video_types import video_encoder_options
 
     assert video_encoder_options(VideoCodec.H264, None, "ultrafast") == {
-        "preset": "ultrafast"
+        "preset": "ultrafast",
+        "crf": "18",
     }
     assert video_encoder_options(VideoCodec.H264, 23.0, "ultrafast") == {
         "preset": "ultrafast",
         "crf": "23.0",
     }
     assert video_encoder_options(VideoCodec.H264, 23.0, None) == {"crf": "23.0"}
-    assert video_encoder_options(VideoCodec.AV1, None, "ultrafast") == {}
+    assert video_encoder_options(VideoCodec.AV1, None, "ultrafast") == {"crf": "24"}
     assert video_encoder_options(VideoCodec.AV1, 0, "ultrafast") == {
         "svtav1-params": "lossless=1"
     }
