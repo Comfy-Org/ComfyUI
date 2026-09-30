@@ -120,6 +120,7 @@ def test_stat_error_drops_entry_and_allows_other_watch_entries_to_commit(
     monkeypatch.setattr("folder_paths.get_input_directory", lambda: str(temp_dir))
     monkeypatch.setattr(scanner_admission, "os", SimpleNamespace(stat=_stat))
     monkeypatch.setattr("app.database.db.WriteSession", sessionmaker(bind=db_engine))
+    monkeypatch.setattr("app.database.db.Session", sessionmaker(bind=db_engine))
 
     with caplog.at_level(logging.INFO):
         tick_watch_list()
@@ -207,6 +208,7 @@ def test_spec_construction_failure_drops_the_entry_without_wedging_the_watch_lis
         scanner_admission, "get_name_and_tags_from_asset_path", _name_and_tags
     )
     monkeypatch.setattr("app.database.db.WriteSession", sessionmaker(bind=db_engine))
+    monkeypatch.setattr("app.database.db.Session", sessionmaker(bind=db_engine))
 
     with caplog.at_level(logging.INFO):
         tick_watch_list()

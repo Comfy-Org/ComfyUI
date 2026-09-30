@@ -1,5 +1,11 @@
 import os
-from typing import Protocol
+from typing import NamedTuple, Protocol
+
+from app.assets.services.gil import yield_gil
+
+# Longer run window for output rescans: they repeat after prompts, so pausing every
+# 2ms would add up to a much slower rescan.
+RESCAN_YIELD_RUN = 0.010
 
 
 class _DirListingCounter(Protocol):
@@ -80,3 +86,73 @@ def list_files_recursively(
                 continue
             out.append(os.path.abspath(os.path.join(dirpath, name)))
     return out
+
+
+# dir path -> (visible file names, visible subdir names)
+DirListings = dict[str, tuple[list[str], list[str]]]
+
+
+class ListingWalk(NamedTuple):
+    files: list[str]
+    listings: DirListings
+    dirs_listed: int
+
+
+def _list_visible_entries(dirpath: str) -> tuple[list[str], list[str]]:
+    """One directory's visible (file names, subdir names), classified as os.walk does:
+    anything whose is_dir() is false or raises is a file. The exception is a symlink
+    whose target is gone: it is left out, so a row for it reads as vanished, as it did
+    when the rescan stat'ed every row through the link."""
+    files: list[str] = []
+    subdirs: list[str] = []
+    with os.scandir(dirpath) as entries:
+        for entry in entries:
+            yield_gil(run=RESCAN_YIELD_RUN)
+            if not is_visible(entry.name):
+                continue
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                is_dir = False
+            if is_dir:
+                subdirs.append(entry.name)
+            elif not (entry.is_symlink() and not os.path.exists(entry.path)):
+                files.append(entry.name)
+    return files, subdirs
+
+
+def walk_listings(base_dir: str) -> ListingWalk:
+    """list_files_recursively, also returning every directory listing it read.
+
+    Same traversal as the os.walk version (visit order, symlink following, device/inode
+    cycle guard, hidden filtering), except each directory is stat'ed before it is listed.
+    ``listings`` holds exactly the directories this walk listed, keyed by normalized
+    absolute path, so it doubles as the record of which directories the walk can vouch for.
+    """
+    files: list[str] = []
+    listings: DirListings = {}
+    # No isdir() precheck, so each directory costs exactly one stat: a root that is
+    # missing or not a directory fails its stat or scandir below and yields nothing.
+    seen_dirs: set[tuple[int, int]] = set()
+    stack = [os.path.abspath(base_dir)]
+    while stack:
+        yield_gil(run=RESCAN_YIELD_RUN)
+        dirpath = stack.pop()
+        try:
+            st = os.stat(dirpath)
+        except OSError:
+            continue
+        dir_id = (st.st_dev, st.st_ino)
+        if dir_id in seen_dirs:
+            continue
+        try:
+            names, subdirs = _list_visible_entries(dirpath)
+        except OSError:
+            continue
+        seen_dirs.add(dir_id)
+        listings[dirpath] = (names, subdirs)
+        for name in names:
+            yield_gil(run=RESCAN_YIELD_RUN)
+            files.append(os.path.abspath(os.path.join(dirpath, name)))
+        stack.extend(os.path.join(dirpath, name) for name in reversed(subdirs))
+    return ListingWalk(files, listings, len(listings))

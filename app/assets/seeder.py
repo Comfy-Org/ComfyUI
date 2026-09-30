@@ -24,8 +24,13 @@ from app.assets.scanner import (
     get_scan_prefixes_for_root,
     get_unenriched_assets_for_roots,
     insert_asset_specs,
+    list_output_for_rescan,
+    live_references_safely,
     mark_missing_outside_prefixes_safely,
+    mark_unlisted_references_missing_safely,
+    rescans_output_by_listing,
     sync_root_safely,
+    unlisted_references,
     sync_temp_references_safely,
     drain_pending_verifications,
     tick_watch_list,
@@ -110,10 +115,16 @@ class _ScanState:
     hash_failed: int = 0
     enrich_failed: int = 0
     permission_denied: int = 0
-    # Directories the input/output walks listed; the models listing is not counted.
+    # Rows the fast scan marked missing because their file was not found. Pruning reports
+    # its own count, and temp retirement is routine, so neither is included.
+    missing_marked: int = 0
+    recovered: int = 0
+    # Directories the input/output walks (or the output rescan's listing) listed; the
+    # models listing is not counted.
     dirs_listed: int = 0
-    # os.stat calls on files in the reference sync, discovery, admission, seed, watch-list
-    # and enrich loops. Hashing's own stability stats are not counted.
+    # os.stat calls on files in the reference sync, output-listing check, discovery,
+    # admission, seed, watch-list and enrich loops. Hashing's own stability stats are
+    # not counted.
     files_statted: int = 0
     # Time blocked at the pause gate.
     paused_s: float = 0.0
@@ -741,6 +752,8 @@ class _AssetSeeder:
                 hash_failed=scan_state.hash_failed,
                 enrich_failed=scan_state.enrich_failed,
                 permission_denied=scan_state.permission_denied,
+                missing_marked_count=scan_state.missing_marked,
+                recovered_count=scan_state.recovered,
                 root=root,
             )
 
@@ -805,6 +818,17 @@ class _AssetSeeder:
                                 pending["phase"].value,
                             )
 
+    @staticmethod
+    def _emit_marked_missing(root: RootType, marked: int) -> None:
+        """Report the rows a scan marked missing because their file was not found."""
+        if marked > 0:
+            emit(
+                "seeder.marked_missing",
+                count=marked,
+                stage=_ScanStage.FAST_SCAN.value,
+                root=root,
+            )
+
     def _run_fast_phase(self, roots: tuple[RootType, ...]) -> tuple[int, int, int]:
         """Run phase 1: fast scan to create stub records.
 
@@ -815,6 +839,8 @@ class _AssetSeeder:
         total_created = 0
         skipped_existing = 0
 
+        by_listing = rescans_output_by_listing(roots)
+        live_references: dict[str, list] = {}
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()
         assert self._scan_state is not None
@@ -822,7 +848,13 @@ class _AssetSeeder:
         for r in roots:
             if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
                 return total_created, skipped_existing, 0
-            existing_paths.update(sync_root_safely(r, scan_state))
+            if by_listing:
+                live_references = live_references_safely(r)
+                existing_paths.update(live_references)
+            else:
+                marked_before = scan_state.missing_marked
+                existing_paths.update(sync_root_safely(r, scan_state))
+                self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
         logging.debug(
             "Fast scan: sync_root phase took %.3fs (%d existing paths)",
             time.perf_counter() - t_sync,
@@ -833,12 +865,26 @@ class _AssetSeeder:
             return total_created, skipped_existing, 0
 
         t_collect = time.perf_counter()
-        paths = collect_paths_for_roots(roots, scan_state)
+        walk = list_output_for_rescan() if by_listing else None
+        paths = walk.files if walk is not None else collect_paths_for_roots(roots, scan_state)
         logging.debug(
             "Fast scan: collect_paths took %.3fs (%d paths found)",
             time.perf_counter() - t_collect,
             len(paths),
         )
+        if walk is not None:
+            scan_state.dirs_listed += walk.dirs_listed
+            vanished, unlisted = unlisted_references(live_references, walk.listings, scan_state)
+            marked_before = scan_state.missing_marked
+            mark_unlisted_references_missing_safely("output", vanished, scan_state)
+            self._emit_marked_missing("output", scan_state.missing_marked - marked_before)
+            logging.debug(
+                "Fast scan: output listing: %d dirs listed, %d rows retired, "
+                "%d rows skipped (not listed, still on disk)",
+                walk.dirs_listed,
+                len(vanished),
+                unlisted,
+            )
         total_paths = len(paths)
         self._update_progress(total=total_paths)
 
