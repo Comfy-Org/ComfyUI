@@ -56,3 +56,29 @@ def test_training_keeps_eager_path():
                                       residual_scale=gate, residual_segments=[(0, 1, 0), (1, 2, 1), (2, 3, 0)])
     result.sum().backward()
     assert x.grad is not None and gate.grad is not None and residual.grad is not None
+
+
+def test_int8_segments_preserve_row_mapping_and_uncast():
+    operations = ops.mixed_precision_ops({}, compute_dtype=torch.bfloat16)
+    layer = operations.Linear(256, 128, bias=False, device="cpu", dtype=torch.bfloat16)
+    layer.weight = torch.nn.Parameter(ops.QuantizedTensor.from_float(
+        torch.randn(128, 256, dtype=torch.bfloat16), "TensorWiseINT8Layout",
+        convrot=True, per_channel=True), requires_grad=False)
+    layer.quant_format = "int8_tensorwise"
+    x = torch.randn(13, 512, dtype=torch.bfloat16)
+    residual = torch.randn(13, 128, dtype=torch.bfloat16)
+    gates = torch.randn(3, 128)
+    segments = [(0, 4, 0), (4, 9, 1), (9, 13, torch.tensor([2, 0, 2, 1]))]
+    rows = torch.tensor([0] * 4 + [1] * 5 + [2, 0, 2, 1], dtype=torch.int32)
+    with torch.no_grad(), \
+            mock.patch.object(ops.quant_ops.ck, "int8_linear_indexed_gate", wraps=ops.quant_ops.ck.int8_linear_indexed_gate) as fused, \
+            mock.patch.object(ops, "uncast_bias_weight", wraps=ops.uncast_bias_weight) as uncast:
+        actual = ops.linear_input_act(layer, x, "swiglu", residual=residual,
+                                      residual_scale=gates, residual_segments=segments)
+        fused.assert_called_once()
+        uncast.assert_called_once()
+        assert torch.equal(fused.call_args.args[4], rows)
+        qdata, scale = ops.TensorWiseINT8Layout.get_plain_tensors(layer.weight)
+        branch = ops.quant_ops.ck.int8_linear(x, qdata, scale, convrot=True, input_act="swiglu")
+        expected = torch.addcmul(residual, branch, gates[rows.long()].to(actual.dtype))
+    assert torch.equal(actual, expected)
