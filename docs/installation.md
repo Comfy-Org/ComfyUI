@@ -216,8 +216,20 @@ After this you should have everything installed and can proceed to running Comfy
 > **Note:** the portable build is not recommended for regular users, who should use the
 > [desktop app](https://www.comfy.org/download) instead.
 
-There is a portable standalone build for Windows that should work for running on Nvidia
-GPUs or for running on your CPU only.
+There is a portable standalone build for Windows, with a version for each GPU vendor. Any
+of them will also run on your CPU alone.
+
+Pick the one matching your GPU:
+
+| GPU | Download |
+| --- | --- |
+| Nvidia | [ComfyUI_windows_portable_nvidia.7z](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_nvidia.7z) |
+| AMD | [ComfyUI_windows_portable_amd.7z](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_amd.7z) |
+| Intel | [ComfyUI_windows_portable_intel.7z](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_intel.7z) |
+
+On a GTX 10 series or older Nvidia GPU? Those cards need the
+[legacy cu126 build](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_nvidia_cu126.7z)
+instead, which ships python 3.12 and pytorch cuda 12.6.
 
 Simply download, extract with [7-Zip](https://7-zip.org) or with the windows explorer on
 recent windows versions and run. For smaller models you normally only need to put the
@@ -227,17 +239,8 @@ which subfolder to put them in under `ComfyUI\models\`.
 
 If you have trouble extracting it, right click the file -> properties -> unblock.
 
-The portable currently comes with python 3.13 and pytorch cuda 13.0. Update your Nvidia
+The Nvidia build above comes with python 3.13 and pytorch cuda 13.0. Update your Nvidia
 drivers if it doesn't start.
-
-All official portable downloads:
-
-| Build | Notes |
-| --- | --- |
-| [Nvidia GPUs](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_nvidia.7z) | Supports 20 series and above |
-| [Nvidia GPUs, pytorch cuda 12.6 + python 3.12](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_nvidia_cu126.7z) | Supports Nvidia 10 series and older GPUs. DO NOT USE THIS ON NEWER 20 SERIES AND ABOVE GPUS |
-| [AMD GPUs](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_amd.7z) | |
-| [Intel GPUs](https://github.com/Comfy-Org/ComfyUI/releases/latest/download/ComfyUI_windows_portable_intel.7z) | |
 
 ## ComfyUI-Manager
 
