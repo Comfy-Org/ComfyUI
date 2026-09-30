@@ -276,9 +276,10 @@ def test_event_schema_shape(fake_sampler):
     assert isinstance(s["per_step_it_per_s"], list)
     assert s["avg_it_per_s"] is None or isinstance(s["avg_it_per_s"], (int, float))
 
-    # resources: series + peak + interval.
+    # resources: series + peak + interval. Default cadence widened to 500ms (M1),
+    # reported from the live sampler instance.
     r = event["resources"]
-    assert r["sample_interval_ms"] == 250
+    assert r["sample_interval_ms"] == 500
     assert isinstance(r["series"], list) and len(r["series"]) == 2
     for point in r["series"]:
         for key in ("t_ms", "cpu_percent", "ram_used_mb", "vram_used_mb",
@@ -515,3 +516,188 @@ def test_null_case_cpu_energy_none(fake_sampler):
     # No prompt -> workflow fully null, image_count None.
     assert event["run"]["image_count"] is None
     assert event["workflow"]["resolution"] == {"width": None, "height": None}
+
+
+# --------------------------------------------------------------------------
+# (d) Prod-hardening: retention cap, file-sink gate, singleton, snapshot, m4.
+# --------------------------------------------------------------------------
+
+def test_retention_prunes_to_newest_n():
+    """_prune_reports keeps the newest N *.json by mtime and deletes the rest."""
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        # 5 files with strictly increasing mtimes so "newest" is unambiguous.
+        paths = []
+        for i in range(5):
+            p = os.path.join(d, f"run-{i}.json")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("{}")
+            os.utime(p, (1000 + i, 1000 + i))  # atime, mtime
+            paths.append(p)
+
+        benchmark._prune_reports(d, keep=3)
+
+        remaining = sorted(os.listdir(d))
+        # Newest 3 (run-2, run-3, run-4) survive; oldest 2 pruned.
+        assert remaining == ["run-2.json", "run-3.json", "run-4.json"]
+
+
+def test_retention_noop_when_under_cap():
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        for i in range(2):
+            with open(os.path.join(d, f"run-{i}.json"), "w", encoding="utf-8") as f:
+                f.write("{}")
+        benchmark._prune_reports(d, keep=50)
+        assert len(os.listdir(d)) == 2
+
+
+def test_retention_negative_disables_pruning():
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        for i in range(5):
+            with open(os.path.join(d, f"run-{i}.json"), "w", encoding="utf-8") as f:
+                f.write("{}")
+        benchmark._prune_reports(d, keep=-1)  # disabled -> unbounded
+        assert len(os.listdir(d)) == 5
+
+
+def test_retention_limit_env_override(monkeypatch):
+    monkeypatch.setenv("COMFYUI_BENCHMARK_RETENTION", "7")
+    assert benchmark._retention_limit() == 7
+    monkeypatch.delenv("COMFYUI_BENCHMARK_RETENTION", raising=False)
+    assert benchmark._retention_limit() == 50  # default
+
+
+def test_write_report_applies_retention(monkeypatch, tmp_path):
+    """End-to-end: _write_json_report writes the file and prunes to the cap."""
+    import os
+    # High cap while writing so the write-time prune (which sees coarse, possibly
+    # equal mtimes) can't race; we then stamp deterministic mtimes and prune once.
+    monkeypatch.setenv("COMFYUI_BENCHMARK_RETENTION", "100")
+    import folder_paths
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(tmp_path))
+
+    out_dir = tmp_path / "benchmarks"
+    for i in range(5):
+        path = benchmark._write_json_report({"prompt_id": f"run-{i}"})
+        os.utime(path, (2000 + i, 2000 + i))  # strictly increasing, deterministic
+
+    # All 5 written (retention 100 didn't prune).
+    assert len(list(out_dir.glob("*.json"))) == 5
+
+    # The just-written file always survives its own prune (newest mtime): write a
+    # 6th under a cap of 3 and confirm the directory is trimmed to the newest 3.
+    monkeypatch.setenv("COMFYUI_BENCHMARK_RETENTION", "3")
+    path = benchmark._write_json_report({"prompt_id": "run-5"})
+    os.utime(path, (2000 + 5, 2000 + 5))
+    benchmark._prune_reports(str(out_dir), 3)  # deterministic final prune
+
+    remaining = sorted(p.name for p in out_dir.glob("*.json"))
+    assert remaining == ["run-3.json", "run-4.json", "run-5.json"]
+
+
+def test_no_file_flag_disables_file_but_event_still_emitted(fake_sampler, monkeypatch, tmp_path):
+    """--benchmark-no-file: file sink off, websocket event still fires."""
+    monkeypatch.setattr(args, "benchmark_no_file", True, raising=False)
+    import folder_paths
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(tmp_path))
+
+    ctx = benchmark.start("prompt-nofile", {"benchmark": True})
+    assert ctx is not None and ctx.write_json is False
+
+    spy = _Spy()
+    event = benchmark.finish(ctx, spy)
+
+    # Event still emitted (canonical channel for cloud/orchestrators).
+    assert spy.events and spy.events[0][0] == "benchmark"
+    assert spy.events[0][1] == event
+    # No file written.
+    assert not (tmp_path / "benchmarks").exists()
+
+
+def test_no_file_env_disables_file_but_event_still_emitted(fake_sampler, monkeypatch, tmp_path):
+    monkeypatch.setenv("COMFYUI_BENCHMARK_NO_FILE", "1")
+    import folder_paths
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(tmp_path))
+
+    ctx = benchmark.start("prompt-nofile-env", {"benchmark": True})
+    assert ctx is not None and ctx.write_json is False
+
+    spy = _Spy()
+    benchmark.finish(ctx, spy)
+    assert spy.events and spy.events[0][0] == "benchmark"
+    assert not (tmp_path / "benchmarks").exists()
+
+
+def test_file_sink_on_by_default(fake_sampler, monkeypatch, tmp_path):
+    """Default (no flag/env): the file is written -- Desktop relies on it."""
+    monkeypatch.delenv("COMFYUI_BENCHMARK_NO_FILE", raising=False)
+    monkeypatch.setattr(args, "benchmark_no_file", False, raising=False)
+    import folder_paths
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(tmp_path))
+
+    ctx = benchmark.start("prompt-default-file", {"benchmark": True})
+    assert ctx.write_json is True
+    benchmark.finish(ctx, _Spy())
+    assert (tmp_path / "benchmarks" / "prompt-default-file.json").exists()
+
+
+def test_start_resets_stray_active_context(fake_sampler):
+    """m5: a stray prior _active is reset (wrappers restored) on the next start."""
+    real_orig = pe.get_all_wrappers
+    ctx1 = benchmark.start("run-a", {"benchmark": True})
+    assert benchmark.get_active() is ctx1
+
+    # Simulate a stray context: start() again without finishing ctx1.
+    ctx2 = benchmark.start("run-b", {"benchmark": True})
+    assert ctx2 is not ctx1
+    assert benchmark.get_active() is ctx2
+
+    # ctx2 must have captured the *real* original wrappers (no leaked layer from
+    # ctx1), so finalizing ctx2 restores get_all_wrappers exactly.
+    ctx2.finalize()
+    assert pe.get_all_wrappers is real_orig, "stray context leaked a wrapper layer"
+
+
+def test_series_snapshotted_after_join(fake_sampler):
+    """m5: finalize snapshots the series; a late thread append can't mutate it."""
+    ctx = benchmark.start("run-snap", {"benchmark": True})
+    inst = fake_sampler["instance"]
+    event = ctx.finalize()
+    assert len(event["resources"]["series"]) == 2
+
+    # A late daemon-thread append after finalize must not leak into the event.
+    inst.series.append({"t_ms": 9999.0})
+    assert len(event["resources"]["series"]) == 2
+
+
+def test_recorder_error_never_breaks_run(fake_sampler, monkeypatch):
+    """m4: a raising recorder can't break the wrapped generation."""
+    ctx = benchmark.start("run-defensive", {"benchmark": True})
+
+    def _boom(*a, **k):
+        raise RuntimeError("capture bug")
+
+    monkeypatch.setattr(ctx, "record_step", _boom)
+    monkeypatch.setattr(ctx, "add_sampler_time", _boom)
+
+    # Wrappers must still return the wrapped executor's result unharmed.
+    assert ctx._predict_noise_wrapper(lambda: "step-ok") == "step-ok"
+    assert ctx._sampler_sample_wrapper(lambda: "sample-ok") == "sample-ok"
+
+
+def test_interval_env_override(monkeypatch):
+    """M1: cadence defaults to 500ms and honors COMFYUI_BENCHMARK_INTERVAL_MS."""
+    monkeypatch.delenv("COMFYUI_BENCHMARK_INTERVAL_MS", raising=False)
+    assert benchmark._sample_interval_s() == 0.5
+    monkeypatch.setenv("COMFYUI_BENCHMARK_INTERVAL_MS", "1000")
+    assert benchmark._sample_interval_s() == 1.0
+    monkeypatch.setenv("COMFYUI_BENCHMARK_INTERVAL_MS", "0")  # invalid -> default
+    assert benchmark._sample_interval_s() == 0.5

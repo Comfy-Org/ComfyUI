@@ -550,7 +550,11 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
                 output_data, output_ui, has_subgraph, has_pending_tasks = await get_output_data(prompt_id, unique_id, obj, input_data_all, execution_block_cb=execution_block_cb, pre_execute_cb=pre_execute_cb, v3_data=v3_data)
             finally:
                 if _bench is not None:
-                    _bench.record_node(unique_id, class_type, (time.perf_counter() - _bench_t0) * 1000.0)
+                    # Best-effort: a capture bug must never break node execution (m4).
+                    try:
+                        _bench.record_node(unique_id, class_type, (time.perf_counter() - _bench_t0) * 1000.0)
+                    except Exception:
+                        logging.debug("benchmark: record_node failed", exc_info=True)
                 if comfy.memory_management.aimdo_enabled:
                     if get_console_log_level(args.verbose) == "DEBUG":
                         comfy_aimdo.control.analyze()

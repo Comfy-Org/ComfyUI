@@ -98,22 +98,40 @@ python main.py --benchmark
 This forces capture on for **every** run. Per-run `extra_data["benchmark"]`
 still works independently.
 
-### 2c. Per-run JSON sink (poll-friendly channel)
+### 2c. Two channels: event (canonical) vs. file (local artifact)
+
+The record is delivered through **two channels**:
+
+- **Websocket `benchmark` event — the canonical channel.** Always emitted when
+  capture is active. This is what orchestrators and **cloud** consume: it needs no
+  shared filesystem and survives ephemeral containers.
+- **Per-run JSON file — a local artifact.** Written to
+  `output/benchmarks/<prompt_id>.json` (one file per run, named deterministically
+  by the sanitized `prompt_id`). This is for **local** poll-based consumers — the
+  Desktop `/api/jobs` runner and soak mode — that have no websocket tap and want
+  to fetch a specific run's record off disk.
 
 Whenever capture is active — **either** the per-run `extra_data["benchmark"]`
-opt-in **or** the global `--benchmark` flag — the same event payload is written
-to a file keyed by prompt id:
+opt-in **or** the global `--benchmark` flag — both channels fire by default.
 
-```
-output/benchmarks/<prompt_id>.json
+**Disabling the file sink (cloud).** In cloud (ephemeral containers, no shared
+FS) the file is dead weight, so it can be turned off while the event keeps firing:
+
+```bash
+python main.py --benchmark --benchmark-no-file   # CLI flag
+COMFYUI_BENCHMARK_NO_FILE=1 python main.py         # or env var
 ```
 
-One file per run, named deterministically by `prompt_id` (the id is sanitized
-for filesystem safety). This exists so orchestrators that poll (e.g. the Desktop
-runner over `/api/jobs`, with no websocket tap) can fetch a specific run's record
-without listening to the event stream. The websocket `benchmark` event is still
-emitted, unchanged — this is an additional, reliable file channel, not a
-replacement.
+Either disables **only** the file; the websocket `benchmark` event is unaffected.
+Default keeps the file **on** (Desktop's poller relies on it).
+
+**Retention cap (bounded disk).** To keep `output/benchmarks/` from growing
+without bound over many runs (soak mode / long-lived Desktop installs), after each
+write only the newest **N** `*.json` (by mtime) are kept; older ones are pruned.
+`N` defaults to **50** and is overridable via `COMFYUI_BENCHMARK_RETENTION`
+(a negative value disables pruning entirely). Pruning is best-effort — a prune
+failure is swallowed and never raised into the run, and the file just written
+always survives its own prune (it has the newest mtime).
 
 The zero-overhead-when-off guarantee is unaffected: when a run does not opt in,
 no directory is created and no file is written.
@@ -136,14 +154,16 @@ when the gate is `False`. This is the zero-overhead guarantee, verified by
 
 ## 3. Event schema (contract)
 
-The payload is delivered through **two channels**, both carrying the identical
-shape below:
+The payload is delivered through the two channels of §2c, both carrying the
+identical shape below:
 
 1. **Websocket event** named **`benchmark`** (via `PromptExecutor.add_message`,
-   `broadcast=False`).
-2. **Per-run file** at `output/benchmarks/<prompt_id>.json`, written whenever
-   capture is active for that run (see §2c). Poll-friendly for consumers without
-   a websocket tap.
+   `broadcast=False`) — the **canonical** channel; always emitted when capture is
+   active. This is the channel cloud/orchestrators consume.
+2. **Per-run file** at `output/benchmarks/<prompt_id>.json` — a **local artifact**,
+   written whenever capture is active *unless* the file sink is disabled
+   (`--benchmark-no-file` / `COMFYUI_BENCHMARK_NO_FILE=1`; see §2c). Poll-friendly
+   for local consumers without a websocket tap; retained newest-N (see §2c).
 
 | Field | Type | Filled by | Notes |
 |-------|------|-----------|-------|
@@ -260,7 +280,7 @@ For a multi-sampler graph, `step_count` aggregates all sampler passes and
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `sample_interval_ms` | `int` | Sampler cadence (default 250). |
+| `sample_interval_ms` | `int` | Sampler cadence. Default **500** (widened from 250 to reduce the observer effect); overridable via `COMFYUI_BENCHMARK_INTERVAL_MS`. Reported from the live sampler instance. |
 | `series` | `object[]` | Time series of hardware samples (see below). |
 | `peak` | `object` | Max over the series for each metric. |
 
@@ -279,8 +299,23 @@ Each `series[]` point:
 | `mem_clock_mhz` | `number \| null` | CUDA | **(v2)** `nvidia-smi clocks.mem`. |
 | `power_limit_w` | `number \| null` | CUDA | **(v2)** `nvidia-smi power.limit` (the enforced cap). |
 
-All v2 GPU metrics come from the **same single nvidia-smi call** per sample as v1
-(one combined `--query-gpu`), so the sampler overhead profile is unchanged.
+**GPU sampling path (fidelity vs. observer effect).** All GPU metrics come from a
+single probe per sample. On CUDA, the sampler prefers a persistent **NVML** handle
+opened once via a *soft* `pynvml` import: each sample is then an in-process,
+microsecond-cost call for `vram_used_mb` / `vram_util_percent` / `power_w` /
+`temperature_c` / `sm_clock_mhz` / `mem_clock_mhz` / `power_limit_w` (and the
+one-shot `env` fields `gpu_model` / `driver_version` / `total_vram_mb` /
+`pcie_gen` / `pcie_width`). When `pynvml` is **not** importable it transparently
+falls back to the original **`nvidia-smi` subprocess** (one combined `--query-gpu`
+per sample), so `pynvml` stays a soft/optional dep — no new hard dependency.
+
+Why this matters: `nvidia-smi` forks a process on every sample. At 4×/sec (the old
+250ms cadence) that runs *concurrently with the generation being measured* and
+perturbs the very numbers it records (CPU scheduling, driver contention). The NVML
+path removes the subprocess entirely; the cadence was also widened to 500ms as
+defense-in-depth. Fidelity tradeoff: NVML is both cheaper **and** more accurate;
+the `nvidia-smi` fallback preserves the metric set but carries the subprocess
+overhead — acceptable because it only engages on machines without `pynvml`.
 
 `peak` mirrors `vram_used_mb`, `ram_used_mb`, `cpu_percent`, `vram_util_percent`,
 `power_w`, plus **(v2)** `temperature_c`, `sm_clock_mhz`, `mem_clock_mhz`,
@@ -389,7 +424,7 @@ part of this heuristic.
     "avg_it_per_s": 4.9839
   },
   "resources": {
-    "sample_interval_ms": 250,
+    "sample_interval_ms": 500,
     "series": [
       { "t_ms": 0.0,   "cpu_percent": 8.3,  "ram_used_mb": 14320.5, "vram_used_mb": 1830.0,  "vram_util_percent": 3.0,  "power_w": 41.2,  "temperature_c": 39.0, "sm_clock_mhz": 420.0,  "mem_clock_mhz": 405.0,   "power_limit_w": 600.0 },
       { "t_ms": 250.1, "cpu_percent": 22.7, "ram_used_mb": 15980.2, "vram_used_mb": 21874.0, "vram_util_percent": 99.0, "power_w": 528.6, "temperature_c": 71.0, "sm_clock_mhz": 2520.0, "mem_clock_mhz": 10501.0, "power_limit_w": 600.0 },
@@ -434,9 +469,9 @@ Small surface: one gate + one node-timing wrap + one sampler module + one event.
 
 | File | Change |
 |------|--------|
-| `comfy/cli_args.py` | Add `--benchmark` flag. |
-| `comfy/benchmark/__init__.py` | Gate (`should_capture`), opt-in metadata parse, `BenchmarkContext`, workflow parser, energy/summary derivation, event assembly, JSON writer, wrapper install/restore. |
-| `comfy/benchmark/sampler.py` | `HardwareSampler` thread (v2 GPU metrics), `baseline_sample()`, `_device_runtime_snapshot()` + backend-aware `env_snapshot()`. |
+| `comfy/cli_args.py` | Add `--benchmark` and `--benchmark-no-file` flags. |
+| `comfy/benchmark/__init__.py` | Gate (`should_capture`), file-sink gate (`file_sink_disabled`), opt-in metadata parse, `BenchmarkContext`, workflow parser, energy/summary derivation, event assembly, JSON writer + retention prune, wrapper install/restore (defensive), cadence resolution (`_sample_interval_s`), singleton guard + series snapshot. |
+| `comfy/benchmark/sampler.py` | `HardwareSampler` thread (v2 GPU metrics via persistent NVML handle w/ nvidia-smi fallback), `baseline_sample()`, `_device_runtime_snapshot()` + backend-aware `env_snapshot()`. |
 | `execution.py` | `start(prompt_id, extra_data, prompt)` after `execution_start`; `finish()` in the `finally` (counts produced images); per-node `perf_counter` bracket around `get_output_data`; `set_status()` in `handle_execution_error` (error vs interrupted). |
 | `tests-unit/benchmark_test/` | Zero-overhead + schema tests (+ v2 run/workflow/device/summary, CUDA + null-case). |
 
@@ -452,9 +487,10 @@ Small surface: one gate + one node-timing wrap + one sampler module + one event.
   `cuda.get_device_capability()`), `nvidia-smi` (`pcie.link.*`),
   `model_management` (`vram_state`, dtypes via loaded model, attention helpers),
   `psutil.sensors_battery()` (laptop hint), and one pre-work `baseline` sample.
-- **resources (v2)**: extended `nvidia-smi` query
-  (`temperature.gpu,clocks.sm,clocks.mem,power.limit`) in the same per-sample call;
-  `peak.throttled` heuristic.
+- **resources (v2)**: per-sample GPU probe (`vram/util/power/temp/clocks/
+  power.limit`) via a persistent NVML handle (soft `pynvml`), falling back to a
+  single extended `nvidia-smi` query when `pynvml` is absent; `peak.throttled`
+  heuristic. Default cadence 500ms (`COMFYUI_BENCHMARK_INTERVAL_MS`).
 - **summary**: trapezoidal power integral / image count; `sec_per_image`.
 
 ### Reality note — wrapper registration
@@ -468,10 +504,21 @@ wraps `patcher_extension.get_all_wrappers` for the duration of the run and resto
 it in `finalize()`. This install happens **only while capture is active**, so the
 off-path is untouched and zero-overhead holds.
 
-### No new dependencies
+### No new (hard) dependencies
 
-Uses `psutil` (already in `requirements.txt`) and stdlib `subprocess` (for
-`nvidia-smi`). No new deps added.
+Uses `psutil` (already in `requirements.txt`) and stdlib `subprocess` (for the
+`nvidia-smi` fallback). `pynvml` is used **only if already importable** (soft
+import) — it is not added to `requirements.txt` and its absence changes nothing
+except that GPU sampling uses the `nvidia-smi` subprocess fallback. No new hard
+dep added.
+
+### Environment variables (all optional)
+
+| Var | Default | Effect |
+|-----|---------|--------|
+| `COMFYUI_BENCHMARK_NO_FILE` | unset | `1`/`true`/`yes`/`on` disables the per-run JSON file sink (event still emitted). Same as `--benchmark-no-file`. |
+| `COMFYUI_BENCHMARK_RETENTION` | `50` | Max per-run JSON files kept under `output/benchmarks/` (newest by mtime). Negative disables pruning. |
+| `COMFYUI_BENCHMARK_INTERVAL_MS` | `500` | Hardware sampler cadence in ms. |
 
 ---
 

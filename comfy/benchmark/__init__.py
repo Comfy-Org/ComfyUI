@@ -11,9 +11,12 @@ Activation (both opt-in, off by default):
   2. Global:   the ``--benchmark`` CLI flag -> capture every run (soak mode).
 
 Whenever capture is active (either activation), the event payload is also written
-to a per-run file ``output/benchmarks/<prompt_id>.json`` so orchestrators that
-poll (no websocket tap) can fetch a specific run's record deterministically. No
-file work happens when capture is off.
+to a per-run file ``output/benchmarks/<prompt_id>.json`` so local orchestrators
+that poll (no websocket tap) can fetch a specific run's record deterministically.
+The file sink can be disabled (``--benchmark-no-file`` / ``COMFYUI_BENCHMARK_NO_FILE``)
+for cloud/ephemeral containers while the websocket event still fires; the file
+directory is retention-capped (``COMFYUI_BENCHMARK_RETENTION``, default 50) so it
+never grows without bound. No file work happens when capture is off.
 
 The emitted ``benchmark`` event is the canonical corpus record shape. Its schema
 is versioned via ``capture_schema_version`` and documented in ``SPIKE.md`` -- that
@@ -39,8 +42,31 @@ from typing import Any, Optional
 CAPTURE_SCHEMA_VERSION = 2
 COLLECTOR_ID = "comfyui-core"
 
-# Sampling cadence for the hardware sampler thread.
-_SAMPLE_INTERVAL_S = 0.25
+# Default number of per-run JSON reports to retain under output/benchmarks/.
+_DEFAULT_RETENTION = 50
+
+
+def _sample_interval_s() -> float:
+    """Sampling cadence for the hardware sampler thread, in seconds.
+
+    Defaults to 500ms (widened from the 250ms spike default to further reduce the
+    observer effect of hardware sampling running concurrently with generation).
+    Overridable via ``COMFYUI_BENCHMARK_INTERVAL_MS``.
+    """
+    try:
+        v = os.environ.get("COMFYUI_BENCHMARK_INTERVAL_MS")
+        if v:
+            ms = float(v)
+            if ms > 0:
+                return ms / 1000.0
+    except Exception:
+        pass
+    return 0.5
+
+
+# Resolved once at import; the schema reports the *actual* interval used per run
+# (BenchmarkContext.finalize reads it off the live sampler instance).
+_SAMPLE_INTERVAL_S = _sample_interval_s()
 
 # The single active capture context, or None when nothing is being captured.
 _active: Optional["BenchmarkContext"] = None
@@ -63,6 +89,33 @@ def should_capture(extra_data: dict) -> bool:
     # ``benchmark: { "id": ..., "version": ..., ... }`` is truthy too, so the
     # same gate captures both without special-casing.
     return bool(extra_data.get("benchmark"))
+
+
+def _env_truthy(name: str) -> bool:
+    """True if env var ``name`` is set to a truthy value (1/true/yes/on)."""
+    v = os.environ.get(name)
+    if v is None:
+        return False
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def file_sink_disabled() -> bool:
+    """Whether the per-run JSON file sink is disabled for this process.
+
+    The websocket ``benchmark`` event is *always* emitted; this only gates the
+    ``output/benchmarks/<prompt_id>.json`` local artifact. Disabled via the
+    ``--benchmark-no-file`` CLI flag or the ``COMFYUI_BENCHMARK_NO_FILE`` env var.
+    Intended for cloud (ephemeral containers, no shared FS) where the event is the
+    canonical channel and the file would be dead weight. Default: file stays on
+    (Desktop's poller relies on it).
+    """
+    try:
+        from comfy.cli_args import args
+        if getattr(args, "benchmark_no_file", False):
+            return True
+    except Exception:
+        pass
+    return _env_truthy("COMFYUI_BENCHMARK_NO_FILE")
 
 
 def _parse_optin_metadata(extra_data: dict) -> dict:
@@ -108,13 +161,31 @@ def start(prompt_id: str, extra_data: dict, prompt: Optional[dict] = None) -> Op
     if not should_capture(extra_data):
         return None  # zero-overhead path: nothing is created, nothing runs.
 
+    # Singleton guard: only one capture context may be live at a time. If a prior
+    # context was never finalized (e.g. a crash between start/finish left a stray
+    # _active), restore its wrappers and drop it so it can't leak a wrapper layer
+    # onto this run's install/restore.
+    if _active is not None:
+        logging.warning(
+            "benchmark: an active capture context already exists (prompt_id=%s); "
+            "resetting it before starting %s",
+            getattr(_active, "prompt_id", "?"), prompt_id,
+        )
+        try:
+            _active._restore_wrappers()
+        except Exception:
+            pass
+        _active = None
+
     # A per-run JSON sink is written whenever capture is active (either the
-    # per-run extra_data["benchmark"] opt-in or the global --benchmark flag), so
+    # per-run extra_data["benchmark"] opt-in or the global --benchmark flag),
+    # UNLESS the file sink is disabled (--benchmark-no-file / env), so
     # orchestrators that poll (e.g. the Desktop /api/jobs runner) can read a
-    # run's record without tapping the websocket. Keyed by prompt_id.
+    # run's record without tapping the websocket. Keyed by prompt_id. In cloud the
+    # event is the canonical channel and the file is disabled.
     ctx = BenchmarkContext(
         prompt_id=prompt_id,
-        write_json=True,
+        write_json=not file_sink_disabled(),
         prompt=prompt,
         optin_metadata=_parse_optin_metadata(extra_data),
     )
@@ -331,8 +402,54 @@ def _safe_filename(name: str) -> str:
     return cleaned or "run"
 
 
+def _retention_limit() -> int:
+    """Max number of per-run JSON reports to keep. Env-overridable.
+
+    Defaults to ``_DEFAULT_RETENTION`` (50). Overridable via
+    ``COMFYUI_BENCHMARK_RETENTION``. A negative value disables pruning
+    (unbounded); ``0`` keeps none but the just-written file.
+    """
+    try:
+        v = os.environ.get("COMFYUI_BENCHMARK_RETENTION")
+        if v is not None and v.strip() != "":
+            return int(v)
+    except Exception:
+        pass
+    return _DEFAULT_RETENTION
+
+
+def _prune_reports(out_dir: str, keep: int) -> None:
+    """Keep only the newest ``keep`` ``*.json`` files in ``out_dir`` by mtime.
+
+    Best-effort: never raises. A negative ``keep`` disables pruning. Prevents the
+    benchmarks directory from growing without bound over many runs (soak mode /
+    long-lived Desktop installs).
+    """
+    try:
+        if keep is None or keep < 0:
+            return  # pruning disabled -> unbounded (opt-out).
+        import glob as _glob
+        paths = _glob.glob(os.path.join(out_dir, "*.json"))
+        if len(paths) <= keep:
+            return
+        # Newest first; delete everything past the retention window.
+        paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        for stale in paths[keep:]:
+            try:
+                os.remove(stale)
+            except Exception:
+                pass  # a concurrent reader/lock -> skip, retry next run.
+    except Exception:
+        # Retention is best-effort; a prune failure must never break the run.
+        logging.debug("benchmark: report pruning failed", exc_info=True)
+
+
 def _write_json_report(event: dict) -> str:
-    """Write one file per run, keyed by prompt_id: output/benchmarks/<prompt_id>.json."""
+    """Write one file per run, keyed by prompt_id: output/benchmarks/<prompt_id>.json.
+
+    After writing, prunes the directory to the newest ``_retention_limit()`` files
+    so disk usage stays bounded across runs (B1).
+    """
     import folder_paths
     out_dir = os.path.join(folder_paths.get_output_directory(), "benchmarks")
     os.makedirs(out_dir, exist_ok=True)
@@ -341,6 +458,8 @@ def _write_json_report(event: dict) -> str:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(event, f, indent=2)
     logging.info("benchmark: wrote report %s", path)
+    # Retention cap: the file just written has the newest mtime, so it survives.
+    _prune_reports(out_dir, _retention_limit())
     return path
 
 
@@ -406,10 +525,14 @@ class BenchmarkContext:
         series: list = []
         peak: dict = {}
         env: dict = {}
+        interval_s = _SAMPLE_INTERVAL_S
         if self.sampler is not None:
             self.sampler.stop()
             self.sampler.join(timeout=5.0)  # joined at run end
-            series = self.sampler.series
+            # Snapshot the series AFTER join so a late daemon-thread append can't
+            # mutate the list mid-iteration while we summarize/serialize it.
+            series = list(self.sampler.series)
+            interval_s = getattr(self.sampler, "interval_s", _SAMPLE_INTERVAL_S)
             peak = self.sampler.peak()
             from .sampler import env_snapshot
             env = env_snapshot(self.sampler.backend)
@@ -477,7 +600,7 @@ class BenchmarkContext:
                 "avg_it_per_s": avg_it_per_s,
             },
             "resources": {
-                "sample_interval_ms": round(_SAMPLE_INTERVAL_S * 1000.0),
+                "sample_interval_ms": round(interval_s * 1000.0),
                 "series": series,
                 "peak": peak,
             },
@@ -544,17 +667,25 @@ class BenchmarkContext:
             self._orig_get_all_wrappers = None
 
     def _predict_noise_wrapper(self, executor, *args, **kwargs):
-        # One PREDICT_NOISE call == one denoise step.
+        # One PREDICT_NOISE call == one denoise step. Recording is best-effort:
+        # a capture bug must never break the wrapped generation (m4).
         t = time.perf_counter()
         try:
             return executor(*args, **kwargs)
         finally:
-            self.record_step((time.perf_counter() - t) * 1000.0)
+            try:
+                self.record_step((time.perf_counter() - t) * 1000.0)
+            except Exception:
+                logging.debug("benchmark: record_step failed", exc_info=True)
 
     def _sampler_sample_wrapper(self, executor, *args, **kwargs):
-        # Brackets the whole sampling loop -> total sampler wall time.
+        # Brackets the whole sampling loop -> total sampler wall time. Recording is
+        # best-effort so it can never break the wrapped sampling loop (m4).
         t = time.perf_counter()
         try:
             return executor(*args, **kwargs)
         finally:
-            self.add_sampler_time((time.perf_counter() - t) * 1000.0)
+            try:
+                self.add_sampler_time((time.perf_counter() - t) * 1000.0)
+            except Exception:
+                logging.debug("benchmark: add_sampler_time failed", exc_info=True)
