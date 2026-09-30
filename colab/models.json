@@ -1,0 +1,8 @@
+[
+  {
+    "name": "SDXL VAE",
+    "folder": "vae",
+    "url": "https://huggingface.co/stabilityai/sdxl-vae/resolve/main/sdxl_vae.safetensors",
+    "filename": "sdxl_vae.safetensors"
+  }
+]

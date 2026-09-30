@@ -9,6 +9,7 @@
 #
 # API keys default to the CIVITAI_API_KEY and HUG_TOKEN Colab secrets.
 
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -100,14 +101,17 @@ class Downloader:
 
         self.debug: bool = debug
 
-        # Fails harmlessly when the daemon is already running from an earlier Downloader.
-        subprocess.run([
-            "aria2c", "--enable-rpc", "--auto-file-renaming=false",
-            "-x", str(self.max_connections_per_server), "-s", str(self.split), "-k", self.min_split_size,
-            f"--max-concurrent-downloads={self.max_concurrent_downloads}", "--disable-ipv6=true",
-            "--log=/content/aria2c.log", f"--log-level={self.console_log_level}", "--daemon=true",
-            "--optimize-concurrent-downloads=true",
-        ])
+        # Reuse the daemon started by an earlier Downloader (e.g. the model_manager node) instead of failing to bind 6800.
+        with socket.socket() as sock:
+            rpc_running = sock.connect_ex(("localhost", 6800)) == 0
+        if not rpc_running:
+            subprocess.run([
+                "aria2c", "--enable-rpc", "--auto-file-renaming=false",
+                "-x", str(self.max_connections_per_server), "-s", str(self.split), "-k", self.min_split_size,
+                f"--max-concurrent-downloads={self.max_concurrent_downloads}", "--disable-ipv6=true",
+                "--log=/content/aria2c.log", f"--log-level={self.console_log_level}", "--daemon=true",
+                "--optimize-concurrent-downloads=true",
+            ])
 
         self._aria2: aria2p.API = aria2p.API(
             aria2p.Client(
@@ -138,8 +142,8 @@ class Downloader:
     def _should_download_input_file(self) -> bool:
         return bool(self._input_file and self._input_file_path.exists() and self._input_file_path.is_file())
 
-    def download(self, model_sub_dir: str, url: str, rename: str = None):
-        self._download(
+    def download(self, model_sub_dir: str, url: str, rename: str = None) -> List[aria2p.Download]:
+        return self._download(
             url,
             directory=self._build_directory(model_sub_dir),
             rename=rename,
@@ -279,6 +283,7 @@ class Downloader:
                 print(f"Unrecognized URL format, skipping: {url}")
                 continue
 
+        downloads = []
         download_config: DownloadConfig
         for download_config in download_configs:
             if self._input_file:
@@ -319,6 +324,7 @@ class Downloader:
                 print(f"Starting Download >> {download_config.url}")
                 download_start_time = time.perf_counter()
                 download: aria2p.Download = self._aria2.add_uris([download_config.url], options=aria2_options)
+                downloads.append(download)
                 print_line("GID", "STATUS", "PROGRESS", "DOWN_SPEED", "UP_SPEED", "ETA", "NAME")
                 print_line(
                     download.gid,
@@ -334,6 +340,7 @@ class Downloader:
 
                 download_time = timedelta(seconds=(download_end_time - download_start_time))
                 print(f"Download Time: {download_time}\n")
+        return downloads
 
     def _build_hf_download_config(self, url: str, rename: Optional[str]) -> DownloadConfig:
         if rename:
