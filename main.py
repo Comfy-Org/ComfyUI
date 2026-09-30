@@ -137,15 +137,20 @@ if args.enable_manager:
         handle_comfyui_manager_unavailable()
 
 
-def apply_custom_paths():
-    # extra model paths
+def extra_model_paths_configs():
+    configs = []
     extra_model_paths_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "extra_model_paths.yaml")
     if os.path.isfile(extra_model_paths_config_path):
-        utils.extra_config.load_extra_path_config(extra_model_paths_config_path)
-
+        configs.append(extra_model_paths_config_path)
     if args.extra_model_paths_config:
-        for config_path in itertools.chain(*args.extra_model_paths_config):
-            utils.extra_config.load_extra_path_config(config_path)
+        configs.extend(itertools.chain(*args.extra_model_paths_config))
+    return configs
+
+
+def apply_custom_paths():
+    # extra model paths
+    for config_path in extra_model_paths_configs():
+        utils.extra_config.load_extra_path_config(config_path)
 
     # --base-directory
     if args.base_directory:
@@ -527,6 +532,11 @@ def start_comfyui(asyncio_loop=None):
         init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
         init_api_nodes=not args.disable_api_nodes
     ))
+
+    # Some custom nodes replace a folder's path list outright at import, dropping the
+    # extra model paths configured for it. Add those back after custom-node imports.
+    for config_path in extra_model_paths_configs():
+        utils.extra_config.restore_extra_path_config(config_path)
 
     # Re-apply Comfy's cuDNN benchmark policy after custom-node imports. Benchmark
     # mode can request near-card-sized autotune workspaces, and some custom nodes set it at import time.
