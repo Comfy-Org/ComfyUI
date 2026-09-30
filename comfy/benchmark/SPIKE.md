@@ -168,7 +168,7 @@ identical shape below:
 | Field | Type | Filled by | Notes |
 |-------|------|-----------|-------|
 | `type` | `str` | always | Constant `"benchmark"`. |
-| `capture_schema_version` | `int` | always | Currently `2`. Bump on breaking change. |
+| `capture_schema_version` | `int` | always | Currently `3`. Bump on breaking change. **v3:** the constant power cap moved from every `resources.series[]` sample (and from `peak`) to a single `device.power_limit_w`; the throttle rollup now lives only in `summary.throttled` (no longer mirrored in `peak`). |
 | `collector_id` | `str` | always | Constant `"comfyui-core"`. |
 | `prompt_id` | `str` | always | The prompt/run id. |
 | `timestamp` | `str` | always | ISO-8601 UTC, `YYYY-MM-DDTHH:MM:SSZ`. |
@@ -297,7 +297,7 @@ Each `series[]` point:
 | `temperature_c` | `number \| null` | CUDA | **(v2)** `nvidia-smi temperature.gpu`. |
 | `sm_clock_mhz` | `number \| null` | CUDA | **(v2)** `nvidia-smi clocks.sm`. |
 | `mem_clock_mhz` | `number \| null` | CUDA | **(v2)** `nvidia-smi clocks.mem`. |
-| `power_limit_w` | `number \| null` | CUDA | **(v2)** `nvidia-smi power.limit` (the enforced cap). |
+| ~~`power_limit_w`~~ | — | — | **(v3: removed from series)** the enforced cap is a device constant — reported once as `device.power_limit_w`, not per sample. |
 
 **GPU sampling path (fidelity vs. observer effect).** All GPU metrics come from a
 single probe per sample. On CUDA, the sampler prefers a persistent **NVML** handle
@@ -318,15 +318,17 @@ the `nvidia-smi` fallback preserves the metric set but carries the subprocess
 overhead — acceptable because it only engages on machines without `pynvml`.
 
 `peak` mirrors `vram_used_mb`, `ram_used_mb`, `cpu_percent`, `vram_util_percent`,
-`power_w`, plus **(v2)** `temperature_c`, `sm_clock_mhz`, `mem_clock_mhz`,
-`power_limit_w` — each the max of non-null samples, or `null` if none.
+`power_w`, plus **(v2)** `temperature_c`, `sm_clock_mhz`, `mem_clock_mhz` — each the
+max of non-null samples, or `null` if none. **(v3)** `power_limit_w` is no longer in
+`peak` (it is a device constant, see `device.power_limit_w`), and the throttle
+rollup is no longer mirrored here (see `summary.throttled`).
 **Peak VRAM = `resources.peak.vram_used_mb`.**
 
-`peak.throttled` **(v2)** — `bool \| null`. Best-effort heuristic: `true` if peak
-`temperature_c ≥ 83°C` **or** any sample's `power_w ≥ 98%` of its `power_limit_w`
-(power-capped). `null` when neither temperature nor power-limit data is available.
-We cannot read the card's base clock, so "clocks below base" is intentionally *not*
-part of this heuristic.
+`summary.throttled` **(v2; v3 sole home)** — `bool \| null`. Best-effort heuristic:
+`true` if peak `temperature_c ≥ 83°C` **or** any sample's `power_w ≥ 98%` of the
+enforced `device.power_limit_w` (power-capped). `null` when neither temperature nor
+power-limit data is available. We cannot read the card's base clock, so "clocks
+below base" is intentionally *not* part of this heuristic.
 
 ### 3f. `summary` (v2 — derived per-image)
 
@@ -334,7 +336,7 @@ part of this heuristic.
 |-------|------|-------|
 | `energy_wh_per_image` | `number \| null` | Trapezoidal integral of `power_w` over `resources.series` (using `t_ms`), in watt-hours, divided by `run.image_count`. `null` if there are no usable power samples or no image count. |
 | `sec_per_image` | `number \| null` | `durations.total_run_ms / 1000 / run.image_count`. `null` if no image count. |
-| `throttled` | `bool \| null` | Mirror of `resources.peak.throttled` for convenience. |
+| `throttled` | `bool \| null` | **(v3: sole home)** throttle rollup (was mirrored in `resources.peak` in v2). See heuristic above. |
 
 ---
 
@@ -395,6 +397,7 @@ part of this heuristic.
     "is_laptop": false,
     "pcie_gen": 5,
     "pcie_width": 16,
+    "power_limit_w": 600.0,
     "baseline": {
       "vram_used_mb": 1830.0,
       "vram_util_percent": 3.0,
@@ -426,9 +429,9 @@ part of this heuristic.
   "resources": {
     "sample_interval_ms": 500,
     "series": [
-      { "t_ms": 0.0,   "cpu_percent": 8.3,  "ram_used_mb": 14320.5, "vram_used_mb": 1830.0,  "vram_util_percent": 3.0,  "power_w": 41.2,  "temperature_c": 39.0, "sm_clock_mhz": 420.0,  "mem_clock_mhz": 405.0,   "power_limit_w": 600.0 },
-      { "t_ms": 250.1, "cpu_percent": 22.7, "ram_used_mb": 15980.2, "vram_used_mb": 21874.0, "vram_util_percent": 99.0, "power_w": 528.6, "temperature_c": 71.0, "sm_clock_mhz": 2520.0, "mem_clock_mhz": 10501.0, "power_limit_w": 600.0 },
-      { "t_ms": 500.2, "cpu_percent": 19.4, "ram_used_mb": 16010.9, "vram_used_mb": 22140.0, "vram_util_percent": 98.0, "power_w": 591.0, "temperature_c": 84.0, "sm_clock_mhz": 2490.0, "mem_clock_mhz": 10501.0, "power_limit_w": 600.0 }
+      { "t_ms": 0.0,   "cpu_percent": 8.3,  "ram_used_mb": 14320.5, "vram_used_mb": 1830.0,  "vram_util_percent": 3.0,  "power_w": 41.2,  "temperature_c": 39.0, "sm_clock_mhz": 420.0,  "mem_clock_mhz": 405.0 },
+      { "t_ms": 250.1, "cpu_percent": 22.7, "ram_used_mb": 15980.2, "vram_used_mb": 21874.0, "vram_util_percent": 99.0, "power_w": 528.6, "temperature_c": 71.0, "sm_clock_mhz": 2520.0, "mem_clock_mhz": 10501.0 },
+      { "t_ms": 500.2, "cpu_percent": 19.4, "ram_used_mb": 16010.9, "vram_used_mb": 22140.0, "vram_util_percent": 98.0, "power_w": 591.0, "temperature_c": 84.0, "sm_clock_mhz": 2490.0, "mem_clock_mhz": 10501.0 }
     ],
     "peak": {
       "vram_used_mb": 22140.0,
@@ -438,9 +441,7 @@ part of this heuristic.
       "power_w": 591.0,
       "temperature_c": 84.0,
       "sm_clock_mhz": 2520.0,
-      "mem_clock_mhz": 10501.0,
-      "power_limit_w": 600.0,
-      "throttled": true
+      "mem_clock_mhz": 10501.0
     }
   },
   "summary": {

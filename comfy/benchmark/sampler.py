@@ -360,6 +360,10 @@ class HardwareSampler(threading.Thread):
         self.vram_is_unified = self.backend == BACKEND_MPS
         # Cache total VRAM once (does not change across the run).
         self._total_vram_mb = self._probe_total_vram_mb()
+        # The enforced power cap is a device constant, not a time series -- latch
+        # the first non-null reading and report it once under `device` (v3),
+        # instead of repeating it in every sample.
+        self._power_limit_w: Optional[float] = None
 
     # -- lifecycle ---------------------------------------------------------
     def run(self) -> None:
@@ -383,6 +387,9 @@ class HardwareSampler(threading.Thread):
         t_ms = round((time.perf_counter() - self._t0) * 1000.0, 2)
         cpu_percent, ram_used_mb = _sample_cpu_ram()
         gpu = _query_gpu(self.backend)
+        # Latch the (constant) power cap for `device`; keep it out of the series.
+        if self._power_limit_w is None and gpu["power_limit_w"] is not None:
+            self._power_limit_w = gpu["power_limit_w"]
         return {
             "t_ms": t_ms,
             "cpu_percent": cpu_percent,
@@ -393,7 +400,6 @@ class HardwareSampler(threading.Thread):
             "temperature_c": gpu["temperature_c"],
             "sm_clock_mhz": gpu["sm_clock_mhz"],
             "mem_clock_mhz": gpu["mem_clock_mhz"],
-            "power_limit_w": gpu["power_limit_w"],
         }
 
     # -- summaries ---------------------------------------------------------
@@ -434,15 +440,16 @@ class HardwareSampler(threading.Thread):
         if temps:
             hot = max(temps) >= _THROTTLE_TEMP_C
         power_capped = None
-        for s in self.series:
-            pw = s.get("power_w")
-            pl = s.get("power_limit_w")
-            if pw is not None and pl is not None and pl > 0:
-                if power_capped is None:
-                    power_capped = False
-                if pw >= _THROTTLE_POWER_FRACTION * pl:
-                    power_capped = True
-                    break
+        pl = self._power_limit_w
+        if pl is not None and pl > 0:
+            for s in self.series:
+                pw = s.get("power_w")
+                if pw is not None:
+                    if power_capped is None:
+                        power_capped = False
+                    if pw >= _THROTTLE_POWER_FRACTION * pl:
+                        power_capped = True
+                        break
         if hot is None and power_capped is None:
             return None
         return bool(hot) or bool(power_capped)
@@ -460,12 +467,18 @@ class HardwareSampler(threading.Thread):
             "temperature_c": _max("temperature_c"),
             "sm_clock_mhz": _max("sm_clock_mhz"),
             "mem_clock_mhz": _max("mem_clock_mhz"),
-            "power_limit_w": _max("power_limit_w"),
-            "throttled": self._throttled(),
         }
 
     def total_vram_mb(self) -> Optional[float]:
         return self._total_vram_mb
+
+    def power_limit_w(self) -> Optional[float]:
+        """The enforced power cap (device constant), latched during sampling."""
+        return self._power_limit_w
+
+    def throttled(self) -> Optional[bool]:
+        """Public throttle rollup (see `_throttled`); reported under `summary`."""
+        return self._throttled()
 
 
 def _device_runtime_snapshot() -> dict[str, Any]:

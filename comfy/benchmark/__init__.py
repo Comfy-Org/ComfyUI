@@ -39,7 +39,7 @@ import os
 import time
 from typing import Any, Optional
 
-CAPTURE_SCHEMA_VERSION = 2
+CAPTURE_SCHEMA_VERSION = 3
 COLLECTOR_ID = "comfyui-core"
 
 # Default number of per-run JSON reports to retain under output/benchmarks/.
@@ -538,6 +538,9 @@ class BenchmarkContext:
             env = env_snapshot(self.sampler.backend)
             if env.get("total_vram_mb") is None and self.sampler.total_vram_mb() is not None:
                 env["total_vram_mb"] = self.sampler.total_vram_mb()
+            # v3: the power cap is a device constant, reported once here instead of
+            # in every resource sample.
+            env["power_limit_w"] = self.sampler.power_limit_w()
         # v2: idle baseline sample taken at capture start (see start()).
         env["baseline"] = self.baseline
 
@@ -607,7 +610,8 @@ class BenchmarkContext:
             "summary": {
                 "energy_wh_per_image": energy_wh_per_image,
                 "sec_per_image": sec_per_image,
-                "throttled": peak.get("throttled") if isinstance(peak, dict) else None,
+                # v3: single home for the throttle rollup (was mirrored in peak).
+                "throttled": self.sampler.throttled() if self.sampler is not None else None,
             },
         }
 

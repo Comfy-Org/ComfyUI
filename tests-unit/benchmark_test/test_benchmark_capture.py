@@ -32,12 +32,10 @@ class FakeSampler:
         self.series = [
             {"t_ms": 0.0, "cpu_percent": 10.0, "ram_used_mb": 1000.0,
              "vram_used_mb": 500.0, "vram_util_percent": 20.0, "power_w": 50.0,
-             "temperature_c": 45.0, "sm_clock_mhz": 900.0, "mem_clock_mhz": 5000.0,
-             "power_limit_w": 600.0},
+             "temperature_c": 45.0, "sm_clock_mhz": 900.0, "mem_clock_mhz": 5000.0},
             {"t_ms": 1000.0, "cpu_percent": 40.0, "ram_used_mb": 1200.0,
              "vram_used_mb": 900.0, "vram_util_percent": 80.0, "power_w": 590.0,
-             "temperature_c": 84.0, "sm_clock_mhz": 2500.0, "mem_clock_mhz": 10000.0,
-             "power_limit_w": 600.0},
+             "temperature_c": 84.0, "sm_clock_mhz": 2500.0, "mem_clock_mhz": 10000.0},
         ]
         self.started = False
         self.stopped = False
@@ -56,10 +54,16 @@ class FakeSampler:
         return {"vram_used_mb": 900.0, "ram_used_mb": 1200.0,
                 "cpu_percent": 40.0, "vram_util_percent": 80.0, "power_w": 590.0,
                 "temperature_c": 84.0, "sm_clock_mhz": 2500.0,
-                "mem_clock_mhz": 10000.0, "power_limit_w": 600.0, "throttled": True}
+                "mem_clock_mhz": 10000.0}
 
     def total_vram_mb(self):
         return 24564.0
+
+    def power_limit_w(self):
+        return 600.0
+
+    def throttled(self):
+        return True
 
 
 @pytest.fixture(autouse=True)
@@ -223,7 +227,7 @@ def test_event_schema_shape(fake_sampler):
 
     # Top-level envelope.
     assert event["type"] == "benchmark"
-    assert event["capture_schema_version"] == benchmark.CAPTURE_SCHEMA_VERSION == 2
+    assert event["capture_schema_version"] == benchmark.CAPTURE_SCHEMA_VERSION == 3
     assert event["collector_id"] == "comfyui-core"
     assert event["prompt_id"] == "prompt-4"
     assert isinstance(event["timestamp"], str) and event["timestamp"].endswith("Z")
@@ -285,13 +289,19 @@ def test_event_schema_shape(fake_sampler):
         for key in ("t_ms", "cpu_percent", "ram_used_mb", "vram_used_mb",
                     "vram_util_percent", "power_w",
                     # v2 additions:
-                    "temperature_c", "sm_clock_mhz", "mem_clock_mhz",
-                    "power_limit_w"):
+                    "temperature_c", "sm_clock_mhz", "mem_clock_mhz"):
             assert key in point
+        # v3: the power cap is a device constant, no longer repeated per sample.
+        assert "power_limit_w" not in point
     assert r["peak"]["vram_used_mb"] == 900.0
-    for key in ("temperature_c", "sm_clock_mhz", "mem_clock_mhz",
-                "power_limit_w", "throttled"):
+    for key in ("temperature_c", "sm_clock_mhz", "mem_clock_mhz"):
         assert key in r["peak"], f"missing peak.{key}"
+    # v3: peak no longer duplicates the constant cap or the throttle rollup.
+    assert "power_limit_w" not in r["peak"]
+    assert "throttled" not in r["peak"]
+    # v3: power cap now lives once under device; throttle rollup under summary.
+    assert "power_limit_w" in event["device"]
+    assert "throttled" in event["summary"]
 
     # Whole event must be JSON-serializable (it is emitted + optionally written).
     json.dumps(event)
@@ -490,11 +500,12 @@ def test_cuda_device_and_energy_fields(fake_sampler_cuda):
     assert dev["weight_dtype"] == "float16"
     assert dev["attention_impl"] == "pytorch"
     assert dev["baseline"] is None or isinstance(dev["baseline"], dict)
+    # v3: the power cap is a device constant, reported once here.
+    assert dev["power_limit_w"] == 600.0
 
-    # peak carries the v2 GPU metrics + a throttle verdict.
+    # peak carries the v2 GPU metrics (throttle verdict now lives in summary).
     peak = event["resources"]["peak"]
     assert peak["temperature_c"] == 84.0
-    assert peak["throttled"] is True
 
     # Energy integrates power over the 1s series (50W->590W) / 3 images.
     # trapezoid: 0.5*(50+590)*1s = 320 Ws = 0.08889 Wh; /3 images.
