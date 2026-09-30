@@ -24,7 +24,7 @@ def main():
     os.makedirs(os.path.dirname(SOCKET), exist_ok=True)
     with open("/content/tailscaled.log", "w") as log:
         subprocess.Popen(["tailscaled", "--tun=userspace-networking", "--state=mem:", f"--socket={SOCKET}"],
-                         stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     for _ in range(30):
         if os.path.exists(SOCKET):
             break
