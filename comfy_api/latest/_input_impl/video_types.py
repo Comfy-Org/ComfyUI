@@ -210,14 +210,15 @@ def video_stream_color_space(stream) -> str | None:
 def video_encoder_options(
     codec: VideoCodec, crf: float | None, preset: str | None = None
 ) -> dict[str, str]:
+    if crf is None:
+        crf = 24 if codec == VideoCodec.AV1 else 18
     options = {}
     if preset is not None and codec == VideoCodec.H264:
         options["preset"] = preset
-    if crf is not None:
-        if codec == VideoCodec.AV1 and crf == 0:
-            options["svtav1-params"] = "lossless=1"
-        else:
-            options["crf"] = str(crf)
+    if codec == VideoCodec.AV1 and crf == 0:
+        options["svtav1-params"] = "lossless=1"
+    else:
+        options["crf"] = str(crf)
     return options
 
 
