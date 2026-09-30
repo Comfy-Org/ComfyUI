@@ -10,15 +10,39 @@ def test_indexed_residual_full_precision_and_hooks(dtype):
     x = torch.randn(13, 512, dtype=dtype)
     residual = torch.randn(13, 128, dtype=dtype)
     gates = torch.randn(3, 128, dtype=torch.float32)
-    rows = torch.arange(13, dtype=torch.int32) % 3
+    segments = [(0, 4, 0), (4, 9, 1), (9, 13, torch.tensor([2, 0, 2, 1]))]
+    rows = torch.tensor([0] * 4 + [1] * 5 + [2, 0, 2, 1])
     seen = []
-    hook = layer.register_forward_hook(lambda m, a, y: seen.append(y.shape))
+    hook = layer.register_forward_hook(lambda m, a, y: seen.append(y))
+    residual_before = residual.clone()
     with torch.no_grad():
         expected = torch.addcmul(residual, layer(ops._swiglu_eager(x)), gates[rows.long()].to(dtype))
         actual = ops.linear_input_act(layer, x, "swiglu", residual=residual,
-                                      residual_scale=gates, residual_indices=rows)
+                                      residual_scale=gates, residual_segments=segments)
     hook.remove()
     assert len(seen) == 2
+    assert torch.equal(actual, expected)
+    assert torch.equal(seen[0], seen[1])
+    assert torch.equal(residual, residual_before)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("full_precision_mm", [False, True])
+def test_segmented_fallback_reuses_linear_output(dtype, full_precision_mm):
+    layer = torch.nn.Linear(256, 128, bias=False, dtype=dtype)
+    layer._full_precision_mm = full_precision_mm
+    x = torch.randn(13, 512, dtype=dtype)
+    residual = torch.randn(13, 128, dtype=dtype)
+    gates = torch.randn(3, 128)
+    segments = [(0, 4, 0), (4, 9, 1), (9, 13, 2)]
+    rows = torch.tensor([0] * 4 + [1] * 5 + [2] * 4)
+    with torch.no_grad():
+        branch = layer(ops._swiglu_eager(x))
+        expected = torch.addcmul(residual, branch, gates[rows].to(dtype))
+        with mock.patch.object(layer, "forward", return_value=branch):
+            actual = ops.linear_input_act(layer, x, "swiglu", residual=residual,
+                                          residual_scale=gates, residual_segments=segments)
+    assert actual.data_ptr() == branch.data_ptr()
     assert torch.equal(actual, expected)
 
 
@@ -27,9 +51,8 @@ def test_training_keeps_eager_path():
     x = torch.randn(3, 512, requires_grad=True)
     residual = torch.randn(3, 128, requires_grad=True)
     gate = torch.randn(2, 128, requires_grad=True)
-    rows = torch.tensor([0, 1, 0], dtype=torch.int32)
     with mock.patch("comfy.model_management.in_training", True):
         result = ops.linear_input_act(layer, x, "swiglu", residual=residual,
-                                      residual_scale=gate, residual_indices=rows)
+                                      residual_scale=gate, residual_segments=[(0, 1, 0), (1, 2, 1), (2, 3, 0)])
     result.sum().backward()
     assert x.grad is not None and gate.grad is not None and residual.grad is not None

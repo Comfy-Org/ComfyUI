@@ -974,7 +974,7 @@ def _fp16_linear_wanted(x):
 
 
 def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
-                     residual=None, residual_scale=None, residual_indices=None):
+                     residual=None, residual_scale=None, residual_segments=None):
     """``linear(act(x))``, with ``act`` folded into an INT8 activation quantizer.
 
     An INT8 linear quantizes its input anyway, so an elementwise activation can
@@ -986,19 +986,31 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
 
     With ``residual``/``residual_scale`` the result is the pre-norm block's
     addcmul, ``residual + residual_scale * linear(act(x))``, fused into the
-    INT8 GEMM epilogue where supported. ``residual_indices`` selects one
-    residual-scale table row per input row without materializing [M,N].
+    INT8 GEMM epilogue where supported. ``residual_segments`` is a list of
+    (start, stop, row) entries covering the output contiguously. A row can be
+    an integer or a per-token index tensor. The inference fallback reuses the
+    fresh linear output without expanding a gate for the whole sequence.
 
     """
     def _residual_out(out):
         if residual is None:
             return out
-        scale = residual_scale if residual_indices is None else residual_scale[residual_indices.long()].to(out.dtype)
-        return torch.addcmul(residual, out, scale)
+        if residual_segments is None:
+            return torch.addcmul(residual, out, residual_scale)
+        if (not torch.is_grad_enabled() and out.dtype == residual.dtype
+                and not (linear._forward_hooks or linear._forward_pre_hooks)):
+            for start, stop, row in residual_segments:
+                segment = out[start:stop]
+                torch.addcmul(residual[start:stop], segment, residual_scale[row].to(out.dtype), out=segment)
+            return out
+        return torch.cat([
+            torch.addcmul(residual[start:stop], out[start:stop], residual_scale[row].to(out.dtype))
+            for start, stop, row in residual_segments
+        ], dim=0)
 
     weight = linear.weight
     full_precision_mm = getattr(linear, "_full_precision_mm", False)
-    if residual_indices is not None and (linear._forward_hooks or linear._forward_pre_hooks):
+    if residual_segments is not None and (linear._forward_hooks or linear._forward_pre_hooks):
         return _residual_out(linear(_eager_input_act(x, input_act, act_weight, act_eps)))
     if (comfy.model_management.in_training
             or not isinstance(weight, QuantizedTensor)
@@ -1008,7 +1020,7 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
         if (not comfy.model_management.in_training
                 and not isinstance(weight, QuantizedTensor)
                 and not full_precision_mm
-                and residual_indices is None
+                and residual_segments is None
                 and _fp16_linear_wanted(x)):
             weight, bias, offload_stream = cast_bias_weight(linear, x, offloadable=True)
             try:
@@ -1030,13 +1042,16 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
             return _residual_out(torch.nn.functional.linear(
                 _eager_input_act(x, input_act, act_weight, act_eps), weight, bias))
         qdata, scale = TensorWiseINT8Layout.get_plain_tensors(weight)
-        if residual_indices is not None:
+        if residual_segments is not None:
             if (bias is None and x.dtype == torch.bfloat16
                     and weight._params.convrot and weight._params.convrot_groupsize == 256
                     and input_act in (None, "swiglu")):
+                rows = torch.empty(x.shape[0], dtype=torch.int32, device=x.device)
+                for start, stop, row in residual_segments:
+                    rows[start:stop] = row
                 return quant_ops.ck.int8_linear_indexed_gate(
                     x, qdata.contiguous(), scale.reshape(-1).expand(qdata.shape[0]).contiguous(),
-                    residual_scale.to(x.dtype).contiguous(), residual_indices, residual,
+                    residual_scale.to(x.dtype).contiguous(), rows, residual,
                     input_act=input_act)
             return _residual_out(quant_ops.ck.int8_linear(
                 x, qdata, scale, bias, x.dtype,
