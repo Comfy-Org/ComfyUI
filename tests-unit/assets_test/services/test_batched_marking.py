@@ -128,10 +128,11 @@ def test_a_row_re_registered_between_batches_is_left_to_its_new_owner(session, c
     replacement: list[str] = []
 
     def between_batches() -> bool:
-        mark_content_missing(session, last.id)
-        new = create_content(session, path=last.path, size_bytes=2, mtime_ns=2)
-        session.commit()
-        replacement.append(new.id)
+        if len(catalog) == 1:
+            mark_content_missing(session, last.id)
+            new = create_content(session, path=last.path, size_bytes=2, mtime_ns=2)
+            session.commit()
+            replacement.append(new.id)
         return False
 
     marked = scanner.mark_missing_outside_prefixes_safely([], between_batches)
@@ -181,7 +182,7 @@ def test_a_foreground_write_gets_the_lock_between_batches(tmp_path, monkeypatch)
     monkeypatch.setattr(scanner, "create_write_session", sessionmaker(bind=write_engine))
     assert scanner.mark_missing_outside_prefixes_safely([], between_batches) == 600
 
-    assert foreground == [True, True]
+    assert foreground == [True, True, True]
 
 
 def test_a_failed_batch_keeps_the_batches_before_it(session, catalog, temp_dir):
@@ -234,7 +235,7 @@ def test_stop_between_batches_leaves_the_rest_live(session, catalog, temp_dir):
     observations = _gone_observations(session, temp_dir, 600)
 
     committed: list[int] = []
-    scanner._write_in_batches(observations, scanner.apply_reference_observations, lambda: True, committed)
+    scanner._write_in_batches(observations, scanner.apply_reference_observations, lambda: bool(committed), committed)
 
     assert committed == [scanner.WRITE_BATCH_ROWS]
     assert len(_live_ids(session)) == 600 - scanner.WRITE_BATCH_ROWS
@@ -473,3 +474,32 @@ async def test_the_prune_endpoint_keeps_the_event_loop_serving(monkeypatch):
     assert json.loads(response.body) == {"status": "completed", "marked": 3}
     assert ticks >= 20
 
+
+
+def test_the_standalone_prune_starts_the_scan_queued_while_it_ran(session, catalog, temp_dir, monkeypatch):
+    """The API runs the prune off the event loop, so a prompt can finish meanwhile and
+    queue its output rescan, which cannot start while the prune holds the seeder."""
+    _rows(session, temp_dir, 10)
+    instance = seeder_module._AssetSeeder()
+    monkeypatch.setattr(seeder_module, "dependencies_available", lambda: True)
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
+    started: list[dict] = []
+
+    def start(**kwargs) -> bool:
+        if instance._state is not State.IDLE:
+            return False
+        started.append(kwargs)
+        return True
+
+    monkeypatch.setattr(instance, "start", start)
+    real = scanner.mark_contents_missing
+
+    def mark(sess, ids):
+        assert instance.enqueue_scan(roots=("output",), phase=seeder_module.ScanPhase.FULL) is False
+        return real(sess, ids)
+
+    with patch("app.assets.scanner.mark_contents_missing", mark):
+        assert instance.mark_missing_outside_prefixes() == 10
+
+    assert [kwargs["roots"] for kwargs in started] == [("output",)]
+    assert instance._pending_scan is None

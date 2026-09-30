@@ -330,7 +330,8 @@ def mark_contents_missing(session: Session, content_ids: Sequence[str]) -> list[
     A row that is gone or already missing is skipped."""
     if not content_ids:
         return []
-    # "= 0", not "IS 0": the id lookup is by primary key either way, but keep the one form.
+    # "= 0", not "IS 0": SQLite only uses the partial live-path index for "= 0". This
+    # lookup is by primary key either way; the form matches the other live-row lookups.
     live = list(session.scalars(sa.select(AssetContent.id).where(AssetContent.id.in_(content_ids), AssetContent.is_missing == sa.false())))
     if not live:
         return []

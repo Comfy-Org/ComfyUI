@@ -582,7 +582,7 @@ def test_scan_prune_failure_is_reported_and_the_scan_still_runs(
         scan_seeder._run_scan()
 
     assert scan_seeder._errors == [
-        "Marking missing assets failed; scan continued without pruning"
+        "Marking missing assets failed; scan continued with the prune incomplete"
     ]
     assert fast_phase_roots == [("models", "input")]
     assert events_named(caplog, "seeder.marked_missing") == []

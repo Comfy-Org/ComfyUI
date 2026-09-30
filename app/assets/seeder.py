@@ -499,8 +499,10 @@ class _AssetSeeder:
                 logging.info("Marked %d references as missing", marked)
             return marked
         finally:
+            # The API runs this off the event loop, so a prompt can finish meanwhile
+            # and queue its output rescan; start it now.
             with self._lock:
-                self._reset_to_idle()
+                self._finish_and_start_pending()
 
     def _reset_to_idle(self) -> None:
         """Reset state to IDLE, preserving last progress. Caller must hold _lock."""
@@ -645,7 +647,7 @@ class _AssetSeeder:
                 marked_count = 0 if marked is None else marked
                 if marked is None:
                     self._add_error(
-                        "Marking missing assets failed; scan continued without pruning"
+                        "Marking missing assets failed; scan continued with the prune incomplete"
                     )
                 else:
                     emit(
@@ -783,23 +785,28 @@ class _AssetSeeder:
                         )
             finally:
                 with self._lock:
-                    start_paused = self._state is State.PAUSED
-                    self._reset_to_idle()
-                    pending = self._pending_scan
-                    if pending is not None:
-                        self._pending_scan = None
-                        if not self.start(
-                            roots=pending["roots"],
-                            phase=pending["phase"],
-                            prune_first=False,
-                            compute_hashes=pending["compute_hashes"],
-                            _start_paused=start_paused,
-                        ):
-                            logging.warning(
-                                "Pending scan could not start (roots=%s, phase=%s)",
-                                pending["roots"],
-                                pending["phase"].value,
-                            )
+                    self._finish_and_start_pending()
+
+    def _finish_and_start_pending(self) -> None:
+        """Reset to IDLE, then start the scan queued while this run held the seeder,
+        paused if this run was. Caller must hold _lock."""
+        start_paused = self._state is State.PAUSED
+        self._reset_to_idle()
+        pending = self._pending_scan
+        if pending is not None:
+            self._pending_scan = None
+            if not self.start(
+                roots=pending["roots"],
+                phase=pending["phase"],
+                prune_first=False,
+                compute_hashes=pending["compute_hashes"],
+                _start_paused=start_paused,
+            ):
+                logging.warning(
+                    "Pending scan could not start (roots=%s, phase=%s)",
+                    pending["roots"],
+                    pending["phase"].value,
+                )
 
     @staticmethod
     def _emit_marked_missing(root: RootType, marked: int) -> None:

@@ -125,7 +125,7 @@ class _ReferenceObservation(NamedTuple):
     stat_result: os.stat_result | None
 
 
-# Between write batches: blocks while the scan is paused, returns True to stop.
+# Before each write batch: blocks while the scan is paused, returns True to stop.
 ShouldStop = Callable[[], bool]
 
 
@@ -153,7 +153,7 @@ def _write_in_batches(
     each batch reports to ``committed`` once it commits. A failure leaves the batches
     before it committed, and ``committed`` says how much they wrote."""
     for start in range(0, len(items), WRITE_BATCH_ROWS):
-        if start and should_stop():
+        if should_stop():
             break
         opened = time.perf_counter()
         with create_write_session() as session:
@@ -161,7 +161,8 @@ def _write_in_batches(
             session.commit()
         committed.append(count)
         held = time.perf_counter() - opened
-        time.sleep(min(max(held, WRITE_YIELD_MIN_SECONDS), WRITE_YIELD_MAX_SECONDS))
+        if start + WRITE_BATCH_ROWS < len(items):
+            time.sleep(min(max(held, WRITE_YIELD_MIN_SECONDS), WRITE_YIELD_MAX_SECONDS))
 
 
 def _log_scan_error(phase: str, error: OSError) -> None:
