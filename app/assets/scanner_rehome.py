@@ -186,11 +186,15 @@ def plan_prune(
     """Decide each unowned ``(content id, path)`` row: re-home, retire, or (``spare``) leave
     as it is. Reads only."""
     roles = _record_roles(session, [content_id for content_id, _ in rows])
-    # A spared row whose every respelling by text is taken (its case duplicate, usually)
-    # stays as it is either way; skip its filesystem reads, which would recur every boot.
+    # A spared row with a respelling by text that is taken (by its case duplicate, usually)
+    # and fits its role can't move: that target is its only fit, or one of several. It stays
+    # as it is either way, so skip its filesystem reads, which would recur every boot.
     spared_targets = {cid: _text_targets(path, prefixes) for cid, path in rows if spare(path)}
     taken_by_text = _taken_paths(session, [t for targets in spared_targets.values() for t in targets])
-    settled = {cid for cid, targets in spared_targets.items() if taken_by_text.issuperset(targets)}
+    settled = {
+        cid for cid, targets in spared_targets.items()
+        if any(t in taken_by_text and roles.get(cid) == {_role(t)} for t in targets)
+    }
     candidates = sorted(
         ((cid, path) for cid, path in rows if cid in roles and cid not in settled), key=lambda row: row[1]
     )

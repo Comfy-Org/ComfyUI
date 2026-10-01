@@ -298,6 +298,23 @@ def test_case_duplicates_cost_no_filesystem_reads_on_later_boots(folders, folds_
         assert _live(session, free) == str(data / "g.png")
 
 
+def test_a_case_duplicate_that_fits_another_folder_still_rehomes(folders, folds_case, session, temp_dir):
+    """Its twin holds the case-folded respelling, but that path has another role, and a
+    model folder linked to the same directory fits; the pre-check must not settle it."""
+    data = temp_dir / "data"
+    _populate(data, ("sub/f.safetensors",))
+    upper = _alias(data, temp_dir / "DATA")
+    if not upper.is_symlink():
+        pytest.skip("this filesystem folds case, so DATA can't be a separate symlink")
+    checkpoints = _alias(data / "sub", temp_dir / "ckpt")
+    folders.use(output=data, models=checkpoints)
+    row = _row(session, upper / "sub" / "f.safetensors", tags=("models", "model_type:checkpoints"))
+    _row(session, data / "sub" / "f.safetensors")  # the output twin
+
+    assert _prune(session, data, checkpoints) == (0, 1)
+    assert _live(session, row) == str(checkpoints / "f.safetensors")
+
+
 def test_a_case_sensitive_sibling_folder_is_not_mistaken_for_the_same_one(folders, folds_case, temp_dir, session):
     """Windows can mark a directory case-sensitive, so output and Output can be two folders."""
     lower, upper = temp_dir / "cs" / "output", temp_dir / "cs" / "Output"
