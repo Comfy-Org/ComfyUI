@@ -7,6 +7,7 @@ from torch import nn
 from comfy.ldm.minimax.model import MiniMaxH3Model, PackedLayout, time_shift_sigma
 from comfy.model_sampling import CONST
 from comfy.model_base import BaseModel, MiniMaxH3
+from comfy.conds import CONDConstant
 
 
 def make_model(video_output, audio_output):
@@ -153,7 +154,10 @@ def test_extra_conds_prepares_references_only_for_inference(monkeypatch, grad_en
     kwargs = {"device": "cpu", "minimax_refs": [ref], "minimax_audio_cond_noise_aug": 0.5}
     with torch.set_grad_enabled(grad_enabled):
         first = wrapper.extra_conds(**kwargs, seed=13)["minimax_payload"].cond
+        repeated = wrapper.extra_conds(**kwargs, seed=13)["minimax_payload"]
         second = wrapper.extra_conds(**kwargs, seed=14)["minimax_payload"].cond
+        assert CONDConstant(first).can_concat(repeated)
+        assert not CONDConstant(first).can_concat(CONDConstant(second))
         assert ("prepared_video_rows" in first) is not grad_enabled
         assert ("prepared_audio_rows" in first) is not grad_enabled
         assert first is not second
