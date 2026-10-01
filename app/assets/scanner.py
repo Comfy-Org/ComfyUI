@@ -8,6 +8,7 @@ can end a batch early, and the cursor holds at the last row the batch attempted,
 so the rows it never reached are selected again when the scan resumes.
 """
 
+import enum
 import logging
 import os
 from dataclasses import dataclass
@@ -34,8 +35,10 @@ from app.assets.scanner_changes import (
     detect_content_change,
     drain_pending_verifications,
     live_contents_under_prefixes,
+    missing_content_ids_by_path,
     pending_recovery_count,
     recover_missing_content,
+    recover_missing_content_by_stat,
 )
 from app.assets.scanner_admission import (
     PARTIAL_DOWNLOAD_EXTENSIONS as PARTIAL_DOWNLOAD_EXTENSIONS,
@@ -45,7 +48,16 @@ from app.assets.scanner_admission import (
     _two_stat_admit,
     tick_watch_list as tick_watch_list,
 )
-from app.assets.services.file_utils import get_mtime_ns, is_visible, list_files_recursively
+from app.assets.services.file_utils import (
+    RESCAN_YIELD_RUN,
+    DirListings,
+    ListingWalk,
+    get_mtime_ns,
+    is_visible,
+    list_files_recursively,
+    walk_listings,
+)
+from app.assets.services.gil import yield_gil
 from app.assets.services.image_dimensions import extract_image_dimensions
 from app.assets.services.metadata_extract import ExtractedMetadata, extract_file_metadata
 from app.assets.services.path_utils import (
@@ -71,6 +83,8 @@ class _ScanProgress(Protocol):
     hash_failed: int
     enrich_failed: int
     permission_denied: int
+    missing_marked: int
+    recovered: int
 
     def mark_emitted(self, key: str) -> bool: ...
 
@@ -147,7 +161,16 @@ def get_temp_prefixes() -> list[str]:
 def collect_models_files() -> list[str]:
     out: list[str] = []
     for folder_name, bases, _exts in get_comfy_models_folders():
-        rel_files = folder_paths.get_filename_list(folder_name) or []
+        try:
+            rel_files = folder_paths.get_filename_list(folder_name) or []
+        except OSError:
+            # The cached listing raises on every call once a folder it recorded has gone
+            # away; a fresh listing skips that folder and lists the rest.
+            try:
+                rel_files = folder_paths.get_filename_list_(folder_name)[0]
+            except OSError as e:
+                logging.warning("Asset scan: skipping model category %s, it can't be listed: %s", folder_name, e)
+                continue
         for rel_path in rel_files:
             if not all(is_visible(part) for part in Path(rel_path).parts):
                 continue
@@ -181,7 +204,7 @@ def observe_references_on_filesystem(
     for content_id, path, size_bytes, mtime_ns in contents:
         try:
             stat_result = os.stat(path, follow_symlinks=True)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
         except PermissionError as e:
             _log_scan_error("reference_stat", e)
@@ -189,9 +212,10 @@ def observe_references_on_filesystem(
                 progress.permission_denied += 1
             logging.debug("Permission denied accessing %s", path)
         except OSError as e:
+            # An I/O error (a flaky network share, a stale handle) says nothing about
+            # whether the file still exists, so the row stays live, as _is_gone leaves it.
             _log_scan_error("reference_stat", e)
             logging.debug("OSError checking %s: %s", path, e)
-            observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
         else:
             survivors.add(os.path.abspath(path))
             if stat_result.st_mtime_ns != mtime_ns:
@@ -203,7 +227,9 @@ def observe_references_on_filesystem(
 
 def apply_reference_observations(
     session: Session, observations: list[_ReferenceObservation]
-) -> None:
+) -> int:
+    """Apply the observations; returns how many rows were marked missing."""
+    marked = 0
     for observation in observations:
         content = session.get(AssetContent, observation.content_id)
         # Skip a row another writer changed since it was observed; the next scan sees it afresh.
@@ -216,6 +242,7 @@ def apply_reference_observations(
             continue
         if observation.stat_result is None:
             mark_content_missing(session, content.id)
+            marked += 1
             continue
         detect_content_change(
             session,
@@ -223,20 +250,23 @@ def apply_reference_observations(
             observation.stat_result,
             hashing_is_enabled=mode.hashing_enabled(),
         )
+    return marked
 
 
 def _sync_prefixes_in_write_txn(
     prefixes: list[str], progress: _ScanProgress | None
-) -> set[str]:
+) -> tuple[set[str], int]:
+    """Returns the surviving paths and how many rows were marked missing."""
     with create_session() as session:
         observations, survivors = observe_references_on_filesystem(
             session, prefixes, progress
         )
+    marked = 0
     if observations:
         with create_write_session() as session:
-            apply_reference_observations(session, observations)
+            marked = apply_reference_observations(session, observations)
             session.commit()
-    return survivors
+    return survivors, marked
 
 
 def sync_root_safely(
@@ -247,7 +277,9 @@ def sync_root_safely(
     Returns survivors (existing paths) or empty set on failure.
     """
     try:
-        return _sync_prefixes_in_write_txn(get_scan_prefixes_for_root(root), progress)
+        survivors, marked = _sync_prefixes_in_write_txn(
+            get_scan_prefixes_for_root(root), progress
+        )
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
         emit(
@@ -256,6 +288,9 @@ def sync_root_safely(
             error_type=error_type(exc),
         )
         return set()
+    if progress is not None:
+        progress.missing_marked += marked
+    return survivors
 
 
 def sync_temp_references_safely(
@@ -297,7 +332,9 @@ def mark_contents_missing_outside_prefixes(
     session: Session, prefixes: list[str]
 ) -> int:
     contents = session.scalars(
-        sa.select(AssetContent).where(AssetContent.is_missing.is_(False))
+        sa.select(AssetContent)
+        .where(AssetContent.is_missing.is_(False))
+        .execution_options(yield_per=500)
     )
     is_owned = path_prefix_matcher(prefixes)
     missing = [content for content in contents if not is_owned(content.path)]
@@ -316,6 +353,149 @@ def collect_paths_for_roots(roots: tuple[RootType, ...]) -> list[str]:
     if "output" in roots:
         paths.extend(list_files_recursively(folder_paths.get_output_directory()))
     return paths
+
+
+def rescans_output_by_listing(roots: tuple[RootType, ...]) -> bool:
+    """Whether this scan checks the catalog against directory listings rather than by
+    stat'ing every live row. Only output-only scans do: the rescan queued after each prompt.
+
+    The listing diff catches every add and delete, but nothing stats an already-cataloged
+    file, so an in-place overwrite (same path; new content, size or mtime) goes undetected
+    until the next scan that is not output-only, such as the startup scan. Core save nodes
+    never overwrite, and reported outputs are registered at save time, so this only
+    affects files written by something else.
+    """
+    return tuple(roots) == ("output",)
+
+
+def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservation]]:
+    """The live rows under ``root`` by path, read without touching the filesystem.
+
+    Each is observed as gone (``stat_result=None``): what apply_reference_observations
+    needs to retire it, should its path turn out not to be listed. Empty on failure, as
+    sync_root_safely is.
+    """
+    prefixes = get_scan_prefixes_for_root(root)
+    live: dict[str, list[_ReferenceObservation]] = {}
+    if not prefixes:
+        return live
+    stmt = sa.select(
+        AssetContent.id, AssetContent.path, AssetContent.size_bytes, AssetContent.mtime_ns
+    ).where(
+        AssetContent.is_missing.is_(False),
+        sa.or_(*(sql_path_under_prefix(AssetContent.path, p) for p in prefixes)),
+    )
+    try:
+        with create_session() as session:
+            for content_id, path, size_bytes, mtime_ns in session.execute(stmt):
+                yield_gil(run=RESCAN_YIELD_RUN)
+                live.setdefault(os.path.abspath(path), []).append(
+                    _ReferenceObservation(content_id, size_bytes, mtime_ns, None)
+                )
+    except Exception as exc:
+        logging.exception("fast DB scan failed for %s: %s", root, exc)
+        emit("scanner.fast_scan_failed", root=root, error_type=error_type(exc))
+        return {}
+    return live
+
+
+def unlisted_references(
+    live: dict[str, list[_ReferenceObservation]], listings: DirListings
+) -> tuple[list[_ReferenceObservation], int]:
+    """Split the live rows into (vanished, skipped count).
+
+    A row its parent's listing names is present, with no further check. Every other row
+    is stat'ed, and has vanished only if the stat says the file is gone: that covers a
+    name the listing lacks, a removed directory, and the rows no listing can speak for
+    (a hidden path, a directory that failed to list, a symlink alias the walk did not
+    take). The skipped count is the rows that were stat'ed and kept.
+    """
+    vanished: list[_ReferenceObservation] = []
+    skipped = 0
+    names_by_dir: dict[str, set[str]] = {}
+    for path, observations in live.items():
+        yield_gil(run=RESCAN_YIELD_RUN)
+        verdict = _listing_verdict(path, listings, names_by_dir)
+        if verdict is ListingVerdict.LISTED:
+            continue
+        # Stat before retiring. A listing compares names exactly, but a case-insensitive
+        # (NTFS, APFS) or Unicode-normalizing (HFS+) filesystem resolves a stored path
+        # spelled differently from its entry. Rows that reach here are normally few.
+        if _is_gone(path):
+            vanished.extend(observations)
+        else:
+            skipped += len(observations)
+    return vanished, skipped
+
+
+def _is_gone(path: str) -> bool:
+    """True only when stat says the path does not exist. Any other error (permissions,
+    I/O) leaves it undecided, and the row stays live, as the per-row stat left it."""
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
+class ListingVerdict(enum.Enum):
+    """What this rescan's directory listings say about a cataloged path."""
+
+    LISTED = "listed"  # its parent's listing has the name
+    ABSENT = "absent"  # the nearest listed directory above it lacks the next component
+    UNKNOWN = "unknown"  # no listing can say: hidden, no listed ancestor, or not walked
+
+
+def _listing_verdict(
+    path: str, listings: DirListings, names_by_dir: dict[str, set[str]]
+) -> ListingVerdict:
+    """Classify ``path`` against the listings; see ListingVerdict. An ancestor that
+    still has the directory this walk did not list is UNKNOWN, not LISTED."""
+    child, parent = path, os.path.dirname(path)
+    while parent not in listings:
+        if not is_visible(os.path.basename(child)):
+            return ListingVerdict.UNKNOWN
+        child, parent = parent, os.path.dirname(parent)
+        if parent == child:  # reached the filesystem root without meeting a listing
+            return ListingVerdict.UNKNOWN
+    name = os.path.basename(child)
+    if not is_visible(name):
+        return ListingVerdict.UNKNOWN
+    names = names_by_dir.get(parent)
+    if names is None:
+        files, subdirs = listings[parent]
+        names = names_by_dir[parent] = {*files, *subdirs}
+    if name not in names:
+        return ListingVerdict.ABSENT
+    return ListingVerdict.LISTED if child == path else ListingVerdict.UNKNOWN
+
+
+def mark_unlisted_references_missing_safely(
+    root: RootType,
+    observations: list[_ReferenceObservation],
+    progress: _ScanProgress | None = None,
+) -> None:
+    """Retire rows whose file the listing lacks, through the same guarded write
+    sync_root applies to a row whose file has vanished."""
+    if not observations:
+        return
+    try:
+        with create_write_session() as session:
+            marked = apply_reference_observations(session, observations)
+            session.commit()
+    except Exception as exc:
+        logging.exception("fast DB scan failed for %s: %s", root, exc)
+        emit("scanner.fast_scan_failed", root=root, error_type=error_type(exc))
+        return
+    if progress is not None:
+        progress.missing_marked += marked
+
+
+def list_output_for_rescan() -> ListingWalk:
+    """Walk the output root, listing every directory."""
+    return walk_listings(folder_paths.get_output_directory())
 
 
 def build_asset_specs(
@@ -364,6 +544,7 @@ def build_asset_specs(
     admitted_paths, _ = _two_stat_admit(candidates)
     candidate_stats = dict(candidates)
     for abs_p in admitted_paths:
+        yield_gil()
         stat_p = candidate_stats[abs_p]
         name, tags = get_name_and_tags_from_asset_path(abs_p)
         rel_fname = compute_loader_path(abs_p)
@@ -394,6 +575,13 @@ def build_asset_specs(
         tag_pool.update(tags)
 
     return specs, tag_pool, skipped
+
+
+@dataclass
+class SeedCounts:
+    """What one seed_asset_specs call did besides creating records."""
+
+    recovered: int = 0
 
 
 class _SpecObservation(NamedTuple):
@@ -436,9 +624,16 @@ def seed_asset_specs(
     session: Session,
     specs: list[SeedAssetSpec],
     observed: dict[str, _SpecObservation | None] | None = None,
+    counts: SeedCounts | None = None,
+    missing_ids_by_path: dict[str, list[str]] | None = None,
 ) -> tuple[int, Exception | None]:
+    """``missing_ids_by_path`` is only used with hashing off. insert_asset_specs reads it
+    before its write transaction opens; when omitted, it is read here."""
     if observed is None:
         observed = observe_asset_specs(specs)
+    hashing_is_enabled = mode.hashing_enabled()
+    if not hashing_is_enabled and missing_ids_by_path is None:
+        missing_ids_by_path = missing_content_ids_by_path(session, _observed_paths(observed))
     created = 0
     first_error: Exception | None = None
     # Counted, not gated through _ScanProgress.mark_emitted like its neighbours, because this
@@ -459,12 +654,16 @@ def seed_asset_specs(
                     )
                     invalid_mtimes += 1
                     continue
-                recovery = recover_missing_content(
-                    session,
-                    path,
-                    observation.snapshot,
-                    hashing_is_enabled=mode.hashing_enabled(),
-                )
+                if hashing_is_enabled:
+                    recovery = recover_missing_content(
+                        session, path, observation.snapshot, hashing_is_enabled=True
+                    )
+                else:
+                    recovery = recover_missing_content_by_stat(
+                        session, path, stat_result, (missing_ids_by_path or {}).get(path, [])
+                    )
+                if recovery == "recovered" and counts is not None:
+                    counts.recovered += 1
                 if recovery != "no_match":
                     continue
                 content, _inserted = create_content_reporting_insert(
@@ -509,14 +708,27 @@ def seed_asset_specs(
     return created, first_error
 
 
+def _observed_paths(observed: dict[str, _SpecObservation | None]) -> list[str]:
+    return [path for path, observation in observed.items() if observation is not None]
+
+
 def insert_asset_specs(
-    specs: list[SeedAssetSpec], _tag_pool: set[str]
+    specs: list[SeedAssetSpec],
+    _tag_pool: set[str],
+    progress: _ScanProgress | None = None,
 ) -> tuple[int, Exception | None]:
     if not specs:
         return 0, None
     observed = observe_asset_specs(specs)
+    missing_ids_by_path = None
+    if not mode.hashing_enabled():
+        with create_session() as sess:
+            missing_ids_by_path = missing_content_ids_by_path(sess, _observed_paths(observed))
+    counts = SeedCounts()
     with create_write_session() as sess:
-        created, first_error = seed_asset_specs(sess, specs, observed)
+        created, first_error = seed_asset_specs(
+            sess, specs, observed, counts, missing_ids_by_path
+        )
         try:
             sess.commit()
         except Exception:
@@ -528,6 +740,8 @@ def insert_asset_specs(
             except Exception:
                 logging.exception("Failed to roll back asset batch after commit failure")
             return 0, first_error
+        if progress is not None:
+            progress.recovered += counts.recovered
         return created, first_error
 
 
