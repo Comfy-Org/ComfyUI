@@ -55,6 +55,13 @@ def fetch_node(node_id, version=None):
     return path
 
 
+# aria2 is used by colab/downloader.py, installed on its own so model downloads can start before the nodes install.
+def install_aria2():
+    run("apt-get", "update", "-qq")
+    run("apt-get", "install", "-y", "-qq", "aria2")
+    run("uv", "pip", "install", "--system", "aria2p")
+
+
 # nodes are registry ids: "*" for every node in the lock, "id@1.2.3" for a version, otherwise the locked or latest version.
 def install(nodes):
     lock = read_lock()
@@ -67,9 +74,6 @@ def install(nodes):
             versions[node_id] = version or lock.get(node_id)
     paths = [fetch_node(node_id, version) for node_id, version in versions.items()]
 
-    # aria2 is used by colab/downloader.py.
-    run("apt-get", "update", "-qq")
-    run("apt-get", "install", "-y", "-qq", "aria2")
     # Colab ships a CUDA build of torch, the unpinned torch requirement keeps it.
     run("uv", "pip", "install", "--system", "-r", "-", input=requirements(paths))
 
@@ -79,5 +83,6 @@ def install(nodes):
 
 
 if __name__ == "__main__":
+    install_aria2()
     install(["*"])
     print(f"Done. Start with: python {os.path.join(ROOT, 'main.py')} --enable-manager")

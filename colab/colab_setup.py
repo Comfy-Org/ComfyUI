@@ -8,7 +8,6 @@
 # Reads the GITHUB_TOKEN (for a models.yaml in a private repo), CIVITAI_API_KEY, HUG_TOKEN and TS_AUTHKEY Colab secrets.
 
 import os
-import time
 import urllib.request
 
 from google.colab import drive, userdata
@@ -55,13 +54,12 @@ def setup(custom_nodes, models_yaml, download_models, tailscale_enabled, google_
     if missing:
         raise ValueError(f"Not in {models_yaml}: {', '.join(missing)}")
 
-    install.install(custom_nodes)
-    # aria2p is installed by install.install, so downloader can only be imported after it.
+    install.install_aria2()
+    # aria2p is installed by install.install_aria2, so downloader can only be imported after it.
     from downloader import Downloader
 
     models_dir = os.path.join(install.ROOT, "models")
     downloader = Downloader(models_dir)
-    downloads = []
     copies = []
     for model in (catalog[name] for name in download_models):
         path = os.path.join(models_dir, model["folder"], model["filename"])
@@ -71,18 +69,13 @@ def setup(custom_nodes, models_yaml, download_models, tailscale_enabled, google_
         if "path" in model:
             copies.append((model["path"], path))
         else:
-            downloads += downloader.download(model["folder"], model["url"], rename=model["filename"])
+            downloader.download(model["folder"], model["url"], rename=model["filename"])
+    # aria2c runs as its own process, so the downloads continue in the background while setup and ComfyUI run.
+    install.install(custom_nodes)
+
     for source, path in copies:
         print(f"Copying {source}")
         copy_model(source, path)
-    # aria2 downloads them in parallel, wait so ComfyUI starts with every model in place.
-    for download in downloads:
-        while not download.is_complete:
-            if download.has_failed:
-                raise RuntimeError(f"{download.name}: {download.error_message}")
-            time.sleep(1)
-            download.update()
-        print(f"Downloaded {download.name}")
 
     if tailscale_enabled:
         tailscale.main()
