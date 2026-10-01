@@ -99,7 +99,7 @@ def test_cross_device_upload_copies_into_place_and_records_the_copys_stat(
 ):
     temp_root, input_root = dirs
     temp = _write_temp(temp_root)
-    temp.chmod(0o644)
+    temp.chmod(0o640)
     dest = _dest_for(input_root, temp)
     calls = _fail_first_replace(monkeypatch, _exdev())
 
@@ -113,7 +113,7 @@ def test_cross_device_upload_copies_into_place_and_records_the_copys_stat(
     assert Path(staging_src).name.startswith(".")
     assert Path(staging_src).name.endswith(".tmp")
     if sys.platform != "win32":
-        assert dest.stat().st_mode & 0o777 == 0o644
+        assert dest.stat().st_mode & 0o777 == 0o640
     _assert_nothing_left(temp, input_root, dest)
     with mock_create_session() as session:
         content = session.scalars(select(AssetContent)).one()
@@ -201,6 +201,65 @@ def test_source_changed_during_the_copy_is_not_published(
         _upload(temp)
 
     _assert_nothing_left(temp, input_root, None)
+
+
+def _deny_staging_writes(monkeypatch: pytest.MonkeyPatch, input_root: Path) -> list:
+    """An ACL that denies writes in the destination: creating a file there raises
+    PermissionError while os.access still reports the directory writable. The
+    first os.replace raises EXDEV and switches os.name to "nt", where
+    tempfile.mkstemp retries that PermissionError up to TMP_MAX times."""
+    real_open = os.open
+    attempts: list = []
+
+    def denying_open(path, flags, mode=0o777, *, dir_fd=None):
+        if os.path.dirname(path) == str(input_root):
+            attempts.append(path)
+            if len(attempts) > 50:
+                raise RuntimeError("staging creation kept retrying")
+            raise PermissionError(errno.EACCES, "Access is denied", str(path))
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    def exdev_as_windows(src, dst):
+        monkeypatch.setattr(os, "name", "nt")
+        raise _exdev()
+
+    monkeypatch.setattr(ingest_module.os, "open", denying_open)
+    monkeypatch.setattr(ingest_module.os, "replace", exdev_as_windows)
+    return attempts
+
+
+def test_write_denied_destination_fails_fast(
+    mock_create_session, hashing_on, dirs, monkeypatch
+):
+    temp_root, input_root = dirs
+    temp = _write_temp(temp_root)
+    attempts = _deny_staging_writes(monkeypatch, input_root)
+
+    with pytest.raises(RuntimeError, match="failed to move uploaded file into place: .*denied"):
+        _upload(temp)
+
+    monkeypatch.undo()
+    assert len(attempts) == 1
+    _assert_nothing_left(temp, input_root, None)
+
+
+def test_staging_name_collision_takes_another_name(
+    mock_create_session, hashing_on, dirs, monkeypatch
+):
+    temp_root, input_root = dirs
+    temp = _write_temp(temp_root)
+    dest = _dest_for(input_root, temp)
+    taken = iter(["0" * 16, "0" * 16, "1" * 16])
+    (input_root / f".{'0' * 16}.upload.tmp").write_bytes(b"someone else's")
+    monkeypatch.setattr(ingest_module.secrets, "token_hex", lambda _n: next(taken))
+    _fail_first_replace(monkeypatch, _exdev())
+
+    _upload(temp)
+
+    assert dest.read_bytes() == _CONTENT
+    assert sorted(p.name for p in input_root.iterdir()) == sorted(
+        [dest.name, f".{'0' * 16}.upload.tmp"]
+    )
 
 
 def test_final_rename_failure_removes_the_staging_file(

@@ -13,8 +13,8 @@ import errno
 import logging
 import mimetypes
 import os
+import secrets
 import shutil
-import tempfile
 from typing import Any, NamedTuple, Sequence
 
 from sqlalchemy import func, select
@@ -188,6 +188,22 @@ def _guess_upload_mime_type(
     return guessed or "application/octet-stream"
 
 
+_STAGING_NAME_ATTEMPTS = 16
+
+
+def _create_staging_file(directory: str) -> tuple[int, str]:
+    """Not tempfile.mkstemp: on Windows it retries PermissionError until TMP_MAX
+    when an ACL denies writes, hanging the upload."""
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+    for _ in range(_STAGING_NAME_ATTEMPTS):
+        path = os.path.join(directory, f".{secrets.token_hex(8)}.upload.tmp")
+        try:
+            return os.open(path, flags, 0o666), path
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"no free staging name in {directory}")
+
+
 def _copy_across_devices(
     temp_path: str, dest_abs: str, verified_stat: os.stat_result
 ) -> os.stat_result:
@@ -195,9 +211,7 @@ def _copy_across_devices(
     partial copy is never visible under the final name. The source must still
     match the stat hashing verified once the copy is done. Returns the copy's
     stat."""
-    fd, staging = tempfile.mkstemp(
-        dir=os.path.dirname(dest_abs), prefix=".", suffix=".upload.tmp"
-    )
+    fd, staging = _create_staging_file(os.path.dirname(dest_abs))
     try:
         with os.fdopen(fd, "wb") as dst, open(temp_path, "rb") as src:
             shutil.copyfileobj(src, dst)
