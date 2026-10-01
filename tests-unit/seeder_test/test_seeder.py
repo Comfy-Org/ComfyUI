@@ -92,7 +92,7 @@ def _configure_fast_phase(
     specs: list[SeedAssetSpec],
 ) -> None:
     monkeypatch.setattr(
-        seeder_module, "sync_root_safely", lambda _root, _progress: set()
+        seeder_module, "sync_root_safely", lambda _root, _progress, **_: set()
     )
     monkeypatch.setattr(
         seeder_module, "collect_paths_for_roots", lambda _roots: [str(path) for path in paths]
@@ -214,6 +214,10 @@ def test_multi_root_scan_emits_one_started_and_completed_without_root(
         "elapsed_ms": 813,
         "enrich_failed": 0,
         "enriched": 4,
+        "found_again_cloud_count": 0,
+        "found_again_count": 0,
+        "found_again_mtime_changed_count": 0,
+        "found_again_size_changed_count": 0,
         "hash_failed": 0,
         "missing_marked_count": 0,
         "permission_denied": 0,
@@ -595,7 +599,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
 ) -> None:
     session = Mock()
     monkeypatch.setattr(
-        seeder_module, "sync_root_safely", lambda _root, _progress: set()
+        seeder_module, "sync_root_safely", lambda _root, _progress, **_: set()
     )
     monkeypatch.setattr(
         seeder_module, "collect_paths_for_roots", lambda roots: ["asset.safetensors"]

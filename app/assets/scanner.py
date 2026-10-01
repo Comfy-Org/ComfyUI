@@ -85,6 +85,10 @@ class _ScanProgress(Protocol):
     permission_denied: int
     missing_marked: int
     recovered: int
+    found_again: int
+    found_again_mtime_changed: int
+    found_again_size_changed: int
+    found_again_cloud: int
 
     def mark_emitted(self, key: str) -> bool: ...
 
@@ -122,6 +126,7 @@ class _ReferenceObservation(NamedTuple):
     size_bytes: int | None
     mtime_ns: int | None
     stat_result: os.stat_result | None
+    path: str
 
 
 def _log_scan_error(phase: str, error: OSError) -> None:
@@ -205,7 +210,7 @@ def observe_references_on_filesystem(
         try:
             stat_result = os.stat(path, follow_symlinks=True)
         except (FileNotFoundError, NotADirectoryError):
-            observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
+            observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None, path))
         except PermissionError as e:
             _log_scan_error("reference_stat", e)
             if progress is not None:
@@ -220,7 +225,7 @@ def observe_references_on_filesystem(
             survivors.add(os.path.abspath(path))
             if stat_result.st_mtime_ns != mtime_ns:
                 observations.append(
-                    _ReferenceObservation(content_id, size_bytes, mtime_ns, stat_result)
+                    _ReferenceObservation(content_id, size_bytes, mtime_ns, stat_result, path)
                 )
     return observations, survivors
 
@@ -254,13 +259,19 @@ def apply_reference_observations(
 
 
 def _sync_prefixes_in_write_txn(
-    prefixes: list[str], progress: _ScanProgress | None
+    prefixes: list[str],
+    progress: _ScanProgress | None,
+    defer_gone: list[_ReferenceObservation] | None = None,
 ) -> tuple[set[str], int]:
-    """Returns the surviving paths and how many rows were marked missing."""
+    """Returns the surviving paths and how many rows were marked missing. With
+    ``defer_gone``, rows whose file is gone are appended to it instead of retired."""
     with create_session() as session:
         observations, survivors = observe_references_on_filesystem(
             session, prefixes, progress
         )
+    if defer_gone is not None:
+        defer_gone.extend(o for o in observations if o.stat_result is None)
+        observations = [o for o in observations if o.stat_result is not None]
     marked = 0
     if observations:
         with create_write_session() as session:
@@ -270,15 +281,19 @@ def _sync_prefixes_in_write_txn(
 
 
 def sync_root_safely(
-    root: RootType, progress: _ScanProgress | None = None
+    root: RootType,
+    progress: _ScanProgress | None = None,
+    *,
+    defer_gone: list[_ReferenceObservation] | None = None,
 ) -> set[str]:
     """Sync a single root's references with the filesystem.
 
-    Returns survivors (existing paths) or empty set on failure.
+    Returns survivors (existing paths) or empty set on failure. With ``defer_gone``,
+    rows whose file is gone are left for resolve_deferred_gone instead of retired.
     """
     try:
         survivors, marked = _sync_prefixes_in_write_txn(
-            get_scan_prefixes_for_root(root), progress
+            get_scan_prefixes_for_root(root), progress, defer_gone
         )
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
@@ -390,7 +405,7 @@ def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservati
             for content_id, path, size_bytes, mtime_ns in session.execute(stmt):
                 yield_gil(run=RESCAN_YIELD_RUN)
                 live.setdefault(os.path.abspath(path), []).append(
-                    _ReferenceObservation(content_id, size_bytes, mtime_ns, None)
+                    _ReferenceObservation(content_id, size_bytes, mtime_ns, None, path)
                 )
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
@@ -491,6 +506,55 @@ def mark_unlisted_references_missing_safely(
         return
     if progress is not None:
         progress.missing_marked += marked
+
+
+# Cloud Files placeholder states (OneDrive and other sync clients): RECALL_ON_OPEN, PINNED,
+# UNPINNED, RECALL_ON_DATA_ACCESS, and a reparse point a link-following stat did not resolve.
+_CLOUD_FILE_ATTRIBUTES = 0x40000 | 0x80000 | 0x100000 | 0x400000 | 0x400
+
+
+def _is_cloud_file(stat_result: os.stat_result) -> bool:
+    return bool(getattr(stat_result, "st_file_attributes", 0) & _CLOUD_FILE_ATTRIBUTES)
+
+
+def resolve_deferred_gone(
+    root: RootType,
+    deferred: list[_ReferenceObservation],
+    walked_paths: set[str],
+    progress: _ScanProgress | None = None,
+) -> set[str]:
+    """Settle the rows sync_root_safely found gone, now the walk has run.
+
+    A row whose path the walk listed again is stat'ed once more and, if its file is there,
+    handled as a live row is: a rewrite in place (a sync client re-downloading it) keeps
+    its record instead of retiring it for the walk to re-create. The rest are retired.
+    Returns the paths that are still live, so the walk does not insert them.
+    """
+    observations: list[_ReferenceObservation] = []
+    live: set[str] = set()
+    for observation in deferred:
+        path = os.path.abspath(observation.path)
+        stat_result = None
+        if path in walked_paths:
+            try:
+                stat_result = os.stat(path, follow_symlinks=True)
+            except (FileNotFoundError, NotADirectoryError):
+                pass
+            except OSError as e:
+                # Undecided, as in observe_references_on_filesystem: the row stays live.
+                _log_scan_error("reference_stat", e)
+                live.add(path)
+                continue
+        if stat_result is not None:
+            live.add(path)
+            if progress is not None:
+                progress.found_again += 1
+                progress.found_again_mtime_changed += stat_result.st_mtime_ns != observation.mtime_ns
+                progress.found_again_size_changed += stat_result.st_size != observation.size_bytes
+                progress.found_again_cloud += _is_cloud_file(stat_result)
+        observations.append(observation._replace(stat_result=stat_result))
+    mark_unlisted_references_missing_safely(root, observations, progress)
+    return live
 
 
 def list_output_for_rescan() -> ListingWalk:

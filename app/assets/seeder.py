@@ -28,6 +28,7 @@ from app.assets.scanner import (
     live_references_safely,
     mark_missing_outside_prefixes_safely,
     mark_unlisted_references_missing_safely,
+    resolve_deferred_gone,
     rescans_output_by_listing,
     sync_root_safely,
     unlisted_references,
@@ -119,6 +120,12 @@ class _ScanState:
     # its own count, and temp retirement is routine, so neither is included.
     missing_marked: int = 0
     recovered: int = 0
+    # Rows found gone by the stored-path stat that the walk then found at the same path,
+    # and of those, how many came back rewritten or as cloud placeholders.
+    found_again: int = 0
+    found_again_mtime_changed: int = 0
+    found_again_size_changed: int = 0
+    found_again_cloud: int = 0
     cancel_stage: str | None = None
     _emitted_keys: set[str] = field(default_factory=set)
 
@@ -733,6 +740,10 @@ class _AssetSeeder:
                 permission_denied=scan_state.permission_denied,
                 missing_marked_count=scan_state.missing_marked,
                 recovered_count=scan_state.recovered,
+                found_again_count=scan_state.found_again,
+                found_again_mtime_changed_count=scan_state.found_again_mtime_changed,
+                found_again_size_changed_count=scan_state.found_again_size_changed,
+                found_again_cloud_count=scan_state.found_again_cloud,
                 root=root,
             )
 
@@ -821,6 +832,9 @@ class _AssetSeeder:
         by_listing = rescans_output_by_listing(roots)
         live_references: dict[str, list] = {}
         existing_paths: set[str] = set()
+        # A file can be briefly absent for the stored-path stat and back for the walk (a
+        # sync client rewriting it), so a gone row is only retired once the walk misses it too.
+        deferred_gone: dict[RootType, list] = {}
         t_sync = time.perf_counter()
         assert self._scan_state is not None
         scan_state = self._scan_state
@@ -831,9 +845,8 @@ class _AssetSeeder:
                 live_references = live_references_safely(r)
                 existing_paths.update(live_references)
             else:
-                marked_before = scan_state.missing_marked
-                existing_paths.update(sync_root_safely(r, scan_state))
-                self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
+                deferred_gone[r] = []
+                existing_paths.update(sync_root_safely(r, scan_state, defer_gone=deferred_gone[r]))
         logging.debug(
             "Fast scan: sync_root phase took %.3fs (%d existing paths)",
             time.perf_counter() - t_sync,
@@ -851,6 +864,14 @@ class _AssetSeeder:
             time.perf_counter() - t_collect,
             len(paths),
         )
+        if any(deferred_gone.values()):
+            walked_paths = {os.path.abspath(p) for p in paths}
+            for r, deferred in deferred_gone.items():
+                marked_before = scan_state.missing_marked
+                existing_paths.update(
+                    resolve_deferred_gone(r, deferred, walked_paths, scan_state)
+                )
+                self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
         if walk is not None:
             vanished, unlisted = unlisted_references(live_references, walk.listings)
             marked_before = scan_state.missing_marked
