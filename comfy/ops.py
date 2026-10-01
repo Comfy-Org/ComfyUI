@@ -1050,14 +1050,15 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
                 _eager_input_act(x, input_act, act_weight, act_eps), weight, bias))
         qdata, scale = TensorWiseINT8Layout.get_plain_tensors(weight)
         if residual_segments is not None:
-            if (bias is None and x.dtype == torch.bfloat16
+            indexed_gate = getattr(quant_ops.ck, "int8_linear_indexed_gate", None)
+            if (indexed_gate is not None and bias is None and x.dtype == torch.bfloat16
                     and residual is not None and residual.dtype == torch.bfloat16
                     and weight._params.convrot and weight._params.convrot_groupsize == 256
                     and input_act in (None, "swiglu")):
                 rows = torch.empty(x.shape[0], dtype=torch.int32, device=x.device)
                 for start, stop, row in residual_segments:
                     rows[start:stop] = row
-                return quant_ops.ck.int8_linear_indexed_gate(
+                return indexed_gate(
                     x, qdata.contiguous(), scale.reshape(-1).expand(qdata.shape[0]).contiguous(),
                     residual_scale.to(x.dtype).contiguous(), rows, residual,
                     input_act=input_act)

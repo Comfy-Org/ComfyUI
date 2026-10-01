@@ -59,7 +59,13 @@ def test_training_keeps_eager_path():
     assert x.grad is not None and gate.grad is not None and residual.grad is not None
 
 
-def test_int8_segments_preserve_row_mapping_and_uncast():
+def _indexed_gate_reference(x, qdata, scale, gates, rows, residual, *, input_act):
+    branch = ops.quant_ops.ck.int8_linear(x, qdata, scale, convrot=True, input_act=input_act)
+    return torch.addcmul(residual, branch, gates[rows.long()])
+
+
+@pytest.mark.parametrize("backend_available", [False, True])
+def test_int8_segments_preserve_row_mapping_and_uncast(backend_available):
     operations = ops.mixed_precision_ops({}, compute_dtype=torch.bfloat16)
     layer = operations.Linear(256, 128, bias=False, device="cpu", dtype=torch.bfloat16)
     layer.weight = torch.nn.Parameter(ops.QuantizedTensor.from_float(
@@ -72,13 +78,15 @@ def test_int8_segments_preserve_row_mapping_and_uncast():
     segments = [(0, 4, 0), (4, 9, 1), (9, 13, torch.tensor([2, 0, 2, 1]))]
     rows = torch.tensor([0] * 4 + [1] * 5 + [2, 0, 2, 1], dtype=torch.int32)
     with torch.no_grad(), \
-            mock.patch.object(ops.quant_ops.ck, "int8_linear_indexed_gate", wraps=ops.quant_ops.ck.int8_linear_indexed_gate) as fused, \
+            mock.patch.object(ops.quant_ops.ck, "int8_linear_indexed_gate",
+                              new=mock.Mock(side_effect=_indexed_gate_reference) if backend_available else None, create=True) as fused, \
             mock.patch.object(ops, "uncast_bias_weight", wraps=ops.uncast_bias_weight) as uncast:
         actual = ops.linear_input_act(layer, x, "swiglu", residual=residual,
                                       residual_scale=gates, residual_segments=segments)
-        fused.assert_called_once()
+        if backend_available:
+            fused.assert_called_once()
+            assert torch.equal(fused.call_args.args[4], rows)
         uncast.assert_called_once()
-        assert torch.equal(fused.call_args.args[4], rows)
         qdata, scale = ops.TensorWiseINT8Layout.get_plain_tensors(layer.weight)
         branch = ops.quant_ops.ck.int8_linear(x, qdata, scale, convrot=True, input_act="swiglu")
         expected = torch.addcmul(residual, branch, gates[rows.long()].to(actual.dtype))
@@ -131,7 +139,7 @@ def test_indexed_fusion_ineligible_operands(case):
                            requires_grad=case == "residual_grad")
     gate = torch.randn(1, 128, requires_grad=case == "gate_grad")
     with torch.set_grad_enabled(case != "fp32_residual"), \
-            mock.patch.object(ops.quant_ops.ck, "int8_linear_indexed_gate", side_effect=AssertionError("ineligible fusion")):
+            mock.patch.object(ops.quant_ops.ck, "int8_linear_indexed_gate", side_effect=AssertionError("ineligible fusion"), create=True):
         actual = ops.linear_input_act(layer, x, "swiglu", residual=residual,
                                       residual_scale=gate, residual_segments=[(0, 3, 0)])
         if case == "fp32_residual":
