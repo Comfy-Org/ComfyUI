@@ -20,7 +20,7 @@ from app.assets.services.ingest import upload_from_temp_path
 from app.assets.services.snapshot_hash import snapshot_hash
 
 _CONTENT = b"cross-device upload bytes"
-_SOURCE_MTIME_NS = 1_600_000_000_123_456_789
+_SOURCE_MTIME_NS = 1_600_000_000_000_000_000  # whole seconds: NTFS keeps 100 ns
 
 
 @pytest.fixture
@@ -162,7 +162,7 @@ def test_copy_failure_leaves_no_destination_and_no_staging_file(
 
 def _rewrite_same_size(temp: Path) -> None:
     temp.write_bytes(_CONTENT[::-1])
-    os.utime(temp, ns=(_SOURCE_MTIME_NS + 1, _SOURCE_MTIME_NS + 1))
+    os.utime(temp, ns=(_SOURCE_MTIME_NS + 2_000_000_000,) * 2)
 
 
 def test_source_changed_after_hashing_is_not_copied(
