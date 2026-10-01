@@ -491,25 +491,12 @@ def test_temp_references_are_still_retired_at_once(temp_dir, session, monkeypatc
         (0x100000, True),  # UNPINNED
         (0x40000, True),  # RECALL_ON_OPEN
         (0x20, False),  # ARCHIVE alone: an ordinary file
+        (0x400 | 0x20, False),  # a reparse point with no placeholder state (compressed, dedup)
         (None, False),  # no st_file_attributes: not Windows
     ],
 )
 def test_cloud_file_attributes(attributes, expected):
     stat_result = SimpleNamespace() if attributes is None else SimpleNamespace(st_file_attributes=attributes)
-    assert scanner._is_cloud_file(stat_result) is expected
-
-
-@pytest.mark.parametrize(
-    ("tag", "expected"),
-    [
-        (0x9000001A, True),  # IO_REPARSE_TAG_CLOUD: a hydrated file, no placeholder state bits
-        (0x9000601A, True),  # IO_REPARSE_TAG_CLOUD_6, as OneDrive sets
-        (0x80000017, False),  # IO_REPARSE_TAG_WOF: a compressed file, not a sync client's
-        (0x80000013, False),  # IO_REPARSE_TAG_DEDUP
-    ],
-)
-def test_cloud_reparse_tags(tag, expected):
-    stat_result = SimpleNamespace(st_file_attributes=0x400 | 0x20, st_reparse_tag=tag)
     assert scanner._is_cloud_file(stat_result) is expected
 
 

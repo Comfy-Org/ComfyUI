@@ -508,17 +508,14 @@ def mark_unlisted_references_missing_safely(
         progress.missing_marked += marked
 
 
-# Cloud Files (OneDrive and other sync clients): the placeholder states RECALL_ON_OPEN, PINNED,
-# UNPINNED and RECALL_ON_DATA_ACCESS, or a hydrated file's IO_REPARSE_TAG_CLOUD_* reparse tag.
+# Cloud Files placeholder states (OneDrive and other sync clients): RECALL_ON_OPEN, PINNED,
+# UNPINNED and RECALL_ON_DATA_ACCESS. A hydrated, unpinned file carries none of them, and the
+# cloud filter hides its reparse tag from stat, so only pinned and online-only files count.
 _CLOUD_FILE_ATTRIBUTES = 0x40000 | 0x80000 | 0x100000 | 0x400000
-_CLOUD_REPARSE_TAG, _CLOUD_REPARSE_TAG_MASK = 0x9000001A, 0xFFFF0FFF
 
 
 def _is_cloud_file(stat_result: os.stat_result) -> bool:
-    tag = getattr(stat_result, "st_reparse_tag", 0)
-    return bool(getattr(stat_result, "st_file_attributes", 0) & _CLOUD_FILE_ATTRIBUTES) or (
-        tag & _CLOUD_REPARSE_TAG_MASK == _CLOUD_REPARSE_TAG
-    )
+    return bool(getattr(stat_result, "st_file_attributes", 0) & _CLOUD_FILE_ATTRIBUTES)
 
 
 def resolve_deferred_gone(
