@@ -2181,9 +2181,15 @@ class MiniMaxH3(BaseModel):
         out = super().extra_conds(**kwargs)
         cross_attn = kwargs.get("cross_attn", None)
         if cross_attn is not None:
-            # run condition_proj + token refiner once per sampling instead of per step
+            # run condition_proj + token refiner once per sampling instead of per step.
+            # The Qwen3-VL states reach ~9.6e4, so under fp16 the preprocessing runs in
+            # fp32 and only its output is cast down; casting the input first gives NaN.
+            dtype_inference = self.get_dtype_inference()
+            preprocess_dtype = torch.float32 if dtype_inference == torch.float16 else dtype_inference
             cross_attn = self.diffusion_model.preprocess_text_embeds(
-                cross_attn.to(device=kwargs["device"], dtype=self.get_dtype_inference()))
+                cross_attn.to(device=kwargs["device"], dtype=preprocess_dtype))
+            if cross_attn.dtype != dtype_inference:
+                cross_attn = cross_attn.to(dtype_inference)
             out['c_crossattn'] = comfy.conds.CONDRegular(cross_attn)
 
         latent_shapes = kwargs.get("latent_shapes", None)

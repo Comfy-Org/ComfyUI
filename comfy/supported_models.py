@@ -976,7 +976,7 @@ class MiniMaxH3(supported_models_base.BASE):
 
     memory_usage_factor = 0.114
 
-    supported_inference_dtypes = [torch.bfloat16, torch.float32]
+    supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]
 
     vae_key_prefix = ["vae."]
     text_encoder_key_prefix = ["text_encoders."]
