@@ -375,7 +375,7 @@ def test_a_model_folder_pruned_while_unregistered_recovers_when_it_returns(
     assert len(edits) == 3
 
     register(None if while_away == "unregistered" else temp_dir / "$UNSET_VAR" / "checkpoints")
-    assert scanner.mark_missing_outside_prefixes_safely(scanner.get_owned_prefixes()) == 3
+    assert scanner.mark_missing_outside_prefixes_safely(scanner.get_owned_prefixes()).marked == 3
     _scan(("models",))
     assert _missing_count(session) == 3
 

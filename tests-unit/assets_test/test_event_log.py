@@ -37,6 +37,7 @@ VALID_VALUES: dict[str, list[object]] = {
     "missing_marked_count": [0, 10],
     "recovered_count": [10],
     "count": [1],
+    "rehomed_count": [0, 77252],
     "error_type": ["ValueError", "FileNotFoundError"],
     "hashing_enabled": [True, False],
     "site": ["discovery", "enrich"],

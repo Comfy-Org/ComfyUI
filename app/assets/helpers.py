@@ -33,8 +33,9 @@ def sql_path_under_prefix(
     ``_``, ``*``, ``?`` or ``[`` needs no escaping and cannot inject.
 
     Only the PREFIX is normalized here. That is sound because the column holds
-    normalized absolute paths — ``records.create_content`` is the sole writer
-    and normalizes there. Normalizing the column in SQL is not an option anyway:
+    normalized absolute paths — ``records.create_content`` and the prune's
+    re-home (``scanner_rehome.apply_prune_plan``) are the only writers, and both
+    normalize. Normalizing the column in SQL is not an option anyway:
     it would need a per-row Python call and would defeat the index.
     """
     base = os.path.abspath(prefix)
@@ -45,15 +46,17 @@ def sql_path_under_prefix(
     )
 
 
-def path_prefix_matcher(prefixes: Iterable[str]) -> Callable[[str], bool]:
+def path_prefix_matcher(prefixes: Iterable[str], *, fold_case: bool = True) -> Callable[[str], bool]:
     """Return ``path -> Path(path).is_relative_to(<any prefix>)``, with the prefixes
     normalized once.
 
     The startup prune tests every catalogued row against every owned prefix, and
     ``Path.is_relative_to`` walks the path's parents on each call, so a pathlib
     check there costs rows x prefixes x depth. A normcase'd, separator-bounded
-    string prefix keeps its component bounds and platform case rules.
+    string prefix keeps its component bounds and platform case rules, or compares
+    case-sensitively everywhere with ``fold_case=False``.
     """
+    normcase = os.path.normcase if fold_case else str
     # abspath keeps exactly two leading separators, and pathlib treats that "//" as an
     # anchor of its own: "//server/f" is not under "/". Such paths are only matched
     # against prefixes with the same anchor.
@@ -61,14 +64,14 @@ def path_prefix_matcher(prefixes: Iterable[str]) -> Callable[[str], bool]:
     exact: dict[bool, set[str]] = {False: set(), True: set()}
     stems: dict[bool, list[str]] = {False: [], True: []}
     for prefix in prefixes:
-        base = os.path.normcase(os.path.abspath(prefix))
+        base = normcase(os.path.abspath(prefix))
         is_double = base.startswith(double)
         exact[is_double].add(base)
         stems[is_double].append(base if base.endswith(os.sep) else base + os.sep)
     stem_tuples = {key: tuple(value) for key, value in stems.items()}
 
     def matches(path: str) -> bool:
-        candidate = os.path.normcase(os.path.abspath(path))
+        candidate = normcase(os.path.abspath(path))
         is_double = candidate.startswith(double)
         return candidate in exact[is_double] or candidate.startswith(stem_tuples[is_double])
 
