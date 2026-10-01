@@ -529,25 +529,27 @@ def test_a_verbatim_prefix_resolves_against_a_plain_spelling(folders, session, t
     assert _live(session, row) == str(real / "f.png")
 
 
-def test_a_hung_mount_costs_a_bounded_wait(folders, session, temp_dir, monkeypatch):
+def test_a_hung_mount_costs_a_bounded_wait(folders, folds_case, session, temp_dir, monkeypatch):
     real = temp_dir / "real"
     _populate(real, ("ok.png",))
     folders.use(output=real, models=None)
     kept = _row(session, _alias(real, temp_dir / "alias") / "ok.png")
     hung = [_row(session, temp_dir / "dead" / d / "f.png") for d in ("a", "b")]
+    registered_hung = temp_dir / "dead" / "zz"
+    case_only = _row(session, temp_dir / "dead" / "ZZ" / "f.png")
     monkeypatch.setattr(scanner_rehome, "STALL_SECONDS", 0.2)
     release = threading.Event()
     real_realpath = os.path.realpath
 
     def hard_mount(path, **kwargs):
-        if os.fspath(path).startswith(str(temp_dir / "dead")):
+        if os.fspath(path).startswith(str(temp_dir / "dead")) and os.fspath(path) != str(registered_hung):
             release.wait(30)
         return real_realpath(path, **kwargs)
 
     monkeypatch.setattr(os.path, "realpath", hard_mount)
     try:
         started = time.monotonic()
-        result = _prune(session, real)
+        result = _prune(session, real, registered_hung)
         elapsed = time.monotonic() - started
     finally:
         release.set()
@@ -555,6 +557,7 @@ def test_a_hung_mount_costs_a_bounded_wait(folders, session, temp_dir, monkeypat
     assert elapsed < 5
     assert result == (2, 1)
     assert [_live(session, row) for row in hung] == [None, None]
+    assert _live(session, case_only) == str(temp_dir / "dead" / "ZZ" / "f.png")  # undecided, left as before
     assert _live(session, kept) == str(real / "ok.png")
 
 

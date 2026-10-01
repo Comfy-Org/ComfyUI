@@ -3,8 +3,9 @@
 A row outside every registered folder by text may still sit in one reached under
 another spelling: a symlink, junction, ``subst`` drive, 8.3 name, ``\\\\?\\`` prefix,
 or a change of letter case. Such a row keeps its id and records, with its path
-rewritten to the folder's spelling today. Every row the code can't prove retires,
-exactly as it would without this step.
+rewritten to the folder's spelling today. Every row the code can't prove gets the
+outcome it would have without this step: retired, or left live if the platform's own
+case rules still place it in a registered folder.
 
 ``plan_prune`` only reads; ``apply_prune_plan`` does every write.
 """
@@ -23,7 +24,8 @@ from app.assets.database.models import Asset, AssetContent, AssetTag
 from app.assets.database.queries import is_live_path_conflict, mark_content_missing
 from app.assets.services.path_utils import compute_loader_path, get_backend_system_tags_from_path
 
-# The filesystem reads stop after this long without progress; undecided rows retire.
+# The filesystem reads stop after this long without progress; undecided rows get the
+# outcome they would have without this step.
 # A stall timeout rather than a deadline, as a large re-spelled folder is legitimately slow.
 STALL_SECONDS = 10.0
 _BATCH = 500
@@ -146,7 +148,7 @@ def _decide_with_stall_timeout(rows, prefixes, roles) -> dict[str, str | None]:
     worker.start()
     while not done.is_set():
         if not progress.wait(STALL_SECONDS):
-            logging.warning("Asset prune: filesystem stalled; undecided rows are marked missing")
+            logging.warning("Asset prune: filesystem stalled; undecided rows are not re-homed")
             break
         progress.clear()
     with lock:
