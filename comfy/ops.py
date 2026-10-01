@@ -74,6 +74,12 @@ try:
                 SDPBackend.MATH,
             ]
 
+            SDPA_CONTIGUOUS_KV_L2_SIZE = 0
+            if comfy.model_management.is_amd():
+                props = torch.cuda.get_device_properties(comfy.model_management.get_torch_device())
+                if props.gcnArchName.split(':')[0] == "gfx1151":  # aotriton gets a lot slower once one head of the strided k/v doesn't fit in L2
+                    SDPA_CONTIGUOUS_KV_L2_SIZE = props.L2_cache_size
+
             def scaled_dot_product_attention(q, k, v, *args, **kwargs):
                 if q.nelement() < 1024 * 128:  # arbitrary number, for small inputs cudnn attention seems slower
                     return torch.nn.functional.scaled_dot_product_attention(q, k, v, *args, **kwargs)
@@ -81,6 +87,8 @@ try:
                 if kwargs.get("enable_gqa", False) and attn_mask is not None and not comfy.model_management.is_nvidia():
                     k, v = repeat_kv_for_gqa(k, v, q.shape[-3], -3)
                     kwargs["enable_gqa"] = False
+                if SDPA_CONTIGUOUS_KV_L2_SIZE and sum(t.shape[-2] * t.shape[-1] for t in (k, v) if not t.is_contiguous()) * k.element_size() > SDPA_CONTIGUOUS_KV_L2_SIZE:
+                    k, v = k.contiguous(), v.contiguous()
                 with sdpa_kernel(SDPA_BACKEND_PRIORITY, set_priority=True):
                     if kwargs.get("enable_gqa", False) and attn_mask is not None and q.shape[-3] != k.shape[-3]:
                         dropout_p = args[1] if len(args) > 1 else kwargs.get("dropout_p", 0.0)
