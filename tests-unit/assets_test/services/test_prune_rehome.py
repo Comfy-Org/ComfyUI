@@ -517,6 +517,39 @@ def test_a_row_both_case_variant_folders_fit_is_left_as_spelled(folders, folds_c
     assert _live(session, row) == str(temp_dir / "Data" / "f.png")
 
 
+def test_a_role_is_derived_once_per_folder_and_extension(folders, temp_dir, monkeypatch):
+    out, models = temp_dir / "out", temp_dir / "out" / "checkpoints"
+    folders.use(output=out, models=models)
+    paths = [str(models / n) for n in ("a.safetensors", "b.safetensors", "c.png", "d.png")]
+    paths += [str(out / "sub" / n) for n in ("e.png", "f.png")] + [str(temp_dir / "elsewhere" / "g.png")]
+    expected = [scanner_rehome._role(path) for path in paths]
+    calls: list[str] = []
+    role = scanner_rehome._role
+    monkeypatch.setattr(scanner_rehome, "_role", lambda path: calls.append(path) or role(path))
+
+    role_of = scanner_rehome._Roles()
+
+    assert [role_of(path) for path in paths] == expected
+    assert len(calls) == 4  # models/.safetensors, models/.png, out/sub/.png, elsewhere/.png
+
+
+def test_case_duplicates_derive_each_folders_role_once(folders, folds_case, session, temp_dir, monkeypatch):
+    data = temp_dir / "data"
+    names = [f"{i}.png" for i in range(5)]
+    _populate(data, tuple(names))
+    folders.use(output=data, models=None)
+    upper = _alias(data, temp_dir / "DATA")
+    for name in names:
+        _row(session, upper / name)
+        _row(session, data / name)
+    calls: list[str] = []
+    role = scanner_rehome._role
+    monkeypatch.setattr(scanner_rehome, "_role", lambda path: calls.append(path) or role(path))
+
+    assert _prune(session, data) == (0, 0)
+    assert len(calls) == 1
+
+
 def test_two_rows_resolving_to_one_target_both_retire(folders, session, temp_dir):
     real = temp_dir / "real"
     _populate(real, ("f.png",))

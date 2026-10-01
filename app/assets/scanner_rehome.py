@@ -68,6 +68,25 @@ def _role(path: str) -> Role | None:
     return frozenset(t for t in tags if t in _ROOT_TAGS or t.startswith("model_type:")), compute_loader_path(path)
 
 
+class _Roles:
+    """``_role`` memoised per (directory, extension): the tags and the loader path's
+    directory part depend only on those, and the file name completes the loader path."""
+
+    def __init__(self) -> None:
+        self._by_folder: dict[tuple[str, str], tuple[frozenset[str], str] | None] = {}
+
+    def __call__(self, path: str) -> Role | None:
+        directory, name = os.path.split(path)
+        key = (directory, os.path.splitext(name)[1].lower())
+        if key not in self._by_folder:
+            role = _role(path)
+            if role is not None and (role[1] is None or not role[1].endswith(name)):
+                return role  # no loader path to split; don't memoise
+            self._by_folder[key] = None if role is None else (role[0], role[1][: len(role[1]) - len(name)])
+        cached = self._by_folder[key]
+        return None if cached is None else (cached[0], cached[1] + name)
+
+
 def _same_file(old: str, new: str) -> bool:
     try:
         before, after = os.stat(old), os.stat(new)
@@ -104,7 +123,7 @@ def _record_roles(session: Session, content_ids: list[str]) -> dict[str, set[Rol
     return roles
 
 
-def _decide(rows, prefixes, roles, decided, lock, progress, stop, done) -> None:
+def _decide(rows, prefixes, roles, role_of, decided, lock, progress, stop, done) -> None:
     """Worker body: each row's single fitting target proven to be the same file, else None."""
     try:
         folders = []
@@ -121,7 +140,7 @@ def _decide(rows, prefixes, roles, decided, lock, progress, stop, done) -> None:
             real_dir = real_dirs[directory]
             targets = set() if real_dir is None else _targets(real_dir, name, folders)
             # The owners are the folders holding the file whose role fits its records.
-            fitting = [target for target in targets if roles[content_id] == {_role(target)}]
+            fitting = [target for target in targets if roles[content_id] == {role_of(target)}]
             target = fitting[0] if len(fitting) == 1 and _same_file(path, fitting[0]) else None
             with lock:
                 if stop.is_set():
@@ -135,13 +154,13 @@ def _decide(rows, prefixes, roles, decided, lock, progress, stop, done) -> None:
         progress.set()
 
 
-def _decide_with_stall_timeout(rows, prefixes, roles) -> dict[str, str | None]:
+def _decide_with_stall_timeout(rows, prefixes, roles, role_of) -> dict[str, str | None]:
     decided: dict[str, str | None] = {}
     lock = threading.Lock()
     progress, stop, done = threading.Event(), threading.Event(), threading.Event()
     worker = threading.Thread(
         target=_decide,
-        args=(rows, prefixes, roles, decided, lock, progress, stop, done),
+        args=(rows, prefixes, roles, role_of, decided, lock, progress, stop, done),
         name="assets-prune-rehome",
         daemon=True,
     )
@@ -186,6 +205,7 @@ def plan_prune(
     """Decide each unowned ``(content id, path)`` row: re-home, retire, or (``spare``) leave
     as it is. Reads only."""
     roles = _record_roles(session, [content_id for content_id, _ in rows])
+    role_of = _Roles()
     # A spared row with a respelling by text that is taken (by its case duplicate, usually)
     # and fits its role can't move: that target is its only fit, or one of several. It stays
     # as it is either way, so skip its filesystem reads, which would recur every boot.
@@ -193,12 +213,12 @@ def plan_prune(
     taken_by_text = _taken_paths(session, [t for targets in spared_targets.values() for t in targets])
     settled = {
         cid for cid, targets in spared_targets.items()
-        if any(t in taken_by_text and roles.get(cid) == {_role(t)} for t in targets)
+        if any(t in taken_by_text and roles.get(cid) == {role_of(t)} for t in targets)
     }
     candidates = sorted(
         ((cid, path) for cid, path in rows if cid in roles and cid not in settled), key=lambda row: row[1]
     )
-    decided = _decide_with_stall_timeout(candidates, prefixes, roles) if candidates else {}
+    decided = _decide_with_stall_timeout(candidates, prefixes, roles, role_of) if candidates else {}
     # Two movers for one target both retire.
     claims = Counter(decided.values())
     movers = {cid: target for cid, target in decided.items() if target is not None and claims[target] == 1}
