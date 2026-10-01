@@ -170,13 +170,30 @@ def _taken_paths(session: Session, paths: list[str]) -> set[str]:
     return taken
 
 
+def _text_targets(path: str, prefixes: list[str]) -> list[str]:
+    """``path`` respelled by text for each folder that owns it with case folded."""
+    targets = []
+    for prefix in prefixes:
+        base = os.path.abspath(prefix).rstrip(os.sep) + os.sep
+        if os.path.normcase(path).startswith(os.path.normcase(base)):
+            targets.append(base + path[len(base):])
+    return targets
+
+
 def plan_prune(
     session: Session, rows: list[tuple[str, str]], prefixes: list[str], spare: Callable[[str], bool] = lambda _: False
 ) -> PrunePlan:
     """Decide each unowned ``(content id, path)`` row: re-home, retire, or (``spare``) leave
     as it is. Reads only."""
     roles = _record_roles(session, [content_id for content_id, _ in rows])
-    candidates = sorted(((cid, path) for cid, path in rows if cid in roles), key=lambda row: row[1])
+    # A spared row whose every respelling by text is taken (its case duplicate, usually)
+    # stays as it is either way; skip its filesystem reads, which would recur every boot.
+    spared_targets = {cid: _text_targets(path, prefixes) for cid, path in rows if spare(path)}
+    taken_by_text = _taken_paths(session, [t for targets in spared_targets.values() for t in targets])
+    settled = {cid for cid, targets in spared_targets.items() if taken_by_text.issuperset(targets)}
+    candidates = sorted(
+        ((cid, path) for cid, path in rows if cid in roles and cid not in settled), key=lambda row: row[1]
+    )
     decided = _decide_with_stall_timeout(candidates, prefixes, roles) if candidates else {}
     # Two movers for one target both retire.
     claims = Counter(decided.values())

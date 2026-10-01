@@ -275,6 +275,29 @@ def test_existing_case_duplicates_keep_their_edits_visible_whichever_spelling_la
         assert _missing_count(session) == 0
 
 
+def test_case_duplicates_cost_no_filesystem_reads_on_later_boots(folders, folds_case, session, temp_dir, monkeypatch):
+    """Their twin holds the target, so they stay as they are without a realpath or stat."""
+    data = temp_dir / "data"
+    _populate(data, ("f.png", "g.png"))
+    folders.use(output=data, models=None)
+    upper = _alias(data, temp_dir / "DATA")
+    duplicate, free = _row(session, upper / "f.png"), _row(session, upper / "g.png")
+    _row(session, data / "f.png")
+    real_realpath, real_stat = os.path.realpath, os.stat
+    reads: list[str] = []
+    monkeypatch.setattr(os.path, "realpath", lambda path, **kw: reads.append(os.fspath(path)) or real_realpath(path, **kw))
+    monkeypatch.setattr(os, "stat", lambda path, *a, **kw: reads.append(os.fspath(path)) or real_stat(path, *a, **kw))
+
+    result = _prune(session, data)
+
+    assert _live(session, duplicate) == str(upper / "f.png")
+    assert not [path for path in reads if path.endswith("f.png")]
+    # A row whose target is free still gets the full proof.
+    if upper.is_symlink():
+        assert result == (0, 1)
+        assert _live(session, free) == str(data / "g.png")
+
+
 def test_a_case_sensitive_sibling_folder_is_not_mistaken_for_the_same_one(folders, folds_case, temp_dir, session):
     """Windows can mark a directory case-sensitive, so output and Output can be two folders."""
     lower, upper = temp_dir / "cs" / "output", temp_dir / "cs" / "Output"
