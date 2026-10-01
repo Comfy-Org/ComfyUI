@@ -865,6 +865,8 @@ class _AssetSeeder:
             len(paths),
         )
         if any(deferred_gone.values()):
+            if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
+                return total_created, skipped_existing, 0
             walked_paths = {os.path.abspath(p) for p in paths}
             for r, deferred in deferred_gone.items():
                 marked_before = scan_state.missing_marked

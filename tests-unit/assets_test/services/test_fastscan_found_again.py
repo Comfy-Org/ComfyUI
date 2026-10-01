@@ -424,6 +424,18 @@ def test_a_cancel_before_the_walk_retires_nothing(drive, session):
     assert [row.is_missing for row in _rows(session, files[0])] == [False]
 
 
+def test_a_cancel_during_the_walk_retires_nothing(drive, session):
+    files = _populate(drive)
+    _scan()
+    seeder = _seeder()
+    files[0].unlink()
+
+    state = _scan(seeder=seeder, after_walk=seeder._cancel_event.set)
+
+    assert state.missing_marked == 0
+    assert [row.is_missing for row in _rows(session, files[0])] == [False]
+
+
 def test_a_held_input_row_resolves_while_models_scans_normally(drive, session, caplog, monkeypatch):
     models = drive / "models"
     models.mkdir()
