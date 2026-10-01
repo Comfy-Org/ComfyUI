@@ -296,7 +296,8 @@ class DiTBlock(nn.Module):
         h = _mod_scale_shift(self.norm1(x), shift_msa, scale_msa, mod_segments)
         x = _mod_gate(x, gate_msa, attention(h, rope_freqs=rope_freqs, transformer_options=transformer_options), mod_segments)
         h = _mod_scale_shift(self.norm2(x), shift_mlp, scale_mlp, mod_segments)
-        if comfy.model_management.in_training or self.mlp._forward_hooks or self.mlp._forward_pre_hooks:
+        if (comfy.model_management.in_training or self.mlp._forward_hooks or self.mlp._forward_pre_hooks
+                or nn.modules.module._global_forward_hooks or nn.modules.module._global_forward_pre_hooks):
             return _mod_gate(x, gate_mlp, self.mlp(h), mod_segments)
         return self.mlp(h, residual=x, gate=gate_mlp, segments=mod_segments)
 

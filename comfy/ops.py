@@ -992,13 +992,17 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
     fresh linear output without expanding a gate for the whole sequence.
 
     """
+    hooks = (linear._forward_hooks or linear._forward_pre_hooks
+             or torch.nn.modules.module._global_forward_hooks
+             or torch.nn.modules.module._global_forward_pre_hooks)
+
     def _residual_out(out):
         if residual is None:
             return out
         if residual_segments is None:
             return torch.addcmul(residual, out, residual_scale)
         if (not torch.is_grad_enabled() and out.dtype == residual.dtype
-                and not (linear._forward_hooks or linear._forward_pre_hooks)):
+                and not hooks):
             for start, stop, row in residual_segments:
                 segment = out[start:stop]
                 torch.addcmul(residual[start:stop], segment, residual_scale[row].to(out.dtype), out=segment)
@@ -1010,7 +1014,10 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
 
     weight = linear.weight
     full_precision_mm = getattr(linear, "_full_precision_mm", False)
-    if residual_segments is not None and (linear._forward_hooks or linear._forward_pre_hooks):
+    needs_grad = torch.is_grad_enabled() and any(
+        t is not None and t.requires_grad
+        for t in (x, weight, linear.bias, act_weight, residual, residual_scale))
+    if residual_segments is not None and (hooks or needs_grad):
         return _residual_out(linear(_eager_input_act(x, input_act, act_weight, act_eps)))
     if (comfy.model_management.in_training
             or not isinstance(weight, QuantizedTensor)
@@ -1044,6 +1051,7 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
         qdata, scale = TensorWiseINT8Layout.get_plain_tensors(weight)
         if residual_segments is not None:
             if (bias is None and x.dtype == torch.bfloat16
+                    and residual is not None and residual.dtype == torch.bfloat16
                     and weight._params.convrot and weight._params.convrot_groupsize == 256
                     and input_act in (None, "swiglu")):
                 rows = torch.empty(x.shape[0], dtype=torch.int32, device=x.device)
