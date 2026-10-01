@@ -35,8 +35,10 @@ from app.assets.scanner_changes import (
     detect_content_change,
     drain_pending_verifications,
     live_contents_under_prefixes,
+    missing_content_ids_by_path,
     pending_recovery_count,
     recover_missing_content,
+    recover_missing_content_by_stat,
 )
 from app.assets.scanner_admission import (
     PARTIAL_DOWNLOAD_EXTENSIONS as PARTIAL_DOWNLOAD_EXTENSIONS,
@@ -81,6 +83,8 @@ class _ScanProgress(Protocol):
     hash_failed: int
     enrich_failed: int
     permission_denied: int
+    missing_marked: int
+    recovered: int
 
     def mark_emitted(self, key: str) -> bool: ...
 
@@ -157,7 +161,16 @@ def get_temp_prefixes() -> list[str]:
 def collect_models_files() -> list[str]:
     out: list[str] = []
     for folder_name, bases, _exts in get_comfy_models_folders():
-        rel_files = folder_paths.get_filename_list(folder_name) or []
+        try:
+            rel_files = folder_paths.get_filename_list(folder_name) or []
+        except OSError:
+            # The cached listing raises on every call once a folder it recorded has gone
+            # away; a fresh listing skips that folder and lists the rest.
+            try:
+                rel_files = folder_paths.get_filename_list_(folder_name)[0]
+            except OSError as e:
+                logging.warning("Asset scan: skipping model category %s, it can't be listed: %s", folder_name, e)
+                continue
         for rel_path in rel_files:
             if not all(is_visible(part) for part in Path(rel_path).parts):
                 continue
@@ -191,7 +204,7 @@ def observe_references_on_filesystem(
     for content_id, path, size_bytes, mtime_ns in contents:
         try:
             stat_result = os.stat(path, follow_symlinks=True)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
         except PermissionError as e:
             _log_scan_error("reference_stat", e)
@@ -199,9 +212,10 @@ def observe_references_on_filesystem(
                 progress.permission_denied += 1
             logging.debug("Permission denied accessing %s", path)
         except OSError as e:
+            # An I/O error (a flaky network share, a stale handle) says nothing about
+            # whether the file still exists, so the row stays live, as _is_gone leaves it.
             _log_scan_error("reference_stat", e)
             logging.debug("OSError checking %s: %s", path, e)
-            observations.append(_ReferenceObservation(content_id, size_bytes, mtime_ns, None))
         else:
             survivors.add(os.path.abspath(path))
             if stat_result.st_mtime_ns != mtime_ns:
@@ -213,7 +227,9 @@ def observe_references_on_filesystem(
 
 def apply_reference_observations(
     session: Session, observations: list[_ReferenceObservation]
-) -> None:
+) -> int:
+    """Apply the observations; returns how many rows were marked missing."""
+    marked = 0
     for observation in observations:
         content = session.get(AssetContent, observation.content_id)
         # Skip a row another writer changed since it was observed; the next scan sees it afresh.
@@ -226,6 +242,7 @@ def apply_reference_observations(
             continue
         if observation.stat_result is None:
             mark_content_missing(session, content.id)
+            marked += 1
             continue
         detect_content_change(
             session,
@@ -233,20 +250,23 @@ def apply_reference_observations(
             observation.stat_result,
             hashing_is_enabled=mode.hashing_enabled(),
         )
+    return marked
 
 
 def _sync_prefixes_in_write_txn(
     prefixes: list[str], progress: _ScanProgress | None
-) -> set[str]:
+) -> tuple[set[str], int]:
+    """Returns the surviving paths and how many rows were marked missing."""
     with create_session() as session:
         observations, survivors = observe_references_on_filesystem(
             session, prefixes, progress
         )
+    marked = 0
     if observations:
         with create_write_session() as session:
-            apply_reference_observations(session, observations)
+            marked = apply_reference_observations(session, observations)
             session.commit()
-    return survivors
+    return survivors, marked
 
 
 def sync_root_safely(
@@ -257,7 +277,9 @@ def sync_root_safely(
     Returns survivors (existing paths) or empty set on failure.
     """
     try:
-        return _sync_prefixes_in_write_txn(get_scan_prefixes_for_root(root), progress)
+        survivors, marked = _sync_prefixes_in_write_txn(
+            get_scan_prefixes_for_root(root), progress
+        )
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
         emit(
@@ -266,6 +288,9 @@ def sync_root_safely(
             error_type=error_type(exc),
         )
         return set()
+    if progress is not None:
+        progress.missing_marked += marked
+    return survivors
 
 
 def sync_temp_references_safely(
@@ -448,7 +473,9 @@ def _listing_verdict(
 
 
 def mark_unlisted_references_missing_safely(
-    root: RootType, observations: list[_ReferenceObservation]
+    root: RootType,
+    observations: list[_ReferenceObservation],
+    progress: _ScanProgress | None = None,
 ) -> None:
     """Retire rows whose file the listing lacks, through the same guarded write
     sync_root applies to a row whose file has vanished."""
@@ -456,11 +483,14 @@ def mark_unlisted_references_missing_safely(
         return
     try:
         with create_write_session() as session:
-            apply_reference_observations(session, observations)
+            marked = apply_reference_observations(session, observations)
             session.commit()
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
         emit("scanner.fast_scan_failed", root=root, error_type=error_type(exc))
+        return
+    if progress is not None:
+        progress.missing_marked += marked
 
 
 def list_output_for_rescan() -> ListingWalk:
@@ -547,6 +577,13 @@ def build_asset_specs(
     return specs, tag_pool, skipped
 
 
+@dataclass
+class SeedCounts:
+    """What one seed_asset_specs call did besides creating records."""
+
+    recovered: int = 0
+
+
 class _SpecObservation(NamedTuple):
     """A spec's file as seen before the write transaction opens.
 
@@ -587,9 +624,16 @@ def seed_asset_specs(
     session: Session,
     specs: list[SeedAssetSpec],
     observed: dict[str, _SpecObservation | None] | None = None,
+    counts: SeedCounts | None = None,
+    missing_ids_by_path: dict[str, list[str]] | None = None,
 ) -> tuple[int, Exception | None]:
+    """``missing_ids_by_path`` is only used with hashing off. insert_asset_specs reads it
+    before its write transaction opens; when omitted, it is read here."""
     if observed is None:
         observed = observe_asset_specs(specs)
+    hashing_is_enabled = mode.hashing_enabled()
+    if not hashing_is_enabled and missing_ids_by_path is None:
+        missing_ids_by_path = missing_content_ids_by_path(session, _observed_paths(observed))
     created = 0
     first_error: Exception | None = None
     # Counted, not gated through _ScanProgress.mark_emitted like its neighbours, because this
@@ -610,12 +654,16 @@ def seed_asset_specs(
                     )
                     invalid_mtimes += 1
                     continue
-                recovery = recover_missing_content(
-                    session,
-                    path,
-                    observation.snapshot,
-                    hashing_is_enabled=mode.hashing_enabled(),
-                )
+                if hashing_is_enabled:
+                    recovery = recover_missing_content(
+                        session, path, observation.snapshot, hashing_is_enabled=True
+                    )
+                else:
+                    recovery = recover_missing_content_by_stat(
+                        session, path, stat_result, (missing_ids_by_path or {}).get(path, [])
+                    )
+                if recovery == "recovered" and counts is not None:
+                    counts.recovered += 1
                 if recovery != "no_match":
                     continue
                 content, _inserted = create_content_reporting_insert(
@@ -660,14 +708,27 @@ def seed_asset_specs(
     return created, first_error
 
 
+def _observed_paths(observed: dict[str, _SpecObservation | None]) -> list[str]:
+    return [path for path, observation in observed.items() if observation is not None]
+
+
 def insert_asset_specs(
-    specs: list[SeedAssetSpec], _tag_pool: set[str]
+    specs: list[SeedAssetSpec],
+    _tag_pool: set[str],
+    progress: _ScanProgress | None = None,
 ) -> tuple[int, Exception | None]:
     if not specs:
         return 0, None
     observed = observe_asset_specs(specs)
+    missing_ids_by_path = None
+    if not mode.hashing_enabled():
+        with create_session() as sess:
+            missing_ids_by_path = missing_content_ids_by_path(sess, _observed_paths(observed))
+    counts = SeedCounts()
     with create_write_session() as sess:
-        created, first_error = seed_asset_specs(sess, specs, observed)
+        created, first_error = seed_asset_specs(
+            sess, specs, observed, counts, missing_ids_by_path
+        )
         try:
             sess.commit()
         except Exception:
@@ -679,6 +740,8 @@ def insert_asset_specs(
             except Exception:
                 logging.exception("Failed to roll back asset batch after commit failure")
             return 0, first_error
+        if progress is not None:
+            progress.recovered += counts.recovered
         return created, first_error
 
 
