@@ -93,17 +93,16 @@ def _alembic_config():
     """
     config = get_alembic_config()
     versions = os.path.join(config.get_main_option("script_location"), "versions")
-    names = os.listdir(versions)
-    ignored = [name for name in names if name.startswith("._")]
+    ignored = []
+    if os.path.isdir(versions):
+        ignored = [name for name in os.listdir(versions) if name.startswith("._")]
     if not ignored:
         yield config
         return
     logging.info("Ignoring %d macOS AppleDouble (._*) files in %s", len(ignored), versions)
-    with tempfile.TemporaryDirectory() as filtered:
-        for name in names:
-            path = os.path.join(versions, name)
-            if not name.startswith("._") and os.path.isfile(path):
-                shutil.copy2(path, filtered)
+    with tempfile.TemporaryDirectory() as scratch:
+        filtered = os.path.join(scratch, "versions")
+        shutil.copytree(versions, filtered, ignore=shutil.ignore_patterns("._*", "__pycache__"))
         config.set_main_option("version_locations", filtered)
         yield config
 

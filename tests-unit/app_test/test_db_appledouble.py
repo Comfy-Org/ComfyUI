@@ -61,7 +61,8 @@ def test_appledouble_file_breaks_alembic_on_its_own(scripts):
     scripts_path, db_path = scripts
     _plant_appledouble(scripts_path)
 
-    with pytest.raises(SyntaxError, match="null bytes"):
+    # Python 3.12+ raises SyntaxError for NUL bytes in source; 3.10 and 3.11 raise ValueError.
+    with pytest.raises((SyntaxError, ValueError), match="null bytes"):
         ScriptDirectory.from_config(_config(scripts_path, db_path)).get_current_head()
 
 
@@ -79,5 +80,13 @@ def test_init_ignores_appledouble_files_and_leaves_them_in_place(scripts):
 
 
 def test_versions_without_appledouble_files_are_used_in_place(scripts):
+    with db_module._alembic_config() as config:
+        assert config.get_main_option("version_locations") is None
+
+
+def test_missing_versions_dir_is_left_to_alembic(scripts):
+    scripts_path, _ = scripts
+    shutil.rmtree(os.path.join(scripts_path, "versions"))
+
     with db_module._alembic_config() as config:
         assert config.get_main_option("version_locations") is None
