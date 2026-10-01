@@ -1,8 +1,8 @@
 # Sets up ComfyUI on Colab from a notebook's config cell, see base.ipynb in the ComfyUI_Colab_Notebooks repo:
 #   !git clone https://github.com/trailbat/ComfyUI.git /content/ComfyUI
 #   import sys; sys.path.append("/content/ComfyUI/colab")
-#   import notebook
-#   notebook.setup(CUSTOM_NODES, MODELS_YAML, DOWNLOAD_MODELS, TAILSCALE, GOOGLE_DRIVE)
+#   import colab_setup
+#   colab_setup.setup(CUSTOM_NODES, MODELS_YAML, DOWNLOAD_MODELS, TAILSCALE, GOOGLE_DRIVE)
 #   !python /content/ComfyUI/main.py --enable-manager --listen
 #
 # Reads the GITHUB_TOKEN (for a models.yaml in a private repo), CIVITAI_API_KEY, HUG_TOKEN and TS_AUTHKEY Colab secrets.

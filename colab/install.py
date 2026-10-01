@@ -1,7 +1,7 @@
 # Installs ComfyUI's requirements and custom nodes from the Comfy Registry with a single uv install.
 # Regenerate colab/custom_nodes.lock with colab/build.py.
 #
-# Colab notebooks call this through colab/notebook.py. Run directly to install every node in the lock:
+# Colab notebooks call this through colab/colab_setup.py. Run directly to install every node in the lock:
 #   !git clone https://github.com/trailbat/ComfyUI.git /content/ComfyUI
 #   !python /content/ComfyUI/colab/install.py
 
