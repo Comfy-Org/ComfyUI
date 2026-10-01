@@ -46,6 +46,14 @@ import node_helpers
 if args.enable_manager:
     import comfyui_manager
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        tomllib = None
+
 def before_node_execution():
     comfy.model_management.throw_exception_if_processing_interrupted()
 
@@ -2251,6 +2259,37 @@ def get_module_name(module_path: str) -> str:
     return base_path
 
 
+def _read_pack_version(module_path: str) -> str | None:
+    if tomllib is None or not os.path.isdir(module_path):
+        return None
+    toml_path = os.path.join(module_path, "pyproject.toml")
+    if not os.path.isfile(toml_path):
+        return None
+    try:
+        with open(toml_path, "rb") as handle:
+            project = tomllib.load(handle).get("project")
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    if not isinstance(project, dict):
+        return None
+    version = project.get("version")
+    if not isinstance(version, str):
+        return None
+    return version.strip() or None
+
+
+def _warn_if_node_replaced(name: str, module_path: str, module_parent: str, version: str | None) -> str:
+    source = f"{module_parent}.{get_module_name(module_path)}"
+    if version:
+        source = f"{source}@{version}"
+    if name not in NODE_CLASS_MAPPINGS:
+        return source
+    old_source = getattr(NODE_CLASS_MAPPINGS[name], "RELATIVE_PYTHON_MODULE", None) or "nodes"
+    if old_source != source:
+        logging.warning(f"Node '{name}' was already registered by {old_source}, replaced by {source}")
+    return source
+
+
 async def load_custom_node(module_path: str, ignore=set(), module_parent="custom_nodes") -> bool:
     module_name = get_module_name(module_path)
     if os.path.isfile(module_path):
@@ -2299,12 +2338,14 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
             if os.path.isdir(web_dir):
                 EXTENSION_WEB_DIRS[module_name] = web_dir
 
+        pack_version = _read_pack_version(module_path)
+
         # V1 node definition
         if hasattr(module, "NODE_CLASS_MAPPINGS") and getattr(module, "NODE_CLASS_MAPPINGS") is not None:
             for name, node_cls in module.NODE_CLASS_MAPPINGS.items():
                 if name not in ignore:
+                    node_cls.RELATIVE_PYTHON_MODULE = _warn_if_node_replaced(name, module_path, module_parent, pack_version)
                     NODE_CLASS_MAPPINGS[name] = node_cls
-                    node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
             if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS") and getattr(module, "NODE_DISPLAY_NAME_MAPPINGS") is not None:
                 for name, display_name in module.NODE_DISPLAY_NAME_MAPPINGS.items():
                     if name not in ignore:
@@ -2333,8 +2374,8 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     node_cls: io.ComfyNode
                     schema = node_cls.GET_SCHEMA()
                     if schema.node_id not in ignore:
+                        node_cls.RELATIVE_PYTHON_MODULE = _warn_if_node_replaced(schema.node_id, module_path, module_parent, pack_version)
                         NODE_CLASS_MAPPINGS[schema.node_id] = node_cls
-                        node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
                         if schema.display_name is not None:
                             NODE_DISPLAY_NAME_MAPPINGS[schema.node_id] = schema.display_name
                 return True
