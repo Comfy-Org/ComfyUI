@@ -561,8 +561,6 @@ class MiniMaxH3Model(nn.Module):
     def _embed_and_pack(self, video_x, audio_x, context, layout, payload, transformer_options):
         device = video_x.device
         dtype = context.dtype
-        img_update = layout.img_update.to(device)
-        audio_update = layout.audio_update.to(device)
         video_rows = patchify_video(video_x.to(torch.float32), self.patch_size)
         audio_rows = pack_audio(audio_x.to(torch.float32))
         cond_video_rows = self._cond_video_rows(payload, device)
@@ -570,14 +568,10 @@ class MiniMaxH3Model(nn.Module):
 
         all_video_rows = video_rows
         if cond_video_rows is not None:
-            all_video_rows = torch.empty(img_update.shape[0], video_rows.shape[1], dtype=torch.float32, device=device)
-            all_video_rows[~img_update] = cond_video_rows
-            all_video_rows[img_update] = video_rows
+            all_video_rows = torch.cat((cond_video_rows, video_rows), dim=0)
         all_audio_rows = audio_rows
         if cond_audio_rows is not None:
-            all_audio_rows = torch.empty(audio_update.shape[0], audio_rows.shape[1], dtype=torch.float32, device=device)
-            all_audio_rows[~audio_update] = cond_audio_rows
-            all_audio_rows[audio_update] = audio_rows
+            all_audio_rows = torch.cat((cond_audio_rows, audio_rows), dim=0)
 
         video_embed = self.video_patch_proj(all_video_rows).to(dtype)
         audio_embed = self.audio_patch_proj(all_audio_rows).to(dtype)
