@@ -21,9 +21,8 @@ def _config(scripts_path: str, db_path: str) -> Config:
     return cfg
 
 
-def _head() -> str:
-    cfg = _config(os.path.join(_REPO_ROOT, "alembic_db"), "unused.db")
-    return ScriptDirectory.from_config(cfg).get_current_head()
+def _head(scripts_path: str) -> str:
+    return ScriptDirectory.from_config(_config(scripts_path, "unused.db")).get_current_head()
 
 
 def _current_revision(db_path: str) -> str:
@@ -38,7 +37,8 @@ def scripts(tmp_path, monkeypatch):
     shutil.copytree(
         os.path.join(_REPO_ROOT, "alembic_db"),
         scripts_path,
-        ignore=shutil.ignore_patterns("__pycache__"),
+        # A checkout on an exFAT volume has its own ._ files; start from a clean copy.
+        ignore=shutil.ignore_patterns("__pycache__", "._*"),
     )
     db_path = str(tmp_path / "comfyui.db")
     monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{db_path}")
@@ -68,13 +68,14 @@ def test_appledouble_file_breaks_alembic_on_its_own(scripts):
 
 def test_init_ignores_appledouble_files_and_leaves_them_in_place(scripts):
     scripts_path, db_path = scripts
+    head = _head(scripts_path)
     planted = _plant_appledouble(scripts_path)
 
     # Alembic must read revisions from the filtered copy only: if it also scanned
     # <script_location>/versions it would load the planted file and raise SyntaxError.
     db_module._init_file_db(db_module.args.database_url)
 
-    assert _current_revision(db_path) == _head()
+    assert _current_revision(db_path) == head
     with open(planted, "rb") as f:
         assert f.read() == _APPLEDOUBLE
 
