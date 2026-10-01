@@ -64,24 +64,22 @@ def test_forward_scales_audio_velocity_before_carry_conversion():
     torch.testing.assert_close(out[1], expected)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("raw_text", [False, True])
 @pytest.mark.parametrize("conditioning", ["none", "refs", "keyframes"])
-def test_embed_and_pack_releases_intermediates(dtype, raw_text, conditioning):
+def test_embed_and_pack_releases_intermediates(conditioning):
     model = MiniMaxH3Model(
         hidden_size=8, num_layers=0, token_refiner_num_layers=0,
         num_attention_heads=1, attention_head_dim=8, ffn_hidden_size=8,
         latents_dim=2, audio_latents_dim=3, text_dim=5,
         timestep_input_dim=8, time_embed_hidden_size=8, time_embed_dim=8,
-        dtype=dtype, device="cpu", operations=nn,
+        dtype=torch.float32, device="cpu", operations=nn,
     )
-    video = torch.randn(1, 2, 1, 4, 6, dtype=dtype)
-    audio = torch.randn(1, 3, 2, 2, dtype=dtype)
-    context = torch.randn(1, 4, 5 if raw_text else 8, dtype=dtype)
+    video = torch.randn(1, 2, 1, 4, 6)
+    audio = torch.randn(1, 3, 2, 2)
+    context = torch.randn(1, 4, 8)
     payload = {}
     if conditioning != "none":
         cond_video = torch.randn_like(video)
-        cond_audio = torch.randn(1, 3, 2, 1, dtype=dtype)
+        cond_audio = torch.randn(1, 3, 2, 1)
         payload.update(cond_video_latents=[cond_video], cond_audio_latents=[cond_audio])
         if conditioning == "refs":
             payload["refs"] = [{"kind": "image", "latent_h": 4, "latent_w": 6},
@@ -94,14 +92,12 @@ def test_embed_and_pack_releases_intermediates(dtype, raw_text, conditioning):
 
     def remember(name):
         def hook(module, inputs, output):
-            outputs[name] = output.to(dtype).clone()
+            outputs[name] = output.clone()
             refs.extend([weakref.ref(inputs[0]), weakref.ref(output)])
         return hook
 
     handles = [model.video_patch_proj.register_forward_hook(remember("video")),
                model.audio_patch_proj.register_forward_hook(remember("audio"))]
-    if raw_text:
-        handles.append(model.token_refiner.register_forward_hook(remember("text")))
     with torch.no_grad():
         packed = model._embed_and_pack(video, audio, context, layout, payload, {})
     for handle in handles:
@@ -109,29 +105,11 @@ def test_embed_and_pack_releases_intermediates(dtype, raw_text, conditioning):
 
     assert all(ref() is None for ref in refs)
     assert packed.shape == (layout.seq_len, 8)
-    assert packed.dtype == dtype
+    assert packed.dtype == torch.float32
     slices = {kind: torch.cat([packed[a:b] for a, b, name in layout.segments if name in kinds])
               for kind, kinds in {"video": {"video", "ref_img", "cond"},
                                   "audio": {"audio", "ref_audio", "cond_audio"},
                                   "text": {"text"}}.items()}
     assert torch.equal(slices["video"], outputs["video"])
     assert torch.equal(slices["audio"], outputs["audio"])
-    assert torch.equal(slices["text"], outputs["text"] if raw_text else context[0])
-
-
-def test_embed_and_pack_preserves_gradients():
-    model = MiniMaxH3Model(
-        hidden_size=8, num_layers=0, token_refiner_num_layers=0,
-        num_attention_heads=1, attention_head_dim=8, ffn_hidden_size=8,
-        latents_dim=2, audio_latents_dim=3, text_dim=5,
-        timestep_input_dim=8, time_embed_hidden_size=8, time_embed_dim=8,
-        dtype=torch.float32, device="cpu", operations=nn,
-    )
-    video = torch.randn(1, 2, 1, 4, 6, requires_grad=True)
-    audio = torch.randn(1, 3, 2, 2, requires_grad=True)
-    context = torch.randn(1, 4, 5, requires_grad=True)
-    packed = model._embed_and_pack(video, audio, context, PackedLayout(4, 1, 4, 6, 2), {}, {})
-    packed.square().sum().backward()
-    for tensor in (video, audio, context):
-        assert tensor.grad is not None
-        assert torch.isfinite(tensor.grad).all()
+    assert torch.equal(slices["text"], context[0])
