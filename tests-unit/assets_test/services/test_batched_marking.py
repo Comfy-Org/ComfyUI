@@ -659,13 +659,23 @@ def test_shutdown_during_a_prune_does_not_start_the_scan_a_prompt_queued(session
         assert shut_down.wait(5)
         return marked
 
+    outcome: list[object] = []
+
+    def prune() -> None:
+        try:
+            outcome.append(instance.mark_missing_outside_prefixes())
+        except seeder_module.PruneCancelledError as cancelled:
+            outcome.append(cancelled)
+
     with patch("app.assets.scanner.mark_contents_missing", mark):
-        worker = threading.Thread(target=lambda: pytest.raises(seeder_module.PruneCancelledError, instance.mark_missing_outside_prefixes))
+        worker = threading.Thread(target=prune)
         worker.start()
         assert first_batch.wait(5)
         threading.Timer(0.1, shut_down.set).start()
         assert instance.shutdown(timeout=5)
         worker.join(5)
 
+    # Asserted here, not in the worker: a failure there would only surface as a warning.
+    assert len(outcome) == 1 and isinstance(outcome[0], seeder_module.PruneCancelledError)
     assert started == []
     assert instance._state is State.IDLE
