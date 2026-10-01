@@ -1,8 +1,7 @@
-# Sidebar tab for installing the models listed in colab/models.json with colab/downloader.py. Each catalog entry is
-#   {"name": "SDXL VAE", "folder": "vae", "url": "https://huggingface.co/...", "filename": "sdxl_vae.safetensors"}
-# where folder is relative to ComfyUI's models directory. The catalog is reread on every request.
-# A models.json uploaded from the sidebar is saved to user/model-manager/models.json and replaces the default catalog
-# until it is reset. Models added by URL from the sidebar are appended to that file, starting from the active catalog.
+# Sidebar tab for installing the models listed in colab/models.yaml with colab/downloader.py, see colab/catalog.py
+# for the format. The catalog is reread on every request.
+# A models.yaml uploaded from the sidebar is saved to user/model-manager/models.yaml and replaces the default catalog
+# until it is reset. Models added by URL from the sidebar are added to that file, starting from the active catalog.
 #
 # API keys come from the CIVITAI_API_KEY and HUG_TOKEN environment variables, Colab secrets
 # can't be read from the ComfyUI process.
@@ -11,20 +10,21 @@
 # Locally on Windows: winget install aria2.aria2 and pip install aria2p.
 
 import asyncio
-import json
 import os
 import sys
 from urllib.parse import urlparse
 
+import yaml
 from aiohttp import web
 
 import folder_paths
 from server import PromptServer
 
 COLAB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "colab")
-CATALOG = os.path.join(COLAB_DIR, "models.json")
-USER_CATALOG = os.path.join(folder_paths.get_user_directory(), "model-manager", "models.json")
+CATALOG = os.path.join(COLAB_DIR, "models.yaml")
+USER_CATALOG = os.path.join(folder_paths.get_user_directory(), "model-manager", "models.yaml")
 sys.path.append(COLAB_DIR)
+from catalog import dump_catalog, parse_catalog  # noqa: E402
 from downloader import Downloader, is_civitai  # noqa: E402
 
 WEB_DIRECTORY = "./js"
@@ -34,17 +34,17 @@ downloader = Downloader(folder_paths.models_dir)
 downloads = {}  # model name -> aria2p.Download started from the sidebar
 
 
-def parse_catalog(models):
-    for model in models:
+def check_catalog(catalog):
+    for model in catalog.values():
         path = os.path.normpath(os.path.join(folder_paths.models_dir, model["folder"], model["filename"]))
         if os.path.basename(path) != model["filename"] or os.path.commonpath([folder_paths.models_dir, os.path.dirname(path)]) != folder_paths.models_dir:
             raise ValueError(f"{model['name']}: folder and filename must stay inside the models directory")
-    return {model["name"]: model for model in models}
+    return catalog
 
 
 def load_catalog():
     with open(USER_CATALOG if os.path.isfile(USER_CATALOG) else CATALOG, encoding="utf-8") as f:
-        return parse_catalog(json.load(f))
+        return check_catalog(parse_catalog(f.read()))
 
 
 def model_status(model):
@@ -65,7 +65,7 @@ def model_status(model):
 def save_catalog(catalog):
     os.makedirs(os.path.dirname(USER_CATALOG), exist_ok=True)
     with open(USER_CATALOG, "w", encoding="utf-8") as f:
-        json.dump(list(catalog.values()), f, indent=2)
+        f.write(dump_catalog(catalog))
 
 
 async def start_downloads(models):
@@ -93,9 +93,9 @@ async def install_models(request):
 @PromptServer.instance.routes.post("/model-manager/catalog")
 async def upload_catalog(request):
     try:
-        catalog = parse_catalog(json.loads(await request.text()))
-    except (ValueError, KeyError, TypeError) as e:
-        return web.Response(status=400, text=f"Invalid models.json: {e!r}")
+        catalog = check_catalog(parse_catalog(await request.text()))
+    except (yaml.YAMLError, ValueError, KeyError, TypeError, AttributeError) as e:
+        return web.Response(status=400, text=f"Invalid models.yaml: {e!r}")
     save_catalog(catalog)
     return web.json_response({})
 
@@ -113,7 +113,7 @@ async def add_model(request):
     model = {"name": filename, "folder": body["folder"], "url": url, "filename": filename}
     catalog = load_catalog() | {filename: model}
     try:
-        parse_catalog(list(catalog.values()))
+        check_catalog(catalog)
     except ValueError as e:
         return web.Response(status=400, text=str(e))
     save_catalog(catalog)

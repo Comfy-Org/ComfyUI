@@ -16,6 +16,7 @@ function statusText(model) {
 
 function render(el) {
     const selected = new Set();
+    const collapsed = new Set();  // folder names, kept across the redraw every second
     let models = [];
     let wasDownloading = false;
 
@@ -24,10 +25,10 @@ function render(el) {
             <input class="filter" placeholder="Filter models" style="padding:6px;background:var(--comfy-input-bg);color:var(--input-text);border:1px solid var(--border-color);border-radius:4px">
             <button class="install" style="padding:6px;cursor:pointer">Install selected</button>
             <div style="display:flex;gap:8px">
-                <button class="upload" style="flex:1;padding:6px;cursor:pointer">Upload models.json</button>
+                <button class="upload" style="flex:1;padding:6px;cursor:pointer">Upload models.yaml</button>
                 <button class="reset" style="padding:6px;cursor:pointer" title="Go back to the default model list">Reset</button>
             </div>
-            <input class="file" type="file" accept=".json,application/json" hidden>
+            <input class="file" type="file" accept=".yaml,.yml" hidden>
             <details>
                 <summary style="cursor:pointer">Add model by URL</summary>
                 <form class="add" style="display:flex;flex-direction:column;gap:8px;padding-top:8px">
@@ -51,7 +52,7 @@ function render(el) {
 
     function row(model) {
         const label = document.createElement("label");
-        label.style = "display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--border-color)";
+        label.style = "display:flex;gap:8px;align-items:center;padding:6px 0 6px 12px;border-bottom:1px solid var(--border-color)";
 
         const box = document.createElement("input");
         box.type = "checkbox";
@@ -65,7 +66,7 @@ function render(el) {
         name.textContent = model.name;
         const detail = document.createElement("div");
         detail.style = "font-size:0.85em;opacity:0.7;overflow-wrap:anywhere";
-        detail.textContent = `${model.folder}/${model.filename}`;
+        detail.textContent = model.filename;
         const status = document.createElement("div");
         status.style = "font-size:0.85em";
         status.textContent = statusText(model);
@@ -82,9 +83,21 @@ function render(el) {
         return label;
     }
 
+    function group(folder, folderModels) {
+        const details = document.createElement("details");
+        details.open = !collapsed.has(folder);
+        details.ontoggle = () => details.open ? collapsed.delete(folder) : collapsed.add(folder);
+        const summary = document.createElement("summary");
+        summary.style = "cursor:pointer;padding:6px 0;font-weight:bold;border-bottom:1px solid var(--border-color)";
+        summary.textContent = `${folder} (${folderModels.length})`;
+        details.append(summary, ...folderModels.map(row));
+        return details;
+    }
+
     function draw() {
         const query = filter.value.toLowerCase();
-        list.replaceChildren(...models.filter((m) => `${m.name} ${m.folder}/${m.filename}`.toLowerCase().includes(query)).map(row));
+        const folders = Map.groupBy(models.filter((m) => `${m.name} ${m.folder}/${m.filename}`.toLowerCase().includes(query)), (m) => m.folder);
+        list.replaceChildren(...[...folders].map(([folder, folderModels]) => group(folder, folderModels)));
     }
 
     async function refresh() {
