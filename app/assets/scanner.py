@@ -508,13 +508,17 @@ def mark_unlisted_references_missing_safely(
         progress.missing_marked += marked
 
 
-# Cloud Files placeholder states (OneDrive and other sync clients): RECALL_ON_OPEN, PINNED,
-# UNPINNED, RECALL_ON_DATA_ACCESS, and a reparse point a link-following stat did not resolve.
-_CLOUD_FILE_ATTRIBUTES = 0x40000 | 0x80000 | 0x100000 | 0x400000 | 0x400
+# Cloud Files (OneDrive and other sync clients): the placeholder states RECALL_ON_OPEN, PINNED,
+# UNPINNED and RECALL_ON_DATA_ACCESS, or a hydrated file's IO_REPARSE_TAG_CLOUD_* reparse tag.
+_CLOUD_FILE_ATTRIBUTES = 0x40000 | 0x80000 | 0x100000 | 0x400000
+_CLOUD_REPARSE_TAG, _CLOUD_REPARSE_TAG_MASK = 0x9000001A, 0xFFFF0FFF
 
 
 def _is_cloud_file(stat_result: os.stat_result) -> bool:
-    return bool(getattr(stat_result, "st_file_attributes", 0) & _CLOUD_FILE_ATTRIBUTES)
+    tag = getattr(stat_result, "st_reparse_tag", 0)
+    return bool(getattr(stat_result, "st_file_attributes", 0) & _CLOUD_FILE_ATTRIBUTES) or (
+        tag & _CLOUD_REPARSE_TAG_MASK == _CLOUD_REPARSE_TAG
+    )
 
 
 def resolve_deferred_gone(
@@ -543,6 +547,8 @@ def resolve_deferred_gone(
             except OSError as e:
                 # Undecided, as in observe_references_on_filesystem: the row stays live.
                 _log_scan_error("reference_stat", e)
+                if progress is not None and isinstance(e, PermissionError):
+                    progress.permission_denied += 1
                 live.add(path)
                 continue
         if stat_result is not None:
