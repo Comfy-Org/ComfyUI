@@ -2225,6 +2225,8 @@ class MiniMaxH3(BaseModel):
                 cross_attn.shape[1], vs[2], (vs[3] + 1) // 2 * 2, (vs[4] + 1) // 2 * 2,
                 latent_shapes[1][-1], keyframes=payload.get("keyframes"),
                 refs=payload.get("refs"))
+        if not torch.is_grad_enabled():
+            payload.update(self.diffusion_model.preprocess_reference_latents(payload, kwargs["device"]))
         out['minimax_payload'] = comfy.conds.CONDConstant(payload)
         return out
 

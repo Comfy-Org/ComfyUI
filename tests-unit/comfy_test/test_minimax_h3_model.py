@@ -6,6 +6,7 @@ from torch import nn
 
 from comfy.ldm.minimax.model import MiniMaxH3Model, PackedLayout, time_shift_sigma
 from comfy.model_sampling import CONST
+from comfy.model_base import BaseModel, MiniMaxH3
 
 
 def make_model(video_output, audio_output):
@@ -113,3 +114,53 @@ def test_embed_and_pack_releases_intermediates(conditioning):
     assert torch.equal(slices["video"], outputs["video"])
     assert torch.equal(slices["audio"], outputs["audio"])
     assert torch.equal(slices["text"], context[0])
+
+
+@pytest.mark.parametrize("augmentation", [1.0, 0.999, 0.5])
+def test_reference_preprocessing_is_exact_and_scoped_to_payload(augmentation):
+    model = MiniMaxH3Model.__new__(MiniMaxH3Model)
+    nn.Module.__init__(model)
+    model.patch_size = (1, 2, 2)
+    payload = {"seed": 13, "visual_cond_noise_aug": augmentation, "audio_cond_noise_aug": augmentation,
+               "cond_video_latents": [torch.randn(1, 2, 1, 4, 12)[..., ::2], torch.randn(1, 2, 2, 4, 6)],
+               "cond_audio_latents": [torch.randn(1, 3, 2, 3), torch.randn(1, 3, 2, 2)]}
+    expected = (model._cond_video_rows(payload, "cpu"), model._cond_audio_rows(payload, "cpu"))
+    prepared = model.preprocess_reference_latents(payload, "cpu")
+    assert "prepared_video_rows" not in payload
+    cached = {**payload, **prepared}
+    assert torch.equal(model._cond_video_rows(cached, "cpu"), expected[0])
+    assert torch.equal(model._cond_audio_rows(cached, "cpu"), expected[1])
+    assert model._cond_video_rows(cached, "cpu").data_ptr() == prepared["prepared_video_rows"].data_ptr()
+    assert model._cond_audio_rows(cached, "cpu").data_ptr() == prepared["prepared_audio_rows"].data_ptr()
+    assert model.preprocess_reference_latents({}, "cpu") == {}
+    assert model._cond_video_rows({}, "cpu") is None
+    if augmentation < 1.0:
+        next_payload = {**payload, "seed": 14}
+        assert not torch.equal(model._cond_video_rows(next_payload, "cpu"), expected[0])
+
+
+@pytest.mark.parametrize("grad_enabled", [False, True])
+def test_extra_conds_prepares_references_only_for_inference(monkeypatch, grad_enabled):
+    monkeypatch.setattr(BaseModel, "extra_conds", lambda self, **kwargs: {})
+    wrapper = MiniMaxH3.__new__(MiniMaxH3)
+    nn.Module.__init__(wrapper)
+    wrapper.latent_shapes = None
+    wrapper.diffusion_model = MiniMaxH3Model.__new__(MiniMaxH3Model)
+    nn.Module.__init__(wrapper.diffusion_model)
+    wrapper.diffusion_model.patch_size = (1, 2, 2)
+    ref = {"latent": torch.randn(1, 2, 1, 4, 6, requires_grad=grad_enabled),
+           "audio_latent": torch.randn(1, 3, 2, 2, requires_grad=grad_enabled)}
+    kwargs = {"device": "cpu", "minimax_refs": [ref], "minimax_audio_cond_noise_aug": 0.5}
+    with torch.set_grad_enabled(grad_enabled):
+        first = wrapper.extra_conds(**kwargs, seed=13)["minimax_payload"].cond
+        second = wrapper.extra_conds(**kwargs, seed=14)["minimax_payload"].cond
+        assert ("prepared_video_rows" in first) is not grad_enabled
+        assert ("prepared_audio_rows" in first) is not grad_enabled
+        assert first is not second
+        a = wrapper.diffusion_model._cond_audio_rows(first, "cpu")
+        b = wrapper.diffusion_model._cond_audio_rows(second, "cpu")
+        assert not torch.equal(a, b)
+        if grad_enabled:
+            a.sum().backward()
+            assert ref["audio_latent"].grad is not None
+    assert "prepared_audio_rows" not in ref
