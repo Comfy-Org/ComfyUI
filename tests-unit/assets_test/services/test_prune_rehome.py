@@ -235,6 +235,10 @@ def test_a_different_folder_with_the_same_layout_is_not_rehomed(folders, temp_di
 def test_a_case_only_respelling_neither_duplicates_nor_retires(folders, folds_case, temp_dir, session):
     real = temp_dir / "data" / "output"
     _populate(real, OUTPUT_FILES)
+    if (temp_dir / "DATA").exists():
+        # macOS: realpath keeps the case it is given, so the row keeps master's outcome
+        # there. Windows' realpath returns the on-disk case.
+        pytest.skip("this filesystem folds case, so DATA can't be a separate symlink")
     upper = _alias(temp_dir / "data", temp_dir / "DATA") / "output"
     folders.use(output=upper, models=None)
     _boot()
