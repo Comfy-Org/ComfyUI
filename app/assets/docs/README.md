@@ -118,7 +118,7 @@ A folder can be registered under a different spelling of the same location: a sy
 - No live row holds the new path, and no missing row that still has records does (recovery may bring that one back).
 - No other row in the same prune would move to the same path.
 
-Every other row is marked missing, as before. That includes two rows for one target, a folder only a bind mount makes equal (`realpath` can't see it), a file that more than one folder fits, and any row whose filesystem reads fail. The reads run on one worker thread; if it makes no progress for 10 seconds the prune stops waiting and the undecided rows are marked missing. A boot where every row matches does no extra filesystem reads.
+Every other row gets the outcome it had before. A row the platform's own case rules still place in a registered folder (a case-only difference on Windows) stays live as it is, which also covers duplicates left by earlier case-only launches. Any other row is marked missing. Both apply to two rows for one target, a folder only a bind mount makes equal (`realpath` can't see it), a file that more than one folder fits, and any row whose filesystem reads fail. The reads run on one worker thread; if it makes no progress for 10 seconds the prune stops waiting and the undecided rows get the same outcome. A boot where every row matches does no extra filesystem reads; a case-only row left live is checked again on every boot.
 
 ### Partial download under its final filename
 

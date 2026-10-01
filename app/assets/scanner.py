@@ -343,8 +343,9 @@ def mark_contents_missing_outside_prefixes(
 
 
 def plan_prune_outside_prefixes(session: Session, prefixes: list[str]) -> PrunePlan:
-    # Case-sensitive, like the per-root sync, the scan's dedupe and the live-path index:
-    # a row in another letter case is re-homed or retired like any other spelling.
+    # Case-sensitive, like the per-root sync, the scan's dedupe and the live-path index, so
+    # a row in another letter case is re-homed like any other spelling. One the platform's
+    # case rules still own is never retired: if it can't move, it stays as it was.
     is_owned = path_prefix_matcher(prefixes, fold_case=False)
     rows = session.execute(
         sa.select(AssetContent.id, AssetContent.path)
@@ -352,7 +353,7 @@ def plan_prune_outside_prefixes(session: Session, prefixes: list[str]) -> PruneP
         .execution_options(yield_per=500)
     )
     unowned = [(content_id, path) for content_id, path in rows if not is_owned(path)]
-    return plan_prune(session, unowned, prefixes)
+    return plan_prune(session, unowned, prefixes, spare=path_prefix_matcher(prefixes))
 
 
 def collect_paths_for_roots(roots: tuple[RootType, ...]) -> list[str]:

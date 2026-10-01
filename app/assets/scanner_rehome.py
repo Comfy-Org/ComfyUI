@@ -13,7 +13,7 @@ import logging
 import os
 import threading
 from collections import Counter
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
@@ -36,6 +36,7 @@ Role = tuple[frozenset[str], str | None]
 class PrunePlan(NamedTuple):
     moves: dict[str, str]  # content id -> path under today's spelling
     retire: list[str]
+    spared: frozenset[str] = frozenset()  # never retired, even if their move fails
 
 
 class PruneResult(NamedTuple):
@@ -167,8 +168,11 @@ def _taken_paths(session: Session, paths: list[str]) -> set[str]:
     return taken
 
 
-def plan_prune(session: Session, rows: list[tuple[str, str]], prefixes: list[str]) -> PrunePlan:
-    """Decide each unowned ``(content id, path)`` row: re-home or retire. Reads only."""
+def plan_prune(
+    session: Session, rows: list[tuple[str, str]], prefixes: list[str], spare: Callable[[str], bool] = lambda _: False
+) -> PrunePlan:
+    """Decide each unowned ``(content id, path)`` row: re-home, retire, or (``spare``) leave
+    as it is. Reads only."""
     roles = _record_roles(session, [content_id for content_id, _ in rows])
     candidates = sorted(((cid, path) for cid, path in rows if cid in roles), key=lambda row: row[1])
     decided = _decide_with_stall_timeout(candidates, prefixes, roles) if candidates else {}
@@ -177,7 +181,8 @@ def plan_prune(session: Session, rows: list[tuple[str, str]], prefixes: list[str
     movers = {cid: target for cid, target in decided.items() if target is not None and claims[target] == 1}
     taken = _taken_paths(session, list(movers.values()))
     moves = {cid: target for cid, target in movers.items() if target not in taken}
-    return PrunePlan(moves, [cid for cid, _ in rows if cid not in moves])
+    spared = frozenset(cid for cid, path in rows if spare(path))
+    return PrunePlan(moves, [cid for cid, _ in rows if cid not in moves and cid not in spared], spared)
 
 
 def _rewrite(session: Session, moves: list[tuple[str, str]]) -> None:
@@ -206,7 +211,8 @@ def apply_prune_plan(session: Session, plan: PrunePlan) -> PruneResult:
             except IntegrityError as exc:
                 if not is_live_path_conflict(exc):
                     raise
-                retire.append(move[0])
+                if move[0] not in plan.spared:
+                    retire.append(move[0])
     for content_id in retire:
         mark_content_missing(session, content_id)
     return PruneResult(len(retire), rehomed)

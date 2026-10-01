@@ -252,6 +252,29 @@ def test_a_case_only_respelling_neither_duplicates_nor_retires(folders, folds_ca
     assert _missing_count(session) == 0
 
 
+def test_existing_case_duplicates_keep_their_edits_visible_whichever_spelling_launches(
+    folders, folds_case, temp_dir, session
+):
+    """Duplicates left by a case-only relaunch before this change: the edited row under one
+    spelling, a scan stub under the other. Neither can move onto the other, and neither
+    may retire, or the edits vanish on every other launch."""
+    data = temp_dir / "data"
+    _populate(data, ("f.png",))
+    upper = _alias(data, temp_dir / "DATA")
+    if not upper.is_symlink():
+        pytest.skip("this filesystem folds case, so DATA can't be a separate symlink")
+    edited = _row(session, upper / "f.png")
+    session.scalars(sa.select(Asset).where(Asset.content_id == edited)).one().name = "edited"
+    _row(session, data / "f.png")
+    session.commit()
+
+    for spelling in (data, upper, data, upper):
+        folders.use(output=spelling, models=None)
+        assert _boot() == 0
+        assert "edited" in {name for _, name in _records(session).values()}
+        assert _missing_count(session) == 0
+
+
 def test_a_case_sensitive_sibling_folder_is_not_mistaken_for_the_same_one(folders, folds_case, temp_dir, session):
     """Windows can mark a directory case-sensitive, so output and Output can be two folders."""
     lower, upper = temp_dir / "cs" / "output", temp_dir / "cs" / "Output"
@@ -265,8 +288,11 @@ def test_a_case_sensitive_sibling_folder_is_not_mistaken_for_the_same_one(folder
 
     folders.use(output=upper, models=None)
 
+    # Not re-homed onto the other folder's files; left live, as master leaves it.
     assert _boot() == len(OUTPUT_FILES)
-    assert not old_ids & set(_records(session))
+    assert {path for rid, (path, _) in _records(session).items() if rid in old_ids} == {
+        str(lower / name) for name in OUTPUT_FILES
+    }
 
 
 def test_input_and_output_on_one_folder_in_two_case_spellings_stay_stable(folders, folds_case, temp_dir, session):
@@ -311,7 +337,7 @@ def test_input_and_output_on_one_folder_keep_each_row_in_its_own_root(folders, t
 
 
 @pytest.mark.parametrize("case_only", [False, True], ids=["alias", "case-only"])
-def test_a_row_whose_folder_now_has_only_another_role_is_retired(
+def test_a_row_whose_folder_now_has_only_another_role_is_not_rehomed(
     folders, folds_case, temp_dir, session, case_only
 ):
     data = temp_dir / "data"
@@ -323,9 +349,12 @@ def test_a_row_whose_folder_now_has_only_another_role_is_retired(
     folders.use(output=None, models=None, input=data)
     _boot()
 
+    # Retired, or for a case-only row left live as master leaves it.
     live = _records(session)
-    assert old_id not in live
-    assert [path for path, _ in live.values()] == [str(data / "f.png")]
+    assert (old_id in live) is case_only
+    assert sorted(path for path, _ in live.values()) == sorted(
+        [str(data / "f.png")] + ([str(temp_dir / "DATA" / "f.png")] if case_only else [])
+    )
 
 
 @pytest.mark.parametrize("hashing", [False, True], ids=["hashing-off", "hashing-on"])
@@ -435,7 +464,7 @@ def test_a_row_owned_by_a_shallower_folder_is_left_as_spelled(folds_case, sessio
     assert _live(session, row) == str(shallow / "output" / "f.png")
 
 
-def test_a_row_both_case_variant_folders_fit_is_retired(folders, folds_case, session, temp_dir):
+def test_a_row_both_case_variant_folders_fit_is_left_as_spelled(folders, folds_case, session, temp_dir):
     """Input and output on one folder in two case spellings: where case folds, a file
     there is tagged with both roles, so either spelling fits and neither is chosen."""
     data = temp_dir / "data"
@@ -444,8 +473,8 @@ def test_a_row_both_case_variant_folders_fit_is_retired(folders, folds_case, ses
     folders.use(output=upper, models=None, input=data)
     row = _row(session, _alias(data, temp_dir / "Data") / "f.png", tags=("input", "output"))
 
-    assert _prune(session, data, upper) == (1, 0)
-    assert _live(session, row) is None
+    assert _prune(session, data, upper) == (0, 0)
+    assert _live(session, row) == str(temp_dir / "Data" / "f.png")
 
 
 def test_two_rows_resolving_to_one_target_both_retire(folders, session, temp_dir):
@@ -458,12 +487,12 @@ def test_two_rows_resolving_to_one_target_both_retire(folders, session, temp_dir
     assert [_live(session, row) for row in rows] == [None, None]
 
 
-def test_a_live_row_at_the_target_keeps_it(folders, folds_case, session, temp_dir):
+def test_a_live_row_at_the_target_keeps_it(folders, session, temp_dir):
     data = temp_dir / "data"
     _populate(data, ("f.png",))
     folders.use(output=data, models=None)
     occupant = _row(session, data / "f.png")
-    mover_path = _alias(data, temp_dir / "DATA") / "f.png"
+    mover_path = _alias(data, temp_dir / "alias") / "f.png"
     mover = _row(session, mover_path)
 
     # Decided by the plan, not left to the write's conflict fallback.
@@ -529,18 +558,23 @@ def test_a_hung_mount_costs_a_bounded_wait(folders, session, temp_dir, monkeypat
     assert _live(session, kept) == str(real / "ok.png")
 
 
-def test_a_target_taken_by_a_racing_writer_skips_that_row_only(folders, session, temp_dir, monkeypatch):
+@pytest.mark.parametrize("spelling", ["alias", "REAL"])
+def test_a_target_taken_by_a_racing_writer_skips_that_row_only(
+    folders, folds_case, session, temp_dir, monkeypatch, spelling
+):
     real = temp_dir / "real"
     _populate(real, ("f.png", "g.png"))
     folders.use(output=real, models=None)
-    alias = _alias(real, temp_dir / "alias")
+    alias = _alias(real, temp_dir / spelling)
     raced, moved = _row(session, alias / "f.png"), _row(session, alias / "g.png")
     racer = _row(session, real / "f.png")
     # The racer's insert lands between the plan's read and the rewrite.
     monkeypatch.setattr(scanner_rehome, "_taken_paths", lambda _session, _paths: set())
 
-    assert _prune(session, real) == (1, 1)
-    assert _live(session, raced) is None
+    # The raced row is retired, or for a case-only row left live as master leaves it.
+    retired = spelling == "alias"
+    assert _prune(session, real) == (int(retired), 1)
+    assert _live(session, raced) == (None if retired else str(alias / "f.png"))
     assert _live(session, moved) == str(real / "g.png")
     assert _live(session, racer) == str(real / "f.png")
 
