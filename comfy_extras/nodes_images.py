@@ -1002,6 +1002,9 @@ _FORMAT_SPECS = {
     ("png", "16-bit", 1): {"scale": 65535.0, "dtype": np.uint16,  "frame_fmt": "gray16le",  "stream_fmt": "gray16be"},
     ("png", "16-bit", 3): {"scale": 65535.0, "dtype": np.uint16,  "frame_fmt": "rgb48le",   "stream_fmt": "rgb48be"},
     ("png", "16-bit", 4): {"scale": 65535.0, "dtype": np.uint16,  "frame_fmt": "rgba64le",  "stream_fmt": "rgba64be"},
+    ("exr", "16-bit float", 1): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "grayf32le",  "stream_fmt": "grayf32le"},
+    ("exr", "16-bit float", 3): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "gbrpf32le",  "stream_fmt": "gbrpf32le"},
+    ("exr", "16-bit float", 4): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "gbrapf32le", "stream_fmt": "gbrapf32le"},
     ("exr", "32-bit float", 1): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "grayf32le",  "stream_fmt": "grayf32le"},
     ("exr", "32-bit float", 3): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "gbrpf32le",  "stream_fmt": "gbrpf32le"},
     ("exr", "32-bit float", 4): {"scale": 1.0, "dtype": np.float32, "frame_fmt": "gbrapf32le", "stream_fmt": "gbrapf32le"},
@@ -1674,6 +1677,9 @@ def _encode_image(
             img_tensor = srgb_to_linear(img_tensor)
         elif colorspace == "HDR":
             img_tensor = hlg_to_linear(img_tensor)
+        if bit_depth == "16-bit float":
+            # Round to half precision before FFmpeg's truncating float-to-half conversion.
+            img_tensor = img_tensor.to(torch.float16)
         img_np = img_tensor.cpu().numpy().astype(np.float32)
     else:
         # PNG path: quantize to integer range.
@@ -1688,6 +1694,8 @@ def _encode_image(
     codec.height = height
     codec.pix_fmt = spec["stream_fmt"]
     codec.time_base = Fraction(1, 1)
+    if file_format == "exr":
+        codec.options = {"format": "half" if bit_depth == "16-bit float" else "float"}
 
     frame = av.VideoFrame.from_ndarray(img_np, format=spec["frame_fmt"])
     if spec["frame_fmt"] != spec["stream_fmt"]:
@@ -1791,7 +1799,7 @@ class SaveImageAdvanced(IO.ComfyNode):
                             IO.Combo.Input("input_color_space", options=["sRGB"], default="sRGB", advanced=True),
                         ]),
                         IO.DynamicCombo.Option("exr", [
-                            IO.Combo.Input("bit_depth", options=["32-bit float"], default="32-bit float", advanced=True),
+                            IO.Combo.Input("bit_depth", options=["32-bit float", "16-bit float"], default="32-bit float", advanced=True),
                             IO.Combo.Input(
                                 "input_color_space",
                                 options=["sRGB", "HDR", "linear"],
