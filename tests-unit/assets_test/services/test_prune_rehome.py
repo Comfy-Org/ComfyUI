@@ -661,6 +661,22 @@ def test_a_target_taken_by_a_racing_writer_skips_that_row_only(
     assert _live(session, racer) == str(real / "f.png")
 
 
+def test_a_row_deleted_between_plan_and_apply_is_skipped(folders, session, temp_dir):
+    real = temp_dir / "real"
+    _populate(real, ("f.png",))
+    folders.use(output=real, models=None)
+    moved = _row(session, _alias(real, temp_dir / "alias") / "f.png")
+    deleted, retired = _row(session, temp_dir / "gone" / "a.png"), _row(session, temp_dir / "gone" / "b.png")
+    plan = scanner_rehome.plan_prune(
+        session, [(cid, session.get(AssetContent, cid).path) for cid in (moved, deleted, retired)], [str(real)]
+    )
+    session.execute(sa.delete(Asset).where(Asset.content_id == deleted))
+    session.execute(sa.delete(AssetContent).where(AssetContent.id == deleted))
+
+    assert scanner_rehome.apply_prune_plan(session, plan) == (1, 1)
+    assert (_live(session, moved), _live(session, retired)) == (str(real / "f.png"), None)
+
+
 def test_an_integrity_error_other_than_a_path_race_is_not_swallowed(folders, session, temp_dir, monkeypatch):
     real = temp_dir / "real"
     _populate(real, ("f.png",))

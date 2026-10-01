@@ -257,6 +257,11 @@ def apply_prune_plan(session: Session, plan: PrunePlan) -> PruneResult:
                     raise
                 if move[0] not in plan.spared:
                     retire.append(move[0])
+    marked = 0
     for content_id in retire:
-        mark_content_missing(session, content_id)
-    return PruneResult(len(retire), rehomed)
+        try:
+            mark_content_missing(session, content_id)
+            marked += 1
+        except LookupError:
+            continue  # deleted since the plan read it
+    return PruneResult(marked, rehomed)
