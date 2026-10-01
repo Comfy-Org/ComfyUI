@@ -1,17 +1,37 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const DOWNLOADING = ["active", "waiting"];
+const DOWNLOADING = ["active", "waiting", "paused", "copying"];
+
+function formatSize(bytes) {
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+    return `${(bytes / 1024 ** i).toFixed(i ? 1 : 0)} ${units[i]}`;
+}
 
 function statusText(model) {
     switch (model.status) {
         case "installed": return "Installed";
         case "missing": return "";
         case "waiting": return "Queued";
+        case "paused": return `Paused ${model.progress.toFixed(0)}%`;
         case "active": return `${model.progress.toFixed(0)}% · ${model.speed} · ${model.eta}`;
+        case "copying": return `Copying ${model.progress.toFixed(0)}%`;
         case "error": return `Error: ${model.error}`;
         default: return model.status;
     }
+}
+
+function addModel(url, folder, filename) {
+    return api.fetchApi("/model-manager/add", { method: "POST", body: JSON.stringify({ url, folder, filename }) });
+}
+
+// The Download button in the workflow's missing models list calls the desktop app's bridge when there is one, otherwise it
+// downloads to the browser. Providing the bridge makes it download on the server instead, which also works remotely.
+async function downloadMissingModel(url, name, directory) {
+    app.extensionManager.sidebarTab.activeSidebarTabId = "model-manager";
+    const resp = await addModel(url, directory, name);
+    if (!resp.ok) app.extensionManager.toast.add({ severity: "error", summary: `Download of ${name} failed`, detail: await resp.text(), life: 10000 });
 }
 
 function render(el) {
@@ -30,11 +50,11 @@ function render(el) {
             </div>
             <input class="file" type="file" accept=".yaml,.yml" hidden>
             <details>
-                <summary style="cursor:pointer">Add model by URL</summary>
+                <summary style="cursor:pointer">Add model by URL or path</summary>
                 <form class="add" style="display:flex;flex-direction:column;gap:8px;padding-top:8px">
-                    <input name="url" required placeholder="Hugging Face or Civitai URL" style="padding:6px;background:var(--comfy-input-bg);color:var(--input-text);border:1px solid var(--border-color);border-radius:4px">
+                    <input name="url" required placeholder="Hugging Face or Civitai URL, or file path" style="padding:6px;background:var(--comfy-input-bg);color:var(--input-text);border:1px solid var(--border-color);border-radius:4px">
                     <select name="folder" required style="padding:6px;background:var(--comfy-input-bg);color:var(--input-text);border:1px solid var(--border-color);border-radius:4px"></select>
-                    <input name="filename" placeholder="Filename (default: from URL)" style="padding:6px;background:var(--comfy-input-bg);color:var(--input-text);border:1px solid var(--border-color);border-radius:4px">
+                    <input name="filename" placeholder="Filename (default: from URL or path)" style="padding:6px;background:var(--comfy-input-bg);color:var(--input-text);border:1px solid var(--border-color);border-radius:4px">
                     <button style="padding:6px;cursor:pointer">Add and install</button>
                 </form>
             </details>
@@ -66,13 +86,13 @@ function render(el) {
         name.textContent = model.name;
         const detail = document.createElement("div");
         detail.style = "font-size:0.85em;opacity:0.7;overflow-wrap:anywhere";
-        detail.textContent = model.filename;
+        detail.textContent = model.size ? `${model.filename} · ${formatSize(model.size)}` : model.filename;
         const status = document.createElement("div");
         status.style = "font-size:0.85em";
         status.textContent = statusText(model);
         info.append(name, detail, status);
 
-        if (model.status === "active") {
+        if (model.status === "active" || model.status === "paused" || model.status === "copying") {
             const bar = document.createElement("progress");
             bar.max = 100;
             bar.value = model.progress;
@@ -80,6 +100,20 @@ function render(el) {
             info.append(bar);
         }
         label.append(box, info);
+
+        if (model.status === "active" || model.status === "waiting" || model.status === "paused") {
+            const action = model.status === "paused" ? "resume" : "pause";
+            const button = document.createElement("button");
+            button.textContent = model.status === "paused" ? "Resume" : "Pause";
+            button.style = "padding:4px 8px;cursor:pointer";
+            button.onclick = async (event) => {
+                event.preventDefault();
+                const resp = await api.fetchApi(`/model-manager/${action}`, { method: "POST", body: JSON.stringify(model.name) });
+                error.textContent = resp.ok ? "" : await resp.text();
+                refresh();
+            };
+            label.append(button);
+        }
         return label;
     }
 
@@ -108,9 +142,13 @@ function render(el) {
         }
         models = await resp.json();
         const downloading = models.some((m) => DOWNLOADING.includes(m.status));
-        if (wasDownloading && !downloading) app.refreshComboInNodes();
+        const finished = wasDownloading && !downloading;
         wasDownloading = downloading;
         draw();
+        if (finished) {
+            await app.refreshComboInNodes();
+            app.refreshMissingModels({ reloadDefs: false });
+        }
     }
 
     filter.oninput = draw;
@@ -144,10 +182,7 @@ function render(el) {
     });
     add.onsubmit = async (event) => {
         event.preventDefault();
-        const resp = await api.fetchApi("/model-manager/add", {
-            method: "POST",
-            body: JSON.stringify({ url: add.url.value, folder: add.folder.value, filename: add.filename.value.trim() }),
-        });
+        const resp = await addModel(add.url.value, add.folder.value, add.filename.value.trim());
         error.textContent = resp.ok ? "" : await resp.text();
         if (resp.ok) {
             add.url.value = "";
@@ -163,11 +198,12 @@ function render(el) {
 app.registerExtension({
     name: "model-manager",
     setup() {
+        window.__comfyDesktop2 ??= { downloadModel: downloadMissingModel };
         app.extensionManager.registerSidebarTab({
             id: "model-manager",
             icon: "pi pi-download",
-            title: "Models",
-            tooltip: "Install models",
+            title: "Download Models",
+            tooltip: "Download models or copy them from a path",
             type: "custom",
             render,
         });

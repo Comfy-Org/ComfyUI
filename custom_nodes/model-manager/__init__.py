@@ -1,5 +1,5 @@
-# Sidebar tab for installing the models listed in colab/models.yaml with colab/downloader.py, see colab/catalog.py
-# for the format. The catalog is reread on every request.
+# Sidebar tab for installing the models listed in colab/models.yaml, downloaded with colab/downloader.py or copied from
+# a local path such as a mounted Google Drive, see colab/catalog.py for the format. The catalog is reread on every request.
 # A models.yaml uploaded from the sidebar is saved to user/model-manager/models.yaml and replaces the default catalog
 # until it is reset. Models added by URL from the sidebar are added to that file, starting from the active catalog.
 #
@@ -12,8 +12,10 @@
 import asyncio
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
+import aria2p
 import yaml
 from aiohttp import web
 
@@ -24,7 +26,7 @@ COLAB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path
 CATALOG = os.path.join(COLAB_DIR, "models.yaml")
 USER_CATALOG = os.path.join(folder_paths.get_user_directory(), "model-manager", "models.yaml")
 sys.path.append(COLAB_DIR)
-from catalog import dump_catalog, parse_catalog  # noqa: E402
+from catalog import copy_model, dump_catalog, parse_catalog  # noqa: E402
 from downloader import Downloader, is_civitai  # noqa: E402
 
 WEB_DIRECTORY = "./js"
@@ -32,6 +34,8 @@ NODE_CLASS_MAPPINGS = {}
 
 downloader = Downloader(folder_paths.models_dir)
 downloads = {}  # model name -> aria2p.Download started from the sidebar
+copier = ThreadPoolExecutor()
+copies = {}  # model name -> Future of a copy started from the sidebar
 
 
 def check_catalog(catalog):
@@ -49,17 +53,30 @@ def load_catalog():
 
 def model_status(model):
     status = {"name": model["name"], "folder": model["folder"], "filename": model["filename"]}
+    path = os.path.join(folder_paths.models_dir, model["folder"], model["filename"])
+    copy = copies.get(model["name"])
+    if copy is not None and not copy.done():
+        part = path + ".part"
+        copied = os.path.getsize(part) if os.path.isfile(part) else 0
+        size = os.path.getsize(model["path"])
+        return status | {"status": "copying", "progress": 100 * copied / max(size, 1), "size": size}
+    if copy is not None and copy.exception() is not None:
+        return status | {"status": "error", "error": str(copy.exception())}
+
     download = downloads.get(model["name"])
     if download is not None:
         download.update()
         if download.status != "complete":
-            return status | {"status": download.status, "progress": download.progress, "speed": download.download_speed_string(),
-                             "eta": download.eta_string(), "error": download.error_message}
+            # aria2 reports a total length of 0 until the server has sent it.
+            return status | {"status": download.status, "progress": download.progress, "size": download.total_length,
+                             "speed": download.download_speed_string(), "eta": download.eta_string(), "error": download.error_message}
 
-    path = os.path.join(folder_paths.models_dir, model["folder"], model["filename"])
     # aria2 creates the file up front and keeps a .aria2 control file next to it until the download finishes.
-    installed = os.path.isfile(path) and not os.path.exists(path + ".aria2")
-    return status | {"status": "installed" if installed else "missing"}
+    if os.path.isfile(path) and not os.path.exists(path + ".aria2"):
+        return status | {"status": "installed", "size": os.path.getsize(path)}
+    if "path" in model and os.path.isfile(model["path"]):
+        return status | {"status": "missing", "size": os.path.getsize(model["path"])}
+    return status | {"status": "missing"}
 
 
 def save_catalog(catalog):
@@ -69,6 +86,10 @@ def save_catalog(catalog):
 
 
 async def start_downloads(models):
+    for model in models:
+        if "path" in model:
+            copies[model["name"]] = copier.submit(copy_model, model["path"], os.path.join(folder_paths.models_dir, model["folder"], model["filename"]))
+    models = [model for model in models if "path" not in model]
     # Civitai links are resolved with a blocking curl call, so resolve them in parallel off the event loop.
     started = await asyncio.gather(*(asyncio.to_thread(downloader.download, model["folder"], model["url"], rename=model["filename"])
                                      for model in models))
@@ -90,6 +111,16 @@ async def install_models(request):
     return web.json_response({})
 
 
+@PromptServer.instance.routes.post("/model-manager/{action:pause|resume}")
+async def pause_download(request):
+    download = downloads[await request.json()]
+    try:
+        await asyncio.to_thread(download.pause if request.match_info["action"] == "pause" else download.resume)
+    except aria2p.ClientException as e:
+        return web.Response(status=400, text=str(e))
+    return web.json_response({})
+
+
 @PromptServer.instance.routes.post("/model-manager/catalog")
 async def upload_catalog(request):
     try:
@@ -104,13 +135,19 @@ async def upload_catalog(request):
 async def add_model(request):
     body = await request.json()
     url = body["url"].strip()
-    # Hugging Face /blob/ links are the file's web page, /resolve/ is the file itself.
-    if "huggingface.co/" in url:
-        url = url.replace("/blob/", "/resolve/", 1)
-    filename = body.get("filename") or ("" if is_civitai(url) else os.path.basename(urlparse(url).path))
-    if not filename:
-        return web.Response(status=400, text="Civitai links don't include the filename, enter one.")
-    model = {"name": filename, "folder": body["folder"], "url": url, "filename": filename}
+    if not urlparse(url).scheme.startswith("http"):
+        if not os.path.isfile(url):
+            return web.Response(status=400, text=f"File not found: {url}")
+        filename = body.get("filename") or os.path.basename(url)
+        model = {"name": filename, "folder": body["folder"], "path": url, "filename": filename}
+    else:
+        # Hugging Face /blob/ links are the file's web page, /resolve/ is the file itself.
+        if "huggingface.co/" in url:
+            url = url.replace("/blob/", "/resolve/", 1)
+        filename = body.get("filename") or ("" if is_civitai(url) else os.path.basename(urlparse(url).path))
+        if not filename:
+            return web.Response(status=400, text="Civitai links don't include the filename, enter one.")
+        model = {"name": filename, "folder": body["folder"], "url": url, "filename": filename}
     catalog = load_catalog() | {filename: model}
     try:
         check_catalog(catalog)

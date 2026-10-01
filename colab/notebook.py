@@ -2,7 +2,7 @@
 #   !git clone https://github.com/trailbat/ComfyUI.git /content/ComfyUI
 #   import sys; sys.path.append("/content/ComfyUI/colab")
 #   import notebook
-#   notebook.setup(CUSTOM_NODES, MODELS_YAML, DOWNLOAD_MODELS, TAILSCALE)
+#   notebook.setup(CUSTOM_NODES, MODELS_YAML, DOWNLOAD_MODELS, TAILSCALE, GOOGLE_DRIVE)
 #   !python /content/ComfyUI/main.py --enable-manager --listen
 #
 # Reads the GITHUB_TOKEN (for a models.yaml in a private repo), CIVITAI_API_KEY, HUG_TOKEN and TS_AUTHKEY Colab secrets.
@@ -11,10 +11,10 @@ import os
 import time
 import urllib.request
 
-from google.colab import userdata
+from google.colab import drive, userdata
 
 import install
-from catalog import parse_catalog
+from catalog import copy_model, parse_catalog
 import tailscale
 from downloader import Downloader
 
@@ -36,16 +36,20 @@ def fetch_catalog(url):
     with urllib.request.urlopen(request) as r:
         text = r.read().decode("utf-8")
     catalog = parse_catalog(text)
-    # The Models sidebar tab reads its default catalog from colab/models.yaml.
+    # The Download Models sidebar tab reads its default catalog from colab/models.yaml.
     with open(CATALOG, "w", encoding="utf-8") as f:
         f.write(text)
     return catalog
 
 
-def setup(custom_nodes, models_yaml, download_models, tailscale_enabled):
+def setup(custom_nodes, models_yaml, download_models, tailscale_enabled, google_drive):
     # Colab secrets can't be read from the ComfyUI process, so pass them through the environment.
     for name in ["CIVITAI_API_KEY", "HUG_TOKEN", "TS_AUTHKEY"]:
         os.environ[name] = secret(name)
+
+    # Models with a path in models.yaml are usually copied from Google Drive.
+    if google_drive:
+        drive.mount("/content/drive")
 
     catalog = fetch_catalog(models_yaml)
     missing = [name for name in download_models if name not in catalog]
@@ -57,12 +61,19 @@ def setup(custom_nodes, models_yaml, download_models, tailscale_enabled):
     models_dir = os.path.join(install.ROOT, "models")
     downloader = Downloader(models_dir)
     downloads = []
+    copies = []
     for model in (catalog[name] for name in download_models):
         path = os.path.join(models_dir, model["folder"], model["filename"])
-        # aria2 refuses to overwrite a finished download, which happens when the setup cell is run again.
+        # Skip installed models when the setup cell is run again, aria2 refuses to overwrite a finished download.
         if os.path.isfile(path) and not os.path.exists(path + ".aria2"):
             continue
-        downloads += downloader.download(model["folder"], model["url"], rename=model["filename"])
+        if "path" in model:
+            copies.append((model["path"], path))
+        else:
+            downloads += downloader.download(model["folder"], model["url"], rename=model["filename"])
+    for source, path in copies:
+        print(f"Copying {source}")
+        copy_model(source, path)
     # aria2 downloads them in parallel, wait so ComfyUI starts with every model in place.
     for download in downloads:
         while not download.is_complete:
