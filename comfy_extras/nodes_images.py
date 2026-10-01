@@ -1799,7 +1799,7 @@ class SaveImageAdvanced(IO.ComfyNode):
                             IO.Combo.Input("input_color_space", options=["sRGB"], default="sRGB", advanced=True),
                         ]),
                         IO.DynamicCombo.Option("exr", [
-                            IO.Combo.Input("bit_depth", options=["32-bit float", "16-bit float"], default="32-bit float", advanced=True),
+                            IO.Combo.Input("bit_depth", options=["32-bit float", "16-bit float"], default="16-bit float", advanced=True),
                             IO.Combo.Input(
                                 "input_color_space",
                                 options=["sRGB", "HDR", "linear"],
