@@ -1,8 +1,9 @@
 """Turns incoming bytes into catalogued assets: multipart uploads moved into a
 hash-addressed destination, files registered where they already sit, and
 records created from a hash the catalog already holds. Every path persists the
-stat that hashing verified (an upload copied across volumes, the copy's stat),
-so a row's recorded size and mtime describe the same observation as its hash. A live row already at the destination is
+stat that hashing verified (for an upload copied across volumes, the stat of a
+copy taken from that verified file), so a row's recorded size and mtime describe
+the same observation as its hash. A live row already at the destination is
 reconciled before the write, so an upload never adopts a fresh hash onto
 records created for bytes it just replaced.
 """
@@ -187,18 +188,29 @@ def _guess_upload_mime_type(
     return guessed or "application/octet-stream"
 
 
-def _copy_across_devices(temp_path: str, dest_abs: str, expected_size: int) -> os.stat_result:
+def _copy_across_devices(
+    temp_path: str, dest_abs: str, verified_stat: os.stat_result
+) -> os.stat_result:
     """Copy to a hidden sibling of ``dest_abs``, then rename it into place, so a
-    partial copy is never visible under the final name. Returns the copy's stat."""
+    partial copy is never visible under the final name. The source must still
+    match the stat hashing verified once the copy is done. Returns the copy's
+    stat."""
     fd, staging = tempfile.mkstemp(
         dir=os.path.dirname(dest_abs), prefix=".", suffix=".upload.tmp"
     )
-    os.close(fd)
     try:
-        shutil.copy2(temp_path, staging)
+        with os.fdopen(fd, "wb") as dst, open(temp_path, "rb") as src:
+            shutil.copyfileobj(src, dst)
+            source_stat = os.fstat(src.fileno())
+        if (source_stat.st_size, source_stat.st_mtime_ns) != (
+            verified_stat.st_size,
+            verified_stat.st_mtime_ns,
+        ):
+            raise OSError("upload file changed after hashing")
+        # Best effort: mode bits cannot be set on some filesystems (e.g. FAT).
+        with contextlib.suppress(OSError):
+            shutil.copymode(temp_path, staging)
         copied_stat = os.stat(staging)
-        if copied_stat.st_size != expected_size:
-            raise OSError(f"copied {copied_stat.st_size} of {expected_size} bytes")
         os.replace(staging, dest_abs)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -221,7 +233,7 @@ def _move_temp_to_dest(
         except OSError as e:
             if e.errno != errno.EXDEV:
                 raise
-        return _copy_across_devices(temp_path, dest_abs, verified_stat.st_size)
+        return _copy_across_devices(temp_path, dest_abs, verified_stat)
     except Exception as e:
         raise RuntimeError(f"failed to move uploaded file into place: {e}") from e
 

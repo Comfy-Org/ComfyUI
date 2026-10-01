@@ -99,15 +99,8 @@ def test_cross_device_upload_copies_into_place_and_records_the_copys_stat(
 ):
     temp_root, input_root = dirs
     temp = _write_temp(temp_root)
+    temp.chmod(0o644)
     dest = _dest_for(input_root, temp)
-    copied_mtime_ns = _SOURCE_MTIME_NS + 7_000_000_000
-    real_copy2 = shutil.copy2
-
-    def copy2_on_coarser_clock(src, dst):
-        real_copy2(src, dst)
-        os.utime(dst, ns=(copied_mtime_ns, copied_mtime_ns))
-
-    monkeypatch.setattr(ingest_module.shutil, "copy2", copy2_on_coarser_clock)
     calls = _fail_first_replace(monkeypatch, _exdev())
 
     result = _upload(temp)
@@ -119,12 +112,33 @@ def test_cross_device_upload_copies_into_place_and_records_the_copys_stat(
     assert Path(staging_src).parent == input_root
     assert Path(staging_src).name.startswith(".")
     assert Path(staging_src).name.endswith(".tmp")
+    if sys.platform != "win32":
+        assert dest.stat().st_mode & 0o777 == 0o644
     _assert_nothing_left(temp, input_root, dest)
     with mock_create_session() as session:
         content = session.scalars(select(AssetContent)).one()
         assert content.path == str(dest)
         assert content.size_bytes == len(_CONTENT)
-        assert content.mtime_ns == dest.stat().st_mtime_ns == copied_mtime_ns
+        assert content.mtime_ns == dest.stat().st_mtime_ns != _SOURCE_MTIME_NS
+
+
+def test_destination_that_rejects_mode_bits_still_accepts_the_upload(
+    mock_create_session, hashing_on, dirs, monkeypatch
+):
+    temp_root, input_root = dirs
+    temp = _write_temp(temp_root)
+    dest = _dest_for(input_root, temp)
+
+    def no_chmod(src, dst):
+        raise PermissionError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(ingest_module.shutil, "copymode", no_chmod)
+    _fail_first_replace(monkeypatch, _exdev())
+
+    _upload(temp)
+
+    assert dest.read_bytes() == _CONTENT
+    _assert_nothing_left(temp, input_root, dest)
 
 
 def test_copy_failure_leaves_no_destination_and_no_staging_file(
@@ -134,10 +148,10 @@ def test_copy_failure_leaves_no_destination_and_no_staging_file(
     temp = _write_temp(temp_root)
 
     def partial_copy(src, dst):
-        Path(dst).write_bytes(_CONTENT[:5])
+        dst.write(src.read(5))
         raise OSError(errno.ENOSPC, "No space left on device")
 
-    monkeypatch.setattr(ingest_module.shutil, "copy2", partial_copy)
+    monkeypatch.setattr(ingest_module.shutil, "copyfileobj", partial_copy)
     _fail_first_replace(monkeypatch, _exdev())
 
     with pytest.raises(RuntimeError, match="failed to move uploaded file into place"):
@@ -146,17 +160,44 @@ def test_copy_failure_leaves_no_destination_and_no_staging_file(
     _assert_nothing_left(temp, input_root, None)
 
 
-def test_short_copy_is_rejected_before_it_takes_the_final_name(
+def _rewrite_same_size(temp: Path) -> None:
+    temp.write_bytes(_CONTENT[::-1])
+    os.utime(temp, ns=(_SOURCE_MTIME_NS + 1, _SOURCE_MTIME_NS + 1))
+
+
+def test_source_changed_after_hashing_is_not_copied(
     mock_create_session, hashing_on, dirs, monkeypatch
 ):
     temp_root, input_root = dirs
     temp = _write_temp(temp_root)
-    monkeypatch.setattr(
-        ingest_module.shutil, "copy2", lambda src, dst: Path(dst).write_bytes(_CONTENT[:5])
-    )
+
+    def rewrite_then_exdev(src, dst):
+        _rewrite_same_size(temp)
+        raise _exdev()
+
+    monkeypatch.setattr(ingest_module.os, "replace", rewrite_then_exdev)
+
+    with pytest.raises(RuntimeError, match="changed after hashing"):
+        _upload(temp)
+
+    _assert_nothing_left(temp, input_root, None)
+
+
+def test_source_changed_during_the_copy_is_not_published(
+    mock_create_session, hashing_on, dirs, monkeypatch
+):
+    temp_root, input_root = dirs
+    temp = _write_temp(temp_root)
+    real_copyfileobj = shutil.copyfileobj
+
+    def copy_then_rewrite(src, dst):
+        real_copyfileobj(src, dst)
+        _rewrite_same_size(temp)
+
+    monkeypatch.setattr(ingest_module.shutil, "copyfileobj", copy_then_rewrite)
     _fail_first_replace(monkeypatch, _exdev())
 
-    with pytest.raises(RuntimeError, match="failed to move uploaded file into place"):
+    with pytest.raises(RuntimeError, match="changed after hashing"):
         _upload(temp)
 
     _assert_nothing_left(temp, input_root, None)
@@ -185,7 +226,7 @@ def test_other_move_errors_do_not_fall_back_to_a_copy(
     temp_root, input_root = dirs
     temp = _write_temp(temp_root)
     copies: list = []
-    monkeypatch.setattr(ingest_module.shutil, "copy2", lambda *a: copies.append(a))
+    monkeypatch.setattr(ingest_module.shutil, "copyfileobj", lambda *a: copies.append(a))
     _fail_first_replace(monkeypatch, PermissionError(errno.EACCES, "Access is denied"))
 
     with pytest.raises(RuntimeError, match="failed to move uploaded file into place"):
@@ -202,7 +243,7 @@ def test_same_device_upload_is_a_plain_rename(
     temp = _write_temp(temp_root)
     dest = _dest_for(input_root, temp)
     copies: list = []
-    monkeypatch.setattr(ingest_module.shutil, "copy2", lambda *a: copies.append(a))
+    monkeypatch.setattr(ingest_module.shutil, "copyfileobj", lambda *a: copies.append(a))
 
     _upload(temp)
 
