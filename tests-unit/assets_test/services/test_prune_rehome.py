@@ -569,6 +569,8 @@ def test_a_target_taken_by_a_racing_writer_skips_that_row_only(
     _populate(real, ("f.png", "g.png"))
     folders.use(output=real, models=None)
     alias = _alias(real, temp_dir / spelling)
+    if not alias.is_symlink():
+        pytest.skip("this filesystem folds case, so REAL can't be a separate symlink")
     raced, moved = _row(session, alias / "f.png"), _row(session, alias / "g.png")
     racer = _row(session, real / "f.png")
     # The racer's insert lands between the plan's read and the rewrite.
