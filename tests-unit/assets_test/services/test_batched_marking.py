@@ -581,9 +581,16 @@ def test_a_cancel_stops_a_standalone_prune_and_shutdown_waits_for_it(session, ca
         assert shut_down.wait(5)  # hold the first batch until shutdown has cancelled
         return marked
 
-    result: list[int | None] = []
+    result: list[object] = []
+
+    def prune() -> None:
+        try:
+            result.append(instance.mark_missing_outside_prefixes())
+        except seeder_module.PruneCancelledError as cancelled:
+            result.append(cancelled)
+
     with patch("app.assets.scanner.mark_contents_missing", mark):
-        worker = threading.Thread(target=lambda: result.append(instance.mark_missing_outside_prefixes()))
+        worker = threading.Thread(target=prune)
         worker.start()
         assert first_batch.wait(5)
         threading.Timer(0.1, shut_down.set).start()
@@ -591,5 +598,35 @@ def test_a_cancel_stops_a_standalone_prune_and_shutdown_waits_for_it(session, ca
         worker.join(5)
 
     assert len(catalog) == 1
-    assert result == [scanner.WRITE_BATCH_ROWS]
+    assert len(result) == 1 and isinstance(result[0], seeder_module.PruneCancelledError)
+    assert result[0].marked == scanner.WRITE_BATCH_ROWS
     assert not instance.standalone_prune_running()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_api_prune_is_not_reported_as_completed(monkeypatch):
+    def cancelled_prune() -> int:
+        raise seeder_module.PruneCancelledError(256)
+
+    monkeypatch.setattr(routes.asset_seeder, "mark_missing_outside_prefixes", cancelled_prune)
+    response = await routes.mark_missing_assets.__wrapped__(make_mocked_request("POST", "/api/assets/prune"))
+
+    assert response.status == 200
+    assert json.loads(response.body) == {"status": "cancelled", "marked": 256}
+
+
+def test_a_prune_that_finishes_before_a_late_cancel_reports_completed(session, catalog, temp_dir, monkeypatch):
+    """The cancel only counts if it stopped a batch from running."""
+    _rows(session, temp_dir, 10)
+    instance = seeder_module._AssetSeeder()
+    monkeypatch.setattr(seeder_module, "dependencies_available", lambda: True)
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
+    real = scanner.mark_contents_missing
+
+    def mark(sess, ids):
+        marked = real(sess, ids)
+        instance.cancel()  # arrives during the last (only) batch
+        return marked
+
+    with patch("app.assets.scanner.mark_contents_missing", mark):
+        assert instance.mark_missing_outside_prefixes() == 10

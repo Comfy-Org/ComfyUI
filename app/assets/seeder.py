@@ -43,6 +43,15 @@ class ScanInProgressError(Exception):
     """Raised when an operation cannot proceed because a scan is running."""
 
 
+class PruneCancelledError(Exception):
+    """A standalone prune stopped by a cancel. The batches before it stay committed;
+    ``marked`` counts them."""
+
+    def __init__(self, marked: int) -> None:
+        super().__init__(f"prune cancelled after marking {marked}")
+        self.marked = marked
+
+
 class State(Enum):
     """Seeder state machine states."""
 
@@ -475,6 +484,7 @@ class _AssetSeeder:
 
         Raises:
             ScanInProgressError: If a scan is currently running
+            PruneCancelledError: If a cancel stopped it part way
         """
         with self._lock:
             if self._state != State.IDLE:
@@ -495,7 +505,14 @@ class _AssetSeeder:
             all_prefixes = get_owned_prefixes()
             # Not pausable (the API waits on it), but a cancel or shutdown stops it
             # between batches: it runs on a worker thread that exit would wait for.
-            marked = mark_missing_outside_prefixes_safely(all_prefixes, self._cancel_event.is_set)
+            stopped = False
+
+            def should_stop() -> bool:
+                nonlocal stopped
+                stopped = self._cancel_event.is_set()
+                return stopped
+
+            marked = mark_missing_outside_prefixes_safely(all_prefixes, should_stop)
             if marked is None:
                 return None
             emit(
@@ -503,6 +520,9 @@ class _AssetSeeder:
                 count=marked,
                 stage=_ScanStage.MARK_MISSING.value,
             )
+            if stopped:
+                logging.info("Marking missing assets cancelled after marking %d", marked)
+                raise PruneCancelledError(marked)
             if marked > 0:
                 logging.info("Marked %d references as missing", marked)
             return marked

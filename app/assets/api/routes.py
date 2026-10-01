@@ -43,7 +43,7 @@ from app.assets.database.queries.records import (
     get_preview_file_paths_by_ids,
     list_records_page,
 )
-from app.assets.seeder import ScanInProgressError, asset_seeder
+from app.assets.seeder import PruneCancelledError, ScanInProgressError, asset_seeder
 from app.assets.services import (
     DependencyMissingError,
     HashMismatchError,
@@ -1135,6 +1135,7 @@ async def mark_missing_assets(request: web.Request) -> web.Response:
 
     Returns:
         200 OK with count of marked assets
+        200 OK with status "cancelled" and the count marked before a cancel stopped it
         409 Conflict if a scan is currently running
         500 Internal Server Error with PRUNE_FAILED if the marking failed, so a
             prune that did not run is never reported as a completed one
@@ -1147,6 +1148,8 @@ async def mark_missing_assets(request: web.Request) -> web.Response:
             {"status": "scan_running", "marked": 0},
             status=409,
         )
+    except PruneCancelledError as cancelled:
+        return web.json_response({"status": "cancelled", "marked": cancelled.marked}, status=200)
     if marked is None:
         return _build_error_response(
             500,
