@@ -630,3 +630,42 @@ def test_a_prune_that_finishes_before_a_late_cancel_reports_completed(session, c
 
     with patch("app.assets.scanner.mark_contents_missing", mark):
         assert instance.mark_missing_outside_prefixes() == 10
+
+
+def test_shutdown_during_a_prune_does_not_start_the_scan_a_prompt_queued(session, catalog, temp_dir, monkeypatch):
+    """A scan started after shutdown cancelled the prune would run on into teardown."""
+    _rows(session, temp_dir, 600)
+    instance = seeder_module._AssetSeeder()
+    monkeypatch.setattr(seeder_module, "dependencies_available", lambda: True)
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
+    started: list[tuple] = []
+
+    def start(roots=("models", "input", "output"), **kwargs) -> bool:
+        if instance._state is not State.IDLE:
+            return False
+        started.append(tuple(roots))
+        return True
+
+    monkeypatch.setattr(instance, "start", start)
+    real = scanner.mark_contents_missing
+    first_batch = threading.Event()
+    shut_down = threading.Event()
+
+    def mark(sess, ids):
+        marked = real(sess, ids)
+        # A prompt finishes and queues its output rescan; the prune holds the seeder.
+        assert instance.enqueue_scan(roots=("output",), phase=seeder_module.ScanPhase.FULL) is False
+        first_batch.set()
+        assert shut_down.wait(5)
+        return marked
+
+    with patch("app.assets.scanner.mark_contents_missing", mark):
+        worker = threading.Thread(target=lambda: pytest.raises(seeder_module.PruneCancelledError, instance.mark_missing_outside_prefixes))
+        worker.start()
+        assert first_batch.wait(5)
+        threading.Timer(0.1, shut_down.set).start()
+        assert instance.shutdown(timeout=5)
+        worker.join(5)
+
+    assert started == []
+    assert instance._state is State.IDLE

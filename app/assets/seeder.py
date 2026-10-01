@@ -528,9 +528,14 @@ class _AssetSeeder:
             return marked
         finally:
             # The API runs this off the event loop, so a prompt can finish meanwhile
-            # and queue its output rescan; start it now.
+            # and queue its output rescan; start it now. Not after a cancel: shutdown
+            # cancels, and a scan started here would run on into teardown. It stays
+            # queued for the next scan to start.
             with self._lock:
-                self._finish_and_start_pending()
+                if self._cancel_event.is_set():
+                    self._reset_to_idle()
+                else:
+                    self._finish_and_start_pending()
                 self._prune_idle.set()
 
     def standalone_prune_running(self) -> bool:
