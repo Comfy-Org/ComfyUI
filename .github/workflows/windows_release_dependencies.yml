@@ -53,7 +53,7 @@ jobs:
             echo If you just want to update normally, close this and run update_comfyui.bat instead.
             echo -
             pause
-            ..\python_embeded\python.exe -s -m pip install --upgrade torch torchvision torchaudio ${{ inputs.xformers }} --extra-index-url https://download.pytorch.org/whl/cu${{ inputs.cu }} -r ../ComfyUI/requirements.txt pygit2
+            ..\python_embeded\python.exe -s -m pip install --upgrade torch torchvision torchaudio ${{ inputs.xformers }} --extra-index-url https://download.pytorch.org/whl/cu${{ inputs.cu }} -r ../ComfyUI/requirements.txt -r ../ComfyUI/manager_requirements.txt pygit2
             pause" > update_comfyui_and_python_dependencies.bat
 
             grep -v comfyui requirements.txt > requirements_nocomfyui.txt
