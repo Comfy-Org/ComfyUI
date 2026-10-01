@@ -73,18 +73,19 @@ class _Roles:
     directory part depend only on those, and the file name completes the loader path."""
 
     def __init__(self) -> None:
-        self._by_folder: dict[tuple[str, str], tuple[frozenset[str], str] | None] = {}
+        self._by_folder: dict[tuple[str, str], tuple[frozenset[str], str | None] | None] = {}
 
     def __call__(self, path: str) -> Role | None:
         directory, name = os.path.split(path)
         key = (directory, os.path.splitext(name)[1].lower())
         if key not in self._by_folder:
             role = _role(path)
-            if role is not None and (role[1] is None or not role[1].endswith(name)):
-                return role  # no loader path to split; don't memoise
-            self._by_folder[key] = None if role is None else (role[0], role[1][: len(role[1]) - len(name)])
+            if role is not None and role[1] is not None and not role[1].endswith(name):
+                return role  # a name the loader path doesn't end with; don't memoise
+            stem = None if role is None or role[1] is None else role[1][: len(role[1]) - len(name)]
+            self._by_folder[key] = None if role is None else (role[0], stem)
         cached = self._by_folder[key]
-        return None if cached is None else (cached[0], cached[1] + name)
+        return None if cached is None else (cached[0], None if cached[1] is None else cached[1] + name)
 
 
 def _same_file(old: str, new: str) -> bool:

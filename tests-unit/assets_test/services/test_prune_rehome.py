@@ -517,12 +517,16 @@ def test_a_row_both_case_variant_folders_fit_is_left_as_spelled(folders, folds_c
     assert _live(session, row) == str(temp_dir / "Data" / "f.png")
 
 
-def test_a_role_is_derived_once_per_folder_and_extension(folders, temp_dir, monkeypatch):
+@pytest.mark.parametrize("output_registered", [True, False], ids=["output-loader-paths", "no-loader-path"])
+def test_a_role_is_derived_once_per_folder_and_extension(folders, temp_dir, monkeypatch, output_registered):
+    """Without output registered, the .png files under the model folder are tagged but
+    have no loader path, as no category there loads them."""
     out, models = temp_dir / "out", temp_dir / "out" / "checkpoints"
-    folders.use(output=out, models=models)
+    folders.use(output=out if output_registered else None, models=models)
     paths = [str(models / n) for n in ("a.safetensors", "b.safetensors", "c.png", "d.png")]
     paths += [str(out / "sub" / n) for n in ("e.png", "f.png")] + [str(temp_dir / "elsewhere" / "g.png")]
     expected = [scanner_rehome._role(path) for path in paths]
+    assert (expected[2][1] is None) is not output_registered
     calls: list[str] = []
     role = scanner_rehome._role
     monkeypatch.setattr(scanner_rehome, "_role", lambda path: calls.append(path) or role(path))
