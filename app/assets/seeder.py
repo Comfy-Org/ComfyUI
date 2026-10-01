@@ -163,6 +163,9 @@ class _AssetSeeder:
         self._cancel_event = threading.Event()
         self._run_gate = threading.Event()
         self._run_gate.set()  # Start unpaused (set = running, clear = paused)
+        # Clear while a standalone prune holds the seeder (set = no prune running).
+        self._prune_idle = threading.Event()
+        self._prune_idle.set()
         self._roots: tuple[RootType, ...] = ()
         self._phase: ScanPhase = ScanPhase.FULL
         self._compute_hashes: bool = False
@@ -478,6 +481,7 @@ class _AssetSeeder:
                     "Cannot mark missing assets while scan is running"
                 )
             self._state = State.RUNNING
+            self._prune_idle.clear()
 
         try:
             if not dependencies_available():
@@ -503,6 +507,14 @@ class _AssetSeeder:
             # and queue its output rescan; start it now.
             with self._lock:
                 self._finish_and_start_pending()
+                self._prune_idle.set()
+
+    def standalone_prune_running(self) -> bool:
+        return not self._prune_idle.is_set()
+
+    def wait_for_standalone_prune(self, timeout: float | None = None) -> bool:
+        """Block until no standalone prune holds the seeder. True unless it timed out."""
+        return self._prune_idle.wait(timeout)
 
     def _reset_to_idle(self) -> None:
         """Reset state to IDLE, preserving last progress. Caller must hold _lock."""

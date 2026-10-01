@@ -1059,6 +1059,14 @@ async def seed_assets(request: web.Request) -> web.Response:
     started = asset_seeder.start(
         roots=valid_roots, compute_hashes=mode.hashing_enabled()
     )
+    if not started and asset_seeder.standalone_prune_running():
+        # A prune from POST /api/assets/prune is not a scan and emits no scan events,
+        # so wait it out (it runs off the loop) rather than answer 409, which a client
+        # takes as "a scan is coming".
+        await asyncio.to_thread(asset_seeder.wait_for_standalone_prune)
+        started = asset_seeder.start(
+            roots=valid_roots, compute_hashes=mode.hashing_enabled()
+        )
     if not started:
         return web.json_response({"status": "already_running"}, status=409)
 

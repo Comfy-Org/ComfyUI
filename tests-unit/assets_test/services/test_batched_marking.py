@@ -505,3 +505,60 @@ def test_the_standalone_prune_starts_the_scan_queued_while_it_ran(session, catal
 
     assert [kwargs["roots"] for kwargs in started] == [("output",)]
     assert instance._pending_scan is None
+
+
+def _seeder_with_recorded_starts(monkeypatch) -> tuple[seeder_module._AssetSeeder, list[tuple]]:
+    instance = seeder_module._AssetSeeder()
+    monkeypatch.setattr(seeder_module, "dependencies_available", lambda: True)
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
+    started: list[tuple] = []
+
+    def start(roots=("models", "input", "output"), **kwargs) -> bool:
+        if instance._state is not State.IDLE:
+            return False
+        started.append(tuple(roots))
+        return True
+
+    monkeypatch.setattr(instance, "start", start)
+    monkeypatch.setattr(routes, "asset_seeder", instance)
+    monkeypatch.setattr(routes, "_ASSETS_ENABLED", True)
+    return instance, started
+
+
+@pytest.mark.asyncio
+async def test_a_seed_request_during_an_api_prune_waits_for_it_then_starts(monkeypatch):
+    """The prune runs off the event loop now, so a seed request can arrive while it
+    holds the seeder. A 409 there would tell the client a scan is coming when none is."""
+    instance, started = _seeder_with_recorded_starts(monkeypatch)
+    release = threading.Event()
+    pruning = threading.Event()
+
+    def blocking_prune(prefixes, should_stop=None):
+        pruning.set()
+        assert release.wait(5)
+        return 0
+
+    monkeypatch.setattr(seeder_module, "mark_missing_outside_prefixes_safely", blocking_prune)
+    prune = asyncio.create_task(asyncio.to_thread(instance.mark_missing_outside_prefixes))
+    assert await asyncio.to_thread(pruning.wait, 5)
+
+    seed = asyncio.create_task(routes.seed_assets.__wrapped__(make_mocked_request("POST", "/api/assets/seed")))
+    await asyncio.sleep(0.2)
+    assert not seed.done()  # waiting out the prune, not answering 409
+    release.set()
+    response = await seed
+    await prune
+
+    assert response.status == 202
+    assert started == [("models", "input", "output")]
+
+
+@pytest.mark.asyncio
+async def test_a_seed_request_during_a_scan_still_gets_409(monkeypatch):
+    instance, started = _seeder_with_recorded_starts(monkeypatch)
+    instance._state = State.RUNNING
+
+    response = await routes.seed_assets.__wrapped__(make_mocked_request("POST", "/api/assets/seed"))
+
+    assert response.status == 409
+    assert started == []
