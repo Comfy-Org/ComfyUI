@@ -442,7 +442,8 @@ class _AssetSeeder:
             True if the scan thread joined cleanly; False on timeout.
         """
         self.cancel()
-        joined = self.wait(timeout=timeout)
+        # A standalone prune stops at its next batch once cancelled.
+        joined = self.wait(timeout=timeout) and self.wait_for_standalone_prune(timeout)
         if not joined:
             logging.warning(
                 "Asset seeder thread did not exit within %ss",
@@ -481,6 +482,7 @@ class _AssetSeeder:
                     "Cannot mark missing assets while scan is running"
                 )
             self._state = State.RUNNING
+            self._cancel_event.clear()
             self._prune_idle.clear()
 
         try:
@@ -491,7 +493,9 @@ class _AssetSeeder:
                 return 0
 
             all_prefixes = get_owned_prefixes()
-            marked = mark_missing_outside_prefixes_safely(all_prefixes)
+            # Not pausable (the API waits on it), but a cancel or shutdown stops it
+            # between batches: it runs on a worker thread that exit would wait for.
+            marked = mark_missing_outside_prefixes_safely(all_prefixes, self._cancel_event.is_set)
             if marked is None:
                 return None
             emit(

@@ -562,3 +562,34 @@ async def test_a_seed_request_during_a_scan_still_gets_409(monkeypatch):
 
     assert response.status == 409
     assert started == []
+
+
+def test_a_cancel_stops_a_standalone_prune_and_shutdown_waits_for_it(session, catalog, temp_dir, monkeypatch):
+    """The API prune runs on a worker thread that interpreter exit joins, so shutdown's
+    cancel must stop it between batches rather than let it run to the end."""
+    _rows(session, temp_dir, 600)
+    instance = seeder_module._AssetSeeder()
+    monkeypatch.setattr(seeder_module, "dependencies_available", lambda: True)
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
+    real = scanner.mark_contents_missing
+    first_batch = threading.Event()
+    shut_down = threading.Event()
+
+    def mark(sess, ids):
+        marked = real(sess, ids)
+        first_batch.set()
+        assert shut_down.wait(5)  # hold the first batch until shutdown has cancelled
+        return marked
+
+    result: list[int | None] = []
+    with patch("app.assets.scanner.mark_contents_missing", mark):
+        worker = threading.Thread(target=lambda: result.append(instance.mark_missing_outside_prefixes()))
+        worker.start()
+        assert first_batch.wait(5)
+        threading.Timer(0.1, shut_down.set).start()
+        assert instance.shutdown(timeout=5)
+        worker.join(5)
+
+    assert len(catalog) == 1
+    assert result == [scanner.WRITE_BATCH_ROWS]
+    assert not instance.standalone_prune_running()
