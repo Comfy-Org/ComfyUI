@@ -16,7 +16,6 @@ from google.colab import drive, userdata
 import install
 from catalog import copy_model, parse_catalog
 import tailscale
-from downloader import Downloader
 
 CATALOG = os.path.join(install.COLAB_DIR, "models.yaml")
 
@@ -57,6 +56,8 @@ def setup(custom_nodes, models_yaml, download_models, tailscale_enabled, google_
         raise ValueError(f"Not in {models_yaml}: {', '.join(missing)}")
 
     install.install(custom_nodes)
+    # aria2p is installed by install.install, so downloader can only be imported after it.
+    from downloader import Downloader
 
     models_dir = os.path.join(install.ROOT, "models")
     downloader = Downloader(models_dir)
