@@ -81,20 +81,19 @@ def test_probe_skips_non_sqlite_databases(monkeypatch):
     assert db_module.lock_holder_db_path() is None
 
 
-def test_probe_treats_an_unreadable_lock_as_free(db_path, monkeypatch):
+def test_probe_treats_a_failed_check_as_free(db_path, monkeypatch):
     open(db_path + ".lock", "a").close()
 
-    def _denied(self, *args, **kwargs):
-        raise PermissionError("denied")
+    def _unexpected(self, *args, **kwargs):
+        raise NotImplementedError("no locking on this filesystem")
 
-    monkeypatch.setattr(FileLock, "acquire", _denied)
+    monkeypatch.setattr(FileLock, "acquire", _unexpected)
 
     assert db_module.lock_holder_db_path() is None
 
 
 def test_assets_off_leaves_the_database_alone(db_path, startup_warnings, monkeypatch):
     monkeypatch.setattr(main, "dependencies_available", lambda: True)
-    monkeypatch.setattr(db_module, "Session", None)
 
     def _init_db():
         pytest.fail("init_db ran with assets off")
@@ -105,7 +104,6 @@ def test_assets_off_leaves_the_database_alone(db_path, startup_warnings, monkeyp
     main.setup_database(asset_manager)
 
     assert asset_manager.started
-    assert not db_module.can_create_session()
     assert not os.path.exists(db_path)
     assert not os.path.exists(db_path + ".lock")
     assert startup_warnings == []

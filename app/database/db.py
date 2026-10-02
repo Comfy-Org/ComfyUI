@@ -215,7 +215,8 @@ def lock_holder_db_path():
         probe.acquire(timeout=0)
     except Timeout:
         return db_path
-    except OSError as e:
+    except Exception as e:
+        # The check is advisory, so it must never stop startup.
         logging.debug(f"Could not check the database lock '{lock_path}': {e}")
         return None
     probe.release()

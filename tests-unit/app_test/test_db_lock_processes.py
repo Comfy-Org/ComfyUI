@@ -91,14 +91,19 @@ def test_running_assets_off_instance_does_not_block_an_assets_on_start(tmp_path)
     assert first.returncode == 0, first.stderr
 
     port = _free_port()
-    server = subprocess.Popen(
-        _comfy_args(tmp_path, "--listen", "127.0.0.1", "--port", str(port)),
-        cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    server_log = tmp_path / "server.log"
+    with open(server_log, "w") as log:
+        server = subprocess.Popen(
+            _comfy_args(tmp_path, "--listen", "127.0.0.1", "--port", str(port)),
+            cwd=REPO_ROOT,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
     try:
-        _wait_until_serving(server, port)
+        try:
+            _wait_until_serving(server, port)
+        except AssertionError as e:
+            raise AssertionError(f"{e}\n{server_log.read_text()[-4000:]}") from None
 
         second = _quick_start(tmp_path, "--enable-assets")
 
