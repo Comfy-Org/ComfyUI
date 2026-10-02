@@ -106,6 +106,7 @@ def _parse_cli_feature_flags() -> dict[str, Any]:
 _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "supports_preview_metadata": True,
     "supports_model_type_tags": True,
+    "supports_missing_model_downloads": True,
     "max_upload_size": args.max_upload_size * 1024 * 1024, # Convert MB to bytes
     "extension": {"manager": {"supports_v4": True}},
     "node_replacements": True,
