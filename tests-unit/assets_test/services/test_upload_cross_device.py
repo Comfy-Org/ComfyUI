@@ -16,7 +16,7 @@ import app.assets.mode as mode_module
 import app.assets.services.ingest as ingest_module
 import folder_paths
 from app.assets.database.models import AssetContent
-from app.assets.services.ingest import upload_from_temp_path
+from app.assets.services.ingest import UploadUnstableError, upload_from_temp_path
 from app.assets.services.snapshot_hash import snapshot_hash
 
 _CONTENT = b"cross-device upload bytes"
@@ -177,7 +177,7 @@ def test_source_changed_after_hashing_is_not_copied(
 
     monkeypatch.setattr(ingest_module.os, "replace", rewrite_then_exdev)
 
-    with pytest.raises(RuntimeError, match="changed after hashing"):
+    with pytest.raises(UploadUnstableError, match="changed after hashing"):
         _upload(temp)
 
     _assert_nothing_left(temp, input_root, None)
@@ -197,7 +197,7 @@ def test_source_changed_during_the_copy_is_not_published(
     monkeypatch.setattr(ingest_module.shutil, "copyfileobj", copy_then_rewrite)
     _fail_first_replace(monkeypatch, _exdev())
 
-    with pytest.raises(RuntimeError, match="changed after hashing"):
+    with pytest.raises(UploadUnstableError, match="changed after hashing"):
         _upload(temp)
 
     _assert_nothing_left(temp, input_root, None)

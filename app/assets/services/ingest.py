@@ -220,7 +220,7 @@ def _copy_across_devices(
             verified_stat.st_size,
             verified_stat.st_mtime_ns,
         ):
-            raise OSError("upload file changed after hashing")
+            raise UploadUnstableError("upload file changed after hashing")
         # Best effort: mode bits cannot be set on some filesystems (e.g. FAT).
         with contextlib.suppress(OSError):
             shutil.copymode(temp_path, staging)
@@ -248,6 +248,8 @@ def _move_temp_to_dest(
             if e.errno != errno.EXDEV:
                 raise
         return _copy_across_devices(temp_path, dest_abs, verified_stat)
+    except UploadUnstableError:
+        raise
     except Exception as e:
         raise RuntimeError(f"failed to move uploaded file into place: {e}") from e
 
