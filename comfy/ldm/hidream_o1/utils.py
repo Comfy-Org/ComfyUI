@@ -31,6 +31,9 @@ def resize_tensor(img_t, image_size, patch_size=16):
         (math.floor(width * scale) // m * m, round(height * scale) // m * m),
         (math.floor(width * scale) // m * m, math.floor(height * scale) // m * m),
     ]
+    # Extremely thin panorama inputs (e.g. a 20px-wide strip) can round a
+    # candidate dimension to 0 below, which then divides by zero.
+    candidates = [tuple(max(c, m) for c in cand) for cand in candidates]
     candidates = sorted(candidates, key=lambda x: x[0] * x[1], reverse=True)
     new_size = candidates[-1]
     for c in candidates:
