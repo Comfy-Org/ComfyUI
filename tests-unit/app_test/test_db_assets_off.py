@@ -129,3 +129,14 @@ def test_assets_off_warns_and_continues_when_another_process_holds_the_lock(
     assert db_path in warning
     assert "Assets are off in this process" in warning
     assert "A future version will refuse to start the second one" in warning
+
+
+def test_probe_treats_a_failed_release_as_free(db_path, monkeypatch):
+    open(db_path + ".lock", "a").close()
+
+    def _unexpected(self, *args, **kwargs):
+        raise OSError("unlock failed")
+
+    monkeypatch.setattr(FileLock, "release", _unexpected)
+
+    assert db_module.lock_holder_db_path() is None
