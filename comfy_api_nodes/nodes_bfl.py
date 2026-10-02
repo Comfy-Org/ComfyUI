@@ -1,3 +1,4 @@
+import json
 import math
 
 import torch
@@ -18,6 +19,7 @@ from comfy_api_nodes.apis.bfl import (
     BFLFluxVTORequest,
     BFLStatus,
     Flux2ProGenerateRequest,
+    Flux3ImageRequest,
     Flux3ImageToVideoRequest,
     Flux3TextToVideoRequest,
     Flux3VideoContinuationRequest,
@@ -1616,6 +1618,176 @@ class FluxVideoEditNode(IO.ComfyNode):
         return await _bfl_video_execute(cls, _FLUX_VIDEO_EDIT_ENDPOINT, request, poll_via_proxy=True)
 
 
+_FLUX3_IMAGE_ENDPOINT = ApiEndpoint(path="/proxy/bfl/v1/flux-3-image", method="POST")
+_FLUX3_IMAGE_ASPECT_RATIOS = [
+    "auto", "21:9", "2:1", "16:9", "3:2", "7:5", "4:3", "5:4", "1:1", "4:5", "3:4", "5:7", "2:3", "9:16", "1:2", "9:21"
+]
+_FLUX3_IMAGE_RESOLUTIONS = {"0.75K": "768sq", "1K": "1k", "1.5K": "1.5k", "2K": "2k", "4K": "4k"}
+_FLUX3_IMAGE_MAX_PROMPT_LENGTH = 15000
+
+
+def _flux3_box_rows(elements: list) -> list[dict]:
+    rows = []
+    for index, element in enumerate(elements, start=1):
+        parts = []
+        if element.get("type") == "text":
+            parts.append(f'the text "{element.get("text", "")}"')
+        if element.get("desc"):
+            parts.append(element["desc"])
+        if element.get("color_palette"):
+            parts.append("colors " + ", ".join(element["color_palette"]))
+        row = {"id": f"box_{index}", "bbox": element["bbox"]}
+        if parts:
+            row["desc"] = ", ".join(parts)
+        rows.append(row)
+    return rows
+
+
+class Flux3ImageNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="Flux3ImageNode",
+            display_name="Flux 3 Image",
+            category="partner/image/BFL",
+            description="Generates an image with FLUX 3 from a prompt, or edits and combines up to 10 "
+            "reference images. Refer to the references in the prompt as image 1, image 2, and so on.",
+            inputs=[
+                IO.String.Input(
+                    "prompt",
+                    multiline=True,
+                    default="",
+                    tooltip="What to generate, or the edit to make. The prompt is interpreted and "
+                    "expanded before generation.",
+                ),
+                IO.Autogrow.Input(
+                    "images",
+                    template=IO.Autogrow.TemplateNames(
+                        IO.Image.Input("image"),
+                        names=[f"image_{i}" for i in range(1, _FLUX3_MAX_IMAGES + 1)],
+                        min=0,
+                    ),
+                    tooltip="Optional reference images, up to 10 in total, at least 256x256 pixels each.",
+                ),
+                IO.Array.Input(
+                    "bounding_boxes",
+                    optional=True,
+                    tooltip="Optional boxes from Create Bounding Boxes that place objects or text in the "
+                    "output. Positions are relative to the canvas, so give it the output's aspect ratio.",
+                ),
+                IO.Combo.Input(
+                    "aspect_ratio",
+                    options=_FLUX3_IMAGE_ASPECT_RATIOS,
+                    default="auto",
+                    tooltip="'auto' follows the first reference image, or picks a ratio from the prompt.",
+                ),
+                IO.Combo.Input(
+                    "resolution",
+                    options=list(_FLUX3_IMAGE_RESOLUTIONS),
+                    default="2K",
+                    tooltip="Output size at the chosen aspect ratio: 0.75K is about 0.6 megapixels, "
+                    "1K 1 MP, 1.5K 2.4 MP, 2K 4.2 MP, 4K 16.8 MP.",
+                ),
+                IO.Boolean.Input(
+                    "grounding",
+                    default=True,
+                    tooltip="Let the model research the prompt with web and image search before generating.",
+                ),
+                IO.Int.Input(
+                    "safety_tolerance",
+                    default=4,
+                    min=0,
+                    max=4,
+                    advanced=True,
+                    tooltip="Moderation tolerance, 0 is the strictest.",
+                ),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=0xFFFFFFFF,
+                    control_after_generate=True,
+                    tooltip="Seed to determine if node should re-run; FLUX 3 picks its own seed, so "
+                    "actual results are nondeterministic regardless of this value.",
+                ),
+            ],
+            outputs=[IO.Image.Output()],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["resolution"]),
+                expr="""
+                (
+                  $prices := {"0.75k": 0.05863, "1k": 0.06864, "1.5k": 0.1001, "2k": 0.143, "4k": 0.86801};
+                  {"type": "usd", "usd": $lookup($prices, widgets.resolution)}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        prompt: str,
+        images: IO.Autogrow.Type,
+        aspect_ratio: str,
+        resolution: str,
+        grounding: bool,
+        safety_tolerance: int,
+        seed: int,
+        bounding_boxes: list | None = None,
+    ) -> IO.NodeOutput:
+        validate_string(prompt, field_name="prompt", min_length=1, max_length=_FLUX3_IMAGE_MAX_PROMPT_LENGTH)
+        if bounding_boxes:
+            prompt = f"{prompt} {json.dumps(_flux3_box_rows(bounding_boxes), ensure_ascii=False)}"
+            if len(prompt) > _FLUX3_IMAGE_MAX_PROMPT_LENGTH:
+                raise ValueError(
+                    f"The prompt together with the bounding boxes is {len(prompt)} characters long, "
+                    f"the limit is {_FLUX3_IMAGE_MAX_PROMPT_LENGTH}. Shorten the prompt or the box descriptions."
+                )
+        reference_images = _flux3_collect_images(images, "reference images")
+        image_urls = None
+        if reference_images:
+            image_urls = await upload_images_to_comfyapi(
+                cls, reference_images, max_images=_FLUX3_MAX_IMAGES, wait_label="Uploading references"
+            )
+        initial_response = await sync_op(
+            cls,
+            _FLUX3_IMAGE_ENDPOINT,
+            response_model=BFLFluxProGenerateResponse,
+            data=Flux3ImageRequest(
+                prompt=prompt,
+                images=image_urls,
+                aspect_ratio=aspect_ratio,
+                resolution=_FLUX3_IMAGE_RESOLUTIONS[resolution],
+                grounding=grounding,
+                safety_tolerance=safety_tolerance,
+            ),
+        )
+        response = await poll_op(
+            cls,
+            ApiEndpoint(path=_BFL_POLL_PROXY_PATH, query_params={"polling_url": initial_response.polling_url}),
+            response_model=BFLFluxStatusResponse,
+            status_extractor=lambda r: r.status,
+            progress_extractor=lambda r: r.progress,
+            completed_statuses=[BFLStatus.ready],
+            failed_statuses=[
+                BFLStatus.request_moderated,
+                BFLStatus.content_moderated,
+                BFLStatus.error,
+                BFLStatus.task_not_found,
+            ],
+            queued_statuses=[BFLStatus.pending],
+            max_retries_per_poll=3,
+        )
+        return IO.NodeOutput(await download_url_to_image_tensor(response.result["sample"]))
+
+
 class BFLExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -1635,6 +1807,7 @@ class BFLExtension(ComfyExtension):
             Flux3VideoContinuationNode,
             FluxVideoUpscaleNode,
             FluxVideoEditNode,
+            Flux3ImageNode,
         ]
 
 
