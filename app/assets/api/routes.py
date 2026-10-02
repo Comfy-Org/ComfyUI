@@ -1030,6 +1030,9 @@ async def get_tags_refine(request: web.Request) -> web.Response:
     return web.json_response(payload.model_dump(mode="json", exclude_none=True), status=200)
 
 
+_PRUNE_POLL_SECONDS = 0.25
+
+
 @ROUTES.post("/api/assets/seed")
 @_require_assets_feature_enabled
 async def seed_assets(request: web.Request) -> web.Response:
@@ -1059,13 +1062,15 @@ async def seed_assets(request: web.Request) -> web.Response:
     started = asset_seeder.start(
         roots=valid_roots, compute_hashes=mode.hashing_enabled()
     )
-    if not started:
-        # A prune from POST /api/assets/prune is not a scan and emits no scan events,
-        # so wait it out (it runs off the loop) rather than answer 409, which a client
-        # takes as "a scan is coming". Retry even if it already ended: it may have
-        # finished after start() failed.
-        if asset_seeder.standalone_prune_running():
-            await asyncio.to_thread(asset_seeder.wait_for_standalone_prune)
+    # A prune from POST /api/assets/prune is not a scan and emits no scan events, so
+    # wait it out rather than answer 409, which a client takes as "a scan is coming".
+    # Polled on the loop: no executor thread is held for the prune's length. The
+    # retry also covers a prune that ended, or another that began, after start() failed.
+    for _ in range(2):
+        if started:
+            break
+        while asset_seeder.standalone_prune_running():
+            await asyncio.sleep(_PRUNE_POLL_SECONDS)
         started = asset_seeder.start(
             roots=valid_roots, compute_hashes=mode.hashing_enabled()
         )

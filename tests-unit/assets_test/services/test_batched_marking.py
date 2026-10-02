@@ -539,9 +539,15 @@ async def test_a_seed_request_during_an_api_prune_waits_for_it_then_starts(monke
         return 0
 
     monkeypatch.setattr(seeder_module, "mark_missing_outside_prefixes_safely", blocking_prune)
+    monkeypatch.setattr(routes, "_PRUNE_POLL_SECONDS", 0.01)
     prune = asyncio.create_task(asyncio.to_thread(instance.mark_missing_outside_prefixes))
     assert await asyncio.to_thread(pruning.wait, 5)
 
+    def must_not_block_a_thread(timeout=None):
+        raise AssertionError("the seed route held an executor thread for the prune")
+
+    # The route waits on the loop; a blocking wait would hold an executor thread per request.
+    monkeypatch.setattr(instance, "wait_for_standalone_prune", must_not_block_a_thread)
     seed = asyncio.create_task(routes.seed_assets.__wrapped__(make_mocked_request("POST", "/api/assets/seed")))
     await asyncio.sleep(0.2)
     assert not seed.done()  # waiting out the prune, not answering 409
@@ -679,3 +685,38 @@ def test_shutdown_during_a_prune_does_not_start_the_scan_a_prompt_queued(session
     assert len(outcome) == 1 and isinstance(outcome[0], seeder_module.PruneCancelledError)
     assert started == []
     assert instance._state is State.IDLE
+
+
+def test_shutdown_before_a_prune_starts_keeps_it_from_starting(session, catalog, temp_dir, monkeypatch):
+    """The API hands the prune to a worker thread; a shutdown that lands before it takes
+    the seeder must still keep it from running into teardown."""
+    _rows(session, temp_dir, 10)
+    instance = seeder_module._AssetSeeder()
+    monkeypatch.setattr(seeder_module, "dependencies_available", lambda: True)
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
+
+    assert instance.shutdown(timeout=1)
+    with pytest.raises(seeder_module.PruneCancelledError) as cancelled:
+        instance.mark_missing_outside_prefixes()
+
+    assert cancelled.value.marked == 0
+    assert len(catalog) == 0
+    assert len(_live_ids(session)) == 10
+    assert not instance.standalone_prune_running()
+
+
+def test_the_prune_flag_clears_even_if_its_cleanup_raises(session, catalog, temp_dir, monkeypatch):
+    _rows(session, temp_dir, 10)
+    instance = seeder_module._AssetSeeder()
+    monkeypatch.setattr(seeder_module, "dependencies_available", lambda: True)
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
+
+    def start_fails():
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(instance, "_finish_and_start_pending", start_fails)
+    with pytest.raises(RuntimeError):
+        instance.mark_missing_outside_prefixes()
+
+    assert not instance.standalone_prune_running()
+    assert instance.wait_for_standalone_prune(0)

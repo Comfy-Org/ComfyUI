@@ -175,6 +175,8 @@ class _AssetSeeder:
         # Clear while a standalone prune holds the seeder (set = no prune running).
         self._prune_idle = threading.Event()
         self._prune_idle.set()
+        # Set by shutdown(): a standalone prune that has not started by then does not.
+        self._shutting_down = False
         self._roots: tuple[RootType, ...] = ()
         self._phase: ScanPhase = ScanPhase.FULL
         self._compute_hashes: bool = False
@@ -450,9 +452,14 @@ class _AssetSeeder:
         Returns:
             True if the scan thread joined cleanly; False on timeout.
         """
+        with self._lock:
+            self._shutting_down = True
         self.cancel()
-        # A standalone prune stops at its next batch once cancelled.
-        joined = self.wait(timeout=timeout) and self.wait_for_standalone_prune(timeout)
+        # A standalone prune stops at its next batch once cancelled. One deadline
+        # covers both waits.
+        deadline = time.monotonic() + timeout
+        joined = self.wait(timeout=timeout)
+        joined = self.wait_for_standalone_prune(max(0.0, deadline - time.monotonic())) and joined
         if not joined:
             logging.warning(
                 "Asset seeder thread did not exit within %ss",
@@ -491,6 +498,8 @@ class _AssetSeeder:
                 raise ScanInProgressError(
                     "Cannot mark missing assets while scan is running"
                 )
+            if self._shutting_down:
+                raise PruneCancelledError(0)
             self._state = State.RUNNING
             self._cancel_event.clear()
             self._prune_idle.clear()
@@ -532,11 +541,13 @@ class _AssetSeeder:
             # cancels, and a scan started here would run on into teardown. It stays
             # queued for the next scan to start.
             with self._lock:
-                if self._cancel_event.is_set():
-                    self._reset_to_idle()
-                else:
-                    self._finish_and_start_pending()
-                self._prune_idle.set()
+                try:
+                    if self._cancel_event.is_set():
+                        self._reset_to_idle()
+                    else:
+                        self._finish_and_start_pending()
+                finally:
+                    self._prune_idle.set()
 
     def standalone_prune_running(self) -> bool:
         return not self._prune_idle.is_set()
