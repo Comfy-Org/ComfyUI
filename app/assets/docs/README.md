@@ -131,6 +131,32 @@ Store absolute, structurally normalised paths: relative segments and repeated se
 
 Classification is fixed at record creation. A newly visible path receives the registry classification in effect when discovered. A path that leaves all registered prefixes becomes missing. An existing in-scope path is not reclassified when the registry changes.
 
+## When the catalogue is updated
+
+Uploads and output registration write their records directly as they happen. Everything else the catalogue learns about the filesystem comes from a background scan or a prune. Only one scan or prune runs at a time. An output rescan requested while a scan is running is queued; any other scan or prune requested then is refused. The background scan pauses while a prompt runs and resumes once the queue is idle.
+
+### Startup scan
+
+At startup the server removes the temp records and the temp directory, then starts one background scan of the models, input and output roots. The scan runs while the server is already accepting requests. It has three steps:
+
+1. Prune: every live content row whose path is outside all the registered folders (the model base directories, input, output and temp) is marked missing. If that folder is registered again later, the next scan that walks it recovers those rows under the usual rules (see Missing content). Live temp rows whose file is gone are marked missing too.
+2. Fast phase, one root at a time: each live row under the root is checked against the file on disk. A row whose file is gone is marked missing, and a changed file goes through change detection (see Hashing modes). The root is then walked, and files with no live row are added, or recover a missing row (see Missing content).
+3. Enrich phase: live records under the roots that have no extracted metadata, or no hash when hashing is on, get them.
+
+The prune and each root's missing-file marking are each written in a single write transaction.
+
+### Output rescans
+
+After a prompt finishes and the queue goes idle, the server queues a scan of the output root alone. It compares the output directory listings with the catalogue instead of checking every row: a cataloged output that the listing lacks is checked on disk and marked missing if it is gone, and a new file in the listing is added. This is how outputs that a node wrote without declaring them reach the catalogue. Because nothing re-checks an already cataloged output, an output file overwritten in place by something other than ComfyUI is only detected by the next scan that covers all roots.
+
+Each `/object_info` request also starts a scan of all roots, without a prune, when no scan is running.
+
+### On-demand scan and prune
+
+`POST /api/assets/seed` starts a scan of the requested roots without a prune. It answers 409 if a scan is already running.
+
+`POST /api/assets/prune` runs the same prune as the startup scan, on its own. It answers 409 if a scan is running. It marks missing every live row outside the registered folders in one write transaction, and runs on the event loop, so the server does not answer other requests until it finishes. Its cost grows with the number of live rows outside the registered folders: while it runs, other writes, such as output registration, wait for the database lock and fail with `database is locked` once SQLite's five-second busy wait runs out (see Write pressure and reader starvation).
+
 ## Asset operations
 
 ### Delete through the API
