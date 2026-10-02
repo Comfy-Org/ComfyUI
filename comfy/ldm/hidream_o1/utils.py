@@ -91,6 +91,7 @@ def get_rope_index_fix_point(
     attention_mask: Optional[torch.Tensor] = None,
     skip_vision_start_token=None,
     fix_point: int = 4096,
+    text_len: Optional[int] = None,
 ):
     mrope_position_deltas = []
     if input_ids is not None and image_grid_thw is not None:
@@ -106,49 +107,70 @@ def get_rope_index_fix_point(
             fp = fix_point
             image_index = 0
             input_ids_b = input_ids_b[attention_mask[i] == 1]
-            vision_start_indices = torch.argwhere(input_ids_b == vision_start_token_id).squeeze(1)
-            vision_tokens = input_ids_b[vision_start_indices + 1]
-            image_nums = (vision_tokens == image_token_id).sum()
             input_tokens = input_ids_b.tolist()
             llm_pos_ids_list = []
-            st = 0
-            remain_images = image_nums
-            for _ in range(image_nums):
-                if image_token_id in input_tokens and remain_images > 0:
-                    ed = input_tokens.index(image_token_id, st)
-                else:
-                    ed = len(input_tokens) + 1
-                t = image_grid_thw[image_index][0]
-                h = image_grid_thw[image_index][1]
-                w = image_grid_thw[image_index][2]
-                image_index += 1
-                remain_images -= 1
-                llm_grid_t = t.item()
-                llm_grid_h = h.item() // spatial_merge_size
-                llm_grid_w = w.item() // spatial_merge_size
-                text_len = ed - st
-                text_len -= skip_vision_start_token[image_index - 1]
-                text_len = max(0, text_len)
-                st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+            if text_len is not None:
+                # Ref-edit path: [vision_start, image_pad, vision_end] blocks are
+                # spliced into the text span, so they are covered by the text
+                # positions instead of getting standalone image spans. Only image
+                # blocks appended after the text (skip_vision_start_token == 1)
+                # receive a dedicated image span, anchored at fix_point.
+                llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1))
+                for grid in (
+                    g for i, g in enumerate(image_grid_thw) if skip_vision_start_token[i]
+                ):
+                    t, h, w = grid
+                    llm_grid_t = t.item()
+                    llm_grid_h = h.item() // spatial_merge_size
+                    llm_grid_w = w.item() // spatial_merge_size
+                    t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
+                    h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
+                    w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
+                    # Image blocks all live on the same 2D plane anchored at
+                    # fix_point (see module docstring), so each block re-anchors.
+                    llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + fix_point)
+            else:
+                vision_start_indices = torch.argwhere(input_ids_b == vision_start_token_id).squeeze(1)
+                vision_tokens = input_ids_b[vision_start_indices + 1]
+                image_nums = (vision_tokens == image_token_id).sum()
+                st = 0
+                remain_images = image_nums
+                for _ in range(image_nums):
+                    if image_token_id in input_tokens and remain_images > 0:
+                        ed = input_tokens.index(image_token_id, st)
+                    else:
+                        ed = len(input_tokens) + 1
+                    t = image_grid_thw[image_index][0]
+                    h = image_grid_thw[image_index][1]
+                    w = image_grid_thw[image_index][2]
+                    image_index += 1
+                    remain_images -= 1
+                    llm_grid_t = t.item()
+                    llm_grid_h = h.item() // spatial_merge_size
+                    llm_grid_w = w.item() // spatial_merge_size
+                    text_len = ed - st
+                    text_len -= skip_vision_start_token[image_index - 1]
+                    text_len = max(0, text_len)
+                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+                    llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
-                t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
-                h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
-                w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
+                    t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
+                    h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
+                    w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
 
-                if skip_vision_start_token[image_index - 1]:
-                    if fp > 0:
-                        fp = fp - st_idx
-                    llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + fp + st_idx)
-                    fp = 0
-                else:
-                    llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
-                st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+                    if skip_vision_start_token[image_index - 1]:
+                        if fp > 0:
+                            fp = fp - st_idx
+                        llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + fp + st_idx)
+                        fp = 0
+                    else:
+                        llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
+                    st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
-            if st < len(input_tokens):
-                st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                text_len = len(input_tokens) - st
-                llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+                if st < len(input_tokens):
+                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+                    text_len = len(input_tokens) - st
+                    llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
             llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
             position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(position_ids.device)
