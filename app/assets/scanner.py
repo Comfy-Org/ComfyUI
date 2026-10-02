@@ -12,6 +12,7 @@ import enum
 import logging
 import os
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Callable, Literal, NamedTuple, Protocol, TypedDict
 
@@ -28,7 +29,14 @@ from app.assets.database.queries import (
     create_record,
 )
 from app.assets.database.models import Asset, AssetContent
-from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix, to_stored_hash
+from app.assets.helpers import (
+    PREFIX_BATCH_SIZE,
+    path_prefix_matcher,
+    sql_path_under_prefix,
+    sql_path_under_prefix_batches,
+    stored_path_under_prefixes,
+    to_stored_hash,
+)
 from app.assets.lifecycle import get_excluded_scan_roots
 from app.assets.scanner_changes import (
     clear_pending_verifications,
@@ -393,19 +401,21 @@ def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservati
     live: dict[str, list[_ReferenceObservation]] = {}
     if not prefixes:
         return live
-    stmt = sa.select(
-        AssetContent.id, AssetContent.path, AssetContent.size_bytes, AssetContent.mtime_ns
-    ).where(
-        AssetContent.is_missing.is_(False),
-        sa.or_(*(sql_path_under_prefix(AssetContent.path, p) for p in prefixes)),
-    )
+    seen: set[str] = set()
     try:
         with create_session() as session:
-            for content_id, path, size_bytes, mtime_ns in session.execute(stmt):
-                yield_gil(run=RESCAN_YIELD_RUN)
-                live.setdefault(os.path.abspath(path), []).append(
-                    _ReferenceObservation(content_id, size_bytes, mtime_ns, None)
-                )
+            for under_prefixes in sql_path_under_prefix_batches(AssetContent.path, prefixes):
+                stmt = sa.select(
+                    AssetContent.id, AssetContent.path, AssetContent.size_bytes, AssetContent.mtime_ns
+                ).where(AssetContent.is_missing.is_(False), under_prefixes)
+                for content_id, path, size_bytes, mtime_ns in session.execute(stmt):
+                    yield_gil(run=RESCAN_YIELD_RUN)
+                    if content_id in seen:
+                        continue
+                    seen.add(content_id)
+                    live.setdefault(os.path.abspath(path), []).append(
+                        _ReferenceObservation(content_id, size_bytes, mtime_ns, None)
+                    )
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
         emit(
@@ -784,12 +794,10 @@ def insert_asset_specs(
         return created, first_error
 
 
-def build_unenriched_candidates_statement(
-    prefixes: list[str],
-    compute_hashes: bool,
-    last_seen_id: str | None,
-    limit: int = 1000,
+def unenriched_candidates_query(
+    compute_hashes: bool, last_seen_id: str | None
 ) -> sa.Select[tuple[str, str, str]]:
+    """Every unenriched live candidate after ``last_seen_id``, in id order."""
     query = (
         sa.select(AssetContent.id, Asset.id, AssetContent.path)
         .join(Asset, Asset.content_id == AssetContent.id)
@@ -806,11 +814,19 @@ def build_unenriched_candidates_statement(
         query = query.where(Asset.system_metadata.is_(None))
     if last_seen_id is not None:
         query = query.where(Asset.id > last_seen_id)
+    return query.order_by(Asset.id.asc())
+
+
+def build_unenriched_candidates_statement(
+    prefixes: list[str],
+    compute_hashes: bool,
+    last_seen_id: str | None,
+    limit: int = 1000,
+) -> sa.Select[tuple[str, str, str]]:
+    """The next page of candidates under at most PREFIX_BATCH_SIZE prefixes."""
     return (
-        query.where(
-            sa.or_(*(sql_path_under_prefix(AssetContent.path, p) for p in prefixes))
-        )
-        .order_by(Asset.id.asc())
+        unenriched_candidates_query(compute_hashes, last_seen_id)
+        .where(sa.or_(*(sql_path_under_prefix(AssetContent.path, p) for p in prefixes)))
         .limit(limit)
     )
 
@@ -828,14 +844,24 @@ def get_unenriched_assets_for_roots(
     if not prefixes:
         return []
 
-    query = build_unenriched_candidates_statement(
-        prefixes,
-        compute_hashes,
-        last_seen_id,
-        limit,
-    )
     with create_session() as sess:
-        rows = sess.execute(query).all()
+        if len(prefixes) <= PREFIX_BATCH_SIZE:
+            statement = build_unenriched_candidates_statement(
+                prefixes,
+                compute_hashes,
+                last_seen_id,
+                limit,
+            )
+            rows = sess.execute(statement).all()
+        else:
+            # Too many prefixes for one SQL predicate. Paging each batch separately
+            # would rescan to the end of the table on every page for any batch with
+            # few matches, so filter a single id-ordered pass here instead.
+            is_under = stored_path_under_prefixes(prefixes)
+            candidates = sess.execute(
+                unenriched_candidates_query(compute_hashes, last_seen_id).execution_options(yield_per=500)
+            )
+            rows = list(islice((row for row in candidates if is_under(row[2])), limit))
 
     return [
         UnenrichedContent(content_id, record_id, file_path)
