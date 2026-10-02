@@ -1624,18 +1624,13 @@ def get_disk_swap_total():
         logging.warning("Could not get amount of swap memory on system.")
     return total
 
-def is_amd_apu():
-    if not is_amd():
-        return False
-    try:
-        return bool(torch.cuda.get_device_properties(get_torch_device()).is_integrated)
-    except:
-        return False
+def is_integrated_gpu():
+    device = get_torch_device()
+    return device.type == "cuda" and bool(torch.cuda.get_device_properties(device).is_integrated)
 
 DISABLE_PINNED_MEMORY = args.disable_pinned_memory
-if not DISABLE_PINNED_MEMORY and is_amd_apu():
-    # APU VRAM is carved out of system RAM, so pinning host memory only takes RAM from the GPU.
-    logging.info("AMD APU detected, disabling pinned memory.")
+if not DISABLE_PINNED_MEMORY and is_integrated_gpu():
+    # Integrated GPU VRAM is carved out of system RAM, so pinning host memory only takes RAM from the GPU.
     DISABLE_PINNED_MEMORY = True
 
 if not DISABLE_PINNED_MEMORY:
