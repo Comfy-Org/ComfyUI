@@ -155,7 +155,7 @@ Each `/object_info` request also starts a scan of all roots, without a prune, wh
 
 `POST /api/assets/seed` starts a scan of the requested roots without a prune. It answers 409 if a scan is already running.
 
-`POST /api/assets/prune` runs the same prune as the startup scan, on its own. It answers 409 if a scan is running. It marks missing every live row outside the registered folders in one write transaction, and runs on the event loop, so the server does not answer other requests until it finishes. Its cost grows with the number of live rows outside the registered folders: while it runs, other writes, such as output registration, wait for the database lock and fail with `database is locked` once SQLite's five-second busy wait runs out (see Write pressure and reader starvation).
+`POST /api/assets/prune` runs the same prune as the startup scan, on its own. The prune is a step of its own rather than part of every scan so that a scan of only some roots cannot mark records under the other roots missing. It answers 409 if a scan is running, and 500 with the code `PRUNE_FAILED` if the prune fails, so a prune that did not run is never reported as completed; one that ran and found nothing answers 200 with `marked: 0`. It marks missing every live row outside the registered folders in one write transaction, and runs on the event loop, so the server does not answer other requests until it finishes. Its cost grows with the number of live rows outside the registered folders: while it runs, other writes, such as output registration, wait for the database lock and fail with `database is locked` once SQLite's five-second busy wait runs out (see Write pressure and reader starvation).
 
 ## Asset operations
 
