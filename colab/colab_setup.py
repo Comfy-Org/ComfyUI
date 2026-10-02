@@ -2,10 +2,11 @@
 #   !git clone https://github.com/trailbat/ComfyUI.git /content/ComfyUI
 #   import sys; sys.path.append("/content/ComfyUI/colab")
 #   import colab_setup
-#   colab_setup.setup(CUSTOM_NODES, MODELS_YAML, DOWNLOAD_MODELS, TAILSCALE, GOOGLE_DRIVE)
+#   colab_setup.setup(CUSTOM_NODES, MODELS_YAML, DOWNLOAD_MODELS, TAILSCALE, GOOGLE_DRIVE, SSH_TUNNEL)
 #   !python /content/ComfyUI/main.py --enable-manager --listen
 #
-# Reads the GITHUB_TOKEN (for a models.yaml in a private repo), CIVITAI_API_KEY, HUG_TOKEN and TS_AUTHKEY Colab secrets.
+# Reads the GITHUB_TOKEN (for a models.yaml in a private repo), CIVITAI_API_KEY, HUG_TOKEN, TS_AUTHKEY,
+# TUNNEL_HOST and TUNNEL_KEY Colab secrets.
 
 import os
 import urllib.request
@@ -14,6 +15,7 @@ from google.colab import drive, userdata
 
 import install
 from catalog import copy_model, parse_catalog
+import ssh_tunnel
 import tailscale
 
 CATALOG = os.path.join(install.COLAB_DIR, "models.yaml")
@@ -40,9 +42,9 @@ def fetch_catalog(url):
     return catalog
 
 
-def setup(custom_nodes, models_yaml, download_models, tailscale_enabled, google_drive):
+def setup(custom_nodes, models_yaml, download_models, tailscale_enabled, google_drive, ssh_tunnel_enabled=False):
     # Colab secrets can't be read from the ComfyUI process, so pass them through the environment.
-    for name in ["CIVITAI_API_KEY", "HUG_TOKEN", "TS_AUTHKEY"]:
+    for name in ["CIVITAI_API_KEY", "HUG_TOKEN", "TS_AUTHKEY", "TUNNEL_HOST", "TUNNEL_KEY"]:
         os.environ[name] = secret(name)
 
     # Models with a path in models.yaml are usually copied from Google Drive.
@@ -79,3 +81,5 @@ def setup(custom_nodes, models_yaml, download_models, tailscale_enabled, google_
 
     if tailscale_enabled:
         tailscale.main()
+    if ssh_tunnel_enabled:
+        ssh_tunnel.main()
