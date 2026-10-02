@@ -92,6 +92,7 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "missing_marked_count": _is_count,
     "recovered_count": _is_count,
     "count": _is_count,
+    "rehomed_count": _is_count,
     "error_type": _is_safe_string,
     "hashing_enabled": _is_flag,
     "site": _one_of(STAT_SITES),

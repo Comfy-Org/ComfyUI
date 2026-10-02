@@ -109,6 +109,17 @@ Path reuse has the same final state as an in-place edit: the old content is miss
 
 There is no filesystem move identity. Mark the old path missing and create new content and a new asset record at the new path.
 
+### Folder registered under a different spelling
+
+A folder can be registered under a different spelling of the same location: a symlink, a junction, a `subst` drive, an 8.3 short name, a `\\?\` prefix, or a change of letter case. The startup prune matches rows against the registered folders case-sensitively, as the per-root sync, the scan's dedupe and the live-path index do, so each of these spellings is handled the same way. A row that doesn't match keeps its id and records, with its path rewritten to the folder's spelling today, only when all of these hold:
+
+- The row's directory, resolved with `realpath` (a leading `\\?\` stripped), lies under the resolved location of exactly one registered folder whose role fits the row: the root tag, `model_type` tags and loader path the new path would get equal those on the row's records.
+- `stat` shows the old and new paths are the same file (device and inode, and the inode is not 0).
+- No live row holds the new path, and no missing row that still has records does (recovery may bring that one back).
+- No other row in the same prune would move to the same path.
+
+Every other row gets the outcome it had before. A row the platform's own case rules still place in a registered folder (a case-only difference on Windows) stays live as it is, which also covers duplicates left by earlier case-only launches. Any other row is marked missing. Both apply to two rows for one target, a folder only a bind mount makes equal (`realpath` can't see it), a file that more than one folder fits, and any row whose filesystem reads fail. The reads run on one worker thread; if it makes no progress for 10 seconds the prune stops waiting and the undecided rows get the same outcome. A boot where every row matches does no extra filesystem reads. A case-only row left live is a candidate again on every boot, but when its case-folded respelling is taken by a row of the same role (its duplicate from an earlier launch), it is settled by one database lookup, with no filesystem reads.
+
 ### Partial download under its final filename
 
 The scanner skips known partial-download extensions. For other files, it records file facts during the walk, waits once per scan pass for a short stability floor, and checks the facts again before inserting.
@@ -125,7 +136,7 @@ The scanner follows symlinks, stores lexical paths, and applies an inode cycle g
 
 ### Case and Unicode path forms
 
-Store absolute, structurally normalised paths: relative segments and repeated separators collapse at the write boundary, so every stored path is the lexical absolute form. Never canonicalize case or Unicode; compare byte-for-byte. Filesystems that treat two case or Unicode spellings as the same path may therefore produce duplicate rows.
+Store absolute, structurally normalised paths: relative segments and repeated separators collapse at the write boundary, so every stored path is the lexical absolute form. Writes and scans never canonicalize case or Unicode; they compare byte-for-byte. The one exception is a registered folder's own spelling, which the startup prune rewrites a row's folder part to (see "Folder registered under a different spelling"). Below that folder, filesystems that treat two case or Unicode spellings as the same path may still produce duplicate rows.
 
 ### Registry changes
 

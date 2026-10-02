@@ -56,8 +56,9 @@ def is_live_path_conflict(error: IntegrityError) -> bool:
 
 
 def create_content_reporting_insert(session: Session, path: str, hash: str | None = None, size_bytes: int = 0, mtime_ns: int | None = None) -> tuple[AssetContent, bool]:
-    # The sole writer of asset_contents.path, which is what makes the raw-column SQL prefix
-    # predicates sound — lifecycle's temp wipe HARD-DELETES every row its predicate admits.
+    # With scanner_rehome.apply_prune_plan, the only writers of asset_contents.path. Both
+    # normalize, which is what makes the raw-column SQL prefix predicates sound: lifecycle's
+    # temp wipe HARD-DELETES every row its predicate admits.
     path = os.path.abspath(path)
     content = AssetContent(path=path, hash=hash, size_bytes=size_bytes, mtime_ns=mtime_ns)
     try:

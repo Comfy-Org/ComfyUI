@@ -15,7 +15,7 @@ from app.assets import seeder as seeder_module
 from app.assets.database.models import Asset, Base
 from app.assets.database.queries import create_content, create_record, mark_content_missing
 from app.assets.event_log import TAG
-from app.assets.scanner import SeedAssetSpec
+from app.assets.scanner import PruneResult, SeedAssetSpec
 from app.assets.seeder import Progress, ScanPhase, State, _AssetSeeder, _ScanStage, _ScanState
 
 
@@ -426,7 +426,7 @@ def test_idle_reset_survives_a_raising_cancellation_emit(
     monkeypatch.setattr(scan_seeder, "_check_pause_and_cancel", cancel_at_pruning)
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 0
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: PruneResult(0, 0)
     )
 
     original_emit = seeder_module.emit
@@ -453,7 +453,7 @@ def test_scan_paused_after_its_last_phase_still_completes(
     scan_seeder._phase = ScanPhase.ENRICH
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 0
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: PruneResult(0, 0)
     )
 
     def pause_while_finishing(roots) -> tuple[bool, int]:
@@ -498,7 +498,7 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
     scan_seeder._phase = ScanPhase.FAST
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 5
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: PruneResult(5, 0)
     )
     monkeypatch.setattr(
         seeder_module, "sync_temp_references_safely", lambda _progress: None
@@ -509,7 +509,7 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
         scan_seeder._run_scan()
 
     assert events_named(caplog, "seeder.marked_missing") == [
-        {"count": 5, "stage": "pruning"}
+        {"count": 5, "rehomed_count": 0, "stage": "pruning"}
     ]
 
 
@@ -521,7 +521,7 @@ def test_standalone_mark_missing_emits_count_with_mark_missing_stage(
     scan_seeder._state = State.IDLE
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 7
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: PruneResult(7, 0)
     )
 
     with caplog.at_level(logging.INFO):
@@ -529,7 +529,7 @@ def test_standalone_mark_missing_emits_count_with_mark_missing_stage(
 
     assert result == 7
     assert events_named(caplog, "seeder.marked_missing") == [
-        {"count": 7, "stage": "mark_missing"}
+        {"count": 7, "rehomed_count": 0, "stage": "mark_missing"}
     ]
 
 

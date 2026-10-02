@@ -40,6 +40,7 @@ from app.assets.scanner_changes import (
     recover_missing_content,
     recover_missing_content_by_stat,
 )
+from app.assets.scanner_rehome import PrunePlan, PruneResult, apply_prune_plan, plan_prune
 from app.assets.scanner_admission import (
     PARTIAL_DOWNLOAD_EXTENSIONS as PARTIAL_DOWNLOAD_EXTENSIONS,
     _WATCH_LIST as _WATCH_LIST,
@@ -308,17 +309,24 @@ def sync_temp_references_safely(
         )
 
 
-def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int | None:
-    """Mark references as missing when outside the given prefixes.
+def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> PruneResult | None:
+    """Mark references as missing when outside the given prefixes, re-homing the ones
+    whose folder is registered under another spelling (see scanner_rehome).
 
-    This is a non-destructive soft-delete. Returns the count marked, or None when
-    the operation fails.
+    This is a non-destructive soft-delete. Returns the outcome, or None when the
+    operation fails.
     """
     try:
+        # The plan only reads, so no write lock is held while it waits on the filesystem.
         with create_session() as sess:
-            count = mark_contents_missing_outside_prefixes(sess, prefixes)
+            plan = plan_prune_outside_prefixes(sess, prefixes)
+        if not plan.moves and not plan.retire:
+            return PruneResult(0, 0)
+        # One write transaction: on the read engine each savepoint would commit by itself.
+        with create_write_session() as sess:
+            result = apply_prune_plan(sess, plan)
             sess.commit()
-            return count
+            return result
     except Exception as exc:
         logging.exception("marking missing assets failed: %s", exc)
         emit(
@@ -330,17 +338,22 @@ def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int | None:
 
 def mark_contents_missing_outside_prefixes(
     session: Session, prefixes: list[str]
-) -> int:
-    contents = session.scalars(
-        sa.select(AssetContent)
+) -> PruneResult:
+    return apply_prune_plan(session, plan_prune_outside_prefixes(session, prefixes))
+
+
+def plan_prune_outside_prefixes(session: Session, prefixes: list[str]) -> PrunePlan:
+    # Case-sensitive, like the per-root sync, the scan's dedupe and the live-path index, so
+    # a row in another letter case is re-homed like any other spelling. One the platform's
+    # case rules still own is never retired: if it can't move, it stays as it was.
+    is_owned = path_prefix_matcher(prefixes, fold_case=False)
+    rows = session.execute(
+        sa.select(AssetContent.id, AssetContent.path)
         .where(AssetContent.is_missing.is_(False))
         .execution_options(yield_per=500)
     )
-    is_owned = path_prefix_matcher(prefixes)
-    missing = [content for content in contents if not is_owned(content.path)]
-    for content in missing:
-        mark_content_missing(session, content.id)
-    return len(missing)
+    unowned = [(content_id, path) for content_id, path in rows if not is_owned(path)]
+    return plan_prune(session, unowned, prefixes, spare=path_prefix_matcher(prefixes))
 
 
 def collect_paths_for_roots(roots: tuple[RootType, ...]) -> list[str]:

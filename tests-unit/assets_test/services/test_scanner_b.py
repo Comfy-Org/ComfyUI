@@ -161,7 +161,7 @@ def test_prune_marks_missing_not_deletes(session, temp_dir: Path):
         seed_asset_specs(session, _build_seed_specs(input_root))
     session.commit()
 
-    marked = mark_contents_missing_outside_prefixes(session, prefixes=[])
+    marked = mark_contents_missing_outside_prefixes(session, prefixes=[]).marked
     session.commit()
 
     content = session.scalar(select(AssetContent))
