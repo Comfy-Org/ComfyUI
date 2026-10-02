@@ -260,6 +260,8 @@ def test_a_file_back_with_new_bytes_splits_as_a_live_row_does(drive, session):
     _scan()
     target = files[0]
     old = _live(session, target)
+    edits = _customise(session)
+    (old_record,) = [rid for rid, rec in edits.items() if rec[0] == old.id]
 
     with _absent_for_the_check(target):
         state = _scan(after_check=lambda: _put_back(target, data=b"different content, longer"))
@@ -270,6 +272,10 @@ def test_a_file_back_with_new_bytes_splits_as_a_live_row_does(drive, session):
     assert sorted(row.is_missing for row in rows) == [False, True]
     assert [row.id for row in rows if row.is_missing] == [old.id]
     assert _live(session, target).size_bytes == len(b"different content, longer")
+    # The old record keeps the user's edits, gaining only the "missing" tag.
+    records = _records(session)
+    assert records[old_record][:4] == edits[old_record][:4]
+    assert records[old_record][4] == edits[old_record][4] | {"missing"}
 
 
 def test_hashing_on_verifies_a_found_again_file_instead_of_re_creating_it(drive, session):
