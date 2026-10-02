@@ -148,6 +148,9 @@ class ModelFileManager:
                     raise ValueError(f"Provide between 1 and {MAX_BULK_MODEL_DOWNLOADS} models")
                 client_id = _required_string(payload, "client_id")
                 batch_id = _required_string(payload, "batch_id")
+                hf_token = payload.get("hf_token", "")
+                if not isinstance(hf_token, str) or len(hf_token) > 1024 or any(ord(c) < 33 or ord(c) > 126 for c in hf_token):
+                    raise ValueError("hf_token must be a token without whitespace or control characters")
                 models = [
                     {key: _required_string(model, key) for key in ("name", "directory", "url")}
                     for model in models
@@ -167,12 +170,14 @@ class ModelFileManager:
                     bytes_downloaded = 0
                     status = "failed"
                     error = None
+                    error_code = None
 
                     def emit(status, error=None):
                         self.send_event("missing_model_download", {
                             **model, "task_id": task_id, "batch_id": batch_id,
                             "status": status, "bytes_downloaded": bytes_downloaded,
                             **({"error": error} if error else {}),
+                            **({"error_code": error_code} if error_code else {}),
                         }, client_id)
 
                     async def progress(size):
@@ -189,6 +194,7 @@ class ModelFileManager:
                             if destination in seen:
                                 status = seen[destination]["status"]
                                 error = seen[destination].get("error")
+                                error_code = seen[destination].get("error_code")
                             elif os.path.isfile(destination):
                                 status = "skipped_existing"
                             elif destination in self._download_destinations:
@@ -196,7 +202,7 @@ class ModelFileManager:
                             else:
                                 self._download_destinations.add(destination)
                                 reserved = True
-                                task = asyncio.create_task(_download_file(session, model["url"], destination, progress))
+                                task = asyncio.create_task(_download_file(session, model["url"], destination, progress, hf_token=hf_token))
                                 self._model_downloads[task_id] = (client_id, batch_id, task)
                                 try:
                                     await asyncio.shield(task)
@@ -209,7 +215,18 @@ class ModelFileManager:
                                     status = "canceled"
                     except aiohttp.ClientResponseError as exc:
                         error = f"Download failed (HTTP {exc.status})"
+                        if str(exc.request_info.real_url.origin()) == "https://huggingface.co":
+                            if exc.status in (401, 403, 451) and exc.headers and exc.headers.get("X-Error-Code") == "GatedRepo":
+                                error_code = "hf_gated"
+                                error = "Request access on the Hugging Face repository, then retry with a token from the approved account"
+                            elif exc.status == 401:
+                                error_code = "hf_authentication"
+                                error = "Provide a valid Hugging Face read token and retry"
+                            elif exc.status in (403, 451):
+                                error_code = "hf_access_denied"
+                                error = "Hugging Face denied access; check the account's repository access and token permissions"
                     except asyncio.TimeoutError:
+                        error_code = "transfer_timeout"
                         error = "Download timed out; try again"
                     except aiohttp.ClientError:
                         error = "Could not download model; check the connection and try again"
@@ -220,7 +237,11 @@ class ModelFileManager:
                         if reserved:
                             self._download_destinations.discard(destination)
 
-                    result = {**model, "status": status, **({"error": error} if error else {})}
+                    result = {
+                        **model, "status": status,
+                        **({"error": error} if error else {}),
+                        **({"error_code": error_code} if error_code else {}),
+                    }
                     results.append(result)
                     if destination is not None:
                         seen[destination] = result
@@ -431,10 +452,16 @@ async def _download_file(
     url: str,
     destination: str,
     progress_callback: DownloadProgressCallback,
+    *,
+    hf_token: str = "",
 ) -> None:
     for hop in range(11):
         _validate_model_url(url, redirect=hop > 0)
-        async with session.get(url, allow_redirects=False) as response:
+        parsed = urlparse(url)
+        headers = {}
+        if hf_token and (parsed.scheme, parsed.hostname, parsed.port) in (("https", "huggingface.co", None), ("https", "huggingface.co", 443)):
+            headers["Authorization"] = f"Bearer {hf_token}"
+        async with session.get(url, allow_redirects=False, headers=headers) as response:
             if response.status in (301, 302, 303, 307, 308):
                 location = response.headers.get("Location")
                 if not location:

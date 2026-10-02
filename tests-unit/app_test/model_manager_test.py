@@ -7,6 +7,8 @@ import struct
 from io import BytesIO
 from PIL import Image
 from aiohttp import web
+from multidict import CIMultiDict
+from yarl import URL
 from unittest.mock import patch
 from app.model_manager import (
     ModelFileManager, ModelDownloadResolver, _download_file,
@@ -109,6 +111,17 @@ async def test_download_rejects_malformed_request(aiohttp_client, app, payload):
     response = await client.post('/experiment/models/download_missing', json=payload)
     assert response.status == 400
     assert 'error' in await response.json()
+
+
+@pytest.mark.parametrize('token', [None, 123, 'hf_secret\r\nInjected: value', 'hf_secret with spaces', 'x' * 1025])
+async def test_download_rejects_invalid_token_without_echoing_it(aiohttp_client, app, token):
+    client = await aiohttp_client(app)
+    response = await client.post('/experiment/models/download_missing', json={
+        'models': [{'name': 'model.safetensors', 'directory': 'checkpoints', 'url': 'https://huggingface.co/org/repo/resolve/main/model.safetensors'}],
+        'client_id': 'client', 'batch_id': 'batch', 'hf_token': token,
+    })
+    assert response.status == 400
+    assert 'hf_secret' not in await response.text()
 
 
 @pytest.mark.parametrize("url", [
@@ -272,3 +285,78 @@ async def test_transfer_failure_never_installs_partial_or_overwrites(aiohttp_ser
     else:
         assert not destination.exists()
     assert not list(tmp_path.glob('*.temp'))
+
+
+@pytest.mark.parametrize('initial_host', ['huggingface.co', 'civitai.com'])
+async def test_token_is_only_sent_to_huggingface_across_redirects(aiohttp_server, tmp_path, monkeypatch, initial_host):
+    received = []
+    async def source(request):
+        received.append(request.headers.get('Authorization'))
+        destinations = {
+            '/start': 'https://huggingface.co/relative',
+            '/relative': '/cdn',
+            '/cdn': 'https://cas-bridge.xethub.hf.co/other',
+            '/other': 'https://civitai.com/final',
+        }
+        if request.path in destinations:
+            raise web.HTTPFound(destinations[request.path])
+        return web.Response(body=b'complete model')
+    source_app = web.Application()
+    source_app.router.add_get('/{path}', source)
+    server = await aiohttp_server(source_app)
+    get = aiohttp.ClientSession.get
+    def local_get(session, url, **kwargs):
+        return get(session, server.make_url(URL(url).path), **kwargs)
+    monkeypatch.setattr(aiohttp.ClientSession, 'get', local_get)
+    async def progress(size):
+        pass
+    destination = tmp_path / 'model.safetensors'
+    async with aiohttp.ClientSession() as session:
+        await _download_file(session, f'https://{initial_host}/start', str(destination), progress, hf_token='hf_secret')
+    assert received == ['Bearer hf_secret' if initial_host == 'huggingface.co' else None, 'Bearer hf_secret', 'Bearer hf_secret', None, None]
+    assert destination.read_bytes() == b'complete model'
+
+
+@pytest.mark.parametrize('host,status,provider_code,error_code', [
+    ('huggingface.co', 401, None, 'hf_authentication'),
+    ('huggingface.co', 403, 'GatedRepo', 'hf_gated'),
+    ('huggingface.co', 403, None, 'hf_access_denied'),
+    ('huggingface.co', 451, None, 'hf_access_denied'),
+    ('cas-bridge.xethub.hf.co', 403, 'GatedRepo', None),
+    ('huggingface.co', None, None, 'transfer_timeout'),
+])
+async def test_access_failures_continue_batch_and_allow_retry(aiohttp_client, app, prompt_server, tmp_path, monkeypatch, host, status, provider_code, error_code):
+    monkeypatch.setattr('folder_paths.folder_names_and_paths', {'checkpoints': ([str(tmp_path)], {'.safetensors'})})
+    token = 'hf_secret'
+    received_tokens = []
+    async def download(session, url, destination, progress, *, hf_token=''):
+        received_tokens.append(hf_token)
+        if destination.endswith('restricted.safetensors') and hf_token == token:
+            if status is None:
+                raise asyncio.TimeoutError()
+            response_url = URL(f'https://{host}/org/repo/resolve/main/restricted.safetensors')
+            info = aiohttp.RequestInfo(response_url, 'GET', CIMultiDict(), response_url)
+            raise aiohttp.ClientResponseError(info, (), status=status, message=token, headers=CIMultiDict({'X-Error-Code': provider_code} if provider_code else {}))
+        with open(destination, 'wb') as output:
+            output.write(b'complete')
+        await progress(8)
+    monkeypatch.setattr('app.model_manager._download_file', download)
+    model = {'name': 'restricted.safetensors', 'directory': 'checkpoints', 'url': 'https://huggingface.co/org/repo/resolve/main/restricted.safetensors'}
+    payload = {'models': [model, {**model, 'name': 'public.safetensors'}], 'client_id': 'client', 'batch_id': 'batch', 'hf_token': token}
+    client = await aiohttp_client(app)
+    response = await client.post('/experiment/models/download_missing', json=payload)
+    result = await response.json()
+    assert result['failed'] == result['downloaded'] == 1
+    assert result['results'][0].get('error_code') == error_code
+    assert token not in json.dumps(result)
+    events = []
+    while not prompt_server.events.empty():
+        events.append(prompt_server.events.get_nowait()[1])
+    assert events[0].get('error_code') == error_code
+    assert token not in json.dumps(events)
+    assert received_tokens == [token, token]
+    response = await client.post('/experiment/models/download_missing', json={**payload, 'hf_token': 'hf_replacement'})
+    retried = await response.json()
+    assert retried['downloaded'] == retried['skipped'] == 1
+    assert retried['failed'] == 0
+    assert received_tokens[-1] == 'hf_replacement'
