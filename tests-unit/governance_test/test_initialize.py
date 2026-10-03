@@ -196,7 +196,7 @@ def test_initialize_does_not_gate_on_capability_version(
     governance.initialize()
 
 
-@pytest.mark.parametrize("active_forms", [["model"], ["customNode", "model"], ["unknownForm"]])
+@pytest.mark.parametrize("active_forms", [["unknownForm"], ["customNode", "unknownForm"]])
 def test_initialize_exits_on_form_this_build_cannot_enforce(
     governed: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -294,6 +294,21 @@ def test_initialize_allows_manager_without_custom_node_policy(governed: Path, mo
     governance.initialize()
 
     assert governance._custom_node_mode is None
+
+
+def test_initialize_applies_model_form(
+    governed: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    governed.write_bytes(b"signed policy")
+    digest = "blake3:" + "a" * 64
+    policy = {"activeForms": ["model"], "models": [digest]}
+    monkeypatch.setattr(governance, "verify_and_load", lambda envelope_bytes: policy, raising=False)
+    monkeypatch.setattr(governance, "_allowed_models", None, raising=False)
+
+    governance.initialize()
+
+    assert governance._allowed_models == frozenset({digest})
 
 
 def _write_extra_model_paths(governed: Path, monkeypatch: pytest.MonkeyPatch, source: str, content: str) -> None:

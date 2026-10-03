@@ -40,7 +40,7 @@ _PAYLOAD_KEYS = {
 }
 _ACTIVE_FORMS = ("customNode", "nodeId", "model", "partnerNode")
 # Only add a form here once this build enforces it; anything absent is refused rather than silently allowed.
-_ENFORCED_FORMS = frozenset({"customNode", "nodeId", "partnerNode"})
+_ENFORCED_FORMS = frozenset({"customNode", "nodeId", "model", "partnerNode"})
 _BASE64URL_PATTERN = re.compile(r"[A-Za-z0-9_-]*")
 _PROVIDER_ID_PATTERN = re.compile(r"[a-z0-9._-]+")
 _MODEL_DIGEST_PATTERN = re.compile(r"blake3:[0-9a-f]{64}")
@@ -64,6 +64,8 @@ _original_load_custom_node: Callable[[str, set[str], str], Awaitable[bool]] | No
 _custom_node_mode: str | None = None
 _denied_packs: frozenset[str] = frozenset()
 _allowed_packs: Mapping[str, str] = MappingProxyType({})
+_allowed_models: frozenset[str] | None = None
+_model_digests: dict[tuple[str, int, int], str] = {}
 
 
 def load_disabled_nodes(path: str) -> set[str]:
@@ -193,6 +195,40 @@ def pack_digest(pack_path: str) -> str:
         assert file_digest is not None
         hasher.update(relative_path.encode("utf-8") + b"\x00" + bytes.fromhex(file_digest) + b"\x00")
     return "blake3:" + hasher.hexdigest()
+
+
+def model_allowed(model_path: str) -> bool:
+    if _allowed_models is None:
+        return True
+    return model_digest(model_path) in _allowed_models
+
+
+def model_digest(model_path: str) -> str:
+    # Keep local for the same reason as pack_digest.
+    from app.assets.database.models import AssetContent
+    from app.assets.services import hashing
+    from app.database.db import can_create_session, create_session
+    from sqlalchemy import select
+
+    path = os.path.abspath(model_path)
+    stat = os.stat(path)
+    key = (path, stat.st_size, stat.st_mtime_ns)
+    digest = _model_digests.get(key)
+    if digest is None and can_create_session():
+        # The assets scanner stores a hash with the size and mtime of the bytes it hashed, so a row that still matches the file is reused.
+        with create_session() as session:
+            digest = session.scalar(
+                select(AssetContent.hash).where(
+                    AssetContent.path == path,
+                    AssetContent.is_missing.is_(False),
+                    AssetContent.size_bytes == stat.st_size,
+                    AssetContent.mtime_ns == stat.st_mtime_ns,
+                )
+            )
+    if digest is None:
+        digest = "blake3:" + hashing.compute_blake3_hash(path)[0]
+    _model_digests[key] = digest
+    return digest
 
 
 def apply_disabled_nodes(disabled: set[str]) -> None:
@@ -372,7 +408,7 @@ def _validate_payload(payload: dict) -> None:
 
 
 def _apply_policy(policy: dict) -> None:
-    global _policy, _disabled_nodes
+    global _policy, _disabled_nodes, _allowed_models
     _policy = policy
     active_forms = policy.get("activeForms", ())
     custom_node_mode = policy.get("customNodeMode") if "customNode" in active_forms else None
@@ -380,6 +416,7 @@ def _apply_policy(policy: dict) -> None:
     set_custom_node_policy(custom_node_mode, frozenset(policy.get("deniedPacks", ())), allowed_packs)
     partner_node_ids = {entry["nodeId"] for entry in policy.get("disabledPartnerNodes", ())}
     _disabled_nodes = frozenset(policy.get("disabledNodes", ())).union(partner_node_ids)
+    _allowed_models = frozenset(policy.get("models", ())) if "model" in active_forms else None
 
 
 def initialize() -> None:

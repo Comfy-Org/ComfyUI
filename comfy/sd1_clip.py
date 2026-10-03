@@ -7,6 +7,7 @@ import traceback
 import zipfile
 from . import model_management
 import comfy.clip_model
+from app import governance
 import json
 import logging
 import numbers
@@ -443,6 +444,9 @@ def load_embed(embedding_name, embedding_directory, embedding_size, embed_key=No
         return None
 
     embed_path = valid_file
+    if not governance.model_allowed(embed_path):
+        logging.warning("Embedding '{}' is not permitted by your organization's policy.".format(embedding_name))
+        return None
 
     embed_out = None
 
