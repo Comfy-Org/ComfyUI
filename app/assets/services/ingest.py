@@ -1,11 +1,10 @@
 """Turns incoming bytes into catalogued assets: multipart uploads moved into a
 hash-addressed destination, files registered where they already sit, and
 records created from a hash the catalog already holds. Every path persists the
-stat that hashing verified (for an upload copied across volumes, the stat of the
-copy), so a row's recorded size and mtime describe the same observation as its
-hash. A live row already at the destination is reconciled before the write, so
-an upload never adopts a fresh hash onto records created for bytes it just
-replaced.
+stat that hashing verified, so a row's recorded size and mtime describe the
+same observation as its hash. A live row already at the destination is
+reconciled before the write, so an upload never adopts a fresh hash onto
+records created for bytes it just replaced.
 """
 
 import contextlib
@@ -14,7 +13,6 @@ import logging
 import mimetypes
 import os
 import shutil
-import uuid
 from typing import Any, NamedTuple, Sequence
 
 from sqlalchemy import func, select
@@ -188,31 +186,16 @@ def _guess_upload_mime_type(
     return guessed or "application/octet-stream"
 
 
-def _move_temp_to_dest(
-    temp_path: str, dest_abs: str, verified_stat: os.stat_result
-) -> os.stat_result:
-    """Move the upload into place and return the stat to record for it. Across
-    volumes (EXDEV, also Windows' ERROR_NOT_SAME_DEVICE) the move is a copy with
-    its own mtime, so that case records the copy's stat."""
+def _move_temp_to_dest(temp_path: str, dest_abs: str) -> None:
     os.makedirs(os.path.dirname(dest_abs), exist_ok=True)
     try:
         try:
             os.replace(temp_path, dest_abs)
-            return verified_stat
-        except OSError as e:
+        except OSError as e:  # EXDEV: destination is on another volume
             if e.errno != errno.EXDEV:
                 raise
-        # Copy beside dest and rename, so a partial copy never takes the hash name.
-        staging = f"{dest_abs}.{uuid.uuid4().hex}.part"
-        try:
-            shutil.move(temp_path, staging)
-            staged_stat = os.stat(staging)
-            os.replace(staging, dest_abs)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.remove(staging)
-            raise
-        return staged_stat
+            if not (os.path.exists(dest_abs) and os.path.getsize(dest_abs) == os.path.getsize(temp_path)):
+                shutil.copyfile(temp_path, dest_abs)
     except Exception as e:
         raise RuntimeError(f"failed to move uploaded file into place: {e}") from e
 
@@ -511,9 +494,10 @@ def upload_from_temp_path(
         content_type = _guess_upload_mime_type(
             mime_type, client_filename, name, os.path.basename(dest_abs)
         )
-        placed_stat = _move_temp_to_dest(temp_path, dest_abs, verified_stat)
+        _move_temp_to_dest(temp_path, dest_abs)
     finally:
         _remove_temp_path(temp_path)
+    placed_stat = os.stat(dest_abs)
     size_bytes, mtime_ns = placed_stat.st_size, placed_stat.st_mtime_ns
     system_metadata = _extract_system_metadata_sync(dest_abs, content_type)
     with create_session() as session:
