@@ -44,7 +44,10 @@ _ENFORCED_FORMS = frozenset({"customNode", "nodeId", "partnerNode"})
 _BASE64URL_PATTERN = re.compile(r"[A-Za-z0-9_-]*")
 _PROVIDER_ID_PATTERN = re.compile(r"[a-z0-9._-]+")
 _MODEL_DIGEST_PATTERN = re.compile(r"blake3:[0-9a-f]{64}")
-_PACK_EXTENSIONS = frozenset({".py", ".pyd", ".so", ".dll", ".dylib"})
+# Every file kind that runs: Python source (.pyw is source on Windows), native libraries, and the web scripts a pack serves.
+_PACK_EXTENSIONS = frozenset({".py", ".pyw", ".pyd", ".so", ".dll", ".dylib", ".js", ".mjs"})
+# A versioned shared library (libfoo.so.1, libfoo.so.1.2) loads like a .so, though its last suffix is a number.
+_VERSIONED_LIBRARY_PATTERN = re.compile(r"\.so(?:\.[0-9]+)+\Z")
 _BYTECODE_EXTENSIONS = frozenset({".pyc", ".pyo"})
 
 _COMFYUI_ROOT = Path(__file__).parent.parent
@@ -127,6 +130,10 @@ def pack_allowed(module_path: str) -> bool:
     return digest == expected_digest
 
 
+def _is_measured(relative: Path) -> bool:
+    return relative.suffix.lower() in _PACK_EXTENSIONS or _VERSIONED_LIBRARY_PATTERN.search("".join(relative.suffixes).lower()) is not None
+
+
 def pack_digest(pack_path: str) -> str:
     # Keep local: hashing imports comfy.cli_args, which would freeze CLI defaults before main enables argument parsing.
     from app.assets.services.hashing import compute_blake3_hash
@@ -154,7 +161,7 @@ def pack_digest(pack_path: str) -> str:
     files = [
         (unicodedata.normalize("NFC", relative.as_posix()), candidate)
         for relative, candidate in contents
-        if relative.suffix.lower() in _PACK_EXTENSIONS
+        if _is_measured(relative)
     ]
     if len(files) != len({relative_path for relative_path, _ in files}):
         raise ValueError("pack paths must remain unique after NFC normalization")

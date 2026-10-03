@@ -134,3 +134,75 @@ def test_pack_digest_rejects_symlinked_pack_root(tmp_path: Path) -> None:
     # When the pack is measured, then the root symlink is rejected
     with pytest.raises(ValueError):
         governance.pack_digest(str(pack_path))
+
+
+# Shared with Comfy-Org/cloud services/comfy-builder/packdigest/digest_test.go (sharedFixtureFiles), which asserts the same digest.
+SHARED_FIXTURE_DIGEST = "blake3:60627b4c95dad13ffe3dd68e165ac182c605ab1f873a88d11c3b9c0b65d531e1"
+SHARED_FIXTURE_FILES = {
+    "__init__.py": b"ROOT = 1\n",
+    "utils/__init__.pyw": b"WINDOWS_SOURCE = 1\n",
+    "web/x.js": b"export const X = 1;\n",
+    "web/x.mjs": b"export const Y = 2;\n",
+    "lib/libfoo.so.1": b"\x7fELFversioned-so\n",
+    "README.md": b"# ignored readme\n",
+    "data/config.json": b'{"ignored": true}\n',
+}
+
+
+def _write_pack(pack_path: Path, files: dict[str, bytes]) -> Path:
+    for relative_path, contents in files.items():
+        file_path = pack_path / relative_path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(contents)
+    return pack_path
+
+
+def test_pack_digest_matches_shared_fixture_with_windows_source_web_and_versioned_library(tmp_path: Path) -> None:
+    # Given the fixture cloud's packdigest also measures
+    pack_path = _write_pack(tmp_path / "pack", SHARED_FIXTURE_FILES)
+
+    # When its pack digest is computed
+    digest = governance.pack_digest(str(pack_path))
+
+    # Then it is the digest both implementations assert
+    assert digest == SHARED_FIXTURE_DIGEST
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "extra.pyw",
+        "web/extra.js",
+        "web/extra.mjs",
+        "native/EXTRA.JS",
+        "lib/libbar.so.1",
+        "lib/libbar.so.1.2",
+        "lib/LIBBAR.SO.3",
+        "native/extra.dll",
+        "native/extra.dylib",
+    ],
+)
+def test_pack_digest_measures_every_file_kind_that_runs(golden_pack: Path, relative_path: str) -> None:
+    # Given a golden pack gaining a file that Python, the browser, or the loader runs
+    _write_pack(golden_pack, {relative_path: b"RUNS = 1\n"})
+
+    # When its digest is recomputed
+    digest = governance.pack_digest(str(golden_pack))
+
+    # Then the new file changes the pack identity
+    assert digest != GOLDEN_DIGEST
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    ["README.md", "data/extra.json", "lib/libbar.so.1a", "lib/libbar.so.", "lib/.so.1", "web/x.js.map"],
+)
+def test_pack_digest_ignores_files_that_do_not_run(golden_pack: Path, relative_path: str) -> None:
+    # Given a golden pack gaining a data file, or a name that only resembles a versioned library
+    _write_pack(golden_pack, {relative_path: b"DATA = 1\n"})
+
+    # When its digest is recomputed
+    digest = governance.pack_digest(str(golden_pack))
+
+    # Then the pack identity is unchanged
+    assert digest == GOLDEN_DIGEST
