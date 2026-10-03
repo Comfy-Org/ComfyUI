@@ -497,6 +497,7 @@ def upload_from_temp_path(
         _move_temp_to_dest(temp_path, dest_abs)
     finally:
         _remove_temp_path(temp_path)
+    # A cross-volume copy gets a new mtime, so record the file on disk (a rename keeps it).
     placed_stat = os.stat(dest_abs)
     size_bytes, mtime_ns = placed_stat.st_size, placed_stat.st_mtime_ns
     system_metadata = _extract_system_metadata_sync(dest_abs, content_type)
