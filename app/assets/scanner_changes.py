@@ -57,7 +57,7 @@ def recover_missing_content(
         return "no_match"
     occupied = session.scalar(
         sa.select(AssetContent.id)
-        .where(AssetContent.path == path, AssetContent.is_missing.is_(False))
+        .where(AssetContent.path == path, AssetContent.is_missing == sa.false())
         .limit(1)
     )
     if occupied is not None:
