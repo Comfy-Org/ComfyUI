@@ -24,6 +24,10 @@ import comfy.weight_adapter as weight_adapter
 import logging
 import torch
 
+KEYLESS_H3_CONTRACT_KEY = "minimax_h3_keyless_contract_v1"
+KEYLESS_H3_ARCHITECTURE = "h3_keyless_core50_v1"
+
+
 LORA_CLIP_MAP = {
     "mlp.fc1": "mlp_fc1",
     "mlp.fc2": "mlp_fc2",
@@ -183,6 +187,47 @@ def model_lora_keys_clip(model, key_map={}):
         key_map["lora_te1_text_projection"] = k #OneTrainer SD3 lora, not necessary but omits warning
 
     return key_map
+
+def _reject_unsupported_keyless_h3_adapter(model):
+    """Fail before generic LoRA mapping can partially apply a native-H3 adapter."""
+    diffusion_model = getattr(model, "diffusion_model", None)
+    if diffusion_model is None or not hasattr(diffusion_model, KEYLESS_H3_CONTRACT_KEY):
+        return
+
+    contract = getattr(diffusion_model, KEYLESS_H3_CONTRACT_KEY)
+    expected = {
+        "api": 1,
+        "architecture": KEYLESS_H3_ARCHITECTURE,
+        "core_blocks": 50,
+        "token_refiner": "native_qkv",
+        "token_refiner_blocks": 2,
+        "routing_source": "value",
+        "retrieval_source": "raw_projected_value",
+        "projection_attr": "qv_proj",
+        "qv_order": "q_effective;v",
+    }
+    mismatches = []
+    for name, wanted in expected.items():
+        if not hasattr(contract, name):
+            mismatches.append(f"missing {name}")
+            continue
+        actual = getattr(contract, name)
+        if actual != wanted:
+            mismatches.append(f"{name}={actual!r} (expected {wanted!r})")
+    if mismatches:
+        raise ValueError(
+            f"malformed {KEYLESS_H3_CONTRACT_KEY}: " + ", ".join(mismatches)
+        )
+
+    raise ValueError(
+        "Generic LoRA/DoRA loading is not supported for h3_keyless_core50_v1. "
+        "A native MiniMax-H3 packed-QKV adapter may contain a nonzero K delta, "
+        "which has no exact generic Keyless destination; partially applying only "
+        "the surviving targets would change the adapter. Use a separately identified "
+        "Keyless-native adapter path, or merge the legacy adapter into the native-QKV "
+        "teacher and distill that merged teacher into a Keyless derivative."
+    )
+
 
 def model_lora_keys_unet(model, key_map={}):
     sd = model.state_dict()
