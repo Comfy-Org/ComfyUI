@@ -1221,7 +1221,7 @@ def text_encoder_device():
         return get_torch_device()
     if comfy.memory_management.aimdo_enabled:
         return get_torch_device()
-    elif vram_state in (VRAMState.HIGH_VRAM, VRAMState.NORMAL_VRAM):
+    elif vram_state in (VRAMState.HIGH_VRAM, VRAMState.NORMAL_VRAM, VRAMState.SHARED):
         if should_use_fp16(prioritize_performance=False):
             return get_torch_device()
         else:
