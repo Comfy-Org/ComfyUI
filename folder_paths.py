@@ -519,7 +519,10 @@ def get_filename_list(folder_name: str) -> list[str]:
 
 def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, image_height=0) -> tuple[str, str, int, str, str]:
     def map_filename(filename: str) -> tuple[int, str]:
-        prefix_len = len(os.path.basename(filename_prefix))
+        # Normalize the same way the `filename` below does: a prefix that ends in
+        # a separator ("out/") has an EMPTY os.path.basename, which would make
+        # every existing file compare as a non-match and pin the counter at 1.
+        prefix_len = len(os.path.basename(os.path.normpath(filename_prefix)))
         prefix = filename[:prefix_len + 1]
         try:
             remainder = filename[prefix_len + 1:]
