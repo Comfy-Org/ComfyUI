@@ -7,8 +7,6 @@ import comfy_aimdo.host_buffer
 import comfy_aimdo.torch
 import torch
 
-from comfy.cli_args import args
-
 def _add_to_bucket(module, module_pin, buckets, size, priority):
     bucket = buckets.setdefault(size, [])
     entry = [-priority, 0, module]
@@ -51,7 +49,7 @@ def get_pin(module, subset="weights"):
     pins = module.__dict__.get("_pins")
     module_pin = None if pins is None else pins.get(subset)
     pin = None if module_pin is None else module_pin.get("pin")
-    if pin is None or module_pin["registered"] or args.disable_pinned_memory:
+    if pin is None or module_pin["registered"] or comfy.model_management.DISABLE_PINNED_MEMORY:
         return pin
 
     _, _, stack_split, pinned_size, *_ = module._pin_state[subset]
@@ -70,7 +68,7 @@ def get_pin(module, subset="weights"):
 
 def pin_memory(module, subset="weights", size=None):
     pin_state = module._pin_state
-    if args.disable_pinned_memory:
+    if comfy.model_management.DISABLE_PINNED_MEMORY:
         return
 
     pin = get_pin(module, subset)
