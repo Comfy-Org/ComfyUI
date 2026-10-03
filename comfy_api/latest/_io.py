@@ -1167,6 +1167,12 @@ class Autogrow(ComfyTypeI):
     @staticmethod
     def _expand_schema_for_dynamic(out_dict: dict[str, Any], live_inputs: dict[str, Any], value: tuple[str, dict[str, Any]], input_type: str, curr_prefix: list[str] | None):
         # NOTE: purposely do not include self in out_dict; instead use only the template inputs
+        finalized_prefix = finalize_prefix(curr_prefix)
+        if finalized_prefix in live_inputs:
+            raise ValueError(
+                f"Input '{finalized_prefix}' is an Autogrow group and cannot be given a value directly; "
+                f"wire each sub-slot individually using a dotted key, e.g. '{finalized_prefix}.<name>'."
+            )
         # need to figure out names based on template type
         is_names = ("names" in value[1]["template"])
         is_prefix = ("prefix" in value[1]["template"])
@@ -1211,7 +1217,6 @@ class Autogrow(ComfyTypeI):
                 new_dict_added_to = True
         # account for the edge case that all inputs are optional and no values are received
         if not new_dict_added_to:
-            finalized_prefix = finalize_prefix(curr_prefix)
             out_dict["dynamic_paths"][finalized_prefix] = finalized_prefix
             out_dict["dynamic_paths_default_value"][finalized_prefix] = DynamicPathsDefaultValue.EMPTY_DICT
         parse_class_inputs(out_dict, live_inputs, new_dict, curr_prefix)
