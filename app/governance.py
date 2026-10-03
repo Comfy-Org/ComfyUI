@@ -214,11 +214,12 @@ def model_digest(model_path: str) -> str:
 
     # Only this process's own hash is trusted: the assets database is user-writable, so a stored hash could vouch for any file.
     path = os.path.abspath(model_path)
-    # The key and the hash both come from one open handle, so a swap of the path cannot pair one file's key with another's bytes.
+    # The key and the hash both come from one open handle, so the cache never pairs one file's key with another file's bytes.
+    # The loader opens the path again after this check, so a file swapped in between is not caught (a known limit).
     with open(path, "rb") as model_file:
         stat = os.fstat(model_file.fileno())
-        # ctime catches an in-place rewrite whose mtime was restored, since os.utime cannot set it.
-        # On Windows st_ctime is the creation time, so this key does not catch that rewrite there.
+        # ctime catches an in-place rewrite whose mtime was restored, since os.utime cannot set it, on filesystems that
+        # update ctime on write (APFS, ext4). It does not on Windows (st_ctime is the creation time) or on FAT32/exFAT.
         key = (path, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
         digest = _model_digests.get(key)
         if digest is None:

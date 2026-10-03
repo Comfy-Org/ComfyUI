@@ -181,6 +181,7 @@ def test_file_replaced_under_the_same_size_and_mtime_is_hashed_again(tmp_path: P
         comfy.utils.load_torch_file(str(model))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="st_ctime is the creation time on Windows, so the cache key cannot see an in-place rewrite")
 def test_file_rewritten_in_place_with_its_mtime_restored_is_hashed_again(tmp_path: Path) -> None:
     # Given an allowed model that has been loaded once
     model = _write_model(tmp_path / "checkpoints" / "model.safetensors", 1.0)
