@@ -4,6 +4,7 @@ import os
 import shutil
 import sqlite3
 import time
+import uuid
 from contextlib import closing
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
@@ -237,13 +238,37 @@ def init_db():
         _init_file_db(db_url)
 
 
+# Holds the in-memory database open: SQLite frees a memdb database with its last connection,
+# and the engines' pools close idle connections.
+_memory_db_anchor = None
+
+
 def _init_memory_db(db_url):
     """Initialize an in-memory SQLite database using metadata.create_all.
 
-    Alembic migrations don't work with in-memory SQLite because each
-    connection gets its own separate database — tables created by Alembic's
-    internal connection are lost immediately.
+    The database lives in SQLite's memdb VFS under a name unique to this init, so every pooled
+    connection sees the same database with normal locking. A single connection shared by all
+    threads interleaves their transactions.
     """
+    global _memory_db_anchor
+    name = f"/comfyui-{uuid.uuid4().hex}"
+    try:
+        _memory_db_anchor = sqlite3.connect(f"file:{name}?vfs=memdb", uri=True, check_same_thread=False)
+    except sqlite3.OperationalError as e:
+        logging.warning(
+            f"SQLite {sqlite3.sqlite_version} has no memdb VFS ({e}); the in-memory database "
+            f"falls back to one connection shared by all threads, which can fail under "
+            f"concurrent writes. SQLite 3.36 or newer fixes this."
+        )
+        _init_shared_connection_memory_db(db_url)
+        return
+
+    engine, write_engine = _create_engines(f"sqlite:///file:{name}?vfs=memdb&uri=true")
+    Base.metadata.create_all(engine)
+    _bind_sessions(engine, write_engine)
+
+
+def _init_shared_connection_memory_db(db_url):
     engine = create_engine(
         db_url,
         poolclass=StaticPool,
@@ -257,10 +282,7 @@ def _init_memory_db(db_url):
         cursor.close()
 
     Base.metadata.create_all(engine)
-
-    global Session, WriteSession
-    Session = sessionmaker(bind=engine)
-    WriteSession = Session
+    _bind_sessions(engine, engine)
 
 
 def _init_file_db(db_url):
@@ -300,10 +322,7 @@ def _upgrade_discards_the_catalog(script, target_rev, current_rev):
     )
 
 
-def _migrate_and_bind(db_url, db_path, db_exists):
-    config = get_alembic_config()
-
-    # Check if we need to upgrade
+def _create_engines(db_url):
     engine = create_engine(db_url)
     write_engine = create_engine(db_url)
 
@@ -327,6 +346,15 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     @event.listens_for(write_engine, "begin")
     def begin_immediate(connection):
         connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+    return engine, write_engine
+
+
+def _migrate_and_bind(db_url, db_path, db_exists):
+    config = get_alembic_config()
+
+    # Check if we need to upgrade
+    engine, write_engine = _create_engines(db_url)
 
     conn = engine.connect()
 
@@ -388,6 +416,10 @@ def _migrate_and_bind(db_url, db_path, db_exists):
 
     conn.close()
 
+    _bind_sessions(engine, write_engine)
+
+
+def _bind_sessions(engine, write_engine):
     global Session, WriteSession
     Session = sessionmaker(bind=engine)
     WriteSession = sessionmaker(bind=write_engine)
