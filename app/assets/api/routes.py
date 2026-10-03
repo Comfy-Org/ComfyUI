@@ -584,9 +584,9 @@ async def download_asset_content(request: web.Request) -> web.Response:
         disposition = "attachment"
 
     try:
-        result = resolve_asset_for_download(
-            reference_id=str(uuid.UUID(request.match_info["id"])),
-        )
+        reference_id = str(uuid.UUID(request.match_info["id"]))
+        # The lookup waits on the database, which a scan holds for a whole batch at a time.
+        result = await asyncio.to_thread(resolve_asset_for_download, reference_id)
         abs_path = result.abs_path
         content_type = result.content_type
         filename = result.download_name
