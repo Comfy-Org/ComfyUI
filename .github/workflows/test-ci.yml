@@ -22,11 +22,10 @@ jobs:
       fail-fast: false
       matrix:
         # os: [macos, linux, windows]
-        # os: [macos, linux]
         os: [linux]
-        python_version: ["3.10", "3.11", "3.12"]
-        cuda_version: ["12.1"]
-        torch_version: ["stable"]
+        python_version: ["3.14", "3.13", "3.12", "3.11"]
+        cuda_version: ["13.2"]
+        torch_version: ["specific"]
         include:
           # - os: macos
           #   runner_label: [self-hosted, macOS]
@@ -44,32 +43,17 @@ jobs:
         with:
           os: ${{ matrix.os }}
           python_version: ${{ matrix.python_version }}
+          cuda_version: ${{ matrix.cuda_version }}
           torch_version: ${{ matrix.torch_version }}
+          # Pin PyTorch 2.12 on CUDA 13.2 (cu132 wheel index). torchaudio is omitted
+          # on purpose: cu132 has no torchaudio build for these Python versions
+          # (it stops at 2.2.0/cp312). requirements.txt still lists torchaudio, so
+          # validate that leg once a runner exists — it may need to be made optional.
+          # NOTE: requires comfy-action to honor `torch_version: specific` on Linux
+          # (today macOS-only). Companion PR in comfy-org/comfy-action is required.
+          specific_torch_install: "pip install torch==2.12.* torchvision --index-url https://download.pytorch.org/whl/cu132"
           google_credentials: ${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}
           comfyui_flags: ${{ matrix.flags }}
-
-  # test-win-nightly:
-  #   strategy:
-  #     fail-fast: true
-  #     matrix:
-  #       os: [windows]
-  #       python_version: ["3.9", "3.10", "3.11", "3.12"]
-  #       cuda_version: ["12.1"]
-  #       torch_version: ["nightly"]
-  #       include:
-  #         - os: windows
-  #           runner_label: [self-hosted, Windows]
-  #           flags: ""
-  #   runs-on: ${{ matrix.runner_label }}
-  #   steps:
-  #     - name: Test Workflows
-  #       uses: comfy-org/comfy-action@main
-  #       with:
-  #         os: ${{ matrix.os }}
-  #         python_version: ${{ matrix.python_version }}
-  #         torch_version: ${{ matrix.torch_version }}
-  #         google_credentials: ${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}
-  #         comfyui_flags: ${{ matrix.flags }}
 
   test-unix-nightly:
     strategy:
@@ -78,7 +62,7 @@ jobs:
         # os: [macos, linux]
         os: [linux]
         python_version: ["3.11"]
-        cuda_version: ["12.1"]
+        cuda_version: ["13.2"]
         torch_version: ["nightly"]
         include:
           # - os: macos
@@ -94,6 +78,7 @@ jobs:
         with:
           os: ${{ matrix.os }}
           python_version: ${{ matrix.python_version }}
+          cuda_version: ${{ matrix.cuda_version }}
           torch_version: ${{ matrix.torch_version }}
           google_credentials: ${{ secrets.GCS_SERVICE_ACCOUNT_JSON }}
           comfyui_flags: ${{ matrix.flags }}
