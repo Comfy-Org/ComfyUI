@@ -1,10 +1,12 @@
 # Code from: https://github.com/Alpha-VLLM/Lumina-Image-2.0/blob/main/models/model.py
 
+import contextlib
 from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import comfy_aimdo.model_vbar
 import comfy.ldm.common_dit
 import comfy.model_management
 import comfy.ops
@@ -14,9 +16,173 @@ from comfy.ldm.modules.diffusionmodules.mmdit import TimestepEmbedder
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_masked
 from comfy.ldm.flux.layers import EmbedND
 from comfy.ldm.flux.math import apply_rope
+import comfy.model_prefetch
 import comfy.patcher_extension
 import comfy.utils
 from comfy.ldm.chroma_radiance.layers import NerfEmbedder
+from comfy.quant_ops import QuantizedTensor, TensorWiseINT8Layout
+
+_FUSED_RMS_MODULATED = getattr(TensorWiseINT8Layout, "fused_rms_modulated", None)
+_FUSED_SWIGLU_FFN = getattr(TensorWiseINT8Layout, "fused_swiglu_ffn", None)
+
+
+def _int8_convrot_linear(linear) -> bool:
+    """Return whether a Linear would use quantized matmul on an INT8 ConvRot weight."""
+    weight = getattr(linear, "weight", None)
+    return (
+        isinstance(weight, QuantizedTensor)
+        and weight._layout_cls == "TensorWiseINT8Layout"
+        and getattr(weight._params, "convrot", False)
+        and not getattr(linear, "_full_precision_mm", False)
+        and not getattr(linear, "comfy_force_cast_weights", False)
+        and len(getattr(linear, "weight_function", [])) == 0
+        and len(getattr(linear, "bias_function", [])) == 0
+    )
+
+
+def _vbar_resident(modules) -> bool:
+    """Return whether the VBAR weights of ``modules`` are already in VRAM.
+
+    Faulting only maps the pages; nothing is copied. The pins are dropped
+    again so the regular cast path stays in charge of the weights.
+    """
+    for s in modules:
+        signature = comfy_aimdo.model_vbar.vbar_fault(s._v)
+        resident = comfy_aimdo.model_vbar.vbar_signature_compare(signature, s._v_signature)
+        if signature is not None:
+            comfy_aimdo.model_vbar.vbar_unpin(s._v)
+        if not resident:
+            return False
+    return True
+
+
+@contextlib.contextmanager
+def _cast_together(modules, x):
+    """Allow the weights of several modules to be cast and used at the same time.
+
+    The fused ops need all their weights at once, so streamed weights would be
+    copied up front instead of overlapping with compute. Weights that are not
+    already in VRAM (or prefetched) therefore skip the fusion, as do legacy
+    offloaded weights.
+    """
+    device = x.device
+    if comfy.model_management.is_device_cpu(device) or any(
+        not hasattr(s, "_v") and s.weight.device != device for s in modules
+    ):
+        yield False
+        return
+    pending = [s for s in modules if hasattr(s, "_v") and not hasattr(s, "_prefetch")]
+    if not _vbar_resident(pending):
+        yield False
+        return
+    offload_stream = None
+    if pending:
+        offload_stream, _ = comfy.model_prefetch.pin_modules(pending, device)
+    try:
+        yield True
+    finally:
+        if offload_stream is not None:
+            offload_stream.wait_stream(comfy.model_management.current_stream(device))
+        if pending:
+            comfy.model_prefetch.cleanup_prefetched_modules(None, pending)
+
+
+def _fused_rms_modulated_linear(x, linear, norm, modulation_scale):
+    """Run fused RMS modulation and INT8 projection when supported."""
+    if (
+        comfy.model_management.in_training
+        or not callable(_FUSED_RMS_MODULATED)
+        or not _int8_convrot_linear(linear)
+    ):
+        return None
+    with _cast_together((norm, linear), x) as supported:
+        if not supported:
+            return None
+        with (
+            comfy.ops.CastBiasWeightContext(norm, x, offloadable=True) as (norm_weight, _),
+            comfy.ops.CastBiasWeightContext(linear, x, offloadable=True) as (weight, bias),
+        ):
+            scale = modulation_scale.to(device=x.device, dtype=x.dtype)
+            fused = _FUSED_RMS_MODULATED(
+                x, weight, bias, norm_weight, norm.eps, scale,
+            )
+    return None if fused is NotImplemented else fused
+
+
+def _fused_swiglu_supported(feed_forward) -> bool:
+    """Return whether a SwiGLU FFN can use the fused INT8 kernel."""
+    linears = (feed_forward.w1, feed_forward.w2, feed_forward.w3)
+    return (
+        not comfy.model_management.in_training
+        and callable(_FUSED_SWIGLU_FFN)
+        and all(linear.bias is None and _int8_convrot_linear(linear) for linear in linears)
+    )
+
+
+def _fused_swiglu_ffn_postnorm(x, feed_forward, norm):
+    """Run the post-normalized fused INT8 SwiGLU FFN when supported."""
+    if not _fused_swiglu_supported(feed_forward):
+        return None
+    ff = feed_forward
+    with _cast_together((ff.w1, ff.w3, ff.w2, norm), x) as supported:
+        if not supported:
+            return None
+        normed = norm(x)
+        with (
+            comfy.ops.CastBiasWeightContext(ff.w1, normed, offloadable=True) as (w1, b1),
+            comfy.ops.CastBiasWeightContext(ff.w3, normed, offloadable=True) as (w3, b3),
+            comfy.ops.CastBiasWeightContext(ff.w2, normed, offloadable=True) as (w2, b2),
+        ):
+            fused = _FUSED_SWIGLU_FFN(
+                normed, w1, w3, w2, b1, b3, b2,
+            )
+    return None if fused is NotImplemented else fused
+
+
+def _fused_swiglu_ffn(x, feed_forward, norm, modulation_scale):
+    """Run fused RMS modulation and an INT8 SwiGLU FFN when supported."""
+    if not _fused_swiglu_supported(feed_forward):
+        return None
+    ff = feed_forward
+    with _cast_together((ff.w1, ff.w3, ff.w2, norm), x) as supported:
+        if not supported:
+            return None
+        with (
+            comfy.ops.CastBiasWeightContext(ff.w1, x, offloadable=True) as (w1, b1),
+            comfy.ops.CastBiasWeightContext(ff.w3, x, offloadable=True) as (w3, b3),
+            comfy.ops.CastBiasWeightContext(ff.w2, x, offloadable=True) as (w2, b2),
+            comfy.ops.CastBiasWeightContext(norm, x, offloadable=True) as (norm_weight, _),
+        ):
+            scale = modulation_scale.to(device=x.device, dtype=x.dtype)
+            fused = _FUSED_SWIGLU_FFN(
+                x, w1, w3, w2, b1, b3, b2,
+                norm_weight=norm_weight, norm_eps=norm.eps, modulation_scale=scale,
+            )
+    return None if fused is NotImplemented else fused
+
+
+def _fused_rms_gated_residual(activation, norm, residual, gate):
+    """Run fused RMS normalization, gating, and residual addition."""
+    ck = getattr(comfy.quant_ops, "ck", None)
+    if ck is None or not callable(getattr(ck, "rms_gated_residual", None)):
+        return None
+    if (
+        comfy.model_management.in_training
+        or activation.dtype != torch.bfloat16
+        or residual.shape != activation.shape
+        or gate.ndim != 2
+        or gate.shape[0] != 1
+        or gate.shape[1] != activation.shape[-1]
+    ):
+        return None
+    norm_weight, _, offload_stream = comfy.ops.cast_bias_weight(norm, activation, offloadable=True)
+    try:
+        gate_vec = gate[0].to(device=activation.device, dtype=activation.dtype)
+        return ck.rms_gated_residual(
+            activation, norm_weight, residual, gate_vec, norm.eps,
+        )
+    finally:
+        comfy.ops.uncast_bias_weight(norm, norm_weight, None, offload_stream)
 
 
 def invert_slices(slices, length):
@@ -130,6 +296,7 @@ class JointAttention(nn.Module):
         x_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
         transformer_options={},
+        qkv: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
 
@@ -143,8 +310,11 @@ class JointAttention(nn.Module):
         """
         bsz, seqlen, _ = x.shape
 
+        if qkv is None:
+            qkv = self.qkv(x)
+
         xq, xk, xv = torch.split(
-            self.qkv(x),
+            qkv,
             [
                 self.n_local_heads * self.head_dim,
                 self.n_local_kv_heads * self.head_dim,
@@ -338,20 +508,53 @@ class JointTransformerBlock(nn.Module):
         if self.modulation:
             assert adaln_input is not None
             scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(adaln_input).chunk(4, dim=1)
+            gate_msa = gate_msa.tanh()
+            gate_mlp = gate_mlp.tanh()
+            gate_msa_t = gate_msa.unsqueeze(1)
+            gate_mlp_t = gate_mlp.unsqueeze(1)
+            # The fused ops apply one modulation row to every token, so they
+            # can't handle per-token-range modulation.
+            fuse = timestep_zero_index is None
 
-            x = x + apply_gate(gate_msa.unsqueeze(1).tanh(), self.attention_norm2(
-                clamp_fp16(self.attention(
+            qkv = _fused_rms_modulated_linear(
+                x, self.attention.qkv, self.attention_norm1, scale_msa,
+            ) if fuse else None
+            if qkv is not None:
+                attn_out = self.attention(
+                    x, x_mask, freqs_cis, transformer_options=transformer_options, qkv=qkv,
+                )
+            else:
+                attn_out = self.attention(
                     modulate(self.attention_norm1(x), scale_msa, timestep_zero_index=timestep_zero_index),
                     x_mask,
                     freqs_cis,
                     transformer_options=transformer_options,
-                ))), timestep_zero_index=timestep_zero_index
-            )
-            x = x + apply_gate(gate_mlp.unsqueeze(1).tanh(), self.ffn_norm2(
-                clamp_fp16(self.feed_forward(
+                )
+            attn_out = clamp_fp16(attn_out)
+            fused_x = _fused_rms_gated_residual(
+                attn_out, self.attention_norm2, x, gate_msa,
+            ) if qkv is not None else None
+            if fused_x is not None:
+                x = fused_x
+            else:
+                x = x + apply_gate(gate_msa_t, self.attention_norm2(attn_out), timestep_zero_index=timestep_zero_index)
+
+            ffn_out = _fused_swiglu_ffn(
+                x, self.feed_forward, self.ffn_norm1, scale_mlp,
+            ) if fuse else None
+            ffn_fused = ffn_out is not None
+            if not ffn_fused:
+                ffn_out = self.feed_forward(
                     modulate(self.ffn_norm1(x), scale_mlp, timestep_zero_index=timestep_zero_index),
-                ))), timestep_zero_index=timestep_zero_index
-            )
+                )
+            ffn_out = clamp_fp16(ffn_out)
+            fused_x = _fused_rms_gated_residual(
+                ffn_out, self.ffn_norm2, x, gate_mlp,
+            ) if ffn_fused else None
+            if fused_x is not None:
+                x = fused_x
+            else:
+                x = x + apply_gate(gate_mlp_t, self.ffn_norm2(ffn_out), timestep_zero_index=timestep_zero_index)
         else:
             assert adaln_input is None
             x = x + self.attention_norm2(
@@ -362,11 +565,10 @@ class JointTransformerBlock(nn.Module):
                     transformer_options=transformer_options,
                 ))
             )
-            x = x + self.ffn_norm2(
-                self.feed_forward(
-                    self.ffn_norm1(x),
-                )
-            )
+            ffn_out = _fused_swiglu_ffn_postnorm(x, self.feed_forward, self.ffn_norm1)
+            if ffn_out is None:
+                ffn_out = self.feed_forward(self.ffn_norm1(x))
+            x = x + self.ffn_norm2(ffn_out)
         return x
 
 
