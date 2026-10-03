@@ -381,8 +381,9 @@ def initialize() -> None:
         if unenforced:
             raise RuntimeError("policy requires forms this build cannot enforce: " + ", ".join(unenforced))
         _apply_policy(policy)
-        if _custom_node_mode == "allowlist" and args.enable_manager:
-            raise RuntimeError("ComfyUI-Manager cannot be enabled under a custom-node allowlist")
+        # Manager's prestartup runs scheduled install scripts and pip installs before any pack is checked, so it cannot run under a pack policy.
+        if _custom_node_mode is not None and args.enable_manager:
+            raise RuntimeError("ComfyUI-Manager cannot be enabled under a custom-node policy")
     except Exception:
         logging.exception("ComfyUI could not apply your organization's policy. Contact your administrator.")
         sys.exit(1)

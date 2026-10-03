@@ -66,6 +66,20 @@ def test_apply_disabled_nodes_removes_class_and_display_name(caplog: pytest.LogC
     assert "Pruned 1 disabled node" in caplog.text
 
 
+def test_apply_disabled_nodes_prunes_policy_nodes_without_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given a signed policy disabled a node and no disabled-node config is given
+    nodes.NODE_CLASS_MAPPINGS["PolicyNode"] = TestNode
+    nodes.NODE_DISPLAY_NAME_MAPPINGS["PolicyNode"] = "Policy Node"
+    monkeypatch.setattr(governance, "_disabled_nodes", frozenset({"PolicyNode"}), raising=False)
+
+    # When
+    governance.apply_disabled_nodes(set())
+
+    # Then the policy's node is pruned
+    assert "PolicyNode" not in nodes.NODE_CLASS_MAPPINGS
+    assert "PolicyNode" not in nodes.NODE_DISPLAY_NAME_MAPPINGS
+
+
 def test_apply_disabled_nodes_warns_once_for_all_missing_ids(caplog: pytest.LogCaptureFixture) -> None:
     # Given
     missing = {"MissingNodeA", "MissingNodeB"}

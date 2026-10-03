@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import MappingProxyType
 
 import pytest
 
@@ -25,6 +26,13 @@ def governed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(governance, "_disabled_nodes", frozenset(), raising=False)
     monkeypatch.setattr(args, "disabled_nodes_config", None)
     monkeypatch.setattr(args, "extra_model_paths_config", None)
+    monkeypatch.setattr(args, "enable_manager", False)
+    # A custom-node policy switches off bytecode writes for the process; undo that and the pack policy after each test.
+    monkeypatch.setattr(sys, "dont_write_bytecode", sys.dont_write_bytecode)
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", os.environ.get("PYTHONDONTWRITEBYTECODE", ""))
+    monkeypatch.setattr(governance, "_custom_node_mode", None, raising=False)
+    monkeypatch.setattr(governance, "_denied_packs", frozenset(), raising=False)
+    monkeypatch.setattr(governance, "_allowed_packs", MappingProxyType({}), raising=False)
     return policy_path
 
 
@@ -216,6 +224,76 @@ def test_initialize_applies_policy_limited_to_enforced_forms(
     governance.initialize()
 
     assert governance._disabled_nodes == frozenset({"SomeNode"})
+
+
+def _use_policy(governed: Path, monkeypatch: pytest.MonkeyPatch, policy: dict) -> None:
+    governed.write_bytes(b"signed policy")
+    monkeypatch.setattr(governance, "verify_and_load", lambda envelope_bytes: policy, raising=False)
+
+
+def test_initialize_prunes_partner_nodes_with_disabled_nodes(governed: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given a policy disabling one node id and one partner node
+    _use_policy(
+        governed,
+        monkeypatch,
+        {
+            "activeForms": ["nodeId", "partnerNode"],
+            "disabledNodes": ["SomeNode"],
+            "disabledPartnerNodes": [{"nodeId": "PartnerNode", "providerId": "acme"}],
+        },
+    )
+
+    # When the policy is applied
+    governance.initialize()
+
+    # Then both ids are pruned
+    assert governance._disabled_nodes == frozenset({"SomeNode", "PartnerNode"})
+
+
+def _custom_node_policy(mode: str) -> dict:
+    return {"activeForms": ["customNode"], "customNodeMode": mode, "packs": [], "deniedPacks": []}
+
+
+@pytest.mark.parametrize("mode", ["allowlist", "blocklist"])
+def test_initialize_refuses_manager_under_custom_node_policy(
+    governed: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    mode: str,
+) -> None:
+    # Given Manager is enabled, whose prestartup runs scheduled install scripts before any pack is checked
+    _use_policy(governed, monkeypatch, _custom_node_policy(mode))
+    monkeypatch.setattr(args, "enable_manager", True)
+
+    # When the policy is applied, then startup stops
+    with pytest.raises(SystemExit) as exc_info:
+        governance.initialize()
+
+    _assert_policy_exit(exc_info, caplog.text)
+    assert "ComfyUI-Manager cannot be enabled" in caplog.text
+
+
+@pytest.mark.parametrize("mode", ["allowlist", "blocklist"])
+def test_initialize_applies_custom_node_policy_without_manager(governed: Path, monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
+    # Given a custom-node policy with Manager off
+    _use_policy(governed, monkeypatch, _custom_node_policy(mode))
+
+    # When the policy is applied
+    governance.initialize()
+
+    # Then the pack gate takes the policy's mode
+    assert governance._custom_node_mode == mode
+
+
+def test_initialize_allows_manager_without_custom_node_policy(governed: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given Manager is enabled and the policy governs node ids only
+    _use_policy(governed, monkeypatch, {"activeForms": ["nodeId"], "disabledNodes": ["SomeNode"]})
+    monkeypatch.setattr(args, "enable_manager", True)
+
+    # When the policy is applied, then startup continues
+    governance.initialize()
+
+    assert governance._custom_node_mode is None
 
 
 def _write_extra_model_paths(governed: Path, monkeypatch: pytest.MonkeyPatch, source: str, content: str) -> None:
