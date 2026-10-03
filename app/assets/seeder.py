@@ -249,8 +249,6 @@ class _AssetSeeder:
             if self._state != State.IDLE:
                 logging.info("Asset seeder already running, skipping start")
                 return False
-            # A queued scan starting while a prompt runs waits for it, like one already running.
-            _start_paused = _start_paused or (_queued and self._pause_requested)
             self._state = State.PAUSED if _start_paused else State.RUNNING
             self._scan_state = _ScanState()
             self._errors = []
@@ -902,7 +900,7 @@ class _AssetSeeder:
 
     def _finish_and_start_pending(self) -> None:
         """Reset to IDLE, then start the scan queued while this run held the seeder,
-        paused if this run was. Caller must hold _lock."""
+        paused if this run was or a prompt is running. Caller must hold _lock."""
         start_paused = self._state is State.PAUSED
         self._reset_to_idle()
         pending = self._pending_scan
@@ -913,7 +911,7 @@ class _AssetSeeder:
                 phase=pending["phase"],
                 prune_first=False,
                 compute_hashes=pending["compute_hashes"],
-                _start_paused=start_paused,
+                _start_paused=start_paused or self._pause_requested,
                 _queued=True,
             ):
                 logging.warning(

@@ -3,6 +3,7 @@
 import threading
 import time
 import types
+from collections.abc import Iterator
 
 import pytest
 
@@ -32,13 +33,9 @@ class FakeTimer:
         self.interval = interval
         self.function = function
         self.daemon = False
-        self.cancelled = False
 
     def start(self) -> None:
         FakeTimer.armed.append(self)
-
-    def cancel(self) -> None:
-        self.cancelled = True
 
 
 class Harness:
@@ -80,7 +77,7 @@ class Harness:
         return self.seeder.enqueue_scan(roots=("output",), phase=ScanPhase.FULL)
 
     def live_timers(self) -> list[FakeTimer]:
-        return [t for t in FakeTimer.armed if not t.cancelled and t.function is not None]
+        return [t for t in FakeTimer.armed if t.function is not None]
 
     def fire_timer(self) -> None:
         [timer] = self.live_timers()
@@ -91,7 +88,7 @@ class Harness:
 
 
 @pytest.fixture
-def harness(monkeypatch: pytest.MonkeyPatch) -> Harness:
+def harness(monkeypatch: pytest.MonkeyPatch) -> Iterator[Harness]:
     clock = FakeClock()
     fake_time = types.SimpleNamespace(
         monotonic=clock.monotonic,
@@ -291,6 +288,11 @@ def test_a_scan_held_during_a_prune_starts_when_the_prune_ends(
 
     assert threads_in_prune == [True]  # nothing started while the prune held the seeder
     assert len(harness.scans) == 2
+    # The timer that fired mid-prune freed its slot, so later prompts are not stranded.
+    harness.clock.now = harness.seeder._queued_not_before + 1
+    assert harness.queue_output_scan()
+    harness.settle()
+    assert len(harness.scans) == 3
 
 
 def test_a_page_load_scan_during_a_prompt_is_not_held(harness: Harness) -> None:
@@ -367,6 +369,10 @@ def test_a_timer_firing_during_a_startup_scan_leaves_it_running(harness: Harness
     assert seen == [(State.RUNNING, ("models", "input", "output"))]
     # The startup scan's end starts the held one, the gap being over.
     assert len(harness.scans) == 3
+    harness.clock.now = harness.seeder._queued_not_before + 1
+    assert harness.queue_output_scan()
+    harness.settle()
+    assert len(harness.scans) == 4
 
 
 def test_a_prompt_arriving_as_the_gap_ends_is_never_stranded(harness: Harness) -> None:
@@ -382,7 +388,6 @@ def test_a_prompt_arriving_as_the_gap_ends_is_never_stranded(harness: Harness) -
         assert harness.seeder._pending_scan is None or harness.live_timers(), remaining
         if harness.live_timers():
             harness.fire_timer()
-        harness.scan_s = 30
 
 
 def test_a_timer_firing_early_waits_out_the_rest(harness: Harness) -> None:
@@ -402,3 +407,17 @@ def test_a_timer_firing_early_waits_out_the_rest(harness: Harness) -> None:
     assert rearmed.interval == pytest.approx(0.01)
     harness.fire_timer()
     assert len(harness.scans) == 2
+
+
+def test_the_rescan_queued_as_a_prompt_ends_starts_running(harness: Harness) -> None:
+    events: list[str] = []
+    harness.seeder.set_event_sink(lambda event, _data: events.append(event))
+
+    # main.py's order: pause before the prompt, then queue the rescan, then resume.
+    harness.seeder.pause()
+    assert harness.queue_output_scan()
+    harness.seeder.resume()
+    harness.settle()
+
+    assert len(harness.scans) == 1
+    assert "assets.seed.resumed" not in events
