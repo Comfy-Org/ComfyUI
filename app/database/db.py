@@ -197,6 +197,31 @@ def _acquire_file_lock(db_path):
             )
 
 
+def lock_holder_db_path():
+    """The database path if another process holds its lock, else None.
+
+    Never waits and never keeps the lock: a free lock is taken and released at once.
+    A missing lock file means no holder, so none is created.
+    """
+    try:
+        db_path = get_db_path()
+    except ValueError:
+        return None
+    lock_path = db_path + ".lock"
+    if not os.path.exists(lock_path):
+        return None
+    probe = FileLock(lock_path)
+    try:
+        probe.acquire(timeout=0)
+        probe.release()
+    except Timeout:
+        return db_path
+    except Exception as e:
+        # The check is advisory, so it must never stop startup.
+        logging.debug(f"Could not check the database lock '{lock_path}': {e}")
+    return None
+
+
 def _is_memory_db(db_url):
     """Check if the database URL refers to an in-memory SQLite database."""
     return db_url in ("sqlite:///:memory:", "sqlite://")

@@ -94,7 +94,6 @@ class NoAssets:
 
     def startup(self) -> None:
         mode.init(self._args)
-        record_hash_mode_transition_intent()
         run_startup(enable_assets=False)
 
     def shutdown(self) -> None:
