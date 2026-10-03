@@ -166,8 +166,7 @@ def tiled_vae(x, vae_model, tile_size=(512, 512), tile_overlap=(64, 64), encode=
         final_weight = w_h.view(1, 1, 1, -1, 1) * w_w.view(1, 1, 1, 1, -1)
 
         valid_d = min(tile_out.shape[2], result.shape[2])
-        tile_out = tile_out[:, :, :valid_d]
-        tile_out.mul_(final_weight)
+        tile_out = tile_out[:, :, :valid_d] * final_weight
         result[:, :, :valid_d, ys:ye, xs:xe] += tile_out
         count[:, :, :, ys:ye, xs:xe] += final_weight
         del tile_out, final_weight, w_h, w_w
