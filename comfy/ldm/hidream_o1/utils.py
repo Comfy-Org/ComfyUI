@@ -20,7 +20,18 @@ def resize_tensor(img_t, image_size, patch_size=16):
     while min(img_t.shape[-2], img_t.shape[-1]) >= 2 * image_size: # Pre-halves with 2x2 box averaging while the image is still very large
         img_t = torch.nn.functional.avg_pool2d(img_t, kernel_size=2, stride=2)
 
+    # Very thin panoramas would interpolate to an enormous intermediate (a
+    # 4000x20 strip lands on a 5408-wide target), so crop the long edge first.
     _, _, height, width = img_t.shape
+    if width > 16 * height:
+        left = (width - 16 * height) // 2
+        img_t = img_t[..., :, left:left + 16 * height]
+        _, _, height, width = img_t.shape
+    elif height > 16 * width:
+        top = (height - 16 * width) // 2
+        img_t = img_t[..., top:top + 16 * width, :]
+        _, _, height, width = img_t.shape
+
     m = patch_size
     s_max = image_size * image_size
     scale = math.sqrt(s_max / (width * height))
