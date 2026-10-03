@@ -544,30 +544,6 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
     monkeypatch.setattr(
         seeder_module, "sync_temp_references_safely", lambda _progress, _should_stop=None: None
     )
-    monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
-
-    with caplog.at_level(logging.INFO):
-        scan_seeder._run_scan()
-
-    assert events_named(caplog, "seeder.marked_missing") == [
-        {"count": 5, "stage": "pruning"}
-    ]
-
-
-def test_seed_completed_reports_pruned_rows_apart_from_the_scans_own(
-    scan_seeder: _AssetSeeder,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    scan_seeder._prune_first = True
-    scan_seeder._phase = ScanPhase.FAST
-    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
-    monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 5
-    )
-    monkeypatch.setattr(
-        seeder_module, "sync_temp_references_safely", lambda _progress: None
-    )
 
     def fast_phase_marking_two(roots) -> tuple[int, int, int]:
         scan_seeder._scan_state.missing_marked += 2
@@ -579,6 +555,9 @@ def test_seed_completed_reports_pruned_rows_apart_from_the_scans_own(
     with caplog.at_level(logging.INFO):
         scan_seeder._run_scan()
 
+    assert events_named(caplog, "seeder.marked_missing") == [
+        {"count": 5, "stage": "pruning"}
+    ]
     [completed_event] = completed_events
     assert completed_event["missing_marked_count"] == 2
     assert completed_event["pruned_count"] == 5
