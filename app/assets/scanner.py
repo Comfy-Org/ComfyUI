@@ -21,7 +21,7 @@ import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.assets import mode
-from app.assets.event_log import emit, error_type
+from app.assets.event_log import emit, error_kind, error_type
 from app.assets.database.queries import (
     create_content_reporting_insert,
     is_live_path_conflict,
@@ -97,6 +97,8 @@ class _ScanProgress(Protocol):
     found_again_mtime_changed: int
     found_again_size_changed: int
     found_again_cloud: int
+    dirs_listed: int
+    files_statted: int
 
     def mark_emitted(self, key: str) -> bool: ...
 
@@ -215,6 +217,8 @@ def observe_references_on_filesystem(
     observations: list[_ReferenceObservation] = []
     survivors: set[str] = set()
     for content_id, path, size_bytes, mtime_ns in contents:
+        if progress is not None:
+            progress.files_statted += 1
         try:
             stat_result = os.stat(path, follow_symlinks=True)
         except (FileNotFoundError, NotADirectoryError):
@@ -309,6 +313,7 @@ def sync_root_safely(
             "scanner.fast_scan_failed",
             root=root,
             error_type=error_type(exc),
+            error_kind=error_kind(exc),
         )
         return set()
     if progress is not None:
@@ -328,6 +333,7 @@ def sync_temp_references_safely(
             "scanner.temp_sync_failed",
             root="temp",
             error_type=error_type(exc),
+            error_kind=error_kind(exc),
         )
 
 
@@ -347,6 +353,7 @@ def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int | None:
         emit(
             "scanner.mark_missing_failed",
             error_type=error_type(exc),
+            error_kind=error_kind(exc),
         )
         return None
 
@@ -366,15 +373,22 @@ def mark_contents_missing_outside_prefixes(
     return len(missing)
 
 
-def collect_paths_for_roots(roots: tuple[RootType, ...]) -> list[str]:
-    """Collect all file paths for the given roots."""
+def collect_paths_for_roots(
+    roots: tuple[RootType, ...], progress: _ScanProgress | None = None
+) -> list[str]:
+    """Collect all file paths for the given roots.
+
+    ``progress.dirs_listed`` counts the input and output walks only. Models are
+    listed through folder_paths.get_filename_list, which walks the model folders
+    on a cache miss and re-checks their mtimes on a hit; none of that is counted.
+    """
     paths: list[str] = []
     if "models" in roots:
         paths.extend(collect_models_files())
     if "input" in roots:
-        paths.extend(list_files_recursively(folder_paths.get_input_directory()))
+        paths.extend(list_files_recursively(folder_paths.get_input_directory(), progress))
     if "output" in roots:
-        paths.extend(list_files_recursively(folder_paths.get_output_directory()))
+        paths.extend(list_files_recursively(folder_paths.get_output_directory(), progress))
     return paths
 
 
@@ -419,13 +433,20 @@ def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservati
                     )
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
-        emit("scanner.fast_scan_failed", root=root, error_type=error_type(exc))
+        emit(
+            "scanner.fast_scan_failed",
+            root=root,
+            error_type=error_type(exc),
+            error_kind=error_kind(exc),
+        )
         return {}
     return live
 
 
 def unlisted_references(
-    live: dict[str, list[_ReferenceObservation]], listings: DirListings
+    live: dict[str, list[_ReferenceObservation]],
+    listings: DirListings,
+    progress: _ScanProgress | None = None,
 ) -> tuple[list[_ReferenceObservation], int]:
     """Split the live rows into (vanished, skipped count).
 
@@ -446,6 +467,8 @@ def unlisted_references(
         # Stat before retiring. A listing compares names exactly, but a case-insensitive
         # (NTFS, APFS) or Unicode-normalizing (HFS+) filesystem resolves a stored path
         # spelled differently from its entry. Rows that reach here are normally few.
+        if progress is not None:
+            progress.files_statted += 1
         if _is_gone(path):
             vanished.extend(observations)
         else:
@@ -512,7 +535,12 @@ def mark_unlisted_references_missing_safely(
             session.commit()
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
-        emit("scanner.fast_scan_failed", root=root, error_type=error_type(exc))
+        emit(
+            "scanner.fast_scan_failed",
+            root=root,
+            error_type=error_type(exc),
+            error_kind=error_kind(exc),
+        )
         return
     if progress is not None:
         progress.missing_marked += marked
@@ -602,6 +630,8 @@ def build_asset_specs(
         if abs_p in existing_paths:
             skipped += 1
             continue
+        if progress is not None:
+            progress.files_statted += 1
         try:
             stat_p = os.stat(abs_p, follow_symlinks=True)
         except FileNotFoundError:
@@ -612,13 +642,18 @@ def build_asset_specs(
                 if isinstance(e, PermissionError):
                     progress.permission_denied += 1
                 if progress.mark_emitted("stat_failed:discovery"):
-                    emit("scanner.stat_failed", site="discovery", error_type=error_type(e))
+                    emit(
+                        "scanner.stat_failed",
+                        site="discovery",
+                        error_type=error_type(e),
+                        error_kind=error_kind(e),
+                    )
             continue
         if not stat_p.st_size:
             continue
         candidates.append((abs_p, stat_p))
 
-    admitted_paths, _ = _two_stat_admit(candidates)
+    admitted_paths, _ = _two_stat_admit(candidates, progress)
     candidate_stats = dict(candidates)
     for abs_p in admitted_paths:
         yield_gil()
@@ -671,7 +706,9 @@ class _SpecObservation(NamedTuple):
     snapshot: tuple[str, os.stat_result] | None
 
 
-def observe_asset_specs(specs: list[SeedAssetSpec]) -> dict[str, _SpecObservation | None]:
+def observe_asset_specs(
+    specs: list[SeedAssetSpec], progress: _ScanProgress | None = None
+) -> dict[str, _SpecObservation | None]:
     """Stat (and, in hashing mode, hash) each spec before the write transaction opens.
 
     ``None`` marks a path that vanished or could not be read.
@@ -680,6 +717,8 @@ def observe_asset_specs(specs: list[SeedAssetSpec]) -> dict[str, _SpecObservatio
     observed: dict[str, _SpecObservation | None] = {}
     for spec in specs:
         path = os.path.abspath(spec["abs_path"])
+        if progress is not None:
+            progress.files_statted += 1
         try:
             stat_result = os.stat(path, follow_symlinks=True)
             snapshot = snapshot_hash(path) if hashing_is_enabled else None
@@ -796,7 +835,7 @@ def insert_asset_specs(
 ) -> tuple[int, Exception | None]:
     if not specs:
         return 0, None
-    observed = observe_asset_specs(specs)
+    observed = observe_asset_specs(specs, progress)
     missing_ids_by_path = None
     if not mode.hashing_enabled():
         with create_session() as sess:
@@ -919,6 +958,8 @@ def enrich_asset(
     Returns:
         Whether enrichment changed the B-schema record or content
     """
+    if progress is not None:
+        progress.files_statted += 1
     try:
         stat_p = os.stat(file_path, follow_symlinks=True)
     except FileNotFoundError:
@@ -929,7 +970,12 @@ def enrich_asset(
             if isinstance(e, PermissionError):
                 progress.permission_denied += 1
             if progress.mark_emitted("stat_failed:enrich"):
-                emit("scanner.stat_failed", site="enrich", error_type=error_type(e))
+                emit(
+                    "scanner.stat_failed",
+                    site="enrich",
+                    error_type=error_type(e),
+                    error_kind=error_kind(e),
+                )
         return False
 
     initial_mtime_ns = get_mtime_ns(stat_p)

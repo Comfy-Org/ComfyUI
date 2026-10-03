@@ -71,10 +71,10 @@ def _around_the_walk(after_check: Hook | None, after_walk: Hook | None):
     walk; ``after_walk`` once the walk has listed the folders."""
     real_collect = seeder_module.collect_paths_for_roots
 
-    def collect(walk_roots):
+    def collect(walk_roots, *args, **kwargs):
         if after_check is not None:
             after_check()
-        paths = real_collect(walk_roots)
+        paths = real_collect(walk_roots, *args, **kwargs)
         if after_walk is not None:
             after_walk()
         return paths

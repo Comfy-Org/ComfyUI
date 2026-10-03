@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Callable, TypedDict
 
-from app.assets.event_log import emit, error_type
+from app.assets.event_log import emit, error_kind, error_type
 from app.assets.scanner import (
     RootType,
     build_asset_specs,
@@ -126,6 +126,15 @@ class _ScanState:
     found_again_mtime_changed: int = 0
     found_again_size_changed: int = 0
     found_again_cloud: int = 0
+    # Directories the input/output walks (or the output rescan's listing) listed; the
+    # models listing is not counted.
+    dirs_listed: int = 0
+    # os.stat calls on files in the reference sync, output-listing check, discovery,
+    # admission, seed, watch-list and enrich loops. Hashing's own stability stats are
+    # not counted.
+    files_statted: int = 0
+    # Time blocked at the pause gate.
+    paused_s: float = 0.0
     cancel_stage: str | None = None
     _emitted_keys: set[str] = field(default_factory=set)
 
@@ -550,7 +559,12 @@ class _AssetSeeder:
         """
         if not self._run_gate.is_set():
             self._emit_event("assets.seed.paused", {})
-        self._run_gate.wait()  # Blocks if paused
+        # Re-checked so a pause landing just after the check above still blocks, and is timed.
+        if not self._run_gate.is_set():
+            t_paused = time.perf_counter()
+            self._run_gate.wait()  # Blocks until resume or cancel
+            if self._scan_state is not None:
+                self._scan_state.paused_s += time.perf_counter() - t_paused
         cancelled = self._is_cancelled()
         if cancelled:
             self._record_cancel_stage(stage)
@@ -622,6 +636,8 @@ class _AssetSeeder:
     def _run_scan(self) -> None:
         """Main scan loop running in background thread."""
         t_start = time.perf_counter()
+        # Per-thread CPU clock on Windows, macOS and Linux; excludes time blocked while paused.
+        cpu_start = time.thread_time()
         roots = self._roots
         phase = self._phase
         root = roots[0] if len(roots) == 1 else None
@@ -719,6 +735,7 @@ class _AssetSeeder:
                 return
 
             elapsed = time.perf_counter() - t_start
+            cpu = time.thread_time() - cpu_start
             logging.info(
                 "Scan(%s, %s) done %.3fs: created=%d enriched=%d skipped=%d",
                 roots,
@@ -732,6 +749,10 @@ class _AssetSeeder:
                 "seeder.scan_completed",
                 phase=phase.value,
                 elapsed_ms=round(elapsed * 1000),
+                cpu_ms=round(cpu * 1000),
+                paused_ms=round(scan_state.paused_s * 1000),
+                dirs_listed_count=scan_state.dirs_listed,
+                files_statted_count=scan_state.files_statted,
                 created=total_created,
                 enriched=total_enriched,
                 skipped=skipped_existing,
@@ -766,6 +787,7 @@ class _AssetSeeder:
                 "seeder.scan_failed",
                 phase=phase.value,
                 error_type=error_type(e),
+                error_kind=error_kind(e),
                 root=root,
             )
             self._emit_event("assets.seed.error", {"message": str(e)})
@@ -858,7 +880,7 @@ class _AssetSeeder:
 
         t_collect = time.perf_counter()
         walk = list_output_for_rescan() if by_listing else None
-        paths = walk.files if walk is not None else collect_paths_for_roots(roots)
+        paths = walk.files if walk is not None else collect_paths_for_roots(roots, scan_state)
         logging.debug(
             "Fast scan: collect_paths took %.3fs (%d paths found)",
             time.perf_counter() - t_collect,
@@ -875,7 +897,8 @@ class _AssetSeeder:
                 )
                 self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
         if walk is not None:
-            vanished, unlisted = unlisted_references(live_references, walk.listings)
+            scan_state.dirs_listed += walk.dirs_listed
+            vanished, unlisted = unlisted_references(live_references, walk.listings, scan_state)
             marked_before = scan_state.missing_marked
             mark_unlisted_references_missing_safely("output", vanished, scan_state)
             self._emit_marked_missing("output", scan_state.missing_marked - marked_before)
@@ -949,7 +972,11 @@ class _AssetSeeder:
                     i,
                     created,
                 )
-                emit("seeder.batch_insert_failed", error_type=error_type(e))
+                emit(
+                    "seeder.batch_insert_failed",
+                    error_type=error_type(e),
+                    error_kind=error_kind(e),
+                )
 
             scanned = i + len(batch)
             now = time.perf_counter()
@@ -968,7 +995,7 @@ class _AssetSeeder:
                 last_progress_time = now
 
         self._update_progress(scanned=len(specs), created=total_created)
-        tick_watch_list()
+        tick_watch_list(scan_state)
         logging.info(
             "Fast scan complete: %.3fs total (created=%d, skipped=%d, total_paths=%d)",
             time.perf_counter() - t_fast_start,
@@ -989,7 +1016,7 @@ class _AssetSeeder:
         with create_session() as session:
             drain_pending_verifications(session)
             session.commit()
-            tick_watch_list()
+            tick_watch_list(scan_state)
             for _ in range(3):
                 drain_transition_queue(session)
                 session.commit()
