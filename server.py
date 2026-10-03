@@ -380,6 +380,10 @@ class PromptServer():
                 type_dir = folder_paths.get_temp_directory()
             elif dir_type == "output":
                 type_dir = folder_paths.get_output_directory()
+            else:
+                # Unrecognised type: signal "no directory" instead of falling
+                # through to an unbound `type_dir` (UnboundLocalError -> 500).
+                return None, dir_type
 
             return type_dir, dir_type
 
@@ -404,6 +408,8 @@ class PromptServer():
 
             image_upload_type = post.get("type")
             upload_dir, image_upload_type = get_dir_by_type(image_upload_type)
+            if upload_dir is None:
+                return web.Response(status=400)
 
             if image and image.file:
                 filename = image.filename
