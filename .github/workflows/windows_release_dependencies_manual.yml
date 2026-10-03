@@ -35,7 +35,8 @@ jobs:
           with:
             python-version: 3.${{ inputs.python_minor }}.${{ inputs.python_patch }}
 
-        - shell: bash
+        - name: Write dependency update batch script
+          shell: bash
           run: |
             echo "@echo off
             call update_comfyui.bat nopause
@@ -48,6 +49,9 @@ jobs:
             ..\python_embeded\python.exe -s -m pip install --upgrade ${{ inputs.torch_dependencies }} -r ../ComfyUI/requirements.txt pygit2
             pause" > update_comfyui_and_python_dependencies.bat
 
+        - name: Build Python dependency wheels and archive
+          shell: bash
+          run: |
             grep -v comfyui requirements.txt > requirements_nocomfyui.txt
             python -m pip wheel --no-cache-dir ${{ inputs.torch_dependencies }} -r requirements_nocomfyui.txt pygit2 -w ./temp_wheel_dir
             python -m pip install --no-cache-dir ./temp_wheel_dir/*
