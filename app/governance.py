@@ -66,7 +66,7 @@ _custom_node_mode: str | None = None
 _denied_packs: frozenset[str] = frozenset()
 _allowed_packs: Mapping[str, str] = MappingProxyType({})
 _allowed_models: frozenset[str] | None = None
-_model_digests: dict[tuple[str, int, int, int], str] = {}
+_model_digests: dict[tuple[str, int, int, int, int], str] = {}
 
 
 def load_disabled_nodes(path: str) -> set[str]:
@@ -214,12 +214,16 @@ def model_digest(model_path: str) -> str:
 
     # Only this process's own hash is trusted: the assets database is user-writable, so a stored hash could vouch for any file.
     path = os.path.abspath(model_path)
-    stat = os.stat(path)
-    key = (path, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-    digest = _model_digests.get(key)
-    if digest is None:
-        digest = "blake3:" + hashing.compute_blake3_hash(path)[0]
-        _model_digests[key] = digest
+    # The key and the hash both come from one open handle, so a swap of the path cannot pair one file's key with another's bytes.
+    with open(path, "rb") as model_file:
+        stat = os.fstat(model_file.fileno())
+        # ctime catches an in-place rewrite whose mtime was restored, since os.utime cannot set it.
+        # On Windows st_ctime is the creation time, so this key does not catch that rewrite there.
+        key = (path, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        digest = _model_digests.get(key)
+        if digest is None:
+            digest = "blake3:" + hashing.compute_blake3_hash(model_file)[0]
+            _model_digests[key] = digest
     return digest
 
 

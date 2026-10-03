@@ -117,7 +117,7 @@ def test_repeat_load_reuses_the_digest_until_the_file_changes(tmp_path: Path, mo
     comfy.utils.load_torch_file(str(model))
     hashed = []
     compute_blake3_hash = hashing.compute_blake3_hash
-    monkeypatch.setattr(hashing, "compute_blake3_hash", lambda path: hashed.append(path) or compute_blake3_hash(path))
+    monkeypatch.setattr(hashing, "compute_blake3_hash", lambda model_file: hashed.append(model_file.name) or compute_blake3_hash(model_file))
 
     # When it loads again, then it is not hashed again
     comfy.utils.load_torch_file(str(model))
@@ -155,7 +155,7 @@ def test_relative_and_absolute_paths_share_one_cache_entry(tmp_path: Path, monke
     monkeypatch.chdir(tmp_path)
     hashed = []
     compute_blake3_hash = hashing.compute_blake3_hash
-    monkeypatch.setattr(hashing, "compute_blake3_hash", lambda path: hashed.append(path) or compute_blake3_hash(path))
+    monkeypatch.setattr(hashing, "compute_blake3_hash", lambda model_file: hashed.append(model_file.name) or compute_blake3_hash(model_file))
 
     # When both are digested, then the file is hashed once and cached under one absolute key
     assert governance.model_digest(str(model)) == governance.model_digest(os.path.join("checkpoints", "model.safetensors"))
@@ -179,6 +179,50 @@ def test_file_replaced_under_the_same_size_and_mtime_is_hashed_again(tmp_path: P
     # Then the new file is hashed rather than trusted from the cache, and refused
     with pytest.raises(RuntimeError, match="organization's policy"):
         comfy.utils.load_torch_file(str(model))
+
+
+def test_file_rewritten_in_place_with_its_mtime_restored_is_hashed_again(tmp_path: Path) -> None:
+    # Given an allowed model that has been loaded once
+    model = _write_model(tmp_path / "checkpoints" / "model.safetensors", 1.0)
+    _apply_model_policy(model)
+    comfy.utils.load_torch_file(str(model))
+
+    # When unlisted bytes of the same size are written into the same inode and the old mtime is restored
+    stat = model.stat()
+    unlisted = _write_model(tmp_path / "unlisted.safetensors", 9.0).read_bytes()
+    assert len(unlisted) == stat.st_size
+    with open(model, "r+b") as stream:
+        stream.write(unlisted)
+    os.utime(model, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert (model.stat().st_ino, model.stat().st_size, model.stat().st_mtime_ns) == (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+
+    # Then the rewritten file is hashed rather than trusted from the cache, and refused
+    with pytest.raises(RuntimeError, match="organization's policy"):
+        comfy.utils.load_torch_file(str(model))
+
+
+def test_swap_between_stat_and_hash_does_not_cache_the_allowed_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given an allowed model and an unlisted one
+    allowed = _write_model(tmp_path / "checkpoints" / "allowed.safetensors", 1.0)
+    unlisted = _write_model(tmp_path / "checkpoints" / "unlisted.safetensors", 7.0)
+    _apply_model_policy(allowed)
+    compute_blake3_hash = hashing.compute_blake3_hash
+
+    def hash_after_swap(fp, *args, **kwargs):
+        # The swap lands after the file was statted: anything that opens the unlisted path from here reads the allowed bytes.
+        # A handle opened before the swap still reads the unlisted bytes.
+        if isinstance(fp, (str, os.PathLike)) and os.path.abspath(fp) == os.path.abspath(unlisted):
+            fp = str(allowed)
+        return compute_blake3_hash(fp, *args, **kwargs)
+
+    # When the unlisted model is digested during the swap, and the swap is then undone
+    monkeypatch.setattr(hashing, "compute_blake3_hash", hash_after_swap)
+    governance.model_allowed(str(unlisted))
+    monkeypatch.setattr(hashing, "compute_blake3_hash", compute_blake3_hash)
+
+    # Then its next load is decided by its own bytes and refused
+    with pytest.raises(RuntimeError, match="unlisted.safetensors.*organization's policy"):
+        comfy.utils.load_torch_file(str(unlisted))
 
 
 def test_policy_refusal_is_a_dedicated_runtime_error(tmp_path: Path) -> None:
