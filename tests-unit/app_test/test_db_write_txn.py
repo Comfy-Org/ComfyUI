@@ -6,20 +6,6 @@ from sqlalchemy import text
 from app.database import db as db_module
 
 
-@pytest.fixture
-def file_db(tmp_path, monkeypatch):
-    db_path = str(tmp_path / "comfyui.db")
-    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{db_path}")
-    monkeypatch.setattr(db_module, "Session", None)
-    monkeypatch.setattr(db_module, "WriteSession", None)
-    monkeypatch.setattr(db_module, "_db_lock", None)
-    db_module._init_file_db(db_module.args.database_url)
-    yield db_path
-    db_module.Session.kw["bind"].dispose()
-    db_module.WriteSession.kw["bind"].dispose()
-    db_module._db_lock.release(force=True)
-
-
 def _other_writer_can_begin(db_path):
     other = sqlite3.connect(db_path, timeout=0, isolation_level=None)
     try:
