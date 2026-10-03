@@ -47,10 +47,13 @@ class Harness:
         self.scan_s = 0.0
         self.paused_s = 0.0
         self.during_scan = None
+        self.scan_error: Exception | None = None
 
     def fast_phase(self, roots):
         self.scans.append(tuple(roots))
         self.clock.now += self.scan_s
+        if self.scan_error is not None:
+            raise self.scan_error
         assert self.seeder._scan_state is not None
         self.seeder._scan_state.paused_s = self.paused_s
         if self.during_scan is not None:
@@ -64,6 +67,7 @@ class Harness:
             with self.seeder._lock:
                 thread = self.seeder._thread
                 if self.seeder._state is State.IDLE and (thread is None or not thread.is_alive()):
+                    assert self.scan_error is not None or self.seeder.get_status().errors == []
                     return
             if thread is not None:
                 thread.join(timeout=0.05)
@@ -236,6 +240,8 @@ def test_a_held_scan_does_not_start_after_shutdown(harness: Harness) -> None:
     harness.fire_timer()
 
     assert len(harness.scans) == 1
+    # Not cancelled at shutdown, so it must not hold the interpreter open.
+    assert timer.daemon is True
 
 
 def test_a_prompt_after_the_gap_joins_the_waiting_scan(harness: Harness) -> None:
@@ -266,9 +272,13 @@ def test_a_scan_held_during_a_prune_starts_when_the_prune_ends(
     harness.queue_output_scan()
     [timer] = harness.live_timers()
 
+    threads_in_prune: list[object] = []
+
     def prune_while_the_timer_fires(_prefixes, _should_stop):
+        thread_before = harness.seeder._thread
         harness.clock.now += timer.interval
         timer.function()
+        threads_in_prune.append(harness.seeder._thread is thread_before)
         return 0
 
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
@@ -276,18 +286,40 @@ def test_a_scan_held_during_a_prune_starts_when_the_prune_ends(
     harness.seeder.mark_missing_outside_prefixes()
     harness.settle()
 
+    assert threads_in_prune == [True]  # nothing started while the prune held the seeder
     assert len(harness.scans) == 2
 
 
-def test_a_page_load_scan_during_a_prompt_starts_paused(harness: Harness) -> None:
+def test_a_page_load_scan_during_a_prompt_is_not_held(harness: Harness) -> None:
     harness.seeder.pause()  # a prompt is running and the seeder is idle
 
     assert harness.seeder.start(roots=("models", "input", "output"))
 
-    assert harness.seeder.get_status().state is State.PAUSED
-    harness.seeder.resume()
+    assert harness.seeder.get_status().state is State.RUNNING
     harness.settle()
     assert len(harness.scans) == 1
+
+
+def test_a_failed_scan_sets_no_wait(harness: Harness) -> None:
+    harness.scan_s = 30
+    harness.scan_error = RuntimeError("share went away")
+    harness.queue_output_scan()
+    harness.settle()
+
+    harness.scan_error = None
+    assert harness.queue_output_scan()
+    harness.settle()
+    assert len(harness.scans) == 2
+
+
+def test_a_scan_left_queued_by_a_cancelled_prune_does_not_block_the_next(harness: Harness) -> None:
+    # A cancelled prune resets to idle and keeps the scan queued during it, with no timer armed.
+    harness.seeder._pending_scan = {"roots": ("output",), "phase": ScanPhase.FULL, "compute_hashes": False}
+
+    assert harness.queue_output_scan()
+    harness.settle()
+
+    assert harness.scans[0] == ("output",)
 
 
 def test_a_timer_firing_between_prompts_starts_the_scan_running(harness: Harness) -> None:
