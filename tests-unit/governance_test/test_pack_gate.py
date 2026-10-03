@@ -160,6 +160,22 @@ def test_pack_gate_denies_pack_when_digest_cannot_be_read(monkeypatch: pytest.Mo
     assert governance.pack_allowed(str(pack_path)) is False
 
 
+def test_pack_install_in_child_interpreter_keeps_pack_allowed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Given an allowed pack whose install.py imports a pack module
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "")
+    pack_path = tmp_path / "pack"
+    pack_path.mkdir()
+    (pack_path / "helper.py").write_text("", encoding="utf-8")
+    (pack_path / "install.py").write_text("import helper\n", encoding="utf-8")
+    governance.set_custom_node_policy("allowlist", frozenset(), {pack_path.name: governance.pack_digest(str(pack_path))})
+
+    # When the install runs in a child interpreter
+    subprocess.run([sys.executable, str(pack_path / "install.py")], check=True)
+
+    # Then it leaves no bytecode behind and the pack is still allowed
+    assert governance.pack_allowed(str(pack_path)) is True
+
+
 @pytest.mark.asyncio
 async def test_blocklist_denied_basename_matching_is_case_insensitive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # Given a mixed-case pack denied by its lowercase basename

@@ -2,6 +2,7 @@ import base64
 import binascii
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import sys
@@ -84,8 +85,9 @@ def set_custom_node_policy(mode: str | None, denied_packs: frozenset[str], allow
     _denied_packs = frozenset(denied_packs)
     _allowed_packs = MappingProxyType({name.lower(): digest for name, digest in allowed_packs.items()})
     if mode is not None:
-        # Cached bytecode runs without reading the source the digest measures, so a gated install must never write any.
+        # Cached bytecode runs without reading the source the digest measures, so a gated install must never write any, child interpreters included.
         sys.dont_write_bytecode = True
+        os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 
 def pack_allowed(module_path: str) -> bool:
