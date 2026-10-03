@@ -1,7 +1,10 @@
+import json
 import numbers
 
 import torch
 
+import comfy.ops
+import comfy.model_management
 import comfy.text_encoders.qwen3vl
 from comfy import sd1_clip
 
@@ -33,9 +36,26 @@ class QwenImage21Qwen3VLClipModel(comfy.text_encoders.qwen3vl.Qwen3VLClipModel):
         # last layer without the final RMSNorm: transformers 4.57 hidden_states[-1], which Qwen's results are tuned to (5.x norms it)
         self.layer_norm_hidden_state = False
         self.image_spans = []
+        self.nvfp4_conditioning = False
+
+    def load_sd(self, sd):
+        quant_config = (json.loads(v.numpy().tobytes()) for k, v in sd.items() if k.startswith("model.layers.") and k.endswith(".comfy_quant"))
+        self.nvfp4_conditioning = any(config.get("format") == "nvfp4" and not config.get("full_precision_matrix_mult", False) for config in quant_config)
+        return super().load_sd(sd)
+
+    def forward(self, tokens):
+        device = self.execution_device
+        if device is None:
+            device = self.transformer.get_input_embeddings().weight.device
+        if not self.nvfp4_conditioning or device.type != "cuda" or not comfy.model_management.supports_nvfp4_compute(device):
+            return super().forward(tokens)
+        with comfy.ops.use_quantized_matmul(self.transformer.model, device):
+            return super().forward(tokens)
 
     def process_tokens(self, tokens, device):
         embeds, attention_mask, num_tokens, embeds_info = super().process_tokens(tokens, device)
+        if self.nvfp4_conditioning and device.type == "cuda" and comfy.model_management.supports_nvfp4_compute(device):
+            embeds = embeds.to(dtype=torch.bfloat16)
         self.image_spans = [(e["index"], e["size"]) for e in embeds_info if e["type"] == "image"]
         return embeds, attention_mask, num_tokens, embeds_info
 
