@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 
 import numpy as np
@@ -1431,6 +1432,27 @@ class LossGraphNode(io.ComfyNode):
 
     @classmethod
     def execute(cls, loss, filename_prefix, prompt=None, extra_pnginfo=None):
+        """Plot the training loss curve and return it as a preview image.
+
+        The series is normalized to the plot height between its own min and
+        max. Two cases have no meaningful normalization: a series whose values
+        are all identical -- which includes every ``steps=1`` run -- is drawn
+        flat at mid-height, and a series containing NaN or infinity is refused,
+        because normalizing it would render a diverged run as a stable one.
+
+        Args:
+            loss: ``LOSS_MAP`` from a training node; ``loss["loss"]`` is the
+                per-step loss list.
+            filename_prefix: Prefix for the saved graph image.
+            prompt: Hidden prompt metadata, embedded in the saved PNG.
+            extra_pnginfo: Hidden extra PNG metadata.
+
+        Returns:
+            A ``NodeOutput`` carrying the graph as a preview image.
+
+        Raises:
+            ValueError: If any recorded loss is not finite.
+        """
         loss_values = loss["loss"]
         width, height = 800, 480
         margin = 40
@@ -1440,12 +1462,46 @@ class LossGraphNode(io.ComfyNode):
         )  # Extend canvas
         draw = ImageDraw.Draw(img)
 
+        # A diverged run reaches here as NaN/inf. Refuse it by name rather than
+        # normalizing it: NaN fails every comparison, so min, max and the range
+        # are all NaN, the range is not > 0, and the series would take the
+        # constant branch below and be drawn as a healthy flat line. Saying so
+        # is the point -- the operator needs to know training diverged.
+        if not all(math.isfinite(l) for l in loss_values):
+            raise ValueError(
+                "Loss graph cannot be drawn: the loss series contains non-finite "
+                "values (NaN or infinity), which usually means training diverged."
+            )
+
         min_loss, max_loss = min(loss_values), max(loss_values)
-        scaled_loss = [(l - min_loss) / (max_loss - min_loss) for l in loss_values]
+        loss_range = max_loss - min_loss
+        if loss_range > 0:
+            scaled_loss = [(l - min_loss) / loss_range for l in loss_values]
+        else:
+            # Every recorded loss is identical, so there is no range to
+            # normalize against and the division above would raise. This is not
+            # a degenerate input: a steps=1 run has exactly one value by
+            # definition, and it is the cheapest way to validate a training
+            # config before committing to a long run. Draw the series flat at
+            # mid-height -- 0.0 or 1.0 would pin it to the axis and read as
+            # "lowest"/"highest" when the only true statement is "unchanged".
+            scaled_loss = [0.5 for _ in loss_values]
 
         steps = len(loss_values)
 
         prev_point = (margin, height - int(scaled_loss[0] * height))
+        if steps == 1:
+            # Nothing to join a single point to, so the loop below never runs
+            # and the canvas would come back empty -- exactly the steps=1 case
+            # this node has to render. Mark the one sample instead.
+            radius = 4
+            draw.ellipse(
+                [
+                    (prev_point[0] - radius, prev_point[1] - radius),
+                    (prev_point[0] + radius, prev_point[1] + radius),
+                ],
+                fill="blue",
+            )
         for i, l in enumerate(scaled_loss[1:], start=1):
             x = margin + int(i / steps * width)  # Scale X properly
             y = height - int(l * height)
