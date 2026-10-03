@@ -1410,6 +1410,12 @@ DEFAULT_AIMDO_CAST_BUFFER_RESERVATION_SIZE = 16 * 1024 ** 3
 def _register_cross_step(module):
     CROSS_STEP_STATE.add(module)
 
+class _CastBuffer:
+    def __init__(self, tensor):
+        self.tensor = tensor
+        self.in_use = False
+
+
 def get_cast_buffer(offload_stream, device, size, ref):
     global LARGEST_CASTED_WEIGHT
 
@@ -1420,7 +1426,17 @@ def get_cast_buffer(offload_stream, device, size, ref):
     else:
         wf_context = nullcontext()
 
-    cast_buffer = STREAM_CAST_BUFFERS.get(offload_stream, None)
+    if in_training:
+        # Autograd may keep this storage after forward has released the cast.
+        with wf_context:
+            return torch.empty((size), dtype=torch.int8, device=device)
+
+    cached = STREAM_CAST_BUFFERS.get(offload_stream, None)
+    if cached is not None and cached.in_use:
+        # Another cast on this stream still needs the cached weights.
+        with wf_context:
+            return torch.empty((size), dtype=torch.int8, device=device)
+    cast_buffer = cached.tensor if cached is not None else None
     if cast_buffer is None or cast_buffer.numel() < size:
         if ref is LARGEST_CASTED_WEIGHT[0]:
             #If there is one giant weight we do not want both streams to
@@ -1432,15 +1448,24 @@ def get_cast_buffer(offload_stream, device, size, ref):
             synchronize()
             del STREAM_CAST_BUFFERS[offload_stream]
             del cast_buffer
+            cached = None
             soft_empty_cache()
         with wf_context:
             cast_buffer = torch.empty((size), dtype=torch.int8, device=device)
-            STREAM_CAST_BUFFERS[offload_stream] = cast_buffer
+            cached = _CastBuffer(cast_buffer)
+            STREAM_CAST_BUFFERS[offload_stream] = cached
 
         if  size > LARGEST_CASTED_WEIGHT[1]:
             LARGEST_CASTED_WEIGHT = (ref, size)
 
+    cached.in_use = True
     return cast_buffer
+
+
+def release_cast_buffer(offload_stream, tensor):
+    cached = STREAM_CAST_BUFFERS.get(offload_stream, None)
+    if cached is not None and tensor.untyped_storage().data_ptr() == cached.tensor.data_ptr():
+        cached.in_use = False
 
 def get_aimdo_cast_buffer(offload_stream, device):
     cast_buffer = STREAM_AIMDO_CAST_BUFFERS.get(offload_stream, None)

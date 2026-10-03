@@ -157,16 +157,14 @@ class JointAttention(nn.Module):
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
         if self.qk_norm and not comfy.model_management.in_training:
-            q_scale, _, q_offload_stream = comfy.ops.cast_bias_weight(self.q_norm, xq, offloadable=True)
-            k_scale, _, k_offload_stream = comfy.ops.cast_bias_weight(self.k_norm, xk, offloadable=True)
-            epsilon = self.q_norm.eps if self.q_norm.eps is not None else torch.finfo(torch.float32).eps
-            if self.n_local_heads == self.n_local_kv_heads:
-                xq, xk = comfy.quant_ops.ck.rms_rope(xq, xk, freqs_cis, q_scale, k_scale, epsilon)
-            else:
-                xq = comfy.quant_ops.ck.rms_rope1(xq, freqs_cis, q_scale, epsilon)
-                xk = comfy.quant_ops.ck.rms_rope1(xk, freqs_cis, k_scale, epsilon)
-            comfy.ops.uncast_bias_weight(self.q_norm, q_scale, None, q_offload_stream)
-            comfy.ops.uncast_bias_weight(self.k_norm, k_scale, None, k_offload_stream)
+            with comfy.ops.CastBiasWeightContext(self.q_norm, xq, offloadable=True) as (q_scale, _), \
+                    comfy.ops.CastBiasWeightContext(self.k_norm, xk, offloadable=True) as (k_scale, _):
+                epsilon = self.q_norm.eps if self.q_norm.eps is not None else torch.finfo(torch.float32).eps
+                if self.n_local_heads == self.n_local_kv_heads:
+                    xq, xk = comfy.quant_ops.ck.rms_rope(xq, xk, freqs_cis, q_scale, k_scale, epsilon)
+                else:
+                    xq = comfy.quant_ops.ck.rms_rope1(xq, freqs_cis, q_scale, epsilon)
+                    xk = comfy.quant_ops.ck.rms_rope1(xk, freqs_cis, k_scale, epsilon)
         else:
             xq = self.q_norm(xq)
             xk = self.k_norm(xk)

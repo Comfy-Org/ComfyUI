@@ -66,13 +66,11 @@ class Ideogram4Attention(nn.Module):
             q = _apply_rope_split_half1(self.norm_q(q), freqs_cis)
             k = _apply_rope_split_half1(self.norm_k(k), freqs_cis)
         else:
-            q_scale, _, q_offload_stream = comfy.ops.cast_bias_weight(self.norm_q, q, offloadable=True)
-            k_scale, _, k_offload_stream = comfy.ops.cast_bias_weight(self.norm_k, k, offloadable=True)
-            q, k = comfy.quant_ops.ck.rms_rope_split_half(
-                q, k, freqs_cis, q_scale, k_scale, self.norm_q.eps
-            )
-            comfy.ops.uncast_bias_weight(self.norm_q, q_scale, None, q_offload_stream)
-            comfy.ops.uncast_bias_weight(self.norm_k, k_scale, None, k_offload_stream)
+            with comfy.ops.CastBiasWeightContext(self.norm_q, q, offloadable=True) as (q_scale, _), \
+                    comfy.ops.CastBiasWeightContext(self.norm_k, k, offloadable=True) as (k_scale, _):
+                q, k = comfy.quant_ops.ck.rms_rope_split_half(
+                    q, k, freqs_cis, q_scale, k_scale, self.norm_q.eps
+                )
 
         # (B, heads, L, head_dim)
         q = AttentionTensorContainer(q.transpose(1, 2))

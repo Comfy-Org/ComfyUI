@@ -113,11 +113,9 @@ class ErnieImageAttention(nn.Module):
         key = k_flat.view(B, S, self.heads, self.head_dim)
 
         if image_rotary_emb is not None and not comfy.model_management.in_training:
-            q_scale, _, q_offload_stream = comfy.ops.cast_bias_weight(self.norm_q, query, offloadable=True)
-            k_scale, _, k_offload_stream = comfy.ops.cast_bias_weight(self.norm_k, key, offloadable=True)
-            query, key = comfy.quant_ops.ck.rms_rope_split_half(query, key, image_rotary_emb, q_scale, k_scale, self.norm_q.eps)
-            comfy.ops.uncast_bias_weight(self.norm_q, q_scale, None, q_offload_stream)
-            comfy.ops.uncast_bias_weight(self.norm_k, k_scale, None, k_offload_stream)
+            with comfy.ops.CastBiasWeightContext(self.norm_q, query, offloadable=True) as (q_scale, _), \
+                    comfy.ops.CastBiasWeightContext(self.norm_k, key, offloadable=True) as (k_scale, _):
+                query, key = comfy.quant_ops.ck.rms_rope_split_half(query, key, image_rotary_emb, q_scale, k_scale, self.norm_q.eps)
         else:
             query = self.norm_q(query)
             key = self.norm_k(key)

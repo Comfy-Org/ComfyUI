@@ -239,9 +239,8 @@ class CausalAttention(nn.Module):
 
     def forward(self, x):
         B, N, C = x.shape
-        weight, _, offload_stream = comfy.ops.cast_bias_weight(self.qkv, x, offloadable=True)
-        qkv = F.linear(x, weight=weight, bias=comfy.ops.cast_to_input(torch.cat((self.q_bias, self.zero_k_bias, self.v_bias)), x))
-        comfy.ops.uncast_bias_weight(self.qkv, weight, None, offload_stream)
+        with comfy.ops.CastBiasWeightContext(self.qkv, x, offloadable=True) as (weight, _):
+            qkv = F.linear(x, weight=weight, bias=comfy.ops.cast_to_input(torch.cat((self.q_bias, self.zero_k_bias, self.v_bias)), x))
         q, k, v = qkv.reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4).unbind(0)
 
         # mean over heads then pool down to the latent width (in_dim >> out_dim)

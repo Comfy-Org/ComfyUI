@@ -1279,10 +1279,10 @@ class BaseQwen3:
         else:
             weight = self.model.embed_tokens.weight.to(x)
 
-        x = torch.nn.functional.linear(input, weight, None)
-
-        comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
-        return x
+        try:
+            return torch.nn.functional.linear(input, weight, None)
+        finally:
+            comfy.ops.uncast_bias_weight(module, weight, None, offload_stream)
 
 class Llama2(BaseLlama, torch.nn.Module):
     def __init__(self, config_dict, dtype, device, operations):
