@@ -64,7 +64,7 @@ class Blend(io.ComfyNode):
         elif mode == "soft_light":
             return torch.where(img2 <= 0.5, img1 - (1 - 2 * img2) * img1 * (1 - img1), img1 + (2 * img2 - 1) * (cls.g(img1) - img1))
         elif mode == "difference":
-            return img1 - img2
+            return torch.abs(img1 - img2)
         raise ValueError(f"Unsupported blend mode: {mode}")
 
     @classmethod
