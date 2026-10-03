@@ -163,7 +163,8 @@ def render_pose_data_openpose(
             positions = cc.get("positions")
             if positions is not None:
                 face_vert_ids = select_face_landmark_vert_ids(
-                    np.asarray(positions), face_mask=cc.get("face_mask"),
+                    np.asarray(positions, dtype=np.float32),
+                    face_mask=cc.get("face_mask"),
                 )
                 if use_rig_only:
                     face_vert_ids = face_vert_ids[_EYES_MOUTH_IDX]
@@ -201,11 +202,18 @@ def render_pose_data_openpose(
 
         if include_face:
             face_xy = None
-            real_face = person.get("pred_face_keypoints_2d")
-            if real_face is not None:
-                arr = np.asarray(real_face, dtype=np.float32)
+            real = person.get("pred_face_keypoints_2d")
+            real_arr = None
+            if real is not None:
+                arr = np.asarray(real, dtype=np.float32)
                 if arr.ndim == 2 and arr.shape[1] == 2:
-                    face_xy = arr
+                    real_arr = arr
+            if use_rig_only:
+                # eyes_mouth: 12-pt subset of the rig (8 eyes + 4 outer lips).
+                if face_vert_ids is not None:
+                    face_xy = _project_face_landmarks_2d(person, face_vert_ids, H, W)
+            elif real_arr is not None:
+                face_xy = real_arr
             elif face_vert_ids is not None:
                 face_xy = _project_face_landmarks_2d(person, face_vert_ids, H, W)
             if face_xy is not None:
