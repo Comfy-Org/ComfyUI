@@ -125,7 +125,20 @@ def _modulated_norm(norm, x, scale, prefix_len, zero):
 
 
 def _gated_residual(x, y, gate, prefix_len):
+    """Add a gated residual to the stream.
+
+    Inference fuses this into `x` in place, which the memory compiler prefers.
+    Training has to build a new tensor instead, because backward still reads
+    `x` and in-place mutation across 32 blocks corrupts the autograd graph.
+    """
     g_prefix, g_target = gate
+    if comfy.model_management.in_training:
+        if prefix_len:
+            return torch.cat((
+                torch.addcmul(x[:, :prefix_len], y[:, :prefix_len], g_prefix),
+                torch.addcmul(x[:, prefix_len:], y[:, prefix_len:], g_target),
+            ), dim=1)
+        return torch.addcmul(x, y, g_target)
     x[:, prefix_len:].addcmul_(y[:, prefix_len:], g_target)
     if prefix_len:
         x[:, :prefix_len].addcmul_(y[:, :prefix_len], g_prefix)
