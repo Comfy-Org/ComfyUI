@@ -47,7 +47,7 @@ def db_url_for(monkeypatch):
 
 
 def _migrate(db_path: str, db_url: str, db_exists: bool) -> None:
-    db_module._migrate_and_bind(db_url, db_path, db_exists)
+    db_module._migrate_and_bind(db_module.get_alembic_config(), db_url, db_path, db_exists)
 
 
 def test_upgrade_across_the_destructive_revision_warns_and_names_the_backup(
