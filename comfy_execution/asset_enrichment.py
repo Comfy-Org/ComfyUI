@@ -99,7 +99,7 @@ def register_cached_outputs(ui_wrapper: dict | None, job_id: str, asset_manager:
     return enriched
 
 
-def emit_cached_output(server: "ExecutionServer", node_id: str, display_node_id: str, cached: "CacheEntry", prompt_id: str, ui_outputs: dict, asset_manager: "AssetManager") -> None:
+def emit_cached_output(server: "ExecutionServer", node_id: str, display_node_id: str, cached: "CacheEntry", prompt_id: str, ui_outputs: dict, asset_manager: "AssetManager", merge: bool = False) -> None:
     if node_id in ui_outputs:
         return
     enriched = register_cached_outputs(cached.ui, prompt_id, asset_manager)
@@ -110,6 +110,6 @@ def emit_cached_output(server: "ExecutionServer", node_id: str, display_node_id:
     output = enriched.get("output") if enriched is not None else None
     server.send_sync(
         "executed",
-        {"node": node_id, "display_node": display_node_id, "output": output, "prompt_id": prompt_id},
+        {"node": node_id, "display_node": display_node_id, "output": output, "prompt_id": prompt_id, "merge": merge},
         server.client_id,
     )
