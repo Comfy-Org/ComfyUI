@@ -1466,22 +1466,22 @@ class LatentComposite:
         samples_to = samples_to["samples"]
         samples_from = samples_from["samples"]
         if feather == 0:
-            s[:,:,y:y+samples_from.shape[2],x:x+samples_from.shape[3]] = samples_from[:,:,:samples_to.shape[2] - y, :samples_to.shape[3] - x]
+            s[...,y:y+samples_from.shape[-2],x:x+samples_from.shape[-1]] = samples_from[...,:samples_to.shape[-2] - y, :samples_to.shape[-1] - x]
         else:
-            samples_from = samples_from[:,:,:samples_to.shape[2] - y, :samples_to.shape[3] - x]
+            samples_from = samples_from[...,:samples_to.shape[-2] - y, :samples_to.shape[-1] - x]
             mask = torch.ones_like(samples_from)
             for t in range(feather):
                 if y != 0:
-                    mask[:,:,t:1+t,:] *= ((1.0/feather) * (t + 1))
+                    mask[...,t:1+t,:] *= ((1.0/feather) * (t + 1))
 
-                if y + samples_from.shape[2] < samples_to.shape[2]:
-                    mask[:,:,mask.shape[2] -1 -t: mask.shape[2]-t,:] *= ((1.0/feather) * (t + 1))
+                if y + samples_from.shape[-2] < samples_to.shape[-2]:
+                    mask[...,mask.shape[-2] -1 -t: mask.shape[-2]-t,:] *= ((1.0/feather) * (t + 1))
                 if x != 0:
-                    mask[:,:,:,t:1+t] *= ((1.0/feather) * (t + 1))
-                if x + samples_from.shape[3] < samples_to.shape[3]:
-                    mask[:,:,:,mask.shape[3]- 1 - t: mask.shape[3]- t] *= ((1.0/feather) * (t + 1))
+                    mask[...,:,t:1+t] *= ((1.0/feather) * (t + 1))
+                if x + samples_from.shape[-1] < samples_to.shape[-1]:
+                    mask[...,:,mask.shape[-1]- 1 - t: mask.shape[-1]- t] *= ((1.0/feather) * (t + 1))
             rev_mask = torch.ones_like(mask) - mask
-            s[:,:,y:y+samples_from.shape[2],x:x+samples_from.shape[3]] = samples_from[:,:,:samples_to.shape[2] - y, :samples_to.shape[3] - x] * mask + s[:,:,y:y+samples_from.shape[2],x:x+samples_from.shape[3]] * rev_mask
+            s[...,y:y+samples_from.shape[-2],x:x+samples_from.shape[-1]] = samples_from[...,:samples_to.shape[-2] - y, :samples_to.shape[-1] - x] * mask + s[...,y:y+samples_from.shape[-2],x:x+samples_from.shape[-1]] * rev_mask
         samples_out["samples"] = s
         return (samples_out,)
 
