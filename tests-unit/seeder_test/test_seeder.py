@@ -556,6 +556,7 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
 def test_seed_completed_counts_pruned_rows_with_the_scans_own(
     scan_seeder: _AssetSeeder,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     scan_seeder._prune_first = True
     scan_seeder._phase = ScanPhase.FAST
@@ -574,10 +575,13 @@ def test_seed_completed_counts_pruned_rows_with_the_scans_own(
     monkeypatch.setattr(scan_seeder, "_run_fast_phase", fast_phase_marking_two)
     completed_events = capture_completed(scan_seeder)
 
-    scan_seeder._run_scan()
+    with caplog.at_level(logging.INFO):
+        scan_seeder._run_scan()
 
     [completed_event] = completed_events
     assert completed_event["missing_marked_count"] == 7
+    [logged] = events_named(caplog, "seeder.scan_completed")
+    assert logged["missing_marked_count"] == 2
 
 
 def test_standalone_mark_missing_emits_count_with_mark_missing_stage(
