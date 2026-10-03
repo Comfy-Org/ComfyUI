@@ -1243,6 +1243,15 @@ class ZImagePixelSpace(ZImage):
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.ZImagePixelSpace(self, device=device)
 
+class TwinFlow_Z_Image(ZImage):
+    unet_config = {
+        "image_model": "twinflow_z_image",
+    }
+
+    def get_model(self, state_dict, prefix="", device=None):
+        out = model_base.TwinFlow_Z_Image(self, device=device)
+        return out
+        
 class MingImage(ZImage):
     unet_config = {
         "image_model": "ming_image",
@@ -2623,6 +2632,7 @@ models = [
     ZImagePixelSpace,
     MingImage,
     ZImage,
+    TwinFlow_Z_Image,
     PiD,
     PixelDiTT2I,
     Lumina2,
