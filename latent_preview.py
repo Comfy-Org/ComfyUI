@@ -7,6 +7,7 @@ import comfy.model_management
 import comfy.model_prefetch
 import folder_paths
 import comfy.utils
+from app import governance
 import logging
 
 default_preview_method = args.preview_method
@@ -104,13 +105,17 @@ def get_previewer(device, latent_format):
 
         if method == LatentPreviewMethod.TAESD:
             if taesd_decoder_path:
-                if latent_format.taesd_decoder_name in VIDEO_TAES:
-                    taesd = VAE(comfy.utils.load_torch_file(taesd_decoder_path))
-                    taesd.first_stage_model.show_progress_bar = False
-                    previewer = TAEHVPreviewerImpl(taesd, compile_preview=latent_format.compile_preview)
-                else:
-                    taesd = TAESD(None, taesd_decoder_path, latent_channels=latent_format.latent_channels).to(device)
-                    previewer = TAESDPreviewerImpl(taesd)
+                try:
+                    if latent_format.taesd_decoder_name in VIDEO_TAES:
+                        taesd = VAE(comfy.utils.load_torch_file(taesd_decoder_path))
+                        taesd.first_stage_model.show_progress_bar = False
+                        previewer = TAEHVPreviewerImpl(taesd, compile_preview=latent_format.compile_preview)
+                    else:
+                        taesd = TAESD(None, taesd_decoder_path, latent_channels=latent_format.latent_channels).to(device)
+                        previewer = TAESDPreviewerImpl(taesd)
+                except governance.ModelNotPermittedError as e:
+                    # The user picked a preview method, not this decoder, so a policy refusal falls back to latent2rgb instead of failing the run.
+                    logging.warning("Warning: TAESD previews enabled, but {} Falling back to latent2rgb previews.".format(e))
             else:
                 logging.warning("Warning: TAESD previews enabled, but could not find models/vae_approx/{}".format(latent_format.taesd_decoder_name))
 

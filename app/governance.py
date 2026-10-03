@@ -39,7 +39,8 @@ _PAYLOAD_KEYS = {
     "models",
 }
 _ACTIVE_FORMS = ("customNode", "nodeId", "model", "partnerNode")
-# Only add a form here once this build enforces it; anything absent is refused rather than silently allowed.
+# Forms this build enforces; a policy naming any other form is refused rather than silently allowed.
+# "model" is enforced in core's loaders (comfy.utils.load_torch_file, comfy.sd1_clip.load_embed); a custom node that reads model files itself is not gated.
 _ENFORCED_FORMS = frozenset({"customNode", "nodeId", "model", "partnerNode"})
 _BASE64URL_PATTERN = re.compile(r"[A-Za-z0-9_-]*")
 _PROVIDER_ID_PATTERN = re.compile(r"[a-z0-9._-]+")
@@ -65,7 +66,7 @@ _custom_node_mode: str | None = None
 _denied_packs: frozenset[str] = frozenset()
 _allowed_packs: Mapping[str, str] = MappingProxyType({})
 _allowed_models: frozenset[str] | None = None
-_model_digests: dict[tuple[str, int, int], str] = {}
+_model_digests: dict[tuple[str, int, int, int], str] = {}
 
 
 def load_disabled_nodes(path: str) -> set[str]:
@@ -197,6 +198,10 @@ def pack_digest(pack_path: str) -> str:
     return "blake3:" + hasher.hexdigest()
 
 
+class ModelNotPermittedError(RuntimeError):
+    """A model load refused because the signed policy does not list the file's digest."""
+
+
 def model_allowed(model_path: str) -> bool:
     if _allowed_models is None:
         return True
@@ -205,29 +210,16 @@ def model_allowed(model_path: str) -> bool:
 
 def model_digest(model_path: str) -> str:
     # Keep local for the same reason as pack_digest.
-    from app.assets.database.models import AssetContent
     from app.assets.services import hashing
-    from app.database.db import can_create_session, create_session
-    from sqlalchemy import select
 
+    # Only this process's own hash is trusted: the assets database is user-writable, so a stored hash could vouch for any file.
     path = os.path.abspath(model_path)
     stat = os.stat(path)
-    key = (path, stat.st_size, stat.st_mtime_ns)
+    key = (path, stat.st_ino, stat.st_size, stat.st_mtime_ns)
     digest = _model_digests.get(key)
-    if digest is None and can_create_session():
-        # The assets scanner stores a hash with the size and mtime of the bytes it hashed, so a row that still matches the file is reused.
-        with create_session() as session:
-            digest = session.scalar(
-                select(AssetContent.hash).where(
-                    AssetContent.path == path,
-                    AssetContent.is_missing.is_(False),
-                    AssetContent.size_bytes == stat.st_size,
-                    AssetContent.mtime_ns == stat.st_mtime_ns,
-                )
-            )
     if digest is None:
         digest = "blake3:" + hashing.compute_blake3_hash(path)[0]
-    _model_digests[key] = digest
+        _model_digests[key] = digest
     return digest
 
 
