@@ -96,10 +96,28 @@ def validate_loops(prompt, outputs, node_ids, start_nodes, end_nodes):
     remaining_ends = set(end_nodes)
     while remaining_ends:
         end_id = next(
-            node_id
-            for node_id in sorted(remaining_ends)
-            if not end_dag[node_id].intersection(remaining_ends)
+            (
+                node_id
+                for node_id in sorted(remaining_ends)
+                if not end_dag[node_id].intersection(remaining_ends)
+            ),
+            None,
         )
+        if end_id is None:
+            # Every remaining End has another remaining End among its ancestors,
+            # so there is no innermost one to pair first. That means the graph
+            # cycles through them, which the dependency-cycle guard ahead of this
+            # call misses when an output's own validation failed for some other
+            # reason before it could report the cycle.
+            end_list = ", ".join(sorted(remaining_ends))
+            raise _loop_validation_error(
+                "loop_end_cycle",
+                "End Loops depend on each other",
+                f"End Loops depend on each other, so none of them can be closed first: {end_list}",
+                set(remaining_ends),
+                children,
+                outputs,
+            )
 
         candidates = _walk_graph(parents[end_id], parents, remaining_starts, return_stops=True)
 
