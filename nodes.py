@@ -40,6 +40,7 @@ from comfy.cli_args import args
 import importlib
 
 import folder_paths
+from comfy_execution.filename_prefix import format_filename_prefix
 import latent_preview
 import node_helpers
 
@@ -1683,7 +1684,9 @@ class SaveImage:
                 })
             },
             "hidden": {
-                "prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+                "execution_list": "EXECUTION_LIST",
             },
         }
 
@@ -1698,8 +1701,13 @@ class SaveImage:
     DESCRIPTION = "Saves the input images to your ComfyUI output directory."
     SEARCH_ALIASES = ["save", "save image", "export image", "output image", "write image", "download"]
 
-    def save_images(self, images, filename_prefix="ComfyUI", prompt=None, extra_pnginfo=None):
+    def save_images(self, images, filename_prefix="ComfyUI", prompt=None, extra_pnginfo=None, execution_list=None):
         filename_prefix += self.prefix_append
+        filename_prefix = format_filename_prefix(
+            filename_prefix,
+            prompt,
+            execution_list.get_node_output if execution_list is not None else None,
+        )
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(filename_prefix, self.output_dir, images[0].shape[1], images[0].shape[0])
         results = list()
         for (batch_number, image) in enumerate(images):

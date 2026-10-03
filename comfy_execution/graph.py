@@ -246,6 +246,12 @@ class ExecutionList(TopologicalSort):
         self.output_cache.set_local(from_node_id, value)
         return value
 
+    def get_node_output(self, node_id, output_index):
+        cached = self.output_cache.get_local(node_id)
+        if cached is None or output_index < 0 or output_index >= len(cached.outputs):
+            return None
+        return cached.outputs[output_index]
+
     def cache_update(self, node_id, value):
         if node_id in self.execution_cache_listeners:
             for to_node_id, from_socket in self.execution_cache_listeners[node_id]:
