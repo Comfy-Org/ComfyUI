@@ -13,7 +13,7 @@ import mimetypes
 import os
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Callable, Final, Protocol
 
 from app.assets.event_log import emit, error_kind, error_type
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
@@ -47,14 +47,20 @@ class _StatCounter(Protocol):
 
 
 def _two_stat_admit(
-    paths_with_stats: list[tuple[str, os.stat_result]], counter: _StatCounter | None = None
+    paths_with_stats: list[tuple[str, os.stat_result]],
+    counter: _StatCounter | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[list[str], list[str]]:
+    """``should_stop`` is called before each second stat; it may block, and True
+    returns ([], []) at once."""
     if not paths_with_stats:
         return [], []
     time.sleep(0.1)
     admitted: list[str] = []
     watched: list[str] = []
     for path, first_stat in paths_with_stats:
+        if should_stop is not None and should_stop():
+            return [], []
         if counter is not None:
             counter.files_statted += 1
         try:
