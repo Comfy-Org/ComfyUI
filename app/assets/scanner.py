@@ -11,6 +11,7 @@ so the rows it never reached are selected again when the scan resumes.
 import enum
 import logging
 import os
+import time
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -25,7 +26,7 @@ from app.assets.event_log import emit, error_kind, error_type
 from app.assets.database.queries import (
     create_content_reporting_insert,
     is_live_path_conflict,
-    mark_content_missing,
+    mark_contents_missing,
     create_record,
 )
 from app.assets.database.models import Asset, AssetContent
@@ -132,6 +133,46 @@ class _ReferenceObservation(NamedTuple):
     size_bytes: int | None
     mtime_ns: int | None
     stat_result: os.stat_result | None
+
+
+# Before each write batch: blocks while the scan is paused, returns True to stop.
+ShouldStop = Callable[[], bool]
+
+
+def _never_stop() -> bool:
+    return False
+
+
+# The marking steps write in batches of WRITE_BATCH_ROWS, each its own transaction, so
+# the write lock is never held for a whole pass and a foreground write (an output being
+# registered) waits at most one batch. After each commit the thread sleeps about as
+# long as it held the lock: a writer in SQLite's busy handler polls with growing sleeps
+# (up to 100 ms), so taking the lock straight back would keep winning it.
+WRITE_BATCH_ROWS = 256
+WRITE_YIELD_MIN_SECONDS = 0.02
+WRITE_YIELD_MAX_SECONDS = 0.1
+
+
+def _write_in_batches(
+    items: list,
+    write_batch: Callable[[Session, list], int],
+    should_stop: ShouldStop,
+    committed: list[int],
+) -> None:
+    """Apply ``write_batch`` to ``items`` a batch per transaction, appending the count
+    each batch reports to ``committed`` once it commits. A failure leaves the batches
+    before it committed, and ``committed`` says how much they wrote."""
+    for start in range(0, len(items), WRITE_BATCH_ROWS):
+        if should_stop():
+            break
+        opened = time.perf_counter()
+        with create_write_session() as session:
+            count = write_batch(session, items[start : start + WRITE_BATCH_ROWS])
+            session.commit()
+        committed.append(count)
+        held = time.perf_counter() - opened
+        if start + WRITE_BATCH_ROWS < len(items):
+            time.sleep(min(max(held, WRITE_YIELD_MIN_SECONDS), WRITE_YIELD_MAX_SECONDS))
 
 
 def _log_scan_error(phase: str, error: OSError) -> None:
@@ -241,7 +282,9 @@ def apply_reference_observations(
     session: Session, observations: list[_ReferenceObservation]
 ) -> int:
     """Apply the observations; returns how many rows were marked missing."""
-    marked = 0
+    # One query loads the rows, so the session.get calls below never go to the database.
+    list(session.scalars(sa.select(AssetContent).where(AssetContent.id.in_([o.content_id for o in observations]))))
+    gone: list[str] = []
     for observation in observations:
         content = session.get(AssetContent, observation.content_id)
         # Skip a row another writer changed since it was observed; the next scan sees it afresh.
@@ -253,8 +296,7 @@ def apply_reference_observations(
         ):
             continue
         if observation.stat_result is None:
-            mark_content_missing(session, content.id)
-            marked += 1
+            gone.append(content.id)
             continue
         detect_content_change(
             session,
@@ -262,35 +304,38 @@ def apply_reference_observations(
             observation.stat_result,
             hashing_is_enabled=mode.hashing_enabled(),
         )
-    return marked
+    return len(mark_contents_missing(session, gone))
 
 
-def _sync_prefixes_in_write_txn(
-    prefixes: list[str], progress: _ScanProgress | None
-) -> tuple[set[str], int]:
-    """Returns the surviving paths and how many rows were marked missing."""
+def _sync_prefixes(
+    prefixes: list[str],
+    progress: _ScanProgress | None,
+    should_stop: ShouldStop,
+    marked: list[int],
+) -> set[str]:
+    """Returns the surviving paths; ``marked`` gets each committed batch's count of rows
+    marked missing, which a caller still has if a later batch raises."""
     with create_session() as session:
         observations, survivors = observe_references_on_filesystem(
             session, prefixes, progress
         )
-    marked = 0
-    if observations:
-        with create_write_session() as session:
-            marked = apply_reference_observations(session, observations)
-            session.commit()
-    return survivors, marked
+    _write_in_batches(observations, apply_reference_observations, should_stop, marked)
+    return survivors
 
 
 def sync_root_safely(
-    root: RootType, progress: _ScanProgress | None = None
+    root: RootType,
+    progress: _ScanProgress | None = None,
+    should_stop: ShouldStop = _never_stop,
 ) -> set[str]:
     """Sync a single root's references with the filesystem.
 
     Returns survivors (existing paths) or empty set on failure.
     """
+    marked: list[int] = []
     try:
-        survivors, marked = _sync_prefixes_in_write_txn(
-            get_scan_prefixes_for_root(root), progress
+        survivors = _sync_prefixes(
+            get_scan_prefixes_for_root(root), progress, should_stop, marked
         )
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
@@ -300,18 +345,19 @@ def sync_root_safely(
             error_type=error_type(exc),
             error_kind=error_kind(exc),
         )
-        return set()
+        survivors = set()
     if progress is not None:
-        progress.missing_marked += marked
+        progress.missing_marked += sum(marked)
     return survivors
 
 
 def sync_temp_references_safely(
     progress: _ScanProgress | None = None,
+    should_stop: ShouldStop = _never_stop,
 ) -> None:
     """Retire temp references whose file is gone; temp is never scanned, so nothing else stats them."""
     try:
-        _sync_prefixes_in_write_txn(get_temp_prefixes(), progress)
+        _sync_prefixes(get_temp_prefixes(), progress, should_stop, [])
     except Exception as exc:
         logging.exception("temp reference sync failed: %s", exc)
         emit(
@@ -322,19 +368,27 @@ def sync_temp_references_safely(
         )
 
 
-def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int | None:
+def mark_missing_outside_prefixes_safely(
+    prefixes: list[str], should_stop: ShouldStop = _never_stop
+) -> int | None:
     """Mark references as missing when outside the given prefixes.
 
     This is a non-destructive soft-delete. Returns the count marked, or None when
-    the operation fails.
+    the operation fails; batches committed before a failure stay committed.
     """
+    marked: list[int] = []
     try:
         with create_session() as sess:
-            count = mark_contents_missing_outside_prefixes(sess, prefixes)
-            sess.commit()
-            return count
+            content_ids = content_ids_outside_prefixes(sess, prefixes)
+        _write_in_batches(
+            content_ids,
+            lambda session, batch: len(mark_contents_missing(session, batch)),
+            should_stop,
+            marked,
+        )
+        return sum(marked)
     except Exception as exc:
-        logging.exception("marking missing assets failed: %s", exc)
+        logging.exception("marking missing assets failed after marking %d: %s", sum(marked), exc)
         emit(
             "scanner.mark_missing_failed",
             error_type=error_type(exc),
@@ -343,19 +397,16 @@ def mark_missing_outside_prefixes_safely(prefixes: list[str]) -> int | None:
         return None
 
 
-def mark_contents_missing_outside_prefixes(
-    session: Session, prefixes: list[str]
-) -> int:
-    contents = session.scalars(
-        sa.select(AssetContent)
-        .where(AssetContent.is_missing.is_(False))
+def content_ids_outside_prefixes(session: Session, prefixes: list[str]) -> list[str]:
+    """The live rows outside every prefix. A read: the marking re-checks each is still
+    live inside its own write transaction."""
+    is_owned = path_prefix_matcher(prefixes)
+    rows = session.execute(
+        sa.select(AssetContent.id, AssetContent.path)
+        .where(AssetContent.is_missing == sa.false())
         .execution_options(yield_per=500)
     )
-    is_owned = path_prefix_matcher(prefixes)
-    missing = [content for content in contents if not is_owned(content.path)]
-    for content in missing:
-        mark_content_missing(session, content.id)
-    return len(missing)
+    return [content_id for content_id, path in rows if not is_owned(path)]
 
 
 def collect_paths_for_roots(
@@ -509,15 +560,13 @@ def mark_unlisted_references_missing_safely(
     root: RootType,
     observations: list[_ReferenceObservation],
     progress: _ScanProgress | None = None,
+    should_stop: ShouldStop = _never_stop,
 ) -> None:
     """Retire rows whose file the listing lacks, through the same guarded write
     sync_root applies to a row whose file has vanished."""
-    if not observations:
-        return
+    marked: list[int] = []
     try:
-        with create_write_session() as session:
-            marked = apply_reference_observations(session, observations)
-            session.commit()
+        _write_in_batches(observations, apply_reference_observations, should_stop, marked)
     except Exception as exc:
         logging.exception("fast DB scan failed for %s: %s", root, exc)
         emit(
@@ -526,9 +575,8 @@ def mark_unlisted_references_missing_safely(
             error_type=error_type(exc),
             error_kind=error_kind(exc),
         )
-        return
     if progress is not None:
-        progress.missing_marked += marked
+        progress.missing_marked += sum(marked)
 
 
 def list_output_for_rescan() -> ListingWalk:

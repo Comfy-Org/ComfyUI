@@ -103,7 +103,7 @@ def _configure_fast_phase(
     specs: list[SeedAssetSpec],
 ) -> None:
     monkeypatch.setattr(
-        seeder_module, "sync_root_safely", lambda _root, _progress: set()
+        seeder_module, "sync_root_safely", lambda _root, _progress, _should_stop=None: set()
     )
     monkeypatch.setattr(
         seeder_module,
@@ -467,7 +467,7 @@ def test_idle_reset_survives_a_raising_cancellation_emit(
     monkeypatch.setattr(scan_seeder, "_check_pause_and_cancel", cancel_at_pruning)
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 0
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes, _should_stop=None: 0
     )
 
     original_emit = seeder_module.emit
@@ -494,7 +494,7 @@ def test_scan_paused_after_its_last_phase_still_completes(
     scan_seeder._phase = ScanPhase.ENRICH
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 0
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes, _should_stop=None: 0
     )
 
     def pause_while_finishing(roots) -> tuple[bool, int]:
@@ -539,10 +539,10 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
     scan_seeder._phase = ScanPhase.FAST
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 5
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes, _should_stop=None: 5
     )
     monkeypatch.setattr(
-        seeder_module, "sync_temp_references_safely", lambda _progress: None
+        seeder_module, "sync_temp_references_safely", lambda _progress, _should_stop=None: None
     )
     monkeypatch.setattr(scan_seeder, "_run_fast_phase", lambda roots: (0, 0, 0))
 
@@ -594,7 +594,7 @@ def test_standalone_mark_missing_emits_count_with_mark_missing_stage(
     scan_seeder._state = State.IDLE
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes: 7
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda prefixes, _should_stop=None: 7
     )
 
     with caplog.at_level(logging.INFO):
@@ -639,10 +639,10 @@ def test_scan_prune_failure_is_reported_and_the_scan_still_runs(
     fast_phase_roots: list[tuple[str, ...]] = []
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
     monkeypatch.setattr(
-        seeder_module, "mark_missing_outside_prefixes_safely", lambda _prefixes: None
+        seeder_module, "mark_missing_outside_prefixes_safely", lambda _prefixes, _should_stop=None: None
     )
     monkeypatch.setattr(
-        seeder_module, "sync_temp_references_safely", lambda _progress: None
+        seeder_module, "sync_temp_references_safely", lambda _progress, _should_stop=None: None
     )
 
     def run_fast_phase(roots: tuple[str, ...]) -> tuple[int, int, int]:
@@ -655,7 +655,7 @@ def test_scan_prune_failure_is_reported_and_the_scan_still_runs(
         scan_seeder._run_scan()
 
     assert scan_seeder._errors == [
-        "Marking missing assets failed; scan continued without pruning"
+        "Marking missing assets failed; scan continued with the prune incomplete"
     ]
     assert fast_phase_roots == [("models", "input")]
     assert events_named(caplog, "seeder.marked_missing") == []
@@ -668,7 +668,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
 ) -> None:
     session = Mock()
     monkeypatch.setattr(
-        seeder_module, "sync_root_safely", lambda _root, _progress: set()
+        seeder_module, "sync_root_safely", lambda _root, _progress, _should_stop=None: set()
     )
     monkeypatch.setattr(
         seeder_module,
