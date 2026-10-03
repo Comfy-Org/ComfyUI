@@ -117,7 +117,7 @@ Files that change between those checks have not finished being written and are n
 
 The watch list holds at most one entry per path and has a fixed maximum size. On overflow the oldest entry is evicted. Eviction is not data loss: an evicted path is rediscovered by ordinary directory traversal on any subsequent scan.
 
-Retry is bounded by scan cadence, not by a timer. There is no background poller, and settlement is not guaranteed within any particular interval. A completed prompt queues an enrichment-only pass rather than a full filesystem walk, and that pass rechecks the watch list, so a partially-written output is normally admitted soon after the generation that produced it. If a stalled partial file passes the check and later resumes, normal change detection splits it from the prematurely admitted content.
+Retry is bounded by scan cadence, not by a timer. There is no background poller, and settlement is not guaranteed within any particular interval. A completed prompt queues a full scan of the output root (a walk, then enrichment), and both of its phases recheck the watch list, so a partially-written output is normally admitted soon after the generation that produced it. If a stalled partial file passes the check and later resumes, normal change detection splits it from the prematurely admitted content.
 
 ### Symlinks and hardlinks
 
@@ -133,7 +133,7 @@ Classification is fixed at record creation. A newly visible path receives the re
 
 ## When the catalogue is updated
 
-Uploads and output registration write their records directly as they happen. Everything else the catalogue learns about the filesystem comes from a background scan or a prune. Only one scan or prune runs at a time. An output rescan requested while a scan is running is queued; any other scan or prune requested then is refused. The background scan pauses while a prompt runs and resumes once the queue is idle.
+Uploads and output registration write their records directly as they happen. Everything else the catalogue learns about the filesystem comes from a background scan or a prune. Only one scan or prune runs at a time. An output rescan requested while a scan is running is queued; any other scan or prune requested then is refused, except that a `POST /api/assets/seed` during an on-demand prune waits for it (see On-demand scan and prune). The background scan pauses while a prompt runs and resumes once the queue is idle.
 
 ### Startup scan
 
@@ -143,11 +143,11 @@ At startup the server removes the temp records and the temp directory, then star
 2. Fast phase, one root at a time: each live row under the root is checked against the file on disk. A row whose file is gone is marked missing, and a changed file goes through change detection (see Hashing modes). The root is then walked, and files with no live row are added, or recover a missing row (see Missing content).
 3. Enrich phase: live records under the roots that have no extracted metadata, or no hash when hashing is on, get them.
 
-The prune and each root's missing-file marking are each written in a single write transaction.
+The prune and each root's missing-file marking write in batches of 256 rows, each its own write transaction. Between batches the scan sleeps about as long as it held the write lock, so other writes such as output registration get in, and before each batch it passes its pause and cancel checks. A failure part way leaves the earlier batches committed; the rows they marked stay marked missing.
 
 ### Output rescans
 
-After a prompt finishes and the queue goes idle, the server queues a scan of the output root alone. It compares the output directory listings with the catalogue instead of checking every row: a cataloged output that the listing lacks is checked on disk and marked missing if it is gone, and a new file in the listing is added. This is how outputs that a node wrote without declaring them reach the catalogue. Because nothing re-checks an already cataloged output, an output file overwritten in place by something other than ComfyUI is only detected by the next scan that covers all roots.
+After a prompt finishes and the queue goes idle, the server queues a full scan of the output root alone: a fast phase, then enrichment. Its fast phase walks the directory rather than only enriching existing records, because only a walk finds outputs a node never declared. It compares the output directory listings with the catalogue instead of checking every row: a cataloged output that the listing lacks is checked on disk and marked missing if it is gone, and a new file in the listing is added. This is how outputs that a node wrote without declaring them reach the catalogue. Because nothing re-checks an already cataloged output, an output file overwritten in place by something other than ComfyUI is only detected by the next scan that covers all roots.
 
 Each `/object_info` request also starts a scan of all roots, without a prune, when no scan is running.
 
@@ -155,7 +155,7 @@ Each `/object_info` request also starts a scan of all roots, without a prune, wh
 
 `POST /api/assets/seed` starts a scan of the requested roots without a prune. It answers 409 if a scan is already running.
 
-`POST /api/assets/prune` runs the same prune as the startup scan, on its own. The prune is a step of its own rather than part of every scan so that a scan of only some roots cannot mark records under the other roots missing. It answers 409 if a scan is running, and 500 with the code `PRUNE_FAILED` if the prune fails, so a prune that did not run is never reported as completed; one that ran and found nothing answers 200 with `marked: 0`. It marks missing every live row outside the registered folders in one write transaction, and runs on the event loop, so the server does not answer other requests until it finishes. Its cost grows with the number of live rows outside the registered folders: while it runs, other writes, such as output registration, wait for the database lock and fail with `database is locked` once SQLite's five-second busy wait runs out (see Write pressure and reader starvation).
+`POST /api/assets/prune` runs the same prune as the startup scan, on its own. The prune is a step of its own rather than part of every scan so that a scan of only some roots cannot mark records under the other roots missing. It answers 409 if a scan is running, and 500 with the code `PRUNE_FAILED` if the prune fails, so a prune that did not run is never reported as completed; one that ran and found nothing answers 200 with `marked: 0`. It runs on a worker thread, so the server keeps answering other requests, and writes in the same short batches as the startup prune, so other writes wait at most one batch for the database lock. Unlike a scan it is not paused while a prompt runs, but a cancel or shutdown stops it between batches; it then answers 200 with status `cancelled` and the number of rows marked so far. A `POST /api/assets/seed` that arrives while it runs waits for it to finish, then starts the scan.
 
 ## Asset operations
 
