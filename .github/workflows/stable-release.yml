@@ -119,7 +119,8 @@ jobs:
 
           grep comfy ../ComfyUI/requirements.txt > ./requirements_comfyui.txt
           ./python.exe -s -m pip install -r requirements_comfyui.txt
-          ./python.exe -s -m pip uninstall -y comfyui-workflow-templates-media-image comfyui-workflow-templates-media-video comfyui-workflow-templates-media-other
+          ./python.exe -s -m pip uninstall -y comfyui-workflow-templates-media-image comfyui-workflow-templates-media-video comfyui-workflow-templates-media-other comfyui-workflow-templates-media-api comfyui-workflow-templates-media-assets-01
+
           rm requirements_comfyui.txt
 
           sed -i '1i../ComfyUI' ./python3${{ inputs.python_minor }}._pth
