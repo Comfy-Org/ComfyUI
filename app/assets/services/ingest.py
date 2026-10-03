@@ -14,6 +14,7 @@ import logging
 import mimetypes
 import os
 import shutil
+import uuid
 from typing import Any, NamedTuple, Sequence
 
 from sqlalchemy import func, select
@@ -192,7 +193,7 @@ def _move_temp_to_dest(
 ) -> os.stat_result:
     """Move the upload into place and return the stat to record for it. Across
     volumes (EXDEV, also Windows' ERROR_NOT_SAME_DEVICE) the move is a copy with
-    its own mtime, so that case records the destination's stat."""
+    its own mtime, so that case records the copy's stat."""
     os.makedirs(os.path.dirname(dest_abs), exist_ok=True)
     try:
         try:
@@ -201,16 +202,17 @@ def _move_temp_to_dest(
         except OSError as e:
             if e.errno != errno.EXDEV:
                 raise
-        dest_existed = os.path.exists(dest_abs)
+        # Copy beside dest and rename, so a partial copy never takes the hash name.
+        staging = f"{dest_abs}.{uuid.uuid4().hex}.part"
         try:
-            shutil.move(temp_path, dest_abs)
+            shutil.move(temp_path, staging)
+            staged_stat = os.stat(staging)
+            os.replace(staging, dest_abs)
         except BaseException:
-            # A failed copy (e.g. a full disk) leaves a truncated file at dest.
-            if not dest_existed:
-                with contextlib.suppress(OSError):
-                    os.remove(dest_abs)
+            with contextlib.suppress(OSError):
+                os.remove(staging)
             raise
-        return os.stat(dest_abs)
+        return staged_stat
     except Exception as e:
         raise RuntimeError(f"failed to move uploaded file into place: {e}") from e
 

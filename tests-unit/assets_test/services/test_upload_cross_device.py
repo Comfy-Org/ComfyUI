@@ -66,11 +66,15 @@ def _upload(temp: Path):
 
 
 def _cross_device(monkeypatch: pytest.MonkeyPatch, exc: OSError | None = None) -> None:
-    """Make renames fail as they do across volumes: os.replace raises ``exc``
-    (EXDEV by default), and so does the os.rename shutil.move tries first."""
+    """Make renames between directories fail as they do across volumes: os.replace
+    raises ``exc`` (EXDEV by default), and so does the os.rename shutil.move tries
+    first. Renames within one directory (staging file to final name) still work."""
     exc = exc or OSError(errno.EXDEV, "Invalid cross-device link")
+    real_replace = os.replace
 
     def fail(src, dst):
+        if os.path.dirname(src) == os.path.dirname(dst):
+            return real_replace(src, dst)
         raise exc
 
     monkeypatch.setattr(ingest_module.os, "replace", fail)
@@ -131,7 +135,7 @@ def test_failed_cross_device_copy_leaves_no_truncated_file(
     _assert_nothing_left(temp, input_root, None)
 
 
-def test_failed_cross_device_copy_keeps_a_file_already_at_the_destination(
+def test_failed_cross_device_copy_leaves_an_existing_file_untouched(
     mock_create_session, hashing_on, dirs, monkeypatch
 ):
     temp_root, input_root = dirs
@@ -140,14 +144,17 @@ def test_failed_cross_device_copy_keeps_a_file_already_at_the_destination(
     dest.write_bytes(_CONTENT)
     _cross_device(monkeypatch)
 
-    def unreadable_source(src, dst):
-        raise PermissionError(errno.EACCES, "Permission denied", src)
+    def disk_full_mid_copy(src, dst):
+        with open(dst, "wb") as partial:
+            partial.write(_CONTENT[:5])
+        raise OSError(errno.ENOSPC, "No space left on device")
 
-    monkeypatch.setattr(ingest_module.shutil, "move", unreadable_source)
+    monkeypatch.setattr(ingest_module.shutil, "move", disk_full_mid_copy)
 
     with pytest.raises(RuntimeError, match="failed to move uploaded file into place"):
         _upload(temp)
 
+    assert dest.read_bytes() == _CONTENT
     _assert_nothing_left(temp, input_root, dest)
 
 
