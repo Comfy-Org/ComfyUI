@@ -370,10 +370,10 @@ class CLIP:
                     t_range = scheduled_opts[0]
                     # don't bother encoding any conds outside of start_percent and end_percent bounds
                     if "start_percent" in add_dict:
-                        if t_range[1] < add_dict["start_percent"]:
+                        if t_range[1] <= add_dict["start_percent"]:
                             continue
                     if "end_percent" in add_dict:
-                        if t_range[0] > add_dict["end_percent"]:
+                        if t_range[0] >= add_dict["end_percent"]:
                             continue
                     hooks_keyframes = scheduled_opts[1]
                     for hook, keyframe in hooks_keyframes:
