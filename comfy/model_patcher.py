@@ -231,7 +231,11 @@ def get_key_weight(model, key):
         except AttributeError:
             pass
 
-        weight = getattr(op, op_keys[1])
+        try:
+            weight = getattr(op, op_keys[1])
+        except AttributeError:
+            # quantized ops list their scale/metadata tensors in the state dict without exposing them as attributes
+            weight = None
         if convert_func is not None:
             weight = comfy.utils.get_attr(model, key)
 
