@@ -317,6 +317,14 @@ class DupUp3D(nn.Module):
             x.size(3),
             x.size(4),
         )
+        if self.repeats < self.factor_s * self.factor_s:
+            # spatial phase slots are not all copies of one channel -> give every
+            # spatial phase the group mean instead of a different source channel
+            x = x.mean(dim=(3, 4), keepdim=True).expand(
+                -1, -1, -1,
+                self.factor_s, self.factor_s,
+                -1, -1, -1
+            )
         x = x.permute(0, 1, 5, 2, 6, 3, 7, 4).contiguous()
         x = x.view(
             x.size(0),
