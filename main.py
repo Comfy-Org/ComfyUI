@@ -204,8 +204,9 @@ def execute_prestartup_script():
             if os.path.isfile(module_path) or module_path.endswith(".disabled") or module_path == "__pycache__":
                 continue
 
-            if not governance.pack_allowed(module_path):
-                logging.warning("Custom node pack '%s' is not permitted by your organization's policy.", possible_module)
+            refusal = governance.pack_refusal(module_path)
+            if refusal is not None:
+                logging.warning(refusal)
                 continue
 
             script_path = os.path.join(module_path, "prestartup_script.py")

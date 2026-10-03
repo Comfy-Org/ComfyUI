@@ -2386,8 +2386,9 @@ async def init_external_custom_nodes():
                     logging.info(f"Blocked by policy: {module_path}")
                     continue
 
-            if not governance.pack_allowed(module_path):
-                logging.warning("Custom node pack '%s' is not permitted by your organization's policy.", possible_module)
+            refusal = governance.pack_refusal(module_path)
+            if refusal is not None:
+                logging.warning(refusal)
                 continue
 
             time_before = time.perf_counter()

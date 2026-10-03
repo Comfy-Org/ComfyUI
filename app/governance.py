@@ -110,12 +110,27 @@ def set_custom_node_policy(mode: str | None, denied_packs: frozenset[str], allow
         os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 
+def pack_refusal(module_path: str) -> str | None:
+    """Return why the custom-node policy refuses this pack, for the log, or None when it may load."""
+    basename = Path(module_path).name
+    if _custom_node_mode is not None and basename.casefold() == _LEGACY_MANAGER_PACK:
+        return (
+            f"Custom node pack '{basename}' is not loaded: ComfyUI-Manager cannot run under a custom-node policy, "
+            "because its startup script installs packs before they are checked."
+        )
+    if not pack_allowed(module_path):
+        return f"Custom node pack '{basename}' is not permitted by your organization's policy."
+    return None
+
+
 def pack_allowed(module_path: str) -> bool:
     if _custom_node_mode is None:
         return True
 
     basename = Path(module_path).name
-    # The legacy Manager pack's prestartup script runs scheduled installs before any other pack is checked, whatever the lists say.
+    # The legacy Manager pack's prestartup script runs scheduled installs before any other pack is checked, so it is
+    # refused even when the policy lists it by digest. It is recognised by folder name only: a copy under another folder
+    # name is checked like any other pack (a blocklist admits it unless denied; an allowlist admits only a listed digest).
     if basename.casefold() == _LEGACY_MANAGER_PACK:
         return False
     expected_digest = _allowed_packs.get(basename.lower())

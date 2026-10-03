@@ -26,6 +26,11 @@ import nodes
 
 COMFYUI_ROOT = Path(__file__).parents[2]
 MAIN_PATH = COMFYUI_ROOT / "main.py"
+GENERIC_REFUSAL = "Custom node pack '{name}' is not permitted by your organization's policy."
+MANAGER_REFUSAL = (
+    "Custom node pack '{name}' is not loaded: ComfyUI-Manager cannot run under a custom-node policy, "
+    "because its startup script installs packs before they are checked."
+)
 
 
 def _load_execute_prestartup_script() -> Callable[[], None]:
@@ -306,10 +311,42 @@ async def test_legacy_manager_pack_is_refused_under_any_custom_node_policy(
     with caplog.at_level(logging.WARNING):
         result = await _run_both_gates(monkeypatch, custom_nodes_path, prestartup_sentinel, import_sentinel)
 
-    # Then neither its prestartup script (which runs scheduled installs) nor its import runs, and each gate says so
+    # Then neither its prestartup script (which runs scheduled installs) nor its import runs, and each gate gives the Manager reason, not a list mistake
     assert result == (False, False)
-    refusal = f"Custom node pack '{name}' is not permitted by your organization's policy."
-    assert [record.getMessage() for record in caplog.records].count(refusal) == 2
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages.count(MANAGER_REFUSAL.format(name=name)) == 2
+    assert GENERIC_REFUSAL.format(name=name) not in messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "denied"),
+    [
+        pytest.param("allowlist", False, id="allowlist-no-entry"),
+        pytest.param("blocklist", True, id="blocklist-denied"),
+    ],
+)
+async def test_other_refused_pack_logs_the_generic_policy_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    mode: str,
+    denied: bool,
+) -> None:
+    # Given an ordinary pack the policy refuses
+    custom_nodes_path = tmp_path / "custom_nodes"
+    _, prestartup_sentinel, import_sentinel = _make_directory_pack(custom_nodes_path, "OtherPack")
+    governance.set_custom_node_policy(mode, frozenset({"otherpack"}) if denied else frozenset(), {})
+
+    # When both gates enumerate it
+    with caplog.at_level(logging.WARNING):
+        result = await _run_both_gates(monkeypatch, custom_nodes_path, prestartup_sentinel, import_sentinel)
+
+    # Then each gate logs the generic policy message, never the Manager reason
+    assert result == (False, False)
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages.count(GENERIC_REFUSAL.format(name="OtherPack")) == 2
+    assert MANAGER_REFUSAL.format(name="OtherPack") not in messages
 
 
 @pytest.mark.asyncio
