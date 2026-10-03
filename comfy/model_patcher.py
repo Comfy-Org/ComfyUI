@@ -285,25 +285,30 @@ class MemoryCounter:
     def decrement(self, used: int):
         self.value -= used
 
-CustomTorchDevice = collections.namedtuple("FakeDevice", ["type", "index"])("comfy-lazy-caster", 0)
+def _validate_lazy_tensor_metadata(placeholder, tensor):
+    if tensor.shape != placeholder.shape or tensor.dtype != placeholder.dtype:
+        raise RuntimeError(
+            f"Materialized lazy tensor metadata does not match its placeholder: "
+            f"expected {placeholder.shape} {placeholder.dtype}, got {tensor.shape} {tensor.dtype}"
+        )
+
 
 class LazyCastingParam(torch.nn.Parameter):
     def __new__(cls, model, key, tensor):
-        return super().__new__(cls, tensor)
+        placeholder = torch.empty(tensor.shape, dtype=tensor.dtype, device="meta")
+        return super().__new__(cls, placeholder, requires_grad=False)
 
     def __init__(self, model, key, tensor):
         self.model = model
         self.key = key
 
-    @property
-    def device(self):
-        return CustomTorchDevice
-
     #safetensors will .to() us to the cpu which we catch here to cast on demand. The returned tensor is
     #then just a short lived thing in the safetensors serialization logic inside its big for loop over
     #all weights getting garbage collected per-weight
     def to(self, *args, **kwargs):
-        return self.model.patch_weight_to_device(self.key, device_to=self.model.load_device, return_weight=True).to("cpu")
+        tensor = self.model.patch_weight_to_device(self.key, device_to=self.model.load_device, return_weight=True).to("cpu").contiguous()
+        _validate_lazy_tensor_metadata(self, tensor)
+        return tensor.to(*args, **kwargs)
 
 
 class LazyCastingQuantizedParam:
@@ -321,20 +326,20 @@ class LazyCastingQuantizedParam:
 
 class LazyCastingParamPiece(torch.nn.Parameter):
     def __new__(cls, caster, state_dict_key, tensor):
-        return super().__new__(cls, tensor)
+        placeholder = torch.empty(tensor.shape, dtype=tensor.dtype, device="meta")
+        return super().__new__(cls, placeholder, requires_grad=False)
 
     def __init__(self, caster, state_dict_key, tensor):
         self.caster = caster
         self.state_dict_key = state_dict_key
 
-    @property
-    def device(self):
-        return CustomTorchDevice
-
     def to(self, *args, **kwargs):
         caster = self.caster
+        tensor = caster.state_dict_tensor(self.state_dict_key).contiguous()
+        _validate_lazy_tensor_metadata(self, tensor)
+        output = tensor.to(*args, **kwargs)
         del self.caster
-        return caster.state_dict_tensor(self.state_dict_key)
+        return output
 
 
 class ModelPatcher:
