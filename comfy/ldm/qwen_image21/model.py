@@ -395,6 +395,9 @@ class QwenImage21Transformer2DModel(nn.Module):
                 hidden_states = block(hidden_states, mod, pe, attn_fn, prefix_len, transformer_options)
             for p in patches.get("single_block", []):
                 hidden_states = p({"img": hidden_states, "x": x, "block_index": i, "transformer_options": transformer_options})["img"]
+            if cache is not None:
+                # Release dequantized K/V before leaving the block's allocation scope.
+                del attn_fn, prefix_k, prefix_v
 
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None, malloc_scope="block")
         comfy.model_prefetch.malloc_graph_end()

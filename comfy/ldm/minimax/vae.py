@@ -269,7 +269,8 @@ class FeedForward(nn.Module):
 
     def forward(self, x, pre_norm, residual, residual_scale):
         # norm, gated silu and residual addcmul fold into the INT8 kernels
-        h = comfy.ops.linear_input_act(self.w1, x, "rms_norm", pre_norm.weight, pre_norm.eps)
+        with comfy.ops.CastBiasWeightContext(pre_norm if pre_norm.weight is not None else None, x, offloadable=True) as (weight, bias):
+            h = comfy.ops.linear_input_act(self.w1, x, "rms_norm", weight, pre_norm.eps)
         return comfy.ops.linear_input_act(
             self.w2, h, "swiglu", residual=residual, residual_scale=residual_scale)
 
@@ -290,7 +291,8 @@ class Attention(nn.Module):
     def forward(self, x, rotary_pos_emb, pre_norm, residual, residual_scale):
         batch_size, seq_len, _ = x.shape
 
-        qkv = comfy.ops.linear_input_act(self.to_qkv, x, "rms_norm", pre_norm.weight, pre_norm.eps)
+        with comfy.ops.CastBiasWeightContext(pre_norm if pre_norm.weight is not None else None, x, offloadable=True) as (weight, bias):
+            qkv = comfy.ops.linear_input_act(self.to_qkv, x, "rms_norm", weight, pre_norm.eps)
         qkv = qkv.view(batch_size, seq_len, -1, 3 * self.dim_head)
         query, key, value = torch.chunk(qkv, 3, dim=-1)
 
@@ -426,6 +428,7 @@ class MiniMaxH3VideoVAE(nn.Module):
         tile_overlap_min=64,
         tiling=True,
         operations=ops,
+        num_layers=36,
     ):
         super().__init__()
         self.vae_ratio = int(math.prod(space_down))
@@ -461,6 +464,7 @@ class MiniMaxH3VideoVAE(nn.Module):
             patch_size_t=self.vae_ratio_t,
             in_channels=z_channels,
             out_channels=out_ch,
+            num_layers=num_layers,
             operations=operations,
         )
 

@@ -43,6 +43,8 @@ class FixedKVBias(FixedKV):
     tracker: dict = None
 
     def prepare(self, num_tokens):
+        if num_tokens == 1 and self.seqlen is not None:
+            self.seqlen.fill_(self.index + num_tokens)
         if self.tracker["step"] == (self.index, num_tokens):
             return
         self.tracker["step"] = (self.index, num_tokens)
@@ -77,7 +79,10 @@ class FixedKVBias(FixedKV):
     def zeros(cls, batch, kv_heads, capacity, head_dim, device, dtype, shared):
         # zero-init: decode attends full capacity with masked tails, 0*0 stays finite
         key = torch.zeros((batch, kv_heads, capacity, head_dim), device=device, dtype=dtype)
-        return cls(key, torch.zeros_like(key), 0, shared[0], None, shared[1], shared[2])
+        seqlen = None
+        if dtype == torch.bfloat16 and head_dim in (128, 256) and comfy_kitchen.flash_attention_decode_is_available(key.device):
+            seqlen = torch.empty((batch,), device=device, dtype=torch.int32)
+        return cls(key, torch.zeros_like(key), 0, shared[0], seqlen, shared[1], shared[2])
 
     def append(self, xk, xv):
         seq = xk.shape[2]
@@ -86,10 +91,13 @@ class FixedKVBias(FixedKV):
         return self.key[:, :, :self.index + seq], self.value[:, :, :self.index + seq]
 
     def decode(self, xq, xk, xv, num_kv_heads):
-        # CUDA-graphable: device-side write position, masked attention over the full capacity
+        # CUDA-graphable: device-side write position and cache length
         batch_size, num_heads, seq, head_dim = xq.shape
         self.key.index_copy_(2, self.position[:seq], xk)
         self.value.index_copy_(2, self.position[:seq], xv)
+        if seq == 1 and self.seqlen is not None:
+            out = comfy_kitchen.flash_attention_decode(xq.transpose(1, 2), self.key.transpose(1, 2), self.value.transpose(1, 2), self.seqlen)
+            return out.reshape(batch_size, seq, num_heads * head_dim)
         groups = num_heads // num_kv_heads
         q = xq.reshape(batch_size, num_kv_heads, groups, seq, head_dim) * head_dim ** -0.5
         bias = self.bias[..., self.bias.shape[-2] - seq:, :].unsqueeze(1)

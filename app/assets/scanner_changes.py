@@ -1,26 +1,29 @@
 """Reconciles catalogued content against what is actually on disk: retiring rows
 whose file is gone, splitting a row whose bytes changed, and recovering one
-whose file came back. Recovery fires only when the returning file's hash
-identifies exactly one missing row and no live row already occupies that path,
-so a restored file can never leave two live rows describing one location.
+whose file came back. Recovery never fires for a path a live row already
+occupies, so a restored file can never leave two live rows describing one
+location. With hashing on, the returning file's hash must identify exactly one
+missing row; with hashing off, its size and modification time must match.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from typing import Literal
 
 import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
-from app.assets.database.models import AssetContent
+from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import (
     create_content,
     create_record,
     mark_content_missing,
     unset_content_missing,
 )
-from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix, to_stored_hash
+from app.assets.helpers import path_prefix_matcher, sql_path_under_prefix_batches, to_stored_hash
+from app.assets.services.file_utils import get_mtime_ns
 from app.assets.services.path_utils import compute_loader_path, get_name_and_tags_from_asset_path
 from app.assets.services.snapshot_hash import snapshot_hash
 
@@ -103,6 +106,60 @@ def recover_missing_content(
     candidate.hash = stored_hash
     candidate.size_bytes = verified_stat.st_size
     candidate.mtime_ns = verified_stat.st_mtime_ns
+    return "recovered"
+
+
+def missing_content_ids_by_path(session: Session, paths: list[str]) -> dict[str, list[str]]:
+    """The ids of the missing rows at ``paths``. No index serves a missing row's path, so
+    callers run this before their write transaction opens."""
+    by_path: dict[str, list[str]] = {}
+    for start in range(0, len(paths), 500):
+        chunk = paths[start : start + 500]
+        for content_id, path in session.execute(
+            sa.select(AssetContent.id, AssetContent.path).where(
+                AssetContent.is_missing.is_(True), AssetContent.path.in_(chunk)
+            )
+        ):
+            by_path.setdefault(path, []).append(content_id)
+    return by_path
+
+
+def recover_missing_content_by_stat(
+    session: Session,
+    path: str,
+    stat_result: os.stat_result,
+    candidate_ids: list[str],
+) -> Literal["recovered", "no_match"]:
+    """Hashing-off recovery: size and modification time are the identity a hashing-off
+    scan checks on a live row, so a returning file that matches them restores its row."""
+    mtime_ns = get_mtime_ns(stat_result)
+    candidates = [session.get(AssetContent, content_id) for content_id in candidate_ids]
+    matches = [
+        candidate
+        for candidate in candidates
+        if candidate is not None
+        and candidate.is_missing
+        and candidate.path == path
+        and (candidate.size_bytes, candidate.mtime_ns) == (stat_result.st_size, mtime_ns)
+        # A row whose records were all deleted while it was missing would come back
+        # live with nothing to show it, and hold the path so no scan ever lists it.
+        and session.scalar(sa.select(Asset.id).where(Asset.content_id == candidate.id).limit(1))
+        is not None
+    ]
+    if not matches:
+        return "no_match"
+    # "= 0", not "IS 0", so the partial live-path index serves it instead of a table scan.
+    occupied = session.scalar(
+        sa.select(AssetContent.id)
+        .where(AssetContent.path == path, AssetContent.is_missing == sa.false())
+        .limit(1)
+    )
+    if occupied is not None:
+        return "no_match"
+    # Several match only when earlier offline cycles left copies of one file behind;
+    # the newest is the one that was live last.
+    recovered = max(matches, key=lambda candidate: (candidate.created_at, candidate.id))
+    unset_content_missing(session, recovered.id)
     return "recovered"
 
 
@@ -202,14 +259,12 @@ def drain_pending_verifications(session: Session, limit: int | None = None) -> i
     return processed
 
 
-def live_contents_under_prefixes(session: Session, prefixes: list[str]) -> list[AssetContent]:
-    if not prefixes:
-        return []
-    return list(
-        session.scalars(
-            sa.select(AssetContent).where(
-                AssetContent.is_missing.is_(False),
-                sa.or_(*(sql_path_under_prefix(AssetContent.path, prefix) for prefix in prefixes)),
-            )
-        )
-    )
+def live_contents_under_prefixes(session: Session, prefixes: list[str]) -> Iterator[AssetContent]:
+    """Stream the live contents under the prefixes in batches; consume it inside the session."""
+    seen: set[str] = set()
+    for under_prefixes in sql_path_under_prefix_batches(AssetContent.path, prefixes):
+        stmt = sa.select(AssetContent).where(AssetContent.is_missing.is_(False), under_prefixes)
+        for content in session.scalars(stmt.execution_options(yield_per=500)):
+            if content.id not in seen:
+                seen.add(content.id)
+                yield content
