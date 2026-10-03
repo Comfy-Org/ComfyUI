@@ -285,3 +285,42 @@ def test_real_main_rejects_unknown_pack_without_manager(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
     assert not prestartup_sentinel.exists()
     assert not import_sentinel.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["ComfyUI-Manager", "comfyui-manager", "COMFYUI-MANAGER"])
+@pytest.mark.parametrize("mode", ["allowlist", "blocklist"])
+async def test_legacy_manager_pack_is_refused_under_any_custom_node_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    mode: str,
+    name: str,
+) -> None:
+    # Given a legacy Manager pack the policy would otherwise admit: listed by digest, and not denied
+    custom_nodes_path = tmp_path / "custom_nodes"
+    pack_path, prestartup_sentinel, import_sentinel = _make_directory_pack(custom_nodes_path, name)
+    governance.set_custom_node_policy(mode, frozenset(), {name: governance.pack_digest(str(pack_path))})
+
+    # When both gates enumerate it
+    with caplog.at_level(logging.WARNING):
+        result = await _run_both_gates(monkeypatch, custom_nodes_path, prestartup_sentinel, import_sentinel)
+
+    # Then neither its prestartup script (which runs scheduled installs) nor its import runs, and each gate says so
+    assert result == (False, False)
+    refusal = f"Custom node pack '{name}' is not permitted by your organization's policy."
+    assert [record.getMessage() for record in caplog.records].count(refusal) == 2
+
+
+@pytest.mark.asyncio
+async def test_legacy_manager_pack_loads_without_a_custom_node_policy(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Given a legacy Manager pack and no custom-node policy
+    custom_nodes_path = tmp_path / "custom_nodes"
+    _, prestartup_sentinel, import_sentinel = _make_directory_pack(custom_nodes_path, "ComfyUI-Manager")
+    governance.set_custom_node_policy(None, frozenset(), {})
+
+    # When both stock loading paths run
+    result = await _run_both_gates(monkeypatch, custom_nodes_path, prestartup_sentinel, import_sentinel)
+
+    # Then governance leaves it alone
+    assert result == (True, True)

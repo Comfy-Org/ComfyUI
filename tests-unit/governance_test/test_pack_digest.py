@@ -149,6 +149,23 @@ SHARED_FIXTURE_FILES = {
 }
 
 
+# The shared fixture plus names where suffix rules could split: Python's pathlib gives a dotfile ("web/.js") no suffix where
+# Go's filepath.Ext would give ".js". Only UPPER.PY and Libs/LibCase.SO.2 are measured. Libs/ is not lib/ so the fixture
+# also holds on a case-insensitive filesystem. cloud's digest_test.go (edgeNameFixtureFiles) asserts the same digest.
+EDGE_NAME_FIXTURE_DIGEST = "blake3:1f34f2d453c9ad9d2aa5302fc0b3332bc60b88077bfd1841e48d6102aa23968a"
+EDGE_NAME_FIXTURE_FILES = {
+    **SHARED_FIXTURE_FILES,
+    "web/.js": b"DOTFILE_JS = 1\n",
+    "pkg/.py": b"DOTFILE_PY = 1\n",
+    "lib/.so.1": b"\x7fELFdotfile-so\n",
+    "lib/libbar.so.": b"\x7fELFtrailing-dot\n",
+    "lib/libt.so.1a": b"\x7fELFnot-a-version\n",
+    "web/v.js.map": b'{"version": 3}\n',
+    "UPPER.PY": b"UPPER = 1\n",
+    "Libs/LibCase.SO.2": b"\x7fELFupper-so\n",
+}
+
+
 def _write_pack(pack_path: Path, files: dict[str, bytes]) -> Path:
     for relative_path, contents in files.items():
         file_path = pack_path / relative_path
@@ -168,6 +185,17 @@ def test_pack_digest_matches_shared_fixture_with_windows_source_web_and_versione
     assert digest == SHARED_FIXTURE_DIGEST
 
 
+def test_pack_digest_matches_shared_fixture_with_edge_names(tmp_path: Path) -> None:
+    # Given the shared fixture plus dotfiles, trailing dots, non-numeric versions and upper-case suffixes
+    pack_path = _write_pack(tmp_path / "pack", EDGE_NAME_FIXTURE_FILES)
+
+    # When its pack digest is computed
+    digest = governance.pack_digest(str(pack_path))
+
+    # Then it is the digest both implementations assert
+    assert digest == EDGE_NAME_FIXTURE_DIGEST
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [
@@ -182,8 +210,8 @@ def test_pack_digest_matches_shared_fixture_with_windows_source_web_and_versione
         "native/extra.dylib",
     ],
 )
-def test_pack_digest_measures_every_file_kind_that_runs(golden_pack: Path, relative_path: str) -> None:
-    # Given a golden pack gaining a file that Python, the browser, or the loader runs
+def test_pack_digest_measures_source_native_and_web_script_files(golden_pack: Path, relative_path: str) -> None:
+    # Given a golden pack gaining Python source, a web script, or a native library
     _write_pack(golden_pack, {relative_path: b"RUNS = 1\n"})
 
     # When its digest is recomputed

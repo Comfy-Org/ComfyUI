@@ -44,11 +44,14 @@ _ENFORCED_FORMS = frozenset({"customNode", "nodeId", "partnerNode"})
 _BASE64URL_PATTERN = re.compile(r"[A-Za-z0-9_-]*")
 _PROVIDER_ID_PATTERN = re.compile(r"[a-z0-9._-]+")
 _MODEL_DIGEST_PATTERN = re.compile(r"blake3:[0-9a-f]{64}")
-# Every file kind that runs: Python source (.pyw is source on Windows), native libraries, and the web scripts a pack serves.
+# What the digest measures: Python source (.pyw is source on Windows) and extension modules, native libraries (versioned
+# .so.N too), and the .js/.mjs files the frontend serves (server.py lists **/*.js). Any other file a pack's code may open
+# or run, such as a shell script, a suffixless executable, .exe, .wasm or .cjs, is not measured.
 _PACK_EXTENSIONS = frozenset({".py", ".pyw", ".pyd", ".so", ".dll", ".dylib", ".js", ".mjs"})
 # A versioned shared library (libfoo.so.1, libfoo.so.1.2) loads like a .so, though its last suffix is a number.
 _VERSIONED_LIBRARY_PATTERN = re.compile(r"\.so(?:\.[0-9]+)+\Z")
 _BYTECODE_EXTENSIONS = frozenset({".pyc", ".pyo"})
+_LEGACY_MANAGER_PACK = "comfyui-manager"
 
 _COMFYUI_ROOT = Path(__file__).parent.parent
 _POLICY_PATH = _COMFYUI_ROOT / "governance" / "policy.signed.json"
@@ -112,6 +115,9 @@ def pack_allowed(module_path: str) -> bool:
         return True
 
     basename = Path(module_path).name
+    # The legacy Manager pack's prestartup script runs scheduled installs before any other pack is checked, whatever the lists say.
+    if basename.casefold() == _LEGACY_MANAGER_PACK:
+        return False
     expected_digest = _allowed_packs.get(basename.lower())
     if _custom_node_mode == "blocklist":
         if basename.lower() in _denied_packs:
