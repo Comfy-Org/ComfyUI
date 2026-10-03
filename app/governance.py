@@ -39,8 +39,9 @@ _PAYLOAD_KEYS = {
     "models",
 }
 _ACTIVE_FORMS = ("customNode", "nodeId", "model", "partnerNode")
-# Only add a form here once this build enforces it; anything absent is refused rather than silently allowed.
-_ENFORCED_FORMS = frozenset({"customNode", "nodeId", "partnerNode"})
+# Forms this build enforces; a policy naming any other form is refused rather than silently allowed.
+# "model" is enforced in core's loaders (comfy.utils.load_torch_file, comfy.sd1_clip.load_embed); a custom node that reads model files itself is not gated.
+_ENFORCED_FORMS = frozenset({"customNode", "nodeId", "model", "partnerNode"})
 _BASE64URL_PATTERN = re.compile(r"[A-Za-z0-9_-]*")
 _PROVIDER_ID_PATTERN = re.compile(r"[a-z0-9._-]+")
 _MODEL_DIGEST_PATTERN = re.compile(r"blake3:[0-9a-f]{64}")
@@ -64,6 +65,8 @@ _original_load_custom_node: Callable[[str, set[str], str], Awaitable[bool]] | No
 _custom_node_mode: str | None = None
 _denied_packs: frozenset[str] = frozenset()
 _allowed_packs: Mapping[str, str] = MappingProxyType({})
+_allowed_models: frozenset[str] | None = None
+_model_digests: dict[tuple[str, int, int, int, int], str] = {}
 
 
 def load_disabled_nodes(path: str) -> set[str]:
@@ -193,6 +196,36 @@ def pack_digest(pack_path: str) -> str:
         assert file_digest is not None
         hasher.update(relative_path.encode("utf-8") + b"\x00" + bytes.fromhex(file_digest) + b"\x00")
     return "blake3:" + hasher.hexdigest()
+
+
+class ModelNotPermittedError(RuntimeError):
+    """A model load refused because the signed policy does not list the file's digest."""
+
+
+def model_allowed(model_path: str) -> bool:
+    if _allowed_models is None:
+        return True
+    return model_digest(model_path) in _allowed_models
+
+
+def model_digest(model_path: str) -> str:
+    # Keep local for the same reason as pack_digest.
+    from app.assets.services import hashing
+
+    # Only this process's own hash is trusted: the assets database is user-writable, so a stored hash could vouch for any file.
+    path = os.path.abspath(model_path)
+    # The key and the hash both come from one open handle, so the cache never pairs one file's key with another file's bytes.
+    # The loader opens the path again after this check, so a file swapped in between is not caught (a known limit).
+    with open(path, "rb") as model_file:
+        stat = os.fstat(model_file.fileno())
+        # ctime catches an in-place rewrite whose mtime was restored, since os.utime cannot set it, on filesystems that
+        # update ctime on write (APFS, ext4). It does not on Windows (st_ctime is the creation time) or on FAT32/exFAT.
+        key = (path, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        digest = _model_digests.get(key)
+        if digest is None:
+            digest = "blake3:" + hashing.compute_blake3_hash(model_file)[0]
+            _model_digests[key] = digest
+    return digest
 
 
 def apply_disabled_nodes(disabled: set[str]) -> None:
@@ -372,7 +405,7 @@ def _validate_payload(payload: dict) -> None:
 
 
 def _apply_policy(policy: dict) -> None:
-    global _policy, _disabled_nodes
+    global _policy, _disabled_nodes, _allowed_models
     _policy = policy
     active_forms = policy.get("activeForms", ())
     custom_node_mode = policy.get("customNodeMode") if "customNode" in active_forms else None
@@ -380,6 +413,7 @@ def _apply_policy(policy: dict) -> None:
     set_custom_node_policy(custom_node_mode, frozenset(policy.get("deniedPacks", ())), allowed_packs)
     partner_node_ids = {entry["nodeId"] for entry in policy.get("disabledPartnerNodes", ())}
     _disabled_nodes = frozenset(policy.get("disabledNodes", ())).union(partner_node_ids)
+    _allowed_models = frozenset(policy.get("models", ())) if "model" in active_forms else None
 
 
 def initialize() -> None:

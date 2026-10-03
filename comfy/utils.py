@@ -33,6 +33,7 @@ from torch.nn.functional import interpolate
 from tqdm.auto import trange
 from einops import rearrange
 from comfy.cli_args import args
+from app import governance
 import json
 import time
 import threading
@@ -157,6 +158,8 @@ def load_safetensors(ckpt):
 
 
 def load_torch_file(ckpt, safe_load=False, device=None, return_metadata=False):
+    if not governance.model_allowed(ckpt):
+        raise governance.ModelNotPermittedError("Model '{}' is not permitted by your organization's policy.".format(os.path.basename(ckpt)))
     if device is None:
         device = torch.device("cpu")
     metadata = None
