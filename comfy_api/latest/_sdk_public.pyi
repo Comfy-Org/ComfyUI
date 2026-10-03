@@ -58,6 +58,9 @@ _T = TypeVar("_T", bound="TensorRef")
 
 class ValueRef(Ref):
     KIND: str
+    async def value(self) -> Any: ...
+    @classmethod
+    async def from_value(cls, v: Any) -> "ValueRef": ...
 
 class TensorRef(Ref):
     KIND: str
@@ -82,6 +85,10 @@ class ImageRef(TensorRef):
     async def spatial_shape(self) -> tuple[int, int]: ...
     async def batch_size(self) -> int: ...
     async def select_batch(self, indices: list[int]) -> "ImageRef": ...
+    async def resize(
+        self, width: int, height: int, method: str = ...,
+        crop: str = ...,
+    ) -> "ImageRef": ...
 
 class MaskRef(TensorRef):
     """MASK asset."""
@@ -123,6 +130,9 @@ class LatentRef(Ref):
         resize_source: bool = ...,
         mask: Optional[MaskRef] = ...,
     ) -> "LatentRef": ...
+    async def minimax_h3_token_count(
+        self, conditioning: "CondRef",
+    ) -> dict[str, Any]: ...
     async def value(self) -> dict: ...
     @classmethod
     async def from_value(cls: type[_L], v: dict) -> _L: ...
@@ -158,6 +168,14 @@ class CondRef(Ref):
         model: "ModelRef",
         latent: LatentRef,
         extra_latent: Optional[LatentRef] = ...,
+    ) -> "CondRef": ...
+    async def with_minimax_h3_guides(
+        self,
+        *,
+        frame_count: int,
+        video_guides: Optional[list[tuple[float, LatentRef]]] = ...,
+        audio_guides: Optional[list[tuple[float, LatentRef]]] = ...,
+        audio_references: Optional[list[LatentRef]] = ...,
     ) -> "CondRef": ...
     async def spatial_crop(
         self, *, x: int, y: int, width: int, height: int,
@@ -288,6 +306,11 @@ class ClipVisionRef(Ref):
 class VaeRef(Ref):
     KIND: str
     async def latent_layout(self) -> dict[str, Optional[int]]: ...
+    async def audio_sample_rate(self) -> Optional[int]: ...
+    async def encode_audio(self, audio: "AudioRef") -> LatentRef: ...
+    async def empty_audio_latent(
+        self, video_frames: int, frame_rate: float,
+    ) -> LatentRef: ...
     async def decode(self, latent: LatentRef) -> ImageRef: ...
     async def decode_tensor(self, latent: LatentRef) -> TensorRef: ...
     async def decode_tiled(
@@ -377,8 +400,13 @@ class ControlNetRef(Ref):
         fullgraph: bool = ...,
     ) -> "ControlNetRef": ...
 
+_A = TypeVar("_A", bound="AudioRef")
+
 class AudioRef(Ref):
     KIND: str
+    async def value(self) -> dict: ...
+    @classmethod
+    async def from_value(cls: type[_A], v: dict) -> _A: ...
 
 class VideoRef(Ref):
     KIND: str

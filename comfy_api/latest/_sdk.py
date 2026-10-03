@@ -82,8 +82,6 @@ logger = logging.getLogger(__name__)
 
 # Env var an operator points at a directory/module implementing ``register``.
 OVERLAY_ENV = "COMFY_OVERLAY_MODULE"
-
-
 # --------------------------------------------------------------------------- #
 # Refs — opaque, typed handles. In OSS a ref is resolved by an identity table
 # (zero-copy, zero-overhead: it holds the real object). The overlay swaps the
@@ -314,6 +312,15 @@ class ImageRef(TensorRef):
         """Select an ordered, bounded set of images from a BHWC batch."""
         return await self.op("image.select_batch", indices=list(indices))
 
+    async def resize(
+        self, width: int, height: int, method: str = "lanczos",
+        crop: str = "disabled",
+    ) -> "ImageRef":
+        """Resize a BHWC image batch with ComfyUI's canonical scaler."""
+        return await self.op(
+            "image.resize", width=int(width), height=int(height),
+            method=str(method), crop=str(crop))
+
 
 class MaskRef(TensorRef):
     KIND = "MASK"
@@ -410,6 +417,7 @@ class LatentRef(ValueRef):
         return await current_runtime().ops.apply(
             "latent.minimax_h3_token_count", self,
             {"conditioning": conditioning})
+
 
 
 # --------------------------------------------------------------------------- #
@@ -527,6 +535,30 @@ class CondRef(ValueRef):
                 "model": model,
                 "latent": latent,
                 "extra_latent": extra_latent,
+            })
+
+    async def with_minimax_h3_guides(
+        self,
+        *,
+        frame_count: int,
+        video_guides: Optional[list[tuple[float, "LatentRef"]]] = None,
+        audio_guides: Optional[list[tuple[float, "LatentRef"]]] = None,
+        audio_references: Optional[list["LatentRef"]] = None,
+    ) -> "CondRef":
+        """Attach validated native MiniMax H3 guide latents.
+
+        This exposes ComfyUI's model-native H3 conditioning vocabulary while
+        keeping embeddings and conditioning dictionaries host-owned.  Guide
+        placement and selection remain pack policy; the trusted side only
+        validates opaque latent refs and appends the corresponding core
+        metadata.
+        """
+        return await current_runtime().ops.apply(
+            "cond.with_minimax_h3_guides", self, {
+                "frame_count": int(frame_count),
+                "video_guides": list(video_guides or ()),
+                "audio_guides": list(audio_guides or ()),
+                "audio_references": list(audio_references or ()),
             })
 
     async def spatial_crop(
@@ -1112,6 +1144,12 @@ class VaeRef(_TypedRef):
         """Return the VAE's bounded latent channel/compression metadata."""
         return dict(await current_runtime().ops.apply(
             "vae.latent_layout", self, {}))
+
+    async def audio_sample_rate(self) -> Optional[int]:
+        """Return the VAE's declared input audio sample rate, if any."""
+        value = await current_runtime().ops.apply(
+            "vae.audio_sample_rate", self, {})
+        return None if value is None else int(value)
 
     async def encode_audio(self, audio: "AudioRef") -> "LatentRef":
         """Encode canonical AUDIO with an audio-capable VAE."""
@@ -10116,12 +10154,14 @@ class InProcessOps:
             "image.spatial_shape": self._image_spatial_shape,
             "image.batch_size": self._image_batch_size,
             "image.select_batch": self._image_select_batch,
+            "image.resize": self._image_resize,
             "mask.grow": self._mask_grow,
             # Operations on live engine objects. These are what let a node
             # DECLARE a MODEL/CLIP/VAE input and still be sandboxable: the node
             # names the operation, the weights stay here.
             "vae.decode": self._vae_decode,
             "vae.latent_layout": self._vae_latent_layout,
+            "vae.audio_sample_rate": self._vae_audio_sample_rate,
             "vae.decode_tensor": self._vae_decode_tensor,
             "vae.decode_tiled": self._vae_decode_tiled,
             "vae.decode_tensor_tiled": self._vae_decode_tensor_tiled,
@@ -10171,6 +10211,8 @@ class InProcessOps:
             "cond.with_clip_vision_output":
                 self._cond_with_clip_vision_output,
             "cond.with_concat_latent": self._cond_with_concat_latent,
+            "cond.with_minimax_h3_guides":
+                self._cond_with_minimax_h3_guides,
             "cond.spatial_crop": self._cond_spatial_crop,
             "latent.spatial_shape": self._latent_spatial_shape,
             "latent.resize": self._latent_resize,
@@ -10414,6 +10456,38 @@ class InProcessOps:
         return ImageRef._wrap(await rt.refs.create(
             "IMAGE", selected))  # type: ignore[return-value]
 
+    async def _image_resize(
+        self, image: "ImageRef", width: int, height: int,
+        method: str = "lanczos", crop: str = "disabled",
+    ) -> "ImageRef":
+        import torch
+        from comfy.utils import common_upscale
+
+        methods = {"nearest-exact", "bilinear", "area", "bicubic", "lanczos"}
+        crops = {"disabled", "center"}
+        if (isinstance(width, bool) or not isinstance(width, int)
+                or isinstance(height, bool) or not isinstance(height, int)):
+            raise TypeError("image width and height must be integers")
+        if not 1 <= width <= 16384 or not 1 <= height <= 16384:
+            raise ValueError("image width and height must be in [1, 16384]")
+        if width * height > 16384 * 16384:
+            raise ValueError("resized image exceeds the pixel limit")
+        if method not in methods:
+            raise ValueError(f"unknown image resize method {method!r}")
+        if crop not in crops:
+            raise ValueError("image crop must be disabled or center")
+        rt = current_runtime()
+        value = await rt.refs.resolve(image)
+        if (not isinstance(value, torch.Tensor) or value.ndim != 4
+                or value.shape[-1] not in (1, 3, 4)
+                or not 1 <= int(value.shape[0]) <= 4096):
+            raise TypeError("image resizing requires a non-empty BHWC IMAGE")
+        output = common_upscale(
+            value.movedim(-1, 1), width, height, method, crop,
+        ).movedim(1, -1)
+        return ImageRef._wrap(await rt.refs.create(
+            "IMAGE", output))  # type: ignore[return-value]
+
     async def _mask_grow(
         self, mask: "MaskRef", amount: int,
         tapered_corners: bool = False,
@@ -10538,6 +10612,22 @@ class InProcessOps:
             "spatial_compression": spatial,
             "temporal_compression": temporal,
         }
+
+    async def _vae_audio_sample_rate(
+        self, vae: "VaeRef",
+    ) -> Optional[int]:
+        value = await current_runtime().refs.resolve(vae)
+        sample_rate = getattr(value, "audio_sample_rate", None)
+        if sample_rate is None:
+            return None
+        if (
+            isinstance(sample_rate, bool)
+            or not isinstance(sample_rate, int)
+            or not 1_000 <= sample_rate <= 768_000
+        ):
+            raise ValueError(
+                "VAE audio sample rate must be an integer in [1000, 768000]")
+        return sample_rate
 
     async def _vae_decode_tensor(
         self, vae: "VaeRef", latent: "LatentRef",
@@ -12162,6 +12252,120 @@ class InProcessOps:
         rt = current_runtime()
         source = await rt.refs.resolve(cond)
         result = node_helpers.conditioning_set_values(source, values)
+        return CondRef._wrap(await rt.refs.create(
+            "CONDITIONING", result))  # type: ignore[return-value]
+
+    async def _cond_with_minimax_h3_guides(
+        self, cond: "CondRef", frame_count: int,
+        video_guides=None, audio_guides=None, audio_references=None,
+    ) -> "CondRef":
+        import math
+        import node_helpers
+        import torch
+
+        if isinstance(frame_count, bool) or not isinstance(frame_count, int):
+            raise TypeError("MiniMax H3 frame_count must be an integer")
+        if not 1 <= frame_count <= 100_000:
+            raise ValueError("MiniMax H3 frame_count is outside the host limit")
+
+        rt = current_runtime()
+
+        async def samples(ref, label, ndim):
+            value = await rt.refs.resolve(ref)
+            if not isinstance(value, dict) or "samples" not in value:
+                raise TypeError(f"{label} must be a LATENT ref with samples")
+            tensor = value["samples"]
+            if not isinstance(tensor, torch.Tensor) or tensor.ndim != ndim:
+                shape = tuple(getattr(tensor, "shape", ()))
+                raise ValueError(
+                    f"{label} must contain a {ndim}D tensor, got {shape}")
+            if tensor.shape[0] != 1:
+                raise ValueError(f"{label} must have batch size 1")
+            if not tensor.is_floating_point():
+                raise TypeError(f"{label} tensor must be floating point")
+            return tensor
+
+        def checked_guides(value, label):
+            if value is None:
+                return []
+            if not isinstance(value, (list, tuple)) or len(value) > 256:
+                raise ValueError(f"{label} must contain at most 256 guides")
+            checked = []
+            for index, entry in enumerate(value):
+                if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                    raise TypeError(
+                        f"{label}[{index}] must be (frame_index, latent)")
+                position = entry[0]
+                if (isinstance(position, bool)
+                        or not isinstance(position, (int, float))):
+                    raise TypeError(f"{label}[{index}] frame index must be numeric")
+                position = float(position)
+                if (not math.isfinite(position)
+                        or not -frame_count <= position < frame_count):
+                    raise ValueError(
+                        f"{label}[{index}] frame index is outside the timeline")
+                checked.append((position, entry[1]))
+            return checked
+
+        video_guides = checked_guides(video_guides, "video_guides")
+        audio_guides = checked_guides(audio_guides, "audio_guides")
+        if audio_references is None:
+            audio_references = []
+        if (not isinstance(audio_references, (list, tuple))
+                or len(audio_references) > 64):
+            raise ValueError("audio_references must contain at most 64 refs")
+
+        keyframes = []
+        for position, ref in video_guides:
+            tensor = await samples(ref, "video guide", 5)
+            if tensor.shape[2] < 1:
+                raise ValueError("video guide must contain a temporal step")
+            keyframes.append({
+                "resolved_frame_index": position,
+                "latent": tensor,
+            })
+        for position, ref in audio_guides:
+            tensor = await samples(ref, "audio guide", 4)
+            if tensor.shape[-1] < 1:
+                raise ValueError("audio guide must contain an audio step")
+            keyframes.append({
+                "resolved_frame_index": position,
+                "audio_latent": tensor,
+            })
+
+        refs = []
+        for ref in audio_references:
+            tensor = await samples(ref, "audio reference", 4)
+            steps = int(tensor.shape[-1])
+            if steps < 1:
+                raise ValueError("audio reference must contain an audio step")
+            refs.append({
+                "kind": "audio",
+                "ref_audio_t": steps,
+                "audio_latent": tensor,
+            })
+
+        source = await rt.refs.resolve(cond)
+        if not isinstance(source, (list, tuple)):
+            raise TypeError("conditioning must be a list of embedding rows")
+        for index, row in enumerate(source):
+            if (
+                not isinstance(row, (list, tuple))
+                or len(row) < 2
+                or not isinstance(row[1], dict)
+            ):
+                raise TypeError(
+                    f"conditioning row {index} has an invalid structure")
+
+        values = {"minimax_frame_count": frame_count}
+        if keyframes:
+            existing = list(source[0][1].get("minimax_keyframes", ())) \
+                if source else []
+            values["minimax_keyframes"] = existing + keyframes
+        result = node_helpers.conditioning_set_values(source, values)
+        if refs:
+            result = node_helpers.conditioning_set_values(
+                result, {"minimax_refs": refs}, append=True)
         return CondRef._wrap(await rt.refs.create(
             "CONDITIONING", result))  # type: ignore[return-value]
 

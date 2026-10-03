@@ -7,8 +7,10 @@ import torch
 from comfy_api.latest._prompt_relay_transform import apply_prompt_relay
 from comfy_api.latest._sdk import (
     AudioRef,
+    CondRef,
     InProcessOps,
     InProcessRefResolver,
+    LatentRef,
     VaeRef,
     bind_runtime,
 )
@@ -26,6 +28,7 @@ class _AudioLayout:
 
 class _AudioVae:
     latent_channels = 8
+    audio_sample_rate = 32_000
 
     def __init__(self):
         self.first_stage_model = _AudioLayout()
@@ -46,11 +49,13 @@ def test_audio_vae_encode_and_empty_layout_are_typed_and_bounded():
             "sample_rate": 48_000,
         }))
         with bind_runtime(refs, None, InProcessOps()):
+            sample_rate = await vae.audio_sample_rate()
             encoded_ref = await vae.encode_audio(audio)
             empty_ref = await vae.empty_audio_latent(25, 24.0)
-        return value, await refs.resolve(encoded_ref), await refs.resolve(empty_ref)
+        return sample_rate, value, await refs.resolve(encoded_ref), await refs.resolve(empty_ref)
 
-    value, encoded, empty = asyncio.run(run())
+    sample_rate, value, encoded, empty = asyncio.run(run())
+    assert sample_rate == 32_000
     assert value.seen.shape == (1, 10, 2)
     assert encoded["type"] == "audio"
     assert encoded["samples"].shape == (1, 8, 3, 6)
@@ -80,6 +85,101 @@ def test_audio_vae_rejects_wrong_waveform_and_unpublished_layout():
 
     with pytest.raises(ValueError, match="audio latent layout"):
         asyncio.run(wrong_layout())
+
+    async def bad_sample_rate():
+        refs = InProcessRefResolver()
+        vae_value = _AudioVae()
+        vae_value.audio_sample_rate = True
+        vae = VaeRef._wrap(await refs.create("VAE", vae_value))
+        with bind_runtime(refs, None, InProcessOps()):
+            await vae.audio_sample_rate()
+
+    with pytest.raises(ValueError, match="audio sample rate"):
+        asyncio.run(bad_sample_rate())
+
+
+def test_minimax_h3_guides_append_validated_native_conditioning():
+    async def run():
+        refs = InProcessRefResolver()
+        source = [[torch.zeros((1, 3, 8)), {
+            "minimax_keyframes": [{
+                "resolved_frame_index": 0.0,
+                "latent": torch.zeros((1, 24, 1, 2, 2)),
+            }],
+            "minimax_refs": [{
+                "kind": "audio",
+                "ref_audio_t": 2,
+                "audio_latent": torch.zeros((1, 32, 2, 2)),
+            }],
+        }]]
+        cond = CondRef._wrap(await refs.create("CONDITIONING", source))
+        video = LatentRef._wrap(await refs.create("LATENT", {
+            "samples": torch.ones((1, 24, 2, 2, 2)),
+        }))
+        audio = LatentRef._wrap(await refs.create("LATENT", {
+            "samples": torch.ones((1, 32, 2, 5)),
+        }))
+        with bind_runtime(refs, None, InProcessOps()):
+            result = await cond.with_minimax_h3_guides(
+                frame_count=124,
+                video_guides=[(17, video)],
+                audio_guides=[(-0.25, audio)],
+                audio_references=[audio],
+            )
+        return source, await refs.resolve(result)
+
+    source, result = asyncio.run(run())
+    assert "minimax_frame_count" not in source[0][1]
+    metadata = result[0][1]
+    assert metadata["minimax_frame_count"] == 124
+    assert [x["resolved_frame_index"] for x in metadata["minimax_keyframes"]] \
+        == [0.0, 17.0, -0.25]
+    assert len(metadata["minimax_refs"]) == 2
+    assert metadata["minimax_refs"][-1]["ref_audio_t"] == 5
+
+
+def test_minimax_h3_guides_reject_invalid_timeline_and_shapes():
+    async def run(position, samples):
+        refs = InProcessRefResolver()
+        cond = CondRef._wrap(await refs.create(
+            "CONDITIONING", [[torch.zeros((1, 3, 8)), {}]]))
+        latent = LatentRef._wrap(await refs.create(
+            "LATENT", {"samples": samples}))
+        with bind_runtime(refs, None, InProcessOps()):
+            return await cond.with_minimax_h3_guides(
+                frame_count=10, video_guides=[(position, latent)])
+
+    with pytest.raises(ValueError, match="outside the timeline"):
+        asyncio.run(run(10, torch.zeros((1, 24, 1, 2, 2))))
+    with pytest.raises(ValueError, match="5D tensor"):
+        asyncio.run(run(0, torch.zeros((1, 24, 2, 2))))
+
+
+def test_image_resize_uses_core_scaler_and_validates_closed_choices(monkeypatch):
+    import comfy.utils
+    from comfy_api.latest._sdk import ImageRef
+
+    calls = []
+
+    def resize(value, width, height, method, crop):
+        calls.append((tuple(value.shape), width, height, method, crop))
+        return torch.zeros((value.shape[0], value.shape[1], height, width))
+
+    monkeypatch.setattr(comfy.utils, "common_upscale", resize)
+
+    async def run():
+        refs = InProcessRefResolver()
+        image = ImageRef._wrap(await refs.create(
+            "IMAGE", torch.zeros((2, 10, 20, 3))))
+        with bind_runtime(refs, None, InProcessOps()):
+            resized = await image.resize(40, 30, "lanczos", "center")
+            with pytest.raises(ValueError, match="resize method"):
+                await image.resize(40, 30, "made-up", "center")
+        return await refs.resolve(resized)
+
+    result = asyncio.run(run())
+    assert calls == [((2, 3, 10, 20), 40, 30, "lanczos", "center")]
+    assert result.shape == (2, 30, 40, 3)
 
 
 class _Attention:
