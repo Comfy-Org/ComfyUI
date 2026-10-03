@@ -7,8 +7,12 @@ try:
     import comfy_kitchen as ck
     _ck_stochastic_rounding_fp8 = ck.stochastic_rounding_fp8
     _CK_STOCHASTIC_ROUNDING_AVAILABLE = True
-except (AttributeError, ImportError):
-    logging.warning("comfy_kitchen does not support stochastic FP8 rounding, please update comfy_kitchen.")
+except Exception as e:
+    # Not just AttributeError/ImportError: comfy_kitchen registers custom ops in its
+    # module body, and torch.library.custom_op raises ValueError on a PEP-585
+    # annotation before torch 2.7 -- which escaped this guard and killed startup on the
+    # older torch builds legacy GPUs are pinned to, instead of falling back below.
+    logging.warning(f"comfy_kitchen stochastic FP8 rounding is unavailable ({e}), please update comfy_kitchen.")
 
 if not _CK_STOCHASTIC_ROUNDING_AVAILABLE:
     def _ck_stochastic_rounding_fp8(value, rng, dtype):
