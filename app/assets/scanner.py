@@ -575,6 +575,8 @@ def resolve_deferred_gone(
         path = os.path.abspath(observation.path)
         stat_result = None
         if path in walked_paths:
+            if progress is not None:
+                progress.files_statted += 1
             try:
                 stat_result = os.stat(path, follow_symlinks=True)
             except (FileNotFoundError, NotADirectoryError):

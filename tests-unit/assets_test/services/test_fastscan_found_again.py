@@ -561,3 +561,15 @@ def test_a_gone_row_the_walk_does_not_list_is_not_stat_ed_again(drive, session, 
 
     assert state.missing_marked == 1
     assert str(target) not in stats_after_walk
+
+
+def test_the_re_stat_counts_as_a_file_stat(drive, session):
+    files = _populate(drive)
+    _scan()
+    baseline = _scan().files_statted
+
+    with _absent_for_the_check(files[0]):
+        state = _scan(after_check=lambda: _put_back(files[0], mtime_bump_ns=1_000_000_000))
+
+    # The stored-path stat that missed it, plus the re-stat after the walk.
+    assert state.files_statted == baseline + 1
