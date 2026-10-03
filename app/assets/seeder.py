@@ -69,6 +69,10 @@ class ScanPhase(Enum):
     FULL = "full"  # Both phases sequentially
 
 
+# Caps the wait after a slow queued scan, so a file written without being declared still appears within this.
+_QUEUED_GAP_CAP_S = 600.0
+
+
 class PendingScan(TypedDict):
     roots: tuple[RootType, ...]
     phase: ScanPhase
@@ -194,6 +198,11 @@ class _AssetSeeder:
         self._event_sink: Callable[[str, dict[str, Any]], None] | None = None
         self._disabled: bool = False
         self._pending_scan: PendingScan | None = None
+        # Queued scans start no sooner than this, so slow storage leaves the scanner idle at least half the time.
+        self._queued_not_before = 0.0
+        self._queued_timer: threading.Timer | None = None
+        self._queued = False
+        self._pause_requested = False
 
     def set_event_sink(self, sink: Callable[[str, dict[str, Any]], None] | None) -> None:
         self._event_sink = sink
@@ -216,6 +225,7 @@ class _AssetSeeder:
         compute_hashes: bool = False,
         *,
         _start_paused: bool = False,
+        _queued: bool = False,
     ) -> bool:
         """Start a background scan for the given roots.
 
@@ -226,6 +236,7 @@ class _AssetSeeder:
             prune_first: If True, prune orphaned assets before scanning
             compute_hashes: If True, compute blake3 hashes (slow)
             _start_paused: Start with phase work blocked until resume()
+            _queued: Set by enqueue_scan; its duration paces the next queued scan
 
         Returns:
             True if scan was started, False if already running
@@ -238,6 +249,8 @@ class _AssetSeeder:
             if self._state != State.IDLE:
                 logging.info("Asset seeder already running, skipping start")
                 return False
+            # A scan starting while a prompt runs waits for it, like one already running.
+            _start_paused = _start_paused or self._pause_requested
             self._state = State.PAUSED if _start_paused else State.RUNNING
             self._scan_state = _ScanState()
             self._errors = []
@@ -245,6 +258,7 @@ class _AssetSeeder:
             self._phase = phase
             self._prune_first = prune_first
             self._compute_hashes = compute_hashes
+            self._queued = _queued
             self._progress_callback = progress_callback
             self._cancel_event.clear()
             if _start_paused:
@@ -290,11 +304,12 @@ class _AssetSeeder:
         compute_hashes: bool = False,
     ) -> bool:
         with self._lock:
-            if self.start(
+            if self._pending_scan is None and time.monotonic() >= self._queued_not_before and self.start(
                 roots=roots,
                 phase=phase,
                 prune_first=False,
                 compute_hashes=compute_hashes,
+                _queued=True,
             ):
                 return True
             if self._pending_scan is not None:
@@ -317,7 +332,26 @@ class _AssetSeeder:
                 self._pending_scan["roots"],
                 self._pending_scan["phase"].value,
             )
+            if self._state is State.IDLE:
+                self._gap_holds_pending()
         return False
+
+    def _gap_holds_pending(self) -> bool:
+        """True until the last queued scan's gap ends; arms a timer to start the pending scan then."""
+        wait_s = self._queued_not_before - time.monotonic()
+        if wait_s <= 0:
+            return False
+        if self._queued_timer is None:
+            self._queued_timer = threading.Timer(wait_s, self._on_queued_timer)
+            self._queued_timer.daemon = True
+            self._queued_timer.start()
+        return True
+
+    def _on_queued_timer(self) -> None:
+        with self._lock:
+            self._queued_timer = None
+            if self._state is State.IDLE and not self._shutting_down:
+                self._finish_and_start_pending()
 
     def cancel(self) -> bool:
         """Request cancellation of the current scan.
@@ -351,6 +385,7 @@ class _AssetSeeder:
             True if pause was requested, False if not running
         """
         with self._lock:
+            self._pause_requested = True
             if self._state != State.RUNNING:
                 return False
             logging.info("Asset seeder pausing")
@@ -367,6 +402,7 @@ class _AssetSeeder:
             True if resumed, False if not paused
         """
         with self._lock:
+            self._pause_requested = False
             if self._state != State.PAUSED:
                 return False
             logging.info("Asset seeder resuming")
@@ -787,6 +823,9 @@ class _AssetSeeder:
 
             elapsed = time.perf_counter() - t_start
             cpu = time.thread_time() - cpu_start
+            if self._queued:
+                active_s = elapsed - scan_state.paused_s
+                self._queued_not_before = time.monotonic() + min(active_s, _QUEUED_GAP_CAP_S)
             logging.info(
                 "Scan(%s, %s) done %.3fs: created=%d enriched=%d skipped=%d",
                 roots,
@@ -867,7 +906,7 @@ class _AssetSeeder:
         start_paused = self._state is State.PAUSED
         self._reset_to_idle()
         pending = self._pending_scan
-        if pending is not None:
+        if pending is not None and not self._gap_holds_pending():
             self._pending_scan = None
             if not self.start(
                 roots=pending["roots"],
@@ -875,6 +914,7 @@ class _AssetSeeder:
                 prune_first=False,
                 compute_hashes=pending["compute_hashes"],
                 _start_paused=start_paused,
+                _queued=True,
             ):
                 logging.warning(
                     "Pending scan could not start (roots=%s, phase=%s)",
