@@ -619,8 +619,17 @@ class disable_weight_init:
                 if bias is not None:
                     out += bias.reshape((1, -1) + (1,) * (out.ndim - 2))
                 return out
-            else:
-                return super()._conv_forward(input, weight, bias, *args, **kwargs)
+            if (autopad == "causal_zero" and input.device.type == "cuda" and torch.version.hip is not None
+                    and input.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
+                    and not isinstance(weight, QuantizedTensor)
+                    and input.ndim == 5 and input.shape[2] == 1 and weight.ndim == 5 and weight.shape[2] == 1
+                    and isinstance(self.padding, tuple) and self.padding[0] == 0
+                    and self.padding_mode == "zeros" and not args and not kwargs):
+                return torch.nn.functional.conv2d(
+                    input.squeeze(2), weight.squeeze(2), bias,
+                    self.stride[1:], self.padding[1:], self.dilation[1:], self.groups,
+                ).unsqueeze(2)
+            return super()._conv_forward(input, weight, bias, *args, **kwargs)
 
         def forward_comfy_cast_weights(self, input, autopad=None):
             with CastBiasWeightContext(self, input, offloadable=True) as (weight, bias):
