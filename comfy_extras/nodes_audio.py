@@ -341,13 +341,24 @@ def load(filepath: str) -> tuple[torch.Tensor, int]:
 
         frames = []
         length = 0
-        for frame in af.decode(streams=stream.index):
-            buf = torch.from_numpy(frame.to_ndarray())
-            if buf.shape[0] != n_channels:
-                buf = buf.view(-1, n_channels).t()
+        skipped = 0
+        for packet in af.demux(stream):
+            try:
+                decoded = packet.decode()
+            except av.error.InvalidDataError:
+                # A damaged frame (common in ripped MP3s): skip it, as the ffmpeg CLI does.
+                skipped += 1
+                continue
+            for frame in decoded:
+                buf = torch.from_numpy(frame.to_ndarray())
+                if buf.shape[0] != n_channels:
+                    buf = buf.view(-1, n_channels).t()
 
-            frames.append(buf)
-            length += buf.shape[1]
+                frames.append(buf)
+                length += buf.shape[1]
+
+        if skipped:
+            logging.warning(f"Skipped {skipped} undecodable audio packet(s) in {filepath}")
 
         if not frames:
             raise ValueError("No audio frames decoded.")
