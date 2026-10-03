@@ -211,12 +211,11 @@ def test_seed_completed_reports_an_offline_drive_and_its_return(drive, session, 
     _bring_back(drive, parked)
     back = _completed_event(roots)
 
-    expected_root = roots[0] if len(roots) == 1 else None
-    assert (offline["root"], offline["missing_marked_count"], offline["recovered_count"]) == (
-        expected_root, len(files), 0,
+    assert (offline["roots"], offline["missing_marked_count"], offline["recovered_count"]) == (
+        list(roots), len(files), 0,
     )
-    assert (back["root"], back["missing_marked_count"], back["recovered_count"]) == (
-        expected_root, 0, len(files),
+    assert (back["roots"], back["missing_marked_count"], back["recovered_count"]) == (
+        list(roots), 0, len(files),
     )
     assert (back["created"], back["enriched"]) == (0, 0)
 

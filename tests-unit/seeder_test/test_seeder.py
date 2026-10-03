@@ -230,7 +230,7 @@ def test_multi_root_scan_emits_one_started_and_completed_without_root(
             "enriched": 4,
             "skipped": 2,
             "elapsed": 0.813,
-            "root": None,
+            "roots": ["models", "input"],
             "missing_marked_count": 0,
             "recovered_count": 0,
         }
@@ -361,7 +361,7 @@ def test_single_root_scan_emits_root_and_phase(
         scan_seeder._run_scan()
 
     [completed_event] = completed_events
-    assert completed_event["root"] == "output"
+    assert completed_event["roots"] == ["output"]
     assert events_named(caplog, "seeder.scan_started") == [
         {"phase": "fast", "root": "output"}
     ]

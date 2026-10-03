@@ -767,8 +767,7 @@ class _AssetSeeder:
                     "enriched": total_enriched,
                     "skipped": skipped_existing,
                     "elapsed": round(elapsed, 3),
-                    # The single root requested, or None when the scan covered more than one.
-                    "root": root,
+                    "roots": list(roots),
                     # Unlike scan_completed's count, includes the rows pruning marked missing.
                     "missing_marked_count": scan_state.missing_marked + marked_count,
                     "recovered_count": scan_state.recovered,
