@@ -506,12 +506,11 @@ def warn_if_database_in_use():
 ________________________________________________________________________
 WARNING WARNING WARNING WARNING WARNING
 
-Another ComfyUI process is already using this install's database:
+Another ComfyUI is already using this install's asset database:
   {db_path}
-Assets are off in this process, so it records nothing there.
-Running two ComfyUI instances on one install is not supported.
-A future version will refuse to start the second one.
-To run a separate instance, give it its own database:
+This ComfyUI was started without --enable-assets, so it doesn't need that database and will start anyway.
+A future version will refuse to start two ComfyUIs on the same asset database.
+To run both, give this one its own:
   --database-url sqlite:///path/to/another.db
 ________________________________________________________________________
 """.strip()

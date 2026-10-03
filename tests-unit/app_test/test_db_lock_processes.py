@@ -12,7 +12,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOCK_HELD = "Database is locked. Another ComfyUI process is already using this database."
-IN_USE = "Another ComfyUI process is already using this install's database"
+IN_USE = "Another ComfyUI is already using this install's asset database"
 
 HOLD_SCRIPT = (
     "import sys; "
@@ -122,7 +122,7 @@ def test_assets_off_start_warns_and_continues_when_the_database_is_held(tmp_path
     assert result.returncode == 0, result.stderr
     assert IN_USE in result.stderr
     assert str(tmp_path / "comfyui.db") in result.stderr
-    assert "A future version will refuse to start the second one" in result.stderr
+    assert "A future version will refuse to start two ComfyUIs on the same asset database" in result.stderr
     assert "Traceback" not in result.stderr
 
 
