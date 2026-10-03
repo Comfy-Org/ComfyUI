@@ -233,6 +233,7 @@ def test_multi_root_scan_emits_one_started_and_completed_without_root(
             "roots": ["models", "input"],
             "missing_marked_count": 0,
             "recovered_count": 0,
+            "pruned_count": 0,
         }
     ]
     assert events_named(caplog, "seeder.scan_started") == [{"phase": "full"}]
@@ -553,7 +554,7 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
     ]
 
 
-def test_seed_completed_counts_pruned_rows_with_the_scans_own(
+def test_seed_completed_reports_pruned_rows_apart_from_the_scans_own(
     scan_seeder: _AssetSeeder,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -579,7 +580,8 @@ def test_seed_completed_counts_pruned_rows_with_the_scans_own(
         scan_seeder._run_scan()
 
     [completed_event] = completed_events
-    assert completed_event["missing_marked_count"] == 7
+    assert completed_event["missing_marked_count"] == 2
+    assert completed_event["pruned_count"] == 5
     [logged] = events_named(caplog, "seeder.scan_completed")
     assert logged["missing_marked_count"] == 2
 

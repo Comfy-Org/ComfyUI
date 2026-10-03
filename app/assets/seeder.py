@@ -768,9 +768,10 @@ class _AssetSeeder:
                     "skipped": skipped_existing,
                     "elapsed": round(elapsed, 3),
                     "roots": list(roots),
-                    # Unlike scan_completed's count, includes the rows pruning marked missing.
-                    "missing_marked_count": scan_state.missing_marked + marked_count,
+                    "missing_marked_count": scan_state.missing_marked,
                     "recovered_count": scan_state.recovered,
+                    # Rows the startup prune marked missing for being outside every registered folder.
+                    "pruned_count": marked_count,
                 },
             )
 
