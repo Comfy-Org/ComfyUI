@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import re
@@ -31,6 +32,57 @@ def get_file_info(path: str, relative_to: str) -> FileInfo:
         "modified": int(os.path.getmtime(path) * 1000),
         "created": int(os.path.getctime(path) * 1000),
     }
+
+
+def _list_user_data_files(
+    path: str, recurse: bool, full_info: bool, split_path: bool
+) -> list[FileInfo | str | list[str]]:
+    pattern = os.path.join(glob.escape(path), '**', '*') if recurse else os.path.join(glob.escape(path), '*')
+
+    def process_full_path(full_path: str) -> FileInfo | str | list[str]:
+        if full_info:
+            return get_file_info(full_path, path)
+
+        rel_path = os.path.relpath(full_path, path).replace(os.sep, '/')
+        return [rel_path] + rel_path.split('/') if split_path else rel_path
+
+    return [
+        process_full_path(full_path)
+        for full_path in glob.glob(pattern, recursive=recurse)
+        if os.path.isfile(full_path)
+    ]
+
+
+def _list_user_data_v2(target_abs_path: str, base_user_path: str) -> list[dict[str, str | int | float]]:
+    results: list[dict[str, str | int | float]] = []
+    for root, dirs, files in os.walk(target_abs_path, topdown=True):
+        for dir_name in dirs:
+            dir_path = os.path.join(root, dir_name)
+            rel_path = os.path.relpath(dir_path, base_user_path).replace(os.sep, '/')
+            results.append({
+                "name": dir_name,
+                "path": rel_path,
+                "type": "directory"
+            })
+
+        for file_name in files:
+            file_path = os.path.join(root, file_name)
+            rel_path = os.path.relpath(file_path, base_user_path).replace(os.sep, '/')
+            entry_info: dict[str, str | int | float] = {
+                "name": file_name,
+                "path": rel_path,
+                "type": "file"
+            }
+            try:
+                stats = os.stat(file_path)
+                entry_info["size"] = stats.st_size
+                entry_info["modified"] = stats.st_mtime
+            except OSError as stat_error:
+                logging.warning(f"Could not stat file {file_path}: {stat_error}")
+            results.append(entry_info)
+
+    results.sort(key=lambda x: (x['type'] != 'directory', x['name'].lower()))
+    return results
 
 
 class UserManager():
@@ -187,27 +239,7 @@ class UserManager():
             full_info = request.rel_url.query.get('full_info', '').lower() == "true"
             split_path = request.rel_url.query.get('split', '').lower() == "true"
 
-            # Use different patterns based on whether we're recursing or not
-            if recurse:
-                pattern = os.path.join(glob.escape(path), '**', '*')
-            else:
-                pattern = os.path.join(glob.escape(path), '*')
-
-            def process_full_path(full_path: str) -> FileInfo | str | list[str]:
-                if full_info:
-                    return get_file_info(full_path, path)
-
-                rel_path = os.path.relpath(full_path, path).replace(os.sep, '/')
-                if split_path:
-                    return [rel_path] + rel_path.split('/')
-
-                return rel_path
-
-            results = [
-                process_full_path(full_path)
-                for full_path in glob.glob(pattern, recursive=recurse)
-                if os.path.isfile(full_path)
-            ]
+            results = await asyncio.to_thread(_list_user_data_files, path, recurse, full_info, split_path)
 
             return web.json_response(results)
 
@@ -278,42 +310,11 @@ class UserManager():
             if not os.path.isdir(target_abs_path):
                  return web.Response(status=400, text="Requested path is not a directory")
 
-            results = []
             try:
-                for root, dirs, files in os.walk(target_abs_path, topdown=True):
-                    # Process directories
-                    for dir_name in dirs:
-                        dir_path = os.path.join(root, dir_name)
-                        rel_path = os.path.relpath(dir_path, base_user_path).replace(os.sep, '/')
-                        results.append({
-                            "name": dir_name,
-                            "path": rel_path,
-                            "type": "directory"
-                        })
-
-                    # Process files
-                    for file_name in files:
-                        file_path = os.path.join(root, file_name)
-                        rel_path = os.path.relpath(file_path, base_user_path).replace(os.sep, '/')
-                        entry_info = {
-                            "name": file_name,
-                            "path": rel_path,
-                            "type": "file"
-                        }
-                        try:
-                            stats = os.stat(file_path) # Use os.stat for potentially better performance with os.walk
-                            entry_info["size"] = stats.st_size
-                            entry_info["modified"] = stats.st_mtime
-                        except OSError as stat_error:
-                            logging.warning(f"Could not stat file {file_path}: {stat_error}")
-                            pass # Include file with available info
-                        results.append(entry_info)
+                results = await asyncio.to_thread(_list_user_data_v2, target_abs_path, base_user_path)
             except OSError as e:
                 logging.error(f"Error listing directory {target_abs_path}: {e}")
                 return web.Response(status=500, text="Error reading directory contents")
-
-            # Sort results alphabetically, directories first then files
-            results.sort(key=lambda x: (x['type'] != 'directory', x['name'].lower()))
 
             return web.json_response(results)
 
