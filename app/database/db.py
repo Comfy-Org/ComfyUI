@@ -243,22 +243,33 @@ def init_db():
 _memory_db_anchor = None
 
 
+def _open_shared_memdb(name):
+    # Before 3.36 a memdb name is private to its connection, though opening it still succeeds.
+    if sqlite3.sqlite_version_info < (3, 36, 0):
+        return None
+    try:
+        return sqlite3.connect(f"file:{name}?vfs=memdb", uri=True, check_same_thread=False)
+    except sqlite3.OperationalError:  # built without the memdb VFS
+        return None
+
+
 def _init_memory_db(db_url):
     """Initialize an in-memory SQLite database using metadata.create_all.
 
     The database lives in SQLite's memdb VFS under a name unique to this init, so every pooled
     connection sees the same database with normal locking. A single connection shared by all
-    threads interleaves their transactions.
+    threads interleaves their transactions. Unlike a WAL file database, memdb blocks readers
+    for the whole of a write transaction, so write transactions must stay short.
     """
     global _memory_db_anchor
     name = f"/comfyui-{uuid.uuid4().hex}"
-    try:
-        _memory_db_anchor = sqlite3.connect(f"file:{name}?vfs=memdb", uri=True, check_same_thread=False)
-    except sqlite3.OperationalError as e:
+    _memory_db_anchor = _open_shared_memdb(name)
+    if _memory_db_anchor is None:
         logging.warning(
-            f"SQLite {sqlite3.sqlite_version} has no memdb VFS ({e}); the in-memory database "
+            f"SQLite {sqlite3.sqlite_version} cannot share an in-memory database between "
+            f"connections (that needs 3.36 or newer with the memdb VFS); the in-memory database "
             f"falls back to one connection shared by all threads, which can fail under "
-            f"concurrent writes. SQLite 3.36 or newer fixes this."
+            f"concurrent writes."
         )
         _init_shared_connection_memory_db(db_url)
         return
