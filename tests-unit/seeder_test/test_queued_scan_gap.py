@@ -15,9 +15,12 @@ SETTLE_TIMEOUT = 5.0
 class FakeClock:
     def __init__(self) -> None:
         self.now = 1000.0
+        self.step = 0.0  # seconds added after each read
 
     def monotonic(self) -> float:
-        return self.now
+        now = self.now
+        self.now += self.step
+        return now
 
     perf_counter = monotonic
 
@@ -292,12 +295,13 @@ def test_a_scan_held_during_a_prune_starts_when_the_prune_ends(
 
 def test_a_page_load_scan_during_a_prompt_is_not_held(harness: Harness) -> None:
     harness.seeder.pause()  # a prompt is running and the seeder is idle
+    states: list[State] = []
+    harness.during_scan = lambda: states.append(harness.seeder.get_status().state)
 
     assert harness.seeder.start(roots=("models", "input", "output"))
-
-    assert harness.seeder.get_status().state is State.RUNNING
     harness.settle()
-    assert len(harness.scans) == 1
+
+    assert states == [State.RUNNING]
 
 
 def test_a_failed_scan_sets_no_wait(harness: Harness) -> None:
@@ -316,10 +320,15 @@ def test_a_scan_left_queued_by_a_cancelled_prune_does_not_block_the_next(harness
     # A cancelled prune resets to idle and keeps the scan queued during it, with no timer armed.
     harness.seeder._pending_scan = {"roots": ("output",), "phase": ScanPhase.FULL, "compute_hashes": False}
 
+    harness.scan_s = 30
     assert harness.queue_output_scan()
     harness.settle()
 
-    assert harness.scans[0] == ("output",)
+    assert harness.scans == [("output",)]
+    # The leftover then runs once, a gap later.
+    harness.fire_timer()
+    assert len(harness.scans) == 2
+    assert harness.seeder._pending_scan is None
 
 
 def test_a_timer_firing_between_prompts_starts_the_scan_running(harness: Harness) -> None:
@@ -330,8 +339,8 @@ def test_a_timer_firing_between_prompts_starts_the_scan_running(harness: Harness
 
     harness.seeder.pause()
     harness.seeder.resume()  # that prompt ended before the gap did
-    harness.during_scan = lambda: running.append(harness.seeder.get_status().state)
     running: list[State] = []
+    harness.during_scan = lambda: running.append(harness.seeder.get_status().state)
     harness.fire_timer()
 
     assert running == [State.RUNNING]
@@ -358,3 +367,38 @@ def test_a_timer_firing_during_a_startup_scan_leaves_it_running(harness: Harness
     assert seen == [(State.RUNNING, ("models", "input", "output"))]
     # The startup scan's end starts the held one, the gap being over.
     assert len(harness.scans) == 3
+
+
+def test_a_prompt_arriving_as_the_gap_ends_is_never_stranded(harness: Harness) -> None:
+    harness.scan_s = 30
+    harness.queue_output_scan()
+    harness.settle()
+    for remaining in (2.0, 1.0, 0.5, 0.0):
+        harness.clock.now = harness.seeder._queued_not_before - remaining
+        harness.clock.step = 1.0  # the gap may end between any two reads
+        harness.queue_output_scan()
+        harness.clock.step = 0.0
+        harness.settle()
+        assert harness.seeder._pending_scan is None or harness.live_timers(), remaining
+        if harness.live_timers():
+            harness.fire_timer()
+        harness.scan_s = 30
+
+
+def test_a_timer_firing_early_waits_out_the_rest(harness: Harness) -> None:
+    harness.scan_s = 30
+    harness.queue_output_scan()
+    harness.settle()
+    harness.queue_output_scan()
+    [timer] = harness.live_timers()
+
+    harness.clock.now += timer.interval - 0.01  # coarse OS timers can fire a little early
+    callback, timer.function = timer.function, None
+    callback()
+    harness.settle()
+
+    assert len(harness.scans) == 1
+    [rearmed] = harness.live_timers()
+    assert rearmed.interval == pytest.approx(0.01)
+    harness.fire_timer()
+    assert len(harness.scans) == 2
