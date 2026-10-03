@@ -532,6 +532,8 @@ class MiniMaxH3Model(nn.Module):
 
     def _cond_video_rows(self, payload, device):
         """Concatenated visual condition rows (normalized latents -> patchified), with condition noise augmentation."""
+        if "prepared_video_rows" in payload:
+            return payload["prepared_video_rows"].to(device)
         rows = []
         aug = payload.get("visual_cond_noise_aug", VISUAL_COND_TIMESTEP)
         seed = int(payload.get("seed", 0))
@@ -546,6 +548,8 @@ class MiniMaxH3Model(nn.Module):
         return torch.cat(rows, dim=0) if rows else None
 
     def _cond_audio_rows(self, payload, device):
+        if "prepared_audio_rows" in payload:
+            return payload["prepared_audio_rows"].to(device)
         rows = []
         aug = payload.get("audio_cond_noise_aug", AUDIO_COND_TIMESTEP)
         seed = int(payload.get("seed", 0)) + 1
@@ -557,6 +561,14 @@ class MiniMaxH3Model(nn.Module):
                 r = aug * r + (1.0 - aug) * noise.to(r.device)
             rows.append(r.to(device))
         return torch.cat(rows, dim=0) if rows else None
+
+    def preprocess_reference_latents(self, payload, device):
+        rows = {}
+        if payload.get("cond_video_latents"):
+            rows["prepared_video_rows"] = self._cond_video_rows(payload, device)
+        if payload.get("cond_audio_latents"):
+            rows["prepared_audio_rows"] = self._cond_audio_rows(payload, device)
+        return rows
 
     def _embed_and_pack(self, video_x, audio_x, context, layout, payload, transformer_options):
         device = video_x.device
