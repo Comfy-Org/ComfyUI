@@ -68,7 +68,7 @@ def create_content_reporting_insert(session: Session, path: str, hash: str | Non
     except IntegrityError as error:
         if not is_live_path_conflict(error):
             raise
-        winner = session.execute(sa.select(AssetContent).where(AssetContent.path == path, AssetContent.is_missing.is_(False))).scalar_one()
+        winner = session.execute(sa.select(AssetContent).where(AssetContent.path == path, AssetContent.is_missing == sa.false())).scalar_one()
         return winner, False
 
 
@@ -141,7 +141,7 @@ def get_record_by_path_or_none(session: Session, path: str) -> Asset | None:
     return session.scalar(
         sa.select(Asset)
         .join(AssetContent, Asset.content_id == AssetContent.id)
-        .where(AssetContent.path == path, AssetContent.is_missing.is_(False))
+        .where(AssetContent.path == path, AssetContent.is_missing == sa.false())
         .order_by(Asset.created_at.desc(), Asset.id.desc())
         .limit(1)
     )
