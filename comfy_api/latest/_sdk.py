@@ -1886,6 +1886,8 @@ class AssetsDomain(Protocol):
         self, ref: AssetRef, return_metadata: bool = False,
     ) -> Any: ...
     async def load_image(self, ref: AssetRef) -> ImageRef: ...
+
+    async def load_video(self, ref: AssetRef) -> VideoRef: ...
     async def load_latent(self, ref: AssetRef) -> LatentRef: ...
 
 
@@ -1981,12 +1983,66 @@ class OutputDomain(Protocol):
         model_key_prefix: str = "model.diffusion_model.",
     ) -> str: ...
     async def save_video(
-        self, images: ImageRef, audio: Optional[AudioRef] = None,
-        fps: float = 25.0, filename_prefix: str = "video/ComfyUI",
-        format: str = "auto", codec: str = "auto",
+        self,
+        images: ImageRef,
+        audio: Optional[AudioRef] = None,
+        fps: float = 25.0,
+        filename_prefix: str = "video/ComfyUI",
+        format: str = "auto",
+        codec: str = "auto",
         encoder_options: Optional[dict[str, Any]] = None,
-        loop_count: int = 0, bit_depth: int = 8,
-        save_output: bool = True, save_metadata: bool = True,
+        loop_count: int = 0,
+        bit_depth: int = 8,
+        save_output: bool = True,
+        save_metadata: bool = True,
+        audio_codec: str = "auto",
+        audio_bitrate_kbps: Optional[int] = None,
+    ) -> dict: ...
+
+    async def transcode_video(
+        self,
+        video: VideoRef,
+        audio: Optional[AudioRef] = None,
+        filename_prefix: str = "video/ComfyUI",
+        format: str = "auto",
+        codec: str = "auto",
+        encoder_options: Optional[dict[str, Any]] = None,
+        audio_mode: str = "source",
+        audio_codec: str = "auto",
+        audio_bitrate_kbps: Optional[int] = None,
+        save_output: bool = True,
+        save_metadata: bool = True,
+    ) -> dict: ...
+
+    async def compose_video(
+        self,
+        background: VideoRef,
+        overlay: VideoRef,
+        mask: VideoRef,
+        *,
+        opacity: float = 1.0,
+        position: str = "right_bottom",
+        margin_x: int = 0,
+        margin_y: int = 0,
+        size_ratio: float = 0.25,
+        background_volume: float = 0.0,
+        overlay_volume: float = 1.0,
+        background_speed: float = 1.0,
+        overlay_speed: float = 1.0,
+        fps: Optional[float] = None,
+        subtitles: Optional[list[dict[str, Any]]] = None,
+        font_asset: Optional[str] = None,
+        font_size: int = 48,
+        font_color: str = "white",
+        subtitle_position: str = "bottom_center",
+        subtitle_x: int = 0,
+        subtitle_y: int = 0,
+        subtitle_max_width: int = 0,
+        subtitle_background_color: str = "black",
+        subtitle_background_opacity: float = 0.7,
+        filename_prefix: str = "overlay",
+        save_output: bool = True,
+        save_metadata: bool = True,
     ) -> dict: ...
     async def save_animation(
         self, images: ImageRef, fps: float = 8.0,
@@ -2638,6 +2694,31 @@ class _InProcessAssets:
         pixels = torch.from_numpy(array).div_(255.0).unsqueeze(0)
         return ImageRef._wrap(await current_runtime().refs.create(
             "IMAGE", pixels))  # type: ignore[return-value]
+
+    async def load_video(self, ref: AssetRef) -> VideoRef:
+        """Open a managed video asset as an opaque VIDEO handle."""
+        from ._input_impl.video_types import VideoFromFile
+
+        path = await self.path(ref)
+        max_bytes = int(
+            os.environ.get("COMFY_SECURE_VIDEO_SOURCE_MAX", str(1024 * 1024 * 1024))
+        )
+        if os.path.getsize(path) > max_bytes:
+            raise ValueError(f"video asset exceeds the {max_bytes}-byte limit")
+        try:
+            value = VideoFromFile(path)
+            width, height = value.get_dimensions()
+        except Exception as error:
+            raise ValueError("asset is not a readable video") from error
+        if (
+            width <= 0
+            or height <= 0
+            or width > 16384
+            or height > 16384
+            or width * height > 16384 * 16384
+        ):
+            raise ValueError("video asset dimensions exceed the limit")
+        return VideoRef._wrap(await current_runtime().refs.create("VIDEO", value))  # type: ignore[return-value]
 
     async def load_latent(self, ref: AssetRef) -> LatentRef:
         """Load ComfyUI's safetensors-backed ``.latent`` format.
@@ -5164,10 +5245,16 @@ class _InProcessOutput:
     }
     _IMAGE_BATCH_MAX = 4096
 
-    def __init__(self, prompt: Any = None, extra_pnginfo: Any = None) -> None:
+    def __init__(
+        self,
+        prompt: Any = None,
+        extra_pnginfo: Any = None,
+        node_module: str = "",
+    ) -> None:
         self._prompt = prompt
         self._extra_pnginfo = extra_pnginfo
         self._metadata_owner = _image_metadata_owner(prompt, extra_pnginfo)
+        self._node_module = str(node_module or "")
 
     @staticmethod
     def _prefix(filename_prefix: str, subfolder: str) -> str:
@@ -5822,7 +5909,26 @@ class _InProcessOutput:
         return value
 
     def _media_target(
-        self, pixels: Any, filename_prefix: str, extension: str,
+        self,
+        pixels: Any,
+        filename_prefix: str,
+        extension: str,
+        save_output: bool,
+    ) -> tuple[str, str, str, Any]:
+        return self._media_target_size(
+            int(pixels.shape[2]),
+            int(pixels.shape[1]),
+            filename_prefix,
+            extension,
+            save_output,
+        )
+
+    def _media_target_size(
+        self,
+        width: int,
+        height: int,
+        filename_prefix: str,
+        extension: str,
         save_output: bool,
     ) -> tuple[str, str, str, Any]:
         import folder_paths
@@ -5835,11 +5941,12 @@ class _InProcessOutput:
         output_dir = os.path.abspath(
             folder_paths.get_output_directory()
             if folder_type == FolderType.output
-            else folder_paths.get_temp_directory())
+            else folder_paths.get_temp_directory()
+        )
         prefix = self._prefix(filename_prefix, "")
-        full_folder, filename, counter, subfolder, _ = (
-            folder_paths.get_save_image_path(
-                prefix, output_dir, pixels.shape[2], pixels.shape[1]))
+        full_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+            prefix, output_dir, int(width), int(height)
+        )
         while True:
             file = f"{filename}_{counter:05}_.{extension}"
             target = os.path.abspath(os.path.join(full_folder, file))
@@ -6018,12 +6125,20 @@ class _InProcessOutput:
         return SavedImages(results).as_dict() | {"pattern": pattern}
 
     async def save_video(
-        self, images: ImageRef, audio: Optional[AudioRef] = None,
-        fps: float = 25.0, filename_prefix: str = "video/ComfyUI",
-        format: str = "auto", codec: str = "auto",
+        self,
+        images: ImageRef,
+        audio: Optional[AudioRef] = None,
+        fps: float = 25.0,
+        filename_prefix: str = "video/ComfyUI",
+        format: str = "auto",
+        codec: str = "auto",
         encoder_options: Optional[dict[str, Any]] = None,
-        loop_count: int = 0, bit_depth: int = 8,
-        save_output: bool = True, save_metadata: bool = True,
+        loop_count: int = 0,
+        bit_depth: int = 8,
+        save_output: bool = True,
+        save_metadata: bool = True,
+        audio_codec: str = "auto",
+        audio_bitrate_kbps: Optional[int] = None,
     ) -> dict:
         import json
         import math
@@ -6049,15 +6164,27 @@ class _InProcessOutput:
             options = dict(encoder_options)
         else:
             raise TypeError("video encoder_options must be a dictionary")
-        allowed_option_names = frozenset({
-            "pixel_format", "crf", "bitrate_kbps", "profile", "level",
-            "coder", "context", "gop_size", "slices", "slice_crc",
-        })
+        allowed_option_names = frozenset(
+            {
+                "pixel_format",
+                "crf",
+                "bitrate_kbps",
+                "profile",
+                "level",
+                "coder",
+                "context",
+                "gop_size",
+                "slices",
+                "slice_crc",
+                "preset",
+            }
+        )
         unknown = set(options) - allowed_option_names
         if unknown:
             raise ValueError(
                 "unsupported video encoder option(s): "
-                + ", ".join(sorted(map(str, unknown))))
+                + ", ".join(sorted(map(str, unknown)))
+            )
 
         containers = {
             "mp4": ("mp4", "mp4"),
@@ -6065,22 +6192,97 @@ class _InProcessOutput:
             "mkv": ("matroska", "mkv"),
             "matroska": ("matroska", "mkv"),
             "mov": ("mov", "mov"),
+            "avi": ("avi", "avi"),
         }
         codecs = {
-            "h264": ("libx264", {"mp4"}, "yuv420p", {"yuv420p", "yuv420p10le"}),
-            "hevc": ("libx265", {"mp4"}, "yuv420p10le", {"yuv420p", "yuv420p10le"}),
-            "av1": ("libsvtav1", {"webm"}, "yuv420p", {"yuv420p", "yuv420p10le"}),
-            "vp9": ("libvpx-vp9", {"webm"}, "yuv420p", {"yuv420p", "yuva420p"}),
-            "prores": ("prores_ks", {"mov"}, "yuv422p10le", {"yuv422p10le", "yuv444p10le", "yuva444p10le"}),
-            "ffv1": ("ffv1", {"mkv"}, "rgba64le", {
-                "rgba64le", "bgra", "yuv420p", "yuv422p", "yuv444p",
-                "yuva420p", "yuva422p", "yuva444p", "yuv420p10le",
-                "yuv422p10le", "yuv444p10le", "yuv420p12le",
-                "yuv422p12le", "yuv444p12le", "yuv420p14le",
-                "yuv422p14le", "yuv444p14le", "yuv420p16le",
-                "yuv422p16le", "yuv444p16le", "gray", "gray10le",
-                "gray12le", "gray16le",
-            }),
+            "h264": (
+                "libx264",
+                {"mp4", "mov", "mkv", "avi"},
+                "yuv420p",
+                {
+                    "yuv420p",
+                    "yuv422p",
+                    "yuv444p",
+                    "yuv420p10le",
+                    "yuv422p10le",
+                    "yuv444p10le",
+                    "rgb24",
+                },
+            ),
+            "hevc": (
+                "libx265",
+                {"mp4", "mov", "mkv"},
+                "yuv420p10le",
+                {
+                    "yuv420p",
+                    "yuv422p",
+                    "yuv444p",
+                    "yuv420p10le",
+                    "yuv422p10le",
+                    "yuv444p10le",
+                    "rgb24",
+                },
+            ),
+            "av1": (
+                "libsvtav1",
+                {"webm", "mkv", "mp4"},
+                "yuv420p",
+                {
+                    "yuv420p",
+                    "yuv420p10le",
+                },
+            ),
+            "vp9": (
+                "libvpx-vp9",
+                {"webm", "mkv"},
+                "yuv420p",
+                {
+                    "yuv420p",
+                    "yuv422p",
+                    "yuv444p",
+                    "yuva420p",
+                    "yuv420p10le",
+                    "yuv422p10le",
+                    "yuv444p10le",
+                },
+            ),
+            "prores": (
+                "prores_ks",
+                {"mov"},
+                "yuv422p10le",
+                {"yuv422p10le", "yuv444p10le", "yuva444p10le"},
+            ),
+            "ffv1": (
+                "ffv1",
+                {"mkv"},
+                "rgba64le",
+                {
+                    "rgba64le",
+                    "bgra",
+                    "yuv420p",
+                    "yuv422p",
+                    "yuv444p",
+                    "yuva420p",
+                    "yuva422p",
+                    "yuva444p",
+                    "yuv420p10le",
+                    "yuv422p10le",
+                    "yuv444p10le",
+                    "yuv420p12le",
+                    "yuv422p12le",
+                    "yuv444p12le",
+                    "yuv420p14le",
+                    "yuv422p14le",
+                    "yuv444p14le",
+                    "yuv420p16le",
+                    "yuv422p16le",
+                    "yuv444p16le",
+                    "gray",
+                    "gray10le",
+                    "gray12le",
+                    "gray16le",
+                },
+            ),
             "h264_nvenc": ("h264_nvenc", {"mp4"}, "yuv420p", {"yuv420p", "p010le"}),
             "hevc_nvenc": ("hevc_nvenc", {"mp4"}, "yuv420p", {"yuv420p", "p010le"}),
             "av1_nvenc": ("av1_nvenc", {"mp4"}, "yuv420p", {"yuv420p", "p010le"}),
@@ -6089,31 +6291,36 @@ class _InProcessOutput:
         container_name = str(format).lower()
         if codec_name == "auto":
             codec_name = {
-                "webm": "vp9", "mkv": "ffv1", "matroska": "ffv1",
+                "webm": "vp9",
+                "mkv": "ffv1",
+                "matroska": "ffv1",
                 "mov": "prores",
             }.get(container_name, "h264")
         if codec_name not in codecs:
             raise ValueError(f"unsupported video codec {codec!r}")
         if container_name == "auto":
             container_name = {
-                "av1": "webm", "vp9": "webm", "ffv1": "mkv",
+                "av1": "webm",
+                "vp9": "webm",
+                "ffv1": "mkv",
                 "prores": "mov",
             }.get(codec_name, "mp4")
         if container_name not in containers:
             raise ValueError(f"unsupported video format {format!r}")
-        av_codec, compatible, default_pixel_format, allowed_pixel_formats = (
-            codecs[codec_name])
+        av_codec, compatible, default_pixel_format, allowed_pixel_formats = codecs[
+            codec_name
+        ]
         normalized_container = "mkv" if container_name == "matroska" else container_name
         if normalized_container not in compatible:
             raise ValueError(
-                f"video codec {codec_name!r} is not valid in "
-                f"{normalized_container!r}")
-        pixel_format = str(options.get(
-            "pixel_format", default_pixel_format)).lower()
+                f"video codec {codec_name!r} is not valid in {normalized_container!r}"
+            )
+        pixel_format = str(options.get("pixel_format", default_pixel_format)).lower()
         if pixel_format not in allowed_pixel_formats:
             raise ValueError(
                 f"pixel format {pixel_format!r} is not permitted for "
-                f"codec {codec_name!r}")
+                f"codec {codec_name!r}"
+            )
 
         def integer_option(name: str, minimum: int, maximum: int) -> Optional[int]:
             if name not in options:
@@ -6122,11 +6329,28 @@ class _InProcessOutput:
             if value != options[name] or not minimum <= value <= maximum:
                 raise ValueError(
                     f"video encoder option {name} must be an integer in "
-                    f"[{minimum}, {maximum}]")
+                    f"[{minimum}, {maximum}]"
+                )
             return value
 
         crf = integer_option("crf", 0, 100)
         bitrate_kbps = integer_option("bitrate_kbps", 1, 999000)
+        preset = str(options.get("preset", ""))
+        allowed_presets = {
+            "ultrafast",
+            "superfast",
+            "veryfast",
+            "faster",
+            "fast",
+            "medium",
+            "slow",
+            "slower",
+            "veryslow",
+        }
+        if preset and preset not in allowed_presets:
+            raise ValueError("unknown video encoder preset")
+        if preset and codec_name not in {"h264", "hevc"}:
+            raise ValueError("video preset is supported only for H.264 and HEVC")
         profile = str(options.get("profile", ""))
         if profile and codec_name != "prores":
             raise ValueError("video profile is currently supported only for ProRes")
@@ -6150,22 +6374,40 @@ class _InProcessOutput:
             slice_crc = options["slice_crc"]
 
         rt = current_runtime()
-        pixels = self._media_pixels(
-            await rt.refs.resolve(images), "save_video")
+        pixels = self._media_pixels(await rt.refs.resolve(images), "save_video")
         total_frames = len(pixels) * (loops + 1)
         if total_frames > 1_000_000:
             raise ValueError("video output is limited to 1,000,000 encoded frames")
         audio_value = None
         if audio is not None:
             audio_value = await rt.refs.resolve(audio)
-            if (not isinstance(audio_value, dict)
-                    or "waveform" not in audio_value
-                    or "sample_rate" not in audio_value):
-                raise TypeError("save_video audio must contain waveform and sample_rate")
+            if (
+                not isinstance(audio_value, dict)
+                or "waveform" not in audio_value
+                or "sample_rate" not in audio_value
+            ):
+                raise TypeError(
+                    "save_video audio must contain waveform and sample_rate"
+                )
+
+        requested_audio_codec = str(audio_codec).lower()
+        requested_audio_codec = {
+            "libopus": "opus",
+            "libmp3lame": "mp3",
+        }.get(requested_audio_codec, requested_audio_codec)
+        allowed_audio_codecs = {"auto", "aac", "mp3", "opus"}
+        if requested_audio_codec not in allowed_audio_codecs:
+            raise ValueError(f"unsupported audio codec {audio_codec!r}")
+        audio_bitrate = None
+        if audio_bitrate_kbps is not None:
+            audio_bitrate = int(audio_bitrate_kbps)
+            if audio_bitrate != audio_bitrate_kbps or not 8 <= audio_bitrate <= 1024:
+                raise ValueError("audio_bitrate_kbps must be an integer in [8, 1024]")
 
         av_format, extension = containers[container_name]
         target, file, subfolder, folder_type = self._media_target(
-            pixels, filename_prefix, extension, bool(save_output))
+            pixels, filename_prefix, extension, bool(save_output)
+        )
         metadata = self._media_metadata(bool(save_metadata))
         try:
             try:
@@ -6176,24 +6418,29 @@ class _InProcessOutput:
                 ) from exc
             open_options = (
                 {"movflags": "use_metadata_tags"}
-                if normalized_container == "mp4" else None)
+                if normalized_container == "mp4"
+                else None
+            )
             with av.open(
-                target, mode="w", format=av_format,
+                target,
+                mode="w",
+                format=av_format,
                 options=open_options,
             ) as output:
                 if metadata is not None:
                     for key, value in metadata.items():
                         # Match ComfyUI's VideoFromComponents contract: every
                         # metadata value is a JSON value, including strings.
-                        output.metadata[str(key)] = json.dumps(
-                            value, default=str)
+                        output.metadata[str(key)] = json.dumps(value, default=str)
                 frame_rate = Fraction(round(rate * 1000), 1000)
                 video_stream = output.add_stream(av_codec, rate=frame_rate)
                 width = int(pixels.shape[2])
                 height = int(pixels.shape[1])
-                alignment = 2 if any(
-                    marker in pixel_format
-                    for marker in ("420", "422", "p010")) else 1
+                alignment = (
+                    2
+                    if any(marker in pixel_format for marker in ("420", "422", "p010"))
+                    else 1
+                )
                 encoded_width = width + (-width % alignment)
                 encoded_height = height + (-height % alignment)
                 video_stream.width = encoded_width
@@ -6205,8 +6452,10 @@ class _InProcessOutput:
                 if profile:
                     stream_options["profile"] = str(profile_values[profile])
                 for name, value in (
-                    ("level", level), ("coder", coder),
-                    ("context", context_model), ("g", gop_size),
+                    ("level", level),
+                    ("coder", coder),
+                    ("context", context_model),
+                    ("g", gop_size),
                     ("slices", slices),
                 ):
                     if value is not None:
@@ -6215,6 +6464,11 @@ class _InProcessOutput:
                     stream_options["slicecrc"] = "1" if slice_crc else "0"
                 if stream_options:
                     video_stream.options = stream_options
+                if preset:
+                    video_stream.options = {
+                        **dict(video_stream.options or {}),
+                        "preset": preset,
+                    }
                 if bitrate_kbps is not None:
                     video_stream.bit_rate = bitrate_kbps * 1000
 
@@ -6225,22 +6479,59 @@ class _InProcessOutput:
                     if not 8000 <= sample_rate <= 192000:
                         raise ValueError("audio sample_rate must be in [8000, 192000]")
                     waveform = audio_value["waveform"]
-                    if (not isinstance(waveform, torch.Tensor)
-                            or waveform.ndim != 3 or len(waveform) == 0):
-                        raise TypeError("audio waveform must have shape [batch, channels, samples]")
+                    if (
+                        not isinstance(waveform, torch.Tensor)
+                        or waveform.ndim != 3
+                        or len(waveform) == 0
+                    ):
+                        raise TypeError(
+                            "audio waveform must have shape [batch, channels, samples]"
+                        )
                     waveform = waveform[0].detach().cpu().float()
                     channels = int(waveform.shape[0])
                     layouts = {
-                        1: "mono", 2: "stereo", 3: "3.0", 4: "quad",
-                        5: "5.0", 6: "5.1", 7: "6.1", 8: "7.1",
+                        1: "mono",
+                        2: "stereo",
+                        3: "3.0",
+                        4: "quad",
+                        5: "5.0",
+                        6: "5.1",
+                        7: "6.1",
+                        8: "7.1",
                     }
                     if channels not in layouts:
                         raise ValueError("audio must contain between 1 and 8 channels")
-                    audio_codec = {
-                        "webm": "libopus", "mkv": "flac", "mov": "pcm_s16le",
-                    }.get(normalized_container, "aac")
+                    selected_audio_codec = requested_audio_codec
+                    if selected_audio_codec == "auto":
+                        selected_audio_codec = {
+                            "webm": "opus",
+                            "mkv": "flac",
+                            "mov": "aac",
+                            "avi": "mp3",
+                        }.get(normalized_container, "aac")
+                    audio_compatibility = {
+                        "aac": {"mp4", "mov", "mkv"},
+                        "mp3": {"mp4", "mov", "mkv", "avi"},
+                        "opus": {"webm", "mkv"},
+                        "flac": {"mkv"},
+                    }
+                    if (
+                        normalized_container
+                        not in audio_compatibility[selected_audio_codec]
+                    ):
+                        raise ValueError(
+                            f"audio codec {selected_audio_codec!r} is not valid in "
+                            f"{normalized_container!r}"
+                        )
+                    av_audio_codec = {
+                        "opus": "libopus",
+                        "mp3": "libmp3lame",
+                    }.get(selected_audio_codec, selected_audio_codec)
                     audio_stream = output.add_stream(
-                        audio_codec, rate=sample_rate, layout=layouts[channels])
+                        av_audio_codec, rate=sample_rate, layout=layouts[channels]
+                    )
+                    if audio_bitrate is not None:
+                        audio_stream.bit_rate = audio_bitrate * 1000
 
                 wants_alpha = pixel_format.startswith(("rgba", "bgra", "yuva"))
                 for _cycle in range(loops + 1):
@@ -6248,7 +6539,9 @@ class _InProcessOutput:
                         array = value.detach().cpu().float().numpy()
                         if wants_alpha:
                             if array.shape[-1] < 4:
-                                alpha = np.ones((*array.shape[:2], 1), dtype=array.dtype)
+                                alpha = np.ones(
+                                    (*array.shape[:2], 1), dtype=array.dtype
+                                )
                                 array = np.concatenate((array[..., :3], alpha), axis=-1)
                             else:
                                 array = array[..., :4]
@@ -6257,21 +6550,30 @@ class _InProcessOutput:
                         if encoded_width != width or encoded_height != height:
                             array = np.pad(
                                 array,
-                                ((0, encoded_height - height),
-                                 (0, encoded_width - width), (0, 0)),
-                                mode="edge")
+                                (
+                                    (0, encoded_height - height),
+                                    (0, encoded_width - width),
+                                    (0, 0),
+                                ),
+                                mode="edge",
+                            )
                         maximum = 65535.0 if depth == 16 else 255.0
                         array = np.clip(array * maximum, 0, maximum).astype(
-                            np.uint16 if depth == 16 else np.uint8)
+                            np.uint16 if depth == 16 else np.uint8
+                        )
                         source_format = (
-                            "rgba64le" if wants_alpha else "rgb48le"
-                        ) if depth == 16 else (
-                            "rgba" if wants_alpha else "rgb24")
+                            ("rgba64le" if wants_alpha else "rgb48le")
+                            if depth == 16
+                            else ("rgba" if wants_alpha else "rgb24")
+                        )
                         frame = av.VideoFrame.from_ndarray(
-                            np.ascontiguousarray(array), format=source_format)
+                            np.ascontiguousarray(array), format=source_format
+                        )
                         frame = frame.reformat(
-                            width=encoded_width, height=encoded_height,
-                            format=pixel_format)
+                            width=encoded_width,
+                            height=encoded_height,
+                            format=pixel_format,
+                        )
                         for packet in video_stream.encode(frame):
                             output.mux(packet)
                 for packet in video_stream.encode(None):
@@ -6282,12 +6584,15 @@ class _InProcessOutput:
                     required = math.ceil(total_frames * sample_rate / rate)
                     if waveform.shape[1] < required:
                         waveform = torch.nn.functional.pad(
-                            waveform, (0, required - waveform.shape[1]))
+                            waveform, (0, required - waveform.shape[1])
+                        )
                     else:
                         waveform = waveform[:, :required]
                     audio_frame = av.AudioFrame.from_ndarray(
-                        waveform.contiguous().numpy(), format="fltp",
-                        layout=audio_stream.layout.name)
+                        waveform.contiguous().numpy(),
+                        format="fltp",
+                        layout=audio_stream.layout.name,
+                    )
                     audio_frame.sample_rate = sample_rate
                     audio_frame.pts = 0
                     for packet in audio_stream.encode(audio_frame):
@@ -6300,9 +6605,875 @@ class _InProcessOutput:
             except FileNotFoundError:
                 pass
             raise
-        return PreviewVideo([
-            SavedResult(file, subfolder, folder_type),
-        ]).as_dict()
+        return PreviewVideo(
+            [
+                SavedResult(file, subfolder, folder_type),
+            ]
+        ).as_dict()
+
+    async def transcode_video(
+        self,
+        video: VideoRef,
+        audio: Optional[AudioRef] = None,
+        filename_prefix: str = "video/ComfyUI",
+        format: str = "auto",
+        codec: str = "auto",
+        encoder_options: Optional[dict[str, Any]] = None,
+        audio_mode: str = "source",
+        audio_codec: str = "auto",
+        audio_bitrate_kbps: Optional[int] = None,
+        save_output: bool = True,
+        save_metadata: bool = True,
+    ) -> dict:
+        """Run a bounded, host-owned FFmpeg transcode job.
+
+        The guest selects only closed media settings.  It never receives the
+        source or destination path, executable path, process handle, or an
+        arbitrary argument surface.
+        """
+        import asyncio
+        import io
+        import json
+        import shutil
+        import tempfile
+        import wave
+
+        import numpy as np
+        import torch
+        from ._ui import PreviewVideo, SavedResult
+
+        if not isinstance(video, Ref) or video.kind != "VIDEO":
+            raise TypeError("transcode_video requires a VIDEO ref")
+        if audio is not None and (not isinstance(audio, Ref) or audio.kind != "AUDIO"):
+            raise TypeError("transcode_video audio must be an AUDIO ref")
+        mode = str(audio_mode).lower()
+        if mode not in {"source", "replace", "remove"}:
+            raise ValueError("audio_mode must be source, replace, or remove")
+        if mode == "replace" and audio is None:
+            raise ValueError("replacement audio is required when audio_mode is replace")
+        if encoder_options is None:
+            options: dict[str, Any] = {}
+        elif type(encoder_options) is dict:
+            options = dict(encoder_options)
+        else:
+            raise TypeError("video encoder_options must be a dictionary")
+        allowed_options = {"pixel_format", "crf", "preset"}
+        unknown = set(options) - allowed_options
+        if unknown:
+            raise ValueError(
+                "unsupported video encoder option(s): "
+                + ", ".join(sorted(map(str, unknown)))
+            )
+
+        containers = {
+            "mp4": "mp4",
+            "webm": "webm",
+            "mkv": "mkv",
+            "matroska": "mkv",
+            "mov": "mov",
+            "avi": "avi",
+        }
+        codecs = {
+            "h264": ("libx264", {"mp4", "mov", "mkv", "avi"}, "yuv420p"),
+            "hevc": ("libx265", {"mp4", "mov", "mkv"}, "yuv420p10le"),
+            "vp9": ("libvpx-vp9", {"webm", "mkv"}, "yuv420p"),
+            "av1": ("libsvtav1", {"webm", "mkv", "mp4"}, "yuv420p"),
+        }
+        rt = current_runtime()
+        value = await rt.refs.resolve(video)
+        for method in ("get_stream_source", "get_dimensions", "get_duration"):
+            if not callable(getattr(value, method, None)):
+                raise TypeError(f"VIDEO value does not support {method}()")
+        width, height = map(int, value.get_dimensions())
+        if (
+            width <= 0
+            or height <= 0
+            or width > 16384
+            or height > 16384
+            or width * height > 16384 * 16384
+        ):
+            raise ValueError("video dimensions are outside the supported range")
+        duration = float(value.get_duration())
+        max_duration = float(
+            os.environ.get("COMFY_SECURE_VIDEO_TRANSCODE_MAX_SECONDS", str(6 * 60 * 60))
+        )
+        if not 0.0 <= duration <= max_duration:
+            raise ValueError(
+                f"video duration exceeds the {max_duration:g}-second limit"
+            )
+
+        container_name = str(format).lower()
+        if container_name == "auto":
+            source_format = str(getattr(value, "get_container_format")()).lower()
+            container_name = next(
+                (
+                    name
+                    for name in ("mp4", "webm", "mkv", "mov", "avi")
+                    if name in source_format.split(",")
+                ),
+                "mp4",
+            )
+        if container_name not in containers:
+            raise ValueError(f"unsupported video format {format!r}")
+        container_name = containers[container_name]
+
+        codec_name = str(codec).lower()
+        codec_name = {
+            "libx264": "h264",
+            "libx265": "hevc",
+            "libvpx-vp9": "vp9",
+            "libsvtav1": "av1",
+        }.get(codec_name, codec_name)
+        if codec_name == "auto":
+            codec_name = "vp9" if container_name == "webm" else "h264"
+        if codec_name != "copy" and codec_name not in codecs:
+            raise ValueError(f"unsupported video codec {codec!r}")
+        if codec_name == "copy":
+            if options:
+                raise ValueError("copy video codec does not accept encoder options")
+        else:
+            av_codec, compatible, default_pixel_format = codecs[codec_name]
+            if container_name not in compatible:
+                raise ValueError(
+                    f"video codec {codec_name!r} is not valid in {container_name!r}"
+                )
+            pixel_format = str(
+                options.get("pixel_format", default_pixel_format)
+            ).lower()
+            allowed_pixel_formats = {
+                "yuv420p",
+                "yuv422p",
+                "yuv444p",
+                "yuv420p10le",
+                "yuv422p10le",
+                "yuv444p10le",
+                "rgb24",
+            }
+            if pixel_format not in allowed_pixel_formats:
+                raise ValueError(f"unsupported pixel format {pixel_format!r}")
+            crf = int(options.get("crf", 23))
+            if crf != options.get("crf", 23) or not 0 <= crf <= 63:
+                raise ValueError("video crf must be an integer in [0, 63]")
+            preset = str(options.get("preset", ""))
+            allowed_presets = {
+                "",
+                "ultrafast",
+                "superfast",
+                "veryfast",
+                "faster",
+                "fast",
+                "medium",
+                "slow",
+                "slower",
+                "veryslow",
+            }
+            if preset not in allowed_presets:
+                raise ValueError("unknown video encoder preset")
+            if preset and codec_name not in {"h264", "hevc"}:
+                raise ValueError("video preset is supported only for H.264 and HEVC")
+
+        selected_audio_codec = str(audio_codec).lower()
+        selected_audio_codec = {
+            "libopus": "opus",
+            "libmp3lame": "mp3",
+        }.get(selected_audio_codec, selected_audio_codec)
+        if selected_audio_codec not in {"auto", "aac", "mp3", "opus"}:
+            raise ValueError(f"unsupported audio codec {audio_codec!r}")
+        if selected_audio_codec == "auto":
+            selected_audio_codec = {
+                "webm": "opus",
+                "avi": "mp3",
+            }.get(container_name, "aac")
+        audio_compatibility = {
+            "aac": {"mp4", "mov", "mkv"},
+            "mp3": {"mp4", "mov", "mkv", "avi"},
+            "opus": {"webm", "mkv"},
+        }
+        if (
+            mode == "replace"
+            and container_name not in audio_compatibility[selected_audio_codec]
+        ):
+            raise ValueError(
+                f"audio codec {selected_audio_codec!r} is not valid in "
+                f"{container_name!r}"
+            )
+        audio_bitrate = 192 if audio_bitrate_kbps is None else int(audio_bitrate_kbps)
+        if (
+            audio_bitrate != (192 if audio_bitrate_kbps is None else audio_bitrate_kbps)
+            or not 8 <= audio_bitrate <= 1024
+        ):
+            raise ValueError("audio_bitrate_kbps must be an integer in [8, 1024]")
+
+        configured_ffmpeg = os.environ.get("COMFY_SECURE_FFMPEG_PATH", "")
+        executable = configured_ffmpeg or shutil.which("ffmpeg")
+        if (
+            not executable
+            or not os.path.isfile(executable)
+            or not os.access(executable, os.X_OK)
+        ):
+            raise RuntimeError("the managed FFmpeg service is unavailable on this host")
+
+        target, file, subfolder, folder_type = self._media_target_size(
+            width, height, filename_prefix, container_name, bool(save_output)
+        )
+        metadata = self._media_metadata(bool(save_metadata))
+        source = value.get_stream_source()
+        max_bytes = int(
+            os.environ.get("COMFY_SECURE_VIDEO_SOURCE_MAX", str(1024 * 1024 * 1024))
+        )
+        timeout = float(os.environ.get("COMFY_SECURE_VIDEO_TRANSCODE_TIMEOUT", "900"))
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="comfy-secure-media-") as scratch:
+                if isinstance(source, (str, os.PathLike)):
+                    source_path = os.fspath(source)
+                    if os.path.getsize(source_path) > max_bytes:
+                        raise ValueError(
+                            f"encoded video exceeds the {max_bytes}-byte limit"
+                        )
+                else:
+                    if isinstance(source, io.BytesIO):
+                        source.seek(0)
+                        content = source.read(max_bytes + 1)
+                    elif hasattr(source, "read"):
+                        if hasattr(source, "seek"):
+                            source.seek(0)
+                        content = source.read(max_bytes + 1)
+                    else:
+                        raise TypeError("VIDEO stream source is not readable")
+                    if not isinstance(content, (bytes, bytearray, memoryview)):
+                        raise TypeError("VIDEO stream source did not return bytes")
+                    if len(content) > max_bytes:
+                        raise ValueError(
+                            f"encoded video exceeds the {max_bytes}-byte limit"
+                        )
+                    source_path = os.path.join(scratch, "source.video")
+                    with open(source_path, "wb") as stream:
+                        stream.write(content)
+
+                command = [
+                    executable,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-i",
+                    source_path,
+                ]
+                if mode == "replace":
+                    audio_value = await rt.refs.resolve(audio)
+                    if (
+                        not isinstance(audio_value, dict)
+                        or "waveform" not in audio_value
+                        or "sample_rate" not in audio_value
+                    ):
+                        raise TypeError(
+                            "transcode_video audio must contain waveform and sample_rate"
+                        )
+                    waveform = audio_value["waveform"]
+                    sample_rate = int(audio_value["sample_rate"])
+                    if (
+                        not isinstance(waveform, torch.Tensor)
+                        or waveform.ndim != 3
+                        or len(waveform) == 0
+                    ):
+                        raise TypeError(
+                            "audio waveform must have shape [batch, channels, samples]"
+                        )
+                    if not 8000 <= sample_rate <= 192000:
+                        raise ValueError("audio sample_rate must be in [8000, 192000]")
+                    samples = waveform[0].detach().cpu().float().clamp(-1, 1)
+                    if not 1 <= samples.shape[0] <= 8:
+                        raise ValueError("audio must contain between 1 and 8 channels")
+                    pcm = (
+                        samples.movedim(0, 1)
+                        .mul(32767)
+                        .round()
+                        .to(torch.int16)
+                        .contiguous()
+                        .numpy()
+                    )
+                    audio_path = os.path.join(scratch, "replacement.wav")
+                    with wave.open(audio_path, "wb") as output:
+                        output.setnchannels(int(pcm.shape[1]))
+                        output.setsampwidth(2)
+                        output.setframerate(sample_rate)
+                        output.writeframes(np.ascontiguousarray(pcm).tobytes())
+                    command.extend(["-i", audio_path])
+
+                start_time, trim_duration = (
+                    value.get_active_trim_window()
+                    if callable(getattr(value, "get_active_trim_window", None))
+                    else (0.0, 0.0)
+                )
+                if float(start_time) > 0:
+                    command.extend(["-ss", f"{float(start_time):.9f}"])
+                if float(trim_duration) > 0:
+                    command.extend(["-t", f"{float(trim_duration):.9f}"])
+                command.extend(["-map", "0:v:0"])
+                if mode == "source":
+                    command.extend(["-map", "0:a:0?"])
+                elif mode == "replace":
+                    command.extend(["-map", "1:a:0"])
+
+                if codec_name == "copy":
+                    command.extend(["-c:v", "copy"])
+                else:
+                    command.extend(
+                        [
+                            "-c:v",
+                            av_codec,
+                            "-pix_fmt",
+                            pixel_format,
+                            "-crf",
+                            str(crf),
+                        ]
+                    )
+                    if preset:
+                        command.extend(["-preset", preset])
+                if mode == "source":
+                    command.extend(["-c:a", "copy"])
+                elif mode == "replace":
+                    command.extend(
+                        [
+                            "-c:a",
+                            {
+                                "opus": "libopus",
+                                "mp3": "libmp3lame",
+                            }.get(selected_audio_codec, selected_audio_codec),
+                            "-b:a",
+                            f"{audio_bitrate}k",
+                            "-shortest",
+                        ]
+                    )
+                else:
+                    command.append("-an")
+                if metadata:
+                    command.extend(
+                        [
+                            "-metadata",
+                            "comment="
+                            + json.dumps(metadata, ensure_ascii=False, default=str),
+                        ]
+                    )
+                if container_name in {"mp4", "mov"}:
+                    command.extend(["-movflags", "use_metadata_tags+faststart"])
+                command.append(target)
+
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    _, stderr = await asyncio.wait_for(
+                        process.communicate(), timeout=timeout
+                    )
+                except BaseException:
+                    if process.returncode is None:
+                        process.terminate()
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=5)
+                        except asyncio.TimeoutError:
+                            process.kill()
+                            await process.wait()
+                    raise
+                if process.returncode:
+                    detail = stderr.decode("utf-8", "replace")[-16384:]
+                    raise RuntimeError(
+                        f"managed FFmpeg transcode failed ({process.returncode}): "
+                        f"{detail.strip()}"
+                    )
+        except BaseException:
+            try:
+                os.unlink(target)
+            except FileNotFoundError:
+                pass
+            raise
+        return PreviewVideo(
+            [
+                SavedResult(file, subfolder, folder_type),
+            ]
+        ).as_dict()
+
+    async def compose_video(
+        self,
+        background: VideoRef,
+        overlay: VideoRef,
+        mask: VideoRef,
+        *,
+        opacity: float = 1.0,
+        position: str = "right_bottom",
+        margin_x: int = 0,
+        margin_y: int = 0,
+        size_ratio: float = 0.25,
+        background_volume: float = 0.0,
+        overlay_volume: float = 1.0,
+        background_speed: float = 1.0,
+        overlay_speed: float = 1.0,
+        fps: Optional[float] = None,
+        subtitles: Optional[list[dict[str, Any]]] = None,
+        font_asset: Optional[str] = None,
+        font_size: int = 48,
+        font_color: str = "white",
+        subtitle_position: str = "bottom_center",
+        subtitle_x: int = 0,
+        subtitle_y: int = 0,
+        subtitle_max_width: int = 0,
+        subtitle_background_color: str = "black",
+        subtitle_background_opacity: float = 0.7,
+        filename_prefix: str = "overlay",
+        save_output: bool = True,
+        save_metadata: bool = True,
+    ) -> dict:
+        """Compose three bounded VIDEO inputs through a closed FFmpeg recipe."""
+        import asyncio
+        import importlib.util
+        import io
+        import json
+        import math
+        import re
+        import shutil
+        import sys
+        import tempfile
+
+        import av
+        from PIL import Image, ImageColor, ImageDraw, ImageFont
+        from ._ui import PreviewVideo, SavedResult
+
+        refs = (background, overlay, mask)
+        if any(not isinstance(ref, Ref) or ref.kind != "VIDEO" for ref in refs):
+            raise TypeError(
+                "compose_video requires background, overlay, and mask VIDEO refs"
+            )
+
+        def bounded_number(name: str, value: Any, low: float, high: float) -> float:
+            result = float(value)
+            if not math.isfinite(result) or not low <= result <= high:
+                raise ValueError(f"{name} must be in [{low:g}, {high:g}]")
+            return result
+
+        def bounded_integer(name: str, value: Any, low: int, high: int) -> int:
+            result = int(value)
+            if result != value or not low <= result <= high:
+                raise ValueError(f"{name} must be an integer in [{low}, {high}]")
+            return result
+
+        opacity = bounded_number("opacity", opacity, 0, 1)
+        size_ratio = bounded_number("size_ratio", size_ratio, 0.1, 1)
+        background_volume = bounded_number("background_volume", background_volume, 0, 2)
+        overlay_volume = bounded_number("overlay_volume", overlay_volume, 0, 2)
+        background_speed = bounded_number("background_speed", background_speed, 0.25, 4)
+        overlay_speed = bounded_number("overlay_speed", overlay_speed, 0.25, 4)
+        margin_x = bounded_integer("margin_x", margin_x, 0, 500)
+        margin_y = bounded_integer("margin_y", margin_y, 0, 500)
+        font_size = bounded_integer("font_size", font_size, 12, 200)
+        subtitle_x = bounded_integer("subtitle_x", subtitle_x, -1000, 3000)
+        subtitle_y = bounded_integer("subtitle_y", subtitle_y, -1000, 3000)
+        subtitle_max_width = bounded_integer(
+            "subtitle_max_width", subtitle_max_width, 0, 4000
+        )
+        subtitle_background_opacity = bounded_number(
+            "subtitle_background_opacity", subtitle_background_opacity, 0, 1
+        )
+        if fps is not None:
+            fps = bounded_number("fps", fps, 1, 120)
+
+        positions = {
+            "right_bottom": (
+                f"main_w-overlay_w-{margin_x}",
+                f"main_h-overlay_h-{margin_y}",
+            ),
+            "right_top": (f"main_w-overlay_w-{margin_x}", str(margin_y)),
+            "left_bottom": (str(margin_x), f"main_h-overlay_h-{margin_y}"),
+            "left_top": (str(margin_x), str(margin_y)),
+            "center": ("(main_w-overlay_w)/2", "(main_h-overlay_h)/2"),
+        }
+        if position not in positions:
+            raise ValueError(f"unsupported overlay position {position!r}")
+        subtitle_positions = {
+            "bottom_center": ("(w-text_w)/2", "h-text_h-40"),
+            "top_center": ("(w-text_w)/2", "40"),
+            "bottom_left": ("40", "h-text_h-40"),
+            "bottom_right": ("w-text_w-40", "h-text_h-40"),
+            "center": ("(w-text_w)/2", "(h-text_h)/2"),
+            "custom": (str(subtitle_x), str(subtitle_y)),
+        }
+        if subtitle_position not in subtitle_positions:
+            raise ValueError(f"unsupported subtitle position {subtitle_position!r}")
+
+        color_pattern = re.compile(r"(?:#[0-9a-fA-F]{6}|[A-Za-z]{1,32})\Z")
+        for name, value in (
+            ("font_color", font_color),
+            ("subtitle_background_color", subtitle_background_color),
+        ):
+            if not isinstance(value, str) or not color_pattern.fullmatch(value):
+                raise ValueError(f"{name} must be a named color or #RRGGBB")
+
+        subtitle_items: list[tuple[str, float, float]] = []
+        if subtitles is not None:
+            if not isinstance(subtitles, list) or len(subtitles) > 1000:
+                raise ValueError("subtitles must contain at most 1000 items")
+            for item in subtitles:
+                if not isinstance(item, dict) or set(item) != {"value", "start", "end"}:
+                    raise ValueError(
+                        "each subtitle must contain only value, start, and end"
+                    )
+                text = str(item["value"])
+                if len(text.encode("utf-8")) > 4096:
+                    raise ValueError("subtitle text is limited to 4096 UTF-8 bytes")
+                start = float(item["start"])
+                end = float(item["end"])
+                if (
+                    not all(map(math.isfinite, (start, end)))
+                    or start < 0
+                    or end <= start
+                ):
+                    raise ValueError("subtitle times must satisfy 0 <= start < end")
+                subtitle_items.append((text, start, end))
+
+        rt = current_runtime()
+        values = [await rt.refs.resolve(ref) for ref in refs]
+        dimensions: list[tuple[int, int]] = []
+        durations: list[float] = []
+        for value in values:
+            for method in ("get_stream_source", "get_dimensions", "get_duration"):
+                if not callable(getattr(value, method, None)):
+                    raise TypeError(f"VIDEO value does not support {method}()")
+            width, height = map(int, value.get_dimensions())
+            duration = float(value.get_duration())
+            if (
+                width <= 0
+                or height <= 0
+                or width > 16384
+                or height > 16384
+                or width * height > 16384 * 16384
+            ):
+                raise ValueError("video dimensions are outside the supported range")
+            if not math.isfinite(duration) or not 0 < duration <= 6 * 60 * 60:
+                raise ValueError("video duration is outside the supported range")
+            dimensions.append((width, height))
+            durations.append(duration)
+
+        background_duration = durations[0] / background_speed
+        overlay_duration = durations[1] / overlay_speed
+        target_duration = max(background_duration, overlay_duration)
+        if any(end > target_duration + 1e-6 for _, _, end in subtitle_items):
+            raise ValueError("subtitle end exceeds the composed video duration")
+        source_rates = [
+            float(value.get_frame_rate())
+            for value in values
+            if callable(getattr(value, "get_frame_rate", None))
+        ]
+        output_rate = float(fps) if fps is not None else max(source_rates or [30.0])
+        if target_duration * output_rate > 1_000_000:
+            raise ValueError("composed video exceeds the 1,000,000-frame limit")
+
+        background_width, background_height = dimensions[0]
+        overlay_width, overlay_height = dimensions[1]
+        target_height = max(2, int(round(background_height * size_ratio / 2)) * 2)
+        target_width = max(
+            2, int(round(target_height * overlay_width / overlay_height / 2)) * 2
+        )
+
+        font_path = None
+        if font_asset is not None:
+            logical = str(font_asset).replace("\\", "/")
+            if (
+                logical.startswith("/")
+                or "\x00" in logical
+                or any(part in {"", ".", ".."} for part in logical.split("/"))
+                or not logical.lower().endswith((".ttf", ".otf"))
+            ):
+                raise ValueError("font_asset must be a confined .ttf or .otf pack path")
+            module = sys.modules.get(self._node_module)
+            module_file = getattr(module, "__file__", None)
+            if module_file is None and self._node_module:
+                spec = importlib.util.find_spec(self._node_module)
+                module_file = None if spec is None else spec.origin
+            if not module_file:
+                raise ValueError("the calling pack root is unavailable for font_asset")
+            pack_root = os.path.realpath(os.path.dirname(module_file))
+            font_path = os.path.realpath(os.path.join(pack_root, *logical.split("/")))
+            if os.path.commonpath(
+                (pack_root, font_path)
+            ) != pack_root or not os.path.isfile(font_path):
+                raise ValueError("font_asset does not name a bundled pack font")
+            if os.path.getsize(font_path) > 16 * 1024 * 1024:
+                raise ValueError("font_asset exceeds the 16 MiB limit")
+
+        configured_ffmpeg = os.environ.get("COMFY_SECURE_FFMPEG_PATH", "")
+        executable = configured_ffmpeg or shutil.which("ffmpeg")
+        if (
+            not executable
+            or not os.path.isfile(executable)
+            or not os.access(executable, os.X_OK)
+        ):
+            raise RuntimeError("the managed FFmpeg service is unavailable on this host")
+        target, file, subfolder, folder_type = self._media_target_size(
+            background_width,
+            background_height,
+            filename_prefix,
+            "mp4",
+            bool(save_output),
+        )
+        metadata = self._media_metadata(bool(save_metadata))
+        max_bytes = int(
+            os.environ.get("COMFY_SECURE_VIDEO_SOURCE_MAX", str(1024 * 1024 * 1024))
+        )
+        timeout = float(os.environ.get("COMFY_SECURE_VIDEO_TRANSCODE_TIMEOUT", "900"))
+
+        def atempo_chain(speed: float) -> str:
+            factors: list[float] = []
+            while speed > 2:
+                factors.append(2)
+                speed /= 2
+            while speed < 0.5:
+                factors.append(0.5)
+                speed /= 0.5
+            factors.append(speed)
+            return ",".join(f"atempo={factor:.9g}" for factor in factors)
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="comfy-secure-compose-") as scratch:
+                paths: list[str] = []
+                for index, value in enumerate(values):
+                    source = value.get_stream_source()
+                    if isinstance(source, (str, os.PathLike)):
+                        path = os.fspath(source)
+                        if os.path.getsize(path) > max_bytes:
+                            raise ValueError(
+                                f"encoded video exceeds the {max_bytes}-byte limit"
+                            )
+                    else:
+                        if isinstance(source, io.BytesIO):
+                            source.seek(0)
+                        elif hasattr(source, "seek"):
+                            source.seek(0)
+                        if not hasattr(source, "read"):
+                            raise TypeError("VIDEO stream source is not readable")
+                        content = source.read(max_bytes + 1)
+                        if not isinstance(content, (bytes, bytearray, memoryview)):
+                            raise TypeError("VIDEO stream source did not return bytes")
+                        if len(content) > max_bytes:
+                            raise ValueError(
+                                f"encoded video exceeds the {max_bytes}-byte limit"
+                            )
+                        path = os.path.join(scratch, f"source-{index}.video")
+                        with open(path, "wb") as stream:
+                            stream.write(content)
+                    paths.append(path)
+
+                audio_present = []
+                for path in paths[:2]:
+                    with av.open(path) as container:
+                        audio_present.append(bool(container.streams.audio))
+
+                subtitle_overlays: list[tuple[str, int, int, float, float]] = []
+                if subtitle_items:
+                    try:
+                        font = (
+                            ImageFont.truetype(font_path, font_size)
+                            if font_path
+                            else ImageFont.load_default()
+                        )
+                        foreground = ImageColor.getrgb(font_color)
+                        background_color = ImageColor.getrgb(
+                            subtitle_background_color)
+                    except (OSError, ValueError) as error:
+                        raise ValueError(
+                            "subtitle font or color is not readable") from error
+                    measure = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+                    max_width = subtitle_max_width or int(background_width * 0.8)
+
+                    def wrap_text(text: str) -> str:
+                        lines: list[str] = []
+                        for raw_line in text.splitlines() or [""]:
+                            current = ""
+                            for character in raw_line:
+                                candidate = current + character
+                                if (current and measure.textlength(
+                                        candidate, font=font) > max_width):
+                                    lines.append(current)
+                                    current = character
+                                else:
+                                    current = candidate
+                            lines.append(current)
+                        return "\n".join(lines)
+
+                    for index, (text, start, end) in enumerate(subtitle_items):
+                        wrapped = wrap_text(text)
+                        bounds = measure.multiline_textbbox(
+                            (0, 0), wrapped, font=font, spacing=4)
+                        text_width = max(1, bounds[2] - bounds[0])
+                        text_height = max(1, bounds[3] - bounds[1])
+                        padding = max(4, font_size // 5)
+                        image_width = text_width + 2 * padding
+                        image_height = text_height + 2 * padding
+                        if image_width * image_height > 16_777_216:
+                            raise ValueError(
+                                "rendered subtitle exceeds the 16-megapixel limit")
+                        card = Image.new(
+                            "RGBA", (image_width, image_height),
+                            (*background_color, round(
+                                subtitle_background_opacity * 255)))
+                        draw = ImageDraw.Draw(card)
+                        draw.multiline_text(
+                            (padding - bounds[0], padding - bounds[1]),
+                            wrapped, font=font, fill=(*foreground, 255), spacing=4)
+                        image_path = os.path.join(scratch, f"subtitle-{index}.png")
+                        card.save(image_path, format="PNG")
+                        if subtitle_position == "custom":
+                            x, y = subtitle_x, subtitle_y
+                        elif subtitle_position == "bottom_center":
+                            x = (background_width - image_width) // 2
+                            y = background_height - image_height - 40
+                        elif subtitle_position == "top_center":
+                            x = (background_width - image_width) // 2
+                            y = 40
+                        elif subtitle_position == "bottom_left":
+                            x, y = 40, background_height - image_height - 40
+                        elif subtitle_position == "bottom_right":
+                            x = background_width - image_width - 40
+                            y = background_height - image_height - 40
+                        else:
+                            x = (background_width - image_width) // 2
+                            y = (background_height - image_height) // 2
+                        subtitle_overlays.append((image_path, x, y, start, end))
+
+                command = [executable, "-hide_banner", "-loglevel", "error", "-y"]
+                if background_duration + 1e-6 < target_duration:
+                    command.extend(["-stream_loop", "-1"])
+                command.extend(["-i", paths[0], "-i", paths[1], "-i", paths[2]])
+                for image_path, _, _, _, _ in subtitle_overlays:
+                    command.extend([
+                        "-loop", "1", "-framerate", f"{output_rate:.9g}",
+                        "-i", image_path,
+                    ])
+
+                filters = [
+                    f"[0:v]setpts=(PTS-STARTPTS)/{background_speed:.9g},"
+                    f"trim=duration={target_duration:.9f},setpts=PTS-STARTPTS[bg]",
+                    f"[1:v]setpts=(PTS-STARTPTS)/{overlay_speed:.9g},"
+                    f"scale={target_width}:{target_height},"
+                    f"tpad=stop_mode=clone:stop_duration={target_duration:.9f},"
+                    f"trim=duration={target_duration:.9f},setpts=PTS-STARTPTS[ov]",
+                    f"[2:v]setpts=(PTS-STARTPTS)/{overlay_speed:.9g},format=gray,"
+                    f"scale={target_width}:{target_height},"
+                    f"tpad=stop_mode=clone:stop_duration={target_duration:.9f},"
+                    f"trim=duration={target_duration:.9f},lut=y='val*{opacity:.9g}'[alpha]",
+                    "[ov][alpha]alphamerge[masked]",
+                ]
+                overlay_x, overlay_y = positions[position]
+                filters.append(
+                    f"[bg][masked]overlay=x={overlay_x}:y={overlay_y}:"
+                    "shortest=1:format=auto[v0]"
+                )
+                video_label = "v0"
+
+                for index, (_, x, y, start, end) in enumerate(subtitle_overlays):
+                    next_label = f"subtitle_video_{index}"
+                    filters.append(
+                        f"[{video_label}][{index + 3}:v]overlay=x={x}:y={y}:"
+                        f"enable='between(t,{start:.9f},{end:.9f})':"
+                        f"shortest=1[{next_label}]")
+                    video_label = next_label
+                if fps is not None:
+                    filters.append(f"[{video_label}]fps={fps:.9g}[video_out]")
+                    video_label = "video_out"
+
+                audio_labels: list[str] = []
+                for index, (present, volume, speed) in enumerate(
+                    (
+                        (audio_present[0], background_volume, background_speed),
+                        (audio_present[1], overlay_volume, overlay_speed),
+                    )
+                ):
+                    if present and volume > 0:
+                        label = f"audio_{index}"
+                        filters.append(
+                            f"[{index}:a]{atempo_chain(speed)},volume={volume:.9g},"
+                            f"apad,atrim=duration={target_duration:.9f}[{label}]"
+                        )
+                        audio_labels.append(label)
+                audio_label = None
+                if len(audio_labels) == 2:
+                    filters.append(
+                        f"[{audio_labels[0]}][{audio_labels[1]}]"
+                        "amix=inputs=2:duration=longest:normalize=0[audio_out]"
+                    )
+                    audio_label = "audio_out"
+                elif audio_labels:
+                    audio_label = audio_labels[0]
+
+                command.extend(
+                    ["-filter_complex", ";".join(filters), "-map", f"[{video_label}]"]
+                )
+                if audio_label:
+                    command.extend(
+                        ["-map", f"[{audio_label}]", "-c:a", "aac", "-b:a", "192k"]
+                    )
+                else:
+                    command.append("-an")
+                command.extend(
+                    [
+                        "-c:v",
+                        "libx264",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-crf",
+                        "18",
+                        "-preset",
+                        "medium",
+                        "-movflags",
+                        "use_metadata_tags+faststart",
+                    ]
+                )
+                if metadata:
+                    command.extend(
+                        [
+                            "-metadata",
+                            "comment="
+                            + json.dumps(metadata, ensure_ascii=False, default=str),
+                        ]
+                    )
+                command.append(target)
+
+                process = await asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    _, stderr = await asyncio.wait_for(
+                        process.communicate(), timeout=timeout
+                    )
+                except BaseException:
+                    if process.returncode is None:
+                        process.terminate()
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=5)
+                        except asyncio.TimeoutError:
+                            process.kill()
+                            await process.wait()
+                    raise
+                if process.returncode:
+                    detail = stderr.decode("utf-8", "replace")[-16384:]
+                    raise RuntimeError(
+                        f"managed FFmpeg composition failed ({process.returncode}): "
+                        f"{detail.strip()}"
+                    )
+        except BaseException:
+            try:
+                os.unlink(target)
+            except FileNotFoundError:
+                pass
+            raise
+        return PreviewVideo(
+            [
+                SavedResult(file, subfolder, folder_type),
+            ]
+        ).as_dict()
 
 
 class _InProcessGraph:
@@ -8720,15 +9891,16 @@ class InProcessCtxProvider:
             storage=_StubDomain("storage"),
             capture=_InProcessCapture(),
             ui=_InProcessUi(plan.prompt, plan.extra_pnginfo),
-            output=_InProcessOutput(plan.prompt, plan.extra_pnginfo),
+            output=_InProcessOutput(plan.prompt, plan.extra_pnginfo, plan.node_module),
             graph=_InProcessGraph(
-                plan.node_id, plan.prompt, plan.extra_pnginfo,
-                plan.dynamic_prompt),
+                plan.node_id, plan.prompt, plan.extra_pnginfo, plan.dynamic_prompt
+            ),
             execution=_InProcessExecution(plan.prompt_id),
             integrations=_InProcessIntegrations(),
             models=_InProcessModels(),
             profiling=InProcessProfiling(
-                f"in-process:{plan.node_module}", plan.node_id),
+                f"in-process:{plan.node_module}", plan.node_id
+            ),
             preview_override=InProcessPreviewOverride(plan.node_id),
             system=_InProcessSystem(),
             closures=_InProcessClosures(),

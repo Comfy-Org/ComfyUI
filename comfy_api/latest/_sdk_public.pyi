@@ -515,6 +515,10 @@ class AssetsDomain(Protocol):
     async def load_state_dict(
         self, ref: AssetRef, return_metadata: bool = ...
     ) -> Any: ...
+
+    async def load_image(self, ref: AssetRef) -> ImageRef: ...
+
+    async def load_video(self, ref: AssetRef) -> VideoRef: ...
     async def load_latent(self, ref: AssetRef) -> LatentRef: ...
 
 class OutputDomain(Protocol):
@@ -584,12 +588,59 @@ class OutputDomain(Protocol):
         audio: Optional[AudioRef] = ...,
         fps: float = ...,
         filename_prefix: str = ...,
-        format: str | dict[str, Any] = ...,
-        timeout_seconds: float = ...,
+        format: str = ...,
         codec: str = ...,
         encoder_options: Optional[dict[str, Any]] = ...,
         loop_count: int = ...,
         bit_depth: int = ...,
+        save_output: bool = ...,
+        save_metadata: bool = ...,
+        audio_codec: str = ...,
+        audio_bitrate_kbps: Optional[int] = ...,
+    ) -> dict: ...
+
+    async def transcode_video(
+        self,
+        video: VideoRef,
+        audio: Optional[AudioRef] = ...,
+        filename_prefix: str = ...,
+        format: str = ...,
+        codec: str = ...,
+        encoder_options: Optional[dict[str, Any]] = ...,
+        audio_mode: str = ...,
+        audio_codec: str = ...,
+        audio_bitrate_kbps: Optional[int] = ...,
+        save_output: bool = ...,
+        save_metadata: bool = ...,
+    ) -> dict: ...
+
+    async def compose_video(
+        self,
+        background: VideoRef,
+        overlay: VideoRef,
+        mask: VideoRef,
+        *,
+        opacity: float = ...,
+        position: str = ...,
+        margin_x: int = ...,
+        margin_y: int = ...,
+        size_ratio: float = ...,
+        background_volume: float = ...,
+        overlay_volume: float = ...,
+        background_speed: float = ...,
+        overlay_speed: float = ...,
+        fps: Optional[float] = ...,
+        subtitles: Optional[list[dict[str, Any]]] = ...,
+        font_asset: Optional[str] = ...,
+        font_size: int = ...,
+        font_color: str = ...,
+        subtitle_position: str = ...,
+        subtitle_x: int = ...,
+        subtitle_y: int = ...,
+        subtitle_max_width: int = ...,
+        subtitle_background_color: str = ...,
+        subtitle_background_opacity: float = ...,
+        filename_prefix: str = ...,
         save_output: bool = ...,
         save_metadata: bool = ...,
     ) -> dict: ...
