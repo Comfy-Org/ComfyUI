@@ -51,7 +51,7 @@ class MultiGPUCFGSplitNode(io.ComfyNode):
 def _force_supported_compute_dtype(patcher: ModelPatcher, device: torch.device):
     """Cast compute dtype to one the device supports; no-op if already supported."""
     weight_dtype = patcher.model_dtype()
-    cast_dtype = comfy.model_management.unet_manual_cast(weight_dtype, device)
+    cast_dtype = comfy.model_management.unet_manual_cast(weight_dtype, device, patcher.model.model_config.supported_inference_dtypes)
     if cast_dtype is None:
         return
     logging.info(f"Select Model Device: using {cast_dtype} compute dtype on {device} (model weight dtype was {weight_dtype}).")
