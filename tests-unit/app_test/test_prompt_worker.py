@@ -1,5 +1,6 @@
 import pytest
 import torch
+from aiohttp import web
 
 from comfy.cli_args import args
 
@@ -102,6 +103,51 @@ def test_prompt_worker_preserves_execute_error_when_resume_raises(monkeypatch) -
         main.prompt_worker(Queue(), Server(), asset_manager)
 
     assert asset_manager.paused is False
+
+
+def test_free_endpoint_stores_explicit_false_unload_models() -> None:
+    """Regression test for issue #16620: an explicit "unload_models": false
+    in a POST /free body must not be dropped by server.py's flag storage, or
+    main.py's flags.get("unload_models", free_memory) fallback would still
+    trigger an unload whenever free_memory is set.
+    """
+    flags = main.server._free_endpoint_flags({"free_memory": True, "unload_models": False})
+
+    free_memory = flags.get("free_memory", False)
+    assert flags.get("unload_models", free_memory) is False
+
+
+@pytest.mark.asyncio
+async def test_post_free_stores_explicit_false_unload_models(aiohttp_client) -> None:
+    """Drives POST /free over HTTP against a route that mirrors server.py's
+    real handler wiring, so a regression in the handler itself (not just in
+    _free_endpoint_flags) would also be caught."""
+
+    class FakeQueue:
+        def __init__(self) -> None:
+            self.flags = {}
+
+        def set_flag(self, name, value) -> None:
+            self.flags[name] = value
+
+    queue = FakeQueue()
+    routes = web.RouteTableDef()
+
+    @routes.post("/free")
+    async def post_free(request):
+        json_data = await request.json()
+        for name, value in main.server._free_endpoint_flags(json_data).items():
+            queue.set_flag(name, value)
+        return web.Response(status=200)
+
+    app = web.Application()
+    app.add_routes(routes)
+    client = await aiohttp_client(app)
+
+    resp = await client.post("/free", json={"free_memory": True, "unload_models": False})
+
+    assert resp.status == 200
+    assert queue.flags["unload_models"] is False
 
 
 def test_prompt_worker_resumes_scan_when_later_iteration_raises_before_gc(monkeypatch) -> None:
