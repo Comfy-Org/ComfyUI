@@ -148,11 +148,11 @@ def get_rope_index_fix_point(
                     llm_grid_t = t.item()
                     llm_grid_h = h.item() // spatial_merge_size
                     llm_grid_w = w.item() // spatial_merge_size
-                    text_len = ed - st
-                    text_len -= skip_vision_start_token[image_index - 1]
-                    text_len = max(0, text_len)
+                    seg_len = ed - st
+                    seg_len -= skip_vision_start_token[image_index - 1]
+                    seg_len = max(0, seg_len)
                     st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                    llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+                    llm_pos_ids_list.append(torch.arange(seg_len).view(1, -1).expand(3, -1) + st_idx)
 
                     t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
                     h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
@@ -164,13 +164,13 @@ def get_rope_index_fix_point(
                         llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + fp + st_idx)
                         fp = 0
                     else:
-                        llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
+                        llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + seg_len + st_idx)
                     st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
                 if st < len(input_tokens):
                     st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                    text_len = len(input_tokens) - st
-                    llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+                    seg_len = len(input_tokens) - st
+                    llm_pos_ids_list.append(torch.arange(seg_len).view(1, -1).expand(3, -1) + st_idx)
 
             llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
             position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(position_ids.device)
