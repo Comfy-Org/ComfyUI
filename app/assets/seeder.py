@@ -766,6 +766,10 @@ class _AssetSeeder:
                     "enriched": total_enriched,
                     "skipped": skipped_existing,
                     "elapsed": round(elapsed, 3),
+                    # None when the scan covered more than one root.
+                    "root": root,
+                    "missing_marked_count": scan_state.missing_marked,
+                    "recovered_count": scan_state.recovered,
                 },
             )
 

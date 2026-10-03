@@ -183,6 +183,44 @@ def test_output_listing_rescan_recovers_a_returning_output_drive(drive, session,
     assert _missing_count(session) == 0
 
 
+def _completed_event(roots) -> dict:
+    """Run a whole fast scan and return its assets.seed.completed payload."""
+    seeder = seeder_module._AssetSeeder()
+    seeder._scan_state = seeder_module._ScanState()
+    seeder._state = seeder_module.State.RUNNING
+    seeder._roots = roots
+    seeder._phase = seeder_module.ScanPhase.FAST
+    completed = []
+    seeder.set_event_sink(
+        lambda event_type, data: completed.append(data)
+        if event_type == "assets.seed.completed"
+        else None
+    )
+    seeder._run_scan()
+    [event] = completed
+    return event
+
+
+@pytest.mark.parametrize("roots", [("output",), ROOTS])
+def test_seed_completed_reports_an_offline_drive_and_its_return(drive, session, roots):
+    files = [path for path in _populate(drive) if path.parent.name in roots]
+    _scan(roots)
+
+    parked = _take_offline(drive, "absent")
+    offline = _completed_event(roots)
+    _bring_back(drive, parked)
+    back = _completed_event(roots)
+
+    expected_root = roots[0] if len(roots) == 1 else None
+    assert (offline["root"], offline["missing_marked_count"], offline["recovered_count"]) == (
+        expected_root, len(files), 0,
+    )
+    assert (back["root"], back["missing_marked_count"], back["recovered_count"]) == (
+        expected_root, 0, len(files),
+    )
+    assert (back["created"], back["enriched"]) == (0, 0)
+
+
 def test_an_io_error_leaves_rows_live(drive, session, monkeypatch):
     files = _populate(drive)
     _scan()
