@@ -56,6 +56,16 @@ def test_binary_messages_are_not_touched(prompt_server):
     assert sent_data(prompt_server) == ["some text"]
 
 
+def test_events_without_a_prompt_id_are_not_touched(prompt_server):
+    prompt_server.workflow_metadata = {"workflow_id": "abc"}
+    prompt_server.send_sync("assets.seed.paused", {"reason": "prompt_running"})
+    prompt_server.send_sync("logs", {"entries": [], "size": 0})
+    assert sent_data(prompt_server) == [
+        {"reason": "prompt_running"},
+        {"entries": [], "size": 0},
+    ]
+
+
 def test_metadata_is_captured_when_the_message_is_queued(prompt_server):
     prompt_server.workflow_metadata = {"workflow_id": "first"}
     prompt_server.send_sync("execution_success", {"prompt_id": "p1"})

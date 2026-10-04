@@ -1443,7 +1443,7 @@ class PromptServer():
             await send_socket_catch_exception(self.sockets[sid].send_json, message)
 
     def send_sync(self, event, data, sid=None):
-        if self.workflow_metadata and event != "status" and isinstance(data, dict):
+        if self.workflow_metadata and isinstance(data, dict) and "prompt_id" in data:
             data = {**self.workflow_metadata, **data}
 
         self.loop.call_soon_threadsafe(
