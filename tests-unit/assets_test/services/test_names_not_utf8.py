@@ -16,7 +16,7 @@ from sqlalchemy.pool import StaticPool
 from app.assets import scanner, seeder as seeder_module
 from app.assets.database.models import AssetContent, Base
 from app.assets.scanner import insert_asset_specs
-from app.assets.scanner_admission import _WATCH_LIST
+from app.assets.scanner_admission import _WATCH_LIST, _WatchEntry
 
 N_FILES = 1000
 BAD_NAME = b"bad_\xff\xfe.png"
@@ -68,6 +68,7 @@ def _scan(roots: tuple[str, ...], phase=seeder_module.ScanPhase.FAST, seeder=Non
     seeder = seeder or seeder_module._AssetSeeder()
     assert seeder.start(roots=roots, phase=phase)
     assert seeder.wait(timeout=60)
+    assert seeder.get_status().errors == []
 
 
 def _write_files(directory: Path, prefix: str, count: int) -> list[Path]:
@@ -126,6 +127,20 @@ def test_full_scan_reports_names_rejected_during_enrichment(roots, monkeypatch, 
     with caplog.at_level(logging.INFO):
         _scan(("input",), phase=seeder_module.ScanPhase.FULL, seeder=seeder)
 
+    assert [m for m in _messages(caplog, logging.INFO) if m.startswith(EVENT)] == [f"{EVENT} count=1"]
+
+
+def test_full_scan_reports_a_name_settling_off_the_watch_list(roots, session, caplog):
+    """The enrich phase's watch-list tick seeds a file that was still being written when
+    the fast phase admitted paths."""
+    bad = _write_bad(roots["input"])
+    _WATCH_LIST.append(_WatchEntry(str(bad), os.stat(bad)))
+
+    with caplog.at_level(logging.INFO):
+        _scan(("input",), phase=seeder_module.ScanPhase.ENRICH)
+
+    assert not _WATCH_LIST
+    assert _live_paths(session) == set()
     assert [m for m in _messages(caplog, logging.INFO) if m.startswith(EVENT)] == [f"{EVENT} count=1"]
 
 
