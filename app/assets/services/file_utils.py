@@ -93,9 +93,9 @@ def _list_visible_entries(
 def _is_dangling(entry: os.DirEntry) -> bool:
     """A symlink whose target is gone. One whose target can't be stat'ed for another
     reason (permissions, a loop) stays listed, so the scan's own stat reports it."""
-    if not entry.is_symlink():
-        return False
     try:
+        if not entry.is_symlink():
+            return False
         os.stat(entry.path)
     except (FileNotFoundError, NotADirectoryError):
         return True

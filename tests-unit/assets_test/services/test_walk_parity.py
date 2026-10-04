@@ -90,8 +90,10 @@ def test_symlinks(temp_dir: Path):
     (base / "broken").symlink_to(base / "nowhere")
     (base / "broken_dir").symlink_to(temp_dir / "gone_dir")
     (base / "file_link.png").symlink_to(base / "a.png")
-    # base, sub and outside: the second path to sub, the loop and the broken link list nothing
-    assert _assert_parity(base).dirs_listed == 3
+    _write(base / "aaa" / "x.png")
+    (base / "aaa" / "link_to_sub").symlink_to(base / "sub")  # which path reaches sub first must not change
+    # base, aaa, sub and outside: the other paths to sub, the loop and the broken link list nothing
+    assert _assert_parity(base).dirs_listed == 4
 
 
 @needs_symlinks
