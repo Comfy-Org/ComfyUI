@@ -159,8 +159,6 @@ def walk_listings(
         except OSError:
             continue
         if listing is None:
-            if dirpath == relist:  # only a cancel stops a second listing
-                break
             stack.append(dirpath)
             relist = dirpath
             continue

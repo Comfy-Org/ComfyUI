@@ -258,7 +258,11 @@ def _list_output_files_on_disk(output_dir):
     walked = []
     seen_dirs = set()
     for dirpath, dirnames, filenames in os.walk(output_root, followlinks=True):
-        st = os.stat(dirpath)
+        try:
+            st = os.stat(dirpath)
+        except OSError:  # gone or unreadable since its parent was listed
+            dirnames.clear()
+            continue
         if (st.st_dev, st.st_ino) in seen_dirs:  # a symlink loop or a second path to a folder
             dirnames.clear()
             continue

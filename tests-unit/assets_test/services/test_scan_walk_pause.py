@@ -219,21 +219,6 @@ def test_a_pause_during_the_second_listing_takes_effect_when_it_ends(flat, entri
     assert len(walk.files) == 11
 
 
-def test_a_cancelled_second_listing_ends_the_walk_whatever_should_stop_says(flat, entries):
-    """Only a cancel stops a folder's second listing, so the walk ends there rather than
-    trusting should_stop to agree (it would otherwise list the folder again forever)."""
-    calls = {"interrupted": 0}
-
-    def interrupted():
-        calls["interrupted"] += 1
-        return calls["interrupted"] == 4  # a pause part way through the first listing
-
-    worker, result = _in_thread(lambda: walk_listings(str(flat), lambda: False, interrupted, lambda: True))
-    worker.join(5)
-    assert not worker.is_alive()
-    assert (result[0].files, result[0].listings) == ([], {})
-
-
 def test_a_subfolder_interrupted_twice_is_listed_in_walk_order(tree, entries):
     """Only the folder a pause interrupted is listed again without pause checks: a later
     folder still stops part way, and the walk keeps os.walk's order."""

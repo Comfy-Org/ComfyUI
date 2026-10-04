@@ -923,7 +923,7 @@ class _AssetSeeder:
                 marked_before = scan_state.missing_marked
                 existing_paths.update(sync_root_safely(r, scan_state, should_stop))
                 self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
-            else:  # only the output-only rescan, so this holds the one root's rows
+            else:
                 live_references = live_references_safely(r)
                 existing_paths.update(live_references)
         logging.debug(
@@ -950,12 +950,11 @@ class _AssetSeeder:
                 continue
             vanished, unlisted = unlisted_references(live_references, walk.listings, scan_state)
             marked_before = scan_state.missing_marked
-            mark_unlisted_references_missing_safely(r, vanished, scan_state, should_stop)
-            self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
+            mark_unlisted_references_missing_safely("output", vanished, scan_state, should_stop)
+            self._emit_marked_missing("output", scan_state.missing_marked - marked_before)
             logging.debug(
-                "Fast scan: %s listing: %d dirs listed, %d rows retired, "
+                "Fast scan: output listing: %d dirs listed, %d rows retired, "
                 "%d rows skipped (not listed, still on disk)",
-                r,
                 walk.dirs_listed,
                 len(vanished),
                 unlisted,
