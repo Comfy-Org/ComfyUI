@@ -923,7 +923,7 @@ class _AssetSeeder:
                 marked_before = scan_state.missing_marked
                 existing_paths.update(sync_root_safely(r, scan_state, should_stop))
                 self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
-            else:
+            else:  # only the output-only rescan, so this holds the one root's rows
                 live_references = live_references_safely(r)
                 existing_paths.update(live_references)
         logging.debug(

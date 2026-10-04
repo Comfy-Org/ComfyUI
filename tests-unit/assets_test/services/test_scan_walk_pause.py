@@ -206,6 +206,34 @@ def test_a_pause_during_the_second_listing_waits_for_it_but_a_cancel_does_not(fl
     assert (walk.files, walk.listings) == ([], {})
 
 
+def test_a_pause_during_the_second_listing_takes_effect_when_it_ends(flat, entries):
+    (flat / "sub").mkdir()
+    (flat / "sub" / "s.png").write_bytes(b"x")
+    pause = _Pause()
+    pause.release.set()
+    pause.probe = lambda: entries.entries
+    entries.on_entry = lambda n: n in (4, 4 + 2) and setattr(pause, "requested", True)
+    walk = pause.walk(flat)
+    # The second pause: as soon as the folder's 11 entries were listed, before "sub".
+    assert pause.parked_after == [4, 4 + 11]
+    assert len(walk.files) == 11
+
+
+def test_a_cancelled_second_listing_ends_the_walk_whatever_should_stop_says(flat, entries):
+    """Only a cancel stops a folder's second listing, so the walk ends there rather than
+    trusting should_stop to agree (it would otherwise list the folder again forever)."""
+    calls = {"interrupted": 0}
+
+    def interrupted():
+        calls["interrupted"] += 1
+        return calls["interrupted"] == 4  # a pause part way through the first listing
+
+    worker, result = _in_thread(lambda: walk_listings(str(flat), lambda: False, interrupted, lambda: True))
+    worker.join(5)
+    assert not worker.is_alive()
+    assert (result[0].files, result[0].listings) == ([], {})
+
+
 def test_a_subfolder_interrupted_twice_is_listed_in_walk_order(tree, entries):
     """Only the folder a pause interrupted is listed again without pause checks: a later
     folder still stops part way, and the walk keeps os.walk's order."""
@@ -216,7 +244,6 @@ def test_a_subfolder_interrupted_twice_is_listed_in_walk_order(tree, entries):
     entries.entries = 0
     pause = _Pause()
     pause.release.set()
-    # The root's FILES entries come first; then the first subfolder (6 files), etc.
     # The root's FILES entries; 3 of the 1st subfolder before the pause, then all 6 again;
     # then 3 into the 2nd subfolder.
     first, second = FILES + 3, FILES + 3 + 6 + 3
@@ -240,12 +267,16 @@ def test_a_folder_renamed_while_the_walk_is_paused_in_it_is_skipped(flat, entrie
     renamed = flat.parent / (flat.name + "-renamed-inner")
 
     worker, result = _in_thread(lambda: pause.walk(sub))
-    assert pause.blocked.wait(5)
-    os.rename(sub, renamed)  # would fail on Windows with the directory still open
-    pause.release.set()
-    worker.join(5)
-    assert result[0].files == [] and result[0].listings == {}
-    os.rename(renamed, sub)
+    try:
+        assert pause.blocked.wait(5)
+        os.rename(sub, renamed)  # would fail on Windows with the directory still open
+        pause.release.set()
+        worker.join(5)
+        assert result[0].files == [] and result[0].listings == {}
+    finally:
+        pause.release.set()
+        if renamed.exists():
+            os.rename(renamed, sub)
 
 
 # should_stop is called once before each directory.
@@ -464,6 +495,32 @@ def test_a_cancel_during_the_second_listing_after_a_pause_stops_it(scan, catalog
     assert result == [(0, 0, 0)]
     assert entries.entries == 3 + 3  # stopped on the cancel, not after the whole folder (3 + FILES)
     assert _rows(catalog) == 0
+
+
+def test_a_second_prompt_during_the_second_listing_lets_it_finish(scan, catalog, entries):
+    """The fast scan passes only a cancel check to a folder's second listing, so a folder
+    slower to list than the gap between prompts still gets listed."""
+    instance, events = scan
+    parked = threading.Event()
+
+    def sink(kind, _data):
+        events.append(kind)
+        if kind == "assets.seed.paused":
+            parked.set()
+
+    instance.set_event_sink(sink)
+    entries.on_entry = lambda n: n in (3, 3 + 2) and instance.pause()
+    worker, result = _in_thread(lambda: instance._run_fast_phase(("input", "output")))
+    assert parked.wait(5)
+    assert entries.entries == 3
+    parked.clear()
+    assert instance.resume()
+    assert parked.wait(5)
+    time.sleep(0.1)
+    assert entries.entries == 3 + FILES  # the second pause waited for the whole folder
+    assert instance.resume()
+    worker.join(5)
+    assert result[0][0] == FILES
 
 
 def _live_rows(engine) -> int:

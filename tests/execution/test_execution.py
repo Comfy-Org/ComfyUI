@@ -256,7 +256,13 @@ def _list_output_files_on_disk(output_dir):
     # A plain os.walk, independent of the scanner's own walker; hidden names are skipped,
     # as the scanner skips them.
     walked = []
-    for dirpath, dirnames, filenames in os.walk(output_root):
+    seen_dirs = set()
+    for dirpath, dirnames, filenames in os.walk(output_root, followlinks=True):
+        st = os.stat(dirpath)
+        if (st.st_dev, st.st_ino) in seen_dirs:  # a symlink loop or a second path to a folder
+            dirnames.clear()
+            continue
+        seen_dirs.add((st.st_dev, st.st_ino))
         dirnames[:] = [d for d in dirnames if not d.startswith(".")]
         walked.extend(os.path.join(dirpath, name) for name in filenames if not name.startswith("."))
     for file_path in walked:

@@ -504,9 +504,6 @@ def unlisted_references(
     return vanished, skipped
 
 
-    return False
-
-
 class ListingVerdict(enum.Enum):
     """What this rescan's directory listings say about a cataloged path."""
 
