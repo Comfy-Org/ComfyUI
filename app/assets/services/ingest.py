@@ -456,7 +456,7 @@ def upload_from_temp_path(
     user_metadata = user_metadata or {}
 
     try:
-        digest, verified_stat = _snapshot_hash_with_retry(temp_path)
+        digest, _ = _snapshot_hash_with_retry(temp_path)
     except UploadUnstableError:
         _remove_temp_path(temp_path)
         raise
