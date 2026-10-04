@@ -96,6 +96,7 @@ class _ScanProgress(Protocol):
     recovered: int
     dirs_listed: int
     files_statted: int
+    names_not_utf8: list[bytes]
 
     def mark_emitted(self, key: str) -> bool: ...
 
@@ -809,11 +810,32 @@ def _observed_paths(observed: dict[str, _SpecObservation | None]) -> list[str]:
     return [path for path, observation in observed.items() if observation is not None]
 
 
+def _drop_names_not_utf8(
+    specs: list[SeedAssetSpec], progress: _ScanProgress | None
+) -> list[SeedAssetSpec]:
+    """The specs whose path SQLite can store. On Linux a name that is not valid UTF-8
+    (unzipped from an old-codepage archive, copied off an old FAT or SMB share) reaches
+    Python surrogate-escaped, and binding it fails the whole statement it is part of."""
+    kept: list[SeedAssetSpec] = []
+    for spec in specs:
+        try:
+            spec["abs_path"].encode("utf-8")
+        except UnicodeEncodeError:
+            name = os.fsencode(spec["abs_path"])
+            logging.debug("Skipping asset whose name is not valid UTF-8: %r", name)
+            if progress is not None:
+                progress.names_not_utf8.append(name)
+            continue
+        kept.append(spec)
+    return kept
+
+
 def insert_asset_specs(
     specs: list[SeedAssetSpec],
     _tag_pool: set[str],
     progress: _ScanProgress | None = None,
 ) -> tuple[int, Exception | None]:
+    specs = _drop_names_not_utf8(specs, progress)
     if not specs:
         return 0, None
     observed = observe_asset_specs(specs, progress)

@@ -135,6 +135,8 @@ class _ScanState:
     # admission, seed, watch-list and enrich loops. Hashing's own stability stats are
     # not counted.
     files_statted: int = 0
+    # Paths left out of the catalog because SQLite cannot store their names.
+    names_not_utf8: list[bytes] = field(default_factory=list)
     # Time blocked at the pause gate.
     paused_s: float = 0.0
     cancel_stage: str | None = None
@@ -1045,6 +1047,16 @@ class _AssetSeeder:
 
         self._update_progress(scanned=len(specs), created=total_created)
         tick_watch_list(scan_state)
+        names = scan_state.names_not_utf8
+        # Not on the output rescan, which would repeat it after every prompt.
+        if names and not by_listing:
+            logging.warning(
+                "Skipped %d file(s) whose names are not valid UTF-8, which the asset "
+                "database cannot store; rename them to add them to the library: %s",
+                len(names),
+                ", ".join(repr(name) for name in names[:5]),
+            )
+            emit("scanner.name_not_utf8", count=len(names))
         logging.info(
             "Fast scan complete: %.3fs total (created=%d, skipped=%d, total_paths=%d)",
             time.perf_counter() - t_fast_start,
