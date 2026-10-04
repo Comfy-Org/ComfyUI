@@ -292,6 +292,7 @@ class PromptServer():
         self.routes = routes
         self.last_node_id = None
         self.client_id = None
+        self.workflow_metadata = {}
 
         self.on_prompt_handlers = []
 
@@ -1151,6 +1152,11 @@ class PromptServer():
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]
 
+                if isinstance(json_data.get("workflow_metadata"), dict):
+                    metadata = json_data["workflow_metadata"]
+                    if len(json.dumps(metadata)) <= 256:
+                        extra_data["workflow_metadata"] = metadata
+
                 if "comfy_usage_source" not in extra_data:
                     usage_source = request.headers.get("Comfy-Usage-Source")
                     if usage_source:
@@ -1424,6 +1430,9 @@ class PromptServer():
             await send_socket_catch_exception(self.sockets[sid].send_json, message)
 
     def send_sync(self, event, data, sid=None):
+        if self.workflow_metadata and event != "status" and isinstance(data, dict):
+            data = {**self.workflow_metadata, **data}
+
         self.loop.call_soon_threadsafe(
             self.messages.put_nowait, (event, data, sid))
 
