@@ -408,7 +408,11 @@ def content_ids_outside_prefixes(session: Session, prefixes: list[str]) -> list[
     return [content_id for content_id, path in rows if not is_owned(path)]
 
 
-def list_root(root: RootType, should_stop: ShouldStop = _never_stop) -> ListingWalk:
+def list_root(
+    root: RootType,
+    should_stop: ShouldStop = _never_stop,
+    interrupted: Callable[[], bool] | None = None,
+) -> ListingWalk:
     """Every file under ``root``, with the directory listings read on the way.
 
     Input and output are walked by walk_listings. Models come from
@@ -418,13 +422,13 @@ def list_root(root: RootType, should_stop: ShouldStop = _never_stop) -> ListingW
     that verify every row.
 
     Once ``should_stop`` returns True the walk is partial, so callers check it again
-    before using the result.
+    before using the result. ``interrupted`` is walk_listings'.
     """
     if root == "models":
         return ListingWalk(collect_models_files(), {}, 0)
     if root == "input":
-        return walk_listings(folder_paths.get_input_directory(), should_stop)
-    return walk_listings(folder_paths.get_output_directory(), should_stop)
+        return walk_listings(folder_paths.get_input_directory(), should_stop, interrupted)
+    return walk_listings(folder_paths.get_output_directory(), should_stop, interrupted)
 
 
 def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservation]]:

@@ -76,10 +76,11 @@ def _in_thread(fn):
 
 class _ScandirCounter:
     """Stands in for file_utils' os module, counting the directory entries scandir hands
-    out and calling ``on_entry(count)`` as each one is handed out."""
+    out (calling ``on_entry(count)`` as each one is), and how many directories are open."""
 
     def __init__(self) -> None:
         self.entries = 0
+        self.open = 0
         self.on_entry = None
 
     def __getattr__(self, name):
@@ -87,6 +88,7 @@ class _ScandirCounter:
 
     def scandir(self, path):
         counter, real = self, os.scandir(path)
+        counter.open += 1
 
         class _Entries:
             def __enter__(self):
@@ -94,6 +96,7 @@ class _ScandirCounter:
 
             def __exit__(self, *_exc):
                 real.close()
+                counter.open -= 1
 
             def __iter__(self):
                 return self
@@ -123,37 +126,68 @@ def flat(temp_dir) -> Path:
     return temp_dir
 
 
-# Gate calls: one before each directory, then one before each of its entries.
-def test_walk_parks_mid_folder_and_resumes_with_the_same_listing(flat, entries):
+class _Pause:
+    """The seeder's gate in miniature: ``interrupted`` is the non-blocking "pause or cancel
+    requested?", ``should_stop`` blocks while paused and returns True once cancelled."""
+
+    def __init__(self) -> None:
+        self.requested = False
+        self.cancelled = False
+        self.interrupted_calls = 0
+        self.blocked = threading.Event()
+        self.release = threading.Event()
+
+    def interrupted(self) -> bool:
+        self.interrupted_calls += 1
+        return self.requested or self.cancelled
+
+    def should_stop(self) -> bool:
+        if self.requested and not self.cancelled:
+            self.blocked.set()
+            assert self.release.wait(5)
+            self.requested = False
+        return self.cancelled
+
+
+def test_walk_closes_the_folder_while_paused_part_way_and_lists_it_again(flat, entries):
     expected = walk_listings(str(flat))
     entries.entries = 0
-    gate = _Gate(block_at=5)  # the folder, then its 1st..4th entries
+    pause = _Pause()
+    entries.on_entry = lambda n: n == 4 and setattr(pause, "requested", True)
 
-    worker, result = _in_thread(lambda: walk_listings(str(flat), gate))
-    assert gate.blocked.wait(5)
+    worker, result = _in_thread(lambda: walk_listings(str(flat), pause.should_stop, pause.interrupted))
+    assert pause.blocked.wait(5)
     time.sleep(0.1)
-    assert entries.entries == 4  # parked on the 4th entry, before reading a 5th
-    gate.release.set()
+    assert entries.entries == 4  # stopped on the 4th entry
+    assert entries.open == 0  # nothing held open while paused
+    calls_when_parked = pause.interrupted_calls
+    pause.release.set()
     worker.join(5)
 
     assert result == [expected]
+    assert entries.entries == 4 + 10  # the folder was read again from the start
+    assert pause.interrupted_calls == calls_when_parked  # in one go, so it can't restart forever
 
 
 def test_walk_abandons_a_folder_cancelled_part_way(flat, entries):
-    walk = walk_listings(str(flat), _Gate(stop_at=5))
+    pause = _Pause()
+    entries.on_entry = lambda n: n == 4 and setattr(pause, "cancelled", True)
+    walk = walk_listings(str(flat), pause.should_stop, pause.interrupted)
     assert entries.entries == 4  # stopped reading, not just skipping the rest
+    assert entries.open == 0
     assert (walk.files, walk.listings) == ([], {})  # the half-read folder vouches for nothing
 
 
+# should_stop is called once before each directory.
 def test_walk_parks_between_folders_and_resumes_with_the_same_listing(tree, entries):
     expected = walk_listings(str(tree))
     entries.entries = 0
-    gate = _Gate(block_at=FILES + 4)  # root, its FILES entries, a subfolder and its file, the next
+    gate = _Gate(block_at=3)  # the root, a subfolder, then the next
 
     worker, result = _in_thread(lambda: walk_listings(str(tree), gate))
     assert gate.blocked.wait(5)
     time.sleep(0.1)
-    assert entries.entries == FILES + 1
+    assert (entries.entries, entries.open) == (FILES + 1, 0)
     gate.release.set()
     worker.join(5)
 
@@ -161,7 +195,7 @@ def test_walk_parks_between_folders_and_resumes_with_the_same_listing(tree, entr
 
 
 def test_walk_cancelled_between_folders_keeps_only_whole_listings(tree, entries):
-    walk = walk_listings(str(tree), _Gate(stop_at=FILES + 4))
+    walk = walk_listings(str(tree), _Gate(stop_at=3))
     assert entries.entries == FILES + 1  # no entry of the next folder read
     [first] = set(walk.listings) - {str(tree)}  # whichever subfolder scandir gave first
     assert str(tree) in walk.listings
@@ -309,6 +343,7 @@ def test_a_prompt_starting_mid_walk_or_stat_parks_the_scan(
     assert parked.wait(5)
     time.sleep(0.2)
     assert (state.dirs_listed, state.files_statted, entries.entries) == parked_at
+    assert entries.open == 0  # no directory held open while paused
     assert instance.resume()
     worker.join(5)
 
@@ -365,6 +400,7 @@ def test_a_prompt_or_cancel_mid_rescan_listing_marks_nothing_missing(
         assert parked.wait(5)
         time.sleep(0.1)
         assert entries.entries == 3  # parked mid-listing
+        assert entries.open == 0
         assert instance.resume()
     worker.join(5)
 

@@ -59,22 +59,22 @@ class ListingWalk(NamedTuple):
 
 
 def _list_visible_entries(
-    dirpath: str, should_stop: Callable[[], bool] | None = None
+    dirpath: str, interrupted: Callable[[], bool] | None = None
 ) -> tuple[list[str], list[str]] | None:
     """One directory's visible (file names, subdir names), classified as os.walk does:
     anything whose is_dir() is false or raises is a file. The exception is a symlink
     whose target is gone: it is left out, so a row for it reads as vanished, as it did
     when the rescan stat'ed every row through the link.
 
-    ``should_stop`` is called before each entry, so a directory of 100k entries on a slow
-    share can pause part way. While it blocks, the directory stays open, and reading goes
-    on from the same entry, so a folder that takes longer to list than the gap between
-    prompts still gets listed. True abandons the directory and returns None."""
+    ``interrupted`` is checked, without blocking, before each entry, so a directory of
+    100k entries on a slow share can be left part way. True closes the directory and
+    returns None: an open directory handle stops Windows renaming or moving any folder
+    above it."""
     files: list[str] = []
     subdirs: list[str] = []
     with os.scandir(dirpath) as entries:
         for entry in entries:
-            if should_stop is not None and should_stop():
+            if interrupted is not None and interrupted():
                 return None
             yield_gil(run=RESCAN_YIELD_RUN)
             if not is_visible(entry.name):
@@ -104,7 +104,11 @@ def _is_dangling(entry: os.DirEntry) -> bool:
     return False
 
 
-def walk_listings(base_dir: str, should_stop: Callable[[], bool] | None = None) -> ListingWalk:
+def walk_listings(
+    base_dir: str,
+    should_stop: Callable[[], bool] | None = None,
+    interrupted: Callable[[], bool] | None = None,
+) -> ListingWalk:
     """Every visible file under ``base_dir``, following symlinks, and every directory
     listing read on the way.
 
@@ -114,9 +118,12 @@ def walk_listings(base_dir: str, should_stop: Callable[[], bool] | None = None) 
     normalized absolute path, so it doubles as the record of which directories the walk
     can vouch for.
 
-    ``should_stop`` is called before each directory and each entry; it may block. Once it
-    returns True the walk ends: the result is partial, and the directory being read is in
-    neither ``files`` nor ``listings``.
+    ``should_stop`` is called before each directory, with none open; it may block, and
+    once it returns True the walk ends with a partial result. ``interrupted`` (a pause or
+    cancel was requested) is checked without blocking before each entry: the directory
+    being read is closed and left out, ``should_stop`` decides, and after a pause that
+    directory is listed again in one go, so a folder that takes longer to list than the
+    gap between prompts still gets listed.
     """
     files: list[str] = []
     listings: DirListings = {}
@@ -124,6 +131,7 @@ def walk_listings(base_dir: str, should_stop: Callable[[], bool] | None = None) 
     # missing or not a directory fails its stat or scandir below and yields nothing.
     seen_dirs: set[tuple[int, int]] = set()
     stack = [os.path.abspath(base_dir)]
+    relist: str | None = None
     while stack:
         if should_stop is not None and should_stop():
             break
@@ -137,11 +145,13 @@ def walk_listings(base_dir: str, should_stop: Callable[[], bool] | None = None) 
         if dir_id in seen_dirs:
             continue
         try:
-            listing = _list_visible_entries(dirpath, should_stop)
+            listing = _list_visible_entries(dirpath, None if dirpath == relist else interrupted)
         except OSError:
             continue
         if listing is None:
-            break
+            stack.append(dirpath)
+            relist = dirpath
+            continue
         names, subdirs = listing
         seen_dirs.add(dir_id)
         listings[dirpath] = (names, subdirs)

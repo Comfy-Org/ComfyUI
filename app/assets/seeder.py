@@ -587,6 +587,11 @@ class _AssetSeeder:
             self._record_cancel_stage(_ScanStage.ENRICH)
         return not self._run_gate.is_set() or cancelled
 
+    def _pause_or_cancel_requested(self) -> bool:
+        """Non-blocking, with no side effects: lets a walk close what it holds open before
+        it blocks in _check_pause_and_cancel."""
+        return not self._run_gate.is_set() or self._cancel_event.is_set()
+
     def _record_cancel_stage(self, stage: _ScanStage) -> None:
         with self._lock:
             if self._scan_state is not None and self._scan_state.cancel_stage is None:
@@ -936,7 +941,7 @@ class _AssetSeeder:
         for r in ("models", "input", "output"):
             if r not in roots:
                 continue
-            walk = list_root(r, should_stop)
+            walk = list_root(r, should_stop, self._pause_or_cancel_requested)
             # A cancel during the walk leaves it partial.
             if should_stop():
                 return total_created, skipped_existing, 0
