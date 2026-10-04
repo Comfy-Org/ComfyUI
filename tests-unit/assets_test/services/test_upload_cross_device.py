@@ -83,6 +83,27 @@ def test_cross_device_upload_replaces_other_bytes_at_the_destination(
     assert dest.read_bytes() == _CONTENT
 
 
+def test_failed_cross_device_copy_fails_the_upload_and_registers_nothing(
+    mock_create_session, cross_device_upload, monkeypatch
+):
+    temp, dest = cross_device_upload
+
+    def disk_full(src, dst):
+        Path(dst).write_bytes(_CONTENT[:5])
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(ingest_module.shutil, "copyfile", disk_full)
+
+    with pytest.raises(RuntimeError, match="failed to move uploaded file into place"):
+        _upload(temp)
+
+    assert not temp.exists()
+    with mock_create_session() as session:
+        assert session.scalars(
+            select(AssetContent).where(AssetContent.path == str(dest))
+        ).first() is None
+
+
 def test_other_move_errors_raise_without_copying(
     mock_create_session, cross_device_upload, monkeypatch
 ):
