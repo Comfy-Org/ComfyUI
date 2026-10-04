@@ -20,11 +20,23 @@ def _write(path: Path, data: bytes = b"x") -> None:
     path.write_bytes(data)
 
 
-def _assert_parity(base: Path) -> None:
-    expected = [p for p in list_files_with_os_walk(str(base)) if os.path.exists(p) or not os.path.islink(p)]
+def _dangling(path: str) -> bool:
+    if not os.path.islink(path):
+        return False
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _assert_parity(base: Path):
+    expected = [p for p in list_files_with_os_walk(str(base)) if not _dangling(p)]
     walk = walk_listings(str(base))
     assert walk.files == expected
-    assert walk.dirs_listed == len(walk.listings)
+    return walk
 
 
 def test_nested_tree(temp_dir: Path):
@@ -50,7 +62,7 @@ def test_flat_folder(temp_dir: Path):
 def test_hidden_files_and_folders(temp_dir: Path):
     for rel in (".hidden.png", ".cache/x.png", "sub/.also_hidden.png", "sub/.dir/y.png", "sub/seen.png"):
         _write(temp_dir / rel)
-    _assert_parity(temp_dir)
+    assert _assert_parity(temp_dir).dirs_listed == 2  # the root and sub; hidden folders are never listed
 
 
 def test_empty_files_partial_downloads_and_odd_names(temp_dir: Path):
@@ -78,7 +90,8 @@ def test_symlinks(temp_dir: Path):
     (base / "broken").symlink_to(base / "nowhere")
     (base / "broken_dir").symlink_to(temp_dir / "gone_dir")
     (base / "file_link.png").symlink_to(base / "a.png")
-    _assert_parity(base)
+    # base, sub and outside: the second path to sub, the loop and the broken link list nothing
+    assert _assert_parity(base).dirs_listed == 3
 
 
 @needs_symlinks
@@ -93,10 +106,13 @@ def test_permission_denied_folder(temp_dir: Path):
     _write(temp_dir / "ok" / "a.png")
     _write(temp_dir / "locked" / "b.png")
     _write(temp_dir / "unlistable" / "c.png")
+    (temp_dir / "link_into_locked.png").symlink_to(temp_dir / "locked" / "b.png")  # stat: permission denied
     os.chmod(temp_dir / "locked", 0)
     os.chmod(temp_dir / "unlistable", 0o300)  # can enter, can't list
     try:
-        _assert_parity(temp_dir)
+        walk = _assert_parity(temp_dir)
+        # Kept, so the scan's own stat counts it as permission denied, as the os.walk walker did.
+        assert str(temp_dir / "link_into_locked.png") in walk.files
     finally:
         os.chmod(temp_dir / "locked", 0o700)
         os.chmod(temp_dir / "unlistable", 0o700)

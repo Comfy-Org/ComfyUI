@@ -160,8 +160,9 @@ def test_walk_parks_between_folders_and_resumes_with_the_same_listing(tree, entr
     assert result == [expected]
 
 
-def test_walk_cancelled_between_folders_keeps_only_whole_listings(tree):
+def test_walk_cancelled_between_folders_keeps_only_whole_listings(tree, entries):
     walk = walk_listings(str(tree), _Gate(stop_at=FILES + 4))
+    assert entries.entries == FILES + 1  # no entry of the next folder read
     [first] = set(walk.listings) - {str(tree)}  # whichever subfolder scandir gave first
     assert str(tree) in walk.listings
     assert walk.files == [os.path.join(first, "a.png")]
@@ -338,18 +339,31 @@ def _live_rows(engine) -> int:
 
 
 @pytest.mark.parametrize("action", ["pause", "cancel"])
-def test_a_prompt_or_cancel_mid_rescan_listing_marks_nothing_missing(scan, catalog, entries, hooked, action):
+def test_a_prompt_or_cancel_mid_rescan_listing_marks_nothing_missing(
+    scan, catalog, entries, hooked, monkeypatch, action
+):
     """The output-only rescan retires rows its listings lack, so a listing cut short must
-    never read as files having vanished."""
-    instance, _events = scan
+    never read as files having vanished. The stat that normally double-checks a row before
+    retiring it is made to say "gone", so only the listing decides."""
+    instance, events = scan
     state = instance._scan_state
     assert instance._run_fast_phase(("input", "output"))[0] == FILES
+    monkeypatch.setattr(scanner, "_is_gone", lambda _path: True)
+    parked = threading.Event()
+
+    def sink(kind, _data):
+        events.append(kind)
+        if kind == "assets.seed.paused":
+            parked.set()
+
+    instance.set_event_sink(sink)
     entries.entries = 0
     hooked("entries", 3, getattr(instance, action))
 
     worker, result = _in_thread(lambda: instance._run_fast_phase(("output",)))
     if action == "pause":
-        time.sleep(0.2)
+        assert parked.wait(5)
+        time.sleep(0.1)
         assert entries.entries == 3  # parked mid-listing
         assert instance.resume()
     worker.join(5)

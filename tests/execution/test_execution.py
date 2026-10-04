@@ -17,7 +17,6 @@ import os
 from pathlib import PurePosixPath
 from comfy_execution.graph_utils import GraphBuilder, Node
 from app.assets.scanner_admission import _should_skip_extension
-from app.assets.services.file_utils import walk_listings
 
 
 ASSET_HEALTH_TIMEOUT_SECONDS = 120
@@ -254,7 +253,13 @@ def _fetch_output_asset_paths(base_url, deadline):
 def _list_output_files_on_disk(output_dir):
     output_root = os.path.abspath(output_dir)
     disk_paths = set()
-    for file_path in walk_listings(output_root).files:
+    # A plain os.walk, independent of the scanner's own walker; hidden names are skipped,
+    # as the scanner skips them.
+    walked = []
+    for dirpath, dirnames, filenames in os.walk(output_root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        walked.extend(os.path.join(dirpath, name) for name in filenames if not name.startswith("."))
+    for file_path in walked:
         if _should_skip_extension(file_path):
             continue
         try:

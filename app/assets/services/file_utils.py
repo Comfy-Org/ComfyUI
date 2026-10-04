@@ -67,7 +67,9 @@ def _list_visible_entries(
     when the rescan stat'ed every row through the link.
 
     ``should_stop`` is called before each entry, so a directory of 100k entries on a slow
-    share can pause part way; True abandons the directory and returns None."""
+    share can pause part way. While it blocks, the directory stays open, and reading goes
+    on from the same entry, so a folder that takes longer to list than the gap between
+    prompts still gets listed. True abandons the directory and returns None."""
     files: list[str] = []
     subdirs: list[str] = []
     with os.scandir(dirpath) as entries:
@@ -83,9 +85,23 @@ def _list_visible_entries(
                 is_dir = False
             if is_dir:
                 subdirs.append(entry.name)
-            elif not (entry.is_symlink() and not os.path.exists(entry.path)):
+            elif not _is_dangling(entry):
                 files.append(entry.name)
     return files, subdirs
+
+
+def _is_dangling(entry: os.DirEntry) -> bool:
+    """A symlink whose target is gone. One whose target can't be stat'ed for another
+    reason (permissions, a loop) stays listed, so the scan's own stat reports it."""
+    if not entry.is_symlink():
+        return False
+    try:
+        os.stat(entry.path)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def walk_listings(base_dir: str, should_stop: Callable[[], bool] | None = None) -> ListingWalk:

@@ -904,7 +904,7 @@ class _AssetSeeder:
 
         should_stop = lambda: self._check_pause_and_cancel(_ScanStage.FAST_SCAN)
         verify = verifies_catalogued_files(roots)
-        live_by_root: dict[RootType, dict[str, list]] = {}
+        live_references: dict[str, list] = {}
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()
         assert self._scan_state is not None
@@ -917,8 +917,8 @@ class _AssetSeeder:
                 existing_paths.update(sync_root_safely(r, scan_state, should_stop))
                 self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
             else:
-                live_by_root[r] = live_references_safely(r)
-                existing_paths.update(live_by_root[r])
+                live_references = live_references_safely(r)
+                existing_paths.update(live_references)
         logging.debug(
             "Fast scan: sync_root phase took %.3fs (%d existing paths)",
             time.perf_counter() - t_sync,
@@ -939,9 +939,9 @@ class _AssetSeeder:
                 return total_created, skipped_existing, 0
             paths.extend(walk.files)
             scan_state.dirs_listed += walk.dirs_listed
-            if r not in live_by_root:
+            if verify:
                 continue
-            vanished, unlisted = unlisted_references(live_by_root[r], walk.listings, scan_state)
+            vanished, unlisted = unlisted_references(live_references, walk.listings, scan_state)
             marked_before = scan_state.missing_marked
             mark_unlisted_references_missing_safely(r, vanished, scan_state, should_stop)
             self._emit_marked_missing(r, scan_state.missing_marked - marked_before)
