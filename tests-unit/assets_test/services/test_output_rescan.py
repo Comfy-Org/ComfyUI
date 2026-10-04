@@ -239,10 +239,10 @@ def test_dir_failing_to_list_stats_its_rows_while_siblings_are_diffed(
 
     real_list = file_utils._list_visible_entries
 
-    def failing_list(dirpath: str, should_stop=None):
+    def failing_list(dirpath: str, interrupted=None):
         if dirpath == str(output / "a"):
             raise OSError("transient listing failure")
-        return real_list(dirpath, should_stop)
+        return real_list(dirpath, interrupted)
 
     monkeypatch.setattr(file_utils, "_list_visible_entries", failing_list)
     _scan_logged(caplog)
@@ -282,10 +282,10 @@ def test_unlistable_output_root_stats_every_row(roots, session, monkeypatch):
     files[0].unlink()
     real_list = file_utils._list_visible_entries
 
-    def failing_root(dirpath: str, should_stop=None):
+    def failing_root(dirpath: str, interrupted=None):
         if dirpath == str(output):
             raise OSError("root unreadable")
-        return real_list(dirpath, should_stop)
+        return real_list(dirpath, interrupted)
 
     monkeypatch.setattr(file_utils, "_list_visible_entries", failing_root)
     _scan()

@@ -2,6 +2,7 @@
 find the same files in the same order. The one intended difference: a symlink whose target
 is gone is left out (the os.walk walker listed it, then the scan's stat dropped it)."""
 
+import errno
 import os
 import sys
 from pathlib import Path
@@ -127,39 +128,49 @@ def test_permission_denied_folder(temp_dir: Path):
         os.chmod(temp_dir / "unlistable", 0o700)
 
 
-class _VanishingEntry:
-    """A directory entry whose file was deleted after the listing named it, on a
-    filesystem whose listing has no file types, so is_dir() and is_symlink() must stat."""
+class _UnreadableEntry:
+    """A directory entry whose type can't be read: on a filesystem whose listing has no
+    file types, is_dir() and is_symlink() must stat, and on a network share that can fail
+    with an I/O error. (A file deleted mid-listing doesn't raise: DirEntry swallows
+    FileNotFoundError, and the scan's own stat drops it.)"""
 
-    name = "vanished.png"
+    name = "unreadable.png"
 
     def __init__(self, dirpath: str) -> None:
         self.path = os.path.join(dirpath, self.name)
 
     def is_dir(self) -> bool:
-        raise FileNotFoundError(self.path)
+        raise OSError(errno.EIO, "I/O error", self.path)
 
     def is_symlink(self) -> bool:
-        raise FileNotFoundError(self.path)
+        raise OSError(errno.EIO, "I/O error", self.path)
 
 
-def test_an_entry_vanishing_mid_listing_keeps_the_rest_of_the_folder(temp_dir: Path, monkeypatch):
+class _OsWithExtraEntry:
+    """Stands in for file_utils' os module (only there), appending one _UnreadableEntry
+    to every listing."""
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def scandir(self, path):
+        real = os.scandir(path)
+
+        class _Entries:
+            def __enter__(self):
+                return iter([*real, _UnreadableEntry(str(path))])
+
+            def __exit__(self, *_exc):
+                real.close()
+
+        return _Entries()
+
+
+def test_an_entry_whose_type_cant_be_read_is_kept_and_the_folder_listed(temp_dir: Path, monkeypatch):
     for name in ("a.png", "b.png"):
         _write(temp_dir / name)
-    real_scandir = os.scandir
-
-    class _Entries:
-        def __init__(self, path):
-            self._real = real_scandir(path)
-            self._items = [*self._real, _VanishingEntry(str(path))]
-
-        def __enter__(self):
-            return iter(self._items)
-
-        def __exit__(self, *_exc):
-            self._real.close()
-
-    monkeypatch.setattr(file_utils.os, "scandir", _Entries)
+    monkeypatch.setattr(file_utils, "os", _OsWithExtraEntry())
     walk = walk_listings(str(temp_dir))
     assert str(temp_dir) in walk.listings
-    assert sorted(walk.files) == [str(temp_dir / "a.png"), str(temp_dir / "b.png")]
+    # Kept as a file, as os.walk keeps an entry whose is_dir() raises; the scan's stat decides.
+    assert sorted(walk.files) == sorted(str(temp_dir / n) for n in ("a.png", "b.png", "unreadable.png"))

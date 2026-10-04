@@ -57,6 +57,7 @@ from app.assets.scanner_admission import (
     _two_stat_admit,
     tick_watch_list as tick_watch_list,
 )
+from app.assets.services.file_utils import is_gone as _is_gone
 from app.assets.services.file_utils import (
     RESCAN_YIELD_RUN,
     DirListings,
@@ -412,6 +413,7 @@ def list_root(
     root: RootType,
     should_stop: ShouldStop = _never_stop,
     interrupted: Callable[[], bool] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> ListingWalk:
     """Every file under ``root``, with the directory listings read on the way.
 
@@ -422,13 +424,13 @@ def list_root(
     that verify every row.
 
     Once ``should_stop`` returns True the walk is partial, so callers check it again
-    before using the result. ``interrupted`` is walk_listings'.
+    before using the result. ``interrupted`` and ``cancelled`` are walk_listings'.
     """
     if root == "models":
         return ListingWalk(collect_models_files(), {}, 0)
     if root == "input":
-        return walk_listings(folder_paths.get_input_directory(), should_stop, interrupted)
-    return walk_listings(folder_paths.get_output_directory(), should_stop, interrupted)
+        return walk_listings(folder_paths.get_input_directory(), should_stop, interrupted, cancelled)
+    return walk_listings(folder_paths.get_output_directory(), should_stop, interrupted, cancelled)
 
 
 def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservation]]:
@@ -502,15 +504,6 @@ def unlisted_references(
     return vanished, skipped
 
 
-def _is_gone(path: str) -> bool:
-    """True only when stat says the path does not exist. Any other error (permissions,
-    I/O) leaves it undecided, and the row stays live, as the per-row stat left it."""
-    try:
-        os.stat(path)
-    except (FileNotFoundError, NotADirectoryError):
-        return True
-    except OSError:
-        return False
     return False
 
 

@@ -3,8 +3,8 @@ from typing import Callable, NamedTuple
 
 from app.assets.services.gil import yield_gil
 
-# Longer run window for output rescans: they repeat after prompts, so pausing every
-# 2ms would add up to a much slower rescan.
+# Longer run window for directory walks: the output rescan repeats after every prompt,
+# so pausing every 2ms would add up to a much slower rescan.
 RESCAN_YIELD_RUN = 0.010
 
 
@@ -90,13 +90,11 @@ def _list_visible_entries(
     return files, subdirs
 
 
-def _is_dangling(entry: os.DirEntry) -> bool:
-    """A symlink whose target is gone. One whose target can't be stat'ed for another
-    reason (permissions, a loop) stays listed, so the scan's own stat reports it."""
+def is_gone(path: str) -> bool:
+    """True only when stat says the path does not exist. Any other error (permissions,
+    I/O) leaves it undecided, so a scan keeps the file rather than guess."""
     try:
-        if not entry.is_symlink():
-            return False
-        os.stat(entry.path)
+        os.stat(path)
     except (FileNotFoundError, NotADirectoryError):
         return True
     except OSError:
@@ -104,10 +102,20 @@ def _is_dangling(entry: os.DirEntry) -> bool:
     return False
 
 
+def _is_dangling(entry: os.DirEntry) -> bool:
+    """A symlink whose target is gone. One whose target can't be stat'ed for another
+    reason (permissions, a loop) stays listed, so the scan's own stat reports it."""
+    try:
+        return entry.is_symlink() and is_gone(entry.path)
+    except OSError:
+        return False
+
+
 def walk_listings(
     base_dir: str,
     should_stop: Callable[[], bool] | None = None,
     interrupted: Callable[[], bool] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> ListingWalk:
     """Every visible file under ``base_dir``, following symlinks, and every directory
     listing read on the way.
@@ -121,9 +129,11 @@ def walk_listings(
     ``should_stop`` is called before each directory, with none open; it may block, and
     once it returns True the walk ends with a partial result. ``interrupted`` (a pause or
     cancel was requested) is checked without blocking before each entry: the directory
-    being read is closed and left out, ``should_stop`` decides, and after a pause that
-    directory is listed again in one go, so a folder that takes longer to list than the
-    gap between prompts still gets listed.
+    being read is closed and left out, so nothing is held open while ``should_stop``
+    blocks. After a pause that directory is listed again checking only ``cancelled``, so
+    a folder that takes longer to list than the gap between prompts still gets listed; a
+    pause that lands during that second listing waits for it, as every listing did
+    before the walk could stop part way.
     """
     files: list[str] = []
     listings: DirListings = {}
@@ -145,7 +155,7 @@ def walk_listings(
         if dir_id in seen_dirs:
             continue
         try:
-            listing = _list_visible_entries(dirpath, None if dirpath == relist else interrupted)
+            listing = _list_visible_entries(dirpath, cancelled if dirpath == relist else interrupted)
         except OSError:
             continue
         if listing is None:

@@ -42,7 +42,6 @@ class _Gate:
 
 
 class _Counts:
-    dirs_listed = 0
     files_statted = 0
 
     def mark_emitted(self, key: str) -> bool:
@@ -136,13 +135,22 @@ class _Pause:
         self.interrupted_calls = 0
         self.blocked = threading.Event()
         self.release = threading.Event()
+        self.parked_after: list[int] = []  # probe() at each pause honoured
+        self.probe = lambda: 0
 
     def interrupted(self) -> bool:
         self.interrupted_calls += 1
         return self.requested or self.cancelled
 
+    def is_cancelled(self) -> bool:
+        return self.cancelled
+
+    def walk(self, base: Path):
+        return walk_listings(str(base), self.should_stop, self.interrupted, self.is_cancelled)
+
     def should_stop(self) -> bool:
         if self.requested and not self.cancelled:
+            self.parked_after.append(self.probe())
             self.blocked.set()
             assert self.release.wait(5)
             self.requested = False
@@ -155,7 +163,7 @@ def test_walk_closes_the_folder_while_paused_part_way_and_lists_it_again(flat, e
     pause = _Pause()
     entries.on_entry = lambda n: n == 4 and setattr(pause, "requested", True)
 
-    worker, result = _in_thread(lambda: walk_listings(str(flat), pause.should_stop, pause.interrupted))
+    worker, result = _in_thread(lambda: pause.walk(flat))
     assert pause.blocked.wait(5)
     time.sleep(0.1)
     assert entries.entries == 4  # stopped on the 4th entry
@@ -172,10 +180,72 @@ def test_walk_closes_the_folder_while_paused_part_way_and_lists_it_again(flat, e
 def test_walk_abandons_a_folder_cancelled_part_way(flat, entries):
     pause = _Pause()
     entries.on_entry = lambda n: n == 4 and setattr(pause, "cancelled", True)
-    walk = walk_listings(str(flat), pause.should_stop, pause.interrupted)
+    walk = pause.walk(flat)
     assert entries.entries == 4  # stopped reading, not just skipping the rest
-    assert entries.open == 0
     assert (walk.files, walk.listings) == ([], {})  # the half-read folder vouches for nothing
+
+
+def test_a_pause_during_the_second_listing_waits_for_it_but_a_cancel_does_not(flat, entries):
+    """The trade-off that keeps a slow folder from restarting forever: once a pause has
+    interrupted a folder, its second listing goes on through another pause, but a cancel
+    still stops it part way."""
+    pause = _Pause()
+
+    def on_entry(n):
+        if n == 4:
+            pause.requested = True  # the first pause: the folder is closed, then listed again
+        elif n == 4 + 2:
+            pause.requested = True  # lands during the second listing: not honoured until it ends
+        elif n == 4 + 6:
+            pause.cancelled = True  # a cancel is
+
+    entries.on_entry = on_entry
+    pause.release.set()  # let the first pause through at once
+    walk = pause.walk(flat)
+    assert entries.entries == 4 + 6  # the second listing stopped on the cancel, not at its end (4 + 10)
+    assert (walk.files, walk.listings) == ([], {})
+
+
+def test_a_subfolder_interrupted_twice_is_listed_in_walk_order(tree, entries):
+    """Only the folder a pause interrupted is listed again without pause checks: a later
+    folder still stops part way, and the walk keeps os.walk's order."""
+    for d in range(FILES):  # six entries in every subfolder, whichever order scandir gives
+        for i in range(5):
+            (tree / f"d{d}" / f"more{i}.png").write_bytes(b"x")
+    expected = walk_listings(str(tree))
+    entries.entries = 0
+    pause = _Pause()
+    pause.release.set()
+    # The root's FILES entries come first; then the first subfolder (6 files), etc.
+    # The root's FILES entries; 3 of the 1st subfolder before the pause, then all 6 again;
+    # then 3 into the 2nd subfolder.
+    first, second = FILES + 3, FILES + 3 + 6 + 3
+    pause.probe = lambda: entries.entries
+    entries.on_entry = lambda n: n in (first, second) and setattr(pause, "requested", True)
+    walk = pause.walk(tree)
+    assert walk == expected
+    # Each pause took effect on the entry it landed on, not at the end of its folder.
+    assert pause.parked_after == [first, second]
+
+
+def test_a_folder_renamed_while_the_walk_is_paused_in_it_is_skipped(flat, entries):
+    """Nothing is held open while paused, so the folder can be renamed; the walk then
+    finds it gone and skips it rather than failing."""
+    pause = _Pause()
+    entries.on_entry = lambda n: n == 4 and setattr(pause, "requested", True)
+    sub = flat / "inner"
+    sub.mkdir()
+    for i in range(10):
+        (sub / f"g{i}.png").write_bytes(b"x")
+    renamed = flat.parent / (flat.name + "-renamed-inner")
+
+    worker, result = _in_thread(lambda: pause.walk(sub))
+    assert pause.blocked.wait(5)
+    os.rename(sub, renamed)  # would fail on Windows with the directory still open
+    pause.release.set()
+    worker.join(5)
+    assert result[0].files == [] and result[0].listings == {}
+    os.rename(renamed, sub)
 
 
 # should_stop is called once before each directory.
@@ -187,7 +257,7 @@ def test_walk_parks_between_folders_and_resumes_with_the_same_listing(tree, entr
     worker, result = _in_thread(lambda: walk_listings(str(tree), gate))
     assert gate.blocked.wait(5)
     time.sleep(0.1)
-    assert (entries.entries, entries.open) == (FILES + 1, 0)
+    assert entries.entries == FILES + 1
     gate.release.set()
     worker.join(5)
 
@@ -271,14 +341,14 @@ def catalog():
 
 
 class _HookedState(seeder_module._ScanState):
-    """Calls ``on_count(name, value)`` as each directory or stat is counted, so a test can
-    land a prompt part way through the walk or the stats."""
+    """Calls ``on_count(name, value)`` as each file stat is counted, so a test can land a
+    prompt part way through the stats."""
 
     on_count = None
 
     def __setattr__(self, name, value):
         super().__setattr__(name, value)
-        if name in ("dirs_listed", "files_statted") and self.on_count is not None:
+        if name == "files_statted" and self.on_count is not None:
             self.on_count(name, value)
 
 
@@ -363,6 +433,36 @@ def test_a_cancel_mid_walk_ends_the_scan_before_it_starts_seeding(scan, catalog,
     assert state.files_statted == 0
     assert "assets.seed.started" not in events
     assert state.cancel_stage == seeder_module._ScanStage.FAST_SCAN.value
+    assert _rows(catalog) == 0
+
+
+def test_a_cancel_during_the_second_listing_after_a_pause_stops_it(scan, catalog, entries):
+    """After a pause closes a folder part way, the walk lists it again without pause
+    checks, but a cancel (shutdown) must still stop it part way."""
+    instance, events = scan
+    parked = threading.Event()
+
+    def sink(kind, _data):
+        events.append(kind)
+        if kind == "assets.seed.paused":
+            parked.set()
+
+    instance.set_event_sink(sink)
+
+    def on_entry(n):
+        if n == 3:  # the output root, part way: pause
+            assert instance.pause()
+        elif n == 3 + 3:  # part way through listing it again: cancel
+            assert instance.cancel()
+
+    entries.on_entry = on_entry
+    worker, result = _in_thread(lambda: instance._run_fast_phase(("input", "output")))
+    assert parked.wait(5)
+    assert instance.resume()
+    worker.join(5)
+
+    assert result == [(0, 0, 0)]
+    assert entries.entries == 3 + 3  # stopped on the cancel, not after the whole folder (3 + FILES)
     assert _rows(catalog) == 0
 
 

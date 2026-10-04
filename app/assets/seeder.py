@@ -582,14 +582,13 @@ class _AssetSeeder:
         open while blocked. The caller is responsible for blocking on
         _check_pause_and_cancel() afterward.
         """
-        cancelled = self._cancel_event.is_set()
-        if cancelled:
+        if self._cancel_event.is_set():
             self._record_cancel_stage(_ScanStage.ENRICH)
-        return not self._run_gate.is_set() or cancelled
+        return self._pause_or_cancel_requested()
 
     def _pause_or_cancel_requested(self) -> bool:
-        """Non-blocking, with no side effects: lets a walk close what it holds open before
-        it blocks in _check_pause_and_cancel."""
+        """_is_paused_or_cancelled without recording a cancel stage, for the fast scan's
+        walk, whose cancel is recorded by the _check_pause_and_cancel that follows."""
         return not self._run_gate.is_set() or self._cancel_event.is_set()
 
     def _record_cancel_stage(self, stage: _ScanStage) -> None:
@@ -909,8 +908,8 @@ class _AssetSeeder:
         should_stop = lambda: self._check_pause_and_cancel(_ScanStage.FAST_SCAN)
         # Every scan but the output-only rescan queued after each prompt stats every live row
         # (sync_root). That rescan retires the rows its listings lack instead, so it misses an
-        # in-place overwrite until the next full scan; save nodes never overwrite, and their
-        # outputs are registered at save time.
+        # in-place overwrite until the next scan that isn't output-only, such as a page load;
+        # save nodes never overwrite, and their outputs are registered at save time.
         verify = tuple(roots) != ("output",)
         live_references: dict[str, list] = {}
         existing_paths: set[str] = set()
@@ -941,7 +940,7 @@ class _AssetSeeder:
         for r in ("models", "input", "output"):
             if r not in roots:
                 continue
-            walk = list_root(r, should_stop, self._pause_or_cancel_requested)
+            walk = list_root(r, should_stop, self._pause_or_cancel_requested, self._cancel_event.is_set)
             # A cancel during the walk leaves it partial.
             if should_stop():
                 return total_created, skipped_existing, 0
