@@ -195,11 +195,17 @@ def _move_temp_to_dest(temp_path: str, dest_abs: str, digest: str) -> None:
         except OSError as e:  # EXDEV: destination is on another volume
             if e.errno != errno.EXDEV:
                 raise
-            existing = snapshot_hash(dest_abs)
-            if existing is None or existing[0] != digest:
+            # Keep only a regular, single-link file with these exact bytes; replace anything else.
+            existing = None if os.path.islink(dest_abs) else snapshot_hash(dest_abs)
+            if existing is None or existing[0] != digest or existing[1].st_nlink != 1:
                 with contextlib.suppress(FileNotFoundError):
                     os.remove(dest_abs)  # never write through a link or over other bytes
-                shutil.copyfile(temp_path, dest_abs)
+                try:
+                    shutil.copyfile(temp_path, dest_abs)
+                except BaseException:
+                    with contextlib.suppress(OSError):
+                        os.remove(dest_abs)  # don't leave a partial copy under the hash name
+                    raise
     except Exception as e:
         raise RuntimeError(f"failed to move uploaded file into place: {e}") from e
 

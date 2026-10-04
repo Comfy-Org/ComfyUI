@@ -103,25 +103,62 @@ def test_cross_device_upload_replaces_other_bytes_at_the_destination(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
-@pytest.mark.parametrize("target_exists", [True, False], ids=["other-file", "dangling"])
-def test_cross_device_upload_does_not_write_through_a_link(
-    mock_create_session, cross_device_upload, tmp_path, target_exists
+@pytest.mark.parametrize(
+    "target", [b"someone else's file", _CONTENT, None], ids=["other-bytes", "same-bytes", "dangling"]
+)
+def test_cross_device_upload_replaces_a_symlink(
+    mock_create_session, cross_device_upload, tmp_path, target
 ):
     temp, dest = cross_device_upload
     dest.parent.mkdir(parents=True)
     elsewhere = tmp_path / "elsewhere.png"
-    if target_exists:
-        elsewhere.write_bytes(b"someone else's file")
+    if target is not None:
+        elsewhere.write_bytes(target)
     dest.symlink_to(elsewhere)
 
     _upload(temp)
 
-    if target_exists:
-        assert elsewhere.read_bytes() == b"someone else's file"
-    else:
+    if target is None:
         assert not elsewhere.exists()
+    else:
+        assert elsewhere.read_bytes() == target
     assert not dest.is_symlink()
     assert dest.read_bytes() == _CONTENT
+
+
+@pytest.mark.parametrize("twin", [b"someone else's file!!", _CONTENT], ids=["other-bytes", "same-bytes"])
+def test_cross_device_upload_replaces_a_hardlink(
+    mock_create_session, cross_device_upload, tmp_path, twin
+):
+    temp, dest = cross_device_upload
+    dest.parent.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere.png"
+    elsewhere.write_bytes(twin)
+    os.link(elsewhere, dest)
+
+    _upload(temp)
+
+    assert elsewhere.read_bytes() == twin
+    assert not os.path.samefile(elsewhere, dest)
+    assert dest.read_bytes() == _CONTENT
+
+
+def test_failed_cross_device_copy_leaves_no_partial_file(
+    mock_create_session, cross_device_upload, monkeypatch
+):
+    temp, dest = cross_device_upload
+
+    def disk_full(src, dst):
+        Path(dst).write_bytes(_CONTENT[:5])
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(ingest_module.shutil, "copyfile", disk_full)
+
+    with pytest.raises(RuntimeError, match="failed to move uploaded file into place"):
+        _upload(temp)
+
+    assert not dest.exists()
+    assert not temp.exists()
 
 
 def test_other_move_errors_raise_without_copying(
