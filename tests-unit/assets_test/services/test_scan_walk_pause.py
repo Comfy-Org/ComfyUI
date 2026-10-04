@@ -207,19 +207,19 @@ def _rows(engine) -> int:
 def test_a_prompt_starting_mid_walk_or_stat_parks_the_scan(scan, catalog, counter, at, parked_at):
     instance, events = scan
     state = instance._scan_state
-    paused = threading.Event()
+    parked = threading.Event()
 
-    def on_count(name, n):
-        if name == counter and n == at:
-            assert instance.pause()
-            paused.set()
+    def sink(kind, _data):
+        events.append(kind)
+        if kind == "assets.seed.paused":
+            parked.set()
 
-    state.on_count = on_count
+    instance.set_event_sink(sink)
+    state.on_count = lambda name, n: name == counter and n == at and instance.pause()
     worker, result = _in_thread(lambda: instance._run_fast_phase(("input", "output")))
-    assert paused.wait(5)
+    assert parked.wait(5)
     time.sleep(0.2)
     assert (state.dirs_listed, state.files_statted) == parked_at
-    assert "assets.seed.paused" in events
     assert instance.resume()
     worker.join(5)
 
@@ -234,7 +234,7 @@ def test_a_cancel_mid_walk_ends_the_scan_before_it_starts_seeding(scan, catalog)
     state.on_count = lambda name, n: name == "dirs_listed" and n == 3 and instance.cancel()
 
     assert instance._run_fast_phase(("input", "output")) == (0, 0, 0)
-    assert state.dirs_listed == 3  # the walk itself stopped
+    assert state.dirs_listed == 3  # none counted after the cancel; test_walk_stops_on_cancel pins the break
     assert state.files_statted == 0
     assert "assets.seed.started" not in events
     assert state.cancel_stage == seeder_module._ScanStage.FAST_SCAN.value
