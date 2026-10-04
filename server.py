@@ -102,7 +102,7 @@ def workflow_metadata_from_prompt(extra_data: dict) -> Optional[dict]:
         return None
     workflow_id = workflow.get("id")
     if isinstance(workflow_id, str) and workflow_id:
-        return {"workflow_id": workflow_id}
+        return valid_workflow_metadata({"workflow_metadata": {"workflow_id": workflow_id}})
     return None
 
 

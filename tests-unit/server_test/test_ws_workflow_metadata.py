@@ -138,6 +138,15 @@ class TestWorkflowMetadataFromPrompt:
     def test_non_dict_workflow_is_ignored(self, value):
         assert server.workflow_metadata_from_prompt(self.pnginfo(value)) is None
 
+    def test_oversized_id_is_ignored(self):
+        # The id comes from the submitted workflow, so it is as client-controlled
+        # as the explicit field and has to meet the same size limit.
+        huge = "x" * 300
+        assert (
+            server.workflow_metadata_from_prompt(self.pnginfo({"id": huge, "nodes": []}))
+            is None
+        )
+
     @pytest.mark.parametrize("value", ["", 7, None, {}])
     def test_non_string_or_empty_id_is_ignored(self, value):
         assert (
