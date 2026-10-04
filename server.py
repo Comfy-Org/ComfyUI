@@ -471,7 +471,7 @@ class PromptServer():
                     if image_upload_type != "temp":
                         # The saved file stays: an /upload/image retry with the same bytes reuses it.
                         if e.locked:
-                            status, code, message = 503, "DATABASE_BUSY", "Asset registration failed: the database is busy, try again"
+                            status, code, message = 503, "DATABASE_BUSY", "Saved, but couldn't add it to the library because the database is busy. Upload again to finish."
                         else:
                             status, code, message = 500, "ASSET_REGISTRATION_FAILED", "Asset registration failed"
                         return web.json_response({"code": code, "message": message, "details": resp}, status=status, reason=message)
