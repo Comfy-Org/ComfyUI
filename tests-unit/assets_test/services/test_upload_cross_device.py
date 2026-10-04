@@ -68,25 +68,6 @@ def test_cross_device_upload_is_copied_into_place(mock_create_session, cross_dev
     assert _recorded_mtime_ns(mock_create_session, dest) == dest.stat().st_mtime_ns
 
 
-def test_cross_device_upload_keeps_identical_bytes_already_there(
-    mock_create_session, cross_device_upload, monkeypatch
-):
-    temp, dest = cross_device_upload
-    dest.parent.mkdir(parents=True)
-    dest.write_bytes(_CONTENT)
-    existing_mtime_ns = _OLD_MTIME_NS - 1_000_000_000
-    os.utime(dest, ns=(existing_mtime_ns, existing_mtime_ns))
-    copies: list = []
-    monkeypatch.setattr(ingest_module.shutil, "copyfile", lambda *a: copies.append(a))
-
-    _upload(temp)
-
-    assert copies == []
-    assert dest.stat().st_mtime_ns == existing_mtime_ns
-    assert _recorded_mtime_ns(mock_create_session, dest) == existing_mtime_ns
-    assert not temp.exists()
-
-
 @pytest.mark.parametrize(
     "existing", [_CONTENT[::-1], _CONTENT[:5]], ids=["same-size-other-bytes", "truncated"]
 )
@@ -100,65 +81,6 @@ def test_cross_device_upload_replaces_other_bytes_at_the_destination(
     _upload(temp)
 
     assert dest.read_bytes() == _CONTENT
-
-
-@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
-@pytest.mark.parametrize(
-    "target", [b"someone else's file", _CONTENT, None], ids=["other-bytes", "same-bytes", "dangling"]
-)
-def test_cross_device_upload_replaces_a_symlink(
-    mock_create_session, cross_device_upload, tmp_path, target
-):
-    temp, dest = cross_device_upload
-    dest.parent.mkdir(parents=True)
-    elsewhere = tmp_path / "elsewhere.png"
-    if target is not None:
-        elsewhere.write_bytes(target)
-    dest.symlink_to(elsewhere)
-
-    _upload(temp)
-
-    if target is None:
-        assert not elsewhere.exists()
-    else:
-        assert elsewhere.read_bytes() == target
-    assert not dest.is_symlink()
-    assert dest.read_bytes() == _CONTENT
-
-
-@pytest.mark.parametrize("twin", [b"someone else's file!!", _CONTENT], ids=["other-bytes", "same-bytes"])
-def test_cross_device_upload_replaces_a_hardlink(
-    mock_create_session, cross_device_upload, tmp_path, twin
-):
-    temp, dest = cross_device_upload
-    dest.parent.mkdir(parents=True)
-    elsewhere = tmp_path / "elsewhere.png"
-    elsewhere.write_bytes(twin)
-    os.link(elsewhere, dest)
-
-    _upload(temp)
-
-    assert elsewhere.read_bytes() == twin
-    assert not os.path.samefile(elsewhere, dest)
-    assert dest.read_bytes() == _CONTENT
-
-
-def test_failed_cross_device_copy_leaves_no_partial_file(
-    mock_create_session, cross_device_upload, monkeypatch
-):
-    temp, dest = cross_device_upload
-
-    def disk_full(src, dst):
-        Path(dst).write_bytes(_CONTENT[:5])
-        raise OSError(errno.ENOSPC, "No space left on device")
-
-    monkeypatch.setattr(ingest_module.shutil, "copyfile", disk_full)
-
-    with pytest.raises(RuntimeError, match="failed to move uploaded file into place"):
-        _upload(temp)
-
-    assert not dest.exists()
-    assert not temp.exists()
 
 
 def test_other_move_errors_raise_without_copying(

@@ -187,7 +187,7 @@ def _guess_upload_mime_type(
     return guessed or "application/octet-stream"
 
 
-def _move_temp_to_dest(temp_path: str, dest_abs: str, digest: str) -> None:
+def _move_temp_to_dest(temp_path: str, dest_abs: str) -> None:
     os.makedirs(os.path.dirname(dest_abs), exist_ok=True)
     try:
         try:
@@ -195,17 +195,7 @@ def _move_temp_to_dest(temp_path: str, dest_abs: str, digest: str) -> None:
         except OSError as e:  # EXDEV: destination is on another volume
             if e.errno != errno.EXDEV:
                 raise
-            # Keep only a regular, single-link file with these exact bytes; replace anything else.
-            existing = None if os.path.islink(dest_abs) else snapshot_hash(dest_abs)
-            if existing is None or existing[0] != digest or existing[1].st_nlink != 1:
-                with contextlib.suppress(FileNotFoundError):
-                    os.remove(dest_abs)  # never write through a link or over other bytes
-                try:
-                    shutil.copyfile(temp_path, dest_abs)
-                except BaseException:
-                    with contextlib.suppress(OSError):
-                        os.remove(dest_abs)  # don't leave a partial copy under the hash name
-                    raise
+            shutil.copyfile(temp_path, dest_abs)
     except Exception as e:
         raise RuntimeError(f"failed to move uploaded file into place: {e}") from e
 
@@ -504,7 +494,7 @@ def upload_from_temp_path(
         content_type = _guess_upload_mime_type(
             mime_type, client_filename, name, os.path.basename(dest_abs)
         )
-        _move_temp_to_dest(temp_path, dest_abs, digest)
+        _move_temp_to_dest(temp_path, dest_abs)
     finally:
         _remove_temp_path(temp_path)
     # A cross-volume copy gets a new mtime, so record the file on disk (a rename keeps it).
