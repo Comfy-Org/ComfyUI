@@ -17,7 +17,7 @@ import os
 from pathlib import PurePosixPath
 from comfy_execution.graph_utils import GraphBuilder, Node
 from app.assets.scanner_admission import _should_skip_extension
-from app.assets.services.file_utils import list_files_recursively
+from app.assets.services.file_utils import walk_listings
 
 
 ASSET_HEALTH_TIMEOUT_SECONDS = 120
@@ -254,7 +254,7 @@ def _fetch_output_asset_paths(base_url, deadline):
 def _list_output_files_on_disk(output_dir):
     output_root = os.path.abspath(output_dir)
     disk_paths = set()
-    for file_path in list_files_recursively(output_root):
+    for file_path in walk_listings(output_root).files:
         if _should_skip_extension(file_path):
             continue
         try:

@@ -63,7 +63,6 @@ from app.assets.services.file_utils import (
     ListingWalk,
     get_mtime_ns,
     is_visible,
-    list_files_recursively,
     walk_listings,
 )
 from app.assets.services.gil import yield_gil
@@ -409,41 +408,38 @@ def content_ids_outside_prefixes(session: Session, prefixes: list[str]) -> list[
     return [content_id for content_id, path in rows if not is_owned(path)]
 
 
-def collect_paths_for_roots(
-    roots: tuple[RootType, ...],
-    progress: _ScanProgress | None = None,
-    should_stop: ShouldStop = _never_stop,
-) -> list[str]:
-    """Collect all file paths for the given roots.
+def list_root(root: RootType, should_stop: ShouldStop = _never_stop) -> ListingWalk:
+    """Every file under ``root``, with the directory listings read on the way.
 
-    ``progress.dirs_listed`` counts the input and output walks only. Models are
-    listed through folder_paths.get_filename_list, which walks the model folders
-    on a cache miss and re-checks their mtimes on a hit; none of that is counted.
+    Input and output are walked by walk_listings. Models come from
+    folder_paths.get_filename_list, the cached listing the loaders use (it walks the
+    model folders on a cache miss and re-checks their mtimes on a hit, none of it counted
+    in ``dirs_listed`` or pausable), with no listings: models are only scanned by scans
+    that verify every row.
 
-    ``should_stop`` is checked before each input or output directory; once it returns
-    True the list is partial, so callers check it again before using the result.
+    Once ``should_stop`` returns True the walk is partial, so callers check it again
+    before using the result.
     """
-    paths: list[str] = []
-    if "models" in roots:
-        paths.extend(collect_models_files())
-    if "input" in roots:
-        paths.extend(list_files_recursively(folder_paths.get_input_directory(), progress, should_stop))
-    if "output" in roots:
-        paths.extend(list_files_recursively(folder_paths.get_output_directory(), progress, should_stop))
-    return paths
+    if root == "models":
+        return ListingWalk(collect_models_files(), {}, 0)
+    if root == "input":
+        return walk_listings(folder_paths.get_input_directory(), should_stop)
+    return walk_listings(folder_paths.get_output_directory(), should_stop)
 
 
-def rescans_output_by_listing(roots: tuple[RootType, ...]) -> bool:
-    """Whether this scan checks the catalog against directory listings rather than by
-    stat'ing every live row. Only output-only scans do: the rescan queued after each prompt.
+def verifies_catalogued_files(roots: tuple[RootType, ...]) -> bool:
+    """Whether this scan stats every live row (sync_root) to find vanished and changed
+    files. Every scan but an output-only one does: the startup scan, page loads, API
+    seeds. The output-only rescan queued after each prompt instead retires the rows its
+    listings lack (unlisted_references).
 
     The listing diff catches every add and delete, but nothing stats an already-cataloged
     file, so an in-place overwrite (same path; new content, size or mtime) goes undetected
-    until the next scan that is not output-only, such as the startup scan. Core save nodes
-    never overwrite, and reported outputs are registered at save time, so this only
-    affects files written by something else.
+    until the next scan that verifies, such as a page load. Core save nodes never
+    overwrite, and reported outputs are registered at save time, so this only affects
+    files written by something else.
     """
-    return tuple(roots) == ("output",)
+    return tuple(roots) != ("output",)
 
 
 def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservation]]:
@@ -582,11 +578,6 @@ def mark_unlisted_references_missing_safely(
         )
     if progress is not None:
         progress.missing_marked += sum(marked)
-
-
-def list_output_for_rescan() -> ListingWalk:
-    """Walk the output root, listing every directory."""
-    return walk_listings(folder_paths.get_output_directory())
 
 
 def build_asset_specs(

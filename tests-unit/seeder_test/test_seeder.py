@@ -18,6 +18,7 @@ from app.assets.database.queries import create_content, create_record, mark_cont
 from app.assets.event_log import TAG
 from app.assets.scanner import SeedAssetSpec
 from app.assets.seeder import Progress, ScanPhase, State, _AssetSeeder, _ScanStage, _ScanState
+from app.assets.services.file_utils import ListingWalk, walk_listings
 
 
 EVENT_LINE_PATTERN = re.compile(
@@ -97,8 +98,10 @@ def _configure_fast_phase(
     )
     monkeypatch.setattr(
         seeder_module,
-        "collect_paths_for_roots",
-        lambda _roots, _progress=None, _should_stop=None: [str(path) for path in paths],
+        "list_root",
+        lambda _root, _should_stop=None, _once=[[str(path) for path in paths]]: ListingWalk(
+            _once.pop() if _once else [], {}, 0
+        ),
     )
     monkeypatch.setattr(
         seeder_module,
@@ -608,8 +611,10 @@ def test_batch_insert_failure_emits_only_the_exception_type(
     )
     monkeypatch.setattr(
         seeder_module,
-        "collect_paths_for_roots",
-        lambda roots, progress=None, should_stop=None: ["asset.safetensors"],
+        "list_root",
+        lambda root, should_stop=None, _once=[["asset.safetensors"]]: ListingWalk(
+            _once.pop() if _once else [], {}, 0
+        ),
     )
     monkeypatch.setattr(
         seeder_module,
@@ -801,12 +806,11 @@ def test_dirs_listed_counts_each_directory_the_walk_lists(tmp_path: Path) -> Non
     for relative in ("a/one.png", "a/b/two.png", "c/three.png", ".hidden/four.png"):
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / relative).write_bytes(b"x")
-    state = _ScanState()
 
-    files = scanner_module.list_files_recursively(str(tmp_path), state)
+    walk = walk_listings(str(tmp_path))
 
-    assert len(files) == 3
-    assert state.dirs_listed == 4  # root, a, a/b, c; the hidden directory is never listed
+    assert len(walk.files) == 3
+    assert walk.dirs_listed == 4  # root, a, a/b, c; the hidden directory is never listed
 
 
 def test_files_statted_counts_discovery_and_admission_stats_only_for_new_files(

@@ -1,15 +1,11 @@
 import os
-from typing import Callable, NamedTuple, Protocol
+from typing import Callable, NamedTuple
 
 from app.assets.services.gil import yield_gil
 
 # Longer run window for output rescans: they repeat after prompts, so pausing every
 # 2ms would add up to a much slower rescan.
 RESCAN_YIELD_RUN = 0.010
-
-
-class _DirListingCounter(Protocol):
-    dirs_listed: int
 
 
 def get_mtime_ns(stat_result: os.stat_result) -> int:
@@ -52,48 +48,6 @@ def is_visible(name: str) -> bool:
     return not name.startswith(".")
 
 
-def list_files_recursively(
-    base_dir: str,
-    counter: _DirListingCounter | None = None,
-    should_stop: Callable[[], bool] | None = None,
-) -> list[str]:
-    """Recursively list all files in a directory, following symlinks.
-
-    ``counter.dirs_listed`` gains one per directory os.walk listed. ``should_stop`` is
-    called before each directory; it may block, and True ends the walk early with a
-    partial list.
-    """
-    out: list[str] = []
-    base_abs = os.path.abspath(base_dir)
-    if not os.path.isdir(base_abs):
-        return out
-    # Track seen real directory identities to prevent circular symlink loops
-    seen_dirs: set[tuple[int, int]] = set()
-    for dirpath, subdirs, filenames in os.walk(
-        base_abs, topdown=True, followlinks=True
-    ):
-        if should_stop is not None and should_stop():
-            break
-        if counter is not None:
-            counter.dirs_listed += 1
-        try:
-            st = os.stat(dirpath)
-            dir_id = (st.st_dev, st.st_ino)
-        except OSError:
-            subdirs.clear()
-            continue
-        if dir_id in seen_dirs:
-            subdirs.clear()
-            continue
-        seen_dirs.add(dir_id)
-        subdirs[:] = [d for d in subdirs if is_visible(d)]
-        for name in filenames:
-            if not is_visible(name):
-                continue
-            out.append(os.path.abspath(os.path.join(dirpath, name)))
-    return out
-
-
 # dir path -> (visible file names, visible subdir names)
 DirListings = dict[str, tuple[list[str], list[str]]]
 
@@ -104,15 +58,22 @@ class ListingWalk(NamedTuple):
     dirs_listed: int
 
 
-def _list_visible_entries(dirpath: str) -> tuple[list[str], list[str]]:
+def _list_visible_entries(
+    dirpath: str, should_stop: Callable[[], bool] | None = None
+) -> tuple[list[str], list[str]] | None:
     """One directory's visible (file names, subdir names), classified as os.walk does:
     anything whose is_dir() is false or raises is a file. The exception is a symlink
     whose target is gone: it is left out, so a row for it reads as vanished, as it did
-    when the rescan stat'ed every row through the link."""
+    when the rescan stat'ed every row through the link.
+
+    ``should_stop`` is called before each entry, so a directory of 100k entries on a slow
+    share can pause part way; True abandons the directory and returns None."""
     files: list[str] = []
     subdirs: list[str] = []
     with os.scandir(dirpath) as entries:
         for entry in entries:
+            if should_stop is not None and should_stop():
+                return None
             yield_gil(run=RESCAN_YIELD_RUN)
             if not is_visible(entry.name):
                 continue
@@ -127,13 +88,19 @@ def _list_visible_entries(dirpath: str) -> tuple[list[str], list[str]]:
     return files, subdirs
 
 
-def walk_listings(base_dir: str) -> ListingWalk:
-    """list_files_recursively, also returning every directory listing it read.
+def walk_listings(base_dir: str, should_stop: Callable[[], bool] | None = None) -> ListingWalk:
+    """Every visible file under ``base_dir``, following symlinks, and every directory
+    listing read on the way.
 
-    Same traversal as the os.walk version (visit order, symlink following, device/inode
-    cycle guard, hidden filtering), except each directory is stat'ed before it is listed.
-    ``listings`` holds exactly the directories this walk listed, keyed by normalized
-    absolute path, so it doubles as the record of which directories the walk can vouch for.
+    The traversal is os.walk's (top-down, depth-first in listing order, following
+    symlinked directories), with a device/inode guard against symlink cycles and hidden
+    names left out. ``listings`` holds exactly the directories this walk listed, keyed by
+    normalized absolute path, so it doubles as the record of which directories the walk
+    can vouch for.
+
+    ``should_stop`` is called before each directory and each entry; it may block. Once it
+    returns True the walk ends: the result is partial, and the directory being read is in
+    neither ``files`` nor ``listings``.
     """
     files: list[str] = []
     listings: DirListings = {}
@@ -142,6 +109,8 @@ def walk_listings(base_dir: str) -> ListingWalk:
     seen_dirs: set[tuple[int, int]] = set()
     stack = [os.path.abspath(base_dir)]
     while stack:
+        if should_stop is not None and should_stop():
+            break
         yield_gil(run=RESCAN_YIELD_RUN)
         dirpath = stack.pop()
         try:
@@ -152,9 +121,12 @@ def walk_listings(base_dir: str) -> ListingWalk:
         if dir_id in seen_dirs:
             continue
         try:
-            names, subdirs = _list_visible_entries(dirpath)
+            listing = _list_visible_entries(dirpath, should_stop)
         except OSError:
             continue
+        if listing is None:
+            break
+        names, subdirs = listing
         seen_dirs.add(dir_id)
         listings[dirpath] = (names, subdirs)
         for name in names:
