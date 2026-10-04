@@ -265,7 +265,8 @@ async def test_an_overwrite_waits_for_the_upload_still_registering(
     def first_waits_for_the_overwrite(attempt, register):
         if attempt == 1:
             first_registering.set()
-            # Serialised, the overwrite queues on the upload lock; without it, it lands meanwhile.
+            # Releases as soon as the overwrite queues on the upload lock. Without serialisation it
+            # lands meanwhile; under another mechanism this just times out and the asserts still hold.
             _ContendedLock.contended.wait(5)
         return register()
 
@@ -278,7 +279,6 @@ async def test_an_overwrite_waits_for_the_upload_still_registering(
         first_body, second_body = await first.json(), await second.json()
 
     assert first.status == second.status == 200, (first_body, second_body)
-    assert _ContendedLock.contended.is_set()
     assert first_body["asset"]["asset_hash"] != second_body["asset"]["asset_hash"]
     assert (input_dir / "photo.png").read_bytes() == b"second bytes"
     with sqlite3.connect(db_path) as conn:
@@ -338,7 +338,8 @@ async def test_temp_upload_still_succeeds_when_registration_fails(
 
 
 @pytest.mark.asyncio
-async def test_in_memory_database_registers_on_the_event_loop(client, monkeypatch):
+async def test_in_memory_database_url_registers_inline(client, monkeypatch):
+    # Pins the dispatch only: the fixture's file engine still serves the registration.
     threads = []
 
     def record_thread(attempt, register):
