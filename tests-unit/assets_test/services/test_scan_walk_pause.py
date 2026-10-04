@@ -90,8 +90,11 @@ def test_walk_blocks_on_pause_and_resumes_with_the_same_files(tree):
 
 def test_walk_stops_on_cancel(tree):
     counts = _Counts()
-    list_files_recursively(str(tree), counts, _Gate(stop_at=3))
+    gate = _Gate(stop_at=3)
+    files = list_files_recursively(str(tree), counts, gate)
     assert counts.dirs_listed == 2
+    assert gate.calls == 3  # stopped walking, not just skipping the rest
+    assert len(files) < FILES
 
 
 def _paths(tree: Path) -> list[str]:
@@ -216,7 +219,7 @@ def test_a_prompt_starting_mid_walk_or_stat_parks_the_scan(scan, catalog, counte
 
     assert result[0][0] == FILES
     assert _rows(catalog) == FILES
-    assert state.paused_s >= 0.2
+    assert state.paused_s > 0.1  # the pause was timed; margin for the worker's lead-in
 
 
 def test_a_cancel_mid_walk_ends_the_scan_before_it_starts_seeding(scan, catalog):
