@@ -39,6 +39,7 @@ from comfy.cli_args import args
 
 import importlib
 
+from app import governance
 import folder_paths
 import latent_preview
 import node_helpers
@@ -2384,6 +2385,11 @@ async def init_external_custom_nodes():
                 if comfyui_manager.should_be_disabled(module_path):
                     logging.info(f"Blocked by policy: {module_path}")
                     continue
+
+            refusal = governance.pack_refusal(module_path)
+            if refusal is not None:
+                logging.warning(refusal)
+                continue
 
             time_before = time.perf_counter()
             success = await load_custom_node(module_path, base_node_names, module_parent="custom_nodes")
