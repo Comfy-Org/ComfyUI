@@ -45,6 +45,7 @@ from comfyui_version import __version__
 from app.frontend_management import FrontendManager, parse_version
 from comfy_api.internal import _ComfyNodeInternal
 from app.assets.event_log import emit
+from app.assets.manager import AssetRegistrationError
 from app.database.db import dependencies_available
 
 if dependencies_available():
@@ -397,7 +398,7 @@ class PromptServer():
                 return a.hexdigest() == b.hexdigest()
             return False
 
-        def image_upload(post, image_save_function=None):
+        async def image_upload(post, image_save_function=None):
             image = post.get("image")
             overwrite = post.get("overwrite")
             image_is_duplicate = False
@@ -443,13 +444,23 @@ class PromptServer():
 
                 resp = {"name" : filename, "subfolder": subfolder, "type": image_upload_type}
 
-                view = self.asset_manager.register_upload(
-                    abs_path=filepath,
-                    name=filename,
-                    upload_type=image_upload_type,
-                    subfolder=subfolder,
-                    content_written=not image_is_duplicate,
-                )
+                try:
+                    # Off the event loop: a locked database makes this wait seconds.
+                    view = await asyncio.to_thread(
+                        self.asset_manager.register_upload,
+                        abs_path=filepath,
+                        name=filename,
+                        upload_type=image_upload_type,
+                        subfolder=subfolder,
+                        content_written=not image_is_duplicate,
+                    )
+                except AssetRegistrationError as e:
+                    # The saved file stays: a retry with the same bytes reuses it and registers again.
+                    if e.locked:
+                        status, error = 503, "Asset registration failed: the database is busy, try again"
+                    else:
+                        status, error = 500, "Asset registration failed"
+                    return web.json_response({**resp, "error": error}, status=status, reason=error)
                 if view is not None:
                     resp["asset"] = {
                         "id": view.asset.id,
@@ -467,7 +478,7 @@ class PromptServer():
         @routes.post("/upload/image")
         async def upload_image(request):
             post = await request.post()
-            return image_upload(post)
+            return await image_upload(post)
 
 
         @routes.post("/upload/mask")
@@ -514,7 +525,7 @@ class PromptServer():
                         original_pil.putalpha(new_alpha)
                         original_pil.save(filepath, compress_level=4, pnginfo=metadata)
 
-            return image_upload(post, image_save_function)
+            return await image_upload(post, image_save_function)
 
         @routes.get("/view")
         async def view_image(request):

@@ -7,11 +7,13 @@ and chooses ``NoAssets`` when the requested mode cannot run.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable, Protocol
 
 from aiohttp import web
 
 from app.assets import mode
+from app.assets.event_log import error_kind
 from app.assets.lifecycle import record_hash_mode_transition_intent, run_shutdown, run_startup
 from app.database.db import dependencies_available, missing_dependencies
 from app.user_manager import UserManager
@@ -30,6 +32,29 @@ if dependencies_available():
     )
     from app.assets.services.path_utils import get_known_subfolder_tags
     from app.assets.services.schemas import RegisteredAsset, UploadAssetView
+
+# Each attempt already waits out SQLite's 5 s busy timeout, so three ride out a ~15 s write lock.
+_LOCKED_ATTEMPTS = 3
+_LOCKED_RETRY_PAUSE_SECONDS = 0.2
+
+
+class AssetRegistrationError(Exception):
+    """An uploaded file was saved but could not be registered as an asset."""
+
+    def __init__(self, locked: bool):
+        super().__init__("database is locked" if locked else "asset registration failed")
+        self.locked = locked
+
+
+def _retry_while_locked(register: Callable[[], Any]) -> Any:
+    for _ in range(_LOCKED_ATTEMPTS - 1):
+        try:
+            return register()
+        except Exception as exc:
+            if error_kind(exc) != "database_locked":
+                raise
+        time.sleep(_LOCKED_RETRY_PAUSE_SECONDS)
+    return register()
 
 
 class AssetManager(Protocol):
@@ -60,7 +85,9 @@ class AssetManager(Protocol):
         subfolder: str,
         *,
         content_written: bool,
-    ) -> UploadAssetView | None: ...
+    ) -> UploadAssetView | None:
+        """None when assets are disabled; raises AssetRegistrationError if registration fails."""
+        ...
 
     def register_executed_output(
         self, abs_path: str, job_id: str | None
@@ -195,12 +222,12 @@ class AssetsEnabled:
         try:
             tag = upload_type if upload_type in ("input", "output") else "input"
             tags = [tag] + get_known_subfolder_tags(subfolder)
-            result = register_file_in_place(
+            result = _retry_while_locked(lambda: register_file_in_place(
                 abs_path=abs_path,
                 name=name,
                 tags=tags,
                 content_written=content_written,
-            )
+            ))
             asset = RegisteredAsset(
                 id=result.ref.id,
                 content_id=result.content_id,
@@ -214,9 +241,9 @@ class AssetsEnabled:
                 mime_type=result.asset.mime_type,
                 tags=result.tags,
             )
-        except Exception:
+        except Exception as exc:
             logging.warning("Failed to register uploaded image as asset", exc_info=True)
-            return None
+            raise AssetRegistrationError(error_kind(exc) == "database_locked") from exc
 
     def register_executed_output(
         self, abs_path: str, job_id: str | None
