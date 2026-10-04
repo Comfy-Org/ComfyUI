@@ -88,6 +88,24 @@ def valid_workflow_metadata(json_data: dict) -> Optional[dict]:
     return None
 
 
+def workflow_metadata_from_prompt(extra_data: dict) -> Optional[dict]:
+    """Fallback for a client that sends a workflow but no explicit metadata.
+
+    Reads the same id /api/jobs reports, so the websocket messages of a prompt
+    carry it whether or not the client knows about workflow_metadata.
+    """
+    extra_pnginfo = extra_data.get("extra_pnginfo")
+    if not isinstance(extra_pnginfo, dict):
+        return None
+    workflow = extra_pnginfo.get("workflow")
+    if not isinstance(workflow, dict):
+        return None
+    workflow_id = workflow.get("id")
+    if isinstance(workflow_id, str) and workflow_id:
+        return {"workflow_id": workflow_id}
+    return None
+
+
 def _remove_sensitive_from_queue(queue: list) -> list:
     """Remove sensitive data (index 5) from queue item tuples."""
     return [item[:5] for item in queue]
@@ -1167,6 +1185,8 @@ class PromptServer():
 
                 extra_data.pop("workflow_metadata", None)
                 metadata = valid_workflow_metadata(json_data)
+                if metadata is None:
+                    metadata = workflow_metadata_from_prompt(extra_data)
                 if metadata is not None:
                     extra_data["workflow_metadata"] = metadata
 

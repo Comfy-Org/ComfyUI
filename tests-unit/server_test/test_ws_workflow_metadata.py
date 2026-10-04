@@ -107,3 +107,49 @@ class TestValidWorkflowMetadata:
         prompt_server.workflow_metadata = {}
         prompt_server.send_sync("executing", {"prompt_id": "p1"})
         assert sent_data(prompt_server) == [{"prompt_id": "p1"}]
+
+
+class TestWorkflowMetadataFromPrompt:
+    """Cloud stamps workflow_id for any client because it reads the id from the
+    job record. Core reads the same id out of the submitted workflow, so a
+    client that knows nothing about workflow_metadata gets the same contract."""
+
+    @staticmethod
+    def pnginfo(workflow):
+        return {"extra_pnginfo": {"workflow": workflow}}
+
+    def test_id_in_the_workflow_is_used(self):
+        assert server.workflow_metadata_from_prompt(
+            self.pnginfo({"id": "abc", "nodes": []})
+        ) == {"workflow_id": "abc"}
+
+    def test_absent_when_the_workflow_has_no_id(self):
+        assert server.workflow_metadata_from_prompt(self.pnginfo({"nodes": []})) is None
+
+    def test_absent_when_there_is_no_workflow(self):
+        assert server.workflow_metadata_from_prompt({}) is None
+        assert server.workflow_metadata_from_prompt({"extra_pnginfo": {}}) is None
+
+    @pytest.mark.parametrize("value", ["abc", 7, [], None])
+    def test_non_dict_extra_pnginfo_is_ignored(self, value):
+        assert server.workflow_metadata_from_prompt({"extra_pnginfo": value}) is None
+
+    @pytest.mark.parametrize("value", ["abc", 7, [], None])
+    def test_non_dict_workflow_is_ignored(self, value):
+        assert server.workflow_metadata_from_prompt(self.pnginfo(value)) is None
+
+    @pytest.mark.parametrize("value", ["", 7, None, {}])
+    def test_non_string_or_empty_id_is_ignored(self, value):
+        assert (
+            server.workflow_metadata_from_prompt(self.pnginfo({"id": value})) is None
+        )
+
+    def test_explicit_metadata_wins_over_the_workflow_id(self):
+        # The route prefers the validated field and only falls back, so a client
+        # that sends both gets the one it asked for.
+        json_data = {"workflow_metadata": {"workflow_id": "explicit"}}
+        extra_data = self.pnginfo({"id": "from-workflow"})
+        metadata = server.valid_workflow_metadata(json_data)
+        if metadata is None:
+            metadata = server.workflow_metadata_from_prompt(extra_data)
+        assert metadata == {"workflow_id": "explicit"}
