@@ -787,7 +787,7 @@ def test_save_to_mp4_writes_metadata_before_media(video_components, tmp_path):
 
 def create_transcode_source(
     width=64, height=64, frames=30, fps=30, audio_streams=1, undecodable_audio=0, rotation=False,
-    container_format="mov", audio_codec="pcm_s16le",
+    container_format="mov", audio_codec="pcm_s16le", audio_waveform=None,
 ):
     """Create a temp video that save_to must transcode (mpeg4 video, so codec != h264).
 
@@ -818,8 +818,9 @@ def create_transcode_source(
         for stream in audio:
             for offset in range(0, 44100 * frames // fps, 1024):
                 n = min(1024, 44100 * frames // fps - offset)
+                samples = torch.zeros(1, n, dtype=torch.int16).numpy() if audio_waveform is None else audio_waveform[:, offset:offset + n]
                 audio_frame = av.AudioFrame.from_ndarray(
-                    torch.zeros(1, n, dtype=torch.int16).numpy(), format="s16", layout="mono"
+                    samples, format="s16", layout="mono"
                 )
                 audio_frame.sample_rate = 44100
                 audio_frame.pts = offset
@@ -1502,13 +1503,19 @@ def test_as_trimmed_strict_duration_gates_unavailable_length(simple_video_file):
 def test_chained_file_trim_preserves_frame_window(
     tmp_path, parent_start, parent_duration, start, duration, strict, first_frame, last_frame, bytes_io,
 ):
-    source_path = create_transcode_source(frames=24, fps=4)
+    samples_per_frame = 44100 // 4
+    sample_indices = np.arange(24 * samples_per_frame)
+    frequencies = 200 + 20 * (sample_indices // samples_per_frame)
+    audio_waveform = np.round(12000 * np.sin(2 * np.pi * frequencies * sample_indices / 44100)).astype(np.int16)[None, :]
+    source_path = create_transcode_source(frames=24, fps=4, audio_waveform=audio_waveform)
     try:
         with open(source_path, "rb") as source_file:
             source_bytes = source_file.read()
         source = io.BytesIO(source_bytes) if bytes_io else source_path
         video = VideoFromFile(source)
         original = video.get_components()
+        source_audio = original.audio["waveform"]
+        assert source_audio.abs().max() > 0.1
         parent = VideoSlice.execute(video, parent_start, parent_duration, False).args[0]
         parent_window = parent.get_active_trim_window()
 
@@ -1520,15 +1527,31 @@ def test_chained_file_trim_preserves_frame_window(
         assert trimmed.get_duration() == pytest.approx(expected_duration, abs=EPSILON)
         assert components.audio is not None
         expected_samples = round(expected_duration * components.audio["sample_rate"])
-        assert abs(components.audio["waveform"].shape[-1] - expected_samples) <= 1
+        pcm_audio = components.audio["waveform"]
+        assert abs(pcm_audio.shape[-1] - expected_samples) <= 1
+        first_sample, last_sample = first_frame * samples_per_frame, last_frame * samples_per_frame
+        # Timestamp-to-sample conversion can round the boundary by one sample.
+        assert any(
+            torch.equal(pcm_audio, source_audio[..., first_sample + shift:first_sample + shift + pcm_audio.shape[-1]])
+            for shift in (-1, 0, 1)
+        )
 
         output = str(tmp_path / "trimmed.mp4")
         trimmed.save_to(output, format=VideoContainer.MP4, codec=VideoCodec.H264, crf=0)
         assert decoded_video_frames(output) == decoded_video_frames(source_path)[first_frame:last_frame]
         with av.open(output) as container:
             audio_stream = container.streams.audio[0]
-            sample_count = sum(frame.samples for frame in container.decode(audio_stream))
-            assert sample_count / audio_stream.sample_rate == pytest.approx(expected_duration, abs=0.1)
+            saved_audio = np.concatenate([frame.to_ndarray() for frame in container.decode(audio_stream)], axis=-1)
+            assert audio_stream.sample_rate == components.audio["sample_rate"]
+            assert saved_audio.shape[-1] / audio_stream.sample_rate == pytest.approx(expected_duration, abs=0.1)
+        expected_audio = source_audio[0, :, first_sample:last_sample].numpy()
+        # Check every tone, excluding AAC transients at each tone boundary.
+        for frame_index in range(last_frame - first_frame):
+            audio_start = frame_index * samples_per_frame + 1024
+            audio_end = (frame_index + 1) * samples_per_frame - 1024
+            assert saved_audio.shape[-1] >= audio_end
+            difference = saved_audio[:, audio_start:audio_end] - expected_audio[:, audio_start:audio_end]
+            assert np.sqrt(np.mean(difference ** 2)) < 0.03
 
         assert video.get_active_trim_window() == (0.0, 0.0)
         assert parent.get_active_trim_window() == parent_window
