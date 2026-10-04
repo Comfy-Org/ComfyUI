@@ -2,6 +2,7 @@
 for every directory and file, so a prompt that starts during them stops the scan at once
 instead of after the whole library has been walked and stat'ed."""
 
+import os
 import threading
 import time
 from contextlib import contextmanager
@@ -15,7 +16,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.assets import scanner, seeder as seeder_module
 from app.assets.database.models import AssetContent, Base
-from app.assets.scanner_admission import _WATCH_LIST
+from app.assets.scanner_admission import _WATCH_LIST, _two_stat_admit
 from app.assets.services.file_utils import list_files_recursively
 
 FILES = 6
@@ -143,6 +144,11 @@ def test_spec_loops_return_nothing_on_cancel(tree, loop):
     assert counts.files_statted == min(start, FILES) + (2 if loop != "spec" else FILES)
 
 
+def test_second_stat_returns_nothing_on_cancel(tree):
+    candidates = [(p, os.stat(p)) for p in _paths(tree)]
+    assert _two_stat_admit(candidates, None, _Gate(stop_at=3)) == ([], [])
+
+
 @pytest.fixture
 def catalog():
     engine = sa.create_engine("sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False})
@@ -228,6 +234,7 @@ def test_a_cancel_mid_walk_ends_the_scan_before_it_starts_seeding(scan, catalog)
     state.on_count = lambda name, n: name == "dirs_listed" and n == 3 and instance.cancel()
 
     assert instance._run_fast_phase(("input", "output")) == (0, 0, 0)
+    assert state.dirs_listed == 3  # the walk itself stopped
     assert state.files_statted == 0
     assert "assets.seed.started" not in events
     assert state.cancel_stage == seeder_module._ScanStage.FAST_SCAN.value
