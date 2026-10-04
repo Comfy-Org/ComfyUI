@@ -1067,6 +1067,11 @@ components:
                 workflow_id:
                     description: UUID identifying the cloud workflow entity to associate with this job
                     type: string
+                workflow_metadata:
+                    additionalProperties:
+                        type: string
+                    description: 'Key/values echoed on every json websocket message sent while this prompt runs, so a client can tell which of its open workflows a message belongs to. The server does not interpret the contents. Limited to 256 bytes serialised; a larger or non-object value is ignored. Note the `workflow_id` key a client typically sends here is the graph id from `extra_pnginfo.workflow.id`, which is not the same thing as the `workflow_id` field above.'
+                    type: object
                 workflow_version_id:
                     description: UUID identifying the workflow version to associate with this job
                     type: string
