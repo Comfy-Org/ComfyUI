@@ -83,6 +83,36 @@ class OrNode(io.ComfyNode):
         return io.NodeOutput(any(values.values()))
 
 
+class BranchNode(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        mtemplate = io.MatchType.Template("switch")
+        minput = io.MatchType.Input("branch", template=mtemplate, lazy=True, optional=True)
+        template = _io.Autogrow.TemplatePrefix(input=minput, prefix="branch", min=1, max=10)
+        return io.Schema(
+            node_id="BranchNode",
+            display_name="Branch",
+            category="logic",
+            is_experimental=True,
+            inputs=[
+                io.String.Input("branch"),
+                io.Array.Input("branch_names"),
+                _io.Autogrow.Input("autogrow", template=template),
+            ],
+            outputs=[
+                io.MatchType.Output(template=mtemplate, display_name="output"),
+            ],
+        )
+
+    @classmethod
+    def check_lazy_status(cls, branch, branch_names, autogrow):
+        return ['autogrow.' + list(autogrow.keys())[branch_names.index(branch)]]
+
+    @classmethod
+    def execute(cls, branch, branch_names, autogrow) -> io.NodeOutput:
+        return list(autogrow.values())[branch_names.index(branch)],
+
+
 class SwitchNode(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -341,6 +371,7 @@ class LogicExtension(ComfyExtension):
             NotNode,
             AndNode,
             OrNode,
+            BranchNode,
             # SoftSwitchNode,
             # ConvertStringToComboNode,
             # DCTestNode,
