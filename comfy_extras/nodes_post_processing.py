@@ -573,7 +573,7 @@ def batch_latents(latents: list[dict[str, torch.Tensor]]) -> dict[str, torch.Ten
 class BatchImagesNode(io.ComfyNode):
     @classmethod
     def define_schema(cls):
-        autogrow_template = io.Autogrow.TemplatePrefix(io.Image.Input("image"), prefix="image", min=1, max=50)
+        autogrow_template = io.Autogrow.TemplatePrefix(io.Image.Input("image"), prefix="image", min=0, max=50)
         return io.Schema(
             node_id="BatchImagesNode",
             display_name="Batch Images",
@@ -590,7 +590,10 @@ class BatchImagesNode(io.ComfyNode):
 
     @classmethod
     def execute(cls, images: io.Autogrow.Type) -> io.NodeOutput:
-        return io.NodeOutput(batch_images(list(images.values())))
+        image_list = list(images.values())
+        if not image_list:
+            raise ValueError("Batch Images requires at least one connected image input.")
+        return io.NodeOutput(batch_images(image_list))
 
 class BatchMasksNode(io.ComfyNode):
     @classmethod
