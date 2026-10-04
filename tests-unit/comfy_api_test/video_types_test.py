@@ -7,12 +7,13 @@ import av
 import io
 import numpy as np
 from fractions import Fraction
-from comfy_api.input_impl.video_types import VideoFromFile, VideoFromComponents
+from comfy_api.input_impl.video_types import VideoFromFile, VideoFromComponents, VideoFromList
 from comfy_api.latest._util.video_types import normalize_crop_rect
 from comfy_api.util.video_types import VideoComponents, VideoContainer, VideoCodec
 from comfy_api.input.basic_types import AudioInput
 from av.error import InvalidDataError
 from av.video.reformatter import ColorPrimaries, ColorRange, ColorTrc
+from comfy_extras.nodes_video import VideoSlice
 
 EPSILON = 0.0001
 
@@ -1481,6 +1482,153 @@ def test_as_trimmed_strict_duration_gates_unavailable_length(simple_video_file):
     assert relaxed is not None
     assert relaxed.get_duration() < 10.0
     assert relaxed.get_duration() == pytest.approx(video.get_duration(), abs=EPSILON)
+
+
+@pytest.mark.parametrize(
+    "parent_start,parent_duration,start,duration,strict,first_frame,last_frame,bytes_io",
+    [
+        pytest.param(2, 2, 1, 0, False, 12, 16, False, id="remaining-bounded-clip"),
+        pytest.param(2, 2, 0, 0, False, 8, 16, False, id="bounded-identity"),
+        pytest.param(2, 2, 1, 2, False, 12, 16, False, id="relaxed-duration"),
+        pytest.param(2, 2, -0.5, 0.5, True, 14, 16, False, id="negative-start"),
+        pytest.param(-4, 2, 1, 0, False, 12, 16, False, id="negative-parent"),
+        pytest.param(-4, 2, -0.5, 0.5, True, 14, 16, False, id="negative-parent-and-start"),
+        pytest.param(2, 2, -10, 0, False, 8, 16, False, id="negative-start-clamped"),
+        pytest.param(2, 2, 0.5, 0.5, True, 10, 12, False, id="bounded-control"),
+        pytest.param(2, 0, 1, 0, False, 12, 24, False, id="open-ended-control"),
+        pytest.param(2, 2, 1, 0, False, 12, 16, True, id="bytesio"),
+    ],
+)
+def test_chained_file_trim_preserves_frame_window(
+    tmp_path, parent_start, parent_duration, start, duration, strict, first_frame, last_frame, bytes_io,
+):
+    source_path = create_transcode_source(frames=24, fps=4)
+    try:
+        with open(source_path, "rb") as source_file:
+            source_bytes = source_file.read()
+        source = io.BytesIO(source_bytes) if bytes_io else source_path
+        video = VideoFromFile(source)
+        original = video.get_components()
+        parent = VideoSlice.execute(video, parent_start, parent_duration, False).args[0]
+        parent_window = parent.get_active_trim_window()
+
+        trimmed = VideoSlice.execute(parent, start, duration, strict).args[0]
+        components = trimmed.get_components()
+        expected = original.images[first_frame:last_frame]
+        torch.testing.assert_close(components.images, expected, rtol=0, atol=0)
+        expected_duration = (last_frame - first_frame) / 4
+        assert trimmed.get_duration() == pytest.approx(expected_duration, abs=EPSILON)
+        assert components.audio is not None
+        expected_samples = round(expected_duration * components.audio["sample_rate"])
+        assert abs(components.audio["waveform"].shape[-1] - expected_samples) <= 1
+
+        output = str(tmp_path / "trimmed.mp4")
+        trimmed.save_to(output, format=VideoContainer.MP4, codec=VideoCodec.H264, crf=0)
+        assert decoded_video_frames(output) == decoded_video_frames(source_path)[first_frame:last_frame]
+        with av.open(output) as container:
+            audio_stream = container.streams.audio[0]
+            sample_count = sum(frame.samples for frame in container.decode(audio_stream))
+            assert sample_count / audio_stream.sample_rate == pytest.approx(expected_duration, abs=0.1)
+
+        assert video.get_active_trim_window() == (0.0, 0.0)
+        assert parent.get_active_trim_window() == parent_window
+        assert trimmed.get_stream_source() is source
+        torch.testing.assert_close(trimmed.get_components().images, expected, rtol=0, atol=0)
+        with open(source_path, "rb") as source_file:
+            assert source_file.read() == source_bytes
+        if bytes_io:
+            assert source.getvalue() == source_bytes
+    finally:
+        os.unlink(source_path)
+
+
+@pytest.mark.parametrize(
+    "start,duration,strict",
+    [
+        pytest.param(1, 2, True, id="strict-duration"),
+        pytest.param(2, 0, False, id="at-parent-end"),
+        pytest.param(2.5, 0, False, id="past-parent-end"),
+    ],
+)
+def test_chained_file_trim_rejects_unavailable_window(start, duration, strict):
+    source = create_transcode_source(frames=24, fps=4, audio_streams=0)
+    try:
+        parent = VideoSlice.execute(VideoFromFile(source), 2, 2, False).args[0]
+        assert parent.as_trimmed(start, duration, strict_duration=strict) is None
+        with pytest.raises(ValueError, match="Failed to slice video"):
+            VideoSlice.execute(parent, start, duration, strict)
+        assert parent.get_active_trim_window() == (2.0, 2.0)
+    finally:
+        os.unlink(source)
+
+
+@pytest.mark.parametrize(
+    "parent_duration,start,duration,first_frame,last_frame",
+    [(0.7, 0.3, 0.4, 3, 7), (0.3, 0.1, 0.2, 1, 3)],
+)
+def test_chained_file_trim_accepts_decimal_boundary(
+    tmp_path, parent_duration, start, duration, first_frame, last_frame,
+):
+    source = create_transcode_source(frames=30, fps=10, audio_streams=0)
+    try:
+        video = VideoFromFile(source)
+        parent = VideoSlice.execute(video, 0, parent_duration, True).args[0]
+        trimmed = VideoSlice.execute(parent, start, duration, True).args[0]
+        expected = video.get_components().images[first_frame:last_frame]
+        torch.testing.assert_close(trimmed.get_components().images, expected, rtol=0, atol=0)
+        output = str(tmp_path / "decimal-trim.mp4")
+        trimmed.save_to(output, codec=VideoCodec.H264, crf=0)
+        assert decoded_video_frames(output) == decoded_video_frames(source)[first_frame:last_frame]
+        assert parent.get_active_trim_window() == (0.0, parent_duration)
+    finally:
+        os.unlink(source)
+
+
+def test_chained_file_trim_noop_keeps_remux(tmp_path):
+    source = create_test_video(width=64, height=64)
+    try:
+        video = VideoFromFile(source)
+        original_packets = video_packet_bytes(source)
+        trimmed = VideoSlice.execute(video, 0, 0, False).args[0]
+        trimmed = VideoSlice.execute(trimmed, 0, 0, False).args[0]
+        output = str(tmp_path / "remuxed.mp4")
+        trimmed.save_to(output)
+        assert video_packet_bytes(output) == original_packets
+        assert decoded_video_frames(output) == decoded_video_frames(source)
+        assert trimmed.get_active_trim_window() == video.get_active_trim_window() == (0.0, 0.0)
+    finally:
+        os.unlink(source)
+
+
+def test_chained_file_trim_matches_list_wrapper():
+    source = create_transcode_source(frames=24, fps=4, audio_streams=0)
+    try:
+        video = VideoFromFile(source)
+        parent = VideoSlice.execute(video, 2, 2, False).args[0]
+        trimmed = VideoSlice.execute(VideoFromList([parent]), 1, 0, False).args[0]
+        torch.testing.assert_close(trimmed.get_components().images, video.get_components().images[12:16], rtol=0, atol=0)
+        assert parent.get_active_trim_window() == (2.0, 2.0)
+    finally:
+        os.unlink(source)
+
+
+def test_chained_file_trim_preserves_crop(tmp_path):
+    source = str(tmp_path / "marker.mp4")
+    _create_marker_video(source, marker_x=6, frames=24, fps=4)
+    video = VideoFromFile(source)
+    cropped = video.as_cropped(4, 2, 32, 16)
+    parent = VideoSlice.execute(cropped, 2, 2, False).args[0]
+    trimmed = VideoSlice.execute(parent, 0.5, 0.5, True).args[0]
+    expected = video.get_components().images[10:12, 2:18, 4:36]
+    torch.testing.assert_close(trimmed.get_components().images, expected, rtol=0, atol=0)
+    assert trimmed.get_dimensions() == (32, 16)
+    assert parent.get_active_trim_window() == (2.0, 2.0)
+
+    output = str(tmp_path / "cropped-trim.mp4")
+    trimmed.save_to(output, codec=VideoCodec.H264, crf=0)
+    with av.open(output) as container:
+        actual = np.stack([frame.to_ndarray(format="gbrpf32le") for frame in container.decode(video=0)])
+    np.testing.assert_allclose(actual, expected.numpy(), rtol=0, atol=EPSILON)
 
 
 def test_normalize_crop_rect_aligns_odd_origin_to_chroma_grid():
