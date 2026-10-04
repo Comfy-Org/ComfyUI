@@ -55,6 +55,8 @@ def _two_stat_admit(
     returns ([], []) at once."""
     if not paths_with_stats:
         return [], []
+    # The caller took the first stat; give a file still being written (a model mid-download)
+    # time to change size or mtime before the second, so it goes on the watch list instead.
     time.sleep(0.1)
     admitted: list[str] = []
     watched: list[str] = []
