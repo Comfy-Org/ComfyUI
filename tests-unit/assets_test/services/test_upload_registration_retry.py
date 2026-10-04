@@ -31,7 +31,9 @@ finally:
 from app.assets import manager as manager_module
 from app.assets.database.models import Base
 from app.assets.manager import AssetRegistrationError, AssetsEnabled, NoAssets
+from app.assets.helpers import to_stored_hash
 from app.assets.services import ingest as ingest_module
+from app.assets.services.hashing import compute_blake3_hash
 from app.assets.services.ingest import register_file_in_place
 
 
@@ -95,6 +97,13 @@ def _write_lock(db_path: Path):
 def _asset_count(db_path: Path) -> int:
     with sqlite3.connect(db_path) as conn:
         return conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+
+
+@pytest.fixture(autouse=True)
+def restore_prompt_server_instance(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        server.PromptServer, "instance", getattr(server.PromptServer, "instance", None), raising=False
+    )
 
 
 async def _serve(manager):
@@ -234,29 +243,42 @@ async def test_locked_registration_does_not_block_other_requests(client, db_path
     assert answered_while_registering == [True]
 
 
+class _ContendedLock(asyncio.Lock):
+    """Sets ``contended`` when an acquire finds the lock already held."""
+
+    contended = threading.Event()
+
+    async def acquire(self):
+        if self.locked():
+            type(self).contended.set()
+        return await super().acquire()
+
+
 @pytest.mark.asyncio
 async def test_an_overwrite_waits_for_the_upload_still_registering(
-    client, db_path, input_dir, monkeypatch
+    input_dir, db_path, monkeypatch
 ):
-    first_registering, second_registering = threading.Event(), threading.Event()
+    _ContendedLock.contended = threading.Event()
+    monkeypatch.setattr(asyncio, "Lock", _ContendedLock)
+    first_registering = threading.Event()
 
-    def first_waits_for_second(attempt, register):
+    def first_waits_for_the_overwrite(attempt, register):
         if attempt == 1:
             first_registering.set()
-            # Without serialisation the overwrite lands and starts registering meanwhile.
-            second_registering.wait(0.5)
-        else:
-            second_registering.set()
+            # Serialised, the overwrite queues on the upload lock; without it, it lands meanwhile.
+            _ContendedLock.contended.wait(5)
         return register()
 
-    _wrap_registration(monkeypatch, first_waits_for_second)
-    first = asyncio.ensure_future(_upload(client, b"first bytes"))
-    assert await asyncio.get_running_loop().run_in_executor(None, first_registering.wait, 5)
-    second = await _upload(client, b"second bytes", overwrite="true")
-    first = await first
+    _wrap_registration(monkeypatch, first_waits_for_the_overwrite)
+    async with await _serve(AssetsEnabled(_ArgsStub())) as client:
+        first = asyncio.ensure_future(_upload(client, b"first bytes"))
+        assert await asyncio.get_running_loop().run_in_executor(None, first_registering.wait, 5)
+        second = await _upload(client, b"second bytes", overwrite="true")
+        first = await first
+        first_body, second_body = await first.json(), await second.json()
 
-    first_body, second_body = await first.json(), await second.json()
     assert first.status == second.status == 200, (first_body, second_body)
+    assert _ContendedLock.contended.is_set()
     assert first_body["asset"]["asset_hash"] != second_body["asset"]["asset_hash"]
     assert (input_dir / "photo.png").read_bytes() == b"second bytes"
     with sqlite3.connect(db_path) as conn:
@@ -279,7 +301,8 @@ async def test_mask_upload_registers_the_composited_file(client, db_path, input_
 
     data = await resp.json()
     assert resp.status == 200, data
-    assert data["asset"]["id"]
+    digest, _ = compute_blake3_hash(str(input_dir / "mask.png"))
+    assert data["asset"]["asset_hash"] == to_stored_hash(digest)
     with Image.open(input_dir / "mask.png") as saved:
         assert saved.getpixel((0, 0)) == (255, 0, 0, 128)
 
@@ -303,13 +326,14 @@ async def test_temp_upload_still_succeeds_when_registration_fails(
     temp_dir = tmp_path / "temp"
     temp_dir.mkdir()
     monkeypatch.setattr(folder_paths, "get_temp_directory", lambda: str(temp_dir))
-    _fail_with(monkeypatch, *(_locked_error() for _ in range(3)))
+    attempts = _fail_with(monkeypatch, *(_locked_error() for _ in range(3)))
 
     resp = await _upload(client, b"webcam frame", upload_type="temp")
 
     body = await resp.json()
     assert resp.status == 200, body
     assert body == {"name": "photo.png", "subfolder": "", "type": "temp"}
+    assert len(attempts) == 1, "a temp upload is not held up retrying"
     assert (temp_dir / "photo.png").read_bytes() == b"webcam frame"
 
 
@@ -322,7 +346,7 @@ async def test_in_memory_database_registers_on_the_event_loop(client, monkeypatc
         return register()
 
     _wrap_registration(monkeypatch, record_thread)
-    monkeypatch.setattr(server, "is_memory_db", lambda: True)
+    monkeypatch.setattr(args, "database_url", "sqlite:///:memory:")
 
     resp = await _upload(client, b"in memory")
 
@@ -424,3 +448,26 @@ def test_register_upload_retry_after_the_reconcile_committed(input_dir, db_path,
             "SELECT hash FROM asset_contents WHERE path = ? AND is_missing = 0", (str(path),)
         ).fetchall()
     assert live == [(new.asset_hash,)]
+
+
+def test_a_lock_reading_back_the_record_does_not_commit_a_second_one(
+    input_dir, db_path, monkeypatch
+):
+    path = input_dir / "readback.png"
+    path.write_bytes(b"read back")
+    real_read = ingest_module._record_to_upload_result
+    reads = []
+
+    def read_locked_once(*args, **kwargs):
+        reads.append(args)
+        if len(reads) == 1:
+            raise _locked_error()
+        return real_read(*args, **kwargs)
+
+    monkeypatch.setattr(ingest_module, "_record_to_upload_result", read_locked_once)
+
+    view = _register(AssetsEnabled(_ArgsStub()), path)
+
+    assert view is not None
+    assert len(reads) == 2
+    assert _asset_count(db_path) == 1

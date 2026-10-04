@@ -47,8 +47,8 @@ class AssetRegistrationError(Exception):
         self.locked = locked
 
 
-def _retry_while_locked(register: Callable[[], Any]) -> Any:
-    for _ in range(_LOCKED_ATTEMPTS - 1):
+def _retry_while_locked(register: Callable[[], Any], attempts: int = _LOCKED_ATTEMPTS) -> Any:
+    for _ in range(attempts - 1):
         try:
             return register()
         except Exception as exc:
@@ -223,12 +223,13 @@ class AssetsEnabled:
         try:
             tag = upload_type if upload_type in ("input", "output") else "input"
             tags = [tag] + get_known_subfolder_tags(subfolder)
+            # A temp upload succeeds without an asset, so it isn't held up retrying.
             result = _retry_while_locked(lambda: register_file_in_place(
                 abs_path=abs_path,
                 name=name,
                 tags=tags,
                 content_written=content_written,
-            ))
+            ), attempts=1 if upload_type == "temp" else _LOCKED_ATTEMPTS)
             asset = RegisteredAsset(
                 id=result.ref.id,
                 content_id=result.content_id,
