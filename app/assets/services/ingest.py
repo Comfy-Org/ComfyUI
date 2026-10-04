@@ -16,7 +16,7 @@ import os
 import shutil
 from typing import Any, NamedTuple, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import false, func, select
 from sqlalchemy.orm import Session
 
 from app.assets import mode
@@ -318,7 +318,7 @@ def _reconcile_live_content_at_path(
     existing = session.scalars(
         select(AssetContent).where(
             AssetContent.path == locator,
-            AssetContent.is_missing.is_(False),
+            AssetContent.is_missing == false(),
         )
     ).first()
     if existing is None:
@@ -373,7 +373,7 @@ def _settle_destination_before_write(session: Session, dest_abs: str) -> None:
     existing = session.scalars(
         select(AssetContent).where(
             AssetContent.path == dest_abs,
-            AssetContent.is_missing.is_(False),
+            AssetContent.is_missing == false(),
         )
     ).first()
     if existing is None:
@@ -671,7 +671,7 @@ def register_cached_output(
         with create_session() as session:
             existing = session.scalars(
                 select(AssetContent).where(
-                    AssetContent.path == locator, AssetContent.is_missing.is_(False)
+                    AssetContent.path == locator, AssetContent.is_missing == false()
                 )
             ).first()
             if existing is None:
@@ -750,7 +750,7 @@ def register_executed_output(
                 existing = session.scalars(
                     select(AssetContent).where(
                         AssetContent.path == locator,
-                        AssetContent.is_missing.is_(False),
+                        AssetContent.is_missing == false(),
                     )
                 ).first()
                 if existing is not None:
