@@ -11,9 +11,10 @@ from unittest.mock import patch
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.orm import Session as SASession, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from app.assets import scanner, seeder as seeder_module
-from app.assets.database.models import AssetContent
+from app.assets.database.models import AssetContent, Base
 from app.assets.scanner import insert_asset_specs
 from app.assets.scanner_admission import _WATCH_LIST
 
@@ -37,6 +38,17 @@ def roots(temp_dir: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     return dirs
 
 
+@pytest.fixture
+def db_engine():
+    """One in-memory database shared with the seeder's scan thread."""
+    engine = sa.create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
 @pytest.fixture(autouse=True)
 def isolated_state(db_engine):
     @contextmanager
@@ -52,13 +64,10 @@ def isolated_state(db_engine):
     _WATCH_LIST.clear()
 
 
-def _scan(roots: tuple[str, ...]) -> tuple[int, int, int]:
-    seeder = seeder_module._AssetSeeder()
-    seeder._scan_state = seeder_module._ScanState()
-    seeder._phase = seeder_module.ScanPhase.FAST
-    seeder._run_gate.set()
-    seeder._cancel_event.clear()
-    return seeder._run_fast_phase(roots)
+def _scan(roots: tuple[str, ...], phase=seeder_module.ScanPhase.FAST, seeder=None) -> None:
+    seeder = seeder or seeder_module._AssetSeeder()
+    assert seeder.start(roots=roots, phase=phase)
+    assert seeder.wait(timeout=60)
 
 
 def _write_files(directory: Path, prefix: str, count: int) -> list[Path]:
@@ -88,19 +97,51 @@ def test_full_scan_catalogs_every_other_file_and_warns_once(roots, session, capl
         roots["output"], "out", N_FILES // 2
     )
     _write_bad(roots["input"])
-    _write_bad(roots["output"])
+    # os.walk lists a folder's files before its subfolders, so this bad file comes last,
+    # in the third insert batch, never in the input one's.
+    (roots["output"] / "z").mkdir()
+    _write_bad(roots["output"] / "z")
 
     with caplog.at_level(logging.INFO):
-        created, _skipped, total = _scan(("models", "input", "output"))
+        _scan(("models", "input", "output"))
 
-    assert total == N_FILES + 2
-    assert created == N_FILES
     assert _live_paths(session) == {str(p) for p in good}
     warnings = [m for m in _messages(caplog, logging.WARNING) if "not valid UTF-8" in m]
     assert len(warnings) == 1
     assert "Skipped 2 file(s)" in warnings[0] and repr(BAD_NAME)[2:-1] in warnings[0]
     assert [m for m in _messages(caplog, logging.INFO) if m.startswith(EVENT)] == [f"{EVENT} count=2"]
     assert not [m for m in _messages(caplog, logging.ERROR) if "Batch insert" in m]
+
+
+def test_full_scan_reports_names_rejected_during_enrichment(roots, monkeypatch, caplog):
+    """A file still being written at fast-phase admission settles off the watch list in
+    the enrich phase, and is rejected there."""
+    seeder = seeder_module._AssetSeeder()
+
+    def enrich_rejecting_a_name(_roots):
+        seeder._scan_state.names_not_utf8.append(b"/late/" + BAD_NAME)
+        return False, 0
+
+    monkeypatch.setattr(seeder, "_run_enrich_phase", enrich_rejecting_a_name)
+    with caplog.at_level(logging.INFO):
+        _scan(("input",), phase=seeder_module.ScanPhase.FULL, seeder=seeder)
+
+    assert [m for m in _messages(caplog, logging.INFO) if m.startswith(EVENT)] == [f"{EVENT} count=1"]
+
+
+def test_a_path_found_twice_is_counted_once(roots, monkeypatch, caplog):
+    """One models folder registered under two categories lists its files twice."""
+    _write_bad(roots["input"])
+    real_collect = scanner.collect_paths_for_roots
+    monkeypatch.setattr(
+        seeder_module,
+        "collect_paths_for_roots",
+        lambda r, progress=None: (paths := real_collect(r, progress)) + paths,
+    )
+    with caplog.at_level(logging.INFO):
+        _scan(("input",))
+
+    assert [m for m in _messages(caplog, logging.INFO) if m.startswith(EVENT)] == [f"{EVENT} count=1"]
 
 
 def test_output_rescan_catalogs_new_files_and_only_logs_at_debug(roots, session, caplog):
@@ -110,9 +151,8 @@ def test_output_rescan_catalogs_new_files_and_only_logs_at_debug(roots, session,
     _write_bad(roots["output"])
 
     with caplog.at_level(logging.DEBUG):
-        created, _skipped, _total = _scan(("output",))
+        _scan(("output",))
 
-    assert created == N_FILES
     assert _live_paths(session) == {str(p) for p in first + added}
     assert not [m for m in _messages(caplog, logging.WARNING) if "not valid UTF-8" in m]
     assert not [m for m in caplog.messages if m.startswith(EVENT)]

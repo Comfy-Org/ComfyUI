@@ -787,6 +787,18 @@ class _AssetSeeder:
                 cancelled = True
                 return
 
+            # After both phases, as each one's watch-list tick can reject more. Not on the
+            # output rescan, which would repeat it after every prompt.
+            names = list(dict.fromkeys(scan_state.names_not_utf8))
+            if names and not rescans_output_by_listing(roots):
+                logging.warning(
+                    "Skipped %d file(s) whose names are not valid UTF-8, which the asset "
+                    "database cannot store; rename them to add them to the library: %s",
+                    len(names),
+                    ", ".join(repr(name) for name in names[:5]),
+                )
+                emit("scanner.name_not_utf8", count=len(names))
+
             elapsed = time.perf_counter() - t_start
             cpu = time.thread_time() - cpu_start
             logging.info(
@@ -1047,16 +1059,6 @@ class _AssetSeeder:
 
         self._update_progress(scanned=len(specs), created=total_created)
         tick_watch_list(scan_state)
-        names = scan_state.names_not_utf8
-        # Not on the output rescan, which would repeat it after every prompt.
-        if names and not by_listing:
-            logging.warning(
-                "Skipped %d file(s) whose names are not valid UTF-8, which the asset "
-                "database cannot store; rename them to add them to the library: %s",
-                len(names),
-                ", ".join(repr(name) for name in names[:5]),
-            )
-            emit("scanner.name_not_utf8", count=len(names))
         logging.info(
             "Fast scan complete: %.3fs total (created=%d, skipped=%d, total_paths=%d)",
             time.perf_counter() - t_fast_start,
