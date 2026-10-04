@@ -264,8 +264,7 @@ def resolve_asset_for_download(
             session.commit()
         except OperationalError as e:
             session.rollback()
-            level = logging.DEBUG if "locked" in str(e) or "busy" in str(e) else logging.WARNING
-            logging.log(level, "Skipped access-time update for %s: %s", reference_id, e)
+            logging.warning("Skipped access-time update for %s: %s", reference_id, e)
 
         ctype = (
             asset_mime
