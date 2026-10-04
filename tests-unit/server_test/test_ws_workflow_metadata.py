@@ -1,5 +1,7 @@
 """Tests for the workflow_metadata key/values added to outgoing websocket messages"""
 
+import json
+
 import pytest
 
 import server
@@ -59,3 +61,39 @@ def test_metadata_is_captured_when_the_message_is_queued(prompt_server):
     prompt_server.send_sync("execution_success", {"prompt_id": "p1"})
     prompt_server.workflow_metadata = {"workflow_id": "second"}
     assert sent_data(prompt_server)[0]["workflow_id"] == "first"
+
+
+class TestValidWorkflowMetadata:
+    """The dict is merged into outgoing messages, so it is validated at the
+    request boundary. A client can also put a value straight into extra_data,
+    which the route strips before applying the validated one."""
+
+    def test_dict_within_the_limit_is_accepted(self):
+        metadata = {"workflow_id": "abc"}
+        assert server.valid_workflow_metadata(
+            {"workflow_metadata": metadata}
+        ) == metadata
+
+    def test_absent_field(self):
+        assert server.valid_workflow_metadata({}) is None
+
+    @pytest.mark.parametrize("value", ["abc", 7, ["abc"], None, True])
+    def test_non_dict_is_rejected(self, value):
+        assert server.valid_workflow_metadata({"workflow_metadata": value}) is None
+
+    def test_oversized_dict_is_rejected(self):
+        assert (
+            server.valid_workflow_metadata({"workflow_metadata": {"k": "v" * 300}})
+            is None
+        )
+
+    def test_dict_at_the_limit_is_accepted(self):
+        metadata = {"k": "v" * (256 - len('{"k": ""}'))}
+        assert len(json.dumps(metadata)) == 256
+        assert server.valid_workflow_metadata({"workflow_metadata": metadata}) == metadata
+
+    def test_empty_dict_is_accepted_and_stamps_nothing(self, prompt_server):
+        assert server.valid_workflow_metadata({"workflow_metadata": {}}) == {}
+        prompt_server.workflow_metadata = {}
+        prompt_server.send_sync("executing", {"prompt_id": "p1"})
+        assert sent_data(prompt_server) == [{"prompt_id": "p1"}]
