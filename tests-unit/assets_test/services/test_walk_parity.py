@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from app.assets.services import file_utils
 from app.assets.services.file_utils import walk_listings
 
 from ..os_walk_reference import list_files_with_os_walk
@@ -90,10 +91,16 @@ def test_symlinks(temp_dir: Path):
     (base / "broken").symlink_to(base / "nowhere")
     (base / "broken_dir").symlink_to(temp_dir / "gone_dir")
     (base / "file_link.png").symlink_to(base / "a.png")
+    (base / "through_file").symlink_to(base / "a.png" / "x")  # NotADirectoryError: gone
+    (base / "loop_a").symlink_to(base / "loop_b")
+    (base / "loop_b").symlink_to(base / "loop_a")  # ELOOP: not gone, so kept for the scan's stat
     _write(base / "aaa" / "x.png")
     (base / "aaa" / "link_to_sub").symlink_to(base / "sub")  # which path reaches sub first must not change
     # base, aaa, sub and outside: the other paths to sub, the loop and the broken link list nothing
-    assert _assert_parity(base).dirs_listed == 4
+    walk = _assert_parity(base)
+    assert walk.dirs_listed == 4
+    assert str(base / "through_file") not in walk.files
+    assert {str(base / "loop_a"), str(base / "loop_b")} <= set(walk.files)
 
 
 @needs_symlinks
@@ -118,3 +125,41 @@ def test_permission_denied_folder(temp_dir: Path):
     finally:
         os.chmod(temp_dir / "locked", 0o700)
         os.chmod(temp_dir / "unlistable", 0o700)
+
+
+class _VanishingEntry:
+    """A directory entry whose file was deleted after the listing named it, on a
+    filesystem whose listing has no file types, so is_dir() and is_symlink() must stat."""
+
+    name = "vanished.png"
+
+    def __init__(self, dirpath: str) -> None:
+        self.path = os.path.join(dirpath, self.name)
+
+    def is_dir(self) -> bool:
+        raise FileNotFoundError(self.path)
+
+    def is_symlink(self) -> bool:
+        raise FileNotFoundError(self.path)
+
+
+def test_an_entry_vanishing_mid_listing_keeps_the_rest_of_the_folder(temp_dir: Path, monkeypatch):
+    for name in ("a.png", "b.png"):
+        _write(temp_dir / name)
+    real_scandir = os.scandir
+
+    class _Entries:
+        def __init__(self, path):
+            self._real = real_scandir(path)
+            self._items = [*self._real, _VanishingEntry(str(path))]
+
+        def __enter__(self):
+            return iter(self._items)
+
+        def __exit__(self, *_exc):
+            self._real.close()
+
+    monkeypatch.setattr(file_utils.os, "scandir", _Entries)
+    walk = walk_listings(str(temp_dir))
+    assert str(temp_dir) in walk.listings
+    assert sorted(walk.files) == [str(temp_dir / "a.png"), str(temp_dir / "b.png")]
