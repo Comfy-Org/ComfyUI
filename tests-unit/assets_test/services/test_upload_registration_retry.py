@@ -37,6 +37,9 @@ from app.assets.services.hashing import compute_blake3_hash
 from app.assets.services.ingest import register_file_in_place
 
 
+_PRODUCTION_RETRY_PAUSE_SECONDS = manager_module._LOCKED_RETRY_PAUSE_SECONDS
+
+
 class _ArgsStub:
     enable_assets = True
     enable_asset_hashing = False
@@ -259,7 +262,6 @@ async def test_an_overwrite_waits_for_the_upload_still_registering(
     input_dir, db_path, monkeypatch
 ):
     _ContendedLock.contended = threading.Event()
-    monkeypatch.setattr(asyncio, "Lock", _ContendedLock)
     first_registering = threading.Event()
 
     def first_waits_for_the_overwrite(attempt, register):
@@ -271,7 +273,10 @@ async def test_an_overwrite_waits_for_the_upload_still_registering(
         return register()
 
     _wrap_registration(monkeypatch, first_waits_for_the_overwrite)
-    async with await _serve(AssetsEnabled(_ArgsStub())) as client:
+    with monkeypatch.context() as building:
+        building.setattr(asyncio, "Lock", _ContendedLock)
+        test_server = await _serve(AssetsEnabled(_ArgsStub()))
+    async with test_server as client:
         first = asyncio.ensure_future(_upload(client, b"first bytes"))
         assert await asyncio.get_running_loop().run_in_executor(None, first_registering.wait, 5)
         second = await _upload(client, b"second bytes", overwrite="true")
@@ -380,11 +385,16 @@ def test_register_upload_retries_a_locked_database_then_succeeds(
     path = input_dir / "retry.png"
     path.write_bytes(b"retry")
     attempts = _fail_with(monkeypatch, _locked_error(), _locked_error())
+    pauses = []
+    monkeypatch.setattr(manager_module.time, "sleep", pauses.append)
 
     view = _register(AssetsEnabled(_ArgsStub()), path)
 
     assert view is not None and view.asset.id
     assert len(attempts) == 3
+    assert pauses == [manager_module._LOCKED_RETRY_PAUSE_SECONDS] * 2
+    # The upload lock is held across these pauses, so every other upload waits them out too.
+    assert _PRODUCTION_RETRY_PAUSE_SECONDS <= 0.5
 
 
 def test_register_upload_gives_up_after_the_bound(input_dir, db_path, monkeypatch):
