@@ -103,18 +103,23 @@ def test_cross_device_upload_replaces_other_bytes_at_the_destination(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+@pytest.mark.parametrize("target_exists", [True, False], ids=["other-file", "dangling"])
 def test_cross_device_upload_does_not_write_through_a_link(
-    mock_create_session, cross_device_upload, tmp_path
+    mock_create_session, cross_device_upload, tmp_path, target_exists
 ):
     temp, dest = cross_device_upload
     dest.parent.mkdir(parents=True)
     elsewhere = tmp_path / "elsewhere.png"
-    elsewhere.write_bytes(b"someone else's file")
+    if target_exists:
+        elsewhere.write_bytes(b"someone else's file")
     dest.symlink_to(elsewhere)
 
     _upload(temp)
 
-    assert elsewhere.read_bytes() == b"someone else's file"
+    if target_exists:
+        assert elsewhere.read_bytes() == b"someone else's file"
+    else:
+        assert not elsewhere.exists()
     assert not dest.is_symlink()
     assert dest.read_bytes() == _CONTENT
 
