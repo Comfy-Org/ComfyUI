@@ -1070,7 +1070,7 @@ components:
                 workflow_metadata:
                     additionalProperties:
                         type: string
-                    description: 'Key/values echoed on every json websocket message sent while this prompt runs, so a client can tell which of its open workflows a message belongs to. The server does not interpret the contents. Limited to 256 bytes serialised; a larger or non-object value is ignored. Note the `workflow_id` key a client typically sends here is the graph id from `extra_pnginfo.workflow.id`, which is not the same thing as the `workflow_id` field above.'
+                    description: 'Key/values echoed on every json websocket message sent while this prompt runs, so a client can tell which of its open workflows a message belongs to. The server does not interpret the contents. Limited to 256 bytes serialised; a larger or non-object value is ignored. When this field is omitted, the server falls back to `{workflow_id: extra_data.extra_pnginfo.workflow.id}` if the submitted workflow carries an id, so a client that sends only the workflow gets the same messages. Note the `workflow_id` key a client typically sends here is the graph id from `extra_pnginfo.workflow.id`, which is not the same thing as the `workflow_id` field above.'
                     type: object
                 workflow_version_id:
                     description: UUID identifying the workflow version to associate with this job
