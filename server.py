@@ -2,6 +2,7 @@ import errno
 import os
 import sys
 import asyncio
+import functools
 import traceback
 import time
 
@@ -46,7 +47,7 @@ from app.frontend_management import FrontendManager, parse_version
 from comfy_api.internal import _ComfyNodeInternal
 from app.assets.event_log import emit
 from app.assets.manager import AssetRegistrationError
-from app.database.db import dependencies_available
+from app.database.db import dependencies_available, is_memory_db
 
 if dependencies_available():
     from app.assets.services.asset_management import resolve_hash_to_path
@@ -452,23 +453,28 @@ class PromptServer():
 
                 resp = {"name" : filename, "subfolder": subfolder, "type": image_upload_type}
 
+                register = functools.partial(
+                    self.asset_manager.register_upload,
+                    abs_path=filepath,
+                    name=filename,
+                    upload_type=image_upload_type,
+                    subfolder=subfolder,
+                    content_written=not image_is_duplicate,
+                )
                 try:
-                    # Off the event loop: a locked database makes this wait seconds.
-                    view = await asyncio.to_thread(
-                        self.asset_manager.register_upload,
-                        abs_path=filepath,
-                        name=filename,
-                        upload_type=image_upload_type,
-                        subfolder=subfolder,
-                        content_written=not image_is_duplicate,
-                    )
+                    # Off the event loop, since a locked database makes this wait seconds. The in-memory
+                    # database shares one connection between all sessions and has nothing to wait for.
+                    view = register() if is_memory_db() else await asyncio.to_thread(register)
                 except AssetRegistrationError as e:
-                    # The saved file stays: an /upload/image retry with the same bytes reuses it.
-                    if e.locked:
-                        status, error = 503, "Asset registration failed: the database is busy, try again"
-                    else:
-                        status, error = 500, "Asset registration failed"
-                    return web.json_response({**resp, "error": error}, status=status, reason=error)
+                    view = None
+                    # A temp file is read back by name, so it is usable without an asset.
+                    if image_upload_type != "temp":
+                        # The saved file stays: an /upload/image retry with the same bytes reuses it.
+                        if e.locked:
+                            status, code, message = 503, "DATABASE_BUSY", "Asset registration failed: the database is busy, try again"
+                        else:
+                            status, code, message = 500, "ASSET_REGISTRATION_FAILED", "Asset registration failed"
+                        return web.json_response({"code": code, "message": message, "details": resp}, status=status, reason=message)
                 if view is not None:
                     resp["asset"] = {
                         "id": view.asset.id,

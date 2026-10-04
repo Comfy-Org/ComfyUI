@@ -3,9 +3,9 @@ import io
 import json
 import sqlite3
 import threading
-import time
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -27,9 +27,11 @@ try:
     import server
 finally:
     args.cpu = _original_cpu
+
 from app.assets import manager as manager_module
 from app.assets.database.models import Base
-from app.assets.manager import AssetRegistrationError, AssetsEnabled
+from app.assets.manager import AssetRegistrationError, AssetsEnabled, NoAssets
+from app.assets.services import ingest as ingest_module
 from app.assets.services.ingest import register_file_in_place
 
 
@@ -112,10 +114,12 @@ async def client(input_dir: Path, db_path: Path):
         yield test_client
 
 
-async def _upload(client: TestClient, data: bytes, name: str = "photo.png", **fields: str):
+async def _upload(
+    client: TestClient, data: bytes, name: str = "photo.png", upload_type: str = "input", **fields: str
+):
     body = FormData()
     body.add_field("image", data, filename=name, content_type="image/png")
-    body.add_field("type", "input")
+    body.add_field("type", upload_type)
     for key, value in fields.items():
         body.add_field(key, value)
     return await client.post("/upload/image", data=body)
@@ -168,8 +172,9 @@ async def test_upload_returns_503_while_locked_and_a_retry_reuses_the_saved_file
         resp = await _upload(client, b"held lock")
         body = await resp.json()
         assert resp.status == 503, body
-        assert "busy" in body["error"]
-        assert "asset" not in body
+        assert body["code"] == "DATABASE_BUSY"
+        assert "busy" in body["message"]
+        assert body["details"] == {"name": "photo.png", "subfolder": "", "type": "input"}
     assert (input_dir / "photo.png").read_bytes() == b"held lock"
     assert _asset_count(db_path) == 0
 
@@ -199,46 +204,52 @@ async def test_upload_returns_500_when_registration_fails_for_another_reason(
 
     body = await resp.json()
     assert resp.status == 500, body
-    assert body["error"] == "Asset registration failed"
+    assert body["code"] == "ASSET_REGISTRATION_FAILED"
+    assert body["details"]["name"] == "photo.png"
     assert len(calls) == 1, "a non-lock failure is not retried"
     assert (input_dir / "photo.png").exists()
 
 
 @pytest.mark.asyncio
 async def test_locked_registration_does_not_block_other_requests(client, db_path, monkeypatch):
-    entered, exited = threading.Event(), threading.Event()
+    entered, ping_answered = threading.Event(), threading.Event()
+    answered_while_registering = []
 
-    def observe(attempt, register):
-        entered.set()
-        try:
-            return register()
-        finally:
-            exited.set()
+    def hold_until_pinged(attempt, register):
+        if attempt == 1:
+            entered.set()
+            # Registration on the event loop would starve the ping until this gives up.
+            answered_while_registering.append(ping_answered.wait(5))
+        return register()
 
-    _wrap_registration(monkeypatch, observe)
+    _wrap_registration(monkeypatch, hold_until_pinged)
     with _write_lock(db_path):
         upload = asyncio.ensure_future(_upload(client, b"slow upload"))
         assert await asyncio.get_running_loop().run_in_executor(None, entered.wait, 5)
         ping = await client.get("/test-ping")
+        ping_answered.set()
         assert ping.status == 200
-        assert not exited.is_set(), "the server answered while registration was still waiting"
         resp = await upload
         assert resp.status == 503
+    assert answered_while_registering == [True]
 
 
 @pytest.mark.asyncio
 async def test_an_overwrite_waits_for_the_upload_still_registering(
     client, db_path, input_dir, monkeypatch
 ):
-    first_registering = threading.Event()
+    first_registering, second_registering = threading.Event(), threading.Event()
 
-    def slow_first(attempt, register):
+    def first_waits_for_second(attempt, register):
         if attempt == 1:
             first_registering.set()
-            time.sleep(0.3)
+            # Without serialisation the overwrite lands and starts registering meanwhile.
+            second_registering.wait(0.5)
+        else:
+            second_registering.set()
         return register()
 
-    _wrap_registration(monkeypatch, slow_first)
+    _wrap_registration(monkeypatch, first_waits_for_second)
     first = asyncio.ensure_future(_upload(client, b"first bytes"))
     assert await asyncio.get_running_loop().run_in_executor(None, first_registering.wait, 5)
     second = await _upload(client, b"second bytes", overwrite="true")
@@ -273,28 +284,50 @@ async def test_mask_upload_registers_the_composited_file(client, db_path, input_
         assert saved.getpixel((0, 0)) == (255, 0, 0, 128)
 
 
-class _AssetsDisabled:
-    enabled = False
-
-    def register_routes(self, app, user_manager):
-        pass
-
-    def set_event_sink(self, sink):
-        pass
-
-    def register_upload(self, abs_path, name, upload_type, subfolder, *, content_written):
-        return None
-
-
 @pytest.mark.asyncio
-async def test_upload_with_assets_disabled_returns_200_without_an_asset(input_dir):
-    async with await _serve(_AssetsDisabled()) as test_client:
+async def test_upload_with_assets_disabled_returns_200_without_an_asset(input_dir, monkeypatch):
+    monkeypatch.setattr(manager_module, "asset_seeder", MagicMock())
+    async with await _serve(NoAssets(_ArgsStub())) as test_client:
         resp = await _upload(test_client, b"no assets")
         body = await resp.json()
 
     assert resp.status == 200, body
     assert body == {"name": "photo.png", "subfolder": "", "type": "input"}
     assert (input_dir / "photo.png").read_bytes() == b"no assets"
+
+
+@pytest.mark.asyncio
+async def test_temp_upload_still_succeeds_when_registration_fails(
+    client, tmp_path, monkeypatch
+):
+    temp_dir = tmp_path / "temp"
+    temp_dir.mkdir()
+    monkeypatch.setattr(folder_paths, "get_temp_directory", lambda: str(temp_dir))
+    _fail_with(monkeypatch, *(_locked_error() for _ in range(3)))
+
+    resp = await _upload(client, b"webcam frame", upload_type="temp")
+
+    body = await resp.json()
+    assert resp.status == 200, body
+    assert body == {"name": "photo.png", "subfolder": "", "type": "temp"}
+    assert (temp_dir / "photo.png").read_bytes() == b"webcam frame"
+
+
+@pytest.mark.asyncio
+async def test_in_memory_database_registers_on_the_event_loop(client, monkeypatch):
+    threads = []
+
+    def record_thread(attempt, register):
+        threads.append(threading.current_thread())
+        return register()
+
+    _wrap_registration(monkeypatch, record_thread)
+    monkeypatch.setattr(server, "is_memory_db", lambda: True)
+
+    resp = await _upload(client, b"in memory")
+
+    assert resp.status == 200, await resp.text()
+    assert threads == [threading.main_thread()]
 
 
 def _register(manager: AssetsEnabled, path: Path):
@@ -362,3 +395,32 @@ def test_register_upload_reports_the_last_failure(input_dir, db_path, monkeypatc
 
     assert raised.value.locked is False
     assert len(attempts) == 2
+
+
+def test_register_upload_retry_after_the_reconcile_committed(input_dir, db_path, monkeypatch):
+    # An overwrite whose first transaction retires the old row and whose insert then hits the lock.
+    path = input_dir / "replaced.png"
+    path.write_bytes(b"old bytes")
+    manager = AssetsEnabled(_ArgsStub())
+    old = _register(manager, path)
+    path.write_bytes(b"new bytes")
+    real_insert = ingest_module.create_content_reporting_insert
+    inserts = []
+
+    def insert_locked_once(*args, **kwargs):
+        inserts.append(args)
+        if len(inserts) == 1:
+            raise _locked_error()
+        return real_insert(*args, **kwargs)
+
+    monkeypatch.setattr(ingest_module, "create_content_reporting_insert", insert_locked_once)
+
+    new = _register(manager, path)
+
+    assert len(inserts) == 2
+    assert new.asset_hash != old.asset_hash
+    with sqlite3.connect(db_path) as conn:
+        live = conn.execute(
+            "SELECT hash FROM asset_contents WHERE path = ? AND is_missing = 0", (str(path),)
+        ).fetchall()
+    assert live == [(new.asset_hash,)]
