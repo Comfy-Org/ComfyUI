@@ -427,21 +427,6 @@ def list_root(root: RootType, should_stop: ShouldStop = _never_stop) -> ListingW
     return walk_listings(folder_paths.get_output_directory(), should_stop)
 
 
-def verifies_catalogued_files(roots: tuple[RootType, ...]) -> bool:
-    """Whether this scan stats every live row (sync_root) to find vanished and changed
-    files. Every scan but an output-only one does: the startup scan, page loads, API
-    seeds. The output-only rescan queued after each prompt instead retires the rows its
-    listings lack (unlisted_references).
-
-    The listing diff catches every add and delete, but nothing stats an already-cataloged
-    file, so an in-place overwrite (same path; new content, size or mtime) goes undetected
-    until the next scan that verifies, such as a page load. Core save nodes never
-    overwrite, and reported outputs are registered at save time, so this only affects
-    files written by something else.
-    """
-    return tuple(roots) != ("output",)
-
-
 def live_references_safely(root: RootType) -> dict[str, list[_ReferenceObservation]]:
     """The live rows under ``root`` by path, read without touching the filesystem.
 

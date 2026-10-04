@@ -27,7 +27,6 @@ from app.assets.scanner import (
     live_references_safely,
     mark_missing_outside_prefixes_safely,
     mark_unlisted_references_missing_safely,
-    verifies_catalogued_files,
     sync_root_safely,
     unlisted_references,
     sync_temp_references_safely,
@@ -903,7 +902,11 @@ class _AssetSeeder:
         skipped_existing = 0
 
         should_stop = lambda: self._check_pause_and_cancel(_ScanStage.FAST_SCAN)
-        verify = verifies_catalogued_files(roots)
+        # Every scan but the output-only rescan queued after each prompt stats every live row
+        # (sync_root). That rescan retires the rows its listings lack instead, so it misses an
+        # in-place overwrite until the next full scan; save nodes never overwrite, and their
+        # outputs are registered at save time.
+        verify = tuple(roots) != ("output",)
         live_references: dict[str, list] = {}
         existing_paths: set[str] = set()
         t_sync = time.perf_counter()
