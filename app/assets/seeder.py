@@ -934,7 +934,11 @@ class _AssetSeeder:
 
         t_collect = time.perf_counter()
         walk = list_output_for_rescan() if by_listing else None
-        paths = walk.files if walk is not None else collect_paths_for_roots(roots, scan_state)
+        should_stop = lambda: self._check_pause_and_cancel(_ScanStage.FAST_SCAN)
+        paths = walk.files if walk is not None else collect_paths_for_roots(roots, scan_state, should_stop)
+        # A cancel during the walk leaves paths partial.
+        if should_stop():
+            return total_created, skipped_existing, 0
         logging.debug(
             "Fast scan: collect_paths took %.3fs (%d paths found)",
             time.perf_counter() - t_collect,
@@ -973,6 +977,7 @@ class _AssetSeeder:
             existing_paths,
             enable_metadata_extraction=False,
             progress=scan_state,
+            should_stop=should_stop,
         )
         logging.debug(
             "Fast scan: build_asset_specs took %.3fs (%d specs, %d skipped)",
