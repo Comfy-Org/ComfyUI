@@ -398,7 +398,15 @@ class PromptServer():
                 return a.hexdigest() == b.hexdigest()
             return False
 
+        # Uploads are handled one at a time, as when registration ran on the event loop: an
+        # overlapping overwrite of the same file could otherwise register the other upload's bytes.
+        upload_lock = asyncio.Lock()
+
         async def image_upload(post, image_save_function=None):
+            async with upload_lock:
+                return await _image_upload(post, image_save_function)
+
+        async def _image_upload(post, image_save_function=None):
             image = post.get("image")
             overwrite = post.get("overwrite")
             image_is_duplicate = False
@@ -455,7 +463,7 @@ class PromptServer():
                         content_written=not image_is_duplicate,
                     )
                 except AssetRegistrationError as e:
-                    # The saved file stays: a retry with the same bytes reuses it and registers again.
+                    # The saved file stays: an /upload/image retry with the same bytes reuses it.
                     if e.locked:
                         status, error = 503, "Asset registration failed: the database is busy, try again"
                     else:

@@ -33,7 +33,8 @@ if dependencies_available():
     from app.assets.services.path_utils import get_known_subfolder_tags
     from app.assets.services.schemas import RegisteredAsset, UploadAssetView
 
-# Each attempt already waits out SQLite's 5 s busy timeout, so three ride out a ~15 s write lock.
+# SQLite already waits its 5 s busy timeout at each blocked write, so three attempts ride out a
+# write lock held for ~15 s.
 _LOCKED_ATTEMPTS = 3
 _LOCKED_RETRY_PAUSE_SECONDS = 0.2
 
