@@ -114,9 +114,10 @@ def test_full_scan_catalogs_every_other_file_and_warns_once(roots, session, capl
     assert not [m for m in _messages(caplog, logging.ERROR) if "Batch insert" in m]
 
 
-def test_full_scan_reports_names_rejected_during_enrichment(roots, monkeypatch, caplog):
-    """A file still being written at fast-phase admission settles off the watch list in
-    the enrich phase, and is rejected there."""
+def test_full_scan_reports_both_phases_rejections_once(roots, monkeypatch, caplog):
+    """The startup scan is FULL: the fast phase rejects a name, and a file still being
+    written at fast-phase admission is rejected later, in the enrich phase."""
+    _write_bad(roots["input"])
     seeder = seeder_module._AssetSeeder()
 
     def enrich_rejecting_a_name(_roots):
@@ -127,7 +128,9 @@ def test_full_scan_reports_names_rejected_during_enrichment(roots, monkeypatch, 
     with caplog.at_level(logging.INFO):
         _scan(("input",), phase=seeder_module.ScanPhase.FULL, seeder=seeder)
 
-    assert [m for m in _messages(caplog, logging.INFO) if m.startswith(EVENT)] == [f"{EVENT} count=1"]
+    warnings = [m for m in _messages(caplog, logging.WARNING) if "not valid UTF-8" in m]
+    assert len(warnings) == 1 and "Skipped 2 file(s)" in warnings[0]
+    assert [m for m in _messages(caplog, logging.INFO) if m.startswith(EVENT)] == [f"{EVENT} count=2"]
 
 
 def test_full_scan_reports_a_name_settling_off_the_watch_list(roots, session, caplog):
