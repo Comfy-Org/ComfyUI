@@ -1,10 +1,11 @@
 """Turns incoming bytes into catalogued assets: multipart uploads moved into a
 hash-addressed destination, files registered where they already sit, and
-records created from a hash the catalog already holds. Every path persists the
-stat that hashing verified, so a row's recorded size and mtime describe the
-same observation as its hash. A live row already at the destination is
-reconciled before the write, so an upload never adopts a fresh hash onto
-records created for bytes it just replaced.
+records created from a hash the catalog already holds. Registration persists
+the stat that hashing verified, so a row's recorded size and mtime describe the
+same observation as its hash; an upload records the stat of the file once it is
+in place, since a copy across volumes has its own mtime. A live row already at
+the destination is reconciled before the write, so an upload never adopts a
+fresh hash onto records created for bytes it just replaced.
 """
 
 import contextlib
@@ -186,7 +187,7 @@ def _guess_upload_mime_type(
     return guessed or "application/octet-stream"
 
 
-def _move_temp_to_dest(temp_path: str, dest_abs: str) -> None:
+def _move_temp_to_dest(temp_path: str, dest_abs: str, digest: str) -> None:
     os.makedirs(os.path.dirname(dest_abs), exist_ok=True)
     try:
         try:
@@ -194,7 +195,10 @@ def _move_temp_to_dest(temp_path: str, dest_abs: str) -> None:
         except OSError as e:  # EXDEV: destination is on another volume
             if e.errno != errno.EXDEV:
                 raise
-            if not (os.path.exists(dest_abs) and os.path.getsize(dest_abs) == os.path.getsize(temp_path)):
+            existing = snapshot_hash(dest_abs)
+            if existing is None or existing[0] != digest:
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(dest_abs)  # never write through a link or over other bytes
                 shutil.copyfile(temp_path, dest_abs)
     except Exception as e:
         raise RuntimeError(f"failed to move uploaded file into place: {e}") from e
@@ -494,7 +498,7 @@ def upload_from_temp_path(
         content_type = _guess_upload_mime_type(
             mime_type, client_filename, name, os.path.basename(dest_abs)
         )
-        _move_temp_to_dest(temp_path, dest_abs)
+        _move_temp_to_dest(temp_path, dest_abs, digest)
     finally:
         _remove_temp_path(temp_path)
     # A cross-volume copy gets a new mtime, so record the file on disk (a rename keeps it).

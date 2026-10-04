@@ -7,14 +7,17 @@ import uuid
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 import app.assets.mode as mode_module
 import app.assets.services.ingest as ingest_module
 import folder_paths
+from app.assets.database.models import AssetContent
 from app.assets.services.ingest import upload_from_temp_path
 from app.assets.services.snapshot_hash import snapshot_hash
 
 _CONTENT = b"cross-device upload bytes"
+_OLD_MTIME_NS = 1_600_000_000_000_000_000
 
 
 @pytest.fixture
@@ -33,6 +36,7 @@ def cross_device_upload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     temp = tmp_path / "temp" / "uploads" / uuid.uuid4().hex / ".upload.part"
     temp.parent.mkdir(parents=True)
     temp.write_bytes(_CONTENT)
+    os.utime(temp, ns=(_OLD_MTIME_NS, _OLD_MTIME_NS))
     dest = tmp_path / "input" / f"{snapshot_hash(str(temp))[0]}.png"
     yield temp, dest
     mode_module.init(None)
@@ -44,6 +48,13 @@ def _upload(temp: Path):
     )
 
 
+def _recorded_mtime_ns(session_factory, dest: Path) -> int:
+    with session_factory() as session:
+        return session.scalars(
+            select(AssetContent.mtime_ns).where(AssetContent.path == str(dest))
+        ).one()
+
+
 def test_cross_device_upload_is_copied_into_place(mock_create_session, cross_device_upload):
     temp, dest = cross_device_upload
 
@@ -52,20 +63,75 @@ def test_cross_device_upload_is_copied_into_place(mock_create_session, cross_dev
     assert result.created_new is True
     assert dest.read_bytes() == _CONTENT
     assert not temp.exists()
+    # The copy has its own mtime, and that is what must be recorded.
+    assert dest.stat().st_mtime_ns != _OLD_MTIME_NS
+    assert _recorded_mtime_ns(mock_create_session, dest) == dest.stat().st_mtime_ns
 
 
-def test_cross_device_upload_keeps_a_same_size_file_already_there(
+def test_cross_device_upload_keeps_identical_bytes_already_there(
     mock_create_session, cross_device_upload, monkeypatch
 ):
     temp, dest = cross_device_upload
     dest.parent.mkdir(parents=True)
     dest.write_bytes(_CONTENT)
-    os.utime(dest, ns=(1_600_000_000_000_000_000,) * 2)
+    existing_mtime_ns = _OLD_MTIME_NS - 1_000_000_000
+    os.utime(dest, ns=(existing_mtime_ns, existing_mtime_ns))
     copies: list = []
     monkeypatch.setattr(ingest_module.shutil, "copyfile", lambda *a: copies.append(a))
 
     _upload(temp)
 
     assert copies == []
-    assert dest.stat().st_mtime_ns == 1_600_000_000_000_000_000
+    assert dest.stat().st_mtime_ns == existing_mtime_ns
+    assert _recorded_mtime_ns(mock_create_session, dest) == existing_mtime_ns
     assert not temp.exists()
+
+
+@pytest.mark.parametrize(
+    "existing", [_CONTENT[::-1], _CONTENT[:5]], ids=["same-size-other-bytes", "truncated"]
+)
+def test_cross_device_upload_replaces_other_bytes_at_the_destination(
+    mock_create_session, cross_device_upload, existing
+):
+    temp, dest = cross_device_upload
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(existing)
+
+    _upload(temp)
+
+    assert dest.read_bytes() == _CONTENT
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_cross_device_upload_does_not_write_through_a_link(
+    mock_create_session, cross_device_upload, tmp_path
+):
+    temp, dest = cross_device_upload
+    dest.parent.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere.png"
+    elsewhere.write_bytes(b"someone else's file")
+    dest.symlink_to(elsewhere)
+
+    _upload(temp)
+
+    assert elsewhere.read_bytes() == b"someone else's file"
+    assert not dest.is_symlink()
+    assert dest.read_bytes() == _CONTENT
+
+
+def test_other_move_errors_raise_without_copying(
+    mock_create_session, cross_device_upload, monkeypatch
+):
+    temp, _dest = cross_device_upload
+
+    def denied(src, dst):
+        raise PermissionError(errno.EACCES, "Access is denied")
+
+    monkeypatch.setattr(ingest_module.os, "replace", denied)
+    copies: list = []
+    monkeypatch.setattr(ingest_module.shutil, "copyfile", lambda *a: copies.append(a))
+
+    with pytest.raises(RuntimeError, match="failed to move uploaded file into place"):
+        _upload(temp)
+
+    assert copies == []
