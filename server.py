@@ -75,6 +75,19 @@ if args.enable_manager:
     import comfyui_manager
 
 
+def valid_workflow_metadata(json_data: dict) -> Optional[dict]:
+    """The metadata a client may attach to a prompt's websocket messages.
+
+    Returns None when absent, not a dict, or over 256 bytes serialised. The
+    value is merged into outgoing messages, so it is validated here rather
+    than at the point of use.
+    """
+    metadata = json_data.get("workflow_metadata")
+    if isinstance(metadata, dict) and len(json.dumps(metadata)) <= 256:
+        return metadata
+    return None
+
+
 def _remove_sensitive_from_queue(queue: list) -> list:
     """Remove sensitive data (index 5) from queue item tuples."""
     return [item[:5] for item in queue]
@@ -1152,10 +1165,10 @@ class PromptServer():
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]
 
-                if isinstance(json_data.get("workflow_metadata"), dict):
-                    metadata = json_data["workflow_metadata"]
-                    if len(json.dumps(metadata)) <= 256:
-                        extra_data["workflow_metadata"] = metadata
+                extra_data.pop("workflow_metadata", None)
+                metadata = valid_workflow_metadata(json_data)
+                if metadata is not None:
+                    extra_data["workflow_metadata"] = metadata
 
                 if "comfy_usage_source" not in extra_data:
                     usage_source = request.headers.get("Comfy-Usage-Source")
