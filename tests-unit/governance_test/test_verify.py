@@ -1,5 +1,6 @@
 import base64
 import json
+from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -315,7 +316,7 @@ def test_payload_rejects_invalid_denied_packs(
 @pytest.mark.parametrize(
     ("active_forms", "custom_node_mode", "key", "value"),
     [
-        (["model"], None, "packs", [{"name": "pack", "digest": "digest"}]),
+        (["model"], None, "packs", [{"name": "pack", "digest": "blake3:" + "a" * 64}]),
         (["customNode"], "allowlist", "disabledNodes", ["Node"]),
         (["customNode"], "allowlist", "disabledPartnerNodes", [{"nodeId": "Node", "providerId": "provider"}]),
         (["customNode"], "allowlist", "models", ["blake3:" + "a" * 64]),
@@ -372,6 +373,44 @@ def test_packs_require_exact_string_entry_schema(private_key: Ed25519PrivateKey,
 
     with pytest.raises(ValueError):
         governance.verify_and_load(_envelope(private_key, payload))
+
+
+@pytest.mark.parametrize(
+    "pack",
+    [
+        {"name": "nested/pack", "digest": "blake3:" + "a" * 64},
+        {"name": "nested\\pack", "digest": "blake3:" + "a" * 64},
+        {"name": "../pack", "digest": "blake3:" + "a" * 64},
+        {"name": "pack", "digest": "digest"},
+        {"name": "pack", "digest": "a" * 64},
+        {"name": "pack", "digest": "blake3:" + "A" * 64},
+        {"name": "pack", "digest": "blake3:" + "a" * 63},
+        {"name": "pack", "digest": "blake3:" + "a" * 65},
+        {"name": "pack", "digest": "blake3:" + "g" * 64},
+        {"name": "pack", "digest": "sha256:" + "a" * 64},
+        {"name": "pack", "digest": "blake3:" + "a" * 64 + "\n"},
+    ],
+)
+def test_packs_reject_names_and_digests_the_gate_would_never_match(private_key: Ed25519PrivateKey, pack: dict) -> None:
+    payload = _payload()
+    payload["packs"] = [pack]
+
+    with pytest.raises(ValueError, match="basenames|canonical BLAKE3"):
+        governance.verify_and_load(_envelope(private_key, payload))
+
+
+def test_packs_accept_pack_digest_output_under_mixed_case_names(private_key: Ed25519PrivateKey, tmp_path: Path) -> None:
+    pack_path = tmp_path / "ComfyUI-Example-Pack"
+    pack_path.mkdir()
+    (pack_path / "__init__.py").write_bytes(b"NODE_CLASS_MAPPINGS = {}\n")
+    payload = _payload()
+    payload["packs"] = [
+        {"name": "ComfyUI-Example-Pack", "digest": governance.pack_digest(str(pack_path))},
+        # The digest cloud's packdigest and test_pack_digest.py both assert for their shared fixture.
+        {"name": "shared-fixture", "digest": "blake3:60627b4c95dad13ffe3dd68e165ac182c605ab1f873a88d11c3b9c0b65d531e1"},
+    ]
+
+    assert governance.verify_and_load(_envelope(private_key, payload))["packs"] == payload["packs"]
 
 
 @pytest.mark.parametrize(

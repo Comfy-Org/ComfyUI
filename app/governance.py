@@ -45,7 +45,8 @@ _ACTIVE_FORMS = ("customNode", "nodeId", "model", "partnerNode")
 _ENFORCED_FORMS = frozenset({"customNode", "nodeId", "partnerNode"})
 _BASE64URL_PATTERN = re.compile(r"[A-Za-z0-9_-]*")
 _PROVIDER_ID_PATTERN = re.compile(r"[a-z0-9._-]+")
-_MODEL_DIGEST_PATTERN = re.compile(r"blake3:[0-9a-f]{64}")
+# The form pack_digest returns, and the form of a model's sealed digest: "blake3:" and 64 lowercase hex digits.
+_BLAKE3_DIGEST_PATTERN = re.compile(r"blake3:[0-9a-f]{64}")
 # What the digest measures: Python source (.pyw is source on Windows) and extension modules, native libraries (versioned
 # .so.N too), and the .js/.mjs files the frontend serves (server.py lists **/*.js). Any other file a pack's code may open
 # or run, such as a shell script, a suffixless executable, .exe, .wasm or .cjs, is not measured.
@@ -343,6 +344,12 @@ def _validate_payload(payload: dict) -> None:
             raise ValueError("governance pack entries must contain exactly name and digest")
         if not isinstance(pack["name"], str) or not isinstance(pack["digest"], str):
             raise ValueError("governance pack name and digest must be strings")
+        # pack_refusal looks a pack up by its lowered folder or file name, so a name with a separator would never match;
+        # case is free, since the builder signs folder names as they are and both sides lower them.
+        if "/" in pack["name"] or "\\" in pack["name"]:
+            raise ValueError("governance pack names must be basenames")
+        if _BLAKE3_DIGEST_PATTERN.fullmatch(pack["digest"]) is None:
+            raise ValueError("governance pack digests must be canonical BLAKE3 digests")
     pack_names = [pack["name"].lower() for pack in packs]
     if len(pack_names) != len(set(pack_names)):
         raise ValueError("governance pack names must be unique")
@@ -383,7 +390,7 @@ def _validate_payload(payload: dict) -> None:
         raise ValueError("governance models must be a string list")
     if models != sorted(set(models)):
         raise ValueError("governance models must be sorted and unique")
-    if any(_MODEL_DIGEST_PATTERN.fullmatch(model) is None for model in models):
+    if any(_BLAKE3_DIGEST_PATTERN.fullmatch(model) is None for model in models):
         raise ValueError("governance models must contain canonical BLAKE3 digests")
 
     if packs and not custom_node_active:
