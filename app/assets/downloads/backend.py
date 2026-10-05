@@ -85,6 +85,7 @@ class DownloadSnapshot:
 
     @property
     def is_terminal(self) -> bool:
+        """Whether this transfer will never change again."""
         return self.phase in TERMINAL_PHASES
 
 
@@ -110,7 +111,9 @@ class DownloadBackend(Protocol):
         """Stable transport identifier, used to namespace derived task ids."""
         ...
 
-    async def available(self) -> bool: ...
+    async def available(self) -> bool:
+        """Whether this transport can run at all in this installation."""
+        ...
 
     def change_hint(self) -> object | None:
         """Cheap synchronous value that differs whenever :meth:`list` might.
@@ -121,12 +124,22 @@ class DownloadBackend(Protocol):
         """
         ...
 
-    async def start(self, request: DownloadRequest) -> DownloadSnapshot: ...
+    async def start(self, request: DownloadRequest) -> DownloadSnapshot:
+        """Begin a transfer and return its first snapshot.
+
+        Raises :class:`DownloadRejected` if the transport refuses the request
+        and :class:`DownloadBackendUnavailable` if it cannot run at all.
+        """
+        ...
 
     async def list(self) -> list[DownloadSnapshot]:
         """Every transfer the transport knows about, including other clients'."""
         ...
 
-    async def get(self, handle: str) -> DownloadSnapshot | None: ...
+    async def get(self, handle: str) -> DownloadSnapshot | None:
+        """One transfer's current state, or None if the transport forgot it."""
+        ...
 
-    async def cancel(self, handle: str) -> CancelOutcome: ...
+    async def cancel(self, handle: str) -> CancelOutcome:
+        """Ask the transport to stop a transfer and reclaim what it wrote."""
+        ...

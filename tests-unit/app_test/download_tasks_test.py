@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
 
 import folder_paths
 from app.assets.downloads import destination
@@ -554,6 +555,18 @@ async def test_cancelling_forwards_the_transports_refusal():
     assert outcome is CancelOutcome.NOT_CANCELLABLE
 
 
+async def test_a_journal_id_cannot_steer_the_read_outside_the_journal_directory(tmp_path):
+    """A handle comes from a journal record's own id field, so it is only as
+    trustworthy as that file."""
+    (tmp_path / "secret.json").write_text('{"id": "secret"}')
+    journal = tmp_path / ".comfy-downloads"
+    journal.mkdir()
+    backend = ComfyCliBackend(str(tmp_path))
+
+    assert backend._read_journal("../secret") is None
+    assert backend._read_journal("/etc/passwd") is None
+
+
 async def test_an_absent_journal_is_a_definite_answer_not_a_failed_probe(tmp_path):
     """None means "cannot tell" and forces an enumeration every tick. comfy-cli
     only creates the directory on its first write, so a fresh install would
@@ -590,8 +603,6 @@ async def test_an_unrecognised_transport_status_is_not_treated_as_progress():
 
 
 async def _request(app, method, path, **kwargs):
-    from aiohttp.test_utils import TestClient, TestServer
-
     async with TestClient(TestServer(app)) as client:
         response = await client.request(method, path, **kwargs)
         return response.status, await response.json()

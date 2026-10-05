@@ -59,6 +59,11 @@ def _forbidden_roots() -> list[str]:
 
 
 def known_folder(folder_name: str) -> str:
+    """Normalize a caller-supplied folder name, refusing anything unwritable.
+
+    This is the gate: the name arrives from a request tag, so a category that
+    is not a model folder must never get past it.
+    """
     resolved = folder_paths.map_legacy(folder_name.strip())
     if resolved not in _model_folders():
         raise DestinationError(
@@ -158,6 +163,7 @@ class Visibility:
 
     @property
     def ok(self) -> bool:
+        """Whether a loader asking for this model would get this file."""
         return self.problem is None
 
 

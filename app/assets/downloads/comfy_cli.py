@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -37,6 +38,10 @@ from app.assets.downloads.backend import (
 )
 
 JOURNAL_DIRNAME = ".comfy-downloads"
+
+# comfy-cli issues 12 hex characters; the bound is loose enough to survive a
+# future widening of that, strict enough to never contain a path separator.
+_HANDLE_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 _PHASES = {
     "starting": DownloadPhase.PENDING,
@@ -89,6 +94,12 @@ class ComfyCliBackend:
         return os.path.join(self.workspace, JOURNAL_DIRNAME)
 
     def resolve_executable(self) -> str | None:
+        """Locate the `comfy` entry point, or None if it is not installed.
+
+        Checks PATH and then the directory holding this interpreter, because the
+        common install puts comfy-cli in the same environment as ComfyUI, which
+        is not on PATH when ComfyUI was launched by interpreter path.
+        """
         if self._executable:
             return self._executable
         if self._looked_up_at is not None and time.monotonic() - self._looked_up_at < _LOOKUP_TTL_S:
@@ -125,6 +136,12 @@ class ComfyCliBackend:
         return _snapshot(record)
 
     async def list(self) -> list[DownloadSnapshot]:
+        """Every download in the journal, reconciled periodically.
+
+        Progress is read straight from the journal; the CLI is invoked only
+        every `_RECONCILE_INTERVAL_S`, because only it detects a worker that
+        died and prunes finished records.
+        """
         if self._reconciled_at is not None and time.monotonic() - self._reconciled_at < _RECONCILE_INTERVAL_S:
             records = await asyncio.to_thread(self._read_all_journals)
             return [_snapshot(record) for record in records]
@@ -148,6 +165,7 @@ class ComfyCliBackend:
         return _snapshot({**(record or {}), **row})
 
     async def cancel(self, handle: str) -> CancelOutcome:
+        """Stop a live background download and reclaim its partial file."""
         snapshot = await self.get(handle)
         if snapshot is None:
             return CancelOutcome.MISSING
@@ -205,6 +223,12 @@ class ComfyCliBackend:
         return out.decode("utf-8", "replace"), err.decode("utf-8", "replace"), process.returncode
 
     def _read_journal(self, handle: str) -> dict[str, Any] | None:
+        # A handle reaches here from a journal record's own `id` field, so it is
+        # only as trustworthy as that file. Keeping it to the id vocabulary
+        # comfy-cli actually issues stops a doctored record from steering the
+        # read at a path of its choosing.
+        if not _HANDLE_RE.fullmatch(handle):
+            return None
         path = os.path.join(self.journal_dir, f"{handle}.json")
         try:
             with open(path, encoding="utf-8") as f:

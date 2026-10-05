@@ -46,6 +46,10 @@ def create_download_service(
     notify: Callable[[str, dict[str, Any]], None],
     refresh_catalog: Callable[[], None] | None = None,
 ) -> DownloadTaskService:
+    """Build the download service on the comfy-cli transport.
+
+    The composition root: the only place that picks which backend is in use.
+    """
     return DownloadTaskService(ComfyCliBackend(workspace), notify, refresh_catalog)
 
 

@@ -98,11 +98,17 @@ class DownloadTaskService:
         return {"task_id": tracked.task_id, "status": tracked.status}
 
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
+        """The TaskResponse for one download, or None if no such task exists.
+
+        None becomes a 404, which the frontend treats as proof the task is gone,
+        so it is only returned when the transport actually answered.
+        """
         handle = await self._resolve(task_id)
         tracked = self._tracked.get(handle) if handle else None
         return _task_response(tracked) if tracked else None
 
     async def cancel_task(self, task_id: str) -> CancelOutcome:
+        """Ask the transport to stop a download, then republish its real state."""
         handle = await self._resolve(task_id)
         if handle is None:
             return CancelOutcome.MISSING
@@ -136,10 +142,12 @@ class DownloadTaskService:
         return None
 
     def start_sweeping(self) -> None:
+        """Begin publishing progress. Idempotent; needs a running loop."""
         if self._sweeper is None or self._sweeper.done():
             self._sweeper = asyncio.create_task(self._sweep_forever())
 
     async def stop_sweeping(self) -> None:
+        """Stop publishing and await the loop. Detached workers keep running."""
         running = [t for t in (self._sweeper, self._sweeping) if t is not None]
         self._sweeper = self._sweeping = None
         for task in running:
