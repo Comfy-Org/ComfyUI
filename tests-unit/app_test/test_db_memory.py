@@ -1,9 +1,11 @@
 import gc
 import sqlite3
 import threading
+import time
+from contextlib import closing
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.assets.database.models import Tag
 from app.database import db as db_module
@@ -25,11 +27,31 @@ def fresh_memory_db(monkeypatch):
         db_module._memory_db_anchor.close()
 
 
+def _sqlite_shares_memdb():
+    # Probed independently of the product, so a wrong fallback fails these tests instead of skipping them.
+    if sqlite3.sqlite_version_info < (3, 36, 0):
+        return False
+    try:
+        sqlite3.connect("file:/comfyui-test-probe?vfs=memdb", uri=True).close()
+    except sqlite3.OperationalError:
+        return False
+    return True
+
+
+requires_memdb = pytest.mark.skipif(
+    not _sqlite_shares_memdb(), reason=f"SQLite {sqlite3.sqlite_version} cannot share a memdb database"
+)
+
+
 @pytest.fixture
 def memory_db(fresh_memory_db):
     db_module.init_db()
-    if db_module._memory_db_anchor is None:
-        pytest.skip(f"SQLite {sqlite3.sqlite_version} cannot share a memdb database")
+    assert db_module._memory_db_anchor is not None
+
+
+def _memdb_connection(timeout):
+    url = db_module.WriteSession.kw["bind"].url
+    return sqlite3.connect(f"{url.database}?vfs=memdb", uri=True, timeout=timeout, isolation_level=None)
 
 
 def _tag_count():
@@ -55,6 +77,7 @@ def _run_threads(target, count):
     return errors
 
 
+@requires_memdb
 def test_concurrent_write_transactions_with_savepoints_all_commit(memory_db):
     # The seeder's batch inserts and output registration nest savepoints in concurrent
     # write transactions; on one shared connection they unwind each other's savepoints.
@@ -72,6 +95,7 @@ def test_concurrent_write_transactions_with_savepoints_all_commit(memory_db):
     assert _tag_count() == threads * per_thread
 
 
+@requires_memdb
 def test_database_outlives_its_pooled_connections(memory_db):
     with db_module.create_write_session() as session, session.begin():
         session.add(Tag(name="kept"))
@@ -83,13 +107,74 @@ def test_database_outlives_its_pooled_connections(memory_db):
     assert _tag_count() == 1
 
 
+@requires_memdb
 def test_each_init_gets_its_own_database(memory_db):
     with db_module.create_write_session() as session, session.begin():
         session.add(Tag(name="first"))
+    first = (db_module._memory_db_anchor, db_module.Session, db_module.WriteSession)
 
     db_module.init_db()
 
     assert _tag_count() == 0
+    first[0].close()
+    first[1].kw["bind"].dispose()
+    first[2].kw["bind"].dispose()
+
+
+@requires_memdb
+def test_a_read_during_a_write_waits_and_sees_only_committed_rows(memory_db):
+    # An API read while the scanner holds a write transaction: it must neither fail on the
+    # lock nor see the uncommitted rows (the writer rolls back here).
+    written, reading = threading.Event(), threading.Event()
+    counts = []
+
+    def write(_):
+        with db_module.create_write_session() as session, session.begin():
+            session.add(Tag(name="uncommitted"))
+            session.flush()
+            written.set()
+            assert reading.wait(_WAIT_SECONDS)
+            time.sleep(0.2)  # let the reader reach the lock
+            session.rollback()
+
+    def read(_):
+        assert written.wait(_WAIT_SECONDS)
+        reading.set()
+        counts.append(_tag_count())
+
+    errors = _run_threads(lambda n: (write, read)[n](n), 2)
+    assert errors == []
+    assert counts == [0]
+
+
+@requires_memdb
+def test_write_session_takes_the_write_lock_before_its_first_write(memory_db):
+    with db_module.create_write_session() as session:
+        session.execute(text("SELECT 1")).scalar_one()
+        other = _memdb_connection(timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute("BEGIN IMMEDIATE")
+        finally:
+            other.close()
+
+
+@requires_memdb
+@pytest.mark.parametrize("factory", ["Session", "WriteSession"])
+def test_memdb_connections_enforce_foreign_keys(memory_db, factory):
+    engine = getattr(db_module, factory).kw["bind"]
+    # Two, so the second is a fresh connection through the engine's connect hooks.
+    with closing(engine.raw_connection()) as first, closing(engine.raw_connection()) as second:
+        assert [c.cursor().execute("PRAGMA foreign_keys").fetchone()[0] for c in (first, second)] == [1, 1]
+
+
+@requires_memdb
+def test_sqlite_3_36_uses_memdb(fresh_memory_db, monkeypatch):
+    monkeypatch.setattr(db_module.sqlite3, "sqlite_version_info", (3, 36, 0))
+
+    db_module.init_db()
+
+    assert db_module._memory_db_anchor is not None
 
 
 def _assert_shared_connection_fallback(caplog):

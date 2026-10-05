@@ -259,7 +259,8 @@ def _init_memory_db(db_url):
     The database lives in SQLite's memdb VFS under a name unique to this init, so every pooled
     connection sees the same database with normal locking. A single connection shared by all
     threads interleaves their transactions. Unlike a WAL file database, memdb blocks readers
-    for the whole of a write transaction, so write transactions must stay short.
+    for the whole of a write transaction, so write transactions must stay short. memdb also
+    caps the database at SQLITE_MEMDB_DEFAULT_MAXSIZE (1 GiB unless the build changes it).
     """
     global _memory_db_anchor
     name = f"/comfyui-{uuid.uuid4().hex}"
@@ -444,6 +445,7 @@ def create_write_session():
     """A session whose transactions open with BEGIN IMMEDIATE. Do filesystem work before
     using it: the write lock is held from the first statement until commit. Do not open
     one inside another: the inner one waits out busy_timeout for the outer's lock, then
-    fails with "database is locked", indistinguishable from real contention. Rule out a
+    fails with "database is locked", indistinguishable from real contention. On the
+    in-memory database the same holds for a read session opened inside one. Rule out a
     nested session before investigating lock contention."""
     return WriteSession()
