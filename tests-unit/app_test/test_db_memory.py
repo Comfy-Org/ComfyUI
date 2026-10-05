@@ -5,7 +5,7 @@ import time
 from contextlib import closing
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
 
 from app.assets.database.models import Tag
 from app.database import db as db_module
@@ -81,13 +81,15 @@ def _run_threads(target, count):
 def test_concurrent_write_transactions_with_savepoints_all_commit(memory_db):
     # The seeder's batch inserts and output registration nest savepoints in concurrent
     # write transactions; on one shared connection they unwind each other's savepoints.
+    # Odd workers write through the read engine's deferred transactions, as tagging does.
     threads, per_thread = 4, 200
     start = threading.Barrier(threads, timeout=_WAIT_SECONDS)
 
     def write(worker):
+        factory = db_module.create_session if worker % 2 else db_module.create_write_session
         start.wait()
         for i in range(per_thread):
-            with db_module.create_write_session() as session, session.begin():
+            with factory() as session, session.begin():
                 with session.begin_nested():
                     session.add(Tag(name=f"w{worker}-{i}"))
 
@@ -127,6 +129,10 @@ def test_a_read_during_a_write_waits_and_sees_only_committed_rows(memory_db):
     # lock nor see the uncommitted rows (the writer rolls back here).
     written, reading = threading.Event(), threading.Event()
     counts = []
+    read_engine = db_module.Session.kw["bind"]
+
+    def signal_reading(*_):
+        reading.set()
 
     def write(_):
         with db_module.create_write_session() as session, session.begin():
@@ -134,17 +140,33 @@ def test_a_read_during_a_write_waits_and_sees_only_committed_rows(memory_db):
             session.flush()
             written.set()
             assert reading.wait(_WAIT_SECONDS)
-            time.sleep(0.2)  # let the reader reach the lock
+            time.sleep(0.1)
+            assert counts == []  # the reader is waiting on the lock, not reading around it
             session.rollback()
 
     def read(_):
         assert written.wait(_WAIT_SECONDS)
-        reading.set()
         counts.append(_tag_count())
 
-    errors = _run_threads(lambda n: (write, read)[n](n), 2)
+    event.listen(read_engine, "before_cursor_execute", signal_reading)
+    try:
+        errors = _run_threads(lambda n: (write, read)[n](n), 2)
+    finally:
+        event.remove(read_engine, "before_cursor_execute", signal_reading)
     assert errors == []
     assert counts == [0]
+
+
+@requires_memdb
+def test_read_session_does_not_take_the_write_lock(memory_db):
+    with db_module.create_session() as session:
+        session.execute(text("SELECT 1")).scalar_one()
+        other = _memdb_connection(timeout=0)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            other.execute("ROLLBACK")
+        finally:
+            other.close()
 
 
 @requires_memdb
