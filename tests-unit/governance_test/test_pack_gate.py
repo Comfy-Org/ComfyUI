@@ -217,6 +217,27 @@ async def test_allowed_pack_never_runs_bytecode_from_a_pycache_prefix(monkeypatc
     assert import_sentinel.read_text(encoding="utf-8") == "source"
 
 
+def test_child_interpreter_never_runs_bytecode_from_a_pycache_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Given PYTHONPYCACHEPREFIX in effect, and bytecode in the prefix tree for an approved pack's module
+    prefix = tmp_path / "pycache-prefix"
+    monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(prefix))
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "")
+    monkeypatch.setattr(sys, "pycache_prefix", str(prefix))
+    pack_path = tmp_path / "pack"
+    pack_path.mkdir()
+    sentinel = tmp_path / "child-import"
+    (pack_path / "helper.py").write_text(f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('source', encoding='utf-8')\n", encoding="utf-8")
+    (pack_path / "install.py").write_text("import helper\n", encoding="utf-8")
+    _plant_bytecode(pack_path / "helper.py", sentinel)
+    governance.set_custom_node_policy("allowlist", frozenset(), {pack_path.name: governance.pack_digest(str(pack_path))})
+
+    # When the pack starts a child interpreter that imports the module
+    subprocess.run([sys.executable, str(pack_path / "install.py")], check=True)
+
+    # Then the child runs the measured source, not the bytecode
+    assert sentinel.read_text(encoding="utf-8") == "source"
+
+
 @pytest.mark.asyncio
 async def test_pack_carrying_bytecode_logs_the_cause_not_the_policy(
     monkeypatch: pytest.MonkeyPatch,

@@ -96,8 +96,10 @@ def set_custom_node_policy(mode: str | None, denied_packs: frozenset[str], allow
         sys.dont_write_bytecode = True
         os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
         # A cache prefix (PYTHONPYCACHEPREFIX, -X pycache_prefix) puts bytecode outside the pack, where the digest cannot
-        # refuse it; without one, imports look only in the pack's own __pycache__, which the digest does refuse.
+        # refuse it; without one, imports look only in the pack's own __pycache__, which the digest does refuse. The
+        # environment variable goes too, so child interpreters a pack starts do not read the prefix either.
         sys.pycache_prefix = None
+        os.environ.pop("PYTHONPYCACHEPREFIX", None)
 
 
 class _PackBytecodeError(ValueError):
@@ -193,7 +195,8 @@ def pack_digest(pack_path: str) -> str:
     contents = [(candidate.relative_to(root), candidate) for candidate in candidates if candidate.is_file()]
     # An unchecked hash-based .pyc executes without reading the .py this digest measures, so bytecode in the pack is
     # refused outright. Bytecode outside it is never read: pack_module_spec loads entry files from source, and
-    # set_custom_node_policy clears sys.pycache_prefix so a pack's imports find bytecode only in its own __pycache__.
+    # set_custom_node_policy clears sys.pycache_prefix and PYTHONPYCACHEPREFIX so a pack's imports, in this process
+    # and in child interpreters it starts, find bytecode only in its own __pycache__.
     bytecode = set()
     for relative, _ in contents:
         if "__pycache__" in relative.parts:
