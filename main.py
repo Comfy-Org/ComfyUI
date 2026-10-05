@@ -181,7 +181,7 @@ def execute_prestartup_script():
     def execute_script(script_path):
         module_name = os.path.splitext(script_path)[0]
         try:
-            spec = importlib.util.spec_from_file_location(module_name, script_path)
+            spec = governance.pack_module_spec(module_name, script_path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return True

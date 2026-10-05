@@ -173,12 +173,15 @@ def test_initialize_rejects_disabled_nodes_config(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # Given a valid policy, so the unsigned config is the only reason to stop
+    _use_policy(governed, monkeypatch, {})
     monkeypatch.setattr(args, "disabled_nodes_config", str(governed.parent / "disabled.yaml"))
 
     with pytest.raises(SystemExit) as exc_info:
         governance.initialize()
 
     _assert_policy_exit(exc_info, caplog.text)
+    assert "unsigned disabled-node config is not allowed" in caplog.text
 
 
 def test_initialize_does_not_gate_on_capability_version(

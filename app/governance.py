@@ -1,5 +1,7 @@
 import base64
 import binascii
+import importlib.machinery
+import importlib.util
 import json
 import logging
 import os
@@ -93,47 +95,75 @@ def set_custom_node_policy(mode: str | None, denied_packs: frozenset[str], allow
         # Cached bytecode runs without reading the source the digest measures, so a gated install must never write any, child interpreters included.
         sys.dont_write_bytecode = True
         os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+        # A cache prefix (PYTHONPYCACHEPREFIX, -X pycache_prefix) puts bytecode outside the pack, where the digest cannot
+        # refuse it; without one, imports look only in the pack's own __pycache__, which the digest does refuse.
+        sys.pycache_prefix = None
+
+
+class _PackBytecodeError(ValueError):
+    def __init__(self, paths: list[Path]):
+        super().__init__("pack must not contain compiled Python bytecode")
+        self.paths = paths
+
+
+class _SourceOnlyLoader(importlib.machinery.SourceFileLoader):
+    # Compiles the .py itself on every load. The stock loader would run a cached .pyc instead, and a single-file pack's
+    # cache sits in custom_nodes/__pycache__, outside the file its digest measures.
+    def get_code(self, fullname):
+        path = self.get_filename(fullname)
+        return self.source_to_code(self.get_data(path), path)
+
+
+def pack_module_spec(name: str, path: str) -> importlib.machinery.ModuleSpec | None:
+    """Spec for a pack's entry file, as spec_from_file_location builds it; under a custom-node policy it never reads bytecode."""
+    if _custom_node_mode is None:
+        return importlib.util.spec_from_file_location(name, path)
+    return importlib.util.spec_from_file_location(name, path, loader=_SourceOnlyLoader(name, path))
 
 
 def pack_refusal(module_path: str) -> str | None:
     """Return why the custom-node policy refuses this pack, for the log, or None when it may load."""
-    basename = Path(module_path).name
-    if _custom_node_mode is not None and basename.casefold() == _LEGACY_MANAGER_PACK:
-        return (
-            f"Custom node pack '{basename}' is not loaded: ComfyUI-Manager cannot run under a custom-node policy, "
-            "because its startup script installs packs before they are checked."
-        )
-    if not pack_allowed(module_path):
-        return f"Custom node pack '{basename}' is not permitted by your organization's policy."
-    return None
-
-
-def pack_allowed(module_path: str) -> bool:
     if _custom_node_mode is None:
-        return True
+        return None
 
     basename = Path(module_path).name
+    refused = f"Custom node pack '{basename}' is not permitted by your organization's policy."
     # The legacy Manager pack's prestartup script runs scheduled installs before any other pack is checked, so it is
     # refused even when the policy lists it by digest. It is recognised by folder name only: a copy under another folder
     # name is checked like any other pack (a blocklist admits it unless denied; an allowlist admits only a listed digest).
     if basename.casefold() == _LEGACY_MANAGER_PACK:
-        return False
+        return (
+            f"Custom node pack '{basename}' is not loaded: ComfyUI-Manager cannot run under a custom-node policy, "
+            "because its startup script installs packs before they are checked."
+        )
     expected_digest = _allowed_packs.get(basename.lower())
     if _custom_node_mode == "blocklist":
         if basename.lower() in _denied_packs:
-            return False
+            return refused
         if expected_digest is None:
-            return True
+            return None
 
     try:
         digest = pack_digest(module_path)
+    except _PackBytecodeError as error:
+        # Usually left by an earlier run without the policy, so the user can fix it without the administrator.
+        return (
+            f"Custom node pack '{basename}' is not loaded: it carries compiled Python files the policy cannot check "
+            f"({', '.join(str(path) for path in error.paths)}). Delete them and restart ComfyUI."
+        )
     except (ValueError, OSError) as error:
         logging.warning("Cannot verify custom node pack '%s': %s", basename, error)
-        return False
+        return refused
 
     if _custom_node_mode == "allowlist":
-        return digest in _allowed_packs.values()
-    return digest == expected_digest
+        allowed = digest in _allowed_packs.values()
+    else:
+        allowed = digest == expected_digest
+    return None if allowed else refused
+
+
+def pack_allowed(module_path: str) -> bool:
+    return pack_refusal(module_path) is None
 
 
 def _is_measured(relative: Path) -> bool:
@@ -161,9 +191,17 @@ def pack_digest(pack_path: str) -> str:
     if any(candidate.is_symlink() for candidate in candidates):
         raise ValueError("pack must not contain symlinks")
     contents = [(candidate.relative_to(root), candidate) for candidate in candidates if candidate.is_file()]
-    # An unchecked hash-based .pyc executes without reading the .py this digest measures, so bytecode is refused outright.
-    if any(relative.suffix.lower() in _BYTECODE_EXTENSIONS or "__pycache__" in relative.parts for relative, _ in contents):
-        raise ValueError("pack must not contain compiled Python bytecode")
+    # An unchecked hash-based .pyc executes without reading the .py this digest measures, so bytecode in the pack is
+    # refused outright. Bytecode outside it is never read: pack_module_spec loads entry files from source, and
+    # set_custom_node_policy clears sys.pycache_prefix so a pack's imports find bytecode only in its own __pycache__.
+    bytecode = set()
+    for relative, _ in contents:
+        if "__pycache__" in relative.parts:
+            bytecode.add(root.joinpath(*relative.parts[: relative.parts.index("__pycache__") + 1]))
+        elif relative.suffix.lower() in _BYTECODE_EXTENSIONS:
+            bytecode.add(root / relative)
+    if bytecode:
+        raise _PackBytecodeError(sorted(bytecode, key=str))
     files = [
         (unicodedata.normalize("NFC", relative.as_posix()), candidate)
         for relative, candidate in contents

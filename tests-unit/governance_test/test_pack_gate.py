@@ -3,9 +3,11 @@ from __future__ import annotations
 import ast
 from collections.abc import Callable
 import importlib
+import importlib.util
 import logging
 import os
 from pathlib import Path
+import py_compile
 import subprocess
 import sys
 import time
@@ -30,6 +32,10 @@ GENERIC_REFUSAL = "Custom node pack '{name}' is not permitted by your organizati
 MANAGER_REFUSAL = (
     "Custom node pack '{name}' is not loaded: ComfyUI-Manager cannot run under a custom-node policy, "
     "because its startup script installs packs before they are checked."
+)
+BYTECODE_REFUSAL = (
+    "Custom node pack '{name}' is not loaded: it carries compiled Python files the policy cannot check ({paths}). "
+    "Delete them and restart ComfyUI."
 )
 
 
@@ -152,6 +158,92 @@ async def test_loose_bytecode_beside_source_denies_the_pack(monkeypatch: pytest.
 
     # Then neither entry point executes
     assert result == (False, False)
+
+
+def _plant_bytecode(source_path: Path, sentinel: Path) -> Path:
+    # Compile other code into the cache file Python would read for source_path; an unchecked-hash .pyc runs without the source.
+    impostor = source_path.parent.parent / f"impostor-{source_path.stem}.py"
+    impostor.write_text(f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('bytecode', encoding='utf-8')\nNODE_CLASS_MAPPINGS = {{}}\n", encoding="utf-8")
+    cache_path = Path(importlib.util.cache_from_source(str(source_path)))
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    py_compile.compile(str(impostor), cfile=str(cache_path), invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH, doraise=True)
+    impostor.unlink()
+    return cache_path
+
+
+@pytest.mark.asyncio
+async def test_allowed_single_file_pack_never_runs_bytecode_beside_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Given an approved single-file pack, and bytecode for it in custom_nodes/__pycache__, outside what its digest measures
+    monkeypatch.setattr(sys, "pycache_prefix", None)
+    custom_nodes_path = tmp_path / "custom_nodes"
+    custom_nodes_path.mkdir()
+    sentinel = tmp_path / "single-file-import"
+    module_path = custom_nodes_path / "goodpack.py"
+    module_path.write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('source', encoding='utf-8')\nNODE_CLASS_MAPPINGS = {{}}\n",
+        encoding="utf-8",
+    )
+    governance.set_custom_node_policy("allowlist", frozenset(), {module_path.name: governance.pack_digest(str(module_path))})
+    _plant_bytecode(module_path, sentinel)
+    monkeypatch.setattr(folder_paths, "get_folder_paths", lambda name: [str(custom_nodes_path)] if name == "custom_nodes" else [])
+
+    # When the import loop loads it
+    await nodes.init_external_custom_nodes()
+
+    # Then the measured source runs, not the bytecode
+    assert sentinel.read_text(encoding="utf-8") == "source"
+
+
+@pytest.mark.asyncio
+async def test_allowed_pack_never_runs_bytecode_from_a_pycache_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Given PYTHONPYCACHEPREFIX in effect, and bytecode in the prefix tree for an approved pack's prestartup script and submodule
+    monkeypatch.setattr(sys, "pycache_prefix", str(tmp_path / "pycache-prefix"))
+    custom_nodes_path = tmp_path / "custom_nodes"
+    pack_path, prestartup_sentinel, import_sentinel = _make_directory_pack(custom_nodes_path)
+    (pack_path / "__init__.py").write_text("from . import helper\nNODE_CLASS_MAPPINGS = {}\n", encoding="utf-8")
+    (pack_path / "helper.py").write_text(f"from pathlib import Path\nPath({str(import_sentinel)!r}).write_text('source', encoding='utf-8')\n", encoding="utf-8")
+    (pack_path / "prestartup_script.py").write_text(
+        f"from pathlib import Path\nPath({str(prestartup_sentinel)!r}).write_text('source', encoding='utf-8')\n", encoding="utf-8"
+    )
+    _plant_bytecode(pack_path / "helper.py", import_sentinel)
+    _plant_bytecode(pack_path / "prestartup_script.py", prestartup_sentinel)
+    governance.set_custom_node_policy("allowlist", frozenset(), {pack_path.name: governance.pack_digest(str(pack_path))})
+
+    # When both gates load it
+    await _run_both_gates(monkeypatch, custom_nodes_path, prestartup_sentinel, import_sentinel)
+
+    # Then both run the measured source, not the bytecode
+    assert prestartup_sentinel.read_text(encoding="utf-8") == "source"
+    assert import_sentinel.read_text(encoding="utf-8") == "source"
+
+
+@pytest.mark.asyncio
+async def test_pack_carrying_bytecode_logs_the_cause_not_the_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Given an approved pack that an earlier ungoverned run left __pycache__ folders in
+    custom_nodes_path = tmp_path / "custom_nodes"
+    pack_path, prestartup_sentinel, import_sentinel = _make_directory_pack(custom_nodes_path)
+    (pack_path / "sub").mkdir()
+    (pack_path / "sub" / "__init__.py").write_text("", encoding="utf-8")
+    governance.set_custom_node_policy("allowlist", frozenset(), {pack_path.name: governance.pack_digest(str(pack_path))})
+    for folder in (pack_path / "__pycache__", pack_path / "sub" / "__pycache__"):
+        folder.mkdir()
+        (folder / "__init__.cpython-313.pyc").write_bytes(b"compiled\n")
+        (folder / "other.cpython-313.pyc").write_bytes(b"compiled\n")
+
+    # When both gates enumerate it
+    with caplog.at_level(logging.WARNING):
+        result = await _run_both_gates(monkeypatch, custom_nodes_path, prestartup_sentinel, import_sentinel)
+
+    # Then neither entry point runs, and each gate names the folders to delete instead of blaming the policy
+    assert result == (False, False)
+    messages = [record.getMessage() for record in caplog.records]
+    paths = f"{pack_path / '__pycache__'}, {pack_path / 'sub' / '__pycache__'}"
+    assert messages.count(BYTECODE_REFUSAL.format(name=pack_path.name, paths=paths)) == 2
+    assert GENERIC_REFUSAL.format(name=pack_path.name) not in messages
 
 
 def test_pack_gate_denies_pack_when_digest_cannot_be_read(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
