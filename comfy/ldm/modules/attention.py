@@ -84,7 +84,7 @@ class ComfyAttention(nn.Module):
         self.function = None
         metadata = state_dict.pop(prefix + "config", None)
         if metadata is not None:
-            config = json.loads(metadata.numpy().tobytes())
+            config = json.loads(metadata.detach().cpu().numpy().tobytes())
             method = config.get("attention")
             if method == "comfy_kitchen_int8":
                 self.config = config
@@ -179,8 +179,6 @@ def Normalize(in_channels, dtype=None, device=None):
 
 
 class AttentionTensorContainer:
-    """Single-owner tensor input consumed by an optimized attention backend."""
-
     __slots__ = ("tensor",)
 
     def __init__(self, tensor: torch.Tensor):
@@ -195,6 +193,9 @@ class AttentionTensorContainer:
         tensor = self.peek()
         self.tensor = None
         return tensor
+
+    def consume(self) -> torch.Tensor:
+        return self.take()
 
 
 def wrap_attn(func):
