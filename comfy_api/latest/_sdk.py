@@ -354,7 +354,7 @@ class LatentRef(ValueRef):
         channels: int = 4,
         spatial_downscale_ratio: Optional[int] = None,
     ) -> "LatentRef":
-        """Create a bounded zero latent without granting raw tensor access."""
+        """Create a bounded zero latent with at least one spatial cell."""
         return await current_runtime().ops.apply(
             "latent.empty", None, {
                 "width": int(width),
@@ -13053,8 +13053,8 @@ class InProcessOps:
             raise TypeError("latent spatial downscale ratio must be an integer")
         ratio = 8 if spatial_downscale_ratio is None else spatial_downscale_ratio
         if (
-            not 64 <= width <= 16384
-            or not 64 <= height <= 16384
+            not ratio <= width <= 16384
+            or not ratio <= height <= 16384
             or not 1 <= ratio <= 128
             or width % ratio
             or height % ratio

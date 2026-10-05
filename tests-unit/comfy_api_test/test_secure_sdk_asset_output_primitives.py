@@ -365,6 +365,15 @@ def test_empty_latent_can_declare_canonical_spatial_ratio():
             flux2_value = await refs.resolve(flux2)
             assert tuple(flux2_value["samples"].shape) == (1, 128, 48, 64)
             assert flux2_value["downscale_ratio_spacial"] == 16
+            minimal = await LatentRef.empty(8, 8, channels=16)
+            minimal_value = await refs.resolve(minimal)
+            assert tuple(minimal_value["samples"].shape) == (1, 16, 1, 1)
+            assert "downscale_ratio_spacial" not in minimal_value
+            with pytest.raises(ValueError, match="bounded range"):
+                await LatentRef.empty(7, 8)
+            with pytest.raises(ValueError, match="bounded range"):
+                await LatentRef.empty(
+                    8, 16, spatial_downscale_ratio=16)
             with pytest.raises(ValueError, match="bounded range"):
                 await LatentRef.empty(
                     1024, 768, channels=129, spatial_downscale_ratio=16)
