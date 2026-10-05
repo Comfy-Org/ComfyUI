@@ -1,6 +1,7 @@
 import base64
 import json
 from pathlib import Path
+import sys
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -301,7 +302,10 @@ def test_payload_rejects_invalid_active_form_and_mode_combinations(
         governance.verify_and_load(_envelope(private_key, payload))
 
 
-@pytest.mark.parametrize("denied_packs", [["pack"], ["Pack"], ["path/pack"], ["path\\pack"], ["b", "a"], ["pack", "pack"], [1]])
+@pytest.mark.parametrize(
+    "denied_packs",
+    [["pack"], ["Pack"], ["path/pack"], ["path\\pack"], [""], ["."], [".."], ["b", "a"], ["pack", "pack"], [1]],
+)
 def test_payload_rejects_invalid_denied_packs(
     private_key: Ed25519PrivateKey,
     denied_packs: list,
@@ -400,21 +404,48 @@ def test_packs_reject_digests_not_in_pack_digest_form(private_key: Ed25519Privat
         governance.verify_and_load(_envelope(private_key, payload))
 
 
-@pytest.mark.parametrize(
-    ("custom_node_mode", "name"),
-    [
-        # On Linux and macOS a backslash is an ordinary folder-name character, so a blocklist entry for it still matches.
-        ("blocklist", "foo\\bar"),
-        # An allowlist admits a pack by digest alone, so the name is never looked up.
-        ("allowlist", "nested/pack"),
-    ],
-)
-def test_packs_accept_names_with_separators(private_key: Ed25519PrivateKey, custom_node_mode: str, name: str) -> None:
+@pytest.mark.parametrize("name", ["nested/pack", "org\\pack", "..", ".", ""])
+def test_blocklist_rejects_pack_names_that_are_not_basenames(private_key: Ed25519PrivateKey, name: str) -> None:
     payload = _payload()
-    payload["customNodeMode"] = custom_node_mode
+    payload["customNodeMode"] = "blocklist"
     payload["packs"] = [{"name": name, "digest": "blake3:" + "a" * 64}]
 
+    with pytest.raises(ValueError, match="blocklist pack names must be basenames"):
+        governance.verify_and_load(_envelope(private_key, payload))
+
+
+def test_allowlist_accepts_pack_names_with_separators(private_key: Ed25519PrivateKey) -> None:
+    # An allowlist admits a pack by digest alone, so the name is never looked up.
+    payload = _payload()
+    payload["packs"] = [{"name": "nested/pack", "digest": "blake3:" + "a" * 64}]
+
     assert governance.verify_and_load(_envelope(private_key, payload))["packs"] == payload["packs"]
+
+
+def test_blocklist_mixed_case_pin_refuses_a_folder_with_another_digest(
+    private_key: Ed25519PrivateKey,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # _apply_policy sets module and interpreter state; monkeypatch puts all of it back after the test.
+    for name in ("_policy", "_disabled_nodes", "_custom_node_mode", "_denied_packs", "_allowed_packs"):
+        monkeypatch.setattr(governance, name, getattr(governance, name))
+    monkeypatch.setattr(sys, "dont_write_bytecode", sys.dont_write_bytecode)
+    monkeypatch.setattr(sys, "pycache_prefix", sys.pycache_prefix)
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)
+    pack_path = tmp_path / "ComfyUI-Example-Pack"
+    pack_path.mkdir()
+    (pack_path / "__init__.py").write_bytes(b"NODE_CLASS_MAPPINGS = {}\n")
+    payload = _payload()
+    payload["customNodeMode"] = "blocklist"
+    payload["packs"] = [{"name": "ComfyUI-Example-Pack", "digest": "blake3:" + "0" * 64}]
+
+    governance._apply_policy(governance.verify_and_load(_envelope(private_key, payload)))
+
+    assert governance.pack_refusal(str(pack_path)) == (
+        "Custom node pack 'ComfyUI-Example-Pack' is not permitted by your organization's policy."
+    )
 
 
 def test_packs_accept_pack_digest_output_under_mixed_case_names(private_key: Ed25519PrivateKey, tmp_path: Path) -> None:

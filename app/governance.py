@@ -303,6 +303,11 @@ def _decode_base64url(encoded: str, field: str) -> bytes:
     return decoded
 
 
+def _is_pack_basename(name: str) -> bool:
+    """Whether a signed pack name can be a folder or file name directly under custom_nodes."""
+    return name not in {"", ".", ".."} and "/" not in name and "\\" not in name
+
+
 def _validate_payload(payload: dict) -> None:
     if not isinstance(payload, dict) or set(payload) != _PAYLOAD_KEYS:
         raise ValueError("governance payload has an unexpected schema")
@@ -344,9 +349,12 @@ def _validate_payload(payload: dict) -> None:
             raise ValueError("governance pack entries must contain exactly name and digest")
         if not isinstance(pack["name"], str) or not isinstance(pack["digest"], str):
             raise ValueError("governance pack name and digest must be strings")
-        # Names are not checked for separators: a blocklist looks a pack up by its lowered folder or file name, where a
-        # backslash is an ordinary character on Linux and macOS, and an allowlist admits by digest alone. Case is free,
-        # since the builder signs folder names as they are and both sides lower them. pack_digest always writes this form.
+        # A blocklist looks a pin up by the lowered folder or file name os.listdir returns, so a name that can never be one
+        # is a pin that silently never applies; an allowlist admits by digest alone and never looks the name up. Case is
+        # free, since the builder signs folder names as they are and both sides lower them.
+        if custom_node_mode == "blocklist" and not _is_pack_basename(pack["name"]):
+            raise ValueError("governance blocklist pack names must be basenames")
+        # pack_digest always writes this form.
         if _BLAKE3_DIGEST_PATTERN.fullmatch(pack["digest"]) is None:
             raise ValueError("governance pack digests must be canonical BLAKE3 digests")
     pack_names = [pack["name"].lower() for pack in packs]
@@ -358,7 +366,7 @@ def _validate_payload(payload: dict) -> None:
         raise ValueError("governance deniedPacks must be a string list")
     if denied_packs != sorted(set(denied_packs)):
         raise ValueError("governance deniedPacks must be sorted and unique")
-    if any(pack != pack.lower() or "/" in pack or "\\" in pack for pack in denied_packs):
+    if any(pack != pack.lower() or not _is_pack_basename(pack) for pack in denied_packs):
         raise ValueError("governance deniedPacks entries must be lowercase basenames")
     if denied_packs and custom_node_mode != "blocklist":
         raise ValueError("governance deniedPacks requires blocklist mode")
