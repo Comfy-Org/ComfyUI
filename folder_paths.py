@@ -517,6 +517,18 @@ def get_filename_list(folder_name: str) -> list[str]:
     cache_helper.set(folder_name, out)
     return list(out[0])
 
+def invalidate_filename_list_cache(folder_name: str) -> None:
+    """Force the next get_filename_list for one folder to walk the disk again.
+
+    The cache validates itself on directory mtimes, which a coarse filesystem
+    timestamp can hide right after a file is written into a directory that was
+    already listed in the same second.
+    """
+    folder_name = map_legacy(folder_name)
+    global filename_list_cache
+    filename_list_cache.pop(folder_name, None)
+    cache_helper.cache.pop(folder_name, None)
+
 def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, image_height=0) -> tuple[str, str, int, str, str]:
     def map_filename(filename: str) -> tuple[int, str]:
         prefix_len = len(os.path.basename(filename_prefix))
