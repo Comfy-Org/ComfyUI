@@ -309,7 +309,7 @@ class ImageRef(TensorRef):
         return int(await self.op("image.batch_size"))
 
     async def select_batch(self, indices: list[int]) -> "ImageRef":
-        """Select an ordered, bounded set of images from a BHWC batch."""
+        """Select ordered images; repeated bounded indices are allowed."""
         return await self.op("image.select_batch", indices=list(indices))
 
     async def repeat_batch(self, amount: int) -> "ImageRef":
@@ -370,7 +370,7 @@ class LatentRef(ValueRef):
             "latent.repeat_batch", self, {"amount": int(amount)})
 
     async def select_batch(self, indices: list[int]) -> "LatentRef":
-        """Select an ordered, bounded set of entries from a latent batch."""
+        """Select ordered latents; repeated bounded indices are allowed."""
         return await current_runtime().ops.apply(
             "latent.select_batch", self, {"indices": list(indices)})
 
