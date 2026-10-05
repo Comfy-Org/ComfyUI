@@ -150,6 +150,43 @@ def test_ppm_scalar_conditioning_token_and_sampler_primitives():
     assert callable(transformer_options["optimized_attention_override"])
 
 
+def test_sigmas_from_values_materializes_bounded_float32_schedule():
+    async def run():
+        refs = InProcessRefResolver()
+        with bind_runtime(refs, None, InProcessOps()):
+            sigmas = await SigmasRef.from_values([14, 3.5, 0.0])
+            single = await SigmasRef.from_values([0.0])
+        return await refs.resolve(sigmas), await refs.resolve(single)
+
+    sigmas, single = asyncio.run(run())
+    assert sigmas.dtype == torch.float32
+    assert sigmas.device.type == "cpu"
+    assert torch.equal(sigmas, torch.tensor([14.0, 3.5, 0.0]))
+    assert torch.equal(single, torch.tensor([0.0]))
+
+
+@pytest.mark.parametrize(
+    "values,error",
+    [
+        ([], ValueError),
+        ([0.0] * 10002, ValueError),
+        ([True], TypeError),
+        ([[1.0]], TypeError),
+        ([float("nan")], ValueError),
+        ([float("inf")], ValueError),
+        ([-0.01], ValueError),
+    ],
+)
+def test_sigmas_from_values_rejects_malformed_values(values, error):
+    async def run():
+        refs = InProcessRefResolver()
+        with bind_runtime(refs, None, InProcessOps()):
+            with pytest.raises(error):
+                await SigmasRef.from_values(values)
+
+    asyncio.run(run())
+
+
 def test_model_sampling_sigmas_uses_bounded_shift_without_mutating_model(
     monkeypatch,
 ):

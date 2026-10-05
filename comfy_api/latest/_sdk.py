@@ -669,6 +669,12 @@ class SigmasRef(_TypedRef):
 
     KIND = "SIGMAS"
 
+    @classmethod
+    async def from_values(cls, values: list[float]) -> "SigmasRef":
+        """Create a bounded float32 sigma schedule from scalar values."""
+        return await current_runtime().ops.apply(
+            "sigmas.from_values", None, {"values": values})
+
     async def steps(self) -> int:
         """Return the number of sampling intervals in this schedule.
 
@@ -10282,6 +10288,7 @@ class InProcessOps:
             "latent.minimax_h3_token_count":
                 self._latent_minimax_h3_token_count,
             "latent.empty": self._latent_empty,
+            "sigmas.from_values": self._sigmas_from_values,
             "sigmas.steps": self._sigmas_steps,
             "sigmas.value_at": self._sigmas_value_at,
             "sigmas.slice": self._sigmas_slice,
@@ -12265,6 +12272,26 @@ class InProcessOps:
             "tokens": int(layout.seq_len),
             "breakdown": "\n".join(f"{key}: {value}" for key, value in parts),
         }
+
+    async def _sigmas_from_values(
+        self, _subject: Optional["Ref"], values: list[float],
+    ) -> "SigmasRef":
+        import math
+        import torch
+
+        if not isinstance(values, list) or not 1 <= len(values) <= 10001:
+            raise ValueError("SIGMAS values must contain 1 to 10001 scalars")
+        normalized = []
+        for value in values:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError("SIGMAS values must be numeric scalars")
+            value = float(value)
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError("SIGMAS values must be finite and nonnegative")
+            normalized.append(value)
+        tensor = torch.tensor(normalized, dtype=torch.float32, device="cpu")
+        return SigmasRef._wrap(await current_runtime().refs.create(
+            "SIGMAS", tensor))
 
     async def _sigmas_steps(self, sigmas: "SigmasRef") -> int:
         import torch
