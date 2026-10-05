@@ -244,8 +244,9 @@ _memory_db_anchor = None
 
 
 def _open_shared_memdb(name):
-    # Before 3.36 a memdb name is private to its connection, though opening it still succeeds.
-    if sqlite3.sqlite_version_info < (3, 36, 0):
+    # Before 3.36 a memdb name is private to its connection, though opening it still succeeds;
+    # before 3.40.1 memdb's locking lets a commit rewrite pages under an active read.
+    if sqlite3.sqlite_version_info < (3, 40, 1):
         return None
     try:
         return sqlite3.connect(f"file:{name}?vfs=memdb", uri=True, check_same_thread=False)
@@ -267,8 +268,9 @@ def _init_memory_db(db_url):
     _memory_db_anchor = _open_shared_memdb(name)
     if _memory_db_anchor is None:
         logging.warning(
-            f"SQLite {sqlite3.sqlite_version} cannot share an in-memory database between "
-            f"connections (that needs 3.36 or newer with the memdb VFS); the in-memory database "
+            f"This SQLite build ({sqlite3.sqlite_version}) cannot share an in-memory database "
+            f"between connections (that needs SQLite 3.40.1 or newer, built with the memdb VFS); "
+            f"the in-memory database "
             f"falls back to one connection shared by all threads, which can fail under "
             f"concurrent writes."
         )

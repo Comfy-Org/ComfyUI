@@ -29,7 +29,7 @@ def fresh_memory_db(monkeypatch):
 
 def _sqlite_shares_memdb():
     # Probed independently of the product, so a wrong fallback fails these tests instead of skipping them.
-    if sqlite3.sqlite_version_info < (3, 36, 0):
+    if sqlite3.sqlite_version_info < (3, 40, 1):
         return False
     try:
         sqlite3.connect("file:/comfyui-test-probe?vfs=memdb", uri=True).close()
@@ -191,8 +191,8 @@ def test_memdb_connections_enforce_foreign_keys(memory_db, factory):
 
 
 @requires_memdb
-def test_sqlite_3_36_uses_memdb(fresh_memory_db, monkeypatch):
-    monkeypatch.setattr(db_module.sqlite3, "sqlite_version_info", (3, 36, 0))
+def test_sqlite_3_40_1_uses_memdb(fresh_memory_db, monkeypatch):
+    monkeypatch.setattr(db_module.sqlite3, "sqlite_version_info", (3, 40, 1))
 
     db_module.init_db()
 
@@ -226,7 +226,9 @@ def test_falls_back_to_a_shared_connection_without_memdb(fresh_memory_db, monkey
     _assert_shared_connection_fallback(caplog)
 
 
-def test_falls_back_to_a_shared_connection_before_sqlite_3_36(fresh_memory_db, monkeypatch, caplog):
-    # SQLite 3.23-3.35 can open a memdb database but not share it between connections.
-    monkeypatch.setattr(db_module.sqlite3, "sqlite_version_info", (3, 35, 5))
+@pytest.mark.parametrize("version", [(3, 35, 5), (3, 40, 0)])
+def test_falls_back_to_a_shared_connection_before_sqlite_3_40_1(fresh_memory_db, monkeypatch, caplog, version):
+    # 3.23-3.35 can open a memdb database but not share it; 3.36-3.40.0 share it, but a
+    # commit can land under an active read, which then fails as a malformed database.
+    monkeypatch.setattr(db_module.sqlite3, "sqlite_version_info", version)
     _assert_shared_connection_fallback(caplog)
