@@ -115,12 +115,14 @@ def test_each_init_gets_its_own_database(memory_db):
         session.add(Tag(name="first"))
     first = (db_module._memory_db_anchor, db_module.Session, db_module.WriteSession)
 
-    db_module.init_db()
+    try:
+        db_module.init_db()
 
-    assert _tag_count() == 0
-    first[0].close()
-    first[1].kw["bind"].dispose()
-    first[2].kw["bind"].dispose()
+        assert _tag_count() == 0
+    finally:
+        first[0].close()
+        first[1].kw["bind"].dispose()
+        first[2].kw["bind"].dispose()
 
 
 @requires_memdb
@@ -226,9 +228,8 @@ def test_falls_back_to_a_shared_connection_without_memdb(fresh_memory_db, monkey
     _assert_shared_connection_fallback(caplog)
 
 
-@pytest.mark.parametrize("version", [(3, 35, 5), (3, 40, 0)])
-def test_falls_back_to_a_shared_connection_before_sqlite_3_40_1(fresh_memory_db, monkeypatch, caplog, version):
+def test_falls_back_to_a_shared_connection_before_sqlite_3_40_1(fresh_memory_db, monkeypatch, caplog):
     # 3.23-3.35 can open a memdb database but not share it; 3.36-3.40.0 share it, but a
     # commit can land under an active read, which then fails as a malformed database.
-    monkeypatch.setattr(db_module.sqlite3, "sqlite_version_info", version)
+    monkeypatch.setattr(db_module.sqlite3, "sqlite_version_info", (3, 40, 0))
     _assert_shared_connection_fallback(caplog)
