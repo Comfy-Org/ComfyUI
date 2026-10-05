@@ -204,6 +204,9 @@ class SigmasRef(Ref):
     KIND: str
     async def steps(self) -> int: ...
     async def value_at(self, index: int) -> float: ...
+    async def slice(
+        self, start: int = ..., end: Optional[int] = ...,
+    ) -> "SigmasRef": ...
 
 class InterpolationStatesRef(Ref):
     KIND: str
@@ -242,6 +245,10 @@ class ModelRef(Ref):
         start_step: int, end_step: int, denoise: float = ...,
         sigma_schedule: Optional[dict] = ...,
     ) -> float: ...
+    async def sampling_sigmas(
+        self, *, scheduler: str, steps: int, denoise: float = ...,
+        shift: Optional[float] = ...,
+    ) -> SigmasRef: ...
 
 class ClipRef(Ref):
     KIND: str

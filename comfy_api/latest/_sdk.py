@@ -684,6 +684,11 @@ class SigmasRef(_TypedRef):
         return float(await current_runtime().ops.apply(
             "sigmas.value_at", self, {"index": int(index)}))
 
+    async def slice(self, start: int = 0, end: Optional[int] = None) -> "SigmasRef":
+        """Return a bounded contiguous slice of this schedule."""
+        return await current_runtime().ops.apply(
+            "sigmas.slice", self, {"start": int(start), "end": end})
+
 
 class WeightDiffCursorRef(_TypedRef):
     """Execution-scoped iterator over host-owned model weight differences.
@@ -882,6 +887,19 @@ class ModelRef(_TypedRef):
                 "denoise": float(denoise),
                 "sigma_schedule": sigma_schedule,
             }))
+
+    async def sampling_sigmas(
+        self, *, scheduler: str, steps: int, denoise: float = 1.0,
+        shift: Optional[float] = None,
+    ) -> "SigmasRef":
+        """Calculate a bounded sigma schedule for this model."""
+        return await current_runtime().ops.apply(
+            "model.sampling_sigmas", self, {
+                "scheduler": str(scheduler),
+                "steps": int(steps),
+                "denoise": float(denoise),
+                "shift": shift,
+            })
 
     async def scheduled_cfg_guider(
         self, positive: "CondRef", negative: "CondRef", cfg: float,
@@ -10266,6 +10284,7 @@ class InProcessOps:
             "latent.empty": self._latent_empty,
             "sigmas.steps": self._sigmas_steps,
             "sigmas.value_at": self._sigmas_value_at,
+            "sigmas.slice": self._sigmas_slice,
             "sampler.named": self._sampler_named,
             "cond.sequence_length": self._cond_sequence_length,
             "cond.combine": self._cond_combine,
@@ -10306,6 +10325,7 @@ class InProcessOps:
             "model.is_zero_terminal_snr": self._model_is_zero_terminal_snr,
             "model.sigma_for_percent": self._model_sigma_for_percent,
             "model.sampling_sigma_delta": self._model_sampling_sigma_delta,
+            "model.sampling_sigmas": self._model_sampling_sigmas,
             "model.latent_scale_factor": self._model_latent_scale_factor,
             "guider.scheduled_cfg": self._guider_scheduled_cfg,
             "sampler.self_refine_video": self._sampler_self_refine_video,
@@ -12277,6 +12297,28 @@ class InProcessOps:
         if not math.isfinite(result):
             raise ValueError("SIGMAS value is not finite")
         return result
+
+    async def _sigmas_slice(
+        self, sigmas: "SigmasRef", start: int = 0,
+        end: Optional[int] = None,
+    ) -> "SigmasRef":
+        import torch
+
+        if isinstance(start, bool) or not isinstance(start, int):
+            raise TypeError("SIGMAS slice start must be an integer")
+        if end is not None and (isinstance(end, bool) or not isinstance(end, int)):
+            raise TypeError("SIGMAS slice end must be an integer or None")
+        value = await current_runtime().refs.resolve(sigmas)
+        if (not isinstance(value, torch.Tensor) or value.ndim != 1
+                or not 2 <= int(value.numel()) <= 10001
+                or not torch.isfinite(value).all()):
+            raise ValueError(
+                "SIGMAS must contain 2 to 10001 finite scalar values")
+        sliced = value[start:end]
+        if not 2 <= int(sliced.numel()) <= 10001:
+            raise ValueError("SIGMAS slice must contain at least two values")
+        return SigmasRef._wrap(await current_runtime().refs.create(
+            "SIGMAS", sliced.detach().clone()))
 
     async def _sampler_named(
         self, _subject: Optional["Ref"], name: str,
@@ -14589,6 +14631,51 @@ class InProcessOps:
                 sigmas = sigmas[-(steps + 1):]
         scale = float(value.model.latent_format.scale_factor)
         return float((sigmas[start_step] - sigmas[end_step]).detach().cpu()) / scale
+
+    async def _model_sampling_sigmas(
+        self, model: "ModelRef", scheduler: str, steps: int,
+        denoise: float = 1.0, shift: Optional[float] = None,
+    ) -> "SigmasRef":
+        import math
+        import torch
+        import comfy.samplers
+
+        steps = int(steps)
+        denoise = float(denoise)
+        if not 1 <= steps <= 10000:
+            raise ValueError("steps must be in [1, 10000]")
+        if not math.isfinite(denoise) or not 0.0 < denoise <= 1.0:
+            raise ValueError("denoise must be finite and in (0, 1]")
+        if scheduler not in comfy.samplers.KSampler.SCHEDULERS:
+            raise ValueError("unknown scheduler name")
+        if shift is not None:
+            shift = float(shift)
+            if not math.isfinite(shift) or not 0.0 <= shift <= 100.0:
+                raise ValueError("shift must be finite and in [0, 100]")
+
+        value = await current_runtime().refs.resolve(model)
+        try:
+            model_sampling = value.get_model_object("model_sampling")
+        except (AttributeError, KeyError) as error:
+            raise ValueError("MODEL has no sampling schedule") from error
+        if shift is not None:
+            class ShiftedSampling(type(model_sampling)):
+                pass
+
+            model_sampling = ShiftedSampling(value.model.model_config)
+            model_sampling.set_parameters(shift=shift)
+
+        total_steps = steps if denoise >= 0.9999 else int(steps / denoise)
+        sigmas = comfy.samplers.calculate_sigmas(
+            model_sampling, scheduler, total_steps).detach().cpu()
+        if denoise < 0.9999:
+            sigmas = sigmas[-(steps + 1):]
+        if (not isinstance(sigmas, torch.Tensor) or sigmas.ndim != 1
+                or int(sigmas.numel()) != steps + 1
+                or not torch.isfinite(sigmas).all()):
+            raise ValueError("scheduler returned an invalid sigma schedule")
+        return SigmasRef._wrap(await current_runtime().refs.create(
+            "SIGMAS", sigmas.clone()))
 
 
 class InProcessExecutionBackend:

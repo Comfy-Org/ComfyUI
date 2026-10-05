@@ -83,6 +83,7 @@ def test_ppm_scalar_conditioning_token_and_sampler_primitives():
             ranged = await conditioning.with_timestep_range(0.2, 0.8)
             zeroed = await conditioning.zero_out()
             sigma = await sigmas.value_at(-2)
+            sigma_tail = await sigmas.slice(1)
             normal_endpoint = await model.sigma_for_percent(0.0)
             actual_endpoint = await model.sigma_for_percent(
                 0.0, actual_endpoints=True)
@@ -99,12 +100,15 @@ def test_ppm_scalar_conditioning_token_and_sampler_primitives():
                 await conditioning.with_timestep_range(0.8, 0.2)
             with pytest.raises(IndexError, match="outside"):
                 await sigmas.value_at(9)
+            with pytest.raises(ValueError, match="at least two"):
+                await sigmas.slice(2)
 
         return {
             "metadata": await refs.resolve(metadata),
             "ranged": await refs.resolve(ranged),
             "zeroed": await refs.resolve(zeroed),
             "sigma": sigma,
+            "sigma_tail": await refs.resolve(sigma_tail),
             "normal_endpoint": normal_endpoint,
             "actual_endpoint": actual_endpoint,
             "sampler": await refs.resolve(sampler),
@@ -129,6 +133,7 @@ def test_ppm_scalar_conditioning_token_and_sampler_primitives():
     assert torch.count_nonzero(
         result["zeroed"][0][1]["pooled_output"]) == 0
     assert result["sigma"] == 2.0
+    assert torch.equal(result["sigma_tail"], torch.tensor([2.0, 0.0]))
     assert result["normal_endpoint"] == pytest.approx(999_999_999.9)
     assert result["actual_endpoint"] == pytest.approx(14.0)
     assert result["sampler"].extra_options == {"ge_gamma": 3.25}
@@ -143,3 +148,49 @@ def test_ppm_scalar_conditioning_token_and_sampler_primitives():
         "transformer_options"]
     assert transformer_options["stable"] is True
     assert callable(transformer_options["optimized_attention_override"])
+
+
+def test_model_sampling_sigmas_uses_bounded_shift_without_mutating_model(
+    monkeypatch,
+):
+    import comfy.samplers
+
+    class Sampling:
+        def __init__(self, config=None):
+            self.config = config
+            self.shift = None
+
+        def set_parameters(self, *, shift):
+            self.shift = shift
+
+    original = Sampling("original")
+    model = SimpleNamespace(
+        model=SimpleNamespace(model_config="config"),
+        get_model_object=lambda name: original if name == "model_sampling" else None,
+    )
+    calls = []
+
+    def calculate_sigmas(sampling, scheduler, steps):
+        calls.append((sampling, scheduler, steps))
+        return torch.linspace(float(steps), 0.0, steps + 1)
+
+    monkeypatch.setattr(comfy.samplers, "calculate_sigmas", calculate_sigmas)
+
+    async def run():
+        refs = InProcessRefResolver()
+        model_ref = ModelRef._wrap(await refs.create("MODEL", model))
+        with bind_runtime(refs, None, InProcessOps()):
+            sigmas = await model_ref.sampling_sigmas(
+                scheduler="normal", steps=4, denoise=0.5, shift=3.25)
+            result = await refs.resolve(sigmas)
+            with pytest.raises(ValueError, match="denoise"):
+                await model_ref.sampling_sigmas(
+                    scheduler="normal", steps=4, denoise=0.0)
+            return result
+
+    result = asyncio.run(run())
+    assert torch.equal(result, torch.tensor([4.0, 3.0, 2.0, 1.0, 0.0]))
+    assert calls[0][1:] == ("normal", 8)
+    assert calls[0][0].shift == 3.25
+    assert calls[0][0].config == "config"
+    assert original.shift is None
