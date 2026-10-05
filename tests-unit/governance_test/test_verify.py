@@ -74,9 +74,13 @@ def _encoded_outer(outer: dict) -> bytes:
 
 
 def _noncanonical_trailing_bits(encoded: str) -> str:
+    # The last character of an unpadded encoding carries 4 unused bits when length % 4 == 2 and 2 when it is 3. Flipping
+    # only those keeps the decoded bytes and leaves them set, which a canonical encoding never has.
     assert len(encoded) % 4 in {2, 3}
+    unused_bits = 0b1111 if len(encoded) % 4 == 2 else 0b11
     index = BASE64URL_ALPHABET.index(encoded[-1])
-    return encoded[:-1] + BASE64URL_ALPHABET[index + 1]
+    assert index & unused_bits == 0
+    return encoded[:-1] + BASE64URL_ALPHABET[index ^ unused_bits]
 
 
 @pytest.fixture
