@@ -344,10 +344,9 @@ def _validate_payload(payload: dict) -> None:
             raise ValueError("governance pack entries must contain exactly name and digest")
         if not isinstance(pack["name"], str) or not isinstance(pack["digest"], str):
             raise ValueError("governance pack name and digest must be strings")
-        # pack_refusal looks a pack up by its lowered folder or file name, so a name with a separator would never match;
-        # case is free, since the builder signs folder names as they are and both sides lower them.
-        if "/" in pack["name"] or "\\" in pack["name"]:
-            raise ValueError("governance pack names must be basenames")
+        # Names are not checked for separators: a blocklist looks a pack up by its lowered folder or file name, where a
+        # backslash is an ordinary character on Linux and macOS, and an allowlist admits by digest alone. Case is free,
+        # since the builder signs folder names as they are and both sides lower them. pack_digest always writes this form.
         if _BLAKE3_DIGEST_PATTERN.fullmatch(pack["digest"]) is None:
             raise ValueError("governance pack digests must be canonical BLAKE3 digests")
     pack_names = [pack["name"].lower() for pack in packs]

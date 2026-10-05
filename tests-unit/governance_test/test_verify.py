@@ -382,9 +382,6 @@ def test_packs_require_exact_string_entry_schema(private_key: Ed25519PrivateKey,
 @pytest.mark.parametrize(
     "pack",
     [
-        {"name": "nested/pack", "digest": "blake3:" + "a" * 64},
-        {"name": "nested\\pack", "digest": "blake3:" + "a" * 64},
-        {"name": "../pack", "digest": "blake3:" + "a" * 64},
         {"name": "pack", "digest": "digest"},
         {"name": "pack", "digest": "a" * 64},
         {"name": "pack", "digest": "blake3:" + "A" * 64},
@@ -395,12 +392,29 @@ def test_packs_require_exact_string_entry_schema(private_key: Ed25519PrivateKey,
         {"name": "pack", "digest": "blake3:" + "a" * 64 + "\n"},
     ],
 )
-def test_packs_reject_names_and_digests_the_gate_would_never_match(private_key: Ed25519PrivateKey, pack: dict) -> None:
+def test_packs_reject_digests_not_in_pack_digest_form(private_key: Ed25519PrivateKey, pack: dict) -> None:
     payload = _payload()
     payload["packs"] = [pack]
 
-    with pytest.raises(ValueError, match="basenames|canonical BLAKE3"):
+    with pytest.raises(ValueError, match="canonical BLAKE3"):
         governance.verify_and_load(_envelope(private_key, payload))
+
+
+@pytest.mark.parametrize(
+    ("custom_node_mode", "name"),
+    [
+        # On Linux and macOS a backslash is an ordinary folder-name character, so a blocklist entry for it still matches.
+        ("blocklist", "foo\\bar"),
+        # An allowlist admits a pack by digest alone, so the name is never looked up.
+        ("allowlist", "nested/pack"),
+    ],
+)
+def test_packs_accept_names_with_separators(private_key: Ed25519PrivateKey, custom_node_mode: str, name: str) -> None:
+    payload = _payload()
+    payload["customNodeMode"] = custom_node_mode
+    payload["packs"] = [{"name": name, "digest": "blake3:" + "a" * 64}]
+
+    assert governance.verify_and_load(_envelope(private_key, payload))["packs"] == payload["packs"]
 
 
 def test_packs_accept_pack_digest_output_under_mixed_case_names(private_key: Ed25519PrivateKey, tmp_path: Path) -> None:
