@@ -218,6 +218,94 @@ def test_exact_image_names_fail_closed_and_never_overwrite(tmp_path, monkeypatch
     assert not (outside / "out.png").exists()
 
 
+def test_closed_still_encoder_options_change_actual_pillow_outputs(
+    tmp_path, monkeypatch,
+):
+    import folder_paths
+    from PIL import JpegImagePlugin
+
+    output = tmp_path / "output"
+    output.mkdir()
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(output))
+
+    async def run():
+        refs = InProcessRefResolver()
+        context = InProcessCtxProvider().build(_plan())
+        # A textured image keeps codec choices observable in the encoded bytes.
+        pixels = torch.arange(64 * 64 * 3, dtype=torch.float32)
+        pixels = (pixels.remainder(251) / 250).reshape(1, 64, 64, 3)
+        image = ImageRef._wrap(await refs.create("IMAGE", pixels))
+        with bind_runtime(refs, context, InProcessOps()):
+            for value, name in (
+                ("4:4:4", "444.jpg"),
+                ("4:2:2", "422.jpg"),
+                ("4:2:0", "420.jpg"),
+                ("auto", "auto.jpg"),
+            ):
+                await context.output.save_images(
+                    image, filenames=[name], image_format="jpeg",
+                    jpeg_subsampling=value, quality=91)
+            for method in (0, 6):
+                await context.output.save_images(
+                    image, filenames=[f"method-{method}.webp"],
+                    image_format="webp", webp_method=method, quality=82)
+            for value in ("none", "lzw", "deflate", "jpeg", "packbits"):
+                await context.output.save_images(
+                    image, filenames=[f"{value}.tiff"], image_format="tiff",
+                    tiff_compression=value, quality=73)
+
+    asyncio.run(run())
+
+    assert JpegImagePlugin.get_sampling(Image.open(output / "444.jpg")) == 0
+    assert JpegImagePlugin.get_sampling(Image.open(output / "422.jpg")) == 1
+    assert JpegImagePlugin.get_sampling(Image.open(output / "420.jpg")) == 2
+    assert JpegImagePlugin.get_sampling(Image.open(output / "auto.jpg")) in (0, 1, 2)
+    assert (output / "method-0.webp").read_bytes() != (
+        output / "method-6.webp").read_bytes()
+    expected_tiff_compression = {
+        "none": 1,
+        "lzw": 5,
+        "deflate": 8,
+        "jpeg": 7,
+        "packbits": 32773,
+    }
+    for value, tag in expected_tiff_compression.items():
+        with Image.open(output / f"{value}.tiff") as saved:
+            assert saved.tag_v2[259] == tag
+            saved.load()
+
+
+def test_closed_still_encoder_options_fail_closed(tmp_path, monkeypatch):
+    import folder_paths
+
+    output = tmp_path / "output"
+    output.mkdir()
+    monkeypatch.setattr(folder_paths, "get_output_directory", lambda: str(output))
+
+    async def run():
+        refs = InProcessRefResolver()
+        context = InProcessCtxProvider().build(_plan())
+        image = ImageRef._wrap(await refs.create(
+            "IMAGE", torch.zeros((1, 2, 2, 3), dtype=torch.float32)))
+        with bind_runtime(refs, context, InProcessOps()):
+            with pytest.raises(ValueError, match="JPEG subsampling"):
+                await context.output.save_images(
+                    image, filenames=["bad-jpeg.jpg"], image_format="jpeg",
+                    jpeg_subsampling="keep")
+            for method in (-1, 7, True, 1.5):
+                with pytest.raises(ValueError, match="WebP method"):
+                    await context.output.save_images(
+                        image, filenames=[f"bad-{method}.webp"],
+                        image_format="webp", webp_method=method)
+            with pytest.raises(ValueError, match="TIFF compression"):
+                await context.output.save_images(
+                    image, filenames=["bad.tiff"], image_format="tiff",
+                    tiff_compression="zip")
+
+    asyncio.run(run())
+    assert not any(output.iterdir())
+
+
 def test_jpeg_large_broker_metadata_degrades_without_losing_the_image(
     tmp_path, monkeypatch,
 ):

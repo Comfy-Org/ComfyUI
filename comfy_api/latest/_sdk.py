@@ -2004,6 +2004,8 @@ class OutputDomain(Protocol):
         image_format: str = "png", quality: int = 95,
         filenames: Optional[list[str]] = None,
         lossless: bool = False, optimize: bool = False,
+        jpeg_subsampling: str = "4:4:4", webp_method: int = 4,
+        tiff_compression: str = "none",
     ) -> dict: ...
     async def save_images_with_alpha(
         self, images: ImageRef, mask: MaskRef,
@@ -5435,6 +5437,8 @@ class _InProcessOutput:
         image_format: str = "png", quality: int = 95,
         filenames: Optional[list[str]] = None,
         lossless: bool = False, optimize: bool = False,
+        jpeg_subsampling: str = "4:4:4", webp_method: int = 4,
+        tiff_compression: str = "none",
     ) -> dict:
         import numpy as np
         from PIL import Image as PILImage
@@ -5466,6 +5470,31 @@ class _InProcessOutput:
             raise ValueError("image quality must be in [1, 100]")
         if type(lossless) is not bool or type(optimize) is not bool:
             raise TypeError("lossless and optimize must be booleans")
+        if not isinstance(jpeg_subsampling, str):
+            raise TypeError("JPEG subsampling must be a string")
+        jpeg_subsampling = jpeg_subsampling.lower()
+        jpeg_subsampling_values = {
+            "4:4:4": 0, "4:2:2": 1, "4:2:0": 2, "auto": None,
+        }
+        if jpeg_subsampling not in jpeg_subsampling_values:
+            raise ValueError(
+                "JPEG subsampling must be one of 4:4:4, 4:2:2, 4:2:0, auto")
+        if type(webp_method) is not int or not 0 <= webp_method <= 6:
+            raise ValueError("WebP method must be an integer in [0, 6]")
+        if not isinstance(tiff_compression, str):
+            raise TypeError("TIFF compression must be a string")
+        tiff_compression = tiff_compression.lower()
+        tiff_compression_values = {
+            "none": None,
+            "lzw": "tiff_lzw",
+            "deflate": "tiff_adobe_deflate",
+            "jpeg": "jpeg",
+            "packbits": "packbits",
+        }
+        if tiff_compression not in tiff_compression_values:
+            raise ValueError(
+                "TIFF compression must be one of none, lzw, deflate, jpeg, "
+                "packbits")
         metadata_owner = _image_metadata_owner(
             self._prompt,
             self._extra_pnginfo,
@@ -5533,15 +5562,24 @@ class _InProcessOutput:
                 if pil_format == "PNG":
                     options["compress_level"] = level
             elif pil_format == "JPEG":
-                options.update(
-                    quality=quality, optimize=optimize, subsampling=0)
+                options.update(quality=quality, optimize=optimize)
+                subsampling = jpeg_subsampling_values[jpeg_subsampling]
+                if subsampling is not None:
+                    options["subsampling"] = subsampling
             elif pil_format in {"WEBP", "AVIF"}:
                 options.update(
                     quality=quality, lossless=lossless, optimize=optimize)
+                if pil_format == "WEBP":
+                    options["method"] = webp_method
             elif pil_format == "JPEG2000":
                 options["irreversible"] = not lossless
             elif pil_format == "TIFF":
                 options["optimize"] = optimize
+                compression = tiff_compression_values[tiff_compression]
+                if compression is not None:
+                    options["compression"] = compression
+                if compression == "jpeg":
+                    options["quality"] = quality
 
             if pil_format in {"WEBP", "AVIF", "JPEG2000", "TIFF"}:
                 exif = ImageSaveHelper._create_webp_metadata(

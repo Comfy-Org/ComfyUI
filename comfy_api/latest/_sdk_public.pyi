@@ -565,6 +565,9 @@ class OutputDomain(Protocol):
         filenames: Optional[list[str]] = ...,
         lossless: bool = ...,
         optimize: bool = ...,
+        jpeg_subsampling: str = ...,
+        webp_method: int = ...,
+        tiff_compression: str = ...,
     ) -> dict: ...
     async def save_images_with_alpha(
         self,
