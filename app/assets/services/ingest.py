@@ -1,19 +1,22 @@
 """Turns incoming bytes into catalogued assets: multipart uploads moved into a
 hash-addressed destination, files registered where they already sit, and
-records created from a hash the catalog already holds. Every path persists the
-stat that hashing verified, so a row's recorded size and mtime describe the
-same observation as its hash. A live row already at the destination is
-reconciled before the write, so an upload never adopts a fresh hash onto
-records created for bytes it just replaced.
+records created from a hash the catalog already holds. Registration persists
+the stat that hashing verified, so a row's recorded size and mtime describe the
+same observation as its hash; an upload records the stat of the file once it is
+in place, since a copy across volumes has its own mtime. A live row already at
+the destination is reconciled before the write, so an upload never adopts a
+fresh hash onto records created for bytes it just replaced.
 """
 
 import contextlib
+import errno
 import logging
 import mimetypes
 import os
+import shutil
 from typing import Any, NamedTuple, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import false, func, select
 from sqlalchemy.orm import Session
 
 from app.assets import mode
@@ -187,7 +190,12 @@ def _guess_upload_mime_type(
 def _move_temp_to_dest(temp_path: str, dest_abs: str) -> None:
     os.makedirs(os.path.dirname(dest_abs), exist_ok=True)
     try:
-        os.replace(temp_path, dest_abs)
+        try:
+            os.replace(temp_path, dest_abs)
+        except OSError as e:  # EXDEV: destination is on another volume
+            if e.errno != errno.EXDEV:
+                raise
+            shutil.copyfile(temp_path, dest_abs)
     except Exception as e:
         raise RuntimeError(f"failed to move uploaded file into place: {e}") from e
 
@@ -310,7 +318,7 @@ def _reconcile_live_content_at_path(
     existing = session.scalars(
         select(AssetContent).where(
             AssetContent.path == locator,
-            AssetContent.is_missing.is_(False),
+            AssetContent.is_missing == false(),
         )
     ).first()
     if existing is None:
@@ -365,7 +373,7 @@ def _settle_destination_before_write(session: Session, dest_abs: str) -> None:
     existing = session.scalars(
         select(AssetContent).where(
             AssetContent.path == dest_abs,
-            AssetContent.is_missing.is_(False),
+            AssetContent.is_missing == false(),
         )
     ).first()
     if existing is None:
@@ -448,7 +456,7 @@ def upload_from_temp_path(
     user_metadata = user_metadata or {}
 
     try:
-        digest, verified_stat = _snapshot_hash_with_retry(temp_path)
+        digest, _ = _snapshot_hash_with_retry(temp_path)
     except UploadUnstableError:
         _remove_temp_path(temp_path)
         raise
@@ -489,7 +497,9 @@ def upload_from_temp_path(
         _move_temp_to_dest(temp_path, dest_abs)
     finally:
         _remove_temp_path(temp_path)
-    size_bytes, mtime_ns = verified_stat.st_size, verified_stat.st_mtime_ns
+    # A cross-volume copy gets a new mtime, so record the file on disk (a rename keeps it).
+    placed_stat = os.stat(dest_abs)
+    size_bytes, mtime_ns = placed_stat.st_size, placed_stat.st_mtime_ns
     system_metadata = _extract_system_metadata_sync(dest_abs, content_type)
     with create_session() as session:
         _reconcile_live_content_at_path(
@@ -661,7 +671,7 @@ def register_cached_output(
         with create_session() as session:
             existing = session.scalars(
                 select(AssetContent).where(
-                    AssetContent.path == locator, AssetContent.is_missing.is_(False)
+                    AssetContent.path == locator, AssetContent.is_missing == false()
                 )
             ).first()
             if existing is None:
@@ -740,7 +750,7 @@ def register_executed_output(
                 existing = session.scalars(
                     select(AssetContent).where(
                         AssetContent.path == locator,
-                        AssetContent.is_missing.is_(False),
+                        AssetContent.is_missing == false(),
                     )
                 ).first()
                 if existing is not None:
