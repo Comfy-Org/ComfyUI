@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import mimetypes
 import logging
@@ -518,11 +519,16 @@ def get_filename_list(folder_name: str) -> list[str]:
     return list(out[0])
 
 def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, image_height=0) -> tuple[str, str, int, str, str]:
-    def map_filename(filename: str) -> tuple[int, str]:
+    def map_filename(existing_filename: str) -> tuple[int, str]:
         prefix_len = len(os.path.basename(filename_prefix))
-        prefix = filename[:prefix_len + 1]
+        prefix = existing_filename[:prefix_len + 1]
+        remainder = existing_filename[prefix_len + 1:]
+        if batch_pattern is not None:
+            match = batch_pattern.match(os.path.normcase(existing_filename))
+            if match:
+                prefix = filename + "_"
+                remainder = match.string[match.end():]
         try:
-            remainder = filename[prefix_len + 1:]
             base_remainder = remainder.split('.')[0]
             digits = int(base_remainder.split('_')[0])
         except:
@@ -555,6 +561,11 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
               "\n         output_dir: " + output_dir
         logging.error(err)
         raise Exception(err)
+
+    batch_pattern = None
+    if "%batch_num%" in filename:
+        parts = [re.escape(os.path.normcase(part)) for part in filename.split("%batch_num%")]
+        batch_pattern = re.compile(parts[0] + r"(?P<batch_num>[0-9]+)" + r"(?P=batch_num)".join(parts[1:]) + "_")
 
     try:
         counter = max(filter(lambda a: os.path.normcase(a[1][:-1]) == os.path.normcase(filename) and a[1][-1] == "_", map(map_filename, os.listdir(full_output_folder))))[0] + 1
