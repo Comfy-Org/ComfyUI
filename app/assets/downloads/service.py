@@ -221,16 +221,19 @@ class DownloadTaskService:
         tracked.snapshot = snapshot
 
         if snapshot.phase is DownloadPhase.TRANSFERRED:
-            if tracked.status not in ("completed", "failed"):
+            if tracked.status not in ("completed", "failed", "cancelled"):
                 await self._finalize(tracked)
         else:
             tracked.status = _STATUSES[snapshot.phase]
             tracked.error = snapshot.error
 
-        if adopted and snapshot.is_terminal:
+        if adopted and snapshot.is_terminal and not self._swept_once:
             # Retained history, not news. comfy-cli keeps finished records for a
-            # week, and announcing them would reopen a toast for every download
-            # the user has ever run.
+            # week, and announcing them at startup would reopen a toast for
+            # every download the user has ever run. A record first seen after
+            # that is a download someone really did start, often one that
+            # failed fast, and staying silent about it is the bug this feature
+            # exists to fix.
             tracked.announced = True
             return
 
@@ -247,14 +250,10 @@ class DownloadTaskService:
         worse than no progress UI at all.
         """
         path = tracked.snapshot.destination
-        folder = destination.folder_for_path(path)
-        visible = bool(folder) and await asyncio.to_thread(destination.is_visible, folder, path)
-        if not visible:
+        seen = await asyncio.to_thread(destination.inspect, path)
+        if not seen.ok:
             tracked.status = "failed"
-            tracked.error = (
-                f"Downloaded file is not visible to this server's model loaders: {path}. "
-                "It may have landed outside the configured model directories."
-            )
+            tracked.error = f"The download finished but this server's model loaders cannot see it: {seen.problem}."
             return
 
         tracked.status = "completed"
@@ -262,7 +261,7 @@ class DownloadTaskService:
         tracked.result = {
             "success": True,
             "file_path": path,
-            "filename": destination.relative_name(folder, path) or os.path.basename(path),
+            "filename": (seen.name or os.path.basename(path)).replace(os.sep, "/"),
             "bytes_downloaded": tracked.snapshot.bytes_completed,
         }
         if self._refresh_catalog is not None:
@@ -302,11 +301,7 @@ def _task_response(tracked: _Tracked) -> dict[str, Any]:
         "idempotency_key": snapshot.handle,
         # Deliberately no url: a resolved download url can carry a presigned
         # token, and this is read by the browser.
-        "payload": {
-            "destination": snapshot.destination,
-            "filename": os.path.basename(snapshot.destination),
-            "folder": folder,
-        },
+        "payload": {"destination": snapshot.destination, "folder": folder},
         "status": tracked.status,
         "create_time": _rfc3339(snapshot.started_at),
         "update_time": _rfc3339(snapshot.updated_at),

@@ -67,9 +67,11 @@ class ComfyCliBackend:
         self.workspace = os.path.abspath(workspace)
         self._executable = executable
         self._looked_up_at: float | None = None
-        # comfy-cli prunes finished records on `model downloads`, so overlapping
-        # invocations would race each other over the same directory.
-        self._lock = asyncio.Lock()
+        # `model downloads` prunes finished records, so two of those would race
+        # over the same directory. Only that verb is serialised: holding the
+        # lock across a submit would stall progress reads and cancels behind a
+        # metadata round trip that can take a minute.
+        self._prune_lock = asyncio.Lock()
 
     @property
     def journal_dir(self) -> str:
@@ -111,7 +113,8 @@ class ComfyCliBackend:
         return _snapshot(record)
 
     async def list(self) -> list[DownloadSnapshot]:
-        envelope = await self._run("model", "downloads", timeout=_QUERY_TIMEOUT_S)
+        async with self._prune_lock:
+            envelope = await self._run("model", "downloads", timeout=_QUERY_TIMEOUT_S)
         rows = (envelope.get("data") or {}).get("downloads") or []
         records = await asyncio.to_thread(self._read_journals, [row.get("id") for row in rows])
         return [_snapshot({**records.get(row.get("id"), {}), **row}) for row in rows if row.get("id")]
@@ -154,8 +157,7 @@ class ComfyCliBackend:
                 "Install it with `pip install comfy-cli`."
             )
         argv = [executable, "--json", "--skip-prompt", "--workspace", self.workspace, *args]
-        async with self._lock:
-            stdout, stderr, code = await self._communicate(argv, timeout)
+        stdout, stderr, code = await self._communicate(argv, timeout)
 
         envelope = _parse_envelope(stdout)
         if envelope is None:
@@ -211,6 +213,12 @@ class ComfyCliBackend:
         """
         try:
             entries = list(os.scandir(self.journal_dir))
+        except FileNotFoundError:
+            # No journal yet is a definite answer, not a failed probe: comfy-cli
+            # only creates the directory on its first write. Reporting None here
+            # would mean "cannot tell", and an install that has never downloaded
+            # anything would enumerate forever.
+            return (0, 0)
         except OSError:
             return None
         newest = 0

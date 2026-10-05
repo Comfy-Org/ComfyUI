@@ -9,11 +9,12 @@ import folder_paths
 from app.assets.downloads import destination
 from app.assets.downloads.backend import (
     CancelOutcome,
+    DownloadBackendUnavailable,
     DownloadPhase,
     DownloadRejected,
     DownloadSnapshot,
 )
-from app.assets.downloads.comfy_cli import _parse_envelope, _snapshot
+from app.assets.downloads.comfy_cli import ComfyCliBackend, _parse_envelope, _snapshot
 from app.assets.downloads.routes import register_download_routes
 from app.assets.downloads.service import DownloadTaskService
 
@@ -30,6 +31,8 @@ def model_root(tmp_path):
     folders = {
         "loras": ([str(loras)], {".safetensors", ".ckpt"}),
         "configs": ([str(tmp_path / "models" / "configs")], {".yaml"}),
+        "custom_nodes": ([str(tmp_path / "custom_nodes")], set()),
+        "datasets": ([str(tmp_path / "datasets")], set()),
     }
     with patch.dict(folder_paths.folder_names_and_paths, folders, clear=True):
         folder_paths.invalidate_filename_list_cache("loras")
@@ -121,6 +124,49 @@ async def test_resolve_refuses_destinations_no_loader_would_list(model_root, fol
     assert excinfo.value.code == code
 
 
+@pytest.mark.parametrize("folder,filename", [
+    ("custom_nodes", "pwned.py"),
+    ("custom_nodes", "evil/__init__.py"),
+    ("configs", "anything.yaml"),
+])
+async def test_resolve_refuses_to_write_outside_the_model_folders(model_root, folder, filename):
+    """custom_nodes is imported at startup, so a download into it is remote code
+    execution. It shares the upload endpoint's allowlist for exactly that reason."""
+    with pytest.raises(destination.DestinationError) as excinfo:
+        destination.resolve(folder, filename)
+    assert excinfo.value.code == "UNKNOWN_MODEL_FOLDER"
+
+
+async def test_resolve_refuses_a_folder_that_enumerates_no_extensions(model_root):
+    """An empty extension set means get_filename_list lists everything, so the
+    visibility check cannot reject anything either. Refuse rather than allow."""
+    with pytest.raises(destination.DestinationError) as excinfo:
+        destination.resolve("datasets", "anything.safetensors")
+    assert excinfo.value.code == "UNSUPPORTED_EXTENSION"
+
+
+async def test_a_download_into_custom_nodes_is_refused_over_http(model_root):
+    app = web.Application()
+    backend = FakeBackend()
+    service, _ = make_service(backend)
+    register_download_routes(app, service)
+
+    status, body = await _request(
+        app,
+        "POST",
+        "/api/assets/download",
+        json={"source_url": "https://e.test/pwned.py", "tags": ["models", "model_type:custom_nodes"]},
+    )
+
+    assert status == 400
+    assert body["error"]["code"] == "UNKNOWN_MODEL_FOLDER"
+    assert backend.requests == []
+
+
+async def test_folder_for_path_ignores_paths_outside_the_model_folders(model_root, tmp_path):
+    assert destination.folder_for_path(str(tmp_path / "custom_nodes" / "x.py")) is None
+
+
 async def test_folder_for_path_identifies_externally_chosen_destinations(model_root):
     assert destination.folder_for_path(str(model_root / "x.safetensors")) == "loras"
     assert destination.folder_for_path("/somewhere/else/x.safetensors") is None
@@ -177,8 +223,23 @@ async def test_transferred_download_fails_when_the_file_landed_where_no_loader_l
     task = await service.get_task(_only_task_id(service))
 
     assert task["status"] == "failed"
-    assert "not visible" in task["error_message"]
+    assert "outside every configured model directory" in task["error_message"]
     assert "result" not in task
+
+
+async def test_a_file_in_the_right_folder_but_the_wrong_format_says_so(model_root):
+    """Reachable through the externally-started path, where comfy-cli chose the
+    name. Blaming placement would send the user looking in the wrong place."""
+    odd = model_root / "weights.gguf"
+    odd.write_bytes(b"weights")
+    backend = FakeBackend([snapshot(phase=DownloadPhase.TRANSFERRED, destination_path=str(odd))])
+    service, _ = make_service(backend)
+
+    await service.sweep()
+    task = await service.get_task(_only_task_id(service))
+
+    assert task["status"] == "failed"
+    assert "not listed by 'loras' loaders" in task["error_message"]
 
 
 async def test_transferred_download_fails_when_the_file_is_gone(model_root):
@@ -284,6 +345,19 @@ async def test_downloads_already_finished_at_startup_are_adopted_without_replayi
     assert len(service._tracked) == 2
 
 
+async def test_a_download_discovered_after_startup_is_announced_even_if_already_finished(model_root):
+    """A worker that dies seconds after the agent launches it writes a terminal
+    record inside one sweep gap; staying quiet about it is the PM-1883 bug."""
+    backend = FakeBackend()
+    service, events = make_service(backend)
+    await service.sweep()
+
+    backend.snapshots.append(snapshot(handle="quick", phase=DownloadPhase.FAILED, error="boom"))
+    await service.sweep()
+
+    assert [e[1]["status"] for e in events] == ["failed"]
+
+
 async def test_submitting_lets_the_transport_name_the_file_when_the_caller_cannot(model_root):
     backend = FakeBackend()
     service, _ = make_service(backend)
@@ -319,6 +393,15 @@ async def test_cancelling_forwards_the_transports_refusal():
     outcome = await service.cancel_task(_only_task_id(service))
 
     assert outcome is CancelOutcome.NOT_CANCELLABLE
+
+
+async def test_an_absent_journal_is_a_definite_answer_not_a_failed_probe(tmp_path):
+    """None means "cannot tell" and forces an enumeration every tick. comfy-cli
+    only creates the directory on its first write, so a fresh install would
+    spawn a subprocess every second forever."""
+    backend = ComfyCliBackend(str(tmp_path / "never-used"))
+
+    assert backend.change_hint() == (0, 0)
 
 
 async def test_envelope_is_read_off_the_last_json_line():
@@ -394,6 +477,25 @@ async def test_submit_surfaces_a_transport_conflict_as_409(model_root):
 
     assert status == 409
     assert body["error"]["code"] == "model_file_exists"
+
+
+async def test_reading_a_task_reports_a_missing_transport_instead_of_crashing(model_root):
+    """taskService treats anything but 404 as transient and retries forever, so a
+    500 here pins a pending cancellation open until the page is reloaded."""
+    app = web.Application()
+    backend = FakeBackend()
+
+    async def unavailable():
+        raise DownloadBackendUnavailable("comfy-cli is not installed")
+
+    backend.list = unavailable
+    service, _ = make_service(backend)
+    register_download_routes(app, service)
+
+    status, body = await _request(app, "GET", "/api/tasks/11111111-2222-3333-4444-555555555555")
+
+    assert status == 503
+    assert body["error"]["code"] == "DEPENDENCY_MISSING"
 
 
 async def test_reading_an_unknown_task_is_a_404(model_root):

@@ -8,6 +8,7 @@ path, and no knowledge that a download is anything other than a task.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -66,11 +67,35 @@ def register_download_routes(app: web.Application, service: DownloadTaskService)
     app.on_cleanup.append(_stop)
 
 
-def _error(status: int, code: str, message: str) -> web.Response:
-    return web.json_response({"error": {"code": code, "message": message}}, status=status)
+def _error(status: int, code: str, message: str, details: dict[str, Any] | None = None) -> web.Response:
+    return web.json_response({"error": {"code": code, "message": message, "details": details or {}}}, status=status)
+
+
+def _transport_errors(handler):
+    """Turn a transport failure into the task API's own vocabulary.
+
+    Every handler here reaches the backend, including the read ones: resolving
+    an unknown task id enumerates. Without this a server whose comfy-cli went
+    missing answers `GET /api/tasks/{id}` with a plain-text 500, which the
+    frontend reads as a transient error and retries forever rather than
+    settling the download.
+    """
+
+    @functools.wraps(handler)
+    async def wrapped(request: web.Request) -> web.Response:
+        try:
+            return await handler(request)
+        except DownloadBackendUnavailable as e:
+            return _error(503, "DEPENDENCY_MISSING", str(e))
+        except DownloadRejected as e:
+            status = 409 if e.code in _CONFLICT_CODES else 502
+            return _error(status, e.code, e.message, {"hint": e.hint} if e.hint else None)
+
+    return wrapped
 
 
 @ROUTES.post("/api/assets/download")
+@_transport_errors
 async def submit_download(request: web.Request) -> web.Response:
     service = request.app[DOWNLOAD_SERVICE]
     try:
@@ -98,18 +123,22 @@ async def submit_download(request: web.Request) -> web.Response:
         task = await service.start(url, folder, body.get("filename") or _filename_from_url(url))
     except DestinationError as e:
         return _error(400, e.code, e.message)
-    except DownloadBackendUnavailable as e:
-        return _error(503, "DEPENDENCY_MISSING", str(e))
     except DownloadRejected as e:
+        # On submit, unlike on a read, a transport refusal is usually something
+        # the caller can fix: a different name, or the download already running.
         status = 409 if e.code in _CONFLICT_CODES else 400
-        return _error(status, e.code, e.message)
+        return _error(status, e.code, e.message, {"hint": e.hint} if e.hint else None)
+    except DownloadBackendUnavailable:
+        raise
     except Exception:
+        # The query string of a resolved download url can carry a presigned token.
         logging.exception("Failed to start model download from %s", urlsplit(url)._replace(query="").geturl())
         return _error(500, "INTERNAL", "Could not start the download.")
     return web.json_response(task, status=202)
 
 
 @ROUTES.get("/api/tasks/{task_id}")
+@_transport_errors
 async def get_task(request: web.Request) -> web.Response:
     task = await request.app[DOWNLOAD_SERVICE].get_task(request.match_info["task_id"])
     if task is None:
@@ -118,11 +147,9 @@ async def get_task(request: web.Request) -> web.Response:
 
 
 @ROUTES.delete("/api/tasks/{task_id}")
+@_transport_errors
 async def cancel_task(request: web.Request) -> web.Response:
-    try:
-        outcome = await request.app[DOWNLOAD_SERVICE].cancel_task(request.match_info["task_id"])
-    except DownloadBackendUnavailable as e:
-        return _error(503, "DEPENDENCY_MISSING", str(e))
+    outcome = await request.app[DOWNLOAD_SERVICE].cancel_task(request.match_info["task_id"])
     if outcome is CancelOutcome.MISSING:
         return _error(404, "TASK_NOT_FOUND", "No such task.")
     if outcome is CancelOutcome.NOT_CANCELLABLE:
