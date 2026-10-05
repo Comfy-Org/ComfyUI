@@ -194,3 +194,38 @@ def test_model_sampling_sigmas_uses_bounded_shift_without_mutating_model(
     assert calls[0][0].shift == 3.25
     assert calls[0][0].config == "config"
     assert original.shift is None
+
+
+@pytest.mark.parametrize(
+    "scheduler", ["simple", "sgm_uniform", "ddim_uniform", "beta", "normal"],
+)
+def test_model_sampling_sigmas_matches_comfy_shifted_schedule(scheduler):
+    import comfy.model_sampling
+    import comfy.samplers
+
+    config = SimpleNamespace(sampling_settings={})
+    original = comfy.model_sampling.ModelSamplingFlux(config)
+    model = SimpleNamespace(
+        model=SimpleNamespace(model_config=config),
+        get_model_object=lambda name: original if name == "model_sampling" else None,
+    )
+
+    class ShiftedSampling(type(original)):
+        pass
+
+    expected_sampling = ShiftedSampling(config)
+    expected_sampling.set_parameters(shift=3.25)
+    expected = comfy.samplers.calculate_sigmas(
+        expected_sampling, scheduler, 8).detach().cpu()[-5:]
+
+    async def run():
+        refs = InProcessRefResolver()
+        model_ref = ModelRef._wrap(await refs.create("MODEL", model))
+        with bind_runtime(refs, None, InProcessOps()):
+            result = await model_ref.sampling_sigmas(
+                scheduler=scheduler, steps=4, denoise=0.5, shift=3.25)
+        return await refs.resolve(result)
+
+    actual = asyncio.run(run())
+    assert torch.equal(actual, expected)
+    assert model.get_model_object("model_sampling") is original
