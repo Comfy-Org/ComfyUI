@@ -79,6 +79,10 @@ class ComfyCliBackend:
         # lock across a submit would stall progress reads and cancels behind a
         # metadata round trip that can take a minute.
         self._prune_lock = asyncio.Lock()
+        # A submit resolves metadata in comfy-cli's foreground, so each one can
+        # hold an interpreter for up to _SUBMIT_TIMEOUT_S. Queue them rather
+        # than forking one per concurrent request.
+        self._submits = asyncio.Semaphore(4)
 
     @property
     def journal_dir(self) -> str:
@@ -109,7 +113,8 @@ class ComfyCliBackend:
         args = ["model", "download", "--url", request.url, "--relative-path", request.directory]
         if request.filename:
             args += ["--filename", request.filename]
-        envelope = await self._run(*args, "--background", timeout=_SUBMIT_TIMEOUT_S)
+        async with self._submits:
+            envelope = await self._run(*args, "--background", timeout=_SUBMIT_TIMEOUT_S)
         handle = (envelope.get("data") or {}).get("download_id")
         if not handle:
             raise DownloadRejected("DOWNLOAD_NOT_STARTED", "comfy-cli did not report a download id.")
@@ -211,8 +216,12 @@ class ComfyCliBackend:
     def _read_all_journals(self) -> list[dict[str, Any]]:
         try:
             names = [e.name for e in os.scandir(self.journal_dir) if e.name.endswith(".json")]
-        except OSError:
+        except FileNotFoundError:
             return []
+        # Any other OSError means the journal could not be read, not that it is
+        # empty. Returning [] would retire every tracked task and make the route
+        # answer an authoritative 404, which the frontend reads as proof the
+        # download is gone.
         found = self._read_journals([name[: -len(".json")] for name in names])
         return [record for record in found.values() if record.get("id")]
 

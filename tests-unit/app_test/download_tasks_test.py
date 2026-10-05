@@ -179,6 +179,37 @@ async def test_a_download_into_a_match_all_folder_is_reported_usable(tmp_path):
     assert task["status"] == "completed"
 
 
+async def test_extra_descriptive_tags_do_not_hide_the_model_folder(model_root):
+    app = web.Application()
+    backend = FakeBackend()
+    service, _ = make_service(backend)
+    register_download_routes(app, service)
+
+    status, _body = await _request(
+        app,
+        "POST",
+        "/api/assets/download",
+        json={"source_url": "https://e.test/a.safetensors", "tags": ["models", "sdxl", "loras"]},
+    )
+
+    assert status == 202
+    assert backend.requests[0].directory == str(model_root)
+
+
+async def test_an_unreadable_journal_is_not_mistaken_for_an_empty_one(tmp_path, monkeypatch):
+    """Returning [] would retire every tracked task and let the route answer an
+    authoritative 404, which the frontend reads as proof the download is gone."""
+    backend = ComfyCliBackend(str(tmp_path))
+
+    def denied(_path):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("app.assets.downloads.comfy_cli.os.scandir", denied)
+
+    with pytest.raises(PermissionError):
+        backend._read_all_journals()
+
+
 async def test_a_download_into_custom_nodes_is_refused_over_http(model_root):
     app = web.Application()
     backend = FakeBackend()

@@ -171,6 +171,7 @@ class DownloadTaskService:
         # a slow enumeration see a recent sweep rather than queueing their own.
         self._last_swept_at = time.monotonic()
         try:
+            self._last_sweep_error = None
             # Read before enumerating, so a record written while we enumerate
             # is not mistaken for one this sweep already covered.
             hint = self._backend.change_hint()
@@ -187,7 +188,6 @@ class DownloadTaskService:
             raise
         finally:
             self._last_swept_at = time.monotonic()
-        self._last_sweep_error = None
         self._change_hint = hint
         self._swept_once = True
 
@@ -313,6 +313,9 @@ class DownloadTaskService:
             progress = min(1.0, round(snapshot.bytes_completed / total, 4))
         else:
             progress = 0.0
+        # No asset_id: locally an asset row only exists once the seeder has
+        # ingested the file, which is after this. The field is optional in the
+        # contract, at the cost of the asset browser's session badge.
         payload = {
             "task_id": tracked.task_id,
             "asset_name": os.path.basename(snapshot.destination),

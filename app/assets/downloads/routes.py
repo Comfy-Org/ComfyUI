@@ -25,7 +25,7 @@ from app.assets.downloads.backend import (
     DownloadRejected,
 )
 from app.assets.downloads.comfy_cli import ComfyCliBackend
-from app.assets.downloads.destination import DestinationError
+from app.assets.downloads.destination import DestinationError, known_folder
 from app.assets.downloads.service import DownloadTaskService
 
 ROUTES = web.RouteTableDef()
@@ -194,10 +194,21 @@ def _folder_from_tags(tags: object) -> str | None:
     for tag in tags:
         if isinstance(tag, str) and tag.startswith(MODEL_TYPE_TAG_PREFIX):
             return tag[len(MODEL_TYPE_TAG_PREFIX) :]
+    # Without the prefix there is nothing marking which tag is the folder, so
+    # skip the ones that do not name one rather than failing on the first
+    # descriptive tag that happens to come first.
     for tag in tags:
-        if isinstance(tag, str) and tag and tag != MODEL_ROOT_TAG:
+        if isinstance(tag, str) and tag and tag != MODEL_ROOT_TAG and _names_a_model_folder(tag):
             return tag
     return None
+
+
+def _names_a_model_folder(tag: str) -> bool:
+    try:
+        known_folder(tag)
+    except DestinationError:
+        return False
+    return True
 
 
 def _filename_from_url(url: str) -> str | None:

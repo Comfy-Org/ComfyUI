@@ -14,7 +14,7 @@ folder_names_and_paths: dict[str, tuple[list[str], set[str]]] = {}
 # Categories in folder_names_and_paths that do not hold loadable models.
 # custom_nodes is executable code ComfyUI imports at startup, so any code path
 # that writes a file into a category chosen by a caller must exclude these.
-non_model_folder_names: set[str] = {"configs", "custom_nodes"}
+non_model_folder_names: frozenset[str] = frozenset({"configs", "custom_nodes"})
 
 # --base-directory - Resets all default paths configured in folder_paths with a new base path
 if args.base_directory:
