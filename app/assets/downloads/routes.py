@@ -8,6 +8,7 @@ path, and no knowledge that a download is anything other than a task.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import logging
@@ -72,13 +73,14 @@ def _error(status: int, code: str, message: str, details: dict[str, Any] | None 
 
 
 def _transport_errors(handler):
-    """Turn a transport failure into the task API's own vocabulary.
+    """Answer a transport failure in this API's own error shape.
 
     Every handler here reaches the backend, including the read ones: resolving
-    an unknown task id enumerates. Without this a server whose comfy-cli went
-    missing answers `GET /api/tasks/{id}` with a plain-text 500, which the
-    frontend reads as a transient error and retries forever rather than
-    settling the download.
+    an unknown task id enumerates, which spawns a subprocess. Without this a
+    server whose comfy-cli went missing answers `GET /api/tasks/{id}` with a
+    plain-text 500 carrying a stack trace. The frontend treats any non-404 the
+    same way either path, so this buys a diagnosable error for whoever is
+    reading the response, not different browser behaviour.
     """
 
     @functools.wraps(handler)
@@ -90,6 +92,10 @@ def _transport_errors(handler):
         except DownloadRejected as e:
             status = 409 if e.code in _CONFLICT_CODES else 502
             return _error(status, e.code, e.message, {"hint": e.hint} if e.hint else None)
+        except asyncio.TimeoutError:
+            return _error(504, "DOWNLOAD_BACKEND_TIMEOUT", "The download backend did not respond in time.")
+        except OSError as e:
+            return _error(502, "DOWNLOAD_BACKEND_ERROR", f"Could not run the download backend: {e}")
 
     return wrapped
 

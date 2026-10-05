@@ -1,3 +1,4 @@
+import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -239,7 +240,32 @@ async def test_a_file_in_the_right_folder_but_the_wrong_format_says_so(model_roo
     task = await service.get_task(_only_task_id(service))
 
     assert task["status"] == "failed"
-    assert "not listed by 'loras' loaders" in task["error_message"]
+    assert "'loras' loaders only list" in task["error_message"]
+
+
+async def test_a_download_shadowed_by_the_preferred_root_is_not_reported_complete(tmp_path):
+    """get_filename_list unions every root, so a name already present in the
+    preferred root makes a download into a secondary one look present while
+    loaders keep opening the other file."""
+    preferred = tmp_path / "models" / "loras"
+    secondary = tmp_path / "extra" / "loras"
+    preferred.mkdir(parents=True)
+    secondary.mkdir(parents=True)
+    (preferred / "same.safetensors").write_bytes(b"the file loaders actually open")
+    landed = secondary / "same.safetensors"
+    landed.write_bytes(b"what was just downloaded")
+
+    folders = {"loras": ([str(preferred), str(secondary)], {".safetensors"})}
+    with patch.dict(folder_paths.folder_names_and_paths, folders, clear=True):
+        folder_paths.invalidate_filename_list_cache("loras")
+        backend = FakeBackend([snapshot(phase=DownloadPhase.TRANSFERRED, destination_path=str(landed))])
+        service, _ = make_service(backend)
+
+        await service.sweep()
+        task = await service.get_task(_only_task_id(service))
+
+    assert task["status"] == "failed"
+    assert "would never read it" in task["error_message"]
 
 
 async def test_transferred_download_fails_when_the_file_is_gone(model_root):
@@ -303,6 +329,41 @@ async def test_polling_a_task_that_will_never_exist_does_not_re_enumerate_each_t
         assert await service.get_task("11111111-2222-3333-4444-555555555555") is None
 
     assert enumerations == 0
+
+
+async def test_concurrent_lookups_share_one_enumeration():
+    """Resolving an unknown id enumerates, and enumerating spawns a subprocess,
+    so a burst of requests must not become a burst of subprocesses."""
+    backend = FakeBackend([snapshot()])
+    service, _ = make_service(backend)
+    enumerations = 0
+    original = backend.list
+
+    async def slow_list():
+        nonlocal enumerations
+        enumerations += 1
+        await asyncio.sleep(0.05)
+        return await original()
+
+    backend.list = slow_list
+    await asyncio.gather(*(service.get_task("11111111-2222-3333-4444-555555555555") for _ in range(20)))
+
+    assert enumerations == 1
+
+
+async def test_a_lookup_during_a_transport_outage_does_not_claim_the_task_is_gone():
+    """404 is authoritative to the frontend: it settles a pending cancellation
+    on it. Only a transport that answered may say a task does not exist."""
+    backend = FakeBackend()
+
+    async def unavailable():
+        raise DownloadBackendUnavailable("comfy-cli is not installed")
+
+    backend.list = unavailable
+    service, _ = make_service(backend)
+
+    with pytest.raises(DownloadBackendUnavailable):
+        await service.get_task("11111111-2222-3333-4444-555555555555")
 
 
 async def test_progress_is_published_in_the_shape_the_toast_consumes():

@@ -76,10 +76,12 @@ class DownloadTaskService:
         self._tracked: dict[str, _Tracked] = {}
         self._by_task: dict[str, str] = {}
         self._sweeper: asyncio.Task | None = None
+        self._sweeping: asyncio.Task | None = None
         self._change_hint: object | None = None
         self._swept_once = False
         self._last_swept_at = 0.0
         self._last_failure: str | None = None
+        self._last_sweep_error: Exception | None = None
 
     async def start(self, url: str, folder_name: str, filename: str | None) -> dict[str, Any]:
         """Submit a download and return its task, ready for a 202 response."""
@@ -122,43 +124,72 @@ class DownloadTaskService:
             return handle
         if time.monotonic() - self._last_swept_at >= _ACTIVE_SWEEP_S:
             await self.sweep()
-        return self._by_task.get(task_id)
+            handle = self._by_task.get(task_id)
+            if handle is not None:
+                return handle
+        # Only a transport that answered can say a task does not exist. The
+        # frontend treats 404 as proof the row is gone and settles a pending
+        # cancellation on it, so guessing that while the backend is down would
+        # retire a download that is still running.
+        if self._last_sweep_error is not None:
+            raise self._last_sweep_error
+        return None
 
     def start_sweeping(self) -> None:
         if self._sweeper is None or self._sweeper.done():
             self._sweeper = asyncio.create_task(self._sweep_forever())
 
     async def stop_sweeping(self) -> None:
-        sweeper, self._sweeper = self._sweeper, None
-        if sweeper is None:
-            return
-        sweeper.cancel()
-        try:
-            await sweeper
-        except asyncio.CancelledError:
-            pass
+        running = [t for t in (self._sweeper, self._sweeping) if t is not None]
+        self._sweeper = self._sweeping = None
+        for task in running:
+            task.cancel()
+        for task in running:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def sweep(self) -> None:
         """Re-read every download the backend knows about and publish changes.
 
-        Downloads this ComfyUI never started are included on purpose: the local
-        agent runs ``comfy model download`` itself, and the complaint this
-        feature answers (PM-1883) is precisely that those are invisible.
+        Callers arriving while one is already running join it rather than
+        starting another: an enumeration spawns a comfy-cli process, and the
+        unknown-task lookup is reachable from every request, so without this a
+        burst of requests becomes a burst of subprocesses. The shield keeps one
+        caller's cancellation from aborting the sweep the others are waiting on.
         """
-        # Read before enumerating, so a record written while we enumerate is
-        # not mistaken for one this sweep already covered.
-        hint = self._backend.change_hint()
-        known = set(self._tracked)
-        snapshots = await self._backend.list()
-        listed = set()
-        for snapshot in snapshots:
-            listed.add(snapshot.handle)
-            await self._update(snapshot)
-        for handle in known - listed:
-            self._forget(handle)
+        if self._sweeping is None or self._sweeping.done():
+            self._sweeping = asyncio.create_task(self._sweep_once())
+        await asyncio.shield(self._sweeping)
+
+    async def _sweep_once(self) -> None:
+        """Downloads this ComfyUI never started are included on purpose: the
+        local agent runs ``comfy model download`` itself, and the complaint this
+        feature answers (PM-1883) is precisely that those are invisible."""
+        # Stamped before the work as well as after, so requests arriving during
+        # a slow enumeration see a recent sweep rather than queueing their own.
+        self._last_swept_at = time.monotonic()
+        try:
+            # Read before enumerating, so a record written while we enumerate
+            # is not mistaken for one this sweep already covered.
+            hint = self._backend.change_hint()
+            known = set(self._tracked)
+            snapshots = await self._backend.list()
+            listed = set()
+            for snapshot in snapshots:
+                listed.add(snapshot.handle)
+                await self._update(snapshot)
+            for handle in known - listed:
+                self._forget(handle)
+        except Exception as e:
+            self._last_sweep_error = e
+            raise
+        finally:
+            self._last_swept_at = time.monotonic()
+        self._last_sweep_error = None
         self._change_hint = hint
         self._swept_once = True
-        self._last_swept_at = time.monotonic()
 
     async def _sweep_forever(self) -> None:
         while True:
@@ -253,9 +284,10 @@ class DownloadTaskService:
         seen = await asyncio.to_thread(destination.inspect, path)
         if not seen.ok:
             tracked.status = "failed"
-            tracked.error = f"The download finished but this server's model loaders cannot see it: {seen.problem}."
+            tracked.error = f"The download finished but this server's model loaders cannot use it: {seen.problem}."
             return
 
+        destination.refresh_listing(seen.folder)
         tracked.status = "completed"
         tracked.error = None
         tracked.result = {

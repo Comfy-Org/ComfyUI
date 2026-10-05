@@ -16,7 +16,6 @@ import os
 from dataclasses import dataclass
 
 import folder_paths
-from app.assets.services.path_utils import get_comfy_models_folders
 
 
 class DestinationError(Exception):
@@ -29,13 +28,17 @@ class DestinationError(Exception):
 def _model_folders() -> dict[str, set[str]]:
     """Writable model categories and the extensions their loaders enumerate.
 
-    Shared with the upload endpoint on purpose. ``folder_names_and_paths`` also
-    holds ``custom_nodes``, whose contents ComfyUI *imports* at startup, so
-    reading it directly here would turn a download into arbitrary code
-    execution. ``get_comfy_models_folders`` is the allowlist that already
-    excludes it.
+    ``folder_names_and_paths`` also holds ``custom_nodes``, whose contents
+    ComfyUI *imports* at startup, so writing into a category straight off that
+    mapping would turn a download into arbitrary code execution.
+    ``non_model_folder_names`` is the exclusion the upload endpoint applies for
+    the same reason; it is read from ``folder_paths`` so the two cannot drift.
     """
-    return {name: extensions for name, _paths, extensions in get_comfy_models_folders()}
+    return {
+        name: set(extensions)
+        for name, (paths, extensions) in folder_paths.folder_names_and_paths.items()
+        if name not in folder_paths.non_model_folder_names and paths
+    }
 
 
 def known_folder(folder_name: str) -> str:
@@ -129,27 +132,49 @@ class Visibility:
 
 
 def inspect(path: str) -> Visibility:
-    """Check that this server now lists ``path``, and say why if it does not.
+    """Check that a loader asking for this model would actually get this file.
 
-    A miss forces the listing to be rebuilt before it is believed: the cache
-    validates itself on directory mtimes, and a file written into a directory
-    that was already listed in the same second does not move one.
+    Membership in ``get_filename_list`` is not enough. That listing is a union
+    over every root configured for the folder, while ``get_full_path`` returns
+    the *first* root holding the name -- so a download into a secondary root
+    whose name already exists in the preferred one reads as present while every
+    loader goes on opening the other file. Several stock folders have two roots
+    (``diffusion_models`` is unet + diffusion_models, ``text_encoders`` is
+    text_encoders + clip) and ``extra_model_paths.yaml`` adds more, so this is
+    ordinary, not exotic. Resolve the name the way a loader resolves it and
+    compare the file it lands on.
     """
     if not os.path.isfile(path):
         return Visibility(None, None, f"the file is no longer at {path}")
     folder = folder_for_path(path)
     if folder is None:
-        return Visibility(None, None, f"{path} is outside every configured model directory")
+        return Visibility(None, None, f"it landed at {path}, outside every configured model directory")
 
     name = relative_name(folder, path)
-    if name in folder_paths.get_filename_list(folder):
-        return Visibility(folder, name, None)
-    folder_paths.invalidate_filename_list_cache(folder)
-    if name in folder_paths.get_filename_list(folder):
-        return Visibility(folder, name, None)
+    extensions = _model_folders().get(folder, set())
+    if os.path.splitext(name)[1].lower() not in extensions:
+        listed = ", ".join(sorted(extensions)) or "nothing"
+        return Visibility(folder, name, f"it landed at {path}, but '{folder}' loaders only list {listed}")
 
-    extensions = ", ".join(sorted(_model_folders().get(folder, set()))) or "none"
-    return Visibility(folder, name, f"'{name}' is not listed by '{folder}' loaders, which load {extensions}")
+    resolved = folder_paths.get_full_path(folder, name)
+    if resolved is None or os.path.realpath(resolved) != os.path.realpath(path):
+        return Visibility(
+            folder,
+            name,
+            f"it landed at {path}, but '{folder}' loaders resolve '{name}' to "
+            f"{resolved or 'nothing'}, so they would never read it",
+        )
+    return Visibility(folder, name, None)
+
+
+def refresh_listing(folder_name: str) -> None:
+    """Drop the cached file listing so the next node refresh shows the model.
+
+    Not needed for correctness -- :func:`inspect` resolves against the
+    filesystem -- but without it the loader combo keeps serving a listing built
+    before the download, which is the stale-catalog half of BE-10028.
+    """
+    folder_paths.invalidate_filename_list_cache(folder_name)
 
 
 def relative_name(folder_name: str, path: str) -> str | None:
