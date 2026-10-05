@@ -253,7 +253,7 @@ class DownloadTaskService:
 
         if snapshot.phase is DownloadPhase.TRANSFERRED:
             if tracked.status not in ("completed", "failed", "cancelled"):
-                await self._finalize(tracked)
+                await self._finalize(tracked, publish=not adopted or self._swept_once)
         else:
             tracked.status = _STATUSES[snapshot.phase]
             tracked.error = snapshot.error
@@ -272,7 +272,7 @@ class DownloadTaskService:
         if changed or not tracked.announced or not snapshot.is_terminal:
             self._emit(tracked)
 
-    async def _finalize(self, tracked: _Tracked) -> None:
+    async def _finalize(self, tracked: _Tracked, *, publish: bool) -> None:
         """Decide whether a finished transfer is actually a finished download.
 
         The bytes arriving is not the promise this API makes. BE-10028 is the
@@ -287,7 +287,10 @@ class DownloadTaskService:
             tracked.error = f"The download finished but this server's model loaders cannot use it: {seen.problem}."
             return
 
-        destination.refresh_listing(seen.folder)
+        if publish:
+            # Records retained from previous runs still need a status, but
+            # their catalog refresh happened long ago.
+            destination.refresh_listing(seen.folder)
         tracked.status = "completed"
         tracked.error = None
         tracked.result = {
@@ -296,16 +299,18 @@ class DownloadTaskService:
             "filename": (seen.name or os.path.basename(path)).replace(os.sep, "/"),
             "bytes_downloaded": tracked.snapshot.bytes_completed,
         }
-        if self._refresh_catalog is not None:
+        if publish and self._refresh_catalog is not None:
             self._refresh_catalog()
 
     def _emit(self, tracked: _Tracked) -> None:
         snapshot = tracked.snapshot
         total = snapshot.bytes_total or 0
+        # A fraction, not a percentage: Cloud's AssetDownloadMessage documents
+        # `progress` as 0.0-1.0 and the toast renders `progress * 100`.
         if tracked.status == "completed":
-            progress = 100.0
+            progress = 1.0
         elif total > 0:
-            progress = min(100.0, round(snapshot.bytes_completed * 100.0 / total, 1))
+            progress = min(1.0, round(snapshot.bytes_completed / total, 4))
         else:
             progress = 0.0
         payload = {
@@ -328,8 +333,6 @@ def _task_response(tracked: _Tracked) -> dict[str, Any]:
     response = {
         "id": tracked.task_id,
         "task_name": TASK_NAME,
-        # The backend's handle is already one-per-destination and survives
-        # restarts, which is exactly what an idempotency key has to be.
         "idempotency_key": snapshot.handle,
         # Deliberately no url: a resolved download url can carry a presigned
         # token, and this is read by the browser.

@@ -41,6 +41,23 @@ def _model_folders() -> dict[str, set[str]]:
     }
 
 
+def _forbidden_roots() -> list[str]:
+    """Directories no download may land in, whatever folder name reaches them.
+
+    The exclusion cannot be keyed on the folder name alone.
+    ``extra_model_paths.yaml`` and ``add_model_folder_path`` both let a second
+    name be registered for a directory that already has one, so an alias such
+    as ``node_packs: custom_nodes/`` would pass a name check and write
+    importable code into ``custom_nodes``.
+    """
+    roots = []
+    for name in folder_paths.non_model_folder_names:
+        paths = folder_paths.folder_names_and_paths.get(name)
+        if paths:
+            roots.extend(paths[0])
+    return roots
+
+
 def known_folder(folder_name: str) -> str:
     resolved = folder_paths.map_legacy(folder_name.strip())
     if resolved not in _model_folders():
@@ -67,26 +84,39 @@ def resolve(folder_name: str, filename: str) -> str:
     """Absolute path a model named ``filename`` must occupy to be loadable.
 
     ``filename`` may contain forward-slash subfolders, which loaders do list.
-    The extension must be one the folder enumerates, and a folder that
-    enumerates nothing refuses every name: ``get_filename_list`` filters on
-    that set, so anything outside it can never reach a loader no matter how
-    well the transfer goes.
+    The extension must be one the folder enumerates, matching
+    ``filter_files_extensions``: an empty set there means the folder lists
+    every file it holds, so it accepts any name rather than none.
     """
     folder_name = known_folder(folder_name)
     relative = _safe_relative_name(filename)
-    extensions = _model_folders()[folder_name]
-    if os.path.splitext(relative)[1].lower() not in extensions:
+    if not _lists_extension_of(relative, _model_folders()[folder_name]):
+        listed = ", ".join(sorted(_model_folders()[folder_name]))
         raise DestinationError(
             "UNSUPPORTED_EXTENSION",
-            f"'{filename}' does not end in an extension that '{folder_name}' loaders list "
-            f"({', '.join(sorted(extensions)) or 'none'}).",
+            f"'{filename}' does not end in an extension that '{folder_name}' loaders list ({listed}).",
         )
 
     root = directory(folder_name)
     resolved = os.path.abspath(os.path.join(root, relative))
     if not folder_paths.is_within_directory(root, resolved):
         raise DestinationError("INVALID_FILENAME", f"'{filename}' escapes the '{folder_name}' directory.")
+    for forbidden in _forbidden_roots():
+        if folder_paths.is_within_directory(forbidden, resolved):
+            raise DestinationError(
+                "UNKNOWN_MODEL_FOLDER",
+                f"'{folder_name}' leads into {forbidden}, which downloads may not write to.",
+            )
     return resolved
+
+
+def _lists_extension_of(name: str, extensions: set[str]) -> bool:
+    """Whether ``get_filename_list`` would include a file called ``name``.
+
+    Mirrors ``filter_files_extensions``, including its rule that an empty set
+    matches everything.
+    """
+    return not extensions or os.path.splitext(name)[1].lower() in extensions
 
 
 def _safe_relative_name(filename: str) -> str:
@@ -152,9 +182,12 @@ def inspect(path: str) -> Visibility:
 
     name = relative_name(folder, path)
     extensions = _model_folders().get(folder, set())
-    if os.path.splitext(name)[1].lower() not in extensions:
-        listed = ", ".join(sorted(extensions)) or "nothing"
-        return Visibility(folder, name, f"it landed at {path}, but '{folder}' loaders only list {listed}")
+    if not _lists_extension_of(name, extensions):
+        return Visibility(
+            folder,
+            name,
+            f"it landed at {path}, but '{folder}' loaders only list {', '.join(sorted(extensions))}",
+        )
 
     resolved = folder_paths.get_full_path(folder, name)
     if resolved is None or os.path.realpath(resolved) != os.path.realpath(path):

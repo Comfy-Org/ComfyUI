@@ -523,11 +523,12 @@ def get_filename_list(folder_name: str) -> list[str]:
     return list(out[0])
 
 def invalidate_filename_list_cache(folder_name: str) -> None:
-    """Force the next get_filename_list for one folder to walk the disk again.
+    """Drop the persistent listing cache for one folder.
 
     The cache validates itself on directory mtimes, which a coarse filesystem
     timestamp can hide right after a file is written into a directory that was
-    already listed in the same second.
+    already listed in the same second. The request-scoped strong cache is left
+    alone so a response already being built stays self-consistent.
     """
     folder_name = map_legacy(folder_name)
     global filename_list_cache

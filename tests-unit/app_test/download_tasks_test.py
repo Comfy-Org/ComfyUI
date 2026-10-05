@@ -138,12 +138,45 @@ async def test_resolve_refuses_to_write_outside_the_model_folders(model_root, fo
     assert excinfo.value.code == "UNKNOWN_MODEL_FOLDER"
 
 
-async def test_resolve_refuses_a_folder_that_enumerates_no_extensions(model_root):
-    """An empty extension set means get_filename_list lists everything, so the
-    visibility check cannot reject anything either. Refuse rather than allow."""
-    with pytest.raises(destination.DestinationError) as excinfo:
-        destination.resolve("datasets", "anything.safetensors")
-    assert excinfo.value.code == "UNSUPPORTED_EXTENSION"
+async def test_a_folder_that_lists_every_extension_accepts_any_name(model_root, tmp_path):
+    """filter_files_extensions treats an empty set as match-all, which is how
+    folders registered by extra_model_paths.yaml and custom nodes arrive."""
+    assert destination.resolve("datasets", "anything.bin") == str(tmp_path / "datasets" / "anything.bin")
+
+
+async def test_an_alias_pointing_at_custom_nodes_is_refused_by_path(tmp_path):
+    """extra_model_paths.yaml can register a second name for a directory that
+    already has one, and a name-keyed exclusion would wave the alias through
+    into code ComfyUI imports at startup."""
+    nodes_dir = tmp_path / "custom_nodes"
+    nodes_dir.mkdir()
+    folders = {
+        "custom_nodes": ([str(nodes_dir)], set()),
+        "node_packs": ([str(nodes_dir)], set()),
+    }
+    with patch.dict(folder_paths.folder_names_and_paths, folders, clear=True):
+        with pytest.raises(destination.DestinationError) as excinfo:
+            destination.resolve("node_packs", "evil.py")
+
+    assert excinfo.value.code == "UNKNOWN_MODEL_FOLDER"
+
+
+async def test_a_download_into_a_match_all_folder_is_reported_usable(tmp_path):
+    """The mirror of the resolve case: inspect must not call a file invisible
+    just because its folder declares no extensions."""
+    root = tmp_path / "datasets"
+    root.mkdir()
+    landed = root / "corpus.bin"
+    landed.write_bytes(b"data")
+    with patch.dict(folder_paths.folder_names_and_paths, {"datasets": ([str(root)], set())}, clear=True):
+        folder_paths.invalidate_filename_list_cache("datasets")
+        backend = FakeBackend([snapshot(phase=DownloadPhase.TRANSFERRED, destination_path=str(landed))])
+        service, _ = make_service(backend)
+
+        await service.sweep()
+        task = await service.get_task(_only_task_id(service))
+
+    assert task["status"] == "completed"
 
 
 async def test_a_download_into_custom_nodes_is_refused_over_http(model_root):
@@ -196,9 +229,13 @@ async def test_transferred_download_completes_once_the_loader_lists_it(model_roo
     path = model_root / "landed.safetensors"
     path.write_bytes(b"weights")
     refreshed = []
-    backend = FakeBackend([snapshot(phase=DownloadPhase.TRANSFERRED, destination_path=str(path), completed=7, total=7)])
+    backend = FakeBackend()
     service, _ = make_service(backend, refresh=lambda: refreshed.append(True))
+    await service.sweep()
 
+    backend.snapshots.append(
+        snapshot(phase=DownloadPhase.TRANSFERRED, destination_path=str(path), completed=7, total=7)
+    )
     await service.sweep()
     task = await service.get_task(_only_task_id(service))
 
@@ -367,6 +404,8 @@ async def test_a_lookup_during_a_transport_outage_does_not_claim_the_task_is_gon
 
 
 async def test_progress_is_published_in_the_shape_the_toast_consumes():
+    """Cloud's AssetDownloadMessage documents progress as a 0.0-1.0 fraction and
+    ProgressToastItem renders `progress * 100`, so a percentage here shows 2500%."""
     backend = FakeBackend([snapshot(completed=3, total=12, destination_path="/models/loras/pretty.safetensors")])
     service, events = make_service(backend)
 
@@ -375,7 +414,7 @@ async def test_progress_is_published_in_the_shape_the_toast_consumes():
     event, payload = events[-1]
     assert event == "asset_download"
     assert payload["asset_name"] == "pretty.safetensors"
-    assert payload["progress"] == 25.0
+    assert payload["progress"] == 0.25
     assert payload["status"] == "running"
 
 
@@ -389,21 +428,38 @@ async def test_progress_stays_zero_while_the_total_is_unknown():
     assert events[-1][1]["progress"] == 0.0
 
 
+async def test_a_completed_download_reports_a_full_fraction(model_root):
+    path = model_root / "whole.safetensors"
+    path.write_bytes(b"weights")
+    backend = FakeBackend()
+    service, events = make_service(backend)
+    await service.sweep()
+
+    backend.snapshots.append(snapshot(phase=DownloadPhase.TRANSFERRED, destination_path=str(path)))
+    await service.sweep()
+
+    assert events[-1][1]["progress"] == 1.0
+    assert events[-1][1]["status"] == "completed"
+
+
 async def test_downloads_already_finished_at_startup_are_adopted_without_replaying_them(model_root):
     path = model_root / "old.safetensors"
     path.write_bytes(b"old")
+    refreshed = []
     backend = FakeBackend(
         [
             snapshot(handle="done", phase=DownloadPhase.CANCELLED),
             snapshot(handle="old", phase=DownloadPhase.TRANSFERRED, destination_path=str(path)),
         ]
     )
-    service, events = make_service(backend)
+    service, events = make_service(backend, refresh=lambda: refreshed.append(True))
 
     await service.sweep()
 
     assert events == []
+    assert refreshed == []
     assert len(service._tracked) == 2
+    assert (await service.get_task(service._tracked["old"].task_id))["status"] == "completed"
 
 
 async def test_a_download_discovered_after_startup_is_announced_even_if_already_finished(model_root):
@@ -437,6 +493,17 @@ async def test_submitting_reports_the_task_immediately(model_root):
 
     assert task["status"] == "created"
     assert events[-1][1]["task_id"] == task["task_id"]
+
+
+async def test_stopping_the_sweeper_leaves_no_task_running():
+    backend = FakeBackend([snapshot()])
+    service, _ = make_service(backend)
+    service.start_sweeping()
+    await asyncio.sleep(0)
+
+    await service.stop_sweeping()
+
+    assert service._sweeper is None and service._sweeping is None
 
 
 async def test_cancelling_an_unknown_task_reports_it_missing():

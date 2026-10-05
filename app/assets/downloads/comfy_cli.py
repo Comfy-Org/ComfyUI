@@ -52,6 +52,12 @@ _PHASES = {
 _SUBMIT_TIMEOUT_S = 120.0
 _QUERY_TIMEOUT_S = 30.0
 
+# How often the CLI is asked to enumerate rather than the journal being read
+# directly. Only the CLI reconciles a worker that died and prunes finished
+# records; progress itself is already in the journal, so paying for a
+# subprocess at the progress cadence buys nothing.
+_RECONCILE_INTERVAL_S = 5.0
+
 # How long a failed executable lookup is trusted. comfy-cli is a separate
 # install, so "not there" is a normal state that can change under a running
 # server without re-probing the PATH on every sweep.
@@ -67,6 +73,7 @@ class ComfyCliBackend:
         self.workspace = os.path.abspath(workspace)
         self._executable = executable
         self._looked_up_at: float | None = None
+        self._reconciled_at: float | None = None
         # `model downloads` prunes finished records, so two of those would race
         # over the same directory. Only that verb is serialised: holding the
         # lock across a submit would stall progress reads and cancels behind a
@@ -113,7 +120,12 @@ class ComfyCliBackend:
         return _snapshot(record)
 
     async def list(self) -> list[DownloadSnapshot]:
+        if self._reconciled_at is not None and time.monotonic() - self._reconciled_at < _RECONCILE_INTERVAL_S:
+            records = await asyncio.to_thread(self._read_all_journals)
+            return [_snapshot(record) for record in records]
+
         async with self._prune_lock:
+            self._reconciled_at = time.monotonic()
             envelope = await self._run("model", "downloads", timeout=_QUERY_TIMEOUT_S)
         rows = (envelope.get("data") or {}).get("downloads") or []
         records = await asyncio.to_thread(self._read_journals, [row.get("id") for row in rows])
@@ -195,6 +207,14 @@ class ComfyCliBackend:
         except (OSError, ValueError):
             return None
         return record if isinstance(record, dict) else None
+
+    def _read_all_journals(self) -> list[dict[str, Any]]:
+        try:
+            names = [e.name for e in os.scandir(self.journal_dir) if e.name.endswith(".json")]
+        except OSError:
+            return []
+        found = self._read_journals([name[: -len(".json")] for name in names])
+        return [record for record in found.values() if record.get("id")]
 
     def _read_journals(self, handles: list[str | None]) -> dict[str, dict[str, Any]]:
         found = {}

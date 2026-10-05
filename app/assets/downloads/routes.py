@@ -111,10 +111,18 @@ async def submit_download(request: web.Request) -> web.Response:
     if not isinstance(body, dict):
         return _error(400, "INVALID_BODY", "Request body must be a JSON object.")
 
-    url = (body.get("source_url") or "").strip()
-    if not url:
-        return _error(400, "INVALID_BODY", "source_url is required.")
-    if urlsplit(url).scheme not in ("http", "https"):
+    url = body.get("source_url")
+    filename = body.get("filename")
+    if not isinstance(url, str) or not url.strip():
+        return _error(400, "INVALID_BODY", "source_url is required and must be a string.")
+    if filename is not None and not isinstance(filename, str):
+        return _error(400, "INVALID_BODY", "filename must be a string.")
+    url = url.strip()
+    try:
+        scheme = urlsplit(url).scheme
+    except ValueError:
+        return _error(400, "INVALID_BODY", "source_url is not a valid URL.")
+    if scheme not in ("http", "https"):
         return _error(400, "INVALID_BODY", "source_url must be an http(s) URL.")
 
     folder = _folder_from_tags(body.get("tags"))
@@ -126,7 +134,7 @@ async def submit_download(request: web.Request) -> web.Response:
         )
 
     try:
-        task = await service.start(url, folder, body.get("filename") or _filename_from_url(url))
+        task = await service.start(url, folder, filename or _filename_from_url(url))
     except DestinationError as e:
         return _error(400, e.code, e.message)
     except DownloadRejected as e:
@@ -134,11 +142,13 @@ async def submit_download(request: web.Request) -> web.Response:
         # the caller can fix: a different name, or the download already running.
         status = 409 if e.code in _CONFLICT_CODES else 400
         return _error(status, e.code, e.message, {"hint": e.hint} if e.hint else None)
-    except DownloadBackendUnavailable:
+    except (DownloadBackendUnavailable, asyncio.TimeoutError, OSError):
+        # Mapped by _transport_errors. Named before the catch-all below because
+        # asyncio.TimeoutError is OSError is a subclass of Exception, so a bare
+        # handler would swallow them and report an unhelpful 500.
         raise
     except Exception:
-        # The query string of a resolved download url can carry a presigned token.
-        logging.exception("Failed to start model download from %s", urlsplit(url)._replace(query="").geturl())
+        logging.exception("Failed to start model download from %s", _scrub(url))
         return _error(500, "INTERNAL", "Could not start the download.")
     return web.json_response(task, status=202)
 
@@ -161,6 +171,16 @@ async def cancel_task(request: web.Request) -> web.Response:
     if outcome is CancelOutcome.NOT_CANCELLABLE:
         return _error(409, "TASK_NOT_CANCELLABLE", "This task can no longer be cancelled.")
     return web.json_response({"status": "cancelling"})
+
+
+def _scrub(url: str) -> str:
+    """Drop the parts of a download url that can carry a credential.
+
+    A resolved url can arrive with a presigned token in its query string or a
+    password in its userinfo, and this one is headed for the log.
+    """
+    parts = urlsplit(url)
+    return parts._replace(netloc=parts.hostname or "", query="", fragment="").geturl()
 
 
 def _folder_from_tags(tags: object) -> str | None:
