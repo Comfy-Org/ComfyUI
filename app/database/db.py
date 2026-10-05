@@ -281,6 +281,15 @@ def _init_file_db(db_url):
         raise
 
 
+# NORMAL: commits skip the fsync that held the write lock. A power loss or OS crash can
+# roll back recent commits but cannot corrupt the database. "FULL" is SQLite's default.
+WAL_SYNCHRONOUS = "NORMAL"
+
+
+def _set_wal_synchronous(dbapi_connection, connection_record=None):
+    dbapi_connection.execute(f"PRAGMA synchronous={WAL_SYNCHRONOUS}")
+
+
 _DESTRUCTIVE_REVISION = "0007_record_content_split"
 
 
@@ -328,6 +337,11 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     else:
         if journal_mode.lower() != "wal":
             logging.warning("SQLite WAL mode unavailable; continuing with %s journal mode.", journal_mode)
+        else:
+            # Only in WAL mode: with a rollback journal, NORMAL risks corruption on power loss.
+            event.listen(engine, "connect", _set_wal_synchronous)
+            event.listen(write_engine, "connect", _set_wal_synchronous)
+            _set_wal_synchronous(conn.connection.dbapi_connection)  # opened before the hooks
 
     context = MigrationContext.configure(conn)
     current_rev = context.get_current_revision()
