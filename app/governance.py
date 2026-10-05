@@ -55,9 +55,6 @@ _LEGACY_MANAGER_PACK = "comfyui-manager"
 
 _COMFYUI_ROOT = Path(__file__).parent.parent
 _POLICY_PATH = _COMFYUI_ROOT / "governance" / "policy.signed.json"
-_EXTRA_MODEL_PATHS_CONFIG_PATH = _COMFYUI_ROOT / "extra_model_paths.yaml"
-# Folder types ComfyUI imports code from; extra_model_paths.yaml may not add them under governance.
-_CODE_FOLDER_NAMES = frozenset({"custom_nodes"})
 _policy: dict | None = None
 _disabled_nodes: frozenset[str] = frozenset()
 _original_load_custom_node: Callable[[str, set[str], str], Awaitable[bool]] | None = None
@@ -82,18 +79,6 @@ def load_disabled_nodes(path: str) -> set[str]:
         raise ValueError("disabled_nodes entries must be strings")
 
     return set(disabled_nodes)
-
-
-def _check_extra_model_paths(path: str | Path) -> None:
-    with open(path, "r", encoding="utf-8") as stream:
-        config = yaml.safe_load(stream)
-
-    if not isinstance(config, dict):
-        raise ValueError(f"{path} must be a mapping")
-    for name, section in config.items():
-        for folder in section or ():
-            if folder in _CODE_FOLDER_NAMES:
-                raise RuntimeError(f"{path}: '{name}' adds a {folder} folder, which is not allowed in a governed build")
 
 
 def set_custom_node_policy(mode: str | None, denied_packs: frozenset[str], allowed_packs: dict[str, str]) -> None:
@@ -391,11 +376,6 @@ def initialize() -> None:
 
         if args.disabled_nodes_config:
             raise RuntimeError("unsigned disabled-node config is not allowed in a governed build")
-        for paths in args.extra_model_paths_config or ():
-            for path in paths:
-                _check_extra_model_paths(path)
-        if _EXTRA_MODEL_PATHS_CONFIG_PATH.is_file():
-            _check_extra_model_paths(_EXTRA_MODEL_PATHS_CONFIG_PATH)
 
         policy = verify_and_load(_POLICY_PATH.read_bytes())
         unenforced = sorted(set(policy.get("activeForms", ())).difference(_ENFORCED_FORMS))
@@ -404,7 +384,8 @@ def initialize() -> None:
         _apply_policy(policy)
         # Manager's prestartup runs scheduled install scripts and pip installs before any pack is checked, so it cannot run under a pack policy.
         if _custom_node_mode is not None and args.enable_manager:
-            raise RuntimeError("ComfyUI-Manager cannot be enabled under a custom-node policy")
+            logging.warning("ComfyUI-Manager is turned off: it cannot run under your organization's custom-node policy.")
+            args.enable_manager = False
     except Exception:
         logging.exception("ComfyUI could not apply your organization's policy. Contact your administrator.")
         sys.exit(1)

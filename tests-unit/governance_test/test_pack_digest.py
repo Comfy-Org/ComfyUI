@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -136,6 +137,10 @@ def test_pack_digest_rejects_symlinked_pack_root(tmp_path: Path) -> None:
         governance.pack_digest(str(pack_path))
 
 
+# Windows drops a trailing dot from a file name, so "lib/libbar.so." is written as "lib/libbar.so", a measured library.
+TRAILING_DOT_NAMES_KEPT = pytest.mark.skipif(sys.platform == "win32", reason="Windows strips a trailing dot from file names")
+
+
 # Shared with Comfy-Org/cloud services/comfy-builder/packdigest/digest_test.go (sharedFixtureFiles), which asserts the same digest.
 SHARED_FIXTURE_DIGEST = "blake3:60627b4c95dad13ffe3dd68e165ac182c605ab1f873a88d11c3b9c0b65d531e1"
 SHARED_FIXTURE_FILES = {
@@ -185,6 +190,7 @@ def test_pack_digest_matches_shared_fixture_with_windows_source_web_and_versione
     assert digest == SHARED_FIXTURE_DIGEST
 
 
+@TRAILING_DOT_NAMES_KEPT
 def test_pack_digest_matches_shared_fixture_with_edge_names(tmp_path: Path) -> None:
     # Given the shared fixture plus dotfiles, trailing dots, non-numeric versions and upper-case suffixes
     pack_path = _write_pack(tmp_path / "pack", EDGE_NAME_FIXTURE_FILES)
@@ -223,7 +229,7 @@ def test_pack_digest_measures_source_native_and_web_script_files(golden_pack: Pa
 
 @pytest.mark.parametrize(
     "relative_path",
-    ["README.md", "data/extra.json", "lib/libbar.so.1a", "lib/libbar.so.", "lib/.so.1", "web/x.js.map"],
+    ["README.md", "data/extra.json", "lib/libbar.so.1a", pytest.param("lib/libbar.so.", marks=TRAILING_DOT_NAMES_KEPT), "lib/.so.1", "web/x.js.map"],
 )
 def test_pack_digest_ignores_files_that_do_not_run(golden_pack: Path, relative_path: str) -> None:
     # Given a golden pack gaining a data file, or a name that only resembles a versioned library
