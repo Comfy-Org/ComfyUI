@@ -49,7 +49,7 @@ async def test_noassets_register_routes_returns_service_disabled_and_disables_se
     assert asset_seeder.is_disabled()
 
 
-def test_noassets_startup_applies_hash_mode_persists_state_and_cleans_temp_dir(
+def test_noassets_startup_applies_hash_mode_leaves_database_alone_and_cleans_temp_dir(
     mock_create_session: Callable[[], AbstractContextManager[Session]],
     session: Session,
     tmp_path: Path,
@@ -63,7 +63,7 @@ def test_noassets_startup_applies_hash_mode_persists_state_and_cleans_temp_dir(
     _no_assets(hashing=True).startup()
 
     assert hashing_enabled() is True
-    assert read_stored_mode(session) == "on"
+    assert read_stored_mode(session) is None
     assert not temp_file.exists()
 
 
@@ -189,7 +189,8 @@ def test_default_asset_manager_disables_assets_when_dependencies_are_unavailable
         asset_manager = manager.default_asset_manager()
 
     assert isinstance(asset_manager, NoAssets)
-    assert "asset endpoints will answer 503" in caplog.text
+    assert "--enable-assets requires packages that could not be imported" in caplog.text
+    assert "Assets are disabled." in caplog.text
     assert "requirements.txt" in caplog.text
 
 

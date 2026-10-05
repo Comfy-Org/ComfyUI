@@ -1,10 +1,13 @@
 """Small conversions the asset system needs in more than one layer: canonical
-stored-hash strings, UTC timestamps, tag normalization, and a SQL predicate for
-path containment. That predicate is deliberately case-sensitive and
-component-bounded, because callers use it to choose rows for hard deletion.
+stored-hash strings, UTC timestamps, tag normalization, and path containment
+checks. The SQL predicate is deliberately case-sensitive and component-bounded,
+because callers use it to choose rows for hard deletion; the Python matcher
+follows ``Path.is_relative_to`` instead, including its platform case rules.
 """
 
+import functools
 import os
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 
 import sqlalchemy as sa
@@ -34,12 +37,96 @@ def sql_path_under_prefix(
     and normalizes there. Normalizing the column in SQL is not an option anyway:
     it would need a per-row Python call and would defeat the index.
     """
-    base = os.path.abspath(prefix)
-    stem = base if base.endswith(os.sep) else base + os.sep
+    base, stem = _base_and_stem(prefix)
     return sa.or_(
         column == base,
         sa.func.substr(column, 1, len(stem)) == stem,
     )
+
+
+def _base_and_stem(prefix: str) -> tuple[str, str]:
+    base = os.path.abspath(prefix)
+    return base, base if base.endswith(os.sep) else base + os.sep
+
+
+def stored_path_under_prefixes(prefixes: list[str]) -> Callable[[str], bool]:
+    """The Python twin of sql_path_under_prefix OR'd over ``prefixes``: the same
+    case-sensitive string test on a stored path, for filtering rows already fetched.
+
+    Unlike path_prefix_matcher, it neither normalizes nor normcases the path.
+    """
+    pairs = [_base_and_stem(prefix) for prefix in prefixes]
+    bases = frozenset(base for base, _ in pairs)
+    stems = tuple(stem for _, stem in pairs)
+    return lambda path: path in bases or path.startswith(stems)
+
+
+# Each prefix adds two terms to one flat OR, and SQLite rejects an expression deeper than
+# 1000, so about 500 prefixes in one statement fail with "Expression tree is too large".
+# SQLAlchemy flattens nested ORs, so more prefixes than this are split across statements,
+# or filtered in Python with stored_path_under_prefixes.
+PREFIX_BATCH_SIZE = 200
+
+
+def sql_path_under_prefix_batches(
+    column: ColumnElement[str], prefixes: list[str]
+) -> list[ColumnElement[bool]]:
+    """sql_path_under_prefix OR'd over each run of at most PREFIX_BATCH_SIZE prefixes.
+
+    Run one statement per predicate and merge. Nested or overlapping prefixes can put a
+    row in more than one batch, so the caller dedupes.
+    """
+    return [
+        sa.or_(*(sql_path_under_prefix(column, p) for p in prefixes[i:i + PREFIX_BATCH_SIZE]))
+        for i in range(0, len(prefixes), PREFIX_BATCH_SIZE)
+    ]
+
+
+def path_prefix_matcher(prefixes: Iterable[str]) -> Callable[[str], bool]:
+    """Return ``path -> Path(path).is_relative_to(<any prefix>)``, with the prefixes
+    normalized once.
+
+    The startup prune tests every catalogued row against every owned prefix, and
+    ``Path.is_relative_to`` walks the path's parents on each call, so a pathlib
+    check there costs rows x prefixes x depth. A normcase'd, separator-bounded
+    string prefix keeps its component bounds and platform case rules.
+    """
+    # abspath keeps exactly two leading separators, and pathlib treats that "//" as an
+    # anchor of its own: "//server/f" is not under "/". Such paths are only matched
+    # against prefixes with the same anchor.
+    double = os.sep * 2
+    exact: dict[bool, set[str]] = {False: set(), True: set()}
+    stems: dict[bool, list[str]] = {False: [], True: []}
+    for prefix in prefixes:
+        base = os.path.normcase(os.path.abspath(prefix))
+        is_double = base.startswith(double)
+        exact[is_double].add(base)
+        stems[is_double].append(base if base.endswith(os.sep) else base + os.sep)
+    stem_tuples = {key: tuple(value) for key, value in stems.items()}
+
+    def matches(path: str) -> bool:
+        candidate = os.path.normcase(os.path.abspath(path))
+        is_double = candidate.startswith(double)
+        return candidate in exact[is_double] or candidate.startswith(stem_tuples[is_double])
+
+    return matches
+
+
+@functools.lru_cache(maxsize=None)
+def cached_prefix_matcher(prefixes: tuple[str, ...]) -> Callable[[str], bool]:
+    """path_prefix_matcher, built once per distinct prefix tuple, for callers that check
+    every scanned file against the same folders.
+
+    Keyed on the raw prefixes: normalizing them in the key would bring back the per-call
+    cost this avoids. A folder-config change is just a new key.
+
+    Precondition: the prefixes are absolute. That is not checked. main.py and
+    extra_model_paths make their folders absolute, but folder_paths' setters and
+    add_model_folder_path store whatever they are given, so a custom node can register a
+    relative one. A relative prefix is resolved against the working directory once, on
+    first use, and that resolution is then frozen for as long as the key is unchanged.
+    """
+    return path_prefix_matcher(prefixes)
 
 
 def escape_sql_like_string(s: str, escape: str = "!") -> tuple[str, str]:

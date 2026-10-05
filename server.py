@@ -44,8 +44,11 @@ import node_helpers
 from comfyui_version import __version__
 from app.frontend_management import FrontendManager, parse_version
 from comfy_api.internal import _ComfyNodeInternal
-from app.assets.services.asset_management import resolve_hash_to_path
 from app.assets.event_log import emit
+from app.database.db import dependencies_available
+
+if dependencies_available():
+    from app.assets.services.asset_management import resolve_hash_to_path
 
 from app.user_manager import UserManager
 from app.model_manager import ModelFileManager
@@ -239,7 +242,7 @@ class PromptServer():
         else:
             middlewares.append(create_origin_only_middleware())
 
-        if args.disable_api_nodes:
+        if args.offline:
             middlewares.append(create_block_external_middleware())
 
         if args.enable_manager:
@@ -523,6 +526,8 @@ class PromptServer():
                 # node preview, it constructs /view?filename=<asset_hash>, so this
                 # endpoint must resolve blake3 hashes to their on-disk file paths.
                 if filename.startswith("blake3:"):
+                    if not self.asset_manager.enabled:
+                        return web.Response(status=404)
                     # Side-effect call: get_request_user_id raises KeyError for an unknown or
                     # system user in multi-user mode, which is what gates hash resolution.
                     # The returned id is deliberately unused (resolution is not owner-scoped).

@@ -12,7 +12,7 @@ import comfy.rmsnorm
 from comfy.ldm.flux.layers import EmbedND, timestep_embedding
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.lightricks.model import TimestepEmbedding
-from comfy.ldm.modules.attention import ComfyAttention, optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.wan.model_animate2 import PoseBranchCache
 
 
@@ -104,6 +104,7 @@ class Attention(nn.Module):
             q, k = comfy.quant_ops.ck.rms_rope(q, k, pe, q_scale, k_scale, self.norm_q.eps)
             comfy.ops.uncast_bias_weight(self.norm_q, q_scale, None, q_stream)
             comfy.ops.uncast_bias_weight(self.norm_k, k_scale, None, k_stream)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
         return self.to_out[0](attn_fn(q, k, v, self.heads, preferred_attention=self.comfy_attention))
 
 
@@ -145,7 +146,7 @@ class QwenImage21TransformerBlock(nn.Module):
         x = _gated_residual(x, self.attn(_modulated_norm(self.img_norm1, x, scale1, prefix_len, zero), pe, attn_fn, prefix_len, transformer_options), gate1, prefix_len)
         x = _gated_residual(x, self.img_mlp(_modulated_norm(self.img_norm2, x, scale2, prefix_len, zero)), gate2, prefix_len)
         if x.dtype == torch.float16:
-            x = x.clip(-65504, 65504)
+            x.clamp_(-65504, 65504)
         return x
 
 
@@ -163,14 +164,51 @@ class LastLayer(nn.Module):
         return comfy.quant_ops.ck.adaln(x, scale, torch.zeros_like(scale[:1]), self.norm.eps)
 
 
+class QwenImage21FunControlBlock(QwenImage21TransformerBlock):
+    def __init__(self, dim, num_attention_heads, attention_head_dim, mlp_ratio=3, eps=1e-6, fused_mlp=True, first=False, dtype=None, device=None, operations=None):
+        super().__init__(dim, num_attention_heads, attention_head_dim, mlp_ratio, eps, fused_mlp, dtype=dtype, device=device, operations=operations)
+        if first:
+            self.before_proj = operations.Linear(dim, dim, dtype=dtype, device=device)
+        self.after_proj = operations.Linear(dim, dim, dtype=dtype, device=device)
+
+
+class QwenImage21FunControl(nn.Module):
+    # VACE-style branch: a stream of block copies started from the embedded joint sequence, each skip added after one base block
+    def __init__(self, num_blocks=16, control_in_dim=129, inner_dim=4096, attention_head_dim=128, mlp_ratio=3, eps=1e-6, fused_mlp=True, dtype=None, device=None, operations=None):
+        super().__init__()
+        self.control_img_in = operations.Linear(control_in_dim, inner_dim, dtype=dtype, device=device)
+        self.control_blocks = nn.ModuleList([
+            QwenImage21FunControlBlock(inner_dim, inner_dim // attention_head_dim, attention_head_dim, mlp_ratio, eps, fused_mlp, first=i == 0, dtype=dtype, device=device, operations=operations)
+            for i in range(num_blocks)
+        ])
+
+    def init_stream(self, x, control, prefix_len):
+        # control latents fill the target rows, text and reference rows stay zero
+        joint = torch.zeros_like(x)
+        joint[:, prefix_len:] = self.control_img_in(control)
+        return self.control_blocks[0].before_proj(joint) + x
+
+    def step(self, index, c, mod, pe, attn_fn, prefix_len, transformer_options={}):
+        block = self.control_blocks[index]
+        c = block(c, mod, pe, attn_fn, prefix_len, transformer_options)
+        return c, block.after_proj(c)
+
+
 def block_causal_attention(segments, transformer_options={}, cache=None, block_index=0, prefix_len=0):
     # segments: (start, end, mask); text segments get a causal mask, image blocks attend to everything before their end
     def attn(q, k, v, heads, preferred_attention=None):
+        q, k, v = q.take(), k.take(), v.take()
         if cache is not None:
             # K and V stacked on dim 1 so batch stays first and quantized rows are per token and head
             cache.put(block_index, torch.stack([k[:, :prefix_len], v[:, :prefix_len]], dim=1))
-        outs = [optimized_attention(q[:, start:end].flatten(2), k[:, :end].flatten(2), v[:, :end].flatten(2), heads, mask=mask, transformer_options=transformer_options, preferred_attention=preferred_attention)
-                for start, end, mask in segments]
+        outs = []
+        for i, (start, end, mask) in enumerate(segments):
+            query = AttentionTensorContainer(q[:, start:end].flatten(2))
+            key = AttentionTensorContainer(k[:, :end].flatten(2))
+            value = AttentionTensorContainer(v[:, :end].flatten(2))
+            if i == len(segments) - 1:
+                del q, k, v
+            outs.append(optimized_attention(query, key, value, heads, mask=mask, transformer_options=transformer_options, preferred_attention=preferred_attention))
         return torch.cat(outs, dim=1) if len(outs) > 1 else outs[0]
     return attn
 
@@ -178,7 +216,10 @@ def block_causal_attention(segments, transformer_options={}, cache=None, block_i
 def prefix_cached_attention(prefix_k, prefix_v, transformer_options={}):
     # target-only queries: block-causal reduces to full attention over [cached prefix, target]
     def attn(q, k, v, heads, preferred_attention=None):
-        return optimized_attention(q.flatten(2), torch.cat([prefix_k, k], dim=1).flatten(2), torch.cat([prefix_v, v], dim=1).flatten(2), heads, transformer_options=transformer_options, preferred_attention=preferred_attention)
+        q = AttentionTensorContainer(q.take().flatten(2))
+        k = AttentionTensorContainer(torch.cat([prefix_k, k.take()], dim=1).flatten(2))
+        v = AttentionTensorContainer(torch.cat([prefix_v, v.take()], dim=1).flatten(2))
+        return optimized_attention(q, k, v, heads, transformer_options=transformer_options, preferred_attention=preferred_attention)
     return attn
 
 
@@ -359,11 +400,15 @@ class QwenImage21Transformer2DModel(nn.Module):
             if ("single_block", i) in blocks_replace:
                 def block_wrap(args):
                     return {"img": block(args["img"], mod, args["pe"], attn_fn, prefix_len, args["transformer_options"])}
-                hidden_states = blocks_replace[("single_block", i)]({"img": hidden_states, "vec": temb, "pe": pe, "transformer_options": transformer_options}, {"original_block": block_wrap})["img"]
+                args = {"img": hidden_states, "vec": temb, "pe": pe, "mod": mod, "attn_fn": attn_fn, "prefix_len": prefix_len, "transformer_options": transformer_options}
+                hidden_states = blocks_replace[("single_block", i)](args, {"original_block": block_wrap})["img"]
             else:
                 hidden_states = block(hidden_states, mod, pe, attn_fn, prefix_len, transformer_options)
             for p in patches.get("single_block", []):
                 hidden_states = p({"img": hidden_states, "x": x, "block_index": i, "transformer_options": transformer_options})["img"]
+            if cache is not None:
+                # Release dequantized K/V before leaving the block's allocation scope.
+                del attn_fn, prefix_k, prefix_v
 
         comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, x.device, None, malloc_scope="block")
         comfy.model_prefetch.malloc_graph_end()
