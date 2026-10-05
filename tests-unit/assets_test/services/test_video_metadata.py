@@ -131,62 +131,43 @@ class TestExtractMediaMetadata:
 
 
 class TestIngestStoresVideoMetadata:
-    def test_register_file_in_place_stores_video_metadata(
-        self, mock_create_session, temp_dir: Path, session
-    ):
-        from app.assets.database.models import AssetReference
-        from app.assets.services.ingest import _ingest_file_from_path
-
-        f = _make_mp4(temp_dir / "clip.mp4", width=64, height=48)
-
-        result = _ingest_file_from_path(
-            abs_path=str(f),
-            asset_hash="blake3:video123",
-            size_bytes=f.stat().st_size,
-            mtime_ns=1234567890000000000,
-            mime_type="video/mp4",
-        )
-
-        assert result.reference_id is not None
-        ref = session.query(AssetReference).one()
-        meta = ref.system_metadata or {}
-        assert meta["kind"] == "video"
-        assert meta["width"] == 64
-        assert meta["height"] == 48
-        assert meta["frame_count"] == 12
-        assert meta["fps"] == pytest.approx(8.0)
-
-    def test_register_existing_asset_backfills_metadata_from_sibling(
-        self, mock_create_session, temp_dir: Path, session
-    ):
-        from app.assets.database.models import AssetReference
-        from app.assets.services.ingest import (
-            _ingest_file_from_path,
-            _register_existing_asset,
-        )
-
-        f = _make_mp4(temp_dir / "clip.mp4", width=64, height=48)
-        _ingest_file_from_path(
-            abs_path=str(f),
-            asset_hash="blake3:videosibling",
-            size_bytes=f.stat().st_size,
-            mtime_ns=1234567890000000000,
-            mime_type="video/mp4",
-        )
-
-        result = _register_existing_asset(
-            asset_hash="blake3:videosibling",
-            name="copy.mp4",
-            mime_type="video/mp4",
-        )
-
-        assert result.created is True
-        session.expire_all()
-        ref = session.query(AssetReference).filter_by(name="copy.mp4").one()
-        meta = ref.system_metadata or {}
+    @staticmethod
+    def _assert_video_metadata(meta: dict) -> None:
         assert meta["kind"] == "video"
         assert meta["width"] == 64
         assert meta["height"] == 48
         assert meta["frame_count"] == 12
         assert meta["fps"] == pytest.approx(8.0)
         assert "duration" in meta
+
+    def test_register_file_in_place_stores_video_metadata(
+        self, mock_create_session, temp_dir: Path
+    ):
+        from app.assets.services.ingest import register_file_in_place
+
+        f = _make_mp4(temp_dir / "clip.mp4", width=64, height=48)
+
+        result = register_file_in_place(
+            abs_path=str(f), name="clip.mp4", tags=["output"], mime_type="video/mp4"
+        )
+
+        self._assert_video_metadata(result.ref.system_metadata or {})
+
+    def test_create_from_hash_stores_video_metadata(
+        self, mock_create_session, monkeypatch, temp_dir: Path
+    ):
+        from app.assets.database.queries.records import create_content
+        from app.assets.helpers import to_stored_hash
+        from app.assets.services.ingest import create_from_hash
+
+        monkeypatch.setattr("app.assets.mode.hashing_enabled", lambda: True)
+        digest = "c" * 64
+        f = _make_mp4(temp_dir / "clip.mp4", width=64, height=48)
+        with mock_create_session() as session:
+            create_content(session, str(f), to_stored_hash(digest), f.stat().st_size)
+            session.commit()
+
+        result = create_from_hash(digest, "copy.mp4", mime_type="video/mp4")
+
+        assert result is not None
+        self._assert_video_metadata(result.ref.system_metadata or {})
