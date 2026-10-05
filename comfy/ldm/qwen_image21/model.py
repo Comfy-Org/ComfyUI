@@ -12,7 +12,7 @@ import comfy.rmsnorm
 from comfy.ldm.flux.layers import EmbedND, timestep_embedding
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.lightricks.model import TimestepEmbedding
-from comfy.ldm.modules.attention import ComfyAttention, optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.wan.model_animate2 import PoseBranchCache
 
 
@@ -104,6 +104,7 @@ class Attention(nn.Module):
             q, k = comfy.quant_ops.ck.rms_rope(q, k, pe, q_scale, k_scale, self.norm_q.eps)
             comfy.ops.uncast_bias_weight(self.norm_q, q_scale, None, q_stream)
             comfy.ops.uncast_bias_weight(self.norm_k, k_scale, None, k_stream)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
         return self.to_out[0](attn_fn(q, k, v, self.heads, preferred_attention=self.comfy_attention))
 
 
@@ -196,11 +197,18 @@ class QwenImage21FunControl(nn.Module):
 def block_causal_attention(segments, transformer_options={}, cache=None, block_index=0, prefix_len=0):
     # segments: (start, end, mask); text segments get a causal mask, image blocks attend to everything before their end
     def attn(q, k, v, heads, preferred_attention=None):
+        q, k, v = q.take(), k.take(), v.take()
         if cache is not None:
             # K and V stacked on dim 1 so batch stays first and quantized rows are per token and head
             cache.put(block_index, torch.stack([k[:, :prefix_len], v[:, :prefix_len]], dim=1))
-        outs = [optimized_attention(q[:, start:end].flatten(2), k[:, :end].flatten(2), v[:, :end].flatten(2), heads, mask=mask, transformer_options=transformer_options, preferred_attention=preferred_attention)
-                for start, end, mask in segments]
+        outs = []
+        for i, (start, end, mask) in enumerate(segments):
+            query = AttentionTensorContainer(q[:, start:end].flatten(2))
+            key = AttentionTensorContainer(k[:, :end].flatten(2))
+            value = AttentionTensorContainer(v[:, :end].flatten(2))
+            if i == len(segments) - 1:
+                del q, k, v
+            outs.append(optimized_attention(query, key, value, heads, mask=mask, transformer_options=transformer_options, preferred_attention=preferred_attention))
         return torch.cat(outs, dim=1) if len(outs) > 1 else outs[0]
     return attn
 
@@ -208,7 +216,10 @@ def block_causal_attention(segments, transformer_options={}, cache=None, block_i
 def prefix_cached_attention(prefix_k, prefix_v, transformer_options={}):
     # target-only queries: block-causal reduces to full attention over [cached prefix, target]
     def attn(q, k, v, heads, preferred_attention=None):
-        return optimized_attention(q.flatten(2), torch.cat([prefix_k, k], dim=1).flatten(2), torch.cat([prefix_v, v], dim=1).flatten(2), heads, transformer_options=transformer_options, preferred_attention=preferred_attention)
+        q = AttentionTensorContainer(q.take().flatten(2))
+        k = AttentionTensorContainer(torch.cat([prefix_k, k.take()], dim=1).flatten(2))
+        v = AttentionTensorContainer(torch.cat([prefix_v, v.take()], dim=1).flatten(2))
+        return optimized_attention(q, k, v, heads, transformer_options=transformer_options, preferred_attention=preferred_attention)
     return attn
 
 
