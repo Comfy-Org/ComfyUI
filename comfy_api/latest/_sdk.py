@@ -312,6 +312,10 @@ class ImageRef(TensorRef):
         """Select an ordered, bounded set of images from a BHWC batch."""
         return await self.op("image.select_batch", indices=list(indices))
 
+    async def repeat_batch(self, amount: int) -> "ImageRef":
+        """Repeat a BHWC image batch through the canonical core operation."""
+        return await self.op("image.repeat_batch", amount=amount)
+
     async def resize(
         self, width: int, height: int, method: str = "lanczos",
         crop: str = "disabled",
@@ -339,6 +343,11 @@ class MaskRef(TensorRef):
 class LatentRef(ValueRef):
     KIND = "LATENT"
 
+    async def batch_size(self) -> int:
+        """Return the latent sample count without exposing its tensor."""
+        return int(await current_runtime().ops.apply(
+            "latent.batch_size", self, {}))
+
     @classmethod
     async def empty(
         cls, width: int, height: int, batch_size: int = 1,
@@ -359,6 +368,11 @@ class LatentRef(ValueRef):
         """Repeat a latent through core's canonical batch operation."""
         return await current_runtime().ops.apply(
             "latent.repeat_batch", self, {"amount": int(amount)})
+
+    async def select_batch(self, indices: list[int]) -> "LatentRef":
+        """Select an ordered, bounded set of entries from a latent batch."""
+        return await current_runtime().ops.apply(
+            "latent.select_batch", self, {"indices": list(indices)})
 
     async def noise_mask(self) -> Optional["MaskRef"]:
         """Return the latent's optional noise mask as an opaque mask ref."""
@@ -10154,6 +10168,7 @@ class InProcessOps:
             "image.spatial_shape": self._image_spatial_shape,
             "image.batch_size": self._image_batch_size,
             "image.select_batch": self._image_select_batch,
+            "image.repeat_batch": self._image_repeat_batch,
             "image.resize": self._image_resize,
             "mask.grow": self._mask_grow,
             # Operations on live engine objects. These are what let a node
@@ -10192,8 +10207,10 @@ class InProcessOps:
             "clip.describe_tokens": self._clip_describe_tokens,
             "clip.generate_text": self._clip_generate_text,
             "gligen.apply_batched": self._gligen_apply_batched,
+            "latent.batch_size": self._latent_batch_size,
             "latent.noise_mask": self._latent_noise_mask,
             "latent.repeat_batch": self._latent_repeat_batch,
+            "latent.select_batch": self._latent_select_batch,
             "latent.minimax_h3_token_count":
                 self._latent_minimax_h3_token_count,
             "latent.empty": self._latent_empty,
@@ -10435,10 +10452,8 @@ class InProcessOps:
             or not 1 <= len(indices) <= 4096
             or any(isinstance(index, bool) or not isinstance(index, int)
                    for index in indices)
-            or len(set(indices)) != len(indices)
         ):
-            raise ValueError(
-                "image batch indices must be 1..4096 unique integers")
+            raise ValueError("image batch indices must be 1..4096 integers")
         rt = current_runtime()
         value = await rt.refs.resolve(image)
         if (
@@ -10455,6 +10470,31 @@ class InProcessOps:
             raise ValueError("selected image batch is too large")
         return ImageRef._wrap(await rt.refs.create(
             "IMAGE", selected))  # type: ignore[return-value]
+
+    async def _image_repeat_batch(
+        self, image: "ImageRef", amount: int,
+    ) -> "ImageRef":
+        import torch
+        from comfy_extras.nodes_images import RepeatImageBatch
+
+        if isinstance(amount, bool) or not isinstance(amount, int):
+            raise TypeError("image repeat amount must be an integer")
+        if not 1 <= amount <= 64:
+            raise ValueError("image repeat amount must be in [1, 64]")
+        rt = current_runtime()
+        value = await rt.refs.resolve(image)
+        if (
+            not isinstance(value, torch.Tensor)
+            or value.ndim != 4
+            or value.shape[-1] not in (1, 3, 4)
+            or not 1 <= int(value.shape[0]) <= 4096
+        ):
+            raise TypeError("image batch repetition requires a BHWC IMAGE")
+        if value.numel() * amount > 268_435_456:
+            raise ValueError("repeated image batch is too large")
+        result = RepeatImageBatch.execute(value, amount).result[0]
+        return ImageRef._wrap(await rt.refs.create(
+            "IMAGE", result))  # type: ignore[return-value]
 
     async def _image_resize(
         self, image: "ImageRef", width: int, height: int,
@@ -13051,6 +13091,18 @@ class InProcessOps:
         return MaskRef._wrap(await rt.refs.create(
             "MASK", mask))  # type: ignore[return-value]
 
+    async def _latent_batch_size(self, latent: "LatentRef") -> int:
+        import torch
+
+        value = await current_runtime().refs.resolve(latent)
+        samples = value.get("samples") if isinstance(value, dict) else None
+        if not isinstance(samples, torch.Tensor) or samples.ndim < 1:
+            raise TypeError("LATENT must contain a batched samples tensor")
+        batch = int(samples.shape[0])
+        if not 1 <= batch <= 4096:
+            raise ValueError("LATENT batch size must be in [1, 4096]")
+        return batch
+
     async def _latent_repeat_batch(
         self, latent: "LatentRef", amount: int,
     ) -> "LatentRef":
@@ -13065,6 +13117,66 @@ class InProcessOps:
         result = RepeatLatentBatch().repeat(value, amount)[0]
         return LatentRef._wrap(await rt.refs.create(
             "LATENT", result))  # type: ignore[return-value]
+
+    async def _latent_select_batch(
+        self, latent: "LatentRef", indices: list[int],
+    ) -> "LatentRef":
+        import math
+        import torch
+
+        if (
+            not isinstance(indices, list)
+            or not 1 <= len(indices) <= 4096
+            or any(isinstance(index, bool) or not isinstance(index, int)
+                   for index in indices)
+        ):
+            raise ValueError("latent batch indices must be 1..4096 integers")
+        rt = current_runtime()
+        value = await rt.refs.resolve(latent)
+        samples = value.get("samples") if isinstance(value, dict) else None
+        if (
+            not isinstance(samples, torch.Tensor)
+            or samples.ndim < 1
+            or not 1 <= int(samples.shape[0]) <= 4096
+        ):
+            raise TypeError("latent batch selection requires LATENT samples")
+        if min(indices) < 0 or max(indices) >= int(samples.shape[0]):
+            raise IndexError("latent batch index is out of range")
+        selected_samples = samples[indices].clone()
+        if selected_samples.numel() > 268_435_456:
+            raise ValueError("selected latent batch is too large")
+
+        selected = value.copy()
+        selected["samples"] = selected_samples
+        mask = value.get("noise_mask")
+        if mask is not None:
+            if not isinstance(mask, torch.Tensor) or mask.ndim < 1:
+                raise TypeError("LATENT noise_mask must be a batched tensor")
+            if int(mask.shape[0]) == 1:
+                selected["noise_mask"] = mask.clone()
+            elif int(mask.shape[0]) > 0:
+                if int(mask.shape[0]) < int(samples.shape[0]):
+                    repeats = math.ceil(
+                        int(samples.shape[0]) / int(mask.shape[0]))
+                    mask = mask.repeat(
+                        (repeats,) + ((1,) * (mask.ndim - 1)))
+                selected["noise_mask"] = mask[:samples.shape[0]][indices].clone()
+            else:
+                raise ValueError("LATENT noise_mask batch cannot be empty")
+        batch_index = value.get("batch_index")
+        if batch_index is None:
+            selected["batch_index"] = list(indices)
+        else:
+            if (
+                not isinstance(batch_index, Sequence)
+                or isinstance(batch_index, (str, bytes, bytearray))
+                or len(batch_index) < int(samples.shape[0])
+            ):
+                raise TypeError(
+                    "LATENT batch_index must cover the samples batch")
+            selected["batch_index"] = [batch_index[index] for index in indices]
+        return LatentRef._wrap(await rt.refs.create(
+            "LATENT", selected))  # type: ignore[return-value]
 
     async def _latent_composite(
         self, latent: "LatentRef", source: "LatentRef", x: int = 0,

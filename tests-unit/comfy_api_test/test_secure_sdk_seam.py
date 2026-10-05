@@ -916,18 +916,66 @@ def test_rgb_selection_and_latent_repeat_are_typed_primitives():
             "LATENT", latent_value))
         with bind_runtime(refs, None, ops):
             rgb_ref = await image.rgb()
+            repeated_image_ref = await image.repeat_batch(2)
+            latent_batch_size = await latent.batch_size()
             repeated_ref = await latent.repeat_batch(3)
+            selected_ref = await latent.select_batch([1, 0, 1])
             rgb = await refs.resolve(rgb_ref)
+            repeated_image = await refs.resolve(repeated_image_ref)
             repeated = await refs.resolve(repeated_ref)
-        return pixels, latent_value, rgb, repeated
+            selected = await refs.resolve(selected_ref)
+        return (
+            pixels, latent_value, rgb, repeated_image, latent_batch_size,
+            repeated, selected,
+        )
 
-    pixels, latent_value, rgb, repeated = asyncio.run(run_operations())
+    (
+        pixels, latent_value, rgb, repeated_image, latent_batch_size,
+        repeated, selected,
+    ) = asyncio.run(run_operations())
     assert torch.equal(rgb, pixels[..., :3])
+    assert torch.equal(repeated_image, pixels.repeat(2, 1, 1, 1))
+    assert latent_batch_size == 2
     assert torch.equal(
         repeated["samples"], latent_value["samples"].repeat(3, 1, 1, 1))
     assert torch.equal(
         repeated["noise_mask"], latent_value["noise_mask"].repeat(3, 1, 1))
     assert repeated["batch_index"] == [4, 5, 6, 7, 8, 9]
+    assert torch.equal(
+        selected["samples"], latent_value["samples"][[1, 0, 1]])
+    assert torch.equal(
+        selected["noise_mask"], latent_value["noise_mask"][[1, 0, 1]])
+    assert selected["batch_index"] == [5, 4, 5]
+
+
+def test_batch_repeat_and_selection_fail_closed():
+    async def run_operations():
+        refs = InProcessRefResolver()
+        ops = InProcessOps()
+        image = ImageRef._wrap(await refs.create(
+            "IMAGE", torch.zeros((2, 2, 3, 3))))
+        latent = sdk.LatentRef._wrap(await refs.create("LATENT", {
+            "samples": torch.zeros((2, 4, 2, 3)),
+            "noise_mask": torch.ones((1, 2, 3)),
+            "batch_index": [8, 9],
+            "stable": "metadata",
+        }))
+        with bind_runtime(refs, None, ops):
+            with pytest.raises(TypeError, match="integer"):
+                await image.repeat_batch(True)
+            with pytest.raises(ValueError, match=r"\[1, 64\]"):
+                await image.repeat_batch(65)
+            with pytest.raises(IndexError, match="out of range"):
+                await latent.select_batch([2])
+            selected_ref = await latent.select_batch([1, 1])
+            selected = await refs.resolve(selected_ref)
+        return selected
+
+    selected = asyncio.run(run_operations())
+    assert selected["stable"] == "metadata"
+    assert selected["samples"].shape[0] == 2
+    assert selected["noise_mask"].shape[0] == 1
+    assert selected["batch_index"] == [9, 9]
 
 
 def test_inpaint_primitives_delegate_to_canonical_core_nodes():

@@ -53,10 +53,9 @@ def test_wan_layout_vision_conditioning_and_batch_selection_stay_opaque():
         with bind_runtime(refs, None, InProcessOps()):
             layout = await vae.latent_layout()
             selected = await images.select_batch([4, 1])
+            duplicated = await images.select_batch([1, 1])
             combined = await first_ref.concat(second_ref)
             attached = await conditioning.with_clip_vision_output(combined)
-            with pytest.raises(ValueError, match="unique integers"):
-                await images.select_batch([1, 1])
             with pytest.raises(IndexError, match="out of range"):
                 await images.select_batch([5])
 
@@ -64,12 +63,14 @@ def test_wan_layout_vision_conditioning_and_batch_selection_stay_opaque():
             refs,
             layout,
             await refs.resolve(selected),
+            await refs.resolve(duplicated),
             await refs.resolve(combined),
             await refs.resolve(attached),
             conditioning_value,
         )
 
-    refs, layout, selected, combined, attached, source = asyncio.run(run())
+    refs, layout, selected, duplicated, combined, attached, source = (
+        asyncio.run(run()))
     assert refs is not None
     assert layout == {
         "channels": 16,
@@ -78,6 +79,10 @@ def test_wan_layout_vision_conditioning_and_batch_selection_stay_opaque():
     }
     assert torch.equal(selected, torch.stack((
         torch.arange(5 * 2 * 3 * 3).reshape(5, 2, 3, 3)[4],
+        torch.arange(5 * 2 * 3 * 3).reshape(5, 2, 3, 3)[1],
+    )))
+    assert torch.equal(duplicated, torch.stack((
+        torch.arange(5 * 2 * 3 * 3).reshape(5, 2, 3, 3)[1],
         torch.arange(5 * 2 * 3 * 3).reshape(5, 2, 3, 3)[1],
     )))
     assert combined.penultimate_hidden_states.shape == (1, 5, 4)
