@@ -223,7 +223,8 @@ class AssetsEnabled:
         try:
             tag = upload_type if upload_type in ("input", "output") else "input"
             tags = [tag] + get_known_subfolder_tags(subfolder)
-            # A temp upload succeeds without an asset, so it isn't held up retrying.
+            # Temp uploads (webcam, audio and 3D captures) are read back by filename and wiped, rows
+            # included, at the next startup: a missing asset costs nothing, a retry up to 15 s of waiting.
             result = _retry_while_locked(lambda: register_file_in_place(
                 abs_path=abs_path,
                 name=name,
