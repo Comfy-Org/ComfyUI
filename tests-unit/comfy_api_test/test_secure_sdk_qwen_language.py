@@ -201,6 +201,80 @@ def test_clip_generation_accepts_still_and_video_with_family_defaults():
     assert calls[1][2]["num_beams"] == 2
 
 
+def test_clip_multimodal_encode_keeps_vision_tokens_on_trusted_side():
+    class FakeClip:
+        def __init__(self):
+            self.calls = []
+
+        def tokenize(self, text, **kwargs):
+            self.calls.append(("tokenize", text, kwargs))
+            # Image-aware tokenizers commonly return tensors. The combined
+            # operation must keep this dictionary on the trusted side.
+            return {"qwen": torch.arange(4).reshape(1, 4)}
+
+        def encode_from_tokens_scheduled(self, tokens):
+            self.calls.append(("encode", tokens))
+            return [[torch.ones((1, 2, 3)), {"pooled_output": None}]]
+
+    async def run():
+        refs = InProcessRefResolver()
+        value = FakeClip()
+        clip = ClipRef._wrap(await refs.create("CLIP", value))
+        first_value = torch.zeros((1, 8, 12, 3))
+        second_value = torch.ones((2, 6, 10, 3))
+        first = ImageRef._wrap(await refs.create("IMAGE", first_value))
+        second = ImageRef._wrap(await refs.create("IMAGE", second_value))
+        with bind_runtime(refs, None, InProcessOps()):
+            result = await clip.encode(
+                "vision prompt",
+                images=[first, second],
+                llama_template="<system>x</system>{}",
+            )
+            resolved = await refs.resolve(result)
+        return value.calls, resolved, first_value, second_value
+
+    calls, resolved, first_value, second_value = asyncio.run(run())
+    assert calls[0][0:2] == ("tokenize", "vision prompt")
+    assert calls[0][2]["images"][0] is first_value
+    assert calls[0][2]["images"][1] is second_value
+    assert calls[0][2]["llama_template"] == "<system>x</system>{}"
+    assert torch.equal(calls[1][1]["qwen"], torch.arange(4).reshape(1, 4))
+    assert torch.equal(resolved[0][0], torch.ones((1, 2, 3)))
+
+
+def test_clip_multimodal_encode_rejects_unbounded_or_wrong_images():
+    class FakeClip:
+        @staticmethod
+        def tokenize(text, **kwargs):
+            return {"tokens": []}
+
+        @staticmethod
+        def encode_from_tokens_scheduled(tokens):
+            return tokens
+
+    async def run():
+        refs = InProcessRefResolver()
+        clip = ClipRef._wrap(await refs.create("CLIP", FakeClip()))
+        image = ImageRef._wrap(await refs.create(
+            "IMAGE", torch.zeros((1, 2, 2, 3))))
+        wrong = ClipRef._wrap(await refs.create("CLIP", FakeClip()))
+        oversized = ImageRef._wrap(await refs.create(
+            "IMAGE", torch.empty((1, 8193, 1, 3), device="meta")))
+        with bind_runtime(refs, None, InProcessOps()):
+            with pytest.raises(ValueError, match="at most 16 images"):
+                await clip.encode("x", images=[image] * 17)
+            with pytest.raises(TypeError, match="must be an ImageRef"):
+                await clip.encode("x", images=[wrong])
+            with pytest.raises(ValueError, match="unsupported dimensions"):
+                await clip.encode("x", images=[oversized])
+            with pytest.raises(ValueError, match="text is too large"):
+                await clip.encode("x" * 32769)
+            with pytest.raises(ValueError, match="llama_template is too large"):
+                await clip.encode("x", llama_template="x" * 32769)
+
+    asyncio.run(run())
+
+
 def test_qwen_shards_merge_remap_and_dequantize_once(monkeypatch, tmp_path):
     import comfy.sd
     import comfy.text_encoders.hunyuan_video

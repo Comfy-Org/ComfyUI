@@ -255,7 +255,10 @@ class ClipRef(Ref):
     async def encode_token_weights_component(
         self, component: str, tokens: list,
     ) -> tuple[TensorRef, Optional[TensorRef]]: ...
-    async def encode(self, text: str) -> CondRef: ...
+    async def encode(
+        self, text: str, *, images: Optional[list[ImageRef]] = ...,
+        llama_template: Optional[str] = ...,
+    ) -> CondRef: ...
     async def generate_text(
         self,
         prompt: str,

@@ -1050,15 +1050,27 @@ class ClipRef(_TypedRef):
         )
         return result[0], result[1]
 
-    async def encode(self, text: str) -> "CondRef":
-        """The two steps above in one call, for the common case.
+    async def encode(
+        self, text: str, *, images: Optional[list["ImageRef"]] = None,
+        llama_template: Optional[str] = None,
+    ) -> "CondRef":
+        """Tokenize and encode without exposing token tensors to the guest.
 
         Exactly what ``CLIPTextEncode`` does, and it saves a wire round trip.
         A convenience over the pair, not a replacement: anything that inspects
         or edits tokens uses ``tokenize`` + ``encode_from_tokens_scheduled``.
+
+        ``images`` and ``llama_template`` cover vision-aware text encoders whose
+        token dictionaries contain tensors. Those tensors stay on the trusted
+        side; only opaque image inputs and the resulting ``CondRef`` cross the
+        boundary.
         """
-        return await current_runtime().ops.apply("clip.encode", self,
-                                                 {"text": text})
+        return await current_runtime().ops.apply(
+            "clip.encode", self, {
+                "text": text,
+                "images": images,
+                "llama_template": llama_template,
+            })
 
     async def generate_text(
         self, prompt: str, image: Optional[ImageRef] = None,
@@ -11285,10 +11297,66 @@ class InProcessOps:
             ))
         return embedding_ref, pooled_ref
 
-    async def _clip_encode(self, clip: "ClipRef", text: str) -> "CondRef":
+    async def _clip_encode(
+        self, clip: "ClipRef", text: str,
+        images: Optional[list["ImageRef"]] = None,
+        llama_template: Optional[str] = None,
+    ) -> "CondRef":
+        import torch
+
+        if not isinstance(text, str):
+            raise TypeError("CLIP encode text must be a string")
+        if len(text) > 32768 or len(text.encode("utf-8")) > 131072:
+            raise ValueError("CLIP encode text is too large")
+        if llama_template is not None:
+            if not isinstance(llama_template, str):
+                raise TypeError("CLIP llama_template must be a string")
+            if (len(llama_template) > 32768
+                    or len(llama_template.encode("utf-8")) > 131072):
+                raise ValueError("CLIP llama_template is too large")
+
         rt = current_runtime()
         c = await rt.refs.resolve(clip)
-        tokens = c.tokenize(text)
+        kwargs: dict[str, Any] = {}
+        if images is not None:
+            if not isinstance(images, list):
+                raise TypeError("CLIP images must be a list of ImageRef values")
+            if len(images) > 16:
+                raise ValueError("CLIP encode accepts at most 16 images")
+            resolved_images = []
+            total_pixels = 0
+            total_frames = 0
+            for index, image in enumerate(images):
+                if not isinstance(image, ImageRef) or image.kind != "IMAGE":
+                    raise TypeError(
+                        f"CLIP image {index} must be an ImageRef")
+                value = await rt.refs.resolve(image)
+                if not isinstance(value, torch.Tensor) or value.ndim != 4:
+                    raise TypeError(
+                        f"CLIP image {index} must be a BHWC tensor")
+                batch, height, width, channels = map(int, value.shape)
+                if not 1 <= batch <= 64:
+                    raise ValueError(
+                        f"CLIP image {index} batch must be in [1, 64]")
+                if (not 1 <= height <= 8192 or not 1 <= width <= 8192
+                        or not 1 <= channels <= 4):
+                    raise ValueError(
+                        f"CLIP image {index} has unsupported dimensions")
+                pixels = batch * height * width
+                if pixels > 32 * 1024 * 1024:
+                    raise ValueError(
+                        f"CLIP image {index} exceeds 32 MiPixels")
+                total_pixels += pixels
+                total_frames += batch
+                if total_pixels > 64 * 1024 * 1024 or total_frames > 64:
+                    raise ValueError(
+                        "CLIP images exceed the aggregate vision budget")
+                resolved_images.append(value)
+            kwargs["images"] = resolved_images
+        if llama_template is not None:
+            kwargs["llama_template"] = llama_template
+
+        tokens = c.tokenize(text, **kwargs)
         return CondRef._wrap(await rt.refs.create(  # type: ignore[return-value]
             "CONDITIONING", c.encode_from_tokens_scheduled(tokens)))
 
