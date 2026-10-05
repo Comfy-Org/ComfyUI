@@ -242,7 +242,7 @@ class PromptServer():
         else:
             middlewares.append(create_origin_only_middleware())
 
-        if args.disable_api_nodes:
+        if args.offline:
             middlewares.append(create_block_external_middleware())
 
         if args.enable_manager:
