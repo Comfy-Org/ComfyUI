@@ -41,6 +41,14 @@ def test_wal_connections_get_the_wal_synchronous_setting(extra_wal_synchronous, 
     assert values == [3, 3]  # EXTRA
 
 
+@pytest.mark.parametrize("factory", ["Session", "WriteSession"])
+def test_connections_keep_temp_storage_in_memory(file_db, factory):
+    engine = getattr(db_module, factory).kw["bind"]
+    with closing(engine.raw_connection()) as first, closing(engine.raw_connection()) as second:
+        values = [c.cursor().execute("PRAGMA temp_store").fetchone()[0] for c in (first, second)]
+    assert values == [2, 2]  # MEMORY
+
+
 @pytest.fixture
 def refused_wal():
     """Stand in for a filesystem that refuses WAL: the request leaves the rollback journal on."""
