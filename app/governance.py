@@ -304,7 +304,8 @@ def _decode_base64url(encoded: str, field: str) -> bytes:
 
 
 def _is_pack_basename(name: str) -> bool:
-    """Whether a signed pack name can be a folder or file name directly under custom_nodes."""
+    """Whether a signed pack name is a plain folder or file name under custom_nodes on every OS a release can target,
+    so a backslash is refused on Linux and macOS too (the builder never signs one)."""
     return name not in {"", ".", ".."} and "/" not in name and "\\" not in name
 
 
@@ -349,8 +350,8 @@ def _validate_payload(payload: dict) -> None:
             raise ValueError("governance pack entries must contain exactly name and digest")
         if not isinstance(pack["name"], str) or not isinstance(pack["digest"], str):
             raise ValueError("governance pack name and digest must be strings")
-        # A blocklist looks a pin up by the lowered folder or file name os.listdir returns, so a name that can never be one
-        # is a pin that silently never applies; an allowlist admits by digest alone and never looks the name up. Case is
+        # A blocklist looks a pin up by the lowered folder or file name os.listdir returns, so a name that is not a plain
+        # name on every target OS is a pin that may silently never apply; an allowlist admits by digest alone. Case is
         # free, since the builder signs folder names as they are and both sides lower them.
         if custom_node_mode == "blocklist" and not _is_pack_basename(pack["name"]):
             raise ValueError("governance blocklist pack names must be basenames")
