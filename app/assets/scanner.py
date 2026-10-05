@@ -410,21 +410,26 @@ def content_ids_outside_prefixes(session: Session, prefixes: list[str]) -> list[
 
 
 def collect_paths_for_roots(
-    roots: tuple[RootType, ...], progress: _ScanProgress | None = None
+    roots: tuple[RootType, ...],
+    progress: _ScanProgress | None = None,
+    should_stop: ShouldStop = _never_stop,
 ) -> list[str]:
     """Collect all file paths for the given roots.
 
     ``progress.dirs_listed`` counts the input and output walks only. Models are
     listed through folder_paths.get_filename_list, which walks the model folders
     on a cache miss and re-checks their mtimes on a hit; none of that is counted.
+
+    ``should_stop`` is checked before each input or output directory; once it returns
+    True the list is partial, so callers check it again before using the result.
     """
     paths: list[str] = []
     if "models" in roots:
         paths.extend(collect_models_files())
     if "input" in roots:
-        paths.extend(list_files_recursively(folder_paths.get_input_directory(), progress))
+        paths.extend(list_files_recursively(folder_paths.get_input_directory(), progress, should_stop))
     if "output" in roots:
-        paths.extend(list_files_recursively(folder_paths.get_output_directory(), progress))
+        paths.extend(list_files_recursively(folder_paths.get_output_directory(), progress, should_stop))
     return paths
 
 
@@ -589,6 +594,7 @@ def build_asset_specs(
     existing_paths: set[str],
     enable_metadata_extraction: bool = True,
     progress: _ScanProgress | None = None,
+    should_stop: ShouldStop = _never_stop,
 ) -> tuple[list[SeedAssetSpec], set[str], int]:
     """Build asset specs from paths, returning (specs, tag_pool, skipped_count).
 
@@ -597,6 +603,8 @@ def build_asset_specs(
         existing_paths: Set of paths that already exist in the database
         enable_metadata_extraction: If True, extract tier 1 & 2 metadata
         progress: Optional per-scan state for emit-once bookkeeping
+        should_stop: Checked before each path's stats and spec, so a large library
+            can pause here; once it returns True, no specs are returned
     """
     specs: list[SeedAssetSpec] = []
     tag_pool: set[str] = set()
@@ -604,6 +612,8 @@ def build_asset_specs(
     candidates: list[tuple[str, os.stat_result]] = []
 
     for p in paths:
+        if should_stop():
+            return [], set(), skipped
         abs_p = os.path.abspath(p)
         if _should_skip_extension(abs_p):
             skipped += 1
@@ -634,9 +644,11 @@ def build_asset_specs(
             continue
         candidates.append((abs_p, stat_p))
 
-    admitted_paths, _ = _two_stat_admit(candidates, progress)
+    admitted_paths, _ = _two_stat_admit(candidates, progress, should_stop)
     candidate_stats = dict(candidates)
     for abs_p in admitted_paths:
+        if should_stop():
+            return [], set(), skipped
         yield_gil()
         stat_p = candidate_stats[abs_p]
         name, tags = get_name_and_tags_from_asset_path(abs_p)
