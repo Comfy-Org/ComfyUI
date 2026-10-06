@@ -151,7 +151,8 @@ def mtime_ns_to_utc(mtime_ns: int, ctime_ns: int) -> datetime:
     made = datetime(1970, 1, 1) + timedelta(microseconds=mtime_ns // 1000)
     if made <= now:
         return made
-    return min(datetime(1970, 1, 1) + timedelta(microseconds=ctime_ns // 1000), now)
+    # A ctime before 1970 (an unset Windows creation time reads as 1601) can't be paged by cursor.
+    return min(datetime(1970, 1, 1) + timedelta(microseconds=ctime_ns // 1000), now) if ctime_ns >= 0 else now
 
 
 def normalize_tags(tags: list[str] | None) -> list[str]:
