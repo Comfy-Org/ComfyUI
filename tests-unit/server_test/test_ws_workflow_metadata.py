@@ -2,7 +2,10 @@
 
 import json
 
+import asyncio
+import struct
 import pytest
+from PIL import Image
 
 import server
 from comfy_api.feature_flags import SERVER_FEATURE_FLAGS  # noqa: F401
@@ -162,3 +165,48 @@ class TestWorkflowMetadataFromPrompt:
         if metadata is None:
             metadata = server.workflow_metadata_from_prompt(extra_data)
         assert metadata == {"workflow_id": "explicit"}
+
+class TestBinaryPreviewMetadata:
+    """The json messages of a prompt carry the client's metadata; the binary
+    preview frames of the same prompt should too, so a client can tell which of
+    its open workflows a mid-execution preview belongs to. Same choke point and
+    same precedence as the json path: the frame's own fields win."""
+
+    @staticmethod
+    def metadata_sent(server, metadata):
+        """Run send_image_with_metadata and return the metadata header it wrote."""
+        captured = {}
+
+        async def fake_send_bytes(event, data, sid=None):
+            length = struct.unpack(">I", bytes(data[:4]))[0]
+            captured.update(json.loads(bytes(data[4 : 4 + length])))
+
+        server.send_bytes = fake_send_bytes
+        image = Image.new("RGB", (2, 2))
+        asyncio.run(
+            server.send_image_with_metadata(("PNG", image, None), dict(metadata))
+        )
+        return captured
+
+    def test_preview_of_a_prompt_carries_the_metadata(self, prompt_server):
+        prompt_server.workflow_metadata = {"workflow_id": "abc"}
+        sent = self.metadata_sent(prompt_server, {"prompt_id": "p1", "node_id": "3"})
+        assert sent["workflow_id"] == "abc"
+        assert sent["prompt_id"] == "p1"
+        assert sent["node_id"] == "3"
+
+    def test_metadata_cannot_overwrite_the_frame_own_fields(self, prompt_server):
+        prompt_server.workflow_metadata = {"prompt_id": "spoofed", "node_id": "spoofed"}
+        sent = self.metadata_sent(prompt_server, {"prompt_id": "p1", "node_id": "3"})
+        assert sent["prompt_id"] == "p1"
+        assert sent["node_id"] == "3"
+
+    def test_absent_when_no_metadata_was_supplied(self, prompt_server):
+        prompt_server.workflow_metadata = {}
+        sent = self.metadata_sent(prompt_server, {"prompt_id": "p1"})
+        assert "workflow_id" not in sent
+
+    def test_left_alone_when_the_frame_names_no_prompt(self, prompt_server):
+        prompt_server.workflow_metadata = {"workflow_id": "abc"}
+        sent = self.metadata_sent(prompt_server, {"node_id": "3"})
+        assert "workflow_id" not in sent

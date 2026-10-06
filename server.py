@@ -1423,6 +1423,8 @@ class PromptServer():
         if metadata is None:
             metadata = {}
         metadata["image_type"] = mimetype
+        if self.workflow_metadata and "prompt_id" in metadata:
+            metadata = {**self.workflow_metadata, **metadata}
 
         # Serialize metadata as JSON
         import json
