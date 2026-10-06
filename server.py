@@ -75,6 +75,37 @@ if args.enable_manager:
     import comfyui_manager
 
 
+def valid_workflow_metadata(json_data: dict) -> Optional[dict]:
+    """The metadata a client may attach to a prompt's websocket messages.
+
+    Returns None when absent, not a dict, or over 256 bytes serialised. The
+    value is merged into outgoing messages, so it is validated here rather
+    than at the point of use.
+    """
+    metadata = json_data.get("workflow_metadata")
+    if isinstance(metadata, dict) and len(json.dumps(metadata)) <= 256:
+        return metadata
+    return None
+
+
+def workflow_metadata_from_prompt(extra_data: dict) -> Optional[dict]:
+    """Fallback for a client that sends a workflow but no explicit metadata.
+
+    Reads the same id /api/jobs reports, so the websocket messages of a prompt
+    carry it whether or not the client knows about workflow_metadata.
+    """
+    extra_pnginfo = extra_data.get("extra_pnginfo")
+    if not isinstance(extra_pnginfo, dict):
+        return None
+    workflow = extra_pnginfo.get("workflow")
+    if not isinstance(workflow, dict):
+        return None
+    workflow_id = workflow.get("id")
+    if isinstance(workflow_id, str) and workflow_id:
+        return valid_workflow_metadata({"workflow_metadata": {"workflow_id": workflow_id}})
+    return None
+
+
 def _remove_sensitive_from_queue(queue: list) -> list:
     """Remove sensitive data (index 5) from queue item tuples."""
     return [item[:5] for item in queue]
@@ -292,6 +323,7 @@ class PromptServer():
         self.routes = routes
         self.last_node_id = None
         self.client_id = None
+        self.workflow_metadata = {}
 
         self.on_prompt_handlers = []
 
@@ -1151,6 +1183,13 @@ class PromptServer():
                 if "client_id" in json_data:
                     extra_data["client_id"] = json_data["client_id"]
 
+                extra_data.pop("workflow_metadata", None)
+                metadata = valid_workflow_metadata(json_data)
+                if metadata is None:
+                    metadata = workflow_metadata_from_prompt(extra_data)
+                if metadata is not None:
+                    extra_data["workflow_metadata"] = metadata
+
                 if "comfy_usage_source" not in extra_data:
                     usage_source = request.headers.get("Comfy-Usage-Source")
                     if usage_source:
@@ -1424,6 +1463,9 @@ class PromptServer():
             await send_socket_catch_exception(self.sockets[sid].send_json, message)
 
     def send_sync(self, event, data, sid=None):
+        if self.workflow_metadata and isinstance(data, dict) and "prompt_id" in data:
+            data = {**self.workflow_metadata, **data}
+
         self.loop.call_soon_threadsafe(
             self.messages.put_nowait, (event, data, sid))
 
