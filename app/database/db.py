@@ -1,6 +1,10 @@
+import importlib
 import logging
 import os
 import shutil
+import sqlite3
+import time
+from contextlib import closing
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
 from filelock import FileLock, Timeout
@@ -8,7 +12,10 @@ from comfy.cli_args import args, database_default_path
 
 _DB_AVAILABLE = False
 Session = None
+WriteSession = None
 
+# The packages the imports below need; keep in step with them.
+_DEPENDENCIES = ("sqlalchemy", "alembic", "blake3")
 
 try:
     from alembic import command
@@ -16,11 +23,13 @@ try:
     from alembic.runtime.migration import MigrationContext
     from alembic.script import ScriptDirectory
     from sqlalchemy import create_engine, event
+    from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
 
     from app.database.models import Base
     import app.assets.database.models  # noqa: F401 — register models with Base.metadata
+    import blake3  # noqa: F401 — verify the hard dependency is importable at startup
 
     _DB_AVAILABLE = True
 except ImportError as e:
@@ -40,6 +49,17 @@ def dependencies_available():
     Temporary function to check if the dependencies are available
     """
     return _DB_AVAILABLE
+
+
+def missing_dependencies():
+    """Names of the database packages that fail to import."""
+    missing = []
+    for name in _DEPENDENCIES:
+        try:
+            importlib.import_module(name)
+        except ImportError:
+            missing.append(name)
+    return missing
 
 
 def can_create_session():
@@ -102,6 +122,19 @@ def copy_legacy_default_db(db_path):
     if os.path.exists(backup_path):
         return
 
+    if os.path.exists(legacy_db_path + "-wal"):
+        # Fold committed WAL pages back into the file before it is renamed and copied.
+        try:
+            with closing(sqlite3.connect(legacy_db_path)) as legacy:
+                busy, _, _ = legacy.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        except sqlite3.Error:
+            busy = 1
+        if busy:
+            logging.warning(
+                f"Not relocating legacy database '{legacy_db_path}': its WAL could not be "
+                f"checkpointed, so it may still be in use."
+            )
+            return
     os.replace(legacy_db_path, backup_path)
     shutil.copy(backup_path, db_path)
     logging.info(
@@ -114,16 +147,38 @@ def prepare_file_db_path(db_path):
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
 
-    copy_legacy_default_db(db_path)
+
+_BACKUP_TIMEOUT_SECONDS = 5.0
+_SQLITE_BUSY, _SQLITE_LOCKED = 5, 6  # sqlite3 only exports these names from Python 3.11
+
+
+def _backup_database(source_path, destination_path):
+    # A plain file copy misses committed pages still in the WAL file.
+    # sqlite3's backup() retries a locked database forever, so bound it: another
+    # client holding the destination must not hang startup.
+    deadline = time.monotonic() + _BACKUP_TIMEOUT_SECONDS
+
+    def give_up_when_locked_too_long(status, remaining, total):
+        if status in (_SQLITE_BUSY, _SQLITE_LOCKED) and time.monotonic() > deadline:
+            raise TimeoutError(f"'{destination_path}' stayed locked; database backup abandoned")
+
+    with closing(sqlite3.connect(source_path)) as source:
+        with closing(sqlite3.connect(destination_path)) as destination:
+            source.backup(destination, progress=give_up_when_locked_too_long)
+    shutil.copymode(source_path, destination_path)
 
 
 _db_lock = None
+_LOCK_WAIT_SECONDS = 5.0
 
 def _acquire_file_lock(db_path):
     """Acquire an OS-level file lock to prevent multi-process access.
 
     Uses filelock for cross-platform support (macOS, Linux, Windows).
     The OS automatically releases the lock when the process exits, even on crashes.
+    If the lock is held, waits up to _LOCK_WAIT_SECONDS for it to be released, since a
+    relaunch can start while the previous process is still exiting. The lock is never
+    taken from a holder.
     """
     global _db_lock
     lock_path = db_path + ".lock"
@@ -131,11 +186,40 @@ def _acquire_file_lock(db_path):
     try:
         _db_lock.acquire(timeout=0)
     except Timeout:
-        raise RuntimeError(
-            f"Could not acquire lock on database '{db_path}'. "
-            "Another ComfyUI process may already be using it. "
-            "Use --database-url to specify a separate database file."
-        )
+        logging.info(f"Database lock is held; waiting up to {_LOCK_WAIT_SECONDS:g}s for it to be released")
+        try:
+            _db_lock.acquire(timeout=_LOCK_WAIT_SECONDS)
+        except Timeout:
+            raise RuntimeError(
+                f"Could not acquire lock on database '{db_path}'. "
+                "Another ComfyUI process may already be using it. "
+                "Use --database-url to specify a separate database file."
+            )
+
+
+def lock_holder_db_path():
+    """The database path if another process holds its lock, else None.
+
+    Never waits and never keeps the lock: a free lock is taken and released at once.
+    A missing lock file means no holder, so none is created.
+    """
+    try:
+        db_path = get_db_path()
+    except ValueError:
+        return None
+    lock_path = db_path + ".lock"
+    if not os.path.exists(lock_path):
+        return None
+    probe = FileLock(lock_path)
+    try:
+        probe.acquire(timeout=0)
+        probe.release()
+    except Timeout:
+        return db_path
+    except Exception as e:
+        # The check is advisory, so it must never stop startup.
+        logging.debug(f"Could not check the database lock '{lock_path}': {e}")
+    return None
 
 
 def _is_memory_db(db_url):
@@ -174,20 +258,54 @@ def _init_memory_db(db_url):
 
     Base.metadata.create_all(engine)
 
-    global Session
+    global Session, WriteSession
     Session = sessionmaker(bind=engine)
+    WriteSession = Session
 
 
 def _init_file_db(db_url):
     """Initialize a file-backed SQLite database using Alembic migrations."""
     db_path = get_db_path()
     prepare_file_db_path(db_path)
-    db_exists = os.path.exists(db_path)
 
+    # Lock before legacy import, migration inspection, backup, upgrade, and failure recovery.
+    # The separate `<db>.lock` file does not block Alembic; this ordering keeps the sequence
+    # process-exclusive.
+    _acquire_file_lock(db_path)
+    try:
+        copy_legacy_default_db(db_path)
+        db_exists = os.path.exists(db_path)
+        _migrate_and_bind(db_url, db_path, db_exists)
+    except Exception:
+        _db_lock.release()
+        raise
+
+
+# NORMAL: commits skip the fsync that held the write lock. A power loss or OS crash can
+# roll back recent commits but cannot corrupt the database. "FULL" is SQLite's default.
+WAL_SYNCHRONOUS = "NORMAL"
+
+
+def _set_wal_synchronous(dbapi_connection, connection_record=None):
+    dbapi_connection.execute(f"PRAGMA synchronous={WAL_SYNCHRONOUS}")
+
+
+_DESTRUCTIVE_REVISION = "0007_record_content_split"
+
+
+def _upgrade_discards_the_catalog(script, target_rev, current_rev):
+    return any(
+        revision.revision == _DESTRUCTIVE_REVISION
+        for revision in script.iterate_revisions(upper=target_rev, lower=current_rev)
+    )
+
+
+def _migrate_and_bind(db_url, db_path, db_exists):
     config = get_alembic_config()
 
     # Check if we need to upgrade
     engine = create_engine(db_url)
+    write_engine = create_engine(db_url)
 
     # Enable foreign key enforcement for SQLite
     @event.listens_for(engine, "connect")
@@ -196,7 +314,34 @@ def _init_file_db(db_url):
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
+    # Writes go through a separate engine whose transactions take the write lock up front.
+    # pysqlite otherwise defers BEGIN until the first INSERT/UPDATE/DELETE, so a transaction
+    # that reads first can fail to upgrade to a write lock without waiting on busy_timeout.
+    # Following SQLAlchemy's pysqlite recipe, the driver's own transaction handling is
+    # switched off so the only BEGIN issued is the BEGIN IMMEDIATE below.
+    @event.listens_for(write_engine, "connect")
+    def configure_write_connection(dbapi_connection, connection_record):
+        dbapi_connection.isolation_level = None
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    @event.listens_for(write_engine, "begin")
+    def begin_immediate(connection):
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+
     conn = engine.connect()
+
+    try:
+        journal_mode = conn.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one()
+    except OperationalError:
+        logging.warning("Could not enable SQLite WAL mode; continuing with the default journal mode.")
+    else:
+        if journal_mode.lower() != "wal":
+            logging.warning("SQLite WAL mode unavailable; continuing with %s journal mode.", journal_mode)
+        else:
+            # Only in WAL mode: with a rollback journal, NORMAL risks corruption on power loss.
+            event.listen(engine, "connect", _set_wal_synchronous)
+            event.listen(write_engine, "connect", _set_wal_synchronous)
+            _set_wal_synchronous(conn.connection.dbapi_connection)  # opened before the hooks
 
     context = MigrationContext.configure(conn)
     current_rev = context.get_current_revision()
@@ -210,7 +355,7 @@ def _init_file_db(db_url):
         # Backup the database pre upgrade
         backup_path = db_path + ".bkp"
         if db_exists:
-            shutil.copy(db_path, backup_path)
+            _backup_database(db_path, backup_path)
         else:
             backup_path = None
 
@@ -218,22 +363,44 @@ def _init_file_db(db_url):
             command.upgrade(config, target_rev)
             logging.info(f"Database upgraded from {current_rev} to {target_rev}")
         except Exception as e:
+            logging.exception("Error upgrading database: ")
             if backup_path:
                 # Restore the database from backup if upgrade fails
-                shutil.copy(backup_path, db_path)
-                os.remove(backup_path)
-            logging.exception("Error upgrading database: ")
+                try:
+                    _backup_database(backup_path, db_path)
+                    os.remove(backup_path)
+                except Exception:
+                    logging.exception(
+                        f"Restoring the database from its pre-upgrade backup, or removing the "
+                        f"backup afterwards, failed; the pre-upgrade copy is kept at {backup_path}"
+                    )
             raise e
 
-    # Acquire an OS-level file lock after migrations are complete.
-    # Alembic uses its own connection, so we must wait until it's done
-    # before locking — otherwise our own lock blocks the migration.
-    conn.close()
-    _acquire_file_lock(db_path)
+        if backup_path and _upgrade_discards_the_catalog(script, target_rev, current_rev):
+            log_startup_warning(
+                f"The asset catalog was rebuilt from scratch by migration "
+                f"{_DESTRUCTIVE_REVISION}: manual tags, user metadata, previews, renames, "
+                f"API-created records and job_id links from the previous database were "
+                f"discarded. Record deletions were also discarded, so files still on disk "
+                f"will be catalogued again. The database from before the upgrade was kept "
+                f"at {backup_path}."
+            )
 
-    global Session
+    conn.close()
+
+    global Session, WriteSession
     Session = sessionmaker(bind=engine)
+    WriteSession = sessionmaker(bind=write_engine)
 
 
 def create_session():
     return Session()
+
+
+def create_write_session():
+    """A session whose transactions open with BEGIN IMMEDIATE. Do filesystem work before
+    using it: the write lock is held from the first statement until commit. Do not open
+    one inside another: the inner one waits out busy_timeout for the outer's lock, then
+    fails with "database is locked", indistinguishable from real contention. Rule out a
+    nested session before investigating lock contention."""
+    return WriteSession()

@@ -105,6 +105,7 @@ class LTXVContextWindowsNode(ContextWindowsManualNode):
         schema.node_id = "LTXVContextWindows"
         schema.display_name = "LTXV Context Windows"
         schema.description = "Set context windows for LTXV-like models."
+        schema.category="model/patch/ltxv"
         schema.inputs = [
             io.Model.Input("model", tooltip="The model to apply context windows to during sampling."),
             io.Int.Input("context_length", min=1, max=nodes.MAX_RESOLUTION, step=8, default=145, tooltip="The length of the context window in real frames. Must be 8*n + 1."),

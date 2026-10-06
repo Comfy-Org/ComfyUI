@@ -12,6 +12,7 @@ from comfy_execution.jobs import (
     JobStatus,
     get_job,
     get_all_jobs,
+    get_job_create_times,
     validate_job_id,
     cancel_job,
     CANCEL_PENDING,
@@ -44,20 +45,28 @@ import node_helpers
 from comfyui_version import __version__
 from app.frontend_management import FrontendManager, parse_version
 from comfy_api.internal import _ComfyNodeInternal
-from app.assets.seeder import asset_seeder
-from app.assets.api.routes import register_assets_routes
-from app.assets.services.ingest import register_file_in_place
-from app.assets.services.path_utils import get_known_subfolder_tags
-from app.assets.services.asset_management import resolve_hash_to_path
+from app.assets.event_log import emit
+from app.database.db import dependencies_available
+
+if dependencies_available():
+    from app.assets.services.asset_management import (
+        get_export_file,
+        list_job_export_files,
+        resolve_hash_to_path,
+    )
+    from app.asset_export import AssetExportManager
 
 from app.user_manager import UserManager
 from app.model_manager import ModelFileManager
 from app.custom_node_manager import CustomNodeManager
 from app.subgraph_manager import SubgraphManager
 from app.node_replace_manager import NodeReplaceManager
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 from api_server.routes.internal.internal_routes import InternalRoutes
 from protocol import BinaryEventTypes
+
+if TYPE_CHECKING:
+    from app.assets.manager import AssetManager
 
 # Import cache control middleware
 from middleware.cache_middleware import cache_control
@@ -206,16 +215,17 @@ def create_block_external_middleware():
         else:
             response = await handler(request)
 
-        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' data:; frame-src 'self'; object-src 'self';"
+        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self'; connect-src 'self' data: blob:; frame-src 'self'; object-src 'self';"
         return response
 
     return block_external_middleware
 
 
 class PromptServer():
-    def __init__(self, loop):
+    def __init__(self, loop, asset_manager: "AssetManager"):
         PromptServer.instance = self
 
+        self.asset_manager = asset_manager
         self.user_manager = UserManager()
         self.model_file_manager = ModelFileManager()
         self.custom_node_manager = CustomNodeManager()
@@ -238,7 +248,7 @@ class PromptServer():
         else:
             middlewares.append(create_origin_only_middleware())
 
-        if args.disable_api_nodes:
+        if args.offline:
             middlewares.append(create_block_external_middleware())
 
         if args.enable_manager:
@@ -254,11 +264,30 @@ class PromptServer():
             else args.front_end_root
         )
         logging.info(f"[Prompt Server] web root: {self.web_root}")
-        if args.enable_assets:
-            register_assets_routes(self.app, self.user_manager)
-        else:
-            register_assets_routes(self.app)
-            asset_seeder.disable()
+        self.asset_manager.register_routes(self.app, self.user_manager)
+        self.asset_manager.set_event_sink(self.send_sync)
+
+        def _job_create_times(prompt_ids):
+            """Creation times of the given jobs, from the queue and history."""
+            running, queued = self.prompt_queue.get_current_queue_volatile()
+            history = {}
+            for prompt_id in prompt_ids:
+                history.update(
+                    self.prompt_queue.get_history(prompt_id=prompt_id, map_function=lambda item: item)
+                )
+            return get_job_create_times(prompt_ids, running, queued, history)
+
+        if dependencies_available():
+            self.asset_export_manager = AssetExportManager(
+                list_job_files=list_job_export_files,
+                get_asset_file=get_export_file,
+                get_job_create_times=_job_create_times,
+                event_sink=self.send_sync,
+                get_user_id=self.user_manager.get_request_user_id,
+            )
+            self.asset_export_manager.register_routes(self.app)
+        if self.asset_manager.enabled:
+            emit("assets.enabled", hashing_enabled=args.enable_asset_hashing)
         routes = web.RouteTableDef()
         self.routes = routes
         self.last_node_id = None
@@ -440,22 +469,22 @@ class PromptServer():
 
                 resp = {"name" : filename, "subfolder": subfolder, "type": image_upload_type}
 
-                if args.enable_assets:
-                    try:
-                        tag = image_upload_type if image_upload_type in ("input", "output") else "input"
-                        tags = [tag]
-                        tags.extend(get_known_subfolder_tags(subfolder))
-                        result = register_file_in_place(abs_path=filepath, name=filename, tags=tags)
-                        resp["asset"] = {
-                            "id": result.ref.id,
-                            "name": result.ref.name,
-                            "asset_hash": result.asset.hash,
-                            "size": result.asset.size_bytes,
-                            "mime_type": result.asset.mime_type,
-                            "tags": result.tags,
-                        }
-                    except Exception:
-                        logging.warning("Failed to register uploaded image as asset", exc_info=True)
+                view = self.asset_manager.register_upload(
+                    abs_path=filepath,
+                    name=filename,
+                    upload_type=image_upload_type,
+                    subfolder=subfolder,
+                    content_written=not image_is_duplicate,
+                )
+                if view is not None:
+                    resp["asset"] = {
+                        "id": view.asset.id,
+                        "name": view.asset.name,
+                        "asset_hash": view.asset_hash,
+                        "size": view.size,
+                        "mime_type": view.mime_type,
+                        "tags": view.tags,
+                    }
 
                 return web.json_response(resp)
             else:
@@ -523,8 +552,13 @@ class PromptServer():
                 # node preview, it constructs /view?filename=<asset_hash>, so this
                 # endpoint must resolve blake3 hashes to their on-disk file paths.
                 if filename.startswith("blake3:"):
-                    owner_id = self.user_manager.get_request_user_id(request)
-                    result = resolve_hash_to_path(filename, owner_id=owner_id)
+                    if not self.asset_manager.enabled:
+                        return web.Response(status=404)
+                    # Side-effect call: get_request_user_id raises KeyError for an unknown or
+                    # system user in multi-user mode, which is what gates hash resolution.
+                    # The returned id is deliberately unused (resolution is not owner-scoped).
+                    self.user_manager.get_request_user_id(request)
+                    result = resolve_hash_to_path(filename)
                     if result is None:
                         return web.Response(status=404)
                     file, filename, resolved_content_type = result.abs_path, result.download_name, result.content_type
@@ -799,7 +833,7 @@ class PromptServer():
 
         @routes.get("/object_info")
         async def get_object_info(request):
-            asset_seeder.start(roots=("models", "input", "output"))
+            self.asset_manager.ensure_scan_started()
             with folder_paths.cache_helper:
                 out = {}
                 for x in nodes.NODE_CLASS_MAPPINGS:

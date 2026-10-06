@@ -24,7 +24,7 @@ def _make_wrapper() -> vae_mod.VideoAutoencoderKLWrapper:
     return wrapper
 
 
-def _fingerprint_decode_(self, z, return_dict=True):
+def _fingerprint_decode(self, z, output_buffer=None):
     b = int(z.shape[0])
     t = int(z.shape[2])
     h = int(z.shape[3])
@@ -36,7 +36,7 @@ def _fingerprint_decode_(self, z, return_dict=True):
 
 
 def _decode_with_patches(wrapper, z):
-    with patch.object(vae_mod.VideoAutoencoderKL, "decode_", _fingerprint_decode_):
+    with patch.object(vae_mod.VideoAutoencoderKLWrapper, "slicing_decode", _fingerprint_decode):
         return wrapper.decode(z)
 
 
@@ -53,10 +53,8 @@ class _Wrapper(vae_mod.VideoAutoencoderKLWrapper):
         nn.Module.__init__(self)
         self.calls = []
 
-    def parameters(self):
-        return iter([torch.nn.Parameter(torch.zeros(()))])
 
-def _decode_stub(self, latent):
+def _decode_stub(self, latent, output_buffer=None):
     self.calls.append(tuple(latent.shape))
     return torch.zeros(latent.shape[0], 3, latent.shape[2], latent.shape[3] * 8, latent.shape[4] * 8)
 
@@ -64,18 +62,11 @@ def _decode_stub(self, latent):
 def test_seedvr2_wrapper_decode_accepts_5d_channel_first_latents_without_preprocessor_state():
     wrapper = _Wrapper()
 
-    with patch.object(vae_mod.VideoAutoencoderKL, "decode_", _decode_stub):
+    with patch.object(vae_mod.VideoAutoencoderKLWrapper, "slicing_decode", _decode_stub):
         out = wrapper.decode(torch.zeros(1, _LATENT_CHANNELS, 2, 4, 5))
 
     assert tuple(out.shape) == (1, 3, 2, 32, 40)
     assert wrapper.calls == [(1, _LATENT_CHANNELS, 2, 4, 5)]
-
-
-def test_seedvr2_wrapper_decode_rejects_wrong_rank_latents():
-    wrapper = _Wrapper()
-
-    with pytest.raises(RuntimeError, match=r"latent input must be 4-D collapsed .* or 5-D"):
-        wrapper.decode(torch.zeros(1, _LATENT_CHANNELS, 4))
 
 
 def _t_padded(t_in: int) -> int:

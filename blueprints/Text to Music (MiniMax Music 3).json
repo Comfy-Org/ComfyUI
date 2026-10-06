@@ -1,0 +1,1244 @@
+{
+  "revision": 0,
+  "last_node_id": "37",
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 37,
+      "type": "ac99f841-a3de-4329-9564-953b81cf9e16",
+      "pos": [
+        1620,
+        630
+      ],
+      "size": [
+        490,
+        540
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "caption",
+          "type": "STRING",
+          "widget": {
+            "name": "caption"
+          },
+          "link": null
+        },
+        {
+          "name": "lyrics",
+          "type": "STRING",
+          "widget": {
+            "name": "lyrics"
+          },
+          "link": null
+        },
+        {
+          "name": "max_duration",
+          "type": "FLOAT",
+          "widget": {
+            "name": "max_duration"
+          },
+          "link": null
+        },
+        {
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "name": "unet_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "unet_name"
+          },
+          "link": null
+        },
+        {
+          "name": "clip_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "clip_name"
+          },
+          "link": null
+        },
+        {
+          "name": "vae_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_name"
+          },
+          "link": null
+        },
+        {
+          "label": "tiled_decode",
+          "name": "switch",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "switch"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "AUDIO",
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.31.0",
+        "previewExposures": []
+      },
+      "widgets_values": [
+        "",
+        "[Intro]\nMmm...\n(rain on the window)\nOoh...\n\n[Verse]\nMidnight and the canvas glows\nDragging little wires where the current flows\nType a quiet dream, let the sampler drift\nNoise into a picture, like the fog just lifts\nTwenty slow steps, I'm in no hurry now\nLatents turning colors and I don't know how\nEvery render's like a polaroid I found\nSoft focus memories, no sound\n\n[Instrumental]\n\n[Verse]\nQueue another frame, let the motion breathe\nPictures start to move like the falling leaves\nVideo drifting by at twenty-four\nLittle animations on my bedroom floor\nSeed after seed like the rain outside\nSome of them are keepers, some I let slide\nSave the ones that feel like a Sunday slow\nNode to node to node... and off we go\n\n[Chorus]\nMmm... let it render on\n(take your time, take your time)\nOoh... by the morning it'll all be done\n(one more queue, one more try)\n\n[Instrumental]\n\n[Bridge]\nRain keeps drawing pictures on the glass...\nMy machine keeps dreaming...\nNeither of us fast...\n\n[Chorus]\nMmm... let it render on\n(take your time, take your time)\nOoh... by the morning it'll all be done\n(one more queue, one more try)\n\n[Instrumental]\n\n[Outro]\nMmm...\n(node to node)\nOoh... goodnight",
+        60,
+        197122968890040,
+        "minimax_music3_dit_fp16.safetensors",
+        "minimax_music3_text_encoder_pruned_int8_convrot.safetensors",
+        "minimax_music3_dav.safetensors",
+        true
+      ],
+      "widgets_values_named": {
+        "caption": "",
+        "lyrics": "[Intro]\nMmm...\n(rain on the window)\nOoh...\n\n[Verse]\nMidnight and the canvas glows\nDragging little wires where the current flows\nType a quiet dream, let the sampler drift\nNoise into a picture, like the fog just lifts\nTwenty slow steps, I'm in no hurry now\nLatents turning colors and I don't know how\nEvery render's like a polaroid I found\nSoft focus memories, no sound\n\n[Instrumental]\n\n[Verse]\nQueue another frame, let the motion breathe\nPictures start to move like the falling leaves\nVideo drifting by at twenty-four\nLittle animations on my bedroom floor\nSeed after seed like the rain outside\nSome of them are keepers, some I let slide\nSave the ones that feel like a Sunday slow\nNode to node to node... and off we go\n\n[Chorus]\nMmm... let it render on\n(take your time, take your time)\nOoh... by the morning it'll all be done\n(one more queue, one more try)\n\n[Instrumental]\n\n[Bridge]\nRain keeps drawing pictures on the glass...\nMy machine keeps dreaming...\nNeither of us fast...\n\n[Chorus]\nMmm... let it render on\n(take your time, take your time)\nOoh... by the morning it'll all be done\n(one more queue, one more try)\n\n[Instrumental]\n\n[Outro]\nMmm...\n(node to node)\nOoh... goodnight",
+        "max_duration": 60,
+        "seed": 197122968890040,
+        "unet_name": "minimax_music3_dit_fp16.safetensors",
+        "clip_name": "minimax_music3_text_encoder_pruned_int8_convrot.safetensors",
+        "vae_name": "minimax_music3_dav.safetensors",
+        "switch": true
+      },
+      "title": "Text to Music (MiniMax Music 3)"
+    }
+  ],
+  "links": [],
+  "version": 0.4,
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "ac99f841-a3de-4329-9564-953b81cf9e16",
+        "version": 1,
+        "state": {
+          "lastGroupId": 0,
+          "lastNodeId": 43,
+          "lastLinkId": 63,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Text to Music (MiniMax Music 3)",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            320,
+            820,
+            128,
+            208
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            3210,
+            380,
+            128,
+            68
+          ]
+        },
+        "inputs": [
+          {
+            "id": "9f92b5c5-dadc-4b0f-84d9-b5ed2b3a0842",
+            "name": "caption",
+            "type": "STRING",
+            "linkIds": [
+              45
+            ],
+            "pos": [
+              424,
+              844
+            ]
+          },
+          {
+            "id": "bb9d2920-ba98-4c51-be7d-4b5736b14407",
+            "name": "lyrics",
+            "type": "STRING",
+            "linkIds": [
+              46
+            ],
+            "pos": [
+              424,
+              864
+            ]
+          },
+          {
+            "id": "be60d2f1-fc99-4ed6-a057-130a7b83945f",
+            "name": "max_duration",
+            "type": "FLOAT",
+            "linkIds": [
+              47
+            ],
+            "pos": [
+              424,
+              884
+            ]
+          },
+          {
+            "id": "a7f66596-0413-4906-a08f-475af0521252",
+            "name": "seed",
+            "type": "INT",
+            "linkIds": [
+              54
+            ],
+            "pos": [
+              424,
+              904
+            ]
+          },
+          {
+            "id": "cbfb7b7b-357f-44ab-80cb-8748020a9880",
+            "name": "unet_name",
+            "type": "COMBO",
+            "linkIds": [
+              55
+            ],
+            "pos": [
+              424,
+              924
+            ]
+          },
+          {
+            "id": "ec2e20dc-2e7b-4147-922f-5f5f26ac9854",
+            "name": "clip_name",
+            "type": "COMBO",
+            "linkIds": [
+              56
+            ],
+            "pos": [
+              424,
+              944
+            ]
+          },
+          {
+            "id": "eeefaa94-f342-415e-96e7-eb13dcccbac0",
+            "name": "vae_name",
+            "type": "COMBO",
+            "linkIds": [
+              57
+            ],
+            "pos": [
+              424,
+              964
+            ]
+          },
+          {
+            "id": "6da74b03-27d0-487e-b8d6-f94018b2ca9a",
+            "name": "switch",
+            "type": "BOOLEAN",
+            "linkIds": [
+              63
+            ],
+            "label": "tiled_decode",
+            "pos": [
+              424,
+              984
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "82bef6fd-2dee-4579-b4ed-7d679d18279f",
+            "name": "AUDIO",
+            "type": "AUDIO",
+            "linkIds": [
+              62
+            ],
+            "localized_name": "AUDIO",
+            "pos": [
+              3234,
+              404
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 6,
+            "type": "UNETLoader",
+            "pos": [
+              700,
+              380
+            ],
+            "size": [
+              480,
+              110
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "showAdvanced": false,
+            "inputs": [
+              {
+                "localized_name": "unet_name",
+                "name": "unet_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "unet_name"
+                },
+                "link": 55
+              },
+              {
+                "localized_name": "weight_dtype",
+                "name": "weight_dtype",
+                "type": "COMBO",
+                "widget": {
+                  "name": "weight_dtype"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "MODEL",
+                "name": "MODEL",
+                "type": "MODEL",
+                "links": [
+                  6
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "UNETLoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.31.0",
+              "models": [
+                {
+                  "name": "minimax_music3_dit_fp16.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/MiniMax-Music-3/resolve/main/diffusion_models/minimax_music3_dit_fp16.safetensors",
+                  "directory": "diffusion_models"
+                }
+              ]
+            },
+            "widgets_values": [
+              "minimax_music3_dit_fp16.safetensors",
+              "default"
+            ],
+            "widgets_values_named": {
+              "unet_name": "minimax_music3_dit_fp16.safetensors",
+              "weight_dtype": "default"
+            }
+          },
+          {
+            "id": 13,
+            "type": "MiniMaxMusic3TextEncode",
+            "pos": [
+              1230,
+              380
+            ],
+            "size": [
+              500,
+              750
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "showAdvanced": true,
+            "inputs": [
+              {
+                "localized_name": "clip",
+                "name": "clip",
+                "type": "CLIP",
+                "link": 18
+              },
+              {
+                "localized_name": "caption",
+                "name": "caption",
+                "type": "STRING",
+                "widget": {
+                  "name": "caption"
+                },
+                "link": 45
+              },
+              {
+                "localized_name": "lyrics",
+                "name": "lyrics",
+                "type": "STRING",
+                "widget": {
+                  "name": "lyrics"
+                },
+                "link": 46
+              },
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": 52
+              },
+              {
+                "localized_name": "max_duration",
+                "name": "max_duration",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "max_duration"
+                },
+                "link": 47
+              },
+              {
+                "localized_name": "cfg_scale",
+                "name": "cfg_scale",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "cfg_scale"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "top_k",
+                "name": "top_k",
+                "type": "INT",
+                "widget": {
+                  "name": "top_k"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "links": [
+                  15,
+                  16
+                ]
+              },
+              {
+                "localized_name": "seconds",
+                "name": "seconds",
+                "type": "FLOAT",
+                "links": [
+                  20
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "MiniMaxMusic3TextEncode",
+              "cnr_id": "comfy-core",
+              "ver": "0.31.0"
+            },
+            "widgets_values": [
+              "",
+              "",
+              222,
+              "fixed",
+              60,
+              1.7,
+              50
+            ],
+            "widgets_values_named": {
+              "caption": "",
+              "lyrics": "",
+              "seed": 222,
+              "control_after_generate": "fixed",
+              "max_duration": 60,
+              "cfg_scale": 1.7,
+              "top_k": 50
+            }
+          },
+          {
+            "id": 3,
+            "type": "CLIPLoader",
+            "pos": [
+              700,
+              550
+            ],
+            "size": [
+              480,
+              140
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "clip_name",
+                "name": "clip_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "clip_name"
+                },
+                "link": 56
+              },
+              {
+                "localized_name": "type",
+                "name": "type",
+                "type": "COMBO",
+                "widget": {
+                  "name": "type"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "device",
+                "name": "device",
+                "shape": 7,
+                "type": "COMBO",
+                "widget": {
+                  "name": "device"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CLIP",
+                "name": "CLIP",
+                "type": "CLIP",
+                "links": [
+                  18
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CLIPLoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.31.0",
+              "models": [
+                {
+                  "name": "minimax_music3_text_encoder_pruned_int8_convrot.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/MiniMax-Music-3/resolve/main/text_encoders/minimax_music3_text_encoder_pruned_int8_convrot.safetensors",
+                  "directory": "text_encoders"
+                }
+              ]
+            },
+            "widgets_values": [
+              "minimax_music3_text_encoder_pruned_int8_convrot.safetensors",
+              "minimax",
+              "default"
+            ],
+            "widgets_values_named": {
+              "clip_name": "minimax_music3_text_encoder_pruned_int8_convrot.safetensors",
+              "type": "minimax",
+              "device": "default"
+            }
+          },
+          {
+            "id": 7,
+            "type": "VAELoader",
+            "pos": [
+              700,
+              750
+            ],
+            "size": [
+              480,
+              90
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "vae_name",
+                "name": "vae_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "vae_name"
+                },
+                "link": 57
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "VAE",
+                "name": "VAE",
+                "type": "VAE",
+                "links": [
+                  13,
+                  59
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAELoader",
+              "cnr_id": "comfy-core",
+              "ver": "0.31.0",
+              "models": [
+                {
+                  "name": "minimax_music3_dav.safetensors",
+                  "url": "https://huggingface.co/Comfy-Org/MiniMax-Music-3/resolve/main/vae/minimax_music3_dav.safetensors",
+                  "directory": "vae"
+                }
+              ]
+            },
+            "widgets_values": [
+              "minimax_music3_dav.safetensors"
+            ],
+            "widgets_values_named": {
+              "vae_name": "minimax_music3_dav.safetensors"
+            }
+          },
+          {
+            "id": 10,
+            "type": "ConditioningZeroOut",
+            "pos": [
+              1820,
+              540
+            ],
+            "size": [
+              230,
+              60
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "conditioning",
+                "name": "conditioning",
+                "type": "CONDITIONING",
+                "link": 16
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "CONDITIONING",
+                "name": "CONDITIONING",
+                "type": "CONDITIONING",
+                "links": [
+                  8
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ConditioningZeroOut",
+              "cnr_id": "comfy-core",
+              "ver": "0.31.0"
+            }
+          },
+          {
+            "id": 15,
+            "type": "EmptyMiniMaxMusic3LatentAudio",
+            "pos": [
+              1780,
+              380
+            ],
+            "size": [
+              350,
+              120
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "seconds",
+                "name": "seconds",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "seconds"
+                },
+                "link": 20
+              },
+              {
+                "localized_name": "batch_size",
+                "name": "batch_size",
+                "type": "INT",
+                "widget": {
+                  "name": "batch_size"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "links": [
+                  21
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "EmptyMiniMaxMusic3LatentAudio",
+              "cnr_id": "comfy-core",
+              "ver": "0.31.0"
+            },
+            "widgets_values": [
+              120,
+              1
+            ],
+            "widgets_values_named": {
+              "seconds": 120,
+              "batch_size": 1
+            }
+          },
+          {
+            "id": 9,
+            "type": "KSampler",
+            "pos": [
+              2170,
+              380
+            ],
+            "size": [
+              370,
+              290
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "model",
+                "name": "model",
+                "type": "MODEL",
+                "link": 6
+              },
+              {
+                "localized_name": "positive",
+                "name": "positive",
+                "type": "CONDITIONING",
+                "link": 15
+              },
+              {
+                "localized_name": "negative",
+                "name": "negative",
+                "type": "CONDITIONING",
+                "link": 8
+              },
+              {
+                "localized_name": "latent_image",
+                "name": "latent_image",
+                "type": "LATENT",
+                "link": 21
+              },
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": 53
+              },
+              {
+                "localized_name": "steps",
+                "name": "steps",
+                "type": "INT",
+                "widget": {
+                  "name": "steps"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "cfg",
+                "name": "cfg",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "cfg"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "sampler_name",
+                "name": "sampler_name",
+                "type": "COMBO",
+                "widget": {
+                  "name": "sampler_name"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "scheduler",
+                "name": "scheduler",
+                "type": "COMBO",
+                "widget": {
+                  "name": "scheduler"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "denoise",
+                "name": "denoise",
+                "type": "FLOAT",
+                "widget": {
+                  "name": "denoise"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "LATENT",
+                "name": "LATENT",
+                "type": "LATENT",
+                "links": [
+                  12,
+                  58
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "KSampler",
+              "cnr_id": "comfy-core",
+              "ver": "0.31.0"
+            },
+            "widgets_values": [
+              1111111112,
+              "fixed",
+              30,
+              1.7,
+              "euler",
+              "simple",
+              1
+            ],
+            "widgets_values_named": {
+              "seed": 1111111112,
+              "control_after_generate": "fixed",
+              "steps": 30,
+              "cfg": 1.7,
+              "sampler_name": "euler",
+              "scheduler": "simple",
+              "denoise": 1
+            }
+          },
+          {
+            "id": 12,
+            "type": "VAEDecodeAudio",
+            "pos": [
+              2590,
+              380
+            ],
+            "size": [
+              230,
+              80
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "samples",
+                "name": "samples",
+                "type": "LATENT",
+                "link": 12
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 13
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "AUDIO",
+                "name": "AUDIO",
+                "type": "AUDIO",
+                "links": [
+                  60
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAEDecodeAudio",
+              "cnr_id": "comfy-core",
+              "ver": "0.31.0"
+            }
+          },
+          {
+            "id": 38,
+            "type": "SeedNode",
+            "pos": [
+              890,
+              970
+            ],
+            "size": [
+              270,
+              90
+            ],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "widget": {
+                  "name": "seed"
+                },
+                "link": 54
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "seed",
+                "name": "seed",
+                "type": "INT",
+                "links": [
+                  52,
+                  53
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "SeedNode",
+              "cnr_id": "comfy-core",
+              "ver": "0.31.0"
+            },
+            "widgets_values": [
+              0,
+              "randomize"
+            ],
+            "widgets_values_named": {
+              "seed": 0,
+              "fixed": "randomize"
+            }
+          },
+          {
+            "id": 42,
+            "type": "VAEDecodeAudioTiled",
+            "pos": [
+              2580,
+              500
+            ],
+            "size": [
+              280,
+              140
+            ],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "samples",
+                "name": "samples",
+                "type": "LATENT",
+                "link": 58
+              },
+              {
+                "localized_name": "vae",
+                "name": "vae",
+                "type": "VAE",
+                "link": 59
+              },
+              {
+                "localized_name": "tile_size",
+                "name": "tile_size",
+                "type": "INT",
+                "widget": {
+                  "name": "tile_size"
+                },
+                "link": null
+              },
+              {
+                "localized_name": "overlap",
+                "name": "overlap",
+                "type": "INT",
+                "widget": {
+                  "name": "overlap"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "AUDIO",
+                "name": "AUDIO",
+                "type": "AUDIO",
+                "links": [
+                  61
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "VAEDecodeAudioTiled",
+              "cnr_id": "comfy-core",
+              "ver": "0.31.0"
+            },
+            "widgets_values": [
+              1536,
+              64
+            ],
+            "widgets_values_named": {
+              "tile_size": 1536,
+              "overlap": 64
+            }
+          },
+          {
+            "id": 43,
+            "type": "ComfySwitchNode",
+            "pos": [
+              2600,
+              690
+            ],
+            "size": [
+              270,
+              110
+            ],
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "shape": 7,
+                "type": "*",
+                "link": 60
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "shape": 7,
+                "type": "*",
+                "link": 61
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 63
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "*",
+                "links": [
+                  62
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode",
+              "cnr_id": "comfy-core",
+              "ver": "0.31.0"
+            },
+            "widgets_values": [
+              false
+            ],
+            "widgets_values_named": {
+              "switch": false
+            }
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 18,
+            "origin_id": 3,
+            "origin_slot": 0,
+            "target_id": 13,
+            "target_slot": 0,
+            "type": "CLIP"
+          },
+          {
+            "id": 16,
+            "origin_id": 13,
+            "origin_slot": 0,
+            "target_id": 10,
+            "target_slot": 0,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 20,
+            "origin_id": 13,
+            "origin_slot": 1,
+            "target_id": 15,
+            "target_slot": 0,
+            "type": "FLOAT"
+          },
+          {
+            "id": 6,
+            "origin_id": 6,
+            "origin_slot": 0,
+            "target_id": 9,
+            "target_slot": 0,
+            "type": "MODEL"
+          },
+          {
+            "id": 15,
+            "origin_id": 13,
+            "origin_slot": 0,
+            "target_id": 9,
+            "target_slot": 1,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 8,
+            "origin_id": 10,
+            "origin_slot": 0,
+            "target_id": 9,
+            "target_slot": 2,
+            "type": "CONDITIONING"
+          },
+          {
+            "id": 21,
+            "origin_id": 15,
+            "origin_slot": 0,
+            "target_id": 9,
+            "target_slot": 3,
+            "type": "LATENT"
+          },
+          {
+            "id": 12,
+            "origin_id": 9,
+            "origin_slot": 0,
+            "target_id": 12,
+            "target_slot": 0,
+            "type": "LATENT"
+          },
+          {
+            "id": 13,
+            "origin_id": 7,
+            "origin_slot": 0,
+            "target_id": 12,
+            "target_slot": 1,
+            "type": "VAE"
+          },
+          {
+            "id": 45,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 13,
+            "target_slot": 1,
+            "type": "STRING"
+          },
+          {
+            "id": 46,
+            "origin_id": -10,
+            "origin_slot": 1,
+            "target_id": 13,
+            "target_slot": 2,
+            "type": "STRING"
+          },
+          {
+            "id": 47,
+            "origin_id": -10,
+            "origin_slot": 2,
+            "target_id": 13,
+            "target_slot": 4,
+            "type": "FLOAT"
+          },
+          {
+            "id": 52,
+            "origin_id": 38,
+            "origin_slot": 0,
+            "target_id": 13,
+            "target_slot": 3,
+            "type": "INT"
+          },
+          {
+            "id": 53,
+            "origin_id": 38,
+            "origin_slot": 0,
+            "target_id": 9,
+            "target_slot": 4,
+            "type": "INT"
+          },
+          {
+            "id": 54,
+            "origin_id": -10,
+            "origin_slot": 3,
+            "target_id": 38,
+            "target_slot": 0,
+            "type": "INT"
+          },
+          {
+            "id": 55,
+            "origin_id": -10,
+            "origin_slot": 4,
+            "target_id": 6,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 56,
+            "origin_id": -10,
+            "origin_slot": 5,
+            "target_id": 3,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 57,
+            "origin_id": -10,
+            "origin_slot": 6,
+            "target_id": 7,
+            "target_slot": 0,
+            "type": "COMBO"
+          },
+          {
+            "id": 58,
+            "origin_id": 9,
+            "origin_slot": 0,
+            "target_id": 42,
+            "target_slot": 0,
+            "type": "LATENT"
+          },
+          {
+            "id": 59,
+            "origin_id": 7,
+            "origin_slot": 0,
+            "target_id": 42,
+            "target_slot": 1,
+            "type": "VAE"
+          },
+          {
+            "id": 60,
+            "origin_id": 12,
+            "origin_slot": 0,
+            "target_id": 43,
+            "target_slot": 0,
+            "type": "AUDIO"
+          },
+          {
+            "id": 61,
+            "origin_id": 42,
+            "origin_slot": 0,
+            "target_id": 43,
+            "target_slot": 1,
+            "type": "AUDIO"
+          },
+          {
+            "id": 62,
+            "origin_id": 43,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "AUDIO"
+          },
+          {
+            "id": 63,
+            "origin_id": -10,
+            "origin_slot": 7,
+            "target_id": 43,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          }
+        ],
+        "extra": {},
+        "category": "Audio/Music generation",
+        "description": "Generates complete songs up to five minutes from a music caption and lyrics using MiniMax Music 3."
+      }
+    ]
+  },
+  "extra": {}
+}

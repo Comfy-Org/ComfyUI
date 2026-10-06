@@ -1721,7 +1721,71 @@ class Wan3ReferenceToVideoApi(IO.ComfyNode):
                                 IO.Combo.Input(
                                     "duration",
                                     options=["auto", *(str(i) for i in range(2, 31))],
-                                    default="5",
+                                    tooltip="Output duration in seconds. With 'auto', the model chooses "
+                                    "a duration that fits the prompt and reference media. The combined "
+                                    "duration of reference videos and output must not exceed 30 seconds.",
+                                ),
+                                IO.Boolean.Input(
+                                    "audio",
+                                    default=True,
+                                    tooltip="Whether the output video contains an audio track.",
+                                ),
+                                IO.Boolean.Input(
+                                    "prompt_extend",
+                                    default=True,
+                                    tooltip="Whether to enhance the prompt with AI assistance.",
+                                    advanced=True,
+                                ),
+                                IO.Autogrow.Input(
+                                    "reference_images",
+                                    template=IO.Autogrow.TemplateNames(
+                                        IO.Image.Input("reference_image"),
+                                        names=[f"image{i}" for i in range(1, 11)],
+                                        min=0,
+                                    ),
+                                ),
+                                IO.Autogrow.Input(
+                                    "reference_videos",
+                                    template=IO.Autogrow.TemplateNames(
+                                        IO.Video.Input("reference_video"),
+                                        names=[f"video{i}" for i in range(1, 6)],
+                                        min=0,
+                                    ),
+                                ),
+                                IO.Autogrow.Input(
+                                    "reference_audios",
+                                    template=IO.Autogrow.TemplateNames(
+                                        IO.Audio.Input("reference_audio"),
+                                        names=[f"audio{i}" for i in range(1, 6)],
+                                        min=0,
+                                    ),
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "wan3.0-video-prime",
+                            [
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Prompt describing the elements and visual features. "
+                                    "Supports English and Chinese. Refer to connected reference media "
+                                    "as @Image1, @Video1, @Audio1, numbered per type in input order.",
+                                ),
+                                IO.Combo.Input(
+                                    "resolution",
+                                    options=["1080P", "720P", "480P"],
+                                ),
+                                IO.Combo.Input(
+                                    "ratio",
+                                    options=["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4"],
+                                    tooltip="Aspect ratio of the output video. With 'adaptive', the output "
+                                    "dimensions are derived from the input media.",
+                                ),
+                                IO.Combo.Input(
+                                    "duration",
+                                    options=["auto", *(str(i) for i in range(2, 31))],
                                     tooltip="Output duration in seconds. With 'auto', the model chooses "
                                     "a duration that fits the prompt and reference media. The combined "
                                     "duration of reference videos and output must not exceed 30 seconds.",
@@ -1795,14 +1859,16 @@ class Wan3ReferenceToVideoApi(IO.ComfyNode):
                 depends_on=IO.PriceBadgeDepends(widgets=["model", "model.resolution", "model.duration"]),
                 expr="""
                 (
-                  $ppsTable := { "480p": 0.0715, "720p": 0.143, "1080p": 0.286 };
+                  $ppsTable := $contains(widgets.model, "prime")
+                    ? { "480p": 0.09724, "720p": 0.2002, "1080p": 0.4004 }
+                    : { "480p": 0.0715, "720p": 0.143, "1080p": 0.286 };
                   $pps := $lookup($ppsTable, $lookup(widgets, "model.resolution"));
                   $dur := $lookup(widgets, "model.duration");
                   $dur = "auto"
                     ? { "type": "usd", "usd": $pps, "format": {"suffix": "/second"} }
                     : (
-                        $minUsd := $round($number($dur) * $pps, 2);
-                        $maxUsd := $round($min([$number($dur) + 15, 30]) * $pps, 2);
+                        $minUsd := $number($dur) * $pps;
+                        $maxUsd := $min([$number($dur) + 15, 30]) * $pps;
                         $minUsd = $maxUsd
                           ? { "type": "usd", "usd": $minUsd }
                           : { "type": "range_usd", "min_usd": $minUsd, "max_usd": $maxUsd }
@@ -1949,7 +2015,45 @@ class Wan3ImageToVideoApi(IO.ComfyNode):
                                 IO.Combo.Input(
                                     "duration",
                                     options=["auto", *(str(i) for i in range(2, 31))],
-                                    default="5",
+                                    tooltip="Output duration in seconds. With 'auto', the model chooses "
+                                    "a duration that fits the prompt.",
+                                ),
+                                IO.Boolean.Input(
+                                    "audio",
+                                    default=True,
+                                    tooltip="Whether the output video contains an audio track.",
+                                ),
+                                IO.Boolean.Input(
+                                    "prompt_extend",
+                                    default=True,
+                                    tooltip="Whether to enhance the prompt with AI assistance.",
+                                    advanced=True,
+                                ),
+                            ],
+                        ),
+                        IO.DynamicCombo.Option(
+                            "wan3.0-video-prime",
+                            [
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="Prompt describing the elements and visual features. "
+                                    "Supports English and Chinese.",
+                                ),
+                                IO.Combo.Input(
+                                    "resolution",
+                                    options=["1080P", "720P", "480P"],
+                                ),
+                                IO.Combo.Input(
+                                    "ratio",
+                                    options=["adaptive", "16:9", "9:16", "1:1", "4:3", "3:4"],
+                                    tooltip="Aspect ratio of the output video. With 'adaptive', the output "
+                                    "dimensions are derived from the first frame.",
+                                ),
+                                IO.Combo.Input(
+                                    "duration",
+                                    options=["auto", *(str(i) for i in range(2, 31))],
                                     tooltip="Output duration in seconds. With 'auto', the model chooses "
                                     "a duration that fits the prompt.",
                                 ),
@@ -2007,12 +2111,14 @@ class Wan3ImageToVideoApi(IO.ComfyNode):
                 depends_on=IO.PriceBadgeDepends(widgets=["model", "model.resolution", "model.duration"]),
                 expr="""
                 (
-                  $ppsTable := { "480p": 0.0715, "720p": 0.143, "1080p": 0.286 };
+                  $ppsTable := $contains(widgets.model, "prime")
+                    ? { "480p": 0.09724, "720p": 0.2002, "1080p": 0.4004 }
+                    : { "480p": 0.0715, "720p": 0.143, "1080p": 0.286 };
                   $pps := $lookup($ppsTable, $lookup(widgets, "model.resolution"));
                   $dur := $lookup(widgets, "model.duration");
                   $dur = "auto"
                     ? { "type": "usd", "usd": $pps, "format": {"suffix": "/second"} }
-                    : { "type": "usd", "usd": $round($number($dur) * $pps, 2) }
+                    : { "type": "usd", "usd": $number($dur) * $pps }
                 )
                 """,
             ),

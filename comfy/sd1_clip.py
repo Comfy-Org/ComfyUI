@@ -308,7 +308,7 @@ class SDClipModel(torch.nn.Module, ClipTokenWeightEncoder):
     def load_sd(self, sd):
         return self.transformer.load_state_dict(sd, strict=False, assign=getattr(self, "can_assign_sd", False))
 
-    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0):
+    def generate(self, tokens, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed, presence_penalty=0.0, mtp=True):
         if isinstance(tokens, dict):
             tokens_only = next(iter(tokens.values())) # todo: get this better?
         else:
@@ -746,5 +746,11 @@ class SD1ClipModel(torch.nn.Module):
     def load_sd(self, sd):
         return getattr(self, self.clip).load_sd(sd)
 
-    def generate(self, tokens, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.95, min_p=0.0, repetition_penalty=1.0, seed=None, presence_penalty=0.0):
-        return getattr(self, self.clip).generate(tokens, do_sample=do_sample, max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty, seed=seed, presence_penalty=presence_penalty)
+    def generate(self, tokens, do_sample=True, max_length=256, temperature=1.0, top_k=50, top_p=0.95, min_p=0.0, repetition_penalty=1.0, seed=None, presence_penalty=0.0, mtp=True):
+        return getattr(self, self.clip).generate(tokens, do_sample=do_sample, max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p, min_p=min_p, repetition_penalty=repetition_penalty, seed=seed, presence_penalty=presence_penalty, mtp=mtp)
+
+    def get_dynamic_vram__units(self):
+        # forward to the inner transformer so ModelPatcher can register vbar units (graph decode)
+        model = getattr(getattr(getattr(self, self.clip), "transformer", None), "model", None)
+        get_units = getattr(model, "get_dynamic_vram__units", None)
+        return get_units() if get_units is not None else ([], [])

@@ -27,6 +27,8 @@ except ImportError:
 
 # Cap on deterministic sweep density: tiny charts on a large atlas would otherwise enumerate every texel column.
 _SWEEP_CAP = 1024
+_TORCH_PREP_MAX_ANGLE_ELEMENTS = 1 << 23
+_TORCH_RASTER_FACE_BATCH = 1 << 17
 
 
 @dataclass
@@ -429,78 +431,83 @@ def _dilate_local(x: Tensor, p: int) -> Tensor:
     return x
 
 
-def _raster_all_torch(uvs_tex_pad, faces_pad, fmask, bw_t, bh_t, padding, device):
+def _raster_all_torch(uvs_tex, uv_offsets, faces_cat, face_offsets, bw_t, bh_t, padding, device):
     """Rasterize every chart into one flat bool buffer; buf[cbase[i]:cbase[i+1]].view(bh,bw)
     is chart i's bitmap. Triangles are bucketed by next-pow2 bbox size to bound memory."""
-    n = uvs_tex_pad.shape[0]
-    fmax = faces_pad.shape[1]
+    n = len(face_offsets) - 1
     bwL, bhL = bw_t.long(), bh_t.long()
     cbase = torch.zeros(n + 1, dtype=torch.long, device=device)
     torch.cumsum(bwL * bhL, 0, out=cbase[1:])
     buf = torch.zeros(int(cbase[-1].item()), dtype=torch.bool, device=device)
 
-    # gather all triangle coords, keep only valid faces -> (Ttot,3,2) + chart id per triangle
-    fp = faces_pad.reshape(n, fmax * 3)
-    tri = torch.gather(uvs_tex_pad, 1, fp[..., None].expand(-1, -1, 2)).reshape(n * fmax, 3, 2)
-    fm = fmask.reshape(-1)
-    tri_f = tri[fm]
-    if tri_f.shape[0] == 0:
+    total_faces = int(faces_cat.shape[0])
+    if total_faces == 0:
         return buf, cbase
-    cid = torch.arange(n, device=device).repeat_interleave(fmax)[fm]
-
-    # per-triangle pixel bbox, inflated by padding (origin >= 0); bucket by next-pow2 max-dim
-    tmin = tri_f.amin(1)
-    tmax = tri_f.amax(1)
-    x0 = (tmin[:, 0].floor().long() - padding).clamp_min(0)
-    y0 = (tmin[:, 1].floor().long() - padding).clamp_min(0)
-    bbw = (tmax[:, 0].ceil().long() + padding) - x0 + 1
-    bbh = (tmax[:, 1].ceil().long() + padding) - y0 + 1
-    mxd = torch.maximum(bbw, bbh).clamp_min(1)
-    bsz = (2 ** torch.ceil(torch.log2(mxd.float())).long()).long()
-
-    a = tri_f[:, 0]
-    b = tri_f[:, 1]
-    c = tri_f[:, 2]
-    v0 = b - a
-    v1 = c - a
-    d00 = (v0 * v0).sum(-1)
-    d01 = (v0 * v1).sum(-1)
-    d11 = (v1 * v1).sum(-1)
-    den = (d00 * d11 - d01 * d01).clamp(min=1e-20)
-
-
+    faces = torch.from_numpy(np.ascontiguousarray(faces_cat)).to(device=device, dtype=torch.long)
+    face_counts = torch.from_numpy(np.diff(face_offsets)).to(device=device, dtype=torch.long)
+    face_charts = torch.arange(n, device=device).repeat_interleave(face_counts)
+    uv_offsets_t = torch.as_tensor(uv_offsets, dtype=torch.long, device=device)
     free = comfy.model_management.get_free_memory(device)
     budget = int(min(1 << 23, max(1 << 20, (free * 0.25) / 56)))
-    for g in sorted(set(bsz.tolist())):                                  # one batch per pow2 grid
-        sel_g = (bsz == g).nonzero(as_tuple=True)[0]
-        per = max(1, budget // (g * g))
-        for cs in range(0, sel_g.shape[0], per):
-            sel = sel_g[cs:cs + per]
-            m = sel.shape[0]
-            xs0 = x0[sel].view(m, 1, 1)
-            ys0 = y0[sel].view(m, 1, 1)
-            cc = cid[sel]
-            bwp = bwL[cc].view(m, 1, 1)
-            bhp = bhL[cc].view(m, 1, 1)
-            gi = torch.arange(g, device=device)
-            px = xs0 + gi.view(1, 1, g)
-            py = ys0 + gi.view(1, g, 1)                                        # (m,g,g) int
-            pxf = px.float() + 0.5
-            pyf = py.float() + 0.5
-            v2x = pxf - a[sel, 0].view(m, 1, 1)
-            v2y = pyf - a[sel, 1].view(m, 1, 1)
-            d20 = v2x * v0[sel, 0].view(m, 1, 1) + v2y * v0[sel, 1].view(m, 1, 1)
-            d21 = v2x * v1[sel, 0].view(m, 1, 1) + v2y * v1[sel, 1].view(m, 1, 1)
-            idn = den[sel].view(m, 1, 1).reciprocal()
-            vv = torch.addcmul(d11[sel].view(m, 1, 1) * d20, d01[sel].view(m, 1, 1), d21, value=-1) * idn
-            ww = torch.addcmul(d00[sel].view(m, 1, 1) * d21, d01[sel].view(m, 1, 1), d20, value=-1) * idn
-            uu = 1.0 - vv - ww
-            inside = (uu >= -1e-6) & (vv >= -1e-6) & (ww >= -1e-6)
-            if padding > 0:
-                inside = _dilate_local(inside, padding)
-            valid = inside & (px < bwp) & (py < bhp)
-            flat = (cbase[cc].view(m, 1, 1) + py * bwp + px)[valid]
-            buf[flat] = True
+    for fs in range(0, total_faces, _TORCH_RASTER_FACE_BATCH):
+        fe = min(fs + _TORCH_RASTER_FACE_BATCH, total_faces)
+        cid = face_charts[fs:fe]
+        tri_f = uvs_tex[faces[fs:fe] + uv_offsets_t[cid, None]]
+
+        # per-triangle pixel bbox, inflated by padding (origin >= 0); bucket by next-pow2 max-dim
+        tmin = tri_f.amin(1)
+        tmax = tri_f.amax(1)
+        x0 = (tmin[:, 0].floor().long() - padding).clamp_min(0)
+        y0 = (tmin[:, 1].floor().long() - padding).clamp_min(0)
+        bbw = (tmax[:, 0].ceil().long() + padding) - x0 + 1
+        bbh = (tmax[:, 1].ceil().long() + padding) - y0 + 1
+        mxd = torch.maximum(bbw, bbh).clamp_min(1)
+        bsz = (2 ** torch.ceil(torch.log2(mxd.float())).long()).long()
+
+        a = tri_f[:, 0]
+        b = tri_f[:, 1]
+        c = tri_f[:, 2]
+        v0 = b - a
+        v1 = c - a
+        d00 = (v0 * v0).sum(-1)
+        d01 = (v0 * v1).sum(-1)
+        d11 = (v1 * v1).sum(-1)
+        den = (d00 * d11 - d01 * d01).clamp(min=1e-20)
+
+        for g in torch.unique(bsz).tolist():                             # one batch per pow2 grid
+            sel_g = (bsz == g).nonzero(as_tuple=True)[0]
+            per = max(1, budget // (g * g))
+            for cs in range(0, sel_g.shape[0], per):
+                sel = sel_g[cs:cs + per]
+                m = sel.shape[0]
+                xs0 = x0[sel].view(m, 1, 1)
+                ys0 = y0[sel].view(m, 1, 1)
+                cc = cid[sel]
+                bwp = bwL[cc].view(m, 1, 1)
+                bhp = bhL[cc].view(m, 1, 1)
+                gi = torch.arange(g, device=device)
+                px = xs0 + gi.view(1, 1, g)
+                py = ys0 + gi.view(1, g, 1)                                    # (m,g,g) int
+                pxf = px.float() + 0.5
+                pyf = py.float() + 0.5
+                v2x = pxf - a[sel, 0].view(m, 1, 1)
+                v2y = pyf - a[sel, 1].view(m, 1, 1)
+                d20 = v2x * v0[sel, 0].view(m, 1, 1) + v2y * v0[sel, 1].view(m, 1, 1)
+                d21 = v2x * v1[sel, 0].view(m, 1, 1) + v2y * v1[sel, 1].view(m, 1, 1)
+                idn = den[sel].view(m, 1, 1).reciprocal()
+                vv = torch.addcmul(d11[sel].view(m, 1, 1) * d20, d01[sel].view(m, 1, 1), d21, value=-1) * idn
+                ww = torch.addcmul(d00[sel].view(m, 1, 1) * d21, d01[sel].view(m, 1, 1), d20, value=-1) * idn
+                uu = 1.0 - vv - ww
+                inside = (uu >= -1e-6) & (vv >= -1e-6) & (ww >= -1e-6)
+                if padding > 0:
+                    inside = _dilate_local(inside, padding)
+                valid = inside & (px < bwp) & (py < bhp)
+                flat = (cbase[cc].view(m, 1, 1) + py * bwp + px)[valid]
+                buf[flat] = True
+                del sel, xs0, ys0, cc, bwp, bhp, gi, px, py, pxf, pyf
+                del v2x, v2y, d20, d21, idn, vv, ww, uu, inside, valid, flat
+        del cid, tri_f, tmin, tmax, x0, y0, bbw, bbh, mxd, bsz
+        del a, b, c, v0, v1, d00, d01, d11, den
     return buf, cbase
 
 
@@ -594,65 +601,99 @@ def _best_placement_torch(atlas, pix0, dim0, dim1, cands, n_sky, cur_w, cur_h, d
     return sky
 
 
-def _pack_bitmap_torch(chart_uvs, chart_3d_areas, chart_uv_areas, chart_faces,
+def _pack_bitmap_torch(uvs_cat, uv_offsets, chart_3d_areas, chart_uv_areas, faces_cat, face_offsets,
                        texels_per_unit, padding_texels, attempts=4096, rng_seed=0,
                        progress_callback=None):
     """Torch rasterize-and-place packer (numba-free fallback). Returns (placements, atlas_w, atlas_h)."""
-    n = len(chart_uvs)
+    n = len(uv_offsets) - 1
     if n == 0:
         return [], 1, 1
     device = comfy.model_management.get_torch_device()
     ang = torch.linspace(0.0, math.pi / 2.0, 37, device=device)[:-1]
     cos_a, sin_a = ang.cos(), ang.sin()
 
-    # ---- Prepare pass 1: best-rotation + scale + bbox for ALL charts at once (batched) ----
-    vcount = [int(u.shape[0]) for u in chart_uvs]
-    fcount = [int(f.shape[0]) for f in chart_faces]
-    vmax = max(vcount)
-    fmax = max(fcount)
-    uvs_pad = torch.zeros(n, vmax, 2, device=device)
-    vmask = torch.zeros(n, vmax, dtype=torch.bool, device=device)
-    faces_pad = torch.zeros(n, fmax, 3, dtype=torch.long, device=device)
-    fmask = torch.zeros(n, fmax, dtype=torch.bool, device=device)
-    for i in range(n):
-        uvs_pad[i, :vcount[i]] = chart_uvs[i].to(device=device, dtype=torch.float32)
-        vmask[i, :vcount[i]] = True
-        if fcount[i]:
-            faces_pad[i, :fcount[i]] = chart_faces[i].to(device=device, dtype=torch.long)
-            fmask[i, :fcount[i]] = True
-    u0, u1 = uvs_pad[..., 0], uvs_pad[..., 1]                            # (N,Vmax)
-    BIG = 1e30
-    mlo = torch.where(vmask, torch.zeros_like(u0), u0.new_full((), BIG))
-    mhi = torch.where(vmask, torch.zeros_like(u0), u0.new_full((), -BIG))
-    xr = torch.addcmul(u0[:, :, None] * cos_a, u1[:, :, None], sin_a, value=-1)   # (N,Vmax,A)
-    yr = torch.addcmul(u0[:, :, None] * sin_a, u1[:, :, None], cos_a)
-    xsp = (xr + mhi[:, :, None]).amax(1) - (xr + mlo[:, :, None]).amin(1)         # (N,A) masked span
-    ysp = (yr + mhi[:, :, None]).amax(1) - (yr + mlo[:, :, None]).amin(1)
-    ti = (xsp * ysp).argmin(1)                                          # (N,) best angle per chart
-    cc, ss = cos_a[ti][:, None], sin_a[ti][:, None]                     # (N,1)
-    rx = torch.addcmul(u0 * cc, u1, ss, value=-1)                      # (N,Vmax)
-    ry = torch.addcmul(u0 * ss, u1, cc)
-    rxmin = (rx + mlo).amin(1)                                          # (N,)
-    rxmax = (rx + mhi).amax(1)
-    rymin = (ry + mlo).amin(1)
-    rymax = (ry + mhi).amax(1)
+    # ---- Prepare pass 1: best-rotation + scale + bbox in bounded batches ----
+    vcount = np.diff(uv_offsets).astype(np.int64, copy=False)
+    uvs_src = torch.from_numpy(np.ascontiguousarray(uvs_cat)).to(device=device, dtype=torch.float32)
+    uvs_tex = torch.empty_like(uvs_src)
     a3 = torch.tensor([max(a, 1e-12) for a in chart_3d_areas], device=device)
     au = torch.tensor([max(a, 1e-12) for a in chart_uv_areas], device=device)
-    base = (a3 / au).sqrt() * texels_per_unit
-    maxb = (4.0 * a3.sqrt() * texels_per_unit).clamp_min(8.0)
-    bbm = torch.maximum(rxmax - rxmin, rymax - rymin).clamp_min(1e-12)
-    scale = torch.minimum(base, maxb / bbm)                            # (N,)
-    uvs_tex_pad = torch.stack([(rx - rxmin[:, None]) * scale[:, None],
-                               (ry - rymin[:, None]) * scale[:, None]], dim=-1)   # (N,Vmax,2)
-    bw_t = ((rxmax - rxmin) * scale).ceil().int() + padding_texels + 1
-    bh_t = ((rymax - rymin) * scale).ceil().int() + padding_texels + 1
+    ti_all = torch.empty(n, dtype=torch.long, device=device)
+    scale_all = torch.empty(n, device=device)
+    bw_t = torch.empty(n, dtype=torch.int, device=device)
+    bh_t = torch.empty(n, dtype=torch.int, device=device)
+    start = 0
+    while start < n:
+        end = start
+        vmax = 0
+        while end < n:
+            next_vmax = max(vmax, int(vcount[end]))
+            if end > start and (end - start + 1) * next_vmax * 36 > _TORCH_PREP_MAX_ANGLE_ELEMENTS:
+                break
+            vmax = next_vmax
+            end += 1
+        m = end - start
+        uvs_pad = torch.zeros(m, vmax, 2, device=device)
+        vmask = torch.zeros(m, vmax, dtype=torch.bool, device=device)
+        for j, i in enumerate(range(start, end)):
+            count = int(vcount[i])
+            uvs_pad[j, :count] = uvs_src[int(uv_offsets[i]):int(uv_offsets[i + 1])]
+            vmask[j, :count] = True
+        u0, u1 = uvs_pad[..., 0], uvs_pad[..., 1]
+        xsp = torch.empty(m, 36, device=device)
+        ysp = torch.empty(m, 36, device=device)
+        angle_batch = max(1, min(36, _TORCH_PREP_MAX_ANGLE_ELEMENTS // max(m * vmax, 1)))
+        mask3 = vmask[:, :, None]
+        for a0 in range(0, 36, angle_batch):
+            a1 = min(a0 + angle_batch, 36)
+            cc = cos_a[a0:a1]
+            ss = sin_a[a0:a1]
+            xr = torch.addcmul(u0[:, :, None] * cc, u1[:, :, None], ss, value=-1)
+            xr.masked_fill_(~mask3, -1e30)
+            xmax = xr.amax(1)
+            xr.masked_fill_(~mask3, 1e30)
+            xsp[:, a0:a1] = xmax - xr.amin(1)
+            del xr
+            yr = torch.addcmul(u0[:, :, None] * ss, u1[:, :, None], cc)
+            yr.masked_fill_(~mask3, -1e30)
+            ymax = yr.amax(1)
+            yr.masked_fill_(~mask3, 1e30)
+            ysp[:, a0:a1] = ymax - yr.amin(1)
+            del yr
+        ti = (xsp * ysp).argmin(1)
+        cc, ss = cos_a[ti][:, None], sin_a[ti][:, None]
+        rx = torch.addcmul(u0 * cc, u1, ss, value=-1)
+        ry = torch.addcmul(u0 * ss, u1, cc)
+        rx.masked_fill_(~vmask, -1e30)
+        rxmax = rx.amax(1)
+        rx.masked_fill_(~vmask, 1e30)
+        rxmin = rx.amin(1)
+        ry.masked_fill_(~vmask, -1e30)
+        rymax = ry.amax(1)
+        ry.masked_fill_(~vmask, 1e30)
+        rymin = ry.amin(1)
+        base = (a3[start:end] / au[start:end]).sqrt() * texels_per_unit
+        maxb = (4.0 * a3[start:end].sqrt() * texels_per_unit).clamp_min(8.0)
+        bbm = torch.maximum(rxmax - rxmin, rymax - rymin).clamp_min(1e-12)
+        scale = torch.minimum(base, maxb / bbm)
+        uvs_batch = torch.stack([(rx - rxmin[:, None]) * scale[:, None],
+                                 (ry - rymin[:, None]) * scale[:, None]], dim=-1)
+        uvs_tex[int(uv_offsets[start]):int(uv_offsets[end])] = uvs_batch[vmask]
+        ti_all[start:end] = ti
+        scale_all[start:end] = scale
+        bw_t[start:end] = ((rxmax - rxmin) * scale).ceil().int() + padding_texels + 1
+        bh_t[start:end] = ((rymax - rymin) * scale).ceil().int() + padding_texels + 1
+        del uvs_pad, vmask, u0, u1, xsp, ysp, mask3, rx, ry, uvs_batch
+        start = end
 
     # one sync: pull all per-chart scalars
-    thetas = ang[ti].cpu().tolist()
-    scales = scale.cpu().tolist()
+    thetas = ang[ti_all].cpu().tolist()
+    scales = scale_all.cpu().tolist()
+    del uvs_src, a3, au, ti_all, scale_all
 
     # ---- Prepare pass 2: rasterize ALL charts at once, then derive per-chart sparse data ----
-    buf, cbase = _raster_all_torch(uvs_tex_pad, faces_pad, fmask, bw_t, bh_t, padding_texels, device)
+    buf, cbase = _raster_all_torch(
+        uvs_tex, uv_offsets, faces_cat, face_offsets, bw_t, bh_t, padding_texels, device)
 
     # nonzero over the flat buffer is ascending, so pixels come out grouped by chart
     nz = buf.nonzero(as_tuple=True)[0]
@@ -679,14 +720,6 @@ def _pack_bitmap_torch(chart_uvs, chart_3d_areas, chart_uv_areas, chart_faces,
     pix_l = [pix_all[offs[i]:offs[i + 1]] for i in range(n)]
     pixr_l = [pixr_all[offs[i]:offs[i + 1]] for i in range(n)]
 
-    # column tops (skyline lift), batched via flat scatter-amax over (chart, column) keys
-    wmax = max(max(h, w) for (h, w) in dim_l)
-    ct_pad = torch.full((n * wmax,), -1, dtype=torch.long, device=device)
-    ctr_pad = torch.full((n * wmax,), -1, dtype=torch.long, device=device)
-    ct_pad.scatter_reduce_(0, cid * wmax + px, py, reduce="amax")
-    ctr_pad.scatter_reduce_(0, cid * wmax + (rmax[cid] - py), px, reduce="amax")
-    ct_pad = ct_pad.view(n, wmax)
-    ctr_pad = ctr_pad.view(n, wmax)
     del cid, py, px, rmax, cmax
 
     # ---- Placement: skyline bin-pack on GPU ----
@@ -731,7 +764,8 @@ def _pack_bitmap_torch(chart_uvs, chart_3d_areas, chart_uv_areas, chart_faces,
         atlas[by + pix[:, 0], bx + pix[:, 1]] = True                    # sparse blit
         cur_w = max(cur_w, bx + bw_)
         cur_h = max(cur_h, by + bh_)
-        ct = (ctr_pad if swap else ct_pad)[ci, :bw_]                    # GPU skyline lift
+        ct = torch.full((bw_,), -1, dtype=torch.long, device=device)
+        ct.scatter_reduce_(0, pix[:, 1], pix[:, 0], reduce="amax")
         ix = ar[bx:bx + bw_]
         sky_t[ix] = torch.where(ct >= 0, torch.maximum(sky_t[ix], by + ct + 1), sky_t[ix])
         placements[ci] = ChartPlacement(chart_id=ci, offset=(float(bx), float(by)),
@@ -761,13 +795,9 @@ def pack_bitmap_concat(
     if n == 0:
         return empty, empty, empty, empty.astype(np.float64), empty.astype(np.float64), empty, 1, 1
     if not _HAVE_NUMBA_PACK:
-        chart_uvs = [torch.from_numpy(np.ascontiguousarray(uvs_cat[uv_offsets[c]:uv_offsets[c + 1]]))
-                     for c in range(n)]
-        chart_faces = [torch.from_numpy(np.ascontiguousarray(faces_cat[face_offsets[c]:face_offsets[c + 1]]))
-                       for c in range(n)]
         placements, w, h = _pack_bitmap_torch(
-            chart_uvs, [float(a) for a in chart_3d_areas], [float(a) for a in chart_uv_areas],
-            chart_faces, texels_per_unit, padding_texels, attempts=attempts,
+            uvs_cat, uv_offsets, [float(a) for a in chart_3d_areas], [float(a) for a in chart_uv_areas],
+            faces_cat, face_offsets, texels_per_unit, padding_texels, attempts=attempts,
             rng_seed=rng_seed, progress_callback=progress_callback)
         px = np.array([p.offset[0] for p in placements], dtype=np.int64)
         py = np.array([p.offset[1] for p in placements], dtype=np.int64)
