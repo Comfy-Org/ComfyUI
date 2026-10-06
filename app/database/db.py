@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 from contextlib import closing
+from app.assets.event_log import error_kind
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
 from filelock import FileLock, Timeout
@@ -275,27 +276,22 @@ def _init_file_db(db_url):
     _acquire_file_lock(db_path)
     try:
         copy_legacy_default_db(db_path)
+        # Only the default database: one named by --database-url may be managed elsewhere.
+        is_default = args.database_url is None
         try:
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
         except Exception as e:
-            # Only the default database: one named by --database-url may be managed elsewhere.
-            if args.database_url is not None or not _is_corruption(e):
+            # SQLITE_CORRUPT or SQLITE_NOTADB, never "database is locked". The error can come
+            # from another file (the pre-upgrade backup), so the live database must fail too.
+            if not is_default or error_kind(e) != "database_corrupt" or _passes_quick_check(db_path):
                 raise
             _quarantine_and_restore(db_path, e)
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
     except Exception:
         _db_lock.release()
         raise
-    _start_daily_backup(db_path)
-
-
-# SQLITE_CORRUPT and SQLITE_NOTADB. Never "database is locked": another process holds it.
-_CORRUPTION_MESSAGES = ("database disk image is malformed", "file is not a database")
-
-
-def _is_corruption(error):
-    error = getattr(error, "orig", error)  # SQLAlchemy wraps the driver's error
-    return isinstance(error, sqlite3.DatabaseError) and any(m in str(error) for m in _CORRUPTION_MESSAGES)
+    if is_default:
+        _start_daily_backup(db_path)
 
 
 def _passes_quick_check(path):
@@ -342,8 +338,6 @@ _DAILY_BACKUP_INTERVAL_SECONDS = 24 * 60 * 60
 
 def _start_daily_backup(db_path):
     """Refresh the daily backup in the background, off the startup path."""
-    if args.database_url is not None:
-        return
     backup_path = db_path + ".daily-backup"
     try:
         if time.time() - os.path.getmtime(backup_path) < _DAILY_BACKUP_INTERVAL_SECONDS:

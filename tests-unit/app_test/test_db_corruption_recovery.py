@@ -1,8 +1,10 @@
 import glob
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from contextlib import closing
 from pathlib import Path
@@ -12,8 +14,10 @@ import torch
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from filelock import FileLock
 
 import app.logger
+from app.assets.event_log import error_kind
 from app.database import db as db_module
 from comfy.cli_args import args as cli_args
 
@@ -70,17 +74,34 @@ def _truncate(db_path: str) -> None:
         f.truncate(os.path.getsize(db_path) // 2)
 
 
+def _break_schema(db_path: str) -> None:
+    # "malformed database schema (...)": SQLITE_CORRUPT with its own message.
+    with open(db_path, "r+b") as f:
+        data = f.read()
+        f.seek(data.index(b"CREATE TABLE alembic_version"))
+        f.write(b"CREATX")
+
+
 @pytest.fixture
-def default_db(tmp_path, monkeypatch):
+def default_db(tmp_path, monkeypatch, backups_started):
     """The default database (no --database-url), in a temporary user directory."""
     monkeypatch.setattr(db_module.args, "database_url", None)
     monkeypatch.setattr("folder_paths.get_user_directory", lambda: str(tmp_path))
     monkeypatch.setattr(db_module, "Session", None)
+    monkeypatch.setattr(db_module, "WriteSession", None)
     monkeypatch.setattr(db_module, "_db_lock", None)
-    monkeypatch.setattr(db_module, "_start_daily_backup", lambda db_path: None)
+    monkeypatch.setattr(db_module, "_start_daily_backup", backups_started.append)
     yield str(tmp_path / "comfyui.db")
+    for session_factory in (db_module.Session, db_module.WriteSession):
+        if session_factory is not None:
+            session_factory.kw["bind"].dispose()
     if db_module._db_lock is not None:
         db_module._db_lock.release(force=True)
+
+
+@pytest.fixture
+def backups_started():
+    return []
 
 
 @pytest.fixture
@@ -107,7 +128,7 @@ def _quarantined(db_path: str) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    "corrupt", [lambda p: _overwrite_page_of(p, "alembic_version"), _overwrite_header, _truncate]
+    "corrupt", [lambda p: _overwrite_page_of(p, "alembic_version"), _overwrite_header, _truncate, _break_schema]
 )
 def test_corrupt_database_is_quarantined_and_recreated_at_boot(default_db, startup_warnings, corrupt):
     _make_db(default_db, marker="lost")
@@ -206,8 +227,72 @@ def test_failed_quarantine_raises_the_corruption(default_db, monkeypatch, startu
 
     with pytest.raises(Exception) as raised:
         db_module.init_db()
-    assert db_module._is_corruption(raised.value)
+    assert error_kind(raised.value) == "database_corrupt"
     assert startup_warnings == []
+
+
+def test_second_failure_propagates_and_releases_the_lock(default_db, monkeypatch):
+    _make_db(default_db)
+    _overwrite_header(default_db)
+    real_migrate = db_module._migrate_and_bind
+    calls = []
+
+    def _fail_after_recovery(*a):
+        calls.append(a)
+        if len(calls) == 1:
+            return real_migrate(*a)
+        raise RuntimeError("restored database failed too")
+
+    monkeypatch.setattr(db_module, "_migrate_and_bind", _fail_after_recovery)
+
+    with pytest.raises(RuntimeError, match="restored database failed too"):
+        db_module.init_db()
+    assert len(calls) == 2
+    contender = FileLock(default_db + ".lock")
+    contender.acquire(timeout=0)
+    contender.release()
+
+
+def test_damaged_pre_upgrade_backup_does_not_quarantine_a_sound_database(default_db):
+    # The pre-upgrade copy is written into the existing .bkp, whose own damage reads as
+    # "file is not a database".
+    _make_db(default_db, revision="0006_add_loader_path")
+    with open(default_db + ".bkp", "wb") as f:
+        f.write(b"\xa5" * 8192)
+
+    with pytest.raises(SystemExit):
+        _boot()
+
+    assert _quarantined(default_db) == []
+    assert _revision(default_db) == "0006_add_loader_path"
+
+
+def test_crash_left_wal_does_not_reach_the_new_database(default_db):
+    _make_db(default_db)
+    writer = sqlite3.connect(default_db)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE marker (value TEXT)")
+    writer.execute("INSERT INTO marker VALUES ('in the wal')")
+    writer.commit()
+    page = writer.execute("SELECT rootpage FROM sqlite_master WHERE name = 'alembic_version'").fetchone()[0]
+    crashed = default_db + ".crashed"
+    shutil.copyfile(default_db, crashed)
+    shutil.copyfile(default_db + "-wal", crashed + "-wal")  # as a crash leaves them
+    writer.close()
+    with open(crashed, "r+b") as f:  # a page the WAL doesn't hold
+        f.seek((page - 1) * _PAGE)
+        f.write(b"\xa5" * _PAGE)
+    os.replace(crashed, default_db)
+    os.replace(crashed + "-wal", default_db + "-wal")
+
+    _boot()
+
+    assert len(_quarantined(default_db)) == 1
+    assert _revision(default_db) == _head()
+    with closing(sqlite3.connect(default_db)) as conn:
+        assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'marker'").fetchone() is None
 
 
 @pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc")
@@ -216,22 +301,12 @@ def test_failed_open_leaves_no_handle_on_the_database(default_db):
     _make_db(default_db)
     _overwrite_page_of(default_db, "alembic_version")
 
-    with pytest.raises(Exception):
+    with pytest.raises(Exception) as raised:
         db_module._migrate_and_bind(db_module.get_database_url(), default_db, True)
 
+    assert raised.value is not None  # its traceback still references the failed engines
     open_files = {os.path.realpath(f"/proc/self/fd/{fd}") for fd in os.listdir("/proc/self/fd")}
     assert os.path.realpath(default_db) not in open_files
-
-
-def test_only_corrupt_and_notadb_count_as_corruption():
-    assert not db_module._is_corruption(sqlite3.OperationalError("database is locked"))
-    assert not db_module._is_corruption(RuntimeError("database disk image is malformed"))
-    with closing(sqlite3.connect(":memory:")) as conn:
-        conn.execute("CREATE TABLE t (x)")
-        other = sqlite3.connect(":memory:")
-        with pytest.raises(sqlite3.Error) as missing:
-            other.execute("SELECT * FROM t")
-    assert not db_module._is_corruption(missing.value)
 
 
 # Daily backup
@@ -281,6 +356,21 @@ def test_failed_backup_removes_its_partial_file(live_db, monkeypatch):
     assert not os.path.exists(backup + ".tmp")
 
 
+def _join_backup_threads():
+    for thread in threading.enumerate():
+        if thread.name == "database-daily-backup":
+            thread.join()
+
+
+def test_started_backup_writes_a_sound_copy(live_db):
+    db_module._start_daily_backup(live_db)
+    _join_backup_threads()
+
+    with closing(sqlite3.connect(live_db + ".daily-backup")) as conn:
+        assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
+        assert conn.execute("SELECT value FROM marker").fetchone() == ("live",)
+
+
 @pytest.mark.parametrize("age_hours, expect_backup", [(None, True), (25, True), (1, False)])
 def test_backup_runs_at_most_daily(tmp_path, monkeypatch, age_hours, expect_backup):
     db_path = str(tmp_path / "comfyui.db")
@@ -289,28 +379,36 @@ def test_backup_runs_at_most_daily(tmp_path, monkeypatch, age_hours, expect_back
         open(backup, "w").close()
         then = time.time() - age_hours * 3600
         os.utime(backup, (then, then))
-    started = []
-    monkeypatch.setattr(db_module.args, "database_url", None)
-    monkeypatch.setattr(db_module.threading, "Thread", lambda **kw: started.append(kw) or _NoThread())
+    written = []
+    monkeypatch.setattr(db_module, "_write_daily_backup", lambda *a: written.append(a))
 
     db_module._start_daily_backup(db_path)
+    _join_backup_threads()
 
-    assert bool(started) == expect_backup
+    assert written == ([(db_path, backup)] if expect_backup else [])
 
 
-def test_backup_skipped_for_an_explicit_database_url(tmp_path, monkeypatch):
+def test_boot_starts_the_backup_for_the_default_database(default_db, backups_started):
+    _make_db(default_db)
+
+    _boot()
+
+    assert backups_started == [default_db]
+
+
+def test_no_backup_for_an_explicit_database_url(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "explicit.db")
+    _make_db(db_path)
     started = []
-    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{tmp_path / 'x.db'}")
-    monkeypatch.setattr(db_module.threading, "Thread", lambda **kw: started.append(kw) or _NoThread())
-
-    db_module._start_daily_backup(str(tmp_path / "x.db"))
+    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{db_path}")
+    monkeypatch.setattr(db_module, "_db_lock", None)
+    monkeypatch.setattr(db_module, "_start_daily_backup", started.append)
+    try:
+        _boot()
+    finally:
+        db_module._db_lock.release(force=True)
 
     assert started == []
-
-
-class _NoThread:
-    def start(self):
-        pass
 
 
 def test_comfyui_launches_on_a_corrupt_default_database(tmp_path):
