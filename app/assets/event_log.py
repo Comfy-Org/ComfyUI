@@ -13,8 +13,10 @@ logfmt delimiter or line break — so file names, paths, asset ids and content
 hashes cannot ride along.
 """
 
+import errno
 import logging
 import os
+import sqlite3
 import traceback
 from collections.abc import Callable
 from typing import Any
@@ -28,6 +30,19 @@ ROOTS = frozenset({"models", "input", "output", "user", "temp"})
 PHASES = frozenset({"fast", "enrich", "full"})
 STAGES = frozenset({"mark_missing", "pruning", "fast_scan", "enrich", "finalize"})
 STAT_SITES = frozenset({"discovery", "enrich"})
+ERROR_KINDS = frozenset({
+    "expression_tree_too_large",
+    "too_many_variables",
+    "database_locked",
+    "disk_full",
+    "disk_io",
+    "unable_to_open",
+    "database_corrupt",
+    "permission_denied",
+    "file_locked",
+    "read_only",
+    "other",
+})
 ALLOWED_EVENTS = frozenset({
     "assets.enabled",
     "seeder.scan_started",
@@ -83,14 +98,21 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "phase": _one_of(PHASES),
     "stage": _one_of(STAGES),
     "elapsed_ms": _is_count,
+    "cpu_ms": _is_count,
+    "paused_ms": _is_count,
+    "dirs_listed_count": _is_count,
+    "files_statted_count": _is_count,
     "created": _is_count,
     "enriched": _is_count,
     "skipped": _is_count,
     "hash_failed": _is_count,
     "enrich_failed": _is_count,
     "permission_denied": _is_count,
+    "missing_marked_count": _is_count,
+    "recovered_count": _is_count,
     "count": _is_count,
     "error_type": _is_safe_string,
+    "error_kind": _one_of(ERROR_KINDS),
     "hashing_enabled": _is_flag,
     "site": _one_of(STAT_SITES),
 }
@@ -165,3 +187,67 @@ def error_type(exc: BaseException) -> str:
     and friends embed the path that triggered them.
     """
     return type(exc).__name__
+
+
+# SQLite primary result codes (sqlite3.Error.sqlite_errorcode & 0xFF, Python 3.11+).
+_SQLITE_CODE_KINDS = {
+    5: "database_locked",  # SQLITE_BUSY
+    6: "database_locked",  # SQLITE_LOCKED
+    8: "read_only",  # SQLITE_READONLY
+    10: "disk_io",  # SQLITE_IOERR
+    11: "database_corrupt",  # SQLITE_CORRUPT
+    13: "disk_full",  # SQLITE_FULL
+    14: "unable_to_open",  # SQLITE_CANTOPEN
+    26: "database_corrupt",  # SQLITE_NOTADB
+}
+# SQLite's own fixed messages, matched as substrings of the driver exception's first
+# argument, which never carries the SQL or its bound parameters (paths). The first two
+# share the generic SQLITE_ERROR code, so only the message tells them apart; the rest
+# cover Python 3.10, which has no sqlite_errorcode.
+_SQLITE_MESSAGE_KINDS = (
+    ("expression tree is too large", "expression_tree_too_large"),
+    ("too many sql variables", "too_many_variables"),
+    ("database is locked", "database_locked"),
+    ("database table is locked", "database_locked"),
+    ("database or disk is full", "disk_full"),
+    ("disk i/o error", "disk_io"),
+    ("unable to open database file", "unable_to_open"),
+    ("database disk image is malformed", "database_corrupt"),
+    ("file is not a database", "database_corrupt"),
+    ("attempt to write a readonly database", "read_only"),
+)
+# Windows reports a file held open by another process (ERROR_SHARING_VIOLATION,
+# ERROR_LOCK_VIOLATION) as EACCES; tell it apart from a real permission problem.
+_WINERROR_KINDS = {32: "file_locked", 33: "file_locked"}
+_ERRNO_KINDS = {
+    errno.ENOSPC: "disk_full",
+    errno.EIO: "disk_io",
+    errno.EACCES: "permission_denied",
+    errno.EPERM: "permission_denied",
+    errno.EROFS: "read_only",
+}
+
+
+def error_kind(exc: BaseException) -> str:
+    """Classify a failure into :data:`ERROR_KINDS`, without ever emitting its text.
+
+    SQLAlchemy wraps the driver's exception as ``exc.orig``; its str() would carry the
+    statement and bound parameters, so only the driver's own message is inspected.
+    """
+    orig = getattr(exc, "orig", None)
+    source = orig if isinstance(orig, BaseException) else exc
+    if isinstance(source, sqlite3.Error):
+        code = getattr(source, "sqlite_errorcode", None)
+        if isinstance(code, int) and (code & 0xFF) in _SQLITE_CODE_KINDS:
+            return _SQLITE_CODE_KINDS[code & 0xFF]
+        if source.args and isinstance(source.args[0], str):
+            message = source.args[0].lower()
+            for needle, kind in _SQLITE_MESSAGE_KINDS:
+                if needle in message:
+                    return kind
+    if isinstance(source, OSError):
+        winerror = getattr(source, "winerror", None)
+        if winerror in _WINERROR_KINDS:
+            return _WINERROR_KINDS[winerror]
+        return _ERRNO_KINDS.get(source.errno, "other")
+    return "other"
