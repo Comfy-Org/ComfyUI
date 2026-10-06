@@ -13,8 +13,7 @@ import shutil
 
 import folder_paths
 
-from app.assets.event_log import error_kind
-from app.database.db import can_create_session, create_session, dependencies_available
+from app.database.db import can_create_session, create_session, dependencies_available, is_recoverable_corruption
 from comfy.cli_args import args
 
 # Startup imports this module even without the database packages; the functions
@@ -117,7 +116,7 @@ def run_asset_startup() -> None:
             wipe_temp_db_rows(session)
             session.commit()
     except Exception as e:
-        if error_kind(e) == "database_corrupt":
+        if is_recoverable_corruption(e):
             raise  # startup replaces the database and runs this again
         logging.exception("Temp DB row wipe failed; skipping filesystem cleanup")
         enqueue_mode_transition_work()
@@ -135,7 +134,7 @@ def run_startup(*, enable_assets: bool) -> None:
         else:
             cleanup_temp_filesystem()
     except Exception as e:
-        if error_kind(e) == "database_corrupt":
+        if is_recoverable_corruption(e):
             raise
         logging.exception("Asset startup maintenance failed")
 

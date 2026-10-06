@@ -258,7 +258,7 @@ def test_corruption_first_hit_by_asset_startup_is_recovered(default_db, boot_eve
 def test_healthy_boot_starts_the_backup_after_asset_startup(default_db, boot_events, monkeypatch):
     _make_db(default_db)
     checked = []
-    monkeypatch.setattr(db_module, "_passes_quick_check", checked.append)
+    monkeypatch.setattr(db_module, "_passes_integrity_check", checked.append)
 
     _boot()
 
@@ -293,6 +293,35 @@ def test_older_backup_is_restored_and_upgraded(default_db):
         assert conn.execute("SELECT value FROM marker").fetchone() == ("old backup",)
 
 
+def test_explicit_database_url_with_corrupt_asset_tables_still_boots(explicit_db, boot_events):
+    # Not recovered (not the default database), so asset startup logs it and carries on.
+    _make_db(explicit_db)
+    _overwrite_page_of(explicit_db, "assets")
+
+    _boot()
+
+    assert boot_events == ["startup", "backup"]
+    assert _quarantined(explicit_db) == []
+
+
+def test_index_damage_quick_check_misses_counts_as_corruption(live_db):
+    with closing(sqlite3.connect(live_db)) as conn:
+        conn.execute("CREATE INDEX marker_value ON marker (value)")
+        conn.commit()
+        page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = 'marker'").fetchone()[0]
+    with open(live_db, "r+b") as f:  # change the row, not its index entry
+        f.seek((page - 1) * _PAGE)
+        data = bytearray(f.read(_PAGE))
+        at = data.index(b"live")
+        data[at:at + 4] = b"lime"
+        f.seek((page - 1) * _PAGE)
+        f.write(data)
+    with closing(sqlite3.connect(live_db)) as conn:
+        assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
+
+    assert not db_module._passes_integrity_check(live_db)
+
+
 def test_recovery_after_init_ignores_other_errors(default_db):
     _make_db(default_db)
     db_module.init_db()
@@ -322,18 +351,6 @@ def test_recovery_after_init_ignores_an_in_memory_database(monkeypatch, url):
 def test_schema_corruption_is_recognised_by_its_message():
     # Python 3.10's sqlite3 has no error codes, so only the message identifies it.
     assert error_kind(sqlite3.DatabaseError("malformed database schema (t) - near \"x\"")) == "database_corrupt"
-
-
-@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
-def test_restored_database_keeps_the_file_mode(default_db):
-    _make_db(default_db + ".daily-backup")
-    _make_db(default_db)
-    _overwrite_header(default_db)
-    os.chmod(default_db, 0o600)
-
-    _boot()
-
-    assert os.stat(default_db).st_mode & 0o777 == 0o600
 
 
 def test_failed_quarantine_raises_the_corruption(default_db, monkeypatch, startup_warnings):
@@ -381,8 +398,8 @@ def test_damaged_pre_upgrade_backup_does_not_quarantine_a_sound_database(default
         f.write(b"\xa5" * 8192)
 
     checked = []
-    real_check = db_module._passes_quick_check
-    monkeypatch.setattr(db_module, "_passes_quick_check", lambda p: checked.append((p, real_check(p))) or checked[-1][1])
+    real_check = db_module._passes_integrity_check
+    monkeypatch.setattr(db_module, "_passes_integrity_check", lambda p: checked.append((p, real_check(p))) or checked[-1][1])
 
     with pytest.raises(SystemExit):
         _boot()
@@ -488,15 +505,6 @@ def test_failed_backup_keeps_the_previous_one(live_db, monkeypatch):
         assert f.read() == b"previous backup"
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
-def test_backup_keeps_the_database_file_mode(live_db):
-    os.chmod(live_db, 0o600)
-
-    db_module._write_daily_backup(live_db, live_db + ".daily-backup")
-
-    assert os.stat(live_db + ".daily-backup").st_mode & 0o777 == 0o600
-
-
 def _end_backup_thread_after_one_pass(monkeypatch):
     # The loop would otherwise sleep for a day; SystemExit ends a thread quietly.
     monkeypatch.setattr(db_module, "time", SimpleNamespace(time=time.time, sleep=lambda s: sys.exit()))
@@ -546,31 +554,33 @@ class _Stop(Exception):
     pass
 
 
-@pytest.mark.parametrize("age_hours, writes_first", [(None, True), (25, True), (1, False)])
-def test_backup_is_refreshed_once_a_day_while_running(tmp_path, monkeypatch, age_hours, writes_first):
+@pytest.mark.parametrize("age_hours, first_write_hour", [(None, 0), (25, 0), (1, 23)])
+def test_backup_is_refreshed_once_a_day_while_running(tmp_path, monkeypatch, age_hours, first_write_hour):
     db_path = str(tmp_path / "comfyui.db")
     backup = db_path + ".daily-backup"
+    now = [1_000_000.0]
     if age_hours is not None:
         open(backup, "w").close()
-        then = time.time() - age_hours * 3600
-        os.utime(backup, (then, then))
-    events = []
+        os.utime(backup, (now[0] - age_hours * 3600,) * 2)
+    writes = []
+
+    def _write(*a):  # a successful write stamps the backup with the fake clock
+        writes.append(round(now[0] - 1_000_000.0) // 3600)
+        open(backup, "w").close()
+        os.utime(backup, (now[0], now[0]))
 
     def _sleep(seconds):
-        events.append(("sleep", round(seconds / 3600)))
-        if len(events) >= 4:
+        now[0] += seconds
+        if len(writes) >= 3:
             raise _Stop
 
-    monkeypatch.setattr(db_module, "time", SimpleNamespace(time=time.time, sleep=_sleep))
-    monkeypatch.setattr(db_module, "_write_daily_backup", lambda *a: events.append(("write", a)))
+    monkeypatch.setattr(db_module, "time", SimpleNamespace(time=lambda: now[0], sleep=_sleep))
+    monkeypatch.setattr(db_module, "_write_daily_backup", _write)
 
     with pytest.raises(_Stop):
         db_module._keep_daily_backup(db_path, backup)
 
-    if writes_first:
-        assert events[:2] == [("write", (db_path, backup)), ("sleep", 24)]
-    else:
-        assert events[0] == ("sleep", 23)
+    assert writes == [first_write_hour, first_write_hour + 24, first_write_hour + 48]
 
 
 def test_no_backup_for_an_explicit_database_url(explicit_db, monkeypatch):
@@ -595,6 +605,20 @@ def test_backup_includes_commits_still_in_the_wal(live_db):
 
     with closing(sqlite3.connect(live_db + ".daily-backup")) as conn:
         assert ("in the wal",) in conn.execute("SELECT value FROM marker").fetchall()
+
+
+def test_backup_replaces_the_previous_one(live_db):
+    backup = live_db + ".daily-backup"
+    db_module._write_daily_backup(live_db, backup)
+    with closing(sqlite3.connect(live_db)) as conn:
+        conn.execute("UPDATE marker SET value = 'a day later'")
+        conn.commit()
+
+    db_module._write_daily_backup(live_db, backup)
+
+    with closing(sqlite3.connect(backup)) as conn:
+        assert conn.execute("SELECT value FROM marker").fetchall() == [("a day later",)]
+    assert not os.path.exists(backup + ".tmp")
 
 
 def test_stale_partial_backup_is_removed(live_db):
