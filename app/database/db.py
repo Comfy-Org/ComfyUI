@@ -5,7 +5,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
-from contextlib import closing, contextmanager
+from contextlib import closing
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
 from filelock import FileLock, Timeout
@@ -81,30 +81,6 @@ def get_alembic_config():
     config.set_main_option("sqlalchemy.url", get_database_url())
 
     return config
-
-
-@contextmanager
-def _alembic_config():
-    """get_alembic_config(), minus macOS AppleDouble `._*` files in the versions dir.
-
-    macOS writes them beside every file on non-HFS volumes (exFAT, FAT, SMB), and Alembic
-    would load them as revision scripts. When any are present, Alembic is pointed at a
-    temporary copy of the versions dir without them; the install itself is never modified.
-    """
-    config = get_alembic_config()
-    versions = os.path.join(config.get_main_option("script_location"), "versions")
-    ignored = []
-    if os.path.isdir(versions):
-        ignored = [name for name in os.listdir(versions) if name.startswith("._")]
-    if not ignored:
-        yield config
-        return
-    logging.info("Ignoring %d macOS AppleDouble (._*) files in %s", len(ignored), versions)
-    with tempfile.TemporaryDirectory() as scratch:
-        filtered = os.path.join(scratch, "versions")
-        shutil.copytree(versions, filtered, ignore=shutil.ignore_patterns("._*", "__pycache__"))
-        config.set_main_option("version_locations", filtered)
-        yield config
 
 
 def get_database_url():
@@ -300,8 +276,7 @@ def _init_file_db(db_url):
     try:
         copy_legacy_default_db(db_path)
         db_exists = os.path.exists(db_path)
-        with _alembic_config() as config:
-            _migrate_and_bind(config, db_url, db_path, db_exists)
+        _migrate_and_bind(db_url, db_path, db_exists)
     except Exception:
         _db_lock.release()
         raise
@@ -326,7 +301,16 @@ def _upgrade_discards_the_catalog(script, target_rev, current_rev):
     )
 
 
-def _migrate_and_bind(config, db_url, db_path, db_exists):
+def _migrate_and_bind(db_url, db_path, db_exists):
+    config = get_alembic_config()
+    # macOS writes AppleDouble ._* files beside every file on exFAT, FAT and SMB volumes, and
+    # Alembic would load them as revisions, so migrate from a copy of versions/ without them.
+    versions = os.path.join(config.get_main_option("script_location"), "versions")
+    if any(name.startswith("._") for name in os.listdir(versions)):
+        filtered = os.path.join(tempfile.mkdtemp(), "versions")
+        shutil.copytree(versions, filtered, ignore=shutil.ignore_patterns("._*", "__pycache__"))
+        config.set_main_option("version_locations", filtered)
+
     # Check if we need to upgrade
     engine = create_engine(db_url)
     write_engine = create_engine(db_url)

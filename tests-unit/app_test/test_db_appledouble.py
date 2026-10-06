@@ -80,14 +80,13 @@ def test_init_ignores_appledouble_files_and_leaves_them_in_place(scripts):
         assert f.read() == _APPLEDOUBLE
 
 
-def test_versions_without_appledouble_files_are_used_in_place(scripts):
-    with db_module._alembic_config() as config:
-        assert config.get_main_option("version_locations") is None
+def test_versions_without_appledouble_files_are_used_in_place(scripts, monkeypatch):
+    scripts_path, db_path = scripts
 
+    def _no_copy():
+        raise AssertionError("copied the versions dir without any ._ files in it")
 
-def test_missing_versions_dir_is_left_to_alembic(scripts):
-    scripts_path, _ = scripts
-    shutil.rmtree(os.path.join(scripts_path, "versions"))
+    monkeypatch.setattr(db_module.tempfile, "mkdtemp", _no_copy)
+    db_module._init_file_db(db_module.args.database_url)
 
-    with db_module._alembic_config() as config:
-        assert config.get_main_option("version_locations") is None
+    assert _current_revision(db_path) == _head(scripts_path)
