@@ -53,13 +53,10 @@ def test_attention_moves_offloaded_qk_norm_scale_to_input_device(monkeypatch):
     x = torch.randn(batch_size, seq_len, heads * dim_head)
     rotary_pos_emb = torch.randn(batch_size, 1, seq_len, dim_head // 2, 2, 2)
 
-    class _Norm:
-        weight = None
-        eps = 1e-5
-
+    pre_norm = comfy.ops.manual_cast.RMSNorm(heads * dim_head, elementwise_affine=False, eps=1e-5)
     with torch.no_grad():
         out = attn.forward(
-            x, rotary_pos_emb, pre_norm=_Norm(), residual=None, residual_scale=None
+            x, rotary_pos_emb, pre_norm=pre_norm, residual=None, residual_scale=None
         )
 
     assert out.device == x.device

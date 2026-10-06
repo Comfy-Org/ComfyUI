@@ -754,7 +754,7 @@ class MLP(nn.Module):
         if self.merged_mlp:
             x = self.gate_up_proj(x)
             if self.merged_input_act is not None:
-                return comfy.ops.linear_input_act(self.down_proj, x, self.merged_input_act)
+                return self.down_proj(x, input_act=self.merged_input_act)
             gate, up = x.chunk(2, dim=-1)
             return self.down_proj(self.activation(gate) * up)
         return self.down_proj(self.activation(self.gate_proj(x)) * self.up_proj(x))

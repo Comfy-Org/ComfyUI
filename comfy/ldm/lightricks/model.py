@@ -326,7 +326,7 @@ class FeedForward(nn.Module):
         # Dropout, so leave it to the stock path whenever it could be active.
         if comfy.model_management.in_training:
             return self.net(x)
-        return comfy.ops.linear_input_act(self.net[2], self.net[0].proj(x), "gelu_tanh")
+        return self.net[2](self.net[0].proj(x), input_act="gelu_tanh")
 
 def apply_rotary_emb(input_tensor, freqs_cis):
     rotation_matrix, split_pe = freqs_cis
