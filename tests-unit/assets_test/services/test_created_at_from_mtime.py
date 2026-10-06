@@ -130,22 +130,6 @@ async def test_upload_after_a_scan_lists_first(one_database, output_dir: Path):
 
 
 @pytest.mark.asyncio
-async def test_future_mtime_is_capped_at_now(
-    one_database, output_dir: Path, monkeypatch: pytest.MonkeyPatch
-):
-    # Pinned a second back, so a coarse clock can't tie the scan with the generation below.
-    scan_time = get_utc_now() - timedelta(seconds=1)
-    with monkeypatch.context() as patched:
-        patched.setattr("app.assets.helpers.get_utc_now", lambda: scan_time)
-        _scan(_write(output_dir, "future.png", datetime(2200, 1, 1)))
-    generated = _write(output_dir, "generated.png")
-    assert register_executed_output(str(generated), job_id="job-1") is not None
-
-    assert _created_at(one_database, "future.png") == scan_time
-    assert (await _listed_names())[0] == "generated.png"
-
-
-@pytest.mark.asyncio
 async def test_future_mtime_file_dates_from_its_arrival_when_scanned_after_a_generation(
     one_database, output_dir: Path
 ):
@@ -193,3 +177,10 @@ def test_ctime_only_dates_a_file_whose_mtime_is_in_the_future():
     # On Windows ctime is the creation time, earlier than any later edit.
     assert mtime_ns_to_utc(_ns(modified), _ns(created)) == modified
     assert mtime_ns_to_utc(_ns(datetime(2200, 1, 1)), _ns(created)) == created
+
+
+def test_future_ctime_is_capped_at_now(monkeypatch: pytest.MonkeyPatch):
+    now = datetime(2026, 10, 1)
+    monkeypatch.setattr("app.assets.helpers.get_utc_now", lambda: now)
+    future = _ns(datetime(2200, 1, 1))
+    assert mtime_ns_to_utc(future, future) == now

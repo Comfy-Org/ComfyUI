@@ -145,8 +145,8 @@ def get_utc_now() -> datetime:
 
 
 def mtime_ns_to_utc(mtime_ns: int, ctime_ns: int) -> datetime:
-    """Naive UTC time of a file mtime. A future mtime falls back to the ctime (creation time on
-    Windows), capped at now, so the file is dated no later than it arrived."""
+    """Naive UTC time of a file mtime. A future mtime falls back to the ctime, capped at now: the
+    creation time on Windows, the last metadata change elsewhere."""
     now = get_utc_now()
     made = datetime(1970, 1, 1) + timedelta(microseconds=mtime_ns // 1000)
     if made <= now:
