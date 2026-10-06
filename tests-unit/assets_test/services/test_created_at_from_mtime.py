@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 import folder_paths
 from app.assets.api import routes
 from app.assets.database.models import Asset
-from app.assets.helpers import get_utc_now, mtime_ns_to_utc
+from app.assets.helpers import mtime_ns_to_utc
 from app.assets.scanner import SeedAssetSpec, insert_asset_specs
 from app.assets.services.ingest import register_executed_output, register_file_in_place
 
