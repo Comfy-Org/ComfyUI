@@ -28,15 +28,14 @@ _FUSED_SWIGLU_FFN = getattr(TensorWiseINT8Layout, "fused_swiglu_ffn", None)
 
 def _int8_convrot_linear(linear) -> bool:
     """Return whether a Linear would use quantized matmul on an INT8 ConvRot weight."""
-    weight = getattr(linear, "weight", None)
     return (
-        isinstance(weight, QuantizedTensor)
-        and weight._layout_cls == "TensorWiseINT8Layout"
-        and getattr(weight._params, "convrot", False)
-        and not getattr(linear, "_full_precision_mm", False)
+        isinstance(linear.weight, QuantizedTensor)
+        and linear.weight._layout_cls == "TensorWiseINT8Layout"
+        and linear.weight._params.convrot
+        and not linear._full_precision_mm
         and not getattr(linear, "comfy_force_cast_weights", False)
-        and len(getattr(linear, "weight_function", [])) == 0
-        and len(getattr(linear, "bias_function", [])) == 0
+        and len(linear.weight_function) == 0
+        and len(linear.bias_function) == 0
     )
 
 
@@ -76,9 +75,9 @@ def _cast_together(modules, x):
         yield False
         return
     offload_stream = None
-    if pending:
-        offload_stream, _ = comfy.model_prefetch.pin_modules(pending, device)
     try:
+        if pending:
+            offload_stream, _ = comfy.model_prefetch.pin_modules(pending, device)
         yield True
     finally:
         if offload_stream is not None:
