@@ -1334,8 +1334,8 @@ class DynamicInputError(ValueError):
 
 
 @comfytype(io_type="COMFY_DYNAMICGROUP_V3")
-class DynamicGroup(ComfyTypeI):
-    """Repeat a widget template and pass its values to execute as a list of row dicts.
+class _DynamicGroup(ComfyTypeI):
+    """Internal, unstable widget template repeated as a list of row dicts.
 
     Template fields must be widget inputs without force_input or nested dynamic inputs.
     Submit fields as '<group>.<index>.<field>', using indices below max without leading zeros.
@@ -1379,8 +1379,8 @@ class DynamicGroup(ComfyTypeI):
                 raise ValueError(f"DynamicGroup id must be nonempty and must not contain '.'. Got: '{id}'")
             if isinstance(min, bool) or not isinstance(min, int) or isinstance(max, bool) or not isinstance(max, int):
                 raise TypeError("DynamicGroup min and max must be integers.")
-            if not 1 <= max <= DynamicGroup._MaxRows:
-                raise ValueError(f"DynamicGroup max must be between 1 and {DynamicGroup._MaxRows}.")
+            if not 1 <= max <= _DynamicGroup._MaxRows:
+                raise ValueError(f"DynamicGroup max must be between 1 and {_DynamicGroup._MaxRows}.")
             if not 0 <= min <= max:
                 raise ValueError("DynamicGroup min must be between 0 and max.")
             self.template = template
@@ -1407,7 +1407,7 @@ class DynamicGroup(ComfyTypeI):
     def _expand_schema_for_dynamic(out_dict: dict[str, Any], live_inputs: dict[str, Any], value: tuple[str, dict[str, Any]], input_type: str, curr_prefix: list[str] | None):
         info = value[1]
         min_rows = info.get("min", 0)
-        max_rows = info.get("max", DynamicGroup._MaxRows)
+        max_rows = info.get("max", _DynamicGroup._MaxRows)
         template = info.get("template", {})
         field_specs = {
             field_id: (field_value, category)
@@ -1659,8 +1659,8 @@ def setup_dynamic_input_funcs():
     register_dynamic_input_func(DynamicCombo.io_type, DynamicCombo._expand_schema_for_dynamic)
     # DynamicSlot.Input
     register_dynamic_input_func(DynamicSlot.io_type, DynamicSlot._expand_schema_for_dynamic)
-    # DynamicGroup.Input
-    register_dynamic_input_func(DynamicGroup.io_type, DynamicGroup._expand_schema_for_dynamic)
+    # _DynamicGroup.Input
+    register_dynamic_input_func(_DynamicGroup.io_type, _DynamicGroup._expand_schema_for_dynamic)
 
 if len(DYNAMIC_INPUT_LOOKUP) == 0:
     setup_dynamic_input_funcs()
@@ -1791,7 +1791,7 @@ class PriceBadgeDepends:
             for inp in inputs:
                 name = prefix + inp.id
                 input_types[name] = inp.get_io_type()
-                if isinstance(inp, DynamicGroup.Input):
+                if isinstance(inp, _DynamicGroup.Input):
                     for row in range(inp.max):
                         collect_inputs(inp.template, f"{name}.{row}.")
                 else:
@@ -2063,7 +2063,7 @@ def parse_class_inputs(out_dict: dict[str, Any], live_inputs: dict[str, Any], cu
 
 def _dynamic_group_prefixes(inputs: list[Input]) -> Iterable[str]:
     for inp in inputs:
-        if isinstance(inp, DynamicGroup.Input):
+        if isinstance(inp, _DynamicGroup.Input):
             yield inp.id + "."
         elif isinstance(inp, DynamicInput):
             for prefix in _dynamic_group_prefixes(inp.get_all()[1:]):
@@ -2705,7 +2705,6 @@ __all__ = [
     "MatchType",
     "DynamicCombo",
     "Autogrow",
-    "DynamicGroup",
     # Other classes
     "HiddenHolder",
     "Hidden",
