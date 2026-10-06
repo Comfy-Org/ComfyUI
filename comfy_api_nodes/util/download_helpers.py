@@ -17,12 +17,12 @@ from folder_paths import get_output_directory
 from . import request_logger
 from ._helpers import (
     default_base_url,
+    diagnose_connectivity,
     get_comfy_api_headers,
     is_processing_interrupted,
     sleep_with_interrupt,
     to_aiohttp_url,
 )
-from .client import _diagnose_connectivity
 from .common_exceptions import ApiServerError, LocalNetworkError, ProcessingInterrupted
 from .conversions import bytesio_to_image_tensor
 
@@ -143,7 +143,7 @@ async def download_url_to_bytesio(
                         )
 
                     if resp.status in _RETRY_STATUS and attempt <= max_retries:
-                        await sleep_with_interrupt(delay, cls, None, None, None)
+                        await sleep_with_interrupt(delay, cls, None, None)
                         delay *= retry_backoff
                         continue
                     raise Exception(f"Failed to download (HTTP {resp.status}).")
@@ -158,24 +158,29 @@ async def download_url_to_bytesio(
                     sink = dest  # BytesIO or file-like
 
                 written = 0
-                while True:
-                    try:
-                        chunk = await asyncio.wait_for(resp.content.read(1024 * 1024), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        chunk = b""
-                    except asyncio.CancelledError:
-                        raise ProcessingInterrupted("Task cancelled") from None
-
-                    if is_processing_interrupted():
-                        raise ProcessingInterrupted("Task cancelled")
-
-                    if not chunk:
-                        if resp.content.at_eof():
-                            break
-                        continue
-
-                    sink.write(chunk)
-                    written += len(chunk)
+                read_task: asyncio.Task | None = None
+                try:
+                    while True:
+                        if read_task is None:
+                            read_task = asyncio.create_task(resp.content.read(1024 * 1024))
+                        done, _ = await asyncio.wait({read_task}, timeout=1.0)
+                        if is_processing_interrupted():
+                            raise ProcessingInterrupted("Task cancelled")
+                        if not done:
+                            continue
+                        chunk = read_task.result()
+                        read_task = None
+                        if not chunk:
+                            if resp.content.at_eof():
+                                break
+                            continue
+                        sink.write(chunk)
+                        written += len(chunk)
+                finally:
+                    if read_task is not None:
+                        read_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
+                            await read_task
 
                 if isinstance(dest, BytesIO):
                     with contextlib.suppress(Exception):
@@ -192,7 +197,7 @@ async def download_url_to_bytesio(
                 return
         except asyncio.CancelledError:
             raise ProcessingInterrupted("Task cancelled") from None
-        except (ClientError, OSError) as e:
+        except (ClientError, OSError, asyncio.TimeoutError) as e:
             if attempt <= max_retries:
                 request_logger.log_request_response(
                     operation_id=op_id,
@@ -200,11 +205,11 @@ async def download_url_to_bytesio(
                     request_url=url,
                     error_message=f"{type(e).__name__}: {str(e)} (will retry)",
                 )
-                await sleep_with_interrupt(delay, cls, None, None, None)
+                await sleep_with_interrupt(delay, cls, None, None)
                 delay *= retry_backoff
                 continue
 
-            diag = await _diagnose_connectivity()
+            diag = await diagnose_connectivity()
             if not diag["internet_accessible"]:
                 raise LocalNetworkError(
                     "Unable to connect to the network. Please check your internet connection and try again."

@@ -1,6 +1,7 @@
 import asyncio
 import bisect
 import itertools
+import logging
 import time
 import torch
 from typing import Sequence, Mapping, Dict
@@ -564,6 +565,7 @@ class RAMPressureCache(LRUCache):
 
             ram_usage = RAM_CACHE_DEFAULT_RAM_USAGE
             oom_ram_usage = ram_usage
+            sizing_failed = False
             seen_storages = set()
             def scan_list_for_ram_usage(outputs):
                 nonlocal ram_usage, oom_ram_usage
@@ -588,9 +590,14 @@ class RAMPressureCache(LRUCache):
                         oom_ram_usage = 1e30
                     elif hasattr(output, "_comfy_cache_tensors"):
                         scan_list_for_ram_usage(output._comfy_cache_tensors())
-            scan_list_for_ram_usage(cache_entry.outputs)
+            try:
+                scan_list_for_ram_usage(cache_entry.outputs)
+            except Exception:
+                logging.warning("Could not size cache entry %s; evicting it first", key, exc_info=True)
+                sizing_failed = True
+                oom_ram_usage = 1e30
 
-            if ram_usage < min_entry_size:
+            if not sizing_failed and ram_usage < min_entry_size:
                 continue
 
             oom_score *= oom_ram_usage

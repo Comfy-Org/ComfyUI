@@ -22,8 +22,9 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.assets.seeder import asset_seeder
-from app.assets.services import register_output_files
+from app.database.db import dependencies_available, init_db, lock_holder_db_path
+from app.assets.lifecycle import cleanup_temp_filesystem
+from app.assets.manager import AssetManager, default_asset_manager
 import itertools
 import utils.extra_config
 from utils.mime_types import init_mime_types
@@ -34,7 +35,6 @@ import sys
 from comfy_execution.progress import get_progress_state
 from comfy_execution.utils import get_executing_context
 from comfy_api import feature_flags
-from app.database.db import init_db, dependencies_available
 
 if __name__ == "__main__":
     #NOTE: These do not do anything on core ComfyUI, they are for custom nodes.
@@ -51,6 +51,9 @@ if __name__ == "__main__":
     ):
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
         logging.warning("On windows we are currently forcing single GPU mode in ComfyUI due to a Nvidia related issue, if you want to disable this use: --cuda-device all")
+
+    if args.disable_api_nodes:
+        logging.warning("--disable-api-nodes is deprecated and will be removed in a future version. It currently behaves like --offline. Use --offline to keep the frontend offline, or --disable-partner-nodes to only disable partner nodes.")
 
 faulthandler.enable(file=sys.stderr, all_threads=args.debug_hang)
 if __name__ == "__main__" and args.debug_hang:
@@ -111,7 +114,7 @@ if __name__ == "__main__":
             os.environ['CUBLAS_WORKSPACE_CONFIG'] = ":4096:8"
 
     if "rocm" in cuda_malloc.get_torch_version_noimport():
-        os.environ['OCL_SET_SVM_SIZE'] = '262144'  # set at the request of AMD
+        os.environ['OCL_SET_SVM_SIZE'] = '4194304'  # 4TB. Much larger than the ROCM 64GB/256GB defaults for Aimdos liberal VA use
 
 
 def handle_comfyui_manager_unavailable():
@@ -316,39 +319,7 @@ def cuda_malloc_warning():
             logging.warning("\nWARNING: this card most likely does not support cuda-malloc, if you get \"CUDA error\" please run ComfyUI with: --disable-cuda-malloc\n")
 
 
-def _collect_output_absolute_paths(history_result: dict) -> list[str]:
-    """Extract absolute file paths for output items from a history result."""
-    paths: list[str] = []
-    seen: set[str] = set()
-    for node_output in history_result.get("outputs", {}).values():
-        for items in node_output.values():
-            if not isinstance(items, list):
-                continue
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                item_type = item.get("type")
-                if item_type not in ("output", "temp"):
-                    continue
-                base_dir = folder_paths.get_directory_by_type(item_type)
-                if base_dir is None:
-                    continue
-                base_dir = os.path.abspath(base_dir)
-                filename = item.get("filename")
-                if not filename:
-                    continue
-                abs_path = os.path.abspath(
-                    os.path.join(base_dir, item.get("subfolder", ""), filename)
-                )
-                if not abs_path.startswith(base_dir + os.sep) and abs_path != base_dir:
-                    continue
-                if abs_path not in seen:
-                    seen.add(abs_path)
-                    paths.append(abs_path)
-    return paths
-
-
-def prompt_worker(q, server_instance):
+def prompt_worker(q, server_instance, asset_manager):
     current_time: float = 0.0
     cache_ram = 0
     cache_ram_inactive = 0
@@ -368,82 +339,93 @@ def prompt_worker(q, server_instance):
     elif args.cache_none:
         cache_type = execution.CacheType.NONE
 
-    e = execution.PromptExecutor(server_instance, cache_type=cache_type, cache_args={ "lru" : args.cache_lru, "ram" : cache_ram, "ram_inactive" : cache_ram_inactive } )
+    e = execution.PromptExecutor(server_instance, cache_type=cache_type, cache_args={ "lru" : args.cache_lru, "ram" : cache_ram, "ram_inactive" : cache_ram_inactive }, asset_manager=asset_manager )
     last_gc_collect = 0
     need_gc = False
     gc_collect_interval = 10.0
+    background_scan_paused = False
 
     while True:
-        timeout = 1000.0
-        if need_gc:
-            timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
+        try:
+            timeout = 1000.0
+            if need_gc:
+                timeout = max(gc_collect_interval - (current_time - last_gc_collect), 0.0)
 
-        queue_item = q.get(timeout=timeout)
-        if queue_item is not None:
-            item, item_id = queue_item
-            execution_start_time = time.perf_counter()
-            prompt_id = item[1]
-            server_instance.last_prompt_id = prompt_id
+            queue_item = q.get(timeout=timeout)
+            if queue_item is not None:
+                item, item_id = queue_item
+                execution_start_time = time.perf_counter()
+                prompt_id = item[1]
+                server_instance.last_prompt_id = prompt_id
 
-            sensitive = item[5]
-            extra_data = item[3].copy()
-            for k in sensitive:
-                extra_data[k] = sensitive[k]
+                sensitive = item[5]
+                extra_data = item[3].copy()
+                for k in sensitive:
+                    extra_data[k] = sensitive[k]
 
-            asset_seeder.pause()
-            e.execute(item[2], prompt_id, extra_data, item[4])
+                asset_manager.pause_background_scan()
+                background_scan_paused = True
+                e.execute(item[2], prompt_id, extra_data, item[4])
 
-            need_gc = True
+                need_gc = True
 
-            remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
-            q.task_done(item_id,
-                        e.history_result,
-                        status=execution.PromptQueue.ExecutionStatus(
-                            status_str='success' if e.success else 'error',
-                            completed=e.success,
-                            messages=e.status_messages), process_item=remove_sensitive)
-            if server_instance.client_id is not None:
-                server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
+                remove_sensitive = lambda prompt: prompt[:5] + prompt[6:]
+                q.task_done(item_id,
+                            e.history_result,
+                            status=execution.PromptQueue.ExecutionStatus(
+                                status_str='success' if e.success else 'error',
+                                completed=e.success,
+                                messages=e.status_messages), process_item=remove_sensitive)
+                if q.get_tasks_remaining() == 0:
+                    # Nothing else is queued, so let the background scan run now rather than on the next GC tick.
+                    asset_manager.resume_background_scan()
+                if server_instance.client_id is not None:
+                    server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
 
-            current_time = time.perf_counter()
-            execution_time = current_time - execution_start_time
+                current_time = time.perf_counter()
+                execution_time = current_time - execution_start_time
 
-            # Log Time in a more readable way after 10 minutes
-            if execution_time > 600:
-                execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
-                logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
-            else:
-                logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
+                # Log Time in a more readable way after 10 minutes
+                if execution_time > 600:
+                    execution_time = time.strftime("%H:%M:%S", time.gmtime(execution_time))
+                    logging.info(f"Prompt executed in {execution_time}", extra={'color': 'green'})
+                else:
+                    logging.info("Prompt executed in {:.2f} seconds".format(execution_time), extra={'color': 'green'})
 
-            if not asset_seeder.is_disabled():
-                paths = _collect_output_absolute_paths(e.history_result)
-                register_output_files(paths, job_id=prompt_id)
+            flags = q.get_flags()
+            free_memory = flags.get("free_memory", False)
 
-        flags = q.get_flags()
-        free_memory = flags.get("free_memory", False)
+            if flags.get("unload_models", free_memory):
+                comfy.model_management.unload_all_models()
+                need_gc = True
+                last_gc_collect = 0
 
-        if flags.get("unload_models", free_memory):
-            comfy.model_management.unload_all_models()
-            need_gc = True
-            last_gc_collect = 0
+            if free_memory:
+                e.reset()
+                need_gc = True
+                last_gc_collect = 0
 
-        if free_memory:
-            e.reset()
-            need_gc = True
-            last_gc_collect = 0
+            if need_gc:
+                current_time = time.perf_counter()
+                if (current_time - last_gc_collect) > gc_collect_interval:
+                    gc.collect()
+                    comfy.model_management.soft_empty_cache()
+                    last_gc_collect = current_time
+                    need_gc = False
+                    hook_breaker_ac10a0.restore_functions()
 
-        if need_gc:
-            current_time = time.perf_counter()
-            if (current_time - last_gc_collect) > gc_collect_interval:
-                gc.collect()
-                comfy.model_management.soft_empty_cache()
-                last_gc_collect = current_time
-                need_gc = False
-                hook_breaker_ac10a0.restore_functions()
-
-                if not asset_seeder.is_disabled():
-                    asset_seeder.enqueue_enrich(roots=("output",), compute_hashes=args.enable_asset_hashing)
-                asset_seeder.resume()
+                    asset_manager.queue_output_scan()
+                    asset_manager.resume_background_scan()
+                    background_scan_paused = False
+        # BaseException is deliberate. This runs on the worker thread, so Ctrl-C lands in
+        # the main thread instead, and resume only flips the seeder's pause state.
+        except BaseException:
+            if background_scan_paused:
+                try:
+                    asset_manager.resume_background_scan()
+                except Exception:
+                    logging.exception("Failed to resume background asset scanning after prompt worker failure")
+            raise
 
 
 async def run(server_instance, address='', port=8188, verbose=True, call_on_start=None):
@@ -486,38 +468,56 @@ def hijack_progress(server_instance):
     comfy.utils.set_progress_bar_global_hook(hook)
 
 
-def cleanup_temp():
-    temp_dir = folder_paths.get_temp_directory()
-    if os.path.exists(temp_dir):
-        shutil.rmtree(temp_dir, ignore_errors=True)
+def setup_database(asset_manager):
+    if not dependencies_available():
+        return
 
+    if not asset_manager.enabled:
+        # Only the asset system uses the database, so leave it, and its lock, to a process that has assets on.
+        warn_if_database_in_use()
+        asset_manager.startup()
+        return
 
-def setup_database():
     try:
-        if dependencies_available():
-            init_db()
-            if args.enable_assets:
-                if asset_seeder.start(roots=("models", "input", "output"), prune_first=True, compute_hashes=args.enable_asset_hashing):
-                    logging.info("Background asset scan initiated for models, input, output")
+        init_db()
+        asset_manager.startup()
     except Exception as e:
-        if "database is locked" in str(e):
+        if "database is locked" in str(e) or "Could not acquire lock on database" in str(e):
             logging.error(
                 "Database is locked. Another ComfyUI process is already using this database.\n"
                 "To resolve this, specify a separate database file for this instance:\n"
                 "  --database-url sqlite:///path/to/another.db"
             )
             sys.exit(1)
-        if args.enable_assets:
-            logging.error(
-                f"Failed to initialize database: {e}\n"
-                "The --enable-assets flag requires a working database connection.\n"
-                "To resolve this, try one of the following:\n"
-                "  1. Install the latest requirements: pip install -r requirements.txt\n"
-                "  2. Specify an alternative database URL: --database-url sqlite:///path/to/your.db\n"
-                "  3. Use an in-memory database: --database-url sqlite:///:memory:"
-            )
-            sys.exit(1)
-        logging.error(f"Failed to initialize database. Please ensure you have installed the latest requirements. If the error persists, please report this as in future the database will be required: {e}")
+        logging.error(
+            f"Failed to initialize database: {e}\n"
+            "The --enable-assets flag requires a working database connection.\n"
+            "To resolve this, try one of the following:\n"
+            "  1. Install the latest requirements: pip install -r requirements.txt\n"
+            "  2. Specify an alternative database URL: --database-url sqlite:///path/to/your.db\n"
+            "  3. Use an in-memory database: --database-url sqlite:///:memory:"
+        )
+        sys.exit(1)
+
+
+def warn_if_database_in_use():
+    db_path = lock_holder_db_path()
+    if db_path is None:
+        return
+    app.logger.log_startup_warning(
+        f"""
+________________________________________________________________________
+WARNING WARNING WARNING WARNING WARNING
+
+Another ComfyUI is already using this install's asset database:
+  {db_path}
+This ComfyUI was started without --enable-assets, so it doesn't need that database and will start anyway.
+A future version will refuse to start two ComfyUIs on the same asset database.
+To run both, give this one its own:
+  --database-url sqlite:///path/to/another.db
+________________________________________________________________________
+""".strip()
+    )
 
 
 def start_comfyui(asyncio_loop=None):
@@ -529,12 +529,16 @@ def start_comfyui(asyncio_loop=None):
         temp_dir = os.path.join(os.path.abspath(args.temp_directory), "temp")
         logging.info(f"Setting temp directory to: {temp_dir}")
         folder_paths.set_temp_directory(temp_dir)
-    cleanup_temp()
+
+    asset_manager: AssetManager = default_asset_manager()
+    feature_flags.SERVER_FEATURE_FLAGS["assets"] = asset_manager.enabled
+    if not asset_manager.enabled:
+        cleanup_temp_filesystem()
 
     if not asyncio_loop:
         asyncio_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(asyncio_loop)
-    prompt_server = server.PromptServer(asyncio_loop)
+    prompt_server = server.PromptServer(asyncio_loop, asset_manager)
 
     if args.enable_manager and not args.disable_manager_ui:
         comfyui_manager.start()
@@ -542,7 +546,7 @@ def start_comfyui(asyncio_loop=None):
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
         init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
-        init_api_nodes=not args.disable_api_nodes
+        init_api_nodes=not args.disable_partner_nodes
     ))
 
     # Re-apply Comfy's cuDNN benchmark policy after custom-node imports. Benchmark
@@ -552,12 +556,12 @@ def start_comfyui(asyncio_loop=None):
     hook_breaker_ac10a0.restore_functions()
 
     cuda_malloc_warning()
-    setup_database()
+    setup_database(asset_manager)
 
     prompt_server.add_routes()
     hijack_progress(prompt_server)
 
-    threading.Thread(target=prompt_worker, daemon=True, args=(prompt_server.prompt_queue, prompt_server,)).start()
+    threading.Thread(target=prompt_worker, daemon=True, args=(prompt_server.prompt_queue, prompt_server, asset_manager)).start()
 
     if args.quick_test_for_ci:
         exit(0)
@@ -605,7 +609,7 @@ if __name__ == "__main__":
             "dynamic vram enabled and using native ComfyUI model formats instead. "
             "ComfyUI native formats like fp8, int8 and w4a8 will be faster even if they are larger than your memory."
         )
-    event_loop, _, start_all_func = start_comfyui()
+    event_loop, prompt_server, start_all_func = start_comfyui()
     try:
         x = start_all_func()
         app.logger.print_startup_warnings()
@@ -613,5 +617,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logging.info("\nStopped server")
     finally:
-        asset_seeder.shutdown()
-        cleanup_temp()
+        prompt_server.asset_manager.shutdown()
