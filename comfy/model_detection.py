@@ -3,6 +3,7 @@ import comfy.memory_management
 import comfy.supported_models
 import comfy.supported_models_base
 import comfy.utils
+import comfy.ldm.kandinsky6.detection
 import math
 import logging
 import torch
@@ -1021,6 +1022,11 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         dit_config["txtlayers"] = state_dict['{}txtfusion.projector.weight'.format(key_prefix)].shape[1]
         dit_config["txtdim"] = state_dict['{}txtfusion.layerwise_blocks.0.prenorm.scale'.format(key_prefix)].shape[0]
         return dit_config
+
+    if '{}visual_embeddings.in_layer.weight'.format(key_prefix) in state_dict_keys: # Kandinsky 6
+        kandinsky6_config = comfy.ldm.kandinsky6.detection.detect_kandinsky6(state_dict, key_prefix)
+        if kandinsky6_config is not None:
+            return kandinsky6_config
 
     if '{}visual_transformer_blocks.0.cross_attention.key_norm.weight'.format(key_prefix) in state_dict_keys: # Kandinsky 5
         dit_config = {}

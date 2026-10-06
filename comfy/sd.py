@@ -25,6 +25,7 @@ import comfy.ldm.ace.vae.music_dcae_pipeline
 import comfy.ldm.cogvideo.vae
 import comfy.ldm.hunyuan_video.vae
 import comfy.ldm.mmaudio.vae.autoencoder
+import comfy.ldm.kandinsky6.audio_vae
 import comfy.ldm.audio.vae_sa3
 import comfy.ldm.minimax_music.dav
 import comfy.pixel_space_convert
@@ -73,6 +74,7 @@ import comfy.text_encoders.mage_flow
 import comfy.text_encoders.ideogram4
 import comfy.text_encoders.ovis
 import comfy.text_encoders.kandinsky5
+import comfy.text_encoders.kandinsky6
 import comfy.text_encoders.jina_clip_2
 import comfy.text_encoders.newbie
 import comfy.text_encoders.anima
@@ -926,6 +928,20 @@ class VAE:
                 self.latent_dim = 2
                 self.output_channels = 3
                 self.disable_offload = True
+            elif metadata is not None and metadata.get("kandinsky6_audio_vae"):  # Kandinsky 6 audio VAE
+                bigvgan_config = json.loads(metadata["bigvgan_config"])
+                self.first_stage_model = comfy.ldm.kandinsky6.audio_vae.Kandinsky6AudioVAE(bigvgan_config)
+                self.memory_used_decode = lambda shape, dtype: (90 * shape[1] * 1411.2) * model_management.dtype_size(dtype)
+                self.latent_channels = 40
+                self.output_channels = 1
+                self.upscale_ratio = 1024
+                self.downscale_ratio = 1024
+                self.latent_dim = 1
+                self.audio_sample_rate = 44100
+                self.process_output = lambda audio: audio
+                self.process_input = lambda audio: audio
+                self.working_dtypes = [torch.float32]
+                self.disable_offload = True
             elif "vocoder.activation_post.downsample.lowpass.filter" in sd: #MMAudio VAE
                 sample_rate = 16000
                 if sample_rate == 16000:
@@ -1602,6 +1618,7 @@ class CLIPType(Enum):
     MAGE = 34
     MINIMAX = 35
     YUE2 = 36
+    KANDINSKY6 = 37
 
 
 
@@ -2057,6 +2074,9 @@ def load_text_encoder_state_dicts(state_dicts=[], embedding_directory=None, clip
         elif clip_type == CLIPType.KANDINSKY5_IMAGE:
             clip_target.clip = comfy.text_encoders.kandinsky5.te(**llama_detect(clip_data))
             clip_target.tokenizer = comfy.text_encoders.kandinsky5.Kandinsky5TokenizerImage
+        elif clip_type == CLIPType.KANDINSKY6:
+            clip_target.clip = comfy.text_encoders.kandinsky6.te(**llama_detect(clip_data))
+            clip_target.tokenizer = comfy.text_encoders.kandinsky6.Kandinsky6Tokenizer
         elif clip_type == CLIPType.LTXV:
             te_models = [detect_te_model(sd) for sd in clip_data]
             gemma4_models = {

@@ -1,0 +1,63 @@
+{
+    "resblock": "1",
+    "num_gpus": 0,
+    "batch_size": 32,
+    "learning_rate": 0.0001,
+    "adam_b1": 0.8,
+    "adam_b2": 0.99,
+    "lr_decay": 0.9999996,
+    "seed": 1234,
+
+    "upsample_rates": [8,4,2,2,2,2],
+    "upsample_kernel_sizes": [16,8,4,4,4,4],
+    "upsample_initial_channel": 1536,
+    "resblock_kernel_sizes": [3,7,11],
+    "resblock_dilation_sizes": [[1,3,5], [1,3,5], [1,3,5]],
+
+    "use_tanh_at_final": false,
+    "use_bias_at_final": false,
+
+    "activation": "snakebeta",
+    "snake_logscale": true,
+
+    "use_cqtd_instead_of_mrd": true,
+    "cqtd_filters": 128,
+    "cqtd_max_filters": 1024,
+    "cqtd_filters_scale": 1,
+    "cqtd_dilations": [1, 2, 4],
+    "cqtd_hop_lengths": [512, 256, 256],
+    "cqtd_n_octaves": [9, 9, 9],
+    "cqtd_bins_per_octaves": [24, 36, 48],
+
+    "mpd_reshapes": [2, 3, 5, 7, 11],
+    "use_spectral_norm": false,
+    "discriminator_channel_mult": 1,
+
+    "use_multiscale_melloss": true,
+    "lambda_melloss": 15,
+
+    "clip_grad_norm": 500,
+
+    "segment_size": 65536,
+    "num_mels": 128,
+    "num_freq": 2049,
+    "n_fft": 2048,
+    "hop_size": 512,
+    "win_size": 2048,
+
+    "sampling_rate": 44100,
+
+    "fmin": 0,
+    "fmax": null,
+    "fmax_for_loss": null,
+
+    "normalize_volume": true,
+
+    "num_workers": 4,
+
+    "dist_config": {
+        "dist_backend": "nccl",
+        "dist_url": "tcp://localhost:54321",
+        "world_size": 1
+    }
+}
