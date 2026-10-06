@@ -28,6 +28,7 @@ def upgrade() -> None:
         " AND NOT EXISTS (SELECT 1 FROM asset_tags AS t WHERE t.asset_id = a.id AND t.tag_name = 'uploaded')"
     ).columns(created_at=sa.DateTime)).all()
     # Only ever earlier: an mtime changed after cataloguing must not move a record above newer work.
+    # The conversion is inlined, not app.assets.helpers', so this migration can't change if that helper does.
     params = [
         {"id": record_id, "created": min(datetime(1970, 1, 1) + timedelta(microseconds=mtime_ns // 1000), created_at)}
         for record_id, created_at, mtime_ns in rows

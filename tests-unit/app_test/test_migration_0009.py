@@ -14,7 +14,7 @@ _CONTENT_TIME = "2026-10-01 12:00:00.000000"
 _SCAN_TIME = "2026-10-01 12:00:00.000004"
 _UPDATED_TIME = "2026-10-01 12:00:00.000007"
 _HALF_SECOND_LATER = "2026-10-01 12:00:00.500000"
-_TWO_SECONDS_LATER = "2026-10-01 12:00:02.000000"
+_OUTSIDE_WINDOW = "2026-10-01 12:00:01.100000"
 _LATER = "2026-10-03 09:00:00.000000"
 _MTIME = datetime(2025, 3, 4, 5, 6, 7, 123456)
 _MTIME_TEXT = "2025-03-04 05:06:07.123456"
@@ -72,7 +72,7 @@ def db_at_0008(tmp_path):
             "reuploaded": _ns(_MTIME),
             "uploaded": _ns(_MTIME),
             "half-second": _ns(_MTIME),
-            "two-seconds": _ns(_MTIME),
+            "outside-window": _ns(_MTIME),
             "touched": _ns(datetime(2026, 10, 2)),  # mtime refreshed after the scan
             "future": _ns(datetime(2200, 1, 1)),
             "no-mtime": None,
@@ -94,7 +94,7 @@ def db_at_0008(tmp_path):
             ("uploaded", "uploaded", "manual", _SCAN_TIME),
         )
         _add_record(conn, "half-second", "half-second", created_at=_HALF_SECOND_LATER)
-        _add_record(conn, "two-seconds", "two-seconds", created_at=_TWO_SECONDS_LATER)
+        _add_record(conn, "outside-window", "outside-window", created_at=_OUTSIDE_WINDOW)
         _add_record(conn, "touched", "touched")
         _add_record(conn, "future", "future")
         _add_record(conn, "no-mtime", "no-mtime")
@@ -116,7 +116,7 @@ def test_0009_dates_scanned_records_by_mtime(db_at_0008):
         "shared-later": _LATER,
         "reuploaded": _LATER,
         "uploaded": _SCAN_TIME,
-        "two-seconds": _TWO_SECONDS_LATER,
+        "outside-window": _OUTSIDE_WINDOW,
         "touched": _SCAN_TIME,
         "future": _SCAN_TIME,
         "no-mtime": _SCAN_TIME,

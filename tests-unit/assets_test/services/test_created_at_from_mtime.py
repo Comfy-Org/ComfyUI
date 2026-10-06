@@ -152,12 +152,14 @@ async def test_cursor_walks_files_sharing_an_mtime_once_each_in_order(
 
     walked: list[str] = []
     params = {"limit": "1"}
-    while True:
+    for _ in range(len(paths)):
         body = await _list(params)
         walked += [asset["name"] for asset in body["assets"]]
         if not body["has_more"]:
             break
         params = {"limit": "1", "after": body["next_cursor"]}
+    else:
+        pytest.fail(f"cursor walk did not finish in {len(paths)} pages: {walked}")
 
     assert walked == expected
     assert sorted(walked) == sorted(path.name for path in paths)
