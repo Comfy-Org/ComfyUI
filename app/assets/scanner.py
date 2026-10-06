@@ -32,6 +32,7 @@ from app.assets.database.queries import (
 from app.assets.database.models import Asset, AssetContent
 from app.assets.helpers import (
     PREFIX_BATCH_SIZE,
+    mtime_ns_to_utc,
     path_prefix_matcher,
     sql_path_under_prefix,
     sql_path_under_prefix_batches,
@@ -795,6 +796,8 @@ def seed_asset_specs(
                     job_id=spec["job_id"],
                     loader_path=spec["fname"],
                     tags=spec["tags"],
+                    # Sorts files already on disk by when they were made, not by walk order.
+                    created_at=mtime_ns_to_utc(get_mtime_ns(stat_result)),
                 )
                 created += 1
         except IntegrityError as error:

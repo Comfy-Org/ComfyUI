@@ -8,7 +8,7 @@ follows ``Path.is_relative_to`` instead, including its platform case rules.
 import functools
 import os
 from collections.abc import Callable, Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import sqlalchemy as sa
 from sqlalchemy.sql import ColumnElement
@@ -142,6 +142,11 @@ def escape_sql_like_string(s: str, escape: str = "!") -> tuple[str, str]:
 def get_utc_now() -> datetime:
     """Naive UTC timestamp (no tzinfo). We always treat DB datetimes as UTC."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def mtime_ns_to_utc(mtime_ns: int) -> datetime:
+    """Naive UTC time of a file mtime, capped at now so a future mtime can't outrank new rows."""
+    return min(datetime(1970, 1, 1) + timedelta(microseconds=mtime_ns // 1000), get_utc_now())
 
 
 def normalize_tags(tags: list[str] | None) -> list[str]:
