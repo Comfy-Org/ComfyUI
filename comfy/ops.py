@@ -124,6 +124,14 @@ def materialize_meta_param(s, param_keys):
             setattr(s, param_key, torch.nn.Parameter(torch.zeros(param.shape, dtype=param.dtype), requires_grad=param.requires_grad))
 
 
+def vbar_above_watermark(s):
+    # prefetch ring manages residency itself, hands off
+    if getattr(s, "_prefetch", None) is not None:
+        return False
+    vbar, alloc, size = s._v
+    return alloc - vbar.base_addr + size > vbar.get_watermark() * (32 << 20)  # watermark is in VBAR pages
+
+
 # FIXME: add n=1 cache hit fast path
 def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blocking, return_faulted=False):
     offload_stream = None
@@ -797,6 +805,11 @@ class disable_weight_init:
             with CastBiasWeightContext(self, device=input.device, dtype=out_dtype, offloadable=True) as (weight, bias):
                 return torch.nn.functional.embedding(input, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse).to(dtype=output_dtype)
 
+        def host_rows(self, input, out_dtype=None):
+            # table not resident: gather the rows from the host copy instead of streaming the table
+            x = self.weight[input.reshape(-1).cpu()].to(input.device)
+            x = x.view(*input.shape, x.shape[-1])
+            return x if out_dtype is None else x.to(dtype=out_dtype)
 
         def forward(self, *args, **kwargs):
             run_every_op()
@@ -1725,6 +1738,22 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
             def state_dict(self, *args, destination=None, prefix="", **kwargs):
                 sd = destination if destination is not None else {}
                 return _quantized_weight_state_dict(self, sd, prefix)
+
+            def host_rows(self, input, out_dtype=None):
+                weight = self.weight
+                if not isinstance(weight, QuantizedTensor):
+                    return super().host_rows(input, out_dtype=out_dtype)
+                if self.quant_format != "int8_tensorwise":
+                    # TODO: fp8 tables still stream through the cast buffer
+                    return self.forward_comfy_cast_weights(input, out_dtype=out_dtype)
+                idx = input.reshape(-1).cpu()
+                params = weight._params
+                scale = params.scale[idx] if params.scale.dim() >= 2 else params.scale  # per-row scale is [vocab, 1], as dequantize_embedding expects
+                params = dataclasses.replace(params, scale=scale.to(input.device))
+                rows = weight._qdata[idx].to(input.device)
+                x = get_layout_class(self.layout_type).dequantize_embedding(rows, params, torch.arange(idx.numel(), device=input.device))
+                x = x.view(*input.shape, x.shape[-1])
+                return x if out_dtype is None else x.to(dtype=out_dtype)
 
             def forward_comfy_cast_weights(self, input, out_dtype=None):
                 weight = self.weight
