@@ -385,11 +385,48 @@ class TestMixedPrecisionOps(unittest.TestCase):
         import comfy.model_management as mm
 
         orig_cpu_state = mm.cpu_state
+        orig_torch_version = mm.torch_version_numeric
         mm.cpu_state = mm.CPUState.MPS
+        mm.torch_version_numeric = (2, 10)
         try:
             self.assertFalse(mm.supports_int8_compute(None))
         finally:
             mm.cpu_state = orig_cpu_state
+            mm.torch_version_numeric = orig_torch_version
+
+    def test_supports_int8_compute_enabled_on_mps_with_torch_2_14_plus(self):
+        """torch._int_mm gained a native MPS implementation in PyTorch 2.14
+        (pytorch/pytorch#193153, closing pytorch/pytorch#141287), so
+        int8_tensorwise should be enabled on MPS from that version on."""
+        import comfy.model_management as mm
+
+        orig_cpu_state = mm.cpu_state
+        orig_torch_version = mm.torch_version_numeric
+        mm.cpu_state = mm.CPUState.MPS
+        mm.torch_version_numeric = (2, 14)
+        try:
+            self.assertTrue(mm.supports_int8_compute(None))
+        finally:
+            mm.cpu_state = orig_cpu_state
+            mm.torch_version_numeric = orig_torch_version
+
+    def test_get_disabled_quant_formats_keeps_convrot_w4a4_disabled_on_mps(self):
+        """Even once int8_tensorwise is enabled on MPS (torch >= 2.14),
+        convrot_w4a4 and the grouped int8 formats have no MPS kernel and
+        must stay disabled."""
+        import comfy.model_management as mm
+
+        orig_cpu_state = mm.cpu_state
+        orig_torch_version = mm.torch_version_numeric
+        mm.cpu_state = mm.CPUState.MPS
+        mm.torch_version_numeric = (2, 14)
+        try:
+            disabled = ops.get_disabled_quant_formats(None)
+            self.assertNotIn("int8_tensorwise", disabled)
+            self.assertIn("convrot_w4a4", disabled)
+        finally:
+            mm.cpu_state = orig_cpu_state
+            mm.torch_version_numeric = orig_torch_version
 
     def test_convrot_w4a4_loads_into_params(self):
         """ConvRot W4A4 checkpoints must load as the dedicated kitchen layout."""

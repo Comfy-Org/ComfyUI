@@ -1772,6 +1772,12 @@ def get_disabled_quant_formats(device=None):
         disabled.add("int8_tensorwise")
         disabled.add("convrot_w4a4")
         disabled.update(_GROUPED_INT8_FORMATS)
+    elif comfy.model_management.is_device_mps(device) or comfy.model_management.mps_mode():
+        # torch._int_mm on MPS (PyTorch >= 2.14) only covers plain tensorwise
+        # int8 matmul. convrot_w4a4 and the grouped int8 formats use separate
+        # comfy_kitchen kernels with no MPS implementation.
+        disabled.add("convrot_w4a4")
+        disabled.update(_GROUPED_INT8_FORMATS)
     return disabled
 
 
