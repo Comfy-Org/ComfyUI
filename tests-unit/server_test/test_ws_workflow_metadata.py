@@ -2,11 +2,9 @@
 
 import json
 
-import asyncio
-import struct
 import pytest
-from PIL import Image
 
+import protocol
 import server
 from comfy_api.feature_flags import SERVER_FEATURE_FLAGS  # noqa: F401
 
@@ -169,44 +167,60 @@ class TestWorkflowMetadataFromPrompt:
 class TestBinaryPreviewMetadata:
     """The json messages of a prompt carry the client's metadata; the binary
     preview frames of the same prompt should too, so a client can tell which of
-    its open workflows a mid-execution preview belongs to. Same choke point and
-    same precedence as the json path: the frame's own fields win."""
+    its open workflows a mid-execution preview belongs to.
+
+    Merged in send_sync rather than at publication: messages sit in a queue, so
+    by the time publish_loop sends a preview the next prompt may already have
+    replaced workflow_metadata, and the frame would carry the wrong workflow."""
+
+    PREVIEW = protocol.BinaryEventTypes.PREVIEW_IMAGE_WITH_METADATA
 
     @staticmethod
-    def metadata_sent(server, metadata):
-        """Run send_image_with_metadata and return the metadata header it wrote."""
-        captured = {}
-
-        async def fake_send_bytes(event, data, sid=None):
-            length = struct.unpack(">I", bytes(data[:4]))[0]
-            captured.update(json.loads(bytes(data[4 : 4 + length])))
-
-        server.send_bytes = fake_send_bytes
-        image = Image.new("RGB", (2, 2))
-        asyncio.run(
-            server.send_image_with_metadata(("PNG", image, None), dict(metadata))
-        )
-        return captured
+    def preview_metadata(prompt_server):
+        """The metadata dict of the last queued preview frame."""
+        event, data, _ = prompt_server.messages.sent[-1]
+        assert event == protocol.BinaryEventTypes.PREVIEW_IMAGE_WITH_METADATA
+        return data[1]
 
     def test_preview_of_a_prompt_carries_the_metadata(self, prompt_server):
         prompt_server.workflow_metadata = {"workflow_id": "abc"}
-        sent = self.metadata_sent(prompt_server, {"prompt_id": "p1", "node_id": "3"})
+        prompt_server.send_sync(self.PREVIEW, ("image", {"prompt_id": "p1", "node_id": "3"}))
+        sent = self.preview_metadata(prompt_server)
         assert sent["workflow_id"] == "abc"
         assert sent["prompt_id"] == "p1"
         assert sent["node_id"] == "3"
 
     def test_metadata_cannot_overwrite_the_frame_own_fields(self, prompt_server):
         prompt_server.workflow_metadata = {"prompt_id": "spoofed", "node_id": "spoofed"}
-        sent = self.metadata_sent(prompt_server, {"prompt_id": "p1", "node_id": "3"})
+        prompt_server.send_sync(self.PREVIEW, ("image", {"prompt_id": "p1", "node_id": "3"}))
+        sent = self.preview_metadata(prompt_server)
         assert sent["prompt_id"] == "p1"
         assert sent["node_id"] == "3"
 
     def test_absent_when_no_metadata_was_supplied(self, prompt_server):
         prompt_server.workflow_metadata = {}
-        sent = self.metadata_sent(prompt_server, {"prompt_id": "p1"})
-        assert "workflow_id" not in sent
+        prompt_server.send_sync(self.PREVIEW, ("image", {"prompt_id": "p1"}))
+        assert "workflow_id" not in self.preview_metadata(prompt_server)
 
     def test_left_alone_when_the_frame_names_no_prompt(self, prompt_server):
         prompt_server.workflow_metadata = {"workflow_id": "abc"}
-        sent = self.metadata_sent(prompt_server, {"node_id": "3"})
-        assert "workflow_id" not in sent
+        prompt_server.send_sync(self.PREVIEW, ("image", {"node_id": "3"}))
+        assert "workflow_id" not in self.preview_metadata(prompt_server)
+
+    def test_the_image_half_of_the_tuple_is_untouched(self, prompt_server):
+        prompt_server.workflow_metadata = {"workflow_id": "abc"}
+        prompt_server.send_sync(self.PREVIEW, ("the-image", {"prompt_id": "p1"}))
+        _, data, _ = prompt_server.messages.sent[-1]
+        assert data[0] == "the-image"
+
+    def test_a_preview_queued_before_the_next_prompt_keeps_its_own_metadata(
+        self, prompt_server
+    ):
+        # The reason the merge is at enqueue time: this frame belongs to p1, and
+        # p2 starting before the queue drains must not relabel it.
+        prompt_server.workflow_metadata = {"workflow_id": "first"}
+        prompt_server.send_sync(self.PREVIEW, ("image", {"prompt_id": "p1"}))
+        prompt_server.workflow_metadata = {"workflow_id": "second"}
+
+        event, data, _ = prompt_server.messages.sent[-1]
+        assert data[1]["workflow_id"] == "first"

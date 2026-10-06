@@ -1423,8 +1423,6 @@ class PromptServer():
         if metadata is None:
             metadata = {}
         metadata["image_type"] = mimetype
-        if self.workflow_metadata and "prompt_id" in metadata:
-            metadata = {**self.workflow_metadata, **metadata}
 
         # Serialize metadata as JSON
         import json
@@ -1465,8 +1463,21 @@ class PromptServer():
             await send_socket_catch_exception(self.sockets[sid].send_json, message)
 
     def send_sync(self, event, data, sid=None):
-        if self.workflow_metadata and isinstance(data, dict) and "prompt_id" in data:
-            data = {**self.workflow_metadata, **data}
+        if self.workflow_metadata:
+            if isinstance(data, dict) and "prompt_id" in data:
+                data = {**self.workflow_metadata, **data}
+            elif (
+                event == BinaryEventTypes.PREVIEW_IMAGE_WITH_METADATA
+                and isinstance(data, tuple)
+                and len(data) == 2
+                and isinstance(data[1], dict)
+                and "prompt_id" in data[1]
+            ):
+                # Merged here rather than at publication: messages wait in the
+                # queue, so by the time publish_loop sends a preview the next
+                # prompt may already have replaced workflow_metadata, and the
+                # frame would carry the wrong workflow.
+                data = (data[0], {**self.workflow_metadata, **data[1]})
 
         self.loop.call_soon_threadsafe(
             self.messages.put_nowait, (event, data, sid))
