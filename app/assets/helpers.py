@@ -144,9 +144,10 @@ def get_utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def mtime_ns_to_utc(mtime_ns: int) -> datetime:
-    """Naive UTC time of a file mtime, capped at now so a future mtime can't outrank rows registered before it."""
-    return min(datetime(1970, 1, 1) + timedelta(microseconds=mtime_ns // 1000), get_utc_now())
+def mtime_ns_to_utc(mtime_ns: int, ctime_ns: int) -> datetime:
+    """Naive UTC time of a file mtime, capped at its ctime and at now, so a future mtime dates
+    the file no later than it arrived."""
+    return min(datetime(1970, 1, 1) + timedelta(microseconds=min(mtime_ns, ctime_ns) // 1000), get_utc_now())
 
 
 def normalize_tags(tags: list[str] | None) -> list[str]:

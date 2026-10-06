@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -138,6 +139,23 @@ async def test_future_mtime_is_capped_at_now(
 
     assert _created_at(one_database, "future.png") == scan_time
     assert (await _listed_names())[0] == "generated.png"
+
+
+@pytest.mark.asyncio
+async def test_future_mtime_file_dates_from_its_arrival_on_a_later_scan(
+    one_database, output_dir: Path
+):
+    future = _write(output_dir, "future.png", datetime(2200, 1, 1))
+    time.sleep(0.05)  # past a coarse clock tick (Windows)
+    generated = _write(output_dir, "generated.png")
+    assert register_executed_output(str(generated), job_id="job-1") is not None
+
+    # The rescan after the prompt reaches the file only now.
+    _scan(future)
+
+    assert (await _listed_names())[0] == "generated.png"
+    arrived = _EPOCH + timedelta(microseconds=future.stat().st_ctime_ns // 1000)
+    assert _created_at(one_database, "future.png") == arrived
 
 
 @pytest.mark.asyncio
