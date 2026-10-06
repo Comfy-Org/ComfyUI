@@ -158,7 +158,7 @@ class Kandinsky6EmptyLatent:
             "sample_rate": _AUDIO_SAMPLE_RATE,
         }
         _validate_joint_latent(latent)
-        return latent
+        return (latent,)
 
 
 class Kandinsky6ImageToVideoAudio:
@@ -166,7 +166,8 @@ class Kandinsky6ImageToVideoAudio:
 
     ``reference_latent`` is intentionally produced by ComfyUI's standard
     ``VAEEncode`` node.  The only K6-specific work here is the canonical
-    ``tail_cond_first_frame`` layout and its denoise mask.
+    ``tail_cond_first_frame`` layout and its denoise mask.  Leave it unconnected
+    for pure text-to-video+audio, which passes the joint latent through as-is.
     """
 
     @classmethod
@@ -176,8 +177,10 @@ class Kandinsky6ImageToVideoAudio:
                 "positive": ("CONDITIONING",),
                 "negative": ("CONDITIONING",),
                 "empty_latent": ("LATENT",),
+            },
+            "optional": {
                 "reference_latent": ("LATENT",),
-            }
+            },
         }
 
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
@@ -185,10 +188,13 @@ class Kandinsky6ImageToVideoAudio:
     FUNCTION = "apply"
     CATEGORY = "Kandinsky 6"
 
-    def apply(self, positive, negative, empty_latent, reference_latent):
+    def apply(self, positive, negative, empty_latent, reference_latent=None):
         _validate_joint_latent(empty_latent)
-        video, audio = _joint_streams(empty_latent)
 
+        if reference_latent is None:
+            return positive, negative, empty_latent
+
+        video, audio = _joint_streams(empty_latent)
         reference = reference_latent.get("samples")
         if getattr(reference, "is_nested", False) or not torch.is_tensor(reference):
             raise ValueError(
