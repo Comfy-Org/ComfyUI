@@ -1184,7 +1184,7 @@ class BaseGenerate:
                 if compile_allocations:
                     comfy.model_prefetch.malloc_graph_begin(device)
                 embed = self.model.embed_tokens
-                if hasattr(embed, "_v") and comfy.ops.vbar_above_watermark(embed):
+                if hasattr(embed, "_v") and embed.weight_lowvram_function is None and len(embed.weight_function) == 0 and comfy.ops.vbar_above_watermark(embed):
                     embeds = embed.host_rows(decode_tokens, out_dtype=execution_dtype)
                 else:
                     embeds = embed(decode_tokens).to(execution_dtype)
