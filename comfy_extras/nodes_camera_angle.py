@@ -79,7 +79,7 @@ class CameraAngle(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="CameraAngle",
-            display_name="Camera Angle",
+            display_name="Compose Camera Angle Prompt",
             search_aliases=["multi angle", "camera view", "orbit camera", "shot angle", "camera prompt"],
             category="3d",
             description="Pick a camera angle around a subject with a 3D preview. Outputs a camera_info "
