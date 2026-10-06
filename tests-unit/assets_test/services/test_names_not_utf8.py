@@ -154,7 +154,7 @@ def test_a_path_found_twice_is_counted_once(roots, monkeypatch, caplog):
     monkeypatch.setattr(
         seeder_module,
         "collect_paths_for_roots",
-        lambda r, progress=None: (paths := real_collect(r, progress)) + paths,
+        lambda *args: (paths := real_collect(*args)) + paths,
     )
     with caplog.at_level(logging.INFO):
         _scan(("input",))
