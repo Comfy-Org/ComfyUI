@@ -165,6 +165,16 @@ def _snapshot_progress(state: _ScanState) -> Progress:
     )
 
 
+# The fast scan inserts INSERT_BATCH_SIZE files per write transaction and pauses after
+# each, so an upload or an output being registered gets the lock.
+INSERT_BATCH_SIZE = 200
+# A write waiting on the lock retries after sleeps of up to 100 ms; the pause outlasts one,
+# plus Windows' 15.6 ms timer tick.
+_BUSY_HANDLER_MAX_SLEEP_SECONDS = 0.1
+_TIMER_TICK_ALLOWANCE_SECONDS = 0.02
+INSERT_PAUSE_SECONDS = _BUSY_HANDLER_MAX_SLEEP_SECONDS + _TIMER_TICK_ALLOWANCE_SECONDS
+
+
 class _AssetSeeder:
     """Background asset scanning manager.
 
@@ -972,7 +982,11 @@ class _AssetSeeder:
 
         t_collect = time.perf_counter()
         walk = list_output_for_rescan() if by_listing else None
-        paths = walk.files if walk is not None else collect_paths_for_roots(roots, scan_state)
+        should_stop = lambda: self._check_pause_and_cancel(_ScanStage.FAST_SCAN)
+        paths = walk.files if walk is not None else collect_paths_for_roots(roots, scan_state, should_stop)
+        # A cancel during the walk leaves paths partial.
+        if should_stop():
+            return total_created, skipped_existing, 0
         logging.debug(
             "Fast scan: collect_paths took %.3fs (%d paths found)",
             time.perf_counter() - t_collect,
@@ -1011,6 +1025,7 @@ class _AssetSeeder:
             existing_paths,
             enable_metadata_extraction=False,
             progress=scan_state,
+            should_stop=should_stop,
         )
         logging.debug(
             "Fast scan: build_asset_specs took %.3fs (%d specs, %d skipped)",
@@ -1023,11 +1038,10 @@ class _AssetSeeder:
         if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
             return total_created, skipped_existing, total_paths
 
-        batch_size = 500
         last_progress_time = time.perf_counter()
         progress_interval = 1.0
 
-        for i in range(0, len(specs), batch_size):
+        for i in range(0, len(specs), INSERT_BATCH_SIZE):
             if self._check_pause_and_cancel(_ScanStage.FAST_SCAN):
                 logging.info(
                     "Fast scan cancelled after %d/%d files (created=%d)",
@@ -1037,7 +1051,7 @@ class _AssetSeeder:
                 )
                 return total_created, skipped_existing, total_paths
 
-            batch = specs[i : i + batch_size]
+            batch = specs[i : i + INSERT_BATCH_SIZE]
             batch_tags = {t for spec in batch for t in spec["tags"]}
             created = 0
             try:
@@ -1080,6 +1094,9 @@ class _AssetSeeder:
                     },
                 )
                 last_progress_time = now
+
+            if scanned < len(specs):
+                time.sleep(INSERT_PAUSE_SECONDS)
 
         self._update_progress(scanned=len(specs), created=total_created)
         tick_watch_list(scan_state)
