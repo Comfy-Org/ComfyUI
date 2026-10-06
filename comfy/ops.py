@@ -1748,7 +1748,7 @@ def mixed_precision_ops(quant_config={}, compute_dtype=torch.bfloat16, full_prec
                     return self.forward_comfy_cast_weights(input, out_dtype=out_dtype)
                 idx = input.reshape(-1).cpu()
                 params = weight._params
-                scale = params.scale[idx] if params.scale.dim() > 0 else params.scale
+                scale = params.scale[idx] if params.scale.dim() >= 2 else params.scale  # per-row scale is [vocab, 1], as dequantize_embedding expects
                 params = dataclasses.replace(params, scale=scale.to(input.device))
                 rows = weight._qdata[idx].to(input.device)
                 x = get_layout_class(self.layout_type).dequantize_embedding(rows, params, torch.arange(idx.numel(), device=input.device))
