@@ -5,6 +5,7 @@ import torch
 
 import comfy.model_management as mm
 import comfy.nested_tensor
+import comfy.utils
 import node_helpers
 
 from comfy.ldm.kandinsky6.core_contract import (
@@ -162,12 +163,12 @@ class Kandinsky6EmptyLatent:
 
 
 class Kandinsky6ImageToVideoAudio:
-    """Append the clean I2VA reference tail while keeping stock Comfy inputs.
+    """Animate a reference image into video+audio, or run text-only.
 
-    ``reference_latent`` is intentionally produced by ComfyUI's standard
-    ``VAEEncode`` node.  The only K6-specific work here is the canonical
-    ``tail_cond_first_frame`` layout and its denoise mask.  Leave it unconnected
-    for pure text-to-video+audio, which passes the joint latent through as-is.
+    ``image`` is resized to the generation size and VAE-encoded here, so no
+    separate VAEEncode step is needed.  Leave ``image`` unconnected for pure
+    text-to-video+audio.  The only K6-specific work is the canonical
+    reference-tail layout and its denoise mask.
     """
 
     @classmethod
@@ -179,7 +180,8 @@ class Kandinsky6ImageToVideoAudio:
                 "empty_latent": ("LATENT",),
             },
             "optional": {
-                "reference_latent": ("LATENT",),
+                "image": ("IMAGE",),
+                "vae": ("VAE",),
             },
         }
 
@@ -188,39 +190,24 @@ class Kandinsky6ImageToVideoAudio:
     FUNCTION = "apply"
     CATEGORY = "Kandinsky 6"
 
-    def apply(self, positive, negative, empty_latent, reference_latent=None):
+    def apply(self, positive, negative, empty_latent, image=None, vae=None):
         _validate_joint_latent(empty_latent)
 
-        if reference_latent is None:
+        if image is None:
             return positive, negative, empty_latent
+        if vae is None:
+            raise ValueError("Connect the video VAE to encode the I2VA reference image.")
 
         video, audio = _joint_streams(empty_latent)
-        reference = reference_latent.get("samples")
-        if getattr(reference, "is_nested", False) or not torch.is_tensor(reference):
-            raise ValueError(
-                "Kandinsky 6 I2VA expects a regular video LATENT from the standard VAEEncode node."
-            )
+        down = vae.spacial_compression_encode()
+        target_w = int(video.shape[4] * down)
+        target_h = int(video.shape[3] * down)
+        resized = comfy.utils.common_upscale(
+            image[:1, :, :, :3].movedim(-1, 1), target_w, target_h, "bilinear", "center"
+        ).movedim(1, -1)
+        reference = vae.encode(resized)
         if reference.ndim == 4:
             reference = reference.unsqueeze(2)
-        if reference.ndim != 5:
-            raise ValueError(
-                "Kandinsky 6 I2VA reference latent must be a 5D BCHTW tensor, "
-                f"got {tuple(reference.shape)}."
-            )
-        if reference.shape[2] != 1:
-            raise ValueError(
-                "Kandinsky 6 I2VA requires exactly one encoded reference frame, "
-                f"got {reference.shape[2]}."
-            )
-        expected = (video.shape[0], video.shape[1], video.shape[3], video.shape[4])
-        actual = (reference.shape[0], reference.shape[1], reference.shape[3], reference.shape[4])
-        if actual != expected:
-            raise ValueError(
-                "Kandinsky 6 I2VA reference latent must match the empty video latent: "
-                f"expected B/C/H/W {expected}, got {actual}. Resize the input image "
-                "to the generation width and height before VAEEncode."
-            )
-
         reference = reference.to(device=video.device, dtype=video.dtype)
         video_with_reference = torch.cat((video, reference), dim=2)
 
