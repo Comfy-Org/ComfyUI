@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f6f5ef" />
+    <title>Daylight — English, one day at a time</title>
+    <link rel="stylesheet" href="style.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#home" aria-label="Daylight 首页">
+          <span class="brand-mark">d.</span>
+          <span class="brand-copy">
+            <strong>daylight</strong>
+            <small>YOUR ENGLISH SPACE</small>
+          </span>
+        </a>
+
+        <div class="nav-label">学习空间</div>
+        <nav class="main-nav" aria-label="主导航">
+          <button class="nav-item active" data-page="home">
+            <span class="nav-icon">⌂</span><span>今日概览</span>
+            <span class="nav-arrow">↗</span>
+          </button>
+          <button class="nav-item" data-page="words">
+            <span class="nav-icon">▤</span><span>我的词库</span>
+          </button>
+          <button class="nav-item" data-page="review">
+            <span class="nav-icon">◉</span><span>单词复习</span>
+            <span class="nav-count" id="review-nav-count">5</span>
+          </button>
+          <button class="nav-item" data-page="course">
+            <span class="nav-icon">✳</span><span>零基础路线</span>
+          </button>
+          <button class="nav-item" data-page="writing">
+            <span class="nav-icon">↗</span><span>自由写作</span>
+          </button>
+        </nav>
+
+        <section class="sidebar-streak">
+          <div class="streak-top">
+            <span class="streak-icon">✳</span>
+            <span>连续学习</span>
+            <span class="streak-number"><b id="streak-count">0</b> 天</span>
+          </div>
+          <div class="week-dots" aria-label="本周学习记录">
+            <span>一</span><span>二</span><span>三</span><span>四</span><span>五</span>
+            <span>六</span><span>日</span>
+          </div>
+          <p>每天一点点，慢慢就很远。</p>
+        </section>
+
+        <div class="sidebar-bottom">
+          <div class="profile-avatar">Y</div>
+          <button class="profile-copy account-trigger" id="open-account" type="button">
+            <strong id="account-name">我的学习角</strong><small id="account-status">本机保存 · 点击登录同步</small>
+          </button>
+          <button class="profile-menu account-trigger" id="open-account-menu" type="button" aria-label="账号设置">···</button>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="breadcrumb"><span>学习空间</span><span class="crumb-divider">/</span><strong id="page-crumb">今日概览</strong></div>
+          <div class="topbar-right">
+            <span class="date-label" id="today-date"></span>
+            <span class="topbar-divider"></span>
+            <span class="sync-status" id="sync-status" role="status">本机保存</span>
+            <button class="avatar-small account-trigger" id="open-account-short" aria-label="账号登录">Y</button>
+          </div>
+        </header>
+
+        <section class="page active" id="page-home">
+          <div class="welcome-row">
+            <div>
+              <p class="eyebrow"><span class="eyebrow-dot"></span> THURSDAY, A FRESH START</p>
+              <h1>早上好，<span>今天也为自己留一点时间。</span></h1>
+              <p class="welcome-subtitle">英语不是要征服的目标，而是每天靠近一点的生活。</p>
+            </div>
+            <div class="weather-note"><span class="weather-sun">☼</span><span>慢一点，<br />也没关系。</span></div>
+          </div>
+
+          <div class="hero-card">
+            <div class="hero-text">
+              <div class="hero-kicker"><span></span> YOUR DAILY PRACTICE</div>
+              <h2>Make English<br />part of your day.</h2>
+              <p>从字母和问候开始，每天 20 分钟，慢慢学会用英语表达。</p>
+              <button class="button-light" data-go="course">打开零基础路线 <span>→</span></button>
+            </div>
+            <div class="hero-art" aria-hidden="true">
+              <div class="sun-shape"></div>
+              <div class="art-note note-one">small<br />steps</div>
+              <div class="art-note note-two">a little<br />every day</div>
+              <div class="art-book">
+                <div class="book-spine"></div>
+                <div class="book-line line-one"></div><div class="book-line line-two"></div>
+                <div class="book-line line-three"></div><span>keep<br />going.</span>
+              </div>
+              <div class="art-star">✳</div>
+            </div>
+            <div class="hero-index"><span>01</span> / 03</div>
+          </div>
+
+          <div class="stats-grid">
+            <article class="stat-card">
+              <div class="stat-heading"><span>今日完成计划</span><span class="stat-symbol">◷</span></div>
+              <div class="stat-value"><strong id="tasks-done-stat">0</strong><small>项计划</small></div>
+              <div class="stat-foot"><span>按自己的节奏来</span></div>
+              <div class="word-progress"><span id="task-progress-fill"></span></div>
+              <div class="progress-caption"><span>今日的三个小目标</span><strong id="task-progress-percent">0%</strong></div>
+            </article>
+            <article class="stat-card word-stat">
+              <div class="stat-heading"><span>已经收集的单词</span><span class="stat-symbol">✳</span></div>
+              <div class="stat-value"><strong id="word-total-stat">8</strong><small>个词汇</small></div>
+              <div class="stat-foot"><span class="stat-change">+<span id="word-added-stat">0</span></span><span>自定义添加</span></div>
+              <div class="word-progress"><span id="word-progress-fill"></span></div>
+              <div class="progress-caption"><span>向 50 个词汇迈进</span><strong id="word-progress-percent">16%</strong></div>
+            </article>
+            <article class="stat-card streak-stat">
+              <div class="stat-heading"><span>学习小火苗</span><span class="stat-symbol">✺</span></div>
+              <div class="stat-value"><strong id="streak-stat">0</strong><small>天连续</small></div>
+              <div class="stat-foot"><span>从今天开始记录</span></div>
+              <div class="streak-track"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            </article>
+          </div>
+
+          <div class="home-columns">
+            <section class="panel daily-panel">
+              <div class="section-heading">
+                <div><p class="eyebrow muted-eyebrow">A LITTLE GOES A LONG WAY</p><h2>今日的小计划</h2></div>
+                <span class="task-progress" id="task-progress">0 / 3 完成</span>
+              </div>
+              <div class="task-list">
+                <label class="task-item">
+                  <input type="checkbox" data-task="review" />
+                  <span class="task-check"></span><span class="task-copy"><strong>复习 5 个单词</strong><small>用间隔重复，把熟悉变成记得</small></span>
+                  <span class="task-time">5 min</span>
+                </label>
+                <label class="task-item">
+                  <input type="checkbox" data-task="read" />
+                  <span class="task-check"></span><span class="task-copy"><strong>读一段英文</strong><small>不查词也没关系，先读懂大意</small></span>
+                  <span class="task-time">5 min</span>
+                </label>
+                <label class="task-item">
+                  <input type="checkbox" data-task="write" />
+                  <span class="task-check"></span><span class="task-copy"><strong>写下今天的一句话</strong><small>把刚学到的表达用起来</small></span>
+                  <span class="task-time">5 min</span>
+                </label>
+              </div>
+              <div class="daily-footer"><span>不需要完美，只要开始。</span><button data-go="writing">去写一句 <span>→</span></button></div>
+            </section>
+
+            <section class="panel word-preview">
+              <div class="section-heading">
+                <div><p class="eyebrow muted-eyebrow">WORDS TO KEEP</p><h2>最近收集的词</h2></div>
+                <button class="text-link" data-go="words">查看全部 <span>→</span></button>
+              </div>
+              <div class="preview-words" id="preview-words"></div>
+              <button class="add-word-quick" data-go="words"><span>＋</span> 收集一个新单词</button>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" id="page-words">
+          <div class="page-intro">
+            <p class="eyebrow"><span class="eyebrow-dot"></span> YOUR PERSONAL COLLECTION</p>
+            <h1>我的词库<span>，越用越熟悉。</span></h1>
+            <p class="welcome-subtitle">把遇见的单词收进来，再用自己的节奏慢慢记住。</p>
+          </div>
+          <div class="wordbook-toolbar">
+            <div class="search-box"><span>⌕</span><input id="word-search" type="search" placeholder="搜索单词或释义..." /></div>
+            <button class="button-primary" id="open-word-form"><span>＋</span> 添加单词</button>
+          </div>
+          <form class="add-word-form hidden" id="add-word-form">
+            <label>英文单词<input name="word" required placeholder="例如：serendipity" /></label>
+            <label>中文释义<input name="meaning" required placeholder="例如：意外发现美好事物的能力" /></label>
+            <label>例句 <span class="optional-label">可选</span><input name="example" placeholder="例如：It was a happy accident." /></label>
+            <div class="form-actions"><button type="button" class="button-quiet" id="cancel-word-form">取消</button><button class="button-primary" type="submit">保存到词库</button></div>
+          </form>
+          <div class="wordbook-summary"><span><strong id="wordbook-count">0</strong> 个单词</span><span id="wordbook-hint">每个单词，都是一次新的发现。</span></div>
+          <div class="word-list" id="word-list"></div>
+          <div class="empty-state hidden" id="word-empty">没有找到这个单词，试试别的关键词。</div>
+        </section>
+
+        <section class="page" id="page-review">
+          <div class="page-intro review-intro">
+            <p class="eyebrow"><span class="eyebrow-dot"></span> SPACED REPETITION</p>
+            <h1>复习一下<span>，让记忆留下来。</span></h1>
+            <p class="welcome-subtitle">想一想单词的意思，再翻开卡片看看答案。</p>
+          </div>
+          <div class="review-layout">
+            <div class="review-main">
+              <div class="review-progress"><span id="review-position">01 / 05</span><div><i id="review-progress-fill"></i></div><span id="review-remaining">还剩 5 个</span></div>
+              <button class="flashcard" id="flashcard" aria-label="点击翻转单词卡片">
+                <span class="card-label">WORD OF THE MOMENT</span>
+                <span class="flash-word" id="flash-word">serendipity</span>
+                <span class="flash-phonetic" id="flash-phonetic">/ˌser.ənˈdɪp.ə.ti/</span>
+                <span class="flash-divider"></span>
+                <span class="flash-prompt" id="flash-prompt">想好了吗？点击卡片揭晓释义 <span>↻</span></span>
+                <span class="flash-meaning hidden" id="flash-meaning"></span>
+                <span class="flash-example hidden" id="flash-example"></span>
+                <span class="card-decoration">✳</span>
+              </button>
+              <div class="review-actions">
+                <button class="button-quiet" id="review-again"><span>↺</span> 再复习</button>
+                <button class="button-known" id="review-known">我记住了 <span>✓</span></button>
+              </div>
+              <div class="review-tip"><span>✦</span> 记不住也很正常，下一次遇见时会更熟悉。</div>
+            </div>
+            <aside class="review-aside">
+              <div class="review-quote"><span class="quote-mark">“</span><p>Words are, of course, the most powerful drug used by mankind.</p><small>— Rudyard Kipling</small></div>
+              <div class="review-aside-stat"><span>本次已复习</span><strong><b id="reviewed-count">0</b> <small>个单词</small></strong><div class="aside-stat-line"><i id="aside-review-fill"></i></div></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="page" id="page-course">
+          <div class="page-intro">
+            <p class="eyebrow"><span class="eyebrow-dot"></span> YOUR BEGINNER ROADMAP</p>
+            <h1>从零开始<span>，一步一步学会用英语。</span></h1>
+            <p class="welcome-subtitle">为中文母语的初学者设计：不用赶进度，每天 20 分钟，每周学 5 天。</p>
+          </div>
+          <section class="course-hero">
+            <div>
+              <p class="course-kicker">12 WEEKS · 60 SHORT LESSONS</p>
+              <h2>先会开口，再慢慢听懂、读懂、写出来。</h2>
+              <p>把英语拆成小块，每次只专注一件事。漏了一天就从下一课继续，不用补课或重来。</p>
+              <button class="button-light" id="continue-course">继续今天的课 <span>→</span></button>
+            </div>
+            <div class="course-progress-card">
+              <span>我的学习进度</span>
+              <strong><b id="course-completed">0</b><small> / 60 课</small></strong>
+              <div class="course-progress-track"><i id="course-progress-fill"></i></div>
+              <small id="course-progress-caption">刚刚起步，正好从第一课开始。</small>
+            </div>
+          </section>
+          <div class="course-section-heading course-library-heading"><div><p class="eyebrow muted-eyebrow">CHOOSE YOUR NEXT RESOURCE</p><h2>教材配套学习路线</h2></div><span>用自己的正版教材学习，网站帮你安排顺序和记录进度。</span></div>
+          <div class="course-library" id="course-library"></div>
+          <div class="course-resource-note"><span>ⓘ</span> 以下是原创学习计划与练习建议，不包含教材原文、课文、题目或答案。不同版本的章节顺序可能不同，请按手头版本选择对应内容。</div>
+          <section class="routine-panel">
+            <div class="routine-heading"><span class="routine-icon">◷</span><div><strong>每天 20 分钟，照这个节奏学</strong><small>准备纸笔；跟读时大声说出来，发音先求清楚，不求像母语者。</small></div></div>
+            <div class="routine-steps"><div><b>05 分钟</b><span>回忆昨天内容</span></div><div><b>08 分钟</b><span>学习今天的新内容</span></div><div><b>05 分钟</b><span>跟读、替换词语造句</span></div><div><b>02 分钟</b><span>合上页面，凭记忆复述</span></div></div>
+          </section>
+          <div class="course-section-heading"><div><p class="eyebrow muted-eyebrow" id="active-course-kicker">YOUR STEP-BY-STEP PLAN</p><h2 id="active-course-heading">12 周学习路线</h2></div><span id="active-course-caption">每周 5 课 · 周末休息或轻松复习</span></div>
+          <div class="course-phases" id="course-phases"></div>
+          <div class="course-note"><span>☼</span><p><strong>给零基础的你：</strong>先读懂、敢开口，再追求快和准。不会就标记回头复习；每课的例句可以大声读三遍，再试着换成自己的信息。</p></div>
+        </section>
+
+        <section class="page" id="page-writing">
+          <div class="page-intro">
+            <p class="eyebrow"><span class="eyebrow-dot"></span> FIND YOUR WORDS</p>
+            <h1>自由写作<span>，不必先写得完美。</span></h1>
+            <p class="welcome-subtitle">从一个小小的念头开始。写错了也没关系，表达本身就是练习。</p>
+          </div>
+          <div class="writing-layout">
+            <section class="writing-card">
+              <div class="writing-card-top"><span class="writing-date" id="writing-date"></span><span class="saved-indicator"><i></i> 自动保存</span></div>
+              <div class="writing-prompt"><span>✳ TODAY'S PROMPT</span><h2>What is one small thing that made you smile today?</h2><p>今天有什么小事让你笑了？试着用英文记录下来。</p></div>
+              <label class="sr-only" for="writing-input">你的英文日记</label>
+              <textarea id="writing-input" placeholder="Today, I noticed..."></textarea>
+              <div class="writing-footer"><span><strong id="writing-words">0</strong> words</span><span>写给自己就好。</span></div>
+            </section>
+            <aside class="writing-side">
+              <div class="phrase-card"><p class="eyebrow muted-eyebrow">A FEW STARTING WORDS</p><h3>不知道怎么开头？</h3>
+                <button class="phrase" data-phrase="One thing I enjoyed today was..."><span>01</span> One thing I enjoyed today was...</button>
+                <button class="phrase" data-phrase="I felt a little more confident when..."><span>02</span> I felt a little more confident when...</button>
+                <button class="phrase" data-phrase="Tomorrow, I would like to..."><span>03</span> Tomorrow, I would like to...</button>
+              </div>
+              <div class="gentle-note"><span>☼</span><p>先写下来，再慢慢变好。<br /><strong>每一句都算数。</strong></p></div>
+            </aside>
+          </div>
+        </section>
+        <footer class="page-footer"><span>made for your own little progress</span><span>DAYLIGHT <i>✳</i></span></footer>
+      </main>
+    </div>
+    <div class="account-backdrop hidden" id="account-backdrop">
+      <section class="account-dialog" role="dialog" aria-modal="true" aria-labelledby="account-title">
+        <button class="account-close" id="close-account" type="button" aria-label="关闭">×</button>
+        <p class="eyebrow"><span class="eyebrow-dot"></span> YOUR PRIVATE LEARNING SPACE</p>
+        <h2 id="account-title">登录并同步进度</h2>
+        <p class="account-description" id="account-description">登录后，词库和学习进度会保存到你的个人服务器。</p>
+        <div class="account-user hidden" id="account-user"></div>
+        <div class="account-tabs" id="account-tabs">
+          <button type="button" data-auth-mode="login" class="active">登录</button>
+          <button type="button" data-auth-mode="register" id="register-tab">首次创建账号</button>
+        </div>
+        <form class="account-form" id="account-form">
+          <label>用户名<input name="username" autocomplete="username" minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]+" required placeholder="3–32 位字母、数字或 _ . -" /></label>
+          <label>密码<input name="password" type="password" autocomplete="current-password" minlength="12" maxlength="128" required placeholder="至少 12 个字符" /></label>
+          <label class="setup-key-field hidden" id="setup-key-field">首次设置码<input name="setup_key" autocomplete="off" placeholder="从服务器启动终端复制一次性设置码" /></label>
+          <p class="account-error hidden" id="account-error" role="alert"></p>
+          <button class="button-primary account-submit" type="submit" id="account-submit">登录并同步</button>
+        </form>
+        <button class="button-quiet signout-button hidden" id="sign-out" type="button">退出登录</button>
+        <p class="account-footnote" id="account-footnote">这是私人自托管账号，不需要邮箱，也不会连接第三方服务。</p>
+      </section>
+    </div>
+  </body>
+</html>

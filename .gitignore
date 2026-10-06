@@ -19,6 +19,7 @@ venv*/
 /tests-ui/data/object_info.json
 /user/
 *.log
+english-learning/daylight.sqlite3*
 web_custom_versions/
 .DS_Store
 filtered-openapi.yaml
