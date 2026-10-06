@@ -145,9 +145,13 @@ def get_utc_now() -> datetime:
 
 
 def mtime_ns_to_utc(mtime_ns: int, ctime_ns: int) -> datetime:
-    """Naive UTC time of a file mtime, capped at its ctime and at now, so a future mtime dates
-    the file no later than it arrived."""
-    return min(datetime(1970, 1, 1) + timedelta(microseconds=min(mtime_ns, ctime_ns) // 1000), get_utc_now())
+    """Naive UTC time of a file mtime. A future mtime falls back to the ctime (creation time on
+    Windows), capped at now, so the file is dated no later than it arrived."""
+    now = get_utc_now()
+    made = datetime(1970, 1, 1) + timedelta(microseconds=mtime_ns // 1000)
+    if made <= now:
+        return made
+    return min(datetime(1970, 1, 1) + timedelta(microseconds=ctime_ns // 1000), now)
 
 
 def normalize_tags(tags: list[str] | None) -> list[str]:

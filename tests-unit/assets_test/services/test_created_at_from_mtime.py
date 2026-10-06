@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 import folder_paths
 from app.assets.api import routes
 from app.assets.database.models import Asset
-from app.assets.helpers import get_utc_now
+from app.assets.helpers import get_utc_now, mtime_ns_to_utc
 from app.assets.scanner import SeedAssetSpec, insert_asset_specs
 from app.assets.services.ingest import register_executed_output, register_file_in_place
 
@@ -48,6 +48,10 @@ def _write(directory: Path, name: str, when: datetime | None = None, extra_ns: i
         mtime_ns = (when - _EPOCH) // timedelta(microseconds=1) * 1000 + extra_ns
         os.utime(path, ns=(mtime_ns, mtime_ns))
     return path
+
+
+def _ns(when: datetime) -> int:
+    return (when - _EPOCH) // timedelta(microseconds=1) * 1000
 
 
 def _spec(path: Path) -> SeedAssetSpec:
@@ -142,7 +146,7 @@ async def test_future_mtime_is_capped_at_now(
 
 
 @pytest.mark.asyncio
-async def test_future_mtime_file_dates_from_its_arrival_on_a_later_scan(
+async def test_future_mtime_file_dates_from_its_arrival_when_scanned_after_a_generation(
     one_database, output_dir: Path
 ):
     future = _write(output_dir, "future.png", datetime(2200, 1, 1))
@@ -150,7 +154,7 @@ async def test_future_mtime_file_dates_from_its_arrival_on_a_later_scan(
     generated = _write(output_dir, "generated.png")
     assert register_executed_output(str(generated), job_id="job-1") is not None
 
-    # The rescan after the prompt reaches the file only now.
+    # A scan reaches the file only after the prompt registered its output.
     _scan(future)
 
     assert (await _listed_names())[0] == "generated.png"
@@ -182,3 +186,10 @@ async def test_cursor_walks_files_sharing_an_mtime_once_each_in_order(
     assert walked == expected
     assert sorted(walked) == sorted(path.name for path in paths)
     assert walked[-1] == "older.png"
+
+
+def test_ctime_only_dates_a_file_whose_mtime_is_in_the_future():
+    created, modified = datetime(2025, 1, 1), datetime(2025, 9, 1)
+    # On Windows ctime is the creation time, earlier than any later edit.
+    assert mtime_ns_to_utc(_ns(modified), _ns(created)) == modified
+    assert mtime_ns_to_utc(_ns(datetime(2200, 1, 1)), _ns(created)) == created
