@@ -22,7 +22,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, init_db, lock_holder_db_path
+from app.database.db import dependencies_available, init_db, lock_holder_db_path, recover_from_corruption, start_daily_backup
 from app.assets.lifecycle import cleanup_temp_filesystem
 from app.assets.manager import AssetManager, default_asset_manager
 import itertools
@@ -482,7 +482,14 @@ def setup_database(asset_manager):
 
     try:
         init_db()
-        asset_manager.startup()
+        try:
+            asset_manager.startup()
+        except Exception as e:
+            # Corruption in a table that init_db doesn't read.
+            if not recover_from_corruption(e):
+                raise
+            asset_manager.startup()
+        start_daily_backup()
     except Exception as e:
         if "database is locked" in str(e) or "Could not acquire lock on database" in str(e):
             logging.error(

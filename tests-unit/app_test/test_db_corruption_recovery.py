@@ -82,16 +82,13 @@ def _break_schema(db_path: str) -> None:
         f.write(b"CREATX")
 
 
-@pytest.fixture
-def default_db(tmp_path, monkeypatch, backups_started):
-    """The default database (no --database-url), in a temporary user directory."""
-    monkeypatch.setattr(db_module.args, "database_url", None)
-    monkeypatch.setattr("folder_paths.get_user_directory", lambda: str(tmp_path))
+@pytest.fixture(autouse=True)
+def boot_state(monkeypatch):
+    """Undo what a boot binds: sessions, their engines and the database lock."""
     monkeypatch.setattr(db_module, "Session", None)
     monkeypatch.setattr(db_module, "WriteSession", None)
     monkeypatch.setattr(db_module, "_db_lock", None)
-    monkeypatch.setattr(db_module, "_start_daily_backup", backups_started.append)
-    yield str(tmp_path / "comfyui.db")
+    yield
     for session_factory in (db_module.Session, db_module.WriteSession):
         if session_factory is not None:
             session_factory.kw["bind"].dispose()
@@ -99,24 +96,45 @@ def default_db(tmp_path, monkeypatch, backups_started):
         db_module._db_lock.release(force=True)
 
 
-@pytest.fixture
-def backups_started():
-    return []
+@pytest.fixture(autouse=True)
+def boot_events(monkeypatch):
+    """What a boot did, in order: "startup" for each asset startup that succeeded, then "backup"."""
+    events = []
+    monkeypatch.setattr(main, "start_daily_backup", lambda: events.append("backup"))
+    monkeypatch.setattr(_AssetsOn, "events", events)
+    return events
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def startup_warnings(monkeypatch):
     warnings = []
     monkeypatch.setattr(app.logger, "STARTUP_WARNINGS", warnings)
     return warnings
 
 
+@pytest.fixture
+def default_db(tmp_path, monkeypatch):
+    """The default database (no --database-url), in a temporary user directory."""
+    monkeypatch.setattr(db_module.args, "database_url", None)
+    monkeypatch.setattr("folder_paths.get_user_directory", lambda: str(tmp_path))
+    return str(tmp_path / "comfyui.db")
+
+
+@pytest.fixture
+def explicit_db(tmp_path, monkeypatch):
+    path = str(tmp_path / "explicit.db")
+    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{path}")
+    return path
+
+
 class _AssetsOn:
     enabled = True
+    events: list[str] = []
 
     def startup(self):
         with db_module.create_session() as session:
-            session.connection().exec_driver_sql("SELECT count(*) FROM assets").scalar_one()
+            session.connection().exec_driver_sql("SELECT * FROM assets").fetchall()
+        self.events.append("startup")
 
 
 def _boot():
@@ -190,7 +208,7 @@ def test_corruption_found_by_an_upgrade_is_quarantined(default_db, startup_warni
     assert len(_quarantined(default_db)) == 1
 
 
-def test_locked_database_is_not_mistaken_for_corruption(default_db, monkeypatch):
+def test_locked_database_is_not_mistaken_for_corruption(default_db):
     _make_db(default_db)
     holder = sqlite3.connect(default_db)
     holder.execute("BEGIN EXCLUSIVE")
@@ -203,17 +221,69 @@ def test_locked_database_is_not_mistaken_for_corruption(default_db, monkeypatch)
     assert _revision(default_db) == _head()
 
 
-def test_explicit_database_url_is_not_quarantined(tmp_path, monkeypatch):
-    db_path = str(tmp_path / "explicit.db")
-    _make_db(db_path)
-    _overwrite_header(db_path)
-    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{db_path}")
-    monkeypatch.setattr(db_module, "_db_lock", None)
+def test_explicit_database_url_is_not_quarantined(explicit_db):
+    _make_db(explicit_db)
+    _overwrite_header(explicit_db)
 
     with pytest.raises(SystemExit):
         _boot()
 
-    assert _quarantined(db_path) == []
+    assert _quarantined(explicit_db) == []
+
+
+def test_corruption_first_hit_by_asset_startup_is_recovered(default_db, boot_events):
+    # init_db doesn't read the assets table; the first query that does is in asset startup.
+    _make_db(default_db + ".daily-backup", marker="from backup")
+    _make_db(default_db)
+    _overwrite_page_of(default_db, "assets")
+
+    _boot()
+
+    [quarantined] = _quarantined(default_db)
+    with closing(sqlite3.connect(default_db)) as conn:
+        assert conn.execute("SELECT value FROM marker").fetchone() == ("from backup",)
+    assert boot_events == ["startup", "backup"]
+    if os.path.isdir("/proc/self/fd"):  # Windows refuses to rename a file this process has open
+        assert os.path.realpath(quarantined) not in _open_files()
+
+
+def test_healthy_boot_starts_the_backup_after_asset_startup(default_db, boot_events):
+    _make_db(default_db)
+
+    _boot()
+
+    assert boot_events == ["startup", "backup"]
+    assert _quarantined(default_db) == []
+
+
+def test_older_backup_is_restored_and_upgraded(default_db):
+    _make_db(default_db + ".daily-backup", revision="0006_add_loader_path", marker="old backup")
+    _make_db(default_db)
+    _overwrite_header(default_db)
+
+    _boot()
+
+    assert _revision(default_db) == _head()
+    with closing(sqlite3.connect(default_db)) as conn:
+        assert conn.execute("SELECT value FROM marker").fetchone() == ("old backup",)
+
+
+def test_recovery_after_init_ignores_other_errors(default_db):
+    _make_db(default_db)
+    db_module.init_db()
+
+    assert not db_module.recover_from_corruption(RuntimeError("database disk image is malformed"))
+    assert not db_module.recover_from_corruption(sqlite3.OperationalError("database is locked"))
+    assert _quarantined(default_db) == []
+
+
+def test_recovery_after_init_ignores_an_explicit_database_url(explicit_db):
+    _make_db(explicit_db)
+    db_module.init_db()
+    _overwrite_header(explicit_db)
+
+    assert not db_module.recover_from_corruption(sqlite3.DatabaseError("file is not a database"))
+    assert _quarantined(explicit_db) == []
 
 
 def test_failed_quarantine_raises_the_corruption(default_db, monkeypatch, startup_warnings):
@@ -267,7 +337,10 @@ def test_damaged_pre_upgrade_backup_does_not_quarantine_a_sound_database(default
     assert _revision(default_db) == "0006_add_loader_path"
 
 
-def test_crash_left_wal_does_not_reach_the_new_database(default_db):
+@pytest.mark.parametrize("with_backup", [False, True])
+def test_crash_left_wal_does_not_reach_the_new_database(default_db, with_backup):
+    if with_backup:
+        _make_db(default_db + ".daily-backup")
     _make_db(default_db)
     writer = sqlite3.connect(default_db)
     writer.execute("PRAGMA journal_mode=WAL")
@@ -305,8 +378,11 @@ def test_failed_open_leaves_no_handle_on_the_database(default_db):
         db_module._migrate_and_bind(db_module.get_database_url(), default_db, True)
 
     assert raised.value is not None  # its traceback still references the failed engines
-    open_files = {os.path.realpath(f"/proc/self/fd/{fd}") for fd in os.listdir("/proc/self/fd")}
-    assert os.path.realpath(default_db) not in open_files
+    assert os.path.realpath(default_db) not in _open_files()
+
+
+def _open_files() -> set[str]:
+    return {os.path.realpath(f"/proc/self/fd/{fd}") for fd in os.listdir("/proc/self/fd")}
 
 
 # Daily backup
@@ -356,66 +432,98 @@ def test_failed_backup_removes_its_partial_file(live_db, monkeypatch):
     assert not os.path.exists(backup + ".tmp")
 
 
-def _join_backup_threads():
-    for thread in threading.enumerate():
-        if thread.name == "database-daily-backup":
-            thread.join()
+def test_backup_is_written_off_the_startup_thread(default_db, monkeypatch):
+    _make_db(default_db)
+    release = threading.Event()
+    writers = []
+
+    def _blocked_write(db_path, backup_path):
+        writers.append((threading.current_thread().name, db_path, backup_path))
+        release.wait(10)
+
+    monkeypatch.setattr(db_module, "_write_daily_backup", _blocked_write)
+
+    db_module.start_daily_backup()  # returns while the write is still blocked
+
+    deadline = time.monotonic() + 10
+    while not writers and time.monotonic() < deadline:
+        time.sleep(0.01)
+    release.set()
+    assert writers == [("database-daily-backup", default_db, default_db + ".daily-backup")]
 
 
-def test_started_backup_writes_a_sound_copy(live_db):
-    db_module._start_daily_backup(live_db)
-    _join_backup_threads()
+def test_started_backup_writes_a_sound_copy(default_db):
+    _make_db(default_db, marker="live")
 
-    with closing(sqlite3.connect(live_db + ".daily-backup")) as conn:
+    db_module.start_daily_backup()
+
+    backup = default_db + ".daily-backup"
+    deadline = time.monotonic() + 30
+    while not os.path.exists(backup) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    with closing(sqlite3.connect(backup)) as conn:
         assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
         assert conn.execute("SELECT value FROM marker").fetchone() == ("live",)
 
 
-@pytest.mark.parametrize("age_hours, expect_backup", [(None, True), (25, True), (1, False)])
-def test_backup_runs_at_most_daily(tmp_path, monkeypatch, age_hours, expect_backup):
+class _Stop(Exception):
+    pass
+
+
+@pytest.mark.parametrize("age_hours, writes_first", [(None, True), (25, True), (1, False)])
+def test_backup_is_refreshed_once_a_day_while_running(tmp_path, monkeypatch, age_hours, writes_first):
     db_path = str(tmp_path / "comfyui.db")
     backup = db_path + ".daily-backup"
     if age_hours is not None:
         open(backup, "w").close()
         then = time.time() - age_hours * 3600
         os.utime(backup, (then, then))
-    written = []
-    monkeypatch.setattr(db_module, "_write_daily_backup", lambda *a: written.append(a))
+    events = []
 
-    db_module._start_daily_backup(db_path)
-    _join_backup_threads()
+    def _sleep(seconds):
+        events.append(("sleep", round(seconds / 3600)))
+        if len(events) >= 4:
+            raise _Stop
 
-    assert written == ([(db_path, backup)] if expect_backup else [])
+    monkeypatch.setattr(db_module.time, "sleep", _sleep)
+    monkeypatch.setattr(db_module, "_write_daily_backup", lambda *a: events.append(("write", a)))
+
+    with pytest.raises(_Stop):
+        db_module._keep_daily_backup(db_path, backup)
+
+    if writes_first:
+        assert events[:2] == [("write", (db_path, backup)), ("sleep", 24)]
+    else:
+        assert events[0] == ("sleep", 23)
 
 
-def test_boot_starts_the_backup_for_the_default_database(default_db, backups_started):
-    _make_db(default_db)
-
-    _boot()
-
-    assert backups_started == [default_db]
-
-
-def test_no_backup_for_an_explicit_database_url(tmp_path, monkeypatch):
-    db_path = str(tmp_path / "explicit.db")
-    _make_db(db_path)
+def test_no_backup_for_an_explicit_database_url(explicit_db, monkeypatch):
     started = []
-    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{db_path}")
-    monkeypatch.setattr(db_module, "_db_lock", None)
-    monkeypatch.setattr(db_module, "_start_daily_backup", started.append)
-    try:
-        _boot()
-    finally:
-        db_module._db_lock.release(force=True)
+    monkeypatch.setattr(db_module.threading, "Thread", lambda **kw: started.append(kw))
+
+    db_module.start_daily_backup()
 
     assert started == []
 
 
-def test_comfyui_launches_on_a_corrupt_default_database(tmp_path):
+def test_stale_partial_backup_is_removed(live_db):
+    backup = live_db + ".daily-backup"
+    with open(backup + ".tmp", "wb") as f:
+        f.write(b"left by a process that exited mid-backup")
+
+    db_module._write_daily_backup(live_db, backup)
+
+    assert not os.path.exists(backup + ".tmp")
+    with closing(sqlite3.connect(backup)) as conn:
+        assert conn.execute("SELECT value FROM marker").fetchone() == ("live",)
+
+
+@pytest.mark.parametrize("table", ["alembic_version", "asset_system_state"])
+def test_comfyui_launches_on_a_corrupt_default_database(tmp_path, table):
     db_path = tmp_path / "user" / "comfyui.db"
     db_path.parent.mkdir()
     _make_db(str(db_path))
-    _overwrite_page_of(str(db_path), "alembic_version")
+    _overwrite_page_of(str(db_path), table)
     repo_root = Path(__file__).resolve().parents[2]
 
     launch = subprocess.run(

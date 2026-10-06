@@ -276,22 +276,36 @@ def _init_file_db(db_url):
     _acquire_file_lock(db_path)
     try:
         copy_legacy_default_db(db_path)
-        # Only the default database: one named by --database-url may be managed elsewhere.
-        is_default = args.database_url is None
         try:
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
         except Exception as e:
-            # SQLITE_CORRUPT or SQLITE_NOTADB, never "database is locked". The error can come
-            # from another file (the pre-upgrade backup), so the live database must fail too.
-            if not is_default or error_kind(e) != "database_corrupt" or _passes_quick_check(db_path):
+            if not _is_corrupt_default_db(e, db_path):
                 raise
             _quarantine_and_restore(db_path, e)
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
     except Exception:
         _db_lock.release()
         raise
-    if is_default:
-        _start_daily_backup(db_path)
+
+
+def _is_corrupt_default_db(error, db_path):
+    # Only the default database: one named by --database-url may be managed elsewhere.
+    # SQLITE_CORRUPT or SQLITE_NOTADB, never "database is locked". The error can come from
+    # another file (the pre-upgrade backup), so the live database must fail its check too.
+    is_default = args.database_url is None
+    return is_default and error_kind(error) == "database_corrupt" and not _passes_quick_check(db_path)
+
+
+def recover_from_corruption(error):
+    """Replace a default database found corrupt after init_db. False for any other error."""
+    db_path = get_db_path()
+    if not _is_corrupt_default_db(error, db_path):
+        return False
+    for session_factory in (Session, WriteSession):
+        session_factory.kw["bind"].dispose()  # Windows refuses to rename an open file
+    _quarantine_and_restore(db_path, error)
+    _migrate_and_bind(get_database_url(), db_path, os.path.exists(db_path))
+    return True
 
 
 def _passes_quick_check(path):
@@ -336,17 +350,27 @@ def _quarantine_and_restore(db_path, error):
 _DAILY_BACKUP_INTERVAL_SECONDS = 24 * 60 * 60
 
 
-def _start_daily_backup(db_path):
-    """Refresh the daily backup in the background, off the startup path."""
-    backup_path = db_path + ".daily-backup"
-    try:
-        if time.time() - os.path.getmtime(backup_path) < _DAILY_BACKUP_INTERVAL_SECONDS:
-            return
-    except OSError:
-        pass  # no backup yet
+def start_daily_backup():
+    """Keep a compact copy of the default database, refreshed once a day, off the startup path."""
+    if args.database_url is not None:
+        return
+    db_path = get_db_path()
     threading.Thread(
-        target=_write_daily_backup, args=(db_path, backup_path), name="database-daily-backup", daemon=True
+        target=_keep_daily_backup, args=(db_path, db_path + ".daily-backup"), name="database-daily-backup", daemon=True
     ).start()
+
+
+def _keep_daily_backup(db_path, backup_path):
+    # A daemon thread: exiting mid-backup leaves only a .tmp file, which the next backup removes.
+    while True:
+        try:
+            due_in = os.path.getmtime(backup_path) + _DAILY_BACKUP_INTERVAL_SECONDS - time.time()
+        except OSError:
+            due_in = 0  # no backup yet
+        if due_in <= 0:
+            _write_daily_backup(db_path, backup_path)
+            due_in = _DAILY_BACKUP_INTERVAL_SECONDS  # also the retry delay after a failure
+        time.sleep(due_in)
 
 
 def _write_daily_backup(db_path, backup_path):
