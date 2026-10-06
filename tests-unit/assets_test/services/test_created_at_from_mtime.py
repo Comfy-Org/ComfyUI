@@ -184,3 +184,10 @@ def test_future_ctime_is_capped_at_now(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("app.assets.helpers.get_utc_now", lambda: now)
     future = _ns(datetime(2200, 1, 1))
     assert mtime_ns_to_utc(future, future) == now
+
+
+def test_future_mtime_with_a_pre_1970_ctime_is_dated_now(monkeypatch: pytest.MonkeyPatch):
+    # An unset Windows creation time reads as 1601, which a cursor can't encode.
+    now = datetime(2026, 10, 1)
+    monkeypatch.setattr("app.assets.helpers.get_utc_now", lambda: now)
+    assert mtime_ns_to_utc(_ns(datetime(2200, 1, 1)), -11_644_473_600 * 10**9) == now
