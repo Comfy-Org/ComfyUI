@@ -12,6 +12,7 @@ from comfy_execution.jobs import (
     JobStatus,
     get_job,
     get_all_jobs,
+    get_job_create_times,
     validate_job_id,
     cancel_job,
     CANCEL_PENDING,
@@ -48,7 +49,12 @@ from app.assets.event_log import emit
 from app.database.db import dependencies_available
 
 if dependencies_available():
-    from app.assets.services.asset_management import resolve_hash_to_path
+    from app.assets.services.asset_management import (
+        get_export_file,
+        list_job_export_files,
+        resolve_hash_to_path,
+    )
+    from app.asset_export import AssetExportManager
 
 from app.user_manager import UserManager
 from app.model_manager import ModelFileManager
@@ -209,7 +215,7 @@ def create_block_external_middleware():
         else:
             response = await handler(request)
 
-        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' data:; frame-src 'self'; object-src 'self';"
+        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self'; connect-src 'self' data: blob:; frame-src 'self'; object-src 'self';"
         return response
 
     return block_external_middleware
@@ -260,6 +266,26 @@ class PromptServer():
         logging.info(f"[Prompt Server] web root: {self.web_root}")
         self.asset_manager.register_routes(self.app, self.user_manager)
         self.asset_manager.set_event_sink(self.send_sync)
+
+        def _job_create_times(prompt_ids):
+            """Creation times of the given jobs, from the queue and history."""
+            running, queued = self.prompt_queue.get_current_queue_volatile()
+            history = {}
+            for prompt_id in prompt_ids:
+                history.update(
+                    self.prompt_queue.get_history(prompt_id=prompt_id, map_function=lambda item: item)
+                )
+            return get_job_create_times(prompt_ids, running, queued, history)
+
+        if dependencies_available():
+            self.asset_export_manager = AssetExportManager(
+                list_job_files=list_job_export_files,
+                get_asset_file=get_export_file,
+                get_job_create_times=_job_create_times,
+                event_sink=self.send_sync,
+                get_user_id=self.user_manager.get_request_user_id,
+            )
+            self.asset_export_manager.register_routes(self.app)
         if self.asset_manager.enabled:
             emit("assets.enabled", hashing_enabled=args.enable_asset_hashing)
         routes = web.RouteTableDef()
