@@ -545,79 +545,50 @@ class Kandinsky6(nn.Module):
         rope_a = self.rope_encode_1d(self.audio_rope_embedder_1d, x_A.shape[1],
                                      scale=freqs_scaling, device=x_V.device, dtype=dtype)
 
-        original_visual = visual_embed
-        original_audio = audio_embed
-        cache_state = transformer_options.get("k6_magcache") if self.n_grid == 1 else None
-        cache_decision = None
-        if cache_state is not None:
-            cache_decision = cache_state.begin(
-                profile="i2va" if visual_reference_tail else "t2va",
-                timestep=timestep,
-                cond_or_uncond=transformer_options.get("cond_or_uncond"),
-                visual=visual_embed,
-                audio=audio_embed,
+        ctx_v = self.video_text_embeddings(context)
+        rope_text_v = self.rope_encode_1d(
+            self.rope_embedder_1d,
+            context.shape[1],
+            device=x_V.device,
+            dtype=dtype,
+        )
+        for block in self.video_text_transformer_blocks:
+            ctx_v = _encoder_block_fp32(
+                block, ctx_v, tev, rope_text_v, transformer_options
             )
 
-        if cache_decision is not None and cache_decision.skip:
-            visual_embed, audio_embed = cache_state.apply_cached(
-                visual_embed, audio_embed, cache_decision
+        ctx_a = self.audio_text_embeddings(context_a)
+        rope_text_a = self.rope_encode_1d(
+            self.audio_rope_embedder_1d,
+            context_a.shape[1],
+            device=x_V.device,
+            dtype=dtype,
+        )
+        for block in self.audio_text_transformer_blocks:
+            ctx_a = _encoder_block_fp32(
+                block, ctx_a, tea, rope_text_a, transformer_options
             )
-        else:
-            # These four text blocks per stream are part of the canonical
-            # MagCache skip region, along with the 60 fused visual blocks.
-            ctx_v = self.video_text_embeddings(context)
-            rope_text_v = self.rope_encode_1d(
-                self.rope_embedder_1d,
-                context.shape[1],
-                device=x_V.device,
-                dtype=dtype,
-            )
-            for block in self.video_text_transformer_blocks:
-                ctx_v = _encoder_block_fp32(
-                    block, ctx_v, tev, rope_text_v, transformer_options
+
+        transformer_options["total_blocks"] = len(self.visual_blocks)
+        for i, block in enumerate(self.visual_blocks):
+            transformer_options["block_index"] = i
+            if ("double_block", i) in blocks_replace:
+                def block_wrap(args, _block=block):
+                    v, a = _block(args["visual"], args["audio"], args["ctx_v"], args["ctx_a"],
+                                  args["tev"], args["tea"], args["rope_v"], args["rope_a"],
+                                  transformer_options=args.get("transformer_options"))
+                    return {"visual": v, "audio": a}
+                out = blocks_replace[("double_block", i)](
+                    {"visual": visual_embed, "audio": audio_embed, "ctx_v": ctx_v, "ctx_a": ctx_a,
+                     "tev": tev, "tea": tea, "rope_v": rope_v, "rope_a": rope_a,
+                     "transformer_options": transformer_options},
+                    {"original_block": block_wrap},
                 )
-
-            ctx_a = self.audio_text_embeddings(context_a)
-            rope_text_a = self.rope_encode_1d(
-                self.audio_rope_embedder_1d,
-                context_a.shape[1],
-                device=x_V.device,
-                dtype=dtype,
-            )
-            for block in self.audio_text_transformer_blocks:
-                ctx_a = _encoder_block_fp32(
-                    block, ctx_a, tea, rope_text_a, transformer_options
-                )
-
-            transformer_options["total_blocks"] = len(self.visual_blocks)
-            for i, block in enumerate(self.visual_blocks):
-                transformer_options["block_index"] = i
-                if ("double_block", i) in blocks_replace:
-                    def block_wrap(args, _block=block):
-                        v, a = _block(args["visual"], args["audio"], args["ctx_v"], args["ctx_a"],
-                                      args["tev"], args["tea"], args["rope_v"], args["rope_a"],
-                                      transformer_options=args.get("transformer_options"))
-                        return {"visual": v, "audio": a}
-                    out = blocks_replace[("double_block", i)](
-                        {"visual": visual_embed, "audio": audio_embed, "ctx_v": ctx_v, "ctx_a": ctx_a,
-                         "tev": tev, "tea": tea, "rope_v": rope_v, "rope_a": rope_a,
-                         "transformer_options": transformer_options},
-                        {"original_block": block_wrap},
-                    )
-                    visual_embed, audio_embed = out["visual"], out["audio"]
-                else:
-                    visual_embed, audio_embed = block(
-                        visual_embed, audio_embed, ctx_v, ctx_a, tev, tea, rope_v, rope_a,
-                        transformer_options=transformer_options,
-                    )
-
-            if cache_decision is not None:
-                cache_state.record_computed(
-                    original_visual,
-                    original_audio,
-                    visual_embed,
-                    audio_embed,
-                    cache_decision,
+                visual_embed, audio_embed = out["visual"], out["audio"]
+            else:
+                visual_embed, audio_embed = block(
+                    visual_embed, audio_embed, ctx_v, ctx_a, tev, tea, rope_v, rope_a,
+                    transformer_options=transformer_options,
                 )
 
         visual_embed = visual_embed.reshape(*visual_shape, -1)
