@@ -22,7 +22,7 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, init_db
+from app.database.db import dependencies_available, init_db, lock_holder_db_path
 from app.assets.lifecycle import cleanup_temp_filesystem
 from app.assets.manager import AssetManager, default_asset_manager
 import itertools
@@ -51,6 +51,9 @@ if __name__ == "__main__":
     ):
         os.environ["CUDA_VISIBLE_DEVICES"] = "0"
         logging.warning("On windows we are currently forcing single GPU mode in ComfyUI due to a Nvidia related issue, if you want to disable this use: --cuda-device all")
+
+    if args.disable_api_nodes:
+        logging.warning("--disable-api-nodes is deprecated and will be removed in a future version. It currently behaves like --offline. Use --offline to keep the frontend offline, or --disable-partner-nodes to only disable partner nodes.")
 
 faulthandler.enable(file=sys.stderr, all_threads=args.debug_hang)
 if __name__ == "__main__" and args.debug_hang:
@@ -354,6 +357,7 @@ def prompt_worker(q, server_instance, asset_manager):
                 execution_start_time = time.perf_counter()
                 prompt_id = item[1]
                 server_instance.last_prompt_id = prompt_id
+                server_instance.workflow_metadata = item[3].get("workflow_metadata", {})
 
                 sensitive = item[5]
                 extra_data = item[3].copy()
@@ -373,8 +377,12 @@ def prompt_worker(q, server_instance, asset_manager):
                                 status_str='success' if e.success else 'error',
                                 completed=e.success,
                                 messages=e.status_messages), process_item=remove_sensitive)
+                if q.get_tasks_remaining() == 0:
+                    # Nothing else is queued, so let the background scan run now rather than on the next GC tick.
+                    asset_manager.resume_background_scan()
                 if server_instance.client_id is not None:
                     server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
+                server_instance.workflow_metadata = {}
 
                 current_time = time.perf_counter()
                 execution_time = current_time - execution_start_time
@@ -466,37 +474,52 @@ def setup_database(asset_manager):
     if not dependencies_available():
         return
 
+    if not asset_manager.enabled:
+        # Only the asset system uses the database, so leave it, and its lock, to a process that has assets on.
+        warn_if_database_in_use()
+        asset_manager.startup()
+        return
+
     try:
         init_db()
         asset_manager.startup()
     except Exception as e:
-        if "database is locked" in str(e):
+        if "database is locked" in str(e) or "Could not acquire lock on database" in str(e):
             logging.error(
                 "Database is locked. Another ComfyUI process is already using this database.\n"
                 "To resolve this, specify a separate database file for this instance:\n"
                 "  --database-url sqlite:///path/to/another.db"
             )
             sys.exit(1)
-        if "Could not acquire lock on database" in str(e):
-            logging.error(
-                "Database is locked. Another ComfyUI process is already using this database.\n"
-                "To resolve this, specify a separate database file for this instance:\n"
-                "  --database-url sqlite:///path/to/another.db"
-            )
-            if args.enable_assets:
-                sys.exit(1)
-            return
-        if args.enable_assets:
-            logging.error(
-                f"Failed to initialize database: {e}\n"
-                "The --enable-assets flag requires a working database connection.\n"
-                "To resolve this, try one of the following:\n"
-                "  1. Install the latest requirements: pip install -r requirements.txt\n"
-                "  2. Specify an alternative database URL: --database-url sqlite:///path/to/your.db\n"
-                "  3. Use an in-memory database: --database-url sqlite:///:memory:"
-            )
-            sys.exit(1)
-        logging.error(f"Failed to initialize database. Please ensure you have installed the latest requirements. If the error persists, please report this as in future the database will be required: {e}")
+        logging.error(
+            f"Failed to initialize database: {e}\n"
+            "The --enable-assets flag requires a working database connection.\n"
+            "To resolve this, try one of the following:\n"
+            "  1. Install the latest requirements: pip install -r requirements.txt\n"
+            "  2. Specify an alternative database URL: --database-url sqlite:///path/to/your.db\n"
+            "  3. Use an in-memory database: --database-url sqlite:///:memory:"
+        )
+        sys.exit(1)
+
+
+def warn_if_database_in_use():
+    db_path = lock_holder_db_path()
+    if db_path is None:
+        return
+    app.logger.log_startup_warning(
+        f"""
+________________________________________________________________________
+WARNING WARNING WARNING WARNING WARNING
+
+Another ComfyUI is already using this install's asset database:
+  {db_path}
+This ComfyUI was started without --enable-assets, so it doesn't need that database and will start anyway.
+A future version will refuse to start two ComfyUIs on the same asset database.
+To run both, give this one its own:
+  --database-url sqlite:///path/to/another.db
+________________________________________________________________________
+""".strip()
+    )
 
 
 def start_comfyui(asyncio_loop=None):
@@ -525,7 +548,7 @@ def start_comfyui(asyncio_loop=None):
     hook_breaker_ac10a0.save_functions()
     asyncio_loop.run_until_complete(nodes.init_extra_nodes(
         init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
-        init_api_nodes=not args.disable_api_nodes
+        init_api_nodes=not args.disable_partner_nodes
     ))
 
     # Re-apply Comfy's cuDNN benchmark policy after custom-node imports. Benchmark

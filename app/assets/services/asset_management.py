@@ -1,7 +1,8 @@
 """Serves the per-asset operations behind the API: reading an asset's detail,
-updating its name, tags, metadata and preview, deleting a record, and resolving
-a hash to a servable path. Name and tag updates move ``updated_at`` only when
-the requested values differ. Other supplied metadata fields record a write.
+updating its name, tags, metadata and preview, deleting a record, resolving
+a hash to a servable path, and looking up the files an export zips. Name and
+tag updates move ``updated_at`` only when the requested values differ. Other
+supplied metadata fields record a write.
 """
 
 import mimetypes
@@ -30,6 +31,7 @@ from app.assets.services.schemas import (
     AssetData,
     AssetDetailResult,
     DownloadResolutionResult,
+    ExportableAssetFile,
     ReferenceData,
     UserMetadata,
 )
@@ -268,4 +270,63 @@ def resolve_asset_for_download(
             abs_path=abs_path,
             content_type=ctype,
             download_name=download_name,
+        )
+
+
+def list_job_export_files(
+    job_ids: Sequence[str], include_previews: bool
+) -> list[ExportableAssetFile]:
+    """Live output records of the given jobs, plus their temp records when previews are requested."""
+    if not job_ids:
+        return []
+    tags = ["output", "temp"] if include_previews else ["output"]
+    with create_session() as session:
+        rows = session.execute(
+            select(
+                Asset.id,
+                Asset.name,
+                Asset.job_id,
+                Asset.created_at,
+                AssetContent.path,
+                AssetContent.hash,
+            )
+            .join(AssetContent, Asset.content_id == AssetContent.id)
+            .where(
+                Asset.job_id.in_(list(job_ids)),
+                AssetContent.is_missing.is_(False),
+                Asset.id.in_(
+                    select(AssetTag.asset_id).where(AssetTag.tag_name.in_(tags))
+                ),
+            )
+        ).all()
+    return [
+        ExportableAssetFile(
+            id=row.id,
+            name=row.name,
+            path=row.path,
+            hash=row.hash,
+            job_id=row.job_id,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+def get_export_file(reference_id: str) -> ExportableAssetFile:
+    with create_session() as session:
+        record = get_record_by_id(session, reference_id)
+        if record is None:
+            raise ValueError(f"AssetReference {reference_id} not found")
+        content = session.get(AssetContent, record.content_id)
+        if content is None or content.is_missing:
+            raise FileNotFoundError(
+                f"No live content for AssetReference {reference_id}"
+            )
+        return ExportableAssetFile(
+            id=record.id,
+            name=record.name,
+            path=content.path,
+            hash=content.hash,
+            job_id=record.job_id,
+            created_at=record.created_at,
         )
