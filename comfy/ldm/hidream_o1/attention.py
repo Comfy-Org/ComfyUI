@@ -7,10 +7,10 @@ gen half hit the user's preferred backend via optimized_attention.
 import torch
 
 import comfy.ops
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, optimized_attention
 
 
-def make_two_pass_attention(ar_len: int, transformer_options=None):
+def make_two_pass_attention(ar_len: int, transformer_options=None, preferred_attention=None):
     """Build a two-pass attention callable. AR pass uses SDPA-causal directly, gen pass routes through optimized_attention.
     The AR pass goes through SDPA directand bypasses wrappers, it is only ~1% of T at typical edit sizes.
     """
@@ -19,20 +19,23 @@ def make_two_pass_attention(ar_len: int, transformer_options=None):
         B, H, T, D = q.shape
 
         if T < k.shape[2]: # KV-cache hot path: Q is shorter than K/V (cached AR prefix is in K/V only), all fresh Q positions are in the gen region, single full-attention call
-            out = optimized_attention(q, k, v, heads, mask=None, skip_reshape=True, skip_output_reshape=True, transformer_options=transformer_options, enable_gqa=enable_gqa)
+            q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+            out = optimized_attention(q, k, v, heads, mask=None, skip_reshape=True, skip_output_reshape=True, transformer_options=transformer_options, preferred_attention=preferred_attention, enable_gqa=enable_gqa)
         elif ar_len >= T:
             out = comfy.ops.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True, enable_gqa=enable_gqa)
         elif ar_len <= 0:
-            out = optimized_attention(q, k, v, heads, mask=None, skip_reshape=True, skip_output_reshape=True, transformer_options=transformer_options, enable_gqa=enable_gqa)
+            q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
+            out = optimized_attention(q, k, v, heads, mask=None, skip_reshape=True, skip_output_reshape=True, transformer_options=transformer_options, preferred_attention=preferred_attention, enable_gqa=enable_gqa)
         else:
             out_ar = comfy.ops.scaled_dot_product_attention(
                 q[:, :, :ar_len], k[:, :, :ar_len], v[:, :, :ar_len],
                 attn_mask=None, dropout_p=0.0, is_causal=True, enable_gqa=enable_gqa,
             )
+            q, k, v = AttentionTensorContainer(q[:, :, ar_len:]), AttentionTensorContainer(k), AttentionTensorContainer(v)
             out_gen = optimized_attention(
-                q[:, :, ar_len:], k, v, heads,
+                q, k, v, heads,
                 mask=None, skip_reshape=True, skip_output_reshape=True,
-                transformer_options=transformer_options, enable_gqa=enable_gqa,
+                transformer_options=transformer_options, preferred_attention=preferred_attention, enable_gqa=enable_gqa,
             )
             out = torch.cat([out_ar, out_gen], dim=2)
 
