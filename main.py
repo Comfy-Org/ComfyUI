@@ -485,7 +485,6 @@ def setup_database(asset_manager):
         try:
             asset_manager.startup()
         except Exception as e:
-            # Corruption in a table that init_db doesn't read.
             if not recover_from_corruption(e):
                 raise
             asset_manager.startup()

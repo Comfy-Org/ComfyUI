@@ -279,7 +279,7 @@ def _init_file_db(db_url):
         try:
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
         except Exception as e:
-            if not _is_corrupt_default_db(e, db_path):
+            if not _is_corrupt_default_db(e):
                 raise
             _quarantine_and_restore(db_path, e)
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
@@ -288,19 +288,19 @@ def _init_file_db(db_url):
         raise
 
 
-def _is_corrupt_default_db(error, db_path):
+def _is_corrupt_default_db(error):
     # Only the default database: one named by --database-url may be managed elsewhere.
     # SQLITE_CORRUPT or SQLITE_NOTADB, never "database is locked". The error can come from
     # another file (the pre-upgrade backup), so the live database must fail its check too.
     is_default = args.database_url is None
-    return is_default and error_kind(error) == "database_corrupt" and not _passes_quick_check(db_path)
+    return is_default and error_kind(error) == "database_corrupt" and not _passes_quick_check(get_db_path())
 
 
 def recover_from_corruption(error):
     """Replace a default database found corrupt after init_db. False for any other error."""
-    db_path = get_db_path()
-    if not _is_corrupt_default_db(error, db_path):
+    if not _is_corrupt_default_db(error):
         return False
+    db_path = get_db_path()
     for session_factory in (Session, WriteSession):
         session_factory.kw["bind"].dispose()  # Windows refuses to rename an open file
     _quarantine_and_restore(db_path, error)
@@ -331,10 +331,11 @@ def _quarantine_and_restore(db_path, error):
     outcome = "Database recreated empty: there was no sound daily backup"
     try:
         shutil.copyfile(backup_path, restore_path)
+        shutil.copymode(quarantine_path, restore_path)
         if _passes_quick_check(restore_path):
+            taken = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(backup_path)))
             # Atomic: a crash leaves either no database or the whole backup, never part of it.
             os.replace(restore_path, db_path)
-            taken = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(backup_path)))
             outcome = f"Database restored from the daily backup taken {taken}; later changes are lost"
     except OSError:
         pass  # no backup, or it can't be read
@@ -381,12 +382,11 @@ def _write_daily_backup(db_path, backup_path):
         # VACUUM INTO fails on a corrupt page it reads, so a corrupt database never replaces the backup.
         with closing(sqlite3.connect(db_path)) as conn:
             conn.execute("VACUUM INTO ?", (tmp_path,))
+        shutil.copymode(db_path, tmp_path)
         os.replace(tmp_path, backup_path)
         logging.info(f"Database daily backup written to '{backup_path}'")
     except Exception:
         logging.exception("Database daily backup failed; keeping the previous one")
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
 
 
 # NORMAL: commits skip the fsync that held the write lock. A power loss or OS crash can
@@ -440,17 +440,11 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     try:
         _migrate(conn, engine, write_engine, config, db_path, db_exists)
     except BaseException:
-        # Close every handle, so a corrupt database can be renamed aside (Windows refuses to
-        # rename an open file).
+        # Close every handle: Windows refuses to rename the file aside while one is open.
         conn.close()
         engine.dispose()
         write_engine.dispose()
         raise
-    conn.close()
-
-    global Session, WriteSession
-    Session = sessionmaker(bind=engine)
-    WriteSession = sessionmaker(bind=write_engine)
 
 
 def _migrate(conn, engine, write_engine, config, db_path, db_exists):
@@ -509,6 +503,12 @@ def _migrate(conn, engine, write_engine, config, db_path, db_exists):
                 f"will be catalogued again. The database from before the upgrade was kept "
                 f"at {backup_path}."
             )
+
+    conn.close()
+
+    global Session, WriteSession
+    Session = sessionmaker(bind=engine)
+    WriteSession = sessionmaker(bind=write_engine)
 
 
 def create_session():

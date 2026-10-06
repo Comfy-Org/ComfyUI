@@ -13,6 +13,7 @@ import shutil
 
 import folder_paths
 
+from app.assets.event_log import error_kind
 from app.database.db import can_create_session, create_session, dependencies_available
 from comfy.cli_args import args
 
@@ -115,7 +116,9 @@ def run_asset_startup() -> None:
         with create_session() as session:
             wipe_temp_db_rows(session)
             session.commit()
-    except Exception:
+    except Exception as e:
+        if error_kind(e) == "database_corrupt":
+            raise  # startup replaces the database and runs this again
         logging.exception("Temp DB row wipe failed; skipping filesystem cleanup")
         enqueue_mode_transition_work()
         start_asset_seeder()
@@ -131,7 +134,9 @@ def run_startup(*, enable_assets: bool) -> None:
             run_asset_startup()
         else:
             cleanup_temp_filesystem()
-    except Exception:
+    except Exception as e:
+        if error_kind(e) == "database_corrupt":
+            raise
         logging.exception("Asset startup maintenance failed")
 
 
