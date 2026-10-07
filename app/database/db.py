@@ -291,12 +291,16 @@ def _init_file_db(db_url):
 
 
 def is_recoverable_corruption(error):
-    if _cannot_move_aside or args.database_url is not None or error_kind(error) != "database_corrupt":  # default DB only
+    # Only the default database: one named by --database-url may be managed elsewhere.
+    # SQLITE_CORRUPT or SQLITE_NOTADB, never "database is locked". The error can come from
+    # another file (the pre-upgrade backup), so the live database must fail its check too.
+    if _cannot_move_aside or args.database_url is not None or error_kind(error) != "database_corrupt":
         return False
-    return not _passes_integrity_check(get_db_path())  # the error may be another file's, e.g. the pre-upgrade backup
+    return not _passes_integrity_check(get_db_path())
 
 
 def recover_from_corruption(error):
+    """Replace a default database found corrupt after init_db. False for any other error."""
     if not is_recoverable_corruption(error):
         return False
     db_path = get_db_path()
@@ -320,7 +324,8 @@ def _connect_existing(path):  # sqlite3.connect would create a missing file
     return sqlite3.connect(path)
 
 
-def _passes_integrity_check(path):  # after an error only; unlike quick_check, it finds index damage
+def _passes_integrity_check(path):
+    # Only after an error: unlike quick_check it also finds an index that disagrees with its table.
     try:
         with closing(_connect_existing(path)) as conn:
             return conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
@@ -329,7 +334,8 @@ def _passes_integrity_check(path):  # after an error only; unlike quick_check, i
 
 
 def _quarantine_and_restore(db_path, error):
-    """Rename a corrupt database aside and restore a sound daily backup; else leave none to recreate."""
+    """Rename a corrupt database aside and restore the daily backup in its place if it is sound.
+    With no sound backup, no database file is left, so the caller creates a new one."""
     quarantine_path = f"{db_path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
     backup_path, restore_path = db_path + ".daily-backup", db_path + ".restore-tmp"
     outcome = "Database recreated empty: there was no sound daily backup"
@@ -341,14 +347,17 @@ def _quarantine_and_restore(db_path, error):
         except OSError:
             sound = False  # no backup, or it can't be read
         try:
-            for suffix in ("-wal", "-shm", "-journal", ""):  # sidecars first, so a failure leaves the database in place
+            # With its WAL and journal: when another connection keeps one, SQLite would replay it.
+            # Sidecars first, so a failure leaves the database in place.
+            for suffix in ("-wal", "-shm", "-journal", ""):
                 if os.path.exists(db_path + suffix):
                     os.replace(db_path + suffix, quarantine_path + suffix)
         except OSError:
             logging.exception(f"Could not move the corrupt database '{db_path}' aside")
             raise error
         if sound:
-            os.replace(restore_path, db_path)  # atomic: never part of a backup
+            # Atomic: a crash leaves either no database or the whole backup, never part of it.
+            os.replace(restore_path, db_path)
             outcome = f"Database restored from the daily backup taken {taken}; later changes are lost"
     finally:
         with suppress(OSError):  # a leftover copy must not undo a finished restore
@@ -359,7 +368,8 @@ def _quarantine_and_restore(db_path, error):
     )
 
 
-def start_daily_backup():  # a compact copy of the default database, refreshed daily, off the startup path
+def start_daily_backup():
+    """Keep a compact copy of the default database, refreshed once a day, off the startup path."""
     if args.database_url is not None:
         return
     db_path = get_db_path()
@@ -369,7 +379,8 @@ def start_daily_backup():  # a compact copy of the default database, refreshed d
 
 
 def _keep_daily_backup(db_path, backup_path):
-    while True:  # a daemon: an exit mid-backup leaves only a .tmp, which the next backup removes
+    # A daemon thread: exiting mid-backup leaves only a .tmp file, which the next backup removes.
+    while True:
         due_in = 0  # no backup yet
         with suppress(OSError):
             due_in = _DAILY_BACKUP_INTERVAL_SECONDS - abs(time.time() - os.path.getmtime(backup_path))  # future: due
@@ -386,7 +397,8 @@ def _write_daily_backup(db_path, backup_path):
             os.remove(tmp_path)  # left by a process that exited mid-backup
         with closing(_connect_existing(db_path)) as conn:  # a deleted database must not back up as empty
             conn.execute("VACUUM INTO ?", (tmp_path,))
-        if not _passes_integrity_check(tmp_path):  # VACUUM INTO copies a row breaking a constraint
+        # VACUUM INTO copies a row that breaks a constraint; only a copy a restore accepts replaces the backup.
+        if not _passes_integrity_check(tmp_path):
             raise sqlite3.DatabaseError("the new backup failed its integrity check")
         os.replace(tmp_path, backup_path)
         logging.info(f"Database daily backup written to '{backup_path}'")
