@@ -9,12 +9,13 @@ if not torch.cuda.is_available():
     args.cpu = True
 
 from comfy_extras.nodes_camera import CreateCameraInfo
-from comfy_extras.nodes_camera_angle import CameraAngle, build_camera_info, vertical_term
+from comfy_extras.nodes_camera_angle import CAMERA_FOV, SUBJECT_CENTER, CameraAngle, build_camera_info, vertical_term
 from comfy_extras.nodes_gaussian_splat import _camera_basis, _lookat_camera_info, _quat_camera_info
 
 DEVICE = torch.device("cpu")
 EYE = [0.0, 0.0, 4.0]
 ORIGIN = [0.0, 0.0, 0.0]
+ROLLED = [0.0, 0.0, math.sin(math.pi / 8), math.cos(math.pi / 8)]
 
 
 @pytest.mark.parametrize("node", [CameraAngle, CreateCameraInfo])
@@ -23,19 +24,36 @@ def test_camera_nodes_agree_on_the_camera_info_output_type(node):
     assert [o.get_io_type() for o in outputs] == ["LOAD3D_CAMERA"]
 
 
+def test_camera_angle_keeps_the_inputs_the_frontend_picker_binds_to():
+    # The picker is selected by widgetType, writes back through these ids, and mirrors the limits,
+    # defaults and scene constants in src/extensions/core/cameraAngle/types.ts. Changing either
+    # side alone leaves the node and its 3D preview disagreeing.
+    inputs = {i.id: i for i in CameraAngle.define_schema().inputs}
+    assert inputs["view"].extra_dict == {"widgetType": "CAMERA_ANGLE_VIEW"}
+    assert [(i.default, i.min, i.max) for i in map(inputs.get, ("horizontal_angle", "vertical_angle", "zoom"))] == [
+        (0, 0, 360), (0, -30, 60), (5.0, 0.0, 10.0),
+    ]
+    assert (SUBJECT_CENTER, CAMERA_FOV) == ((0.0, 0.0, 0.0), 35.0)
+
+
 @pytest.mark.parametrize("horizontal, vertical", [(0, 0), (90, 0), (180, 0), (270, 0), (45, 30), (0, -30)])
 def test_camera_angle_aims_the_splat_renderer_where_it_was_asked_to(horizontal, vertical):
     # CameraAngle emits no quaternion, so _camera_basis takes its look-at path. The view direction
     # it recovers there has to be the angle the node was given.
     yaw, pitch = math.radians(horizontal), math.radians(vertical)
-    _, target, _, _, fwd = _camera_basis(build_camera_info(horizontal, vertical, 5.0), DEVICE)
+    _, _, _, _, fwd = _camera_basis(build_camera_info(horizontal, vertical, 5.0), DEVICE)
     assert [float(v) for v in fwd] == pytest.approx(
         [-math.cos(pitch) * math.sin(yaw), math.sin(pitch), math.cos(pitch) * math.cos(yaw)], abs=1e-5)
+
+
+def test_camera_angle_always_aims_at_the_subject_centre():
+    _, target, _, _, _ = _camera_basis(build_camera_info(45, 30, 5.0), DEVICE)
     assert [float(v) for v in target] == pytest.approx(ORIGIN, abs=1e-6)
 
 
 @pytest.mark.parametrize("vertical, term", [
-    (-30, "low-angle shot"), (0, "eye-level shot"), (20, "elevated shot"), (60, "high-angle shot"),
+    (-30, "low-angle shot"), (-15, "eye-level shot"), (0, "eye-level shot"),
+    (15, "elevated shot"), (45, "high-angle shot"), (60, "high-angle shot"),
 ])
 def test_camera_angle_elevation_wording_matches_the_rendered_view(vertical, term):
     # The splat frame is Y-down, so a camera above the subject looks along a positive forward Y.
@@ -45,11 +63,11 @@ def test_camera_angle_elevation_wording_matches_the_rendered_view(vertical, term
 
 
 def test_camera_info_flags_custom_up_when_world_up_would_be_wrong():
-    # The viewer reads the quaternion's up only when useCustomUp is set, so a rolled camera and an
-    # explicitly supplied rotation both say so. A plain look-at leaves it off and keeps world up.
+    # The viewer reads the quaternion's up only when useCustomUp is set, so a rolled camera and a
+    # supplied rotation that tilts up both say so. A plain look-at leaves it off and keeps world up.
     assert "useCustomUp" not in _lookat_camera_info(EYE, ORIGIN, 35.0, DEVICE)
     assert _lookat_camera_info(EYE, ORIGIN, 35.0, DEVICE, roll=30.0)["useCustomUp"] is True
-    assert _quat_camera_info(EYE, [0.0, 0.0, 0.0, 1.0], 35.0, DEVICE)["useCustomUp"] is True
+    assert _quat_camera_info(EYE, ROLLED, 35.0, DEVICE)["useCustomUp"] is True
 
 
 def test_camera_angle_leaves_the_viewer_up_vector_alone():

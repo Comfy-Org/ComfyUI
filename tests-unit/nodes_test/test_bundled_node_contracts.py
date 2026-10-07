@@ -40,6 +40,14 @@ def bundled_nodes():
         nodes.NODE_DISPLAY_NAME_MAPPINGS.update(display_name_mappings)
 
 
+def test_both_halves_of_a_default_startup_are_loaded(bundled_nodes):
+    # The sweep below is only as good as its node list, and the api nodes are a third of it. Pin one
+    # from each half so a glob that stops matching shows up here instead of quietly shrinking it.
+    assert "KSampler" in bundled_nodes
+    assert "CameraAngle" in bundled_nodes
+    assert "OpenAIGPTImage1" in bundled_nodes
+
+
 def test_camera_nodes_register_under_the_ids_workflows_reference(bundled_nodes):
     # CreateCameraInfo has shipped since v0.23.0 and just moved out of nodes_gaussian_splat.py into
     # nodes_camera.py, so saved workflows already carry its id. CameraAngle is new, and the frontend
@@ -60,7 +68,7 @@ def _strings(value):
             yield from _strings(item)
 
 
-def test_a_dynamic_group_widget_is_detectable(bundled_nodes):
+def test_a_dynamic_group_widget_is_detectable():
     class Grouped(io.ComfyNode):
         @classmethod
         def define_schema(cls):
