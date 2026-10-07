@@ -137,41 +137,44 @@ def test_krea2_trained_per_projection_qkv_adapter_is_reported():
     assert len(messages) == 1 and q in messages[0] and "not applied" in messages[0]
 
 
-def test_unconverted_krea2_fused_qkv_lora_is_reported():
-    # A loader that calls comfy.lora.load_lora without comfy.lora_convert cannot map the fused
-    # to_qkv keys, so the trained weights are never applied.
-    sd = _make_sd(24, 384, 24, 256)
-    q = MAIN_PREFIX.replace("qkv", "q")
-    sd[q + ".lokr_w2"] = torch.zeros(256, 256)  # the placeholder LyCORIS writes next to it
-    key_map = {q: "diffusion_model.blocks.0.attn.wq.weight"}
+def test_load_lora_converts_krea2_fused_qkv_lora():
+    # comfy.hooks and custom nodes call comfy.lora.load_lora without comfy.lora_convert, so the
+    # fused to_qkv adapter has to be split for them as well.
+    sd = _make_sd(16, 576, 16, 384)  # not q/k/v aligned, so the projections need row offsets
+    prefix = MAIN_PREFIX.replace("qkv", "")
+    for proj, rows in zip("qkv", (MAIN_IN, 1536, 1536)):
+        # the unused per-projection placeholders LyCORIS writes next to the fused adapter
+        sd[prefix + proj + ".lokr_w1"] = torch.randn(16, 16)
+        sd[prefix + proj + ".lokr_w2"] = torch.zeros(rows // 16, 384)
+        sd[prefix + proj + ".alpha"] = sd[MAIN_PREFIX + ".alpha"]
+        sd[prefix + proj + ".dora_scale"] = torch.randn(rows, 1)
 
+    fused = LoKrAdapter.load(MAIN_PREFIX, sd, float(sd[MAIN_PREFIX + ".alpha"].item()), sd[MAIN_PREFIX + ".dora_scale"], set())
+    reference = comfy.lora.calculate_weight([(1.0, fused, 1.0, None, None)], torch.zeros(MAIN_OUT, MAIN_IN), MAIN_PREFIX)
+
+    key_map = {prefix + proj: "diffusion_model.blocks.0.attn." + p + ".weight" for proj, p in zip("qkv", ("wq", "wk", "wv"))}
     messages, patches = _capture_warnings(lambda: comfy.lora.load_lora(sd, key_map))
 
-    assert len(patches) == 1  # built from the zero delta placeholder, not from to_qkv
-    assert any(message.startswith("lora key not loaded") for message in messages)
-    assert any("Load LoRA" in message for message in messages)
+    assert len(patches) == 3
+    assert not any(message.startswith("lora key not loaded: " + MAIN_PREFIX) for message in messages)
+    offset = 0
+    for proj, size in zip("qkv", (MAIN_IN, 1536, 1536)):
+        key = "diffusion_model.blocks.0.attn." + {"q": "wq", "k": "wk", "v": "wv"}[proj] + ".weight"
+        result = comfy.lora.calculate_weight([(1.0, patches[key], 1.0, None, None)], torch.zeros(size, MAIN_IN), key)
+        assert torch.allclose(result, reference[offset:offset + size], atol=1e-4)
+        offset += size
 
 
-def test_convert_lora_leaves_other_fused_qkv_models_alone():
-    # Audio models keep a real fused to_qkv module; their adapters must not be rewritten.
-    sd = {
-        "diffusion_model.decoder.layers.0.self_attn.to_qkv.lokr_w1": torch.randn(4, 4),
-        "diffusion_model.decoder.layers.0.self_attn.to_qkv.lokr_w2": torch.randn(4, 4),
-    }
-
-    assert comfy.lora_convert.convert_lora(sd) is sd
-
-
-def test_lokr_fused_qkv_without_converter_picks_projection_rows():
-    # Some custom loaders call comfy.lora.load_lora directly without comfy.lora_convert, so the
-    # fused qkv factors reach the adapter unsplit. It must still pick the right rows.
+def test_lokr_fused_qkv_kept_per_projection_picks_projection_rows():
+    # Tools and loaders that rename a fused to_qkv adapter per projection leave the factors as
+    # wide as the whole module, so the rows of the named projection still have to be applied.
     torch.manual_seed(0)
     w1 = torch.randn(16, 16)
     w2 = torch.randn(576, 384)  # 16 * 576 = 9216 out, 16 * 384 = 6144 in, not q/k/v aligned
     alpha = torch.tensor(16.0)
-    dora = torch.randn(9216, 1)
+    dora = torch.randn(MAIN_OUT, 1)
+    prefix = MAIN_PREFIX.replace("qkv", "")
 
-    prefix = "lycoris_transformer_blocks_0_attn_to_"
     lora = {}
     for proj in "qkv":
         lora[prefix + proj + ".lokr_w1"] = w1
@@ -183,12 +186,51 @@ def test_lokr_fused_qkv_without_converter_picks_projection_rows():
     reference = comfy.lora.calculate_weight([(1.0, fused, 1.0, None, None)], torch.zeros(MAIN_OUT, MAIN_IN), "fused")
 
     key_map = {prefix + proj: "diffusion_model.blocks.0.attn." + p + ".weight" for proj, p in zip("qkv", ("wq", "wk", "wv"))}
-    patches = comfy.lora.load_lora(lora, key_map, log_missing=False)
+    messages, patches = _capture_warnings(lambda: comfy.lora.load_lora(lora, key_map, log_missing=False))
 
-    sizes = [MAIN_IN, 1536, 1536]
+    assert len(patches) == 3
+    x = torch.randn(2, MAIN_IN)
+    fused_h = fused.h(x, torch.randn(2, MAIN_OUT))
     offset = 0
-    for proj, size in zip("qkv", sizes):
+    for proj, size in zip("qkv", (MAIN_IN, 1536, 1536)):
         key = "diffusion_model.blocks.0.attn." + {"q": "wq", "k": "wk", "v": "wv"}[proj] + ".weight"
-        result = comfy.lora.calculate_weight([(1.0, patches[key], 1.0, None, None)], torch.zeros(size, MAIN_IN), key)
+        patch = patches[key]
+        result = comfy.lora.calculate_weight([(1.0, patch, 1.0, None, None)], torch.zeros(size, MAIN_IN), key)
         assert torch.allclose(result, reference[offset:offset + size], atol=1e-4)
+        # the bypass path slices the same rows, so its output matches the base output width
+        assert torch.allclose(patch.h(x, torch.zeros(2, size)), fused_h[:, offset:offset + size], atol=1e-4)
         offset += size
+
+
+def test_lokr_fused_qkv_mapped_to_one_projection_picks_projection_rows():
+    # A loader that maps the fused to_qkv entry itself onto a projection keeps the fused factors
+    # under the fused name, so the rows have to come from the target key.
+    torch.manual_seed(0)
+    w1 = torch.randn(16, 16)
+    w2 = torch.randn(576, 384)  # 16 * 576 = 9216 out, 16 * 384 = 6144 in, not q/k/v aligned
+    dora = torch.randn(MAIN_OUT, 1)
+    lora = {
+        MAIN_PREFIX + ".lokr_w1": w1,
+        MAIN_PREFIX + ".lokr_w2": w2,
+        MAIN_PREFIX + ".alpha": torch.tensor(16.0),
+        MAIN_PREFIX + ".dora_scale": dora,
+    }
+
+    fused = LoKrAdapter.load("fused", {"fused.lokr_w1": w1, "fused.lokr_w2": w2}, 16.0, dora, set())
+    reference = comfy.lora.calculate_weight([(1.0, fused, 1.0, None, None)], torch.zeros(MAIN_OUT, MAIN_IN), "fused")
+
+    key = "diffusion_model.blocks.0.attn.wk.weight"
+    messages, patches = _capture_warnings(lambda: comfy.lora.load_lora(lora, {MAIN_PREFIX: key}, log_missing=False))
+
+    result = comfy.lora.calculate_weight([(1.0, patches[key], 1.0, None, None)], torch.zeros(1536, MAIN_IN), key)
+    assert torch.allclose(result, reference[MAIN_IN:MAIN_IN + 1536], atol=1e-4)
+
+
+def test_convert_lora_leaves_other_fused_qkv_models_alone():
+    # Audio models keep a real fused to_qkv module; their adapters must not be rewritten.
+    sd = {
+        "diffusion_model.decoder.layers.0.self_attn.to_qkv.lokr_w1": torch.randn(4, 4),
+        "diffusion_model.decoder.layers.0.self_attn.to_qkv.lokr_w2": torch.randn(4, 4),
+    }
+
+    assert comfy.lora_convert.convert_lora(sd) is sd
