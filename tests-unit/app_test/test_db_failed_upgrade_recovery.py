@@ -144,3 +144,39 @@ def test_failed_first_upgrade_of_a_new_database_is_not_moved_aside(default_db, m
 
     assert _moved_aside(default_db) == []
     assert not any("Database upgrade failed" in w for w in startup_warnings)
+
+
+def test_explicit_database_url_naming_the_default_file_is_recreated(default_db, monkeypatch, startup_warnings):
+    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{default_db}")
+    _make_db(default_db, revision="0001_assets")
+    _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
+
+    _boot()
+
+    assert _revision(default_db) == _head()
+    assert len(_moved_aside(default_db)) == 1
+
+
+def test_failed_move_puts_every_file_back(default_db, monkeypatch):
+    _make_db(default_db, revision="0001_assets")
+    _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
+    real_recreate, real_replace = db_module._recreate_after_failed_upgrade, os.replace
+
+    def recreate_with_a_wal_left_behind(db_path, error):
+        open(db_path + "-wal", "wb").close()  # moves before the database does
+        real_recreate(db_path, error)
+
+    def database_cannot_move(src, dst):
+        if src == default_db:
+            raise PermissionError("held open")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(db_module, "_recreate_after_failed_upgrade", recreate_with_a_wal_left_behind)
+    monkeypatch.setattr(db_module.os, "replace", database_cannot_move)
+    with pytest.raises(SystemExit):
+        _boot()
+    monkeypatch.undo()
+
+    assert os.path.exists(default_db + "-wal")
+    assert glob.glob(default_db + ".failed-upgrade-*") == []
+    assert _revision(default_db) == "0001_assets"
