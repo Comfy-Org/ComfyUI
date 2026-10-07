@@ -62,7 +62,12 @@ ALLOWED_EVENTS = frozenset({
     "scanner.watch_stat_failed",
     "scanner.watch_spec_failed",
     "scanner.watch_seed_failed",
+    "previews.generated",
+    "previews.generation_failed",
 })
+PREVIEW_SOURCE_FORMATS = frozenset({"exr", "other"})
+PREVIEW_FAILURE_REASONS = frozenset({"too_large", "decode_failed", "encode_failed", "write_failed", "timeout"})
+PREVIEW_SOURCES = frozenset({"upload", "output"})
 
 
 class EventLogError(ValueError):
@@ -115,6 +120,9 @@ ALLOWED_FIELDS: dict[str, Callable[[Any], bool]] = {
     "error_kind": _one_of(ERROR_KINDS),
     "hashing_enabled": _is_flag,
     "site": _one_of(STAT_SITES),
+    "format": _one_of(PREVIEW_SOURCE_FORMATS),
+    "reason": _one_of(PREVIEW_FAILURE_REASONS),
+    "source": _one_of(PREVIEW_SOURCES),
 }
 
 _warned_call_sites: set[tuple[str, int]] = set()
@@ -186,7 +194,9 @@ def error_type(exc: BaseException) -> str:
     Stringifying the exception itself is banned here, because FileNotFoundError
     and friends embed the path that triggered them.
     """
-    return type(exc).__name__
+    # Third-party exception names are arbitrary; keep them within the field validator.
+    name = "".join("_" if char in FORBIDDEN_STRING_CHARS else char for char in type(exc).__name__)
+    return name[:MAX_STRING_LENGTH] or "other"
 
 
 # SQLite primary result codes (sqlite3.Error.sqlite_errorcode & 0xFF, Python 3.11+).

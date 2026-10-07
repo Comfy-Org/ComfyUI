@@ -1,4 +1,4 @@
-"""Which assets are their own preview."""
+"""How an asset's preview is reported: a linked preview, the asset itself, or none."""
 import mimetypes
 import os
 
@@ -22,3 +22,31 @@ def own_preview_kind(mime_type: str | None, path: str | None) -> str | None:
     if mime in _NEVER_SELF_MIME_TYPES or os.path.splitext(path or "")[1].lower() in _NEVER_SELF_EXTENSIONS:
         return None
     return mime.split("/", 1)[0]
+
+
+def content_url(asset_id: str) -> str:
+    # No query string: clients tell this form apart from /api/view?type=... by that.
+    return f"/api/assets/{asset_id}/content"
+
+
+def preview_fields(
+    asset_id: str,
+    preview_id: str | None,
+    mime_type: str | None,
+    file_path: str | None,
+    is_missing: bool,
+    preview_paths: dict[str, str],
+) -> tuple[str | None, str | None]:
+    """(preview_id, preview_url); preview_id is only ever sent with a URL."""
+    # A self-nomination is ignored: whether a file is its own preview is decided below.
+    if preview_id and preview_id != asset_id:
+        # A nominated preview is one whatever it holds, so no media check here.
+        if preview_id in preview_paths:
+            return preview_id, content_url(preview_id)
+        return None, None
+    if is_missing or not file_path:
+        return None, None
+    kind = own_preview_kind(mime_type, file_path)
+    if kind is None:
+        return None, None
+    return (asset_id if kind == "image" else None), content_url(asset_id)

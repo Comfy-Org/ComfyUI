@@ -60,8 +60,45 @@ def _enrich_in_place(
                 result = register(abs_path, job_id)
                 if result is not None:
                     entry["id"] = result.id
+                    if result.preview_id:
+                        entry["preview_id"] = result.preview_id
+                    elif _is_own_image_preview(abs_path):
+                        entry["preview_id"] = result.id
             except Exception:
                 logging.warning("Asset registration failed for output: %s", entry.get("filename"), exc_info=True)
+
+
+def _is_own_image_preview(abs_path: str) -> bool:
+    from app.assets.previews import has_preview_generator
+    from app.assets.services.preview_rules import own_preview_kind
+
+    return not has_preview_generator(abs_path) and own_preview_kind(None, abs_path) == "image"
+
+
+async def generate_output_previews(output_ui: dict) -> None:
+    """Make previews for registered entries that need one; a cached replay never does."""
+    from app.assets.previews import generate_previews, has_preview_generator
+
+    pending: list[tuple[dict, str]] = []
+    for entries in output_ui.values():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict) or "id" not in entry or "preview_id" in entry:
+                continue
+            abs_path = _resolve_output_path(entry)
+            if abs_path is not None and has_preview_generator(abs_path):
+                pending.append((entry, abs_path))
+    if not pending:
+        return
+    try:
+        linked = await generate_previews([(entry["id"], path) for entry, path in pending], "output")
+    except Exception:
+        logging.warning("Preview generation failed for outputs", exc_info=True)
+        return
+    for entry, _ in pending:
+        if entry["id"] in linked:
+            entry["preview_id"] = linked[entry["id"]]
 
 
 def _strip_ids(output_ui: dict) -> None:
@@ -71,6 +108,7 @@ def _strip_ids(output_ui: dict) -> None:
         for entry in entries:
             if isinstance(entry, dict):
                 entry.pop("id", None)
+                entry.pop("preview_id", None)
 
 
 def register_executed_outputs(output_ui: dict, job_id: str, asset_manager: "AssetManager") -> dict:

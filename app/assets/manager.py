@@ -206,6 +206,7 @@ class AssetsEnabled:
                 content_id=result.content_id,
                 job_id=result.ref.job_id,
                 name=result.ref.name,
+                preview_id=result.ref.preview_id,
             )
             return UploadAssetView(
                 asset=asset,

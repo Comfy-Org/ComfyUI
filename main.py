@@ -168,6 +168,11 @@ def apply_custom_paths():
         logging.info(f"Setting input directory to: {input_dir}")
         folder_paths.set_input_directory(input_dir)
 
+    if args.previews_directory:
+        previews_dir = os.path.abspath(args.previews_directory)
+        logging.info(f"Setting previews directory to: {previews_dir}")
+        folder_paths.set_previews_directory(previews_dir)
+
     if args.user_directory:
         user_dir = os.path.abspath(args.user_directory)
         logging.info(f"Setting user directory to: {user_dir}")

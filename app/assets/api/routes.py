@@ -7,6 +7,7 @@ shaping only; the work itself belongs to the services layer.
 """
 
 import asyncio
+import dataclasses
 import functools
 import json
 import logging
@@ -60,7 +61,8 @@ from app.assets.services import (
     upload_from_temp_path,
 )
 from app.assets.services.path_utils import compute_asset_response_paths
-from app.assets.services.preview_rules import own_preview_kind
+from app.assets.previews import generate_upload_preview
+from app.assets.services.preview_rules import preview_fields
 from app.assets.services.cursor import (
     InvalidCursorError,
     decode_cursor,
@@ -75,7 +77,7 @@ from app.database.db import create_session
 ROUTES = web.RouteTableDef()
 USER_MANAGER: user_manager.UserManager | None = None
 _ASSETS_ENABLED = False
-SYSTEM_TAGS = frozenset({"missing"})
+SYSTEM_TAGS = frozenset({"missing", "preview"})
 _CURSOR_SORT_FIELDS: tuple[RecordSortField, ...] = (
     "created_at",
     "updated_at",
@@ -260,32 +262,11 @@ def _validate_sort_field(requested: str | None) -> RecordSortField:
             return "created_at"
 
 
-def _content_url(asset_id: str) -> str:
-    # No query string: clients tell this form apart from /api/view?type=... by that.
-    return f"/api/assets/{asset_id}/content"
-
-
-def _preview_fields(
-    asset_id: str,
-    preview_id: str | None,
-    mime_type: str | None,
-    file_path: str | None,
-    is_missing: bool,
-    preview_paths: dict[str, str],
-) -> tuple[str | None, str | None]:
-    """(preview_id, preview_url); preview_id is only ever sent with a URL."""
-    # A self-nomination is ignored: whether a file is its own preview is decided below.
-    if preview_id and preview_id != asset_id:
-        # A nominated preview is one whatever it holds, so no media check here.
-        if preview_id in preview_paths:
-            return preview_id, _content_url(preview_id)
-        return None, None
-    if is_missing or not file_path:
-        return None, None
-    kind = own_preview_kind(mime_type, file_path)
-    if kind is None:
-        return None, None
-    return (asset_id if kind == "image" else None), _content_url(asset_id)
+async def _with_upload_preview(result: schemas.UploadResult) -> schemas.UploadResult:
+    preview_id = await generate_upload_preview(result.ref.id, result.ref.file_path, result.ref.preview_id)
+    if preview_id == result.ref.preview_id:
+        return result
+    return dataclasses.replace(result, ref=dataclasses.replace(result.ref, preview_id=preview_id))
 
 
 def _resolve_preview_paths(
@@ -300,7 +281,7 @@ def _build_asset_response(
     result: schemas.AssetDetailResult | schemas.UploadResult,
     preview_paths: dict[str, str],
 ) -> schemas_out.Asset:
-    preview_id, preview_url = _preview_fields(
+    preview_id, preview_url = preview_fields(
         result.ref.id,
         result.ref.preview_id,
         result.asset.mime_type if result.asset else None,
@@ -346,7 +327,7 @@ def _build_record_response(
     content = record.content
     paths = compute_asset_response_paths(content.path)
     display_name = paths[1] if paths else None
-    preview_id, preview_url = _preview_fields(
+    preview_id, preview_url = preview_fields(
         record.id, record.preview_id, record.mime_type, content.path, content.is_missing, preview_paths
     )
 
@@ -666,6 +647,7 @@ async def create_asset_from_hash_route(request: web.Request) -> web.Response:
             404, "ASSET_NOT_FOUND", f"Asset content {body.hash} does not exist"
         )
 
+    result = await _with_upload_preview(result)
     asset = _build_asset_response(result, _resolve_preview_paths([result]))
     payload_out = schemas_out.AssetCreated(
         **asset.model_dump(),
@@ -757,6 +739,7 @@ async def upload_asset(request: web.Request) -> web.Response:
         logging.exception("upload_asset failed for tenant_id=%s", tenant_id)
         return _build_error_response(500, "INTERNAL", "Unexpected server error.")
 
+    result = await _with_upload_preview(result)
     asset = _build_asset_response(result, _resolve_preview_paths([result]))
     payload_out = schemas_out.AssetCreated(
         **asset.model_dump(),

@@ -66,3 +66,12 @@ def test_handles_no_extension():
 def test_handles_no_files():
     files = []
     assert filter_files_content_types(files, ["image", "audio", "video"]) == []
+
+
+def test_exr_and_hdr_are_never_listed_as_images():
+    # Pillow can't decode them, so an image loader that listed them would fail on select.
+    files = ["a.exr", "b.EXR", "c.hdr", "d.png"]
+    warm = {**extension_mimetypes_cache, "exr": "image", "EXR": "image", "hdr": "image"}
+    for cache in (extension_mimetypes_cache.copy(), warm):
+        with patch("folder_paths.extension_mimetypes_cache", cache):
+            assert filter_files_content_types(files, ["image"]) == ["d.png"]

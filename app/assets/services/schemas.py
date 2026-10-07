@@ -102,6 +102,7 @@ class RegisteredAsset:
     content_id: str
     job_id: str | None
     name: str
+    preview_id: str | None = None
 
 
 @dataclass(frozen=True)

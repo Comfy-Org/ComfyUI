@@ -17,7 +17,7 @@ import shutil
 from typing import Any, NamedTuple, Sequence
 
 from sqlalchemy import false, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.assets import mode
 from app.assets.database.models import Asset, AssetContent, AssetTag
@@ -82,6 +82,24 @@ def _extract_system_metadata_sync(
     if dims:
         system_metadata.update(dims)
     return system_metadata
+
+
+def _live_sibling_preview_id(session: Session, content_id: str) -> str | None:
+    """A preview another record of the same content already has, if its file is live."""
+    preview = aliased(Asset)
+    preview_content = aliased(AssetContent)
+    return session.scalars(
+        select(Asset.preview_id)
+        .join(preview, preview.id == Asset.preview_id)
+        .join(preview_content, preview_content.id == preview.content_id)
+        .where(
+            Asset.content_id == content_id,
+            Asset.preview_id != Asset.id,
+            preview_content.is_missing == false(),
+        )
+        .order_by(Asset.created_at.desc())
+        .limit(1)
+    ).first()
 
 
 def _discard_unreferenced_content(session: Session, content_id: str) -> None:
@@ -212,6 +230,9 @@ def _create_upload_record(
 ) -> Asset:
     if preview_id is not None and session.get(Asset, preview_id) is None:
         raise ValueError(f"preview_id {preview_id!r} does not reference an existing asset")
+    if preview_id is None:
+        # Same bytes, same picture: reuse the preview instead of generating another.
+        preview_id = _live_sibling_preview_id(session, content_id)
     record = create_record(
         session,
         content_id,
@@ -710,6 +731,7 @@ def register_cached_output(
                     tags=path_tags,
                     system_metadata=system_metadata,
                 )
+                record.preview_id = _live_sibling_preview_id(session, existing.id)
                 session.commit()
             except Exception:
                 session.rollback()
@@ -718,6 +740,7 @@ def register_cached_output(
             record_content_id = record.content_id
             record_job_id = record.job_id
             record_name = record.name
+            record_preview_id = record.preview_id
     except Exception:
         logging.exception("Failed to register cached output: %s", locator)
         return None
@@ -727,6 +750,7 @@ def register_cached_output(
         content_id=record_content_id,
         job_id=record_job_id,
         name=record_name,
+        preview_id=record_preview_id,
     )
 
 
