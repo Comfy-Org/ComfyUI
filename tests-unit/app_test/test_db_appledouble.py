@@ -140,6 +140,20 @@ def test_next_launch_replaces_the_copy(scripts, temp_root):
     assert _current_revision(db_path) == head
 
 
+def test_each_install_gets_its_own_copy(scripts, temp_root, tmp_path, monkeypatch):
+    scripts_path, db_path = scripts
+    other = str(tmp_path / "other" / "alembic_db")
+    shutil.copytree(scripts_path, other)
+    _plant_appledouble(scripts_path)
+    _plant_appledouble(other)
+    db_module._init_file_db(db_module.args.database_url)
+
+    monkeypatch.setattr(db_module, "get_alembic_config", lambda: _config(other, db_path))
+    _relaunch()
+
+    assert len(_copies(temp_root)) == 2
+
+
 @pytest.mark.skipif(
     sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions, as non-root"
 )
@@ -153,6 +167,7 @@ def test_copy_of_a_read_only_install_stays_removable(scripts, temp_root):
         os.chmod(path, os.stat(path).st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
     try:
         db_module._init_file_db(db_module.args.database_url)
+        # The copy now has the source's read-only mode, as after a launch that was killed.
         _relaunch()
     finally:
         for path in read_only:
