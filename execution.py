@@ -427,6 +427,8 @@ def format_value(x):
         return None
     elif isinstance(x, (int, float, bool, str)):
         return x
+    elif isinstance(x, torch.Tensor):
+        return "Tensor(shape={}, dtype={}, device={})".format(list(x.shape), x.dtype, x.device)
     else:
         return str(x)
 
