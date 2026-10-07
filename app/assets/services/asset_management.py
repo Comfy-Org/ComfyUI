@@ -93,6 +93,7 @@ def update_asset_metadata(
     tag_origin: str = "manual",
     mime_type: str | None = None,
     preview_id: str | None = None,
+    clear_preview: bool = False,
 ) -> AssetDetailResult:
     with create_session() as session:
         record = get_record_by_id(session, reference_id)
@@ -131,6 +132,12 @@ def update_asset_metadata(
                 update(Asset)
                 .where(Asset.id == reference_id)
                 .values(preview_id=preview_id, updated_at=get_utc_now())
+            )
+        elif clear_preview:
+            session.execute(
+                update(Asset)
+                .where(Asset.id == reference_id)
+                .values(preview_id=None, updated_at=get_utc_now())
             )
         if tags is not None:
             for tag_name in normalize_tags(list(tags)):

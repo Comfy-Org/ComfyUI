@@ -61,26 +61,38 @@ def _make_result(
     return AssetDetailResult(ref=ref, asset=asset, tags=tags or [])
 
 
+def _url(asset_id: str) -> str:
+    return f"/api/assets/{asset_id}/content"
+
+
 @pytest.mark.parametrize(
-    ("root", "relative"),
+    "relative",
     [
-        ("temp", "ComfyUI_temp_abcde_00001_.png"),
-        ("output", "ComfyUI_00001_.png"),
-        ("input", "example.png"),
+        "temp/ComfyUI_temp_abcde_00001_.png",
+        "output/ComfyUI_00001_.png",
+        "input/example.png",
+        "models/checkpoints/m.png",
+        "output/runs & takes/my shot.png",
     ],
 )
-def test_every_view_root_gets_a_preview_url(
-    sandboxed_comfy_roots: Path, root: str, relative: str
+def test_preview_url_is_the_content_route_by_id_wherever_the_file_lives(
+    sandboxed_comfy_roots: Path, relative: str
 ):
     resp = _build_asset_response(
-        _make_result(name=relative, file_path=str(sandboxed_comfy_roots / root / relative)),
+        _make_result(name=Path(relative).name, file_path=str(sandboxed_comfy_roots / relative)),
         {},
     )
 
-    assert resp.preview_url == f"/api/view?type={root}&filename={relative}", (
-        f"a file in {root} must get a preview URL; temp is the one the old "
-        f"tag chain fell off the end of"
+    assert resp.preview_url == _url("ref-1"), (
+        "the URL names the asset, not its root or subfolder, so clients never parse a path"
     )
+    assert "?" not in resp.preview_url, "clients tell this form from /api/view?type=... by the query"
+
+
+def test_a_file_outside_every_root_still_previews(sandboxed_comfy_roots: Path):
+    resp = _build_asset_response(_make_result(file_path="/elsewhere/a.png"), {})
+
+    assert resp.preview_url == _url("ref-1"), "the content route serves by id, not by root"
 
 
 @pytest.mark.parametrize(
@@ -94,38 +106,100 @@ def test_preview_url_does_not_depend_on_tags(
         _make_result(file_path=str(sandboxed_comfy_roots / "temp" / "a.png"), tags=tags), {}
     )
 
-    assert resp.preview_url == "/api/view?type=temp&filename=a.png", (
+    assert resp.preview_url == _url("ref-1"), (
         "tags are user-editable; removing one must not destroy the preview"
     )
 
 
-def test_preview_url_does_not_depend_on_the_metadata_filename(
-    sandboxed_comfy_roots: Path,
+def test_an_image_is_its_own_preview_id(sandboxed_comfy_roots: Path):
+    resp = _build_asset_response(
+        _make_result(file_path=str(sandboxed_comfy_roots / "output" / "a.png")), {}
+    )
+
+    assert (resp.preview_id, resp.preview_url) == ("ref-1", _url("ref-1"))
+
+
+@pytest.mark.parametrize(
+    ("name", "mime_type"),
+    [("clip.mp4", "video/mp4"), ("take.wav", "audio/wav"), ("notes.txt", "text/plain")],
+)
+def test_other_media_get_a_url_but_no_preview_id(
+    sandboxed_comfy_roots: Path, name: str, mime_type: str
 ):
     resp = _build_asset_response(
-        _make_result(
-            file_path=str(sandboxed_comfy_roots / "output" / "a.png"), user_metadata=None
-        ),
+        _make_result(name=name, file_path=str(sandboxed_comfy_roots / "output" / name), mime_type=mime_type),
         {},
     )
 
-    assert resp.preview_url == "/api/view?type=output&filename=a.png", (
-        "a reference carrying no metadata filename must still get a preview"
-    )
+    assert resp.preview_url == _url("ref-1"), "players and text snippets read preview_url"
+    assert resp.preview_id is None, "preview_id names an image preview only"
 
 
-def test_subfolder_is_split_out_and_both_halves_encoded(sandboxed_comfy_roots: Path):
+@pytest.mark.parametrize(
+    ("name", "mime_type"),
+    [
+        ("frame.exr", "image/x-exr"),
+        ("frame.exr", None),
+        ("sky.hdr", "image/vnd.radiance"),
+        ("sky.hdr", None),
+        ("sky.HDR", "image/x-whatever-this-host-says"),
+    ],
+)
+def test_exr_and_hdr_are_never_their_own_preview(
+    sandboxed_comfy_roots: Path, name: str, mime_type: str | None
+):
     resp = _build_asset_response(
-        _make_result(
-            name="my shot.png",
-            file_path=str(sandboxed_comfy_roots / "output" / "runs & takes" / "my shot.png"),
-        ),
+        _make_result(name=name, file_path=str(sandboxed_comfy_roots / "output" / name), mime_type=mime_type),
         {},
     )
 
-    assert resp.preview_url == (
-        "/api/view?type=output&filename=my%20shot.png&subfolder=runs%20%26%20takes"
-    ), "an unencoded & or space in the path would break the query string"
+    assert (resp.preview_id, resp.preview_url) == (None, None), (
+        "browsers can't display these, so the bytes must never be offered as a preview"
+    )
+
+
+def test_hdr_is_excluded_even_where_the_host_maps_it_to_an_image(sandboxed_comfy_roots: Path):
+    with patch("mimetypes.guess_type", return_value=("image/vnd.radiance", None)):
+        resp = _build_asset_response(
+            _make_result(name="sky.hdr", file_path=str(sandboxed_comfy_roots / "output" / "sky.hdr"), mime_type=None),
+            {},
+        )
+
+    assert resp.preview_url is None
+
+
+def test_an_exr_with_a_generated_preview_shows_it(sandboxed_comfy_roots: Path):
+    result = _make_result(
+        name="frame.exr",
+        file_path=str(sandboxed_comfy_roots / "output" / "frame.exr"),
+        mime_type="image/x-exr",
+        preview_id="preview-ref",
+    )
+
+    resp = _build_asset_response(result, {"preview-ref": str(sandboxed_comfy_roots / "previews" / "p.webp")})
+
+    assert (resp.preview_id, resp.preview_url) == ("preview-ref", _url("preview-ref"))
+
+
+@pytest.mark.parametrize(
+    ("name", "mime_type", "expected"),
+    [("frame.exr", "image/x-exr", (None, None)), ("a.png", "image/png", ("ref-1", "/api/assets/ref-1/content"))],
+)
+def test_a_stored_self_nomination_is_ignored(
+    sandboxed_comfy_roots: Path, name: str, mime_type: str, expected: tuple
+):
+    result = _make_result(
+        name=name,
+        file_path=str(sandboxed_comfy_roots / "output" / name),
+        mime_type=mime_type,
+        preview_id="ref-1",
+    )
+
+    resp = _build_asset_response(result, {"ref-1": str(sandboxed_comfy_roots / "output" / name)})
+
+    assert (resp.preview_id, resp.preview_url) == expected, (
+        "a self-link written before the guard must not make an EXR its own preview"
+    )
 
 
 def test_preview_id_resolves_through_the_page_lookup(sandboxed_comfy_roots: Path):
@@ -139,23 +213,23 @@ def test_preview_id_resolves_through_the_page_lookup(sandboxed_comfy_roots: Path
         result, {"preview-ref": str(sandboxed_comfy_roots / "output" / "thumb.png")}
     )
 
-    assert resp.preview_url == "/api/view?type=output&filename=thumb.png", (
+    assert resp.preview_url == _url("preview-ref"), (
         "a nominated preview stands in for content with no visual form"
     )
     assert resp.preview_id == "preview-ref"
 
 
-def test_unresolvable_preview_id_yields_no_url(sandboxed_comfy_roots: Path):
+def test_unresolvable_preview_id_yields_neither_field(sandboxed_comfy_roots: Path):
     result = _make_result(
         file_path=str(sandboxed_comfy_roots / "output" / "a.png"), preview_id="gone"
     )
 
     resp = _build_asset_response(result, {})
 
-    assert resp.preview_url is None, (
+    assert (resp.preview_id, resp.preview_url) == (None, None), (
         "a preview absent from the lookup is soft-deleted, invisible or "
-        "path-less, so advertising it would promise a URL that 404s - and the "
-        "asset's own bytes are a different picture, not a degraded one"
+        "path-less; preview_id is only ever sent with a URL that works, and "
+        "the asset's own bytes are a different picture, not a degraded one"
     )
 
 
@@ -178,10 +252,10 @@ def test_text_is_previewable(sandboxed_comfy_roots: Path, name: str, mime_type: 
         {},
     )
 
-    assert resp.preview_url == f"/api/view?type=output&filename={name}", (
+    assert resp.preview_url == _url("ref-1"), (
         "text assets are rendered as a snippet from preview_url, so withholding "
         "it leaves that with nothing to fetch; the dangerous members stay safe "
-        "because /api/view forces them to download, not because they get no URL"
+        "because the content route forces them to download, not because they get no URL"
     )
 
 
@@ -209,8 +283,8 @@ def test_no_preview_url_for_content_a_browser_cannot_render(
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
-        ("shot.png", "/api/view?type=temp&filename=shot.png"),
-        ("clip.mp4", "/api/view?type=temp&filename=clip.mp4"),
+        ("shot.png", "/api/assets/ref-1/content"),
+        ("clip.mp4", "/api/assets/ref-1/content"),
         ("model.safetensors", None),
     ],
 )
@@ -233,7 +307,7 @@ def test_missing_mime_type_falls_back_to_the_path(
 @pytest.mark.parametrize(
     ("name", "stored_filename", "expected"),
     [
-        ("untitled", "shot.png", "/api/view?type=temp&filename=shot.png"),
+        ("untitled", "shot.png", "/api/assets/ref-1/content"),
         ("shot.png", "weights.safetensors", None),
     ],
 )
@@ -267,36 +341,14 @@ def test_mime_type_parameters_do_not_defeat_the_media_check(
         {},
     )
 
-    assert resp.preview_url == "/api/view?type=temp&filename=a.png"
-
-
-def test_no_preview_url_for_a_model(sandboxed_comfy_roots: Path):
-    resp = _build_asset_response(
-        _make_result(
-            name="m.png",
-            file_path=str(sandboxed_comfy_roots / "models" / "checkpoints" / "m.png"),
-        ),
-        {},
-    )
-
-    assert resp.preview_url is None, (
-        "models is not a root /api/view can address, whatever the file is"
-    )
-
-
-def test_no_preview_url_for_a_path_outside_every_root(sandboxed_comfy_roots: Path):
-    resp = _build_asset_response(_make_result(file_path="/elsewhere/a.png"), {})
-
-    assert resp.preview_url is None, (
-        "/api/view cannot address a file outside the roots it serves"
-    )
+    assert resp.preview_url == _url("ref-1")
 
 
 def test_no_preview_url_without_a_file_path(sandboxed_comfy_roots: Path):
     resp = _build_asset_response(_make_result(file_path=None), {})
 
     assert resp.preview_url is None, (
-        "an API-created reference has no path, so no view URL can be derived"
+        "an API-created reference has no path, so it has no bytes to preview"
     )
 
 
@@ -322,9 +374,9 @@ def test_no_self_preview_url_when_content_is_missing(sandboxed_comfy_roots: Path
         {},
     )
 
-    assert resp.preview_url is None, (
+    assert (resp.preview_id, resp.preview_url) == (None, None), (
         "a missing-content record must not advertise a preview of its own bytes; "
-        "those bytes are gone, so /api/view would 404"
+        "those bytes are gone, so the content route would 404"
     )
 
 
@@ -341,13 +393,13 @@ def test_missing_content_still_shows_a_nominated_preview(sandboxed_comfy_roots: 
         result, {"preview-ref": str(sandboxed_comfy_roots / "output" / "thumb.png")}
     )
 
-    assert resp.preview_url == "/api/view?type=output&filename=thumb.png", (
+    assert resp.preview_url == _url("preview-ref"), (
         "suppression targets self-content only; a nominated (live) preview still "
         "stands in for a missing record"
     )
 
 
-def test_record_response_shows_self_preview_url_for_live_content(
+def test_record_response_shows_self_preview_for_live_content(
     sandboxed_comfy_roots: Path, session
 ):
     content = create_content(
@@ -360,10 +412,36 @@ def test_record_response_shows_self_preview_url_for_live_content(
 
     resp = _build_record_response(record, [], {})
 
-    assert resp.preview_url == "/api/view?type=output&filename=live.png", (
+    assert (resp.preview_id, resp.preview_url) == (record.id, _url(record.id)), (
         "a live record still previews its own bytes — the positive control that "
         "proves the missing-case suppression is what withholds the URL"
     )
+
+
+def test_record_response_falls_back_to_the_path_when_mime_type_is_empty(
+    sandboxed_comfy_roots: Path, session
+):
+    content = create_content(
+        session, path=str(sandboxed_comfy_roots / "output" / "live.png")
+    )
+    record = create_record(session, content_id=content.id, name="untitled", mime_type=None)
+    session.commit()
+
+    resp = _build_record_response(record, [], {})
+
+    assert resp.preview_url == _url(record.id)
+
+
+def test_record_response_never_self_previews_an_exr(sandboxed_comfy_roots: Path, session):
+    content = create_content(
+        session, path=str(sandboxed_comfy_roots / "output" / "frame.exr")
+    )
+    record = create_record(session, content_id=content.id, name="frame.exr", mime_type="image/x-exr")
+    session.commit()
+
+    resp = _build_record_response(record, [], {})
+
+    assert (resp.preview_id, resp.preview_url) == (None, None)
 
 
 def test_record_response_has_no_self_preview_url_when_content_is_missing(

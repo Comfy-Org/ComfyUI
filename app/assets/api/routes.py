@@ -10,7 +10,6 @@ import asyncio
 import functools
 import json
 import logging
-import mimetypes
 import os
 import urllib.parse
 import uuid
@@ -61,6 +60,7 @@ from app.assets.services import (
     upload_from_temp_path,
 )
 from app.assets.services.path_utils import compute_asset_response_paths
+from app.assets.services.preview_rules import own_preview_kind
 from app.assets.services.cursor import (
     InvalidCursorError,
     decode_cursor,
@@ -260,38 +260,32 @@ def _validate_sort_field(requested: str | None) -> RecordSortField:
             return "created_at"
 
 
-# What a client can render from the bytes themselves; anything else needs a nominated preview.
-PREVIEWABLE_MIME_PREFIXES = ("image/", "video/", "audio/", "text/")
-
-# models is deliberately absent: /api/view has no directory type for it.
-VIEWABLE_NAMESPACES = frozenset({"input", "output", "temp"})
+def _content_url(asset_id: str) -> str:
+    # No query string: clients tell this form apart from /api/view?type=... by that.
+    return f"/api/assets/{asset_id}/content"
 
 
-def _has_previewable_content(asset: schemas.AssetData | None, file_path: str | None) -> bool:
-    if asset is None:
-        return False
-    # Resolved from the path, not the caller-editable name, so a rename cannot change what previews.
-    raw = asset.mime_type or mimetypes.guess_type(file_path or "")[0] or ""
-    return raw.split(";", 1)[0].strip().lower().startswith(PREVIEWABLE_MIME_PREFIXES)
-
-
-def _build_view_url(file_path: str | None) -> str | None:
-    # /api/view is a FileResponse: byte-range seeking, no user header, no access write.
-    if not file_path:
-        return None
-    paths = compute_asset_response_paths(file_path)
-    if not paths:
-        return None
-    logical_path, relative_path = paths
-    namespace = logical_path.split("/", 1)[0]
-    if namespace not in VIEWABLE_NAMESPACES or not relative_path:
-        return None
-
-    subfolder, _, filename = relative_path.rpartition("/")
-    url = f"/api/view?type={namespace}&filename={urllib.parse.quote(filename, safe='')}"
-    if subfolder:
-        url += f"&subfolder={urllib.parse.quote(subfolder, safe='')}"
-    return url
+def _preview_fields(
+    asset_id: str,
+    preview_id: str | None,
+    mime_type: str | None,
+    file_path: str | None,
+    is_missing: bool,
+    preview_paths: dict[str, str],
+) -> tuple[str | None, str | None]:
+    """(preview_id, preview_url); preview_id is only ever sent with a URL."""
+    # A self-nomination is ignored: whether a file is its own preview is decided below.
+    if preview_id and preview_id != asset_id:
+        # A nominated preview is one whatever it holds, so no media check here.
+        if preview_id in preview_paths:
+            return preview_id, _content_url(preview_id)
+        return None, None
+    if is_missing or not file_path:
+        return None, None
+    kind = own_preview_kind(mime_type, file_path)
+    if kind is None:
+        return None, None
+    return (asset_id if kind == "image" else None), _content_url(asset_id)
 
 
 def _resolve_preview_paths(
@@ -306,15 +300,14 @@ def _build_asset_response(
     result: schemas.AssetDetailResult | schemas.UploadResult,
     preview_paths: dict[str, str],
 ) -> schemas_out.Asset:
-    if result.ref.preview_id:
-        # A nominated preview is one whatever it holds, so no media check here.
-        preview_url = _build_view_url(preview_paths.get(result.ref.preview_id))
-    elif result.asset is not None and result.asset.is_missing:
-        preview_url = None
-    elif _has_previewable_content(result.asset, result.ref.file_path):
-        preview_url = _build_view_url(result.ref.file_path)
-    else:
-        preview_url = None
+    preview_id, preview_url = _preview_fields(
+        result.ref.id,
+        result.ref.preview_id,
+        result.asset.mime_type if result.asset else None,
+        result.ref.file_path if result.asset else None,
+        result.asset is not None and result.asset.is_missing,
+        preview_paths,
+    )
     if result.ref.file_path:
         paths = compute_asset_response_paths(result.ref.file_path)
         display_name = paths[1] if paths else None
@@ -334,7 +327,7 @@ def _build_asset_response(
         mime_type=result.asset.mime_type if result.asset else None,
         tags=result.tags,
         preview_url=preview_url,
-        preview_id=result.ref.preview_id,
+        preview_id=preview_id,
         user_metadata=result.ref.user_metadata or {},
         metadata=result.ref.system_metadata,
         job_id=result.ref.job_id,
@@ -353,18 +346,9 @@ def _build_record_response(
     content = record.content
     paths = compute_asset_response_paths(content.path)
     display_name = paths[1] if paths else None
-    if record.preview_id:
-        preview_url = _build_view_url(preview_paths.get(record.preview_id))
-    elif content.is_missing:
-        preview_url = None
-    else:
-        mime_type = record.mime_type or mimetypes.guess_type(content.path)[0] or ""
-        if mime_type.split(";", 1)[0].strip().lower().startswith(
-            PREVIEWABLE_MIME_PREFIXES
-        ):
-            preview_url = _build_view_url(content.path)
-        else:
-            preview_url = None
+    preview_id, preview_url = _preview_fields(
+        record.id, record.preview_id, record.mime_type, content.path, content.is_missing, preview_paths
+    )
 
     return schemas_out.Asset(
         id=record.id,
@@ -376,7 +360,7 @@ def _build_record_response(
         mime_type=record.mime_type,
         tags=tags,
         preview_url=preview_url,
-        preview_id=record.preview_id,
+        preview_id=preview_id,
         user_metadata=record.user_metadata or {},
         metadata=record.system_metadata,
         job_id=record.job_id,
@@ -627,32 +611,16 @@ async def download_asset_content(request: web.Request) -> web.Response:
     encoded = urllib.parse.quote(safe_name)
     cd = f"{disposition}; filename*=UTF-8''{encoded}"
 
-    file_size = os.path.getsize(abs_path)
-    size_mb = file_size / (1024 * 1024)
-    logging.info(
-        "download_asset_content: path=%s, size=%d bytes (%.2f MB), type=%s, name=%s",
+    # debug, not info: preview_url points here, so every thumbnail render is a fetch.
+    logging.debug("download_asset_content: path=%s, type=%s, name=%s", abs_path, content_type, filename)
+
+    # FileResponse for Range requests (video seeking). Content-Type is set explicitly:
+    # FileResponse would otherwise guess it from the path and bypass the check above.
+    return web.FileResponse(
         abs_path,
-        file_size,
-        size_mb,
-        content_type,
-        filename,
-    )
-
-    async def stream_file_chunks():
-        chunk_size = 64 * 1024
-        with open(abs_path, "rb") as f:
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
-
-    return web.Response(
-        body=stream_file_chunks(),
-        content_type=content_type,
         headers={
+            "Content-Type": content_type,
             "Content-Disposition": cd,
-            "Content-Length": str(file_size),
             "X-Content-Type-Options": "nosniff",
             **extra_headers,
         },
@@ -811,12 +779,19 @@ async def update_asset_route(request: web.Request) -> web.Response:
             400, "INVALID_JSON", "Request body must be valid JSON."
         )
 
+    if body.preview_id == reference_id:
+        # A self-reference makes the record undeletable (an ORM delete cycle).
+        return _build_error_response(
+            400, "INVALID_BODY", "An asset cannot be its own preview_id.", {"id": reference_id}
+        )
+
     try:
         result = update_asset_metadata(
             reference_id=reference_id,
             name=body.name,
             user_metadata=body.user_metadata,
             preview_id=body.preview_id,
+            clear_preview=body.clears_preview,
         )
         payload = _build_asset_response(result, _resolve_preview_paths([result]))
     except PermissionError as pe:

@@ -108,6 +108,9 @@ extension_mimetypes_cache = {
     "fbx" : "model",
 }
 
+# Image types Pillow can't decode, so image loaders must not list them.
+PIL_UNREADABLE_IMAGE_EXTENSIONS = frozenset({"exr", "hdr"})
+
 def map_legacy(folder_name: str) -> str:
     legacy = {"unet": "diffusion_models",
               "clip": "text_encoders"}
@@ -239,6 +242,8 @@ def filter_files_content_types(files: list[str], content_types: List[Literal["im
     result = []
     for file in files:
         extension = file.split('.')[-1]
+        if extension.lower() in PIL_UNREADABLE_IMAGE_EXTENSIONS:
+            continue
         if extension not in extension_mimetypes_cache:
             mime_type, _ = mimetypes.guess_type(file, strict=False)
             if not mime_type:

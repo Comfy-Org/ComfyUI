@@ -100,11 +100,15 @@ class ListAssetsQuery(BaseModel):
 class UpdateAssetBody(BaseModel):
     name: str | None = None
     user_metadata: dict[str, Any] | None = None
-    preview_id: str | None = None  # references an asset_reference id, not an asset id
+    preview_id: str | None = None  # references an asset_reference id; an explicit null clears it
+
+    @property
+    def clears_preview(self) -> bool:
+        return "preview_id" in self.model_fields_set and self.preview_id is None
 
     @model_validator(mode="after")
     def _validate_at_least_one_field(self):
-        if all(
+        if not self.clears_preview and all(
             v is None
             for v in (self.name, self.user_metadata, self.preview_id)
         ):
