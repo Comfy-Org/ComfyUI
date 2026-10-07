@@ -11,6 +11,7 @@ import comfy.ldm.common_dit
 import comfy.ops
 import comfy.patcher_extension
 from comfy.ldm.flux.layers import EmbedND
+from comfy.ldm.flux.math import apply_rope1
 
 from comfy.ldm.kandinsky5.model import (
     TimeEmbeddings,
@@ -20,6 +21,7 @@ from comfy.ldm.kandinsky5.model import (
     OutLayer,
     TransformerEncoderBlock,
     TransformerDecoderBlock,
+    attention,
     get_shift_scale_gate,
 )
 from .core_contract import DIT_CONFIG, GENERATION_DEFAULTS
@@ -42,26 +44,15 @@ _DEFAULT_ROPE_SCALE = tuple(
 
 @contextlib.contextmanager
 def _cast_bias_weight_fp32(layer, x):
-    """Use Comfy's patched/offloadable weights across stable API versions."""
-    kwargs = {
-        "device": x.device,
-        "dtype": torch.float32,
-        "bias_dtype": torch.float32,
-        "offloadable": True,
-    }
-    context_type = getattr(comfy.ops, "CastBiasWeightContext", None)
-    if context_type is not None:
-        with context_type(layer, **kwargs) as weights:
-            yield weights
-        return
-
-    # ``CastBiasWeightContext`` was added after ComfyUI v0.24.1. Stable
-    # releases expose the same lifecycle as the two functions below.
-    state = comfy.ops.cast_bias_weight(layer, **kwargs)
-    try:
-        yield state[:2]
-    finally:
-        comfy.ops.uncast_bias_weight(layer, *state)
+    """Use Comfy's patched/offloadable weights in fp32."""
+    with comfy.ops.CastBiasWeightContext(
+        layer,
+        device=x.device,
+        dtype=torch.float32,
+        bias_dtype=torch.float32,
+        offloadable=True,
+    ) as weights:
+        yield weights
 
 
 def _linear_fp32(layer, x):
@@ -135,9 +126,6 @@ class AsymCrossAttention(nn.Module):
         self.out_layer = operations.Linear(q_dim, q_dim, bias=True, device=device, dtype=dtype)
 
     def forward(self, x, context, rope_q=None, rope_kv=None, transformer_options={}):
-        from comfy.ldm.flux.math import apply_rope1
-        from comfy.ldm.kandinsky5.model import attention
-
         q = self.to_query(x).view(*x.shape[:-1], self.num_heads, -1)
         k = self.to_key(context).view(*context.shape[:-1], self.num_heads, -1)
         v = self.to_value(context).view(*context.shape[:-1], self.num_heads, -1)
