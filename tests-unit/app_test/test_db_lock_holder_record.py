@@ -26,7 +26,6 @@ HOLDER_SCRIPT = (
 @pytest.fixture(autouse=True)
 def isolated_lock(monkeypatch):
     monkeypatch.setattr(db_module, "_db_lock", None)
-    monkeypatch.setattr(db_module, "_holder_record", None)
     yield
     if db_module._db_lock is not None:
         db_module._db_lock.release(force=True)
@@ -125,78 +124,13 @@ def test_a_failed_acquire_leaves_the_holders_record(db_path, monkeypatch):
         _stop_holder(holder, "exit")
 
 
-def test_clean_exit_removes_the_record(db_path):
-    _stop_holder(_start_holder(db_path)[0], "exit")
-
-    assert not os.path.exists(db_path + ".lock.json")
-
-
-def test_a_crashed_holders_record_is_replaced_by_the_next_holder(db_path):
+@pytest.mark.parametrize("how", ["exit", "crash"])
+def test_a_previous_holders_record_stays_until_the_next_holder_replaces_it(db_path, how):
     holder, pid = _start_holder(db_path)
-    _stop_holder(holder, "crash")
+    _stop_holder(holder, how)
     assert _read_record(db_path)["pid"] == pid
 
     db_module._acquire_file_lock(db_path)
-
-    assert _read_record(db_path)["pid"] == os.getpid()
-
-
-def test_failed_init_removes_the_record(db_path, monkeypatch):
-    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{db_path}")
-
-    def _explode():
-        assert _read_record(db_path)["pid"] == os.getpid()
-        raise RuntimeError("alembic config exploded")
-
-    monkeypatch.setattr(db_module, "get_alembic_config", _explode)
-
-    with pytest.raises(RuntimeError, match="alembic config exploded"):
-        db_module._init_file_db(db_module.args.database_url)
-
-    assert not os.path.exists(db_path + ".lock.json")
-
-
-def test_exit_after_a_failed_init_leaves_the_next_holders_record(db_path, monkeypatch):
-    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{db_path}")
-    monkeypatch.setattr(db_module, "get_alembic_config", lambda: 1 / 0)
-    with pytest.raises(ZeroDivisionError):
-        db_module._init_file_db(db_module.args.database_url)
-    holder, pid = _start_holder(db_path)
-    try:
-        db_module._remove_holder_record()  # what atexit runs
-
-        assert _read_record(db_path)["pid"] == pid
-    finally:
-        _stop_holder(holder, "exit")
-
-
-def test_failed_init_removes_the_record_before_releasing_the_lock(db_path, monkeypatch):
-    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{db_path}")
-    monkeypatch.setattr(db_module, "get_alembic_config", lambda: 1 / 0)
-    record_at_release = []
-
-    class _Lock(db_module.FileLock):
-        def release(self, *args, **kwargs):
-            record_at_release.append(os.path.exists(db_path + ".lock.json"))
-            super().release(*args, **kwargs)
-
-    monkeypatch.setattr(db_module, "FileLock", _Lock)
-    with pytest.raises(ZeroDivisionError):
-        db_module._init_file_db(db_module.args.database_url)
-
-    # A holder waiting on the lock writes its record as soon as it is released.
-    assert record_at_release == [False]
-
-
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
-def test_a_forked_child_leaves_the_parents_record(db_path):
-    db_module._acquire_file_lock(db_path)
-
-    child = os.fork()
-    if child == 0:
-        db_module._remove_holder_record()  # what atexit runs in the child
-        os._exit(0)
-    os.waitpid(child, 0)
 
     assert _read_record(db_path)["pid"] == os.getpid()
 

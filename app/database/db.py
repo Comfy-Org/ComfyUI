@@ -1,4 +1,3 @@
-import atexit
 import importlib
 import json
 import logging
@@ -217,7 +216,7 @@ def _process_start_token():
         return str((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime)
     if sys.platform == "darwin":
         env = {**os.environ, "TZ": "UTC", "LC_ALL": "C"}
-        result = subprocess.run(["ps", "-o", "lstart=", "-p", str(os.getpid())],
+        result = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(os.getpid())],
                                 capture_output=True, text=True, env=env, timeout=5, check=True)
         return result.stdout.strip() or None
     if not sys.platform.startswith("linux"):
@@ -230,16 +229,12 @@ def _process_start_token():
     return f"{boot_id}:{stat[stat.rindex(')') + 2:].split()[19]}"
 
 
-_holder_record = None  # (path, writer pid): a forked child must not remove its parent's record
-
-
 def _write_holder_record(db_path):
     """Record which process holds the lock in `<db>.lock.json`, so other processes can
-    identify it. The record outlives a killed holder: it is only valid while its pid runs
-    with the same start token. Best effort: startup never fails over it."""
-    global _holder_record
+    identify it. It is never removed, so it is only valid while its pid runs with the same
+    start token; the next holder overwrites it. Best effort: startup never fails over it."""
     path = db_path + ".lock.json"
-    tmp_path = f"{path}.{os.getpid()}.tmp"
+    tmp_path = path + ".tmp"
     try:
         started = _process_start_token()
         if not started:
@@ -255,20 +250,10 @@ def _write_holder_record(db_path):
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(record, f)
         os.replace(tmp_path, path)
-        _holder_record = (path, os.getpid())
     except Exception as e:
         logging.warning(f"Could not record the database lock holder in '{path}': {e}")
         with suppress(OSError):
             os.remove(tmp_path)
-
-
-@atexit.register
-def _remove_holder_record():
-    global _holder_record
-    record, _holder_record = _holder_record, None
-    if record is not None and record[1] == os.getpid():
-        with suppress(OSError):
-            os.remove(record[0])
 
 
 def lock_holder_db_path():
@@ -351,7 +336,6 @@ def _init_file_db(db_url):
         db_exists = os.path.exists(db_path)
         _migrate_and_bind(db_url, db_path, db_exists)
     except Exception:
-        _remove_holder_record()  # before the release, or it could remove the next holder's record
         _db_lock.release()
         raise
 

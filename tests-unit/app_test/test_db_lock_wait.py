@@ -1,4 +1,6 @@
+import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -69,6 +71,8 @@ def test_waits_for_a_holder_that_is_shutting_down(tmp_path, caplog):
 
     assert db_module._db_lock.is_locked
     assert WAITING in caplog.text
+    with open(db_path + ".lock.json", encoding="utf-8") as f:
+        assert json.load(f)["pid"] == os.getpid()
 
 
 def test_gives_up_when_the_lock_stays_held(tmp_path, monkeypatch, caplog):

@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sqlite3
@@ -56,6 +57,9 @@ def test_init_file_db_migrates_when_lock_is_free(stale_db):
 
 def test_successful_init_keeps_holding_the_lock(stale_db):
     db_module._init_file_db(db_module.args.database_url)
+
+    with open(stale_db + ".lock.json", encoding="utf-8") as f:
+        assert json.load(f)["pid"] == os.getpid()
 
     contender = FileLock(stale_db + ".lock")
     with pytest.raises(Timeout):
