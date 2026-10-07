@@ -151,3 +151,22 @@ def test_indexed_fusion_ineligible_operands(case):
             actual.float().sum().backward()
             operand = {"gate_grad": gate, "input_grad": x, "residual_grad": residual}[case]
             assert operand.grad is not None and torch.isfinite(operand.grad).all()
+
+
+def test_segmented_residual_preserves_custom_forward_gradients():
+    class OffsetLinear(torch.nn.Linear):
+        def __init__(self):
+            super().__init__(8, 4, bias=False)
+            self.weight.requires_grad_(False)
+            self.offset = torch.nn.Parameter(torch.randn(4))
+
+        def forward(self, x):
+            return super().forward(x) + self.offset
+
+    layer = OffsetLinear()
+    x, residual, gate = torch.randn(3, 8), torch.randn(3, 4), torch.randn(1, 4)
+    result = ops.linear_input_act(layer, x, None, residual=residual,
+                                  residual_scale=gate, residual_segments=[(0, 3, 0)])
+    torch.testing.assert_close(result, torch.addcmul(residual, layer(x), gate))
+    result.sum().backward()
+    torch.testing.assert_close(layer.offset.grad, gate[0] * len(x))

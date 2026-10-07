@@ -1039,7 +1039,7 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
     def residual_out(out):
         if residual_segments is None:
             return _linear_residual(out, residual, residual_scale)
-        if (not comfy.model_management.in_training and not needs_grad
+        if (not comfy.model_management.in_training and not needs_grad and not out.requires_grad
                 and residual.dtype == out.dtype and not hooks):
             for start, stop, row in residual_segments:
                 segment = out[start:stop]
