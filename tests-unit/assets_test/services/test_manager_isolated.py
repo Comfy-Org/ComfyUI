@@ -254,11 +254,32 @@ def test_ensure_scan_started_starts_the_lazy_object_info_scan(
     enabled_manager: AssetsEnabled, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seeder_start = MagicMock()
+    served = MagicMock()
     monkeypatch.setattr(asset_seeder, "start", seeder_start)
+    monkeypatch.setattr(asset_seeder, "node_list_served", served)
 
     enabled_manager.ensure_scan_started()
 
+    served.assert_called_once_with()
     seeder_start.assert_called_once_with(roots=("models", "input", "output"))
+
+
+@pytest.mark.parametrize("pending", [True, False])
+def test_ensure_scan_started_queues_the_pending_prune_behind_a_running_scan(
+    enabled_manager: AssetsEnabled, monkeypatch: pytest.MonkeyPatch, pending: bool
+) -> None:
+    enqueue = MagicMock()
+    monkeypatch.setattr(asset_seeder, "start", MagicMock(return_value=False))
+    monkeypatch.setattr(asset_seeder, "node_list_served", MagicMock())
+    monkeypatch.setattr(asset_seeder, "prune_pending", lambda: pending)
+    monkeypatch.setattr(asset_seeder, "enqueue_scan", enqueue)
+
+    enabled_manager.ensure_scan_started()
+
+    if pending:
+        enqueue.assert_called_once_with(roots=("models", "input", "output"), phase=seeder_module.ScanPhase.FULL)
+    else:
+        enqueue.assert_not_called()
 
 
 def test_shutdown_runs_lifecycle_cleanup_when_seeder_shutdown_times_out(

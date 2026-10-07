@@ -865,7 +865,6 @@ class PromptServer():
 
         @routes.get("/object_info")
         async def get_object_info(request):
-            self.asset_manager.ensure_scan_started()
             with folder_paths.cache_helper:
                 out = {}
                 for x in nodes.NODE_CLASS_MAPPINGS:
@@ -874,7 +873,9 @@ class PromptServer():
                     except Exception:
                         logging.error(f"[ERROR] An error occurred while retrieving information for the '{x}' node.")
                         logging.error(traceback.format_exc())
-                return web.json_response(out)
+            # After INPUT_TYPES, where some nodes register model folders, and outside the cache.
+            self.asset_manager.ensure_scan_started()
+            return web.json_response(out)
 
         @routes.get("/object_info/{node_class}")
         async def get_object_info_node(request):

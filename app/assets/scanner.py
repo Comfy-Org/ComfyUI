@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from itertools import islice
 from pathlib import Path
 from typing import Callable, Literal, NamedTuple, Protocol, TypedDict
@@ -28,6 +29,7 @@ from app.assets.database.queries import (
     is_live_path_conflict,
     mark_contents_missing,
     create_record,
+    revive_contents,
 )
 from app.assets.database.models import Asset, AssetContent
 from app.assets.helpers import (
@@ -36,6 +38,7 @@ from app.assets.helpers import (
     sql_path_under_prefix,
     sql_path_under_prefix_batches,
     stored_path_under_prefixes,
+    get_utc_now,
     to_stored_hash,
 )
 from app.assets.lifecycle import get_excluded_scan_roots
@@ -582,6 +585,97 @@ def mark_unlisted_references_missing_safely(
         )
     if progress is not None:
         progress.missing_marked += sum(marked)
+
+
+# A row a scan marked missing revives in bulk when its file is listed again at the same
+# size within this long; after that only the per-file revive (exact size and mtime) applies.
+REVIVE_WINDOW = timedelta(days=7)
+
+
+def _revival_candidates(session: Session, prefixes: list[str], since: datetime) -> dict[str, tuple[str, int]]:
+    """Path -> (content id, size) of the newest row at each path that a scan marked missing
+    since ``since`` and that still has a record. Records come first: a newer row whose
+    records were deleted must not hide an older one the user's history hangs off."""
+    newest: dict[str, tuple[tuple[datetime, datetime], str, int]] = {}
+    for under_prefixes in sql_path_under_prefix_batches(AssetContent.path, prefixes):
+        stmt = sa.select(
+            AssetContent.id, AssetContent.path, AssetContent.size_bytes, AssetContent.missing_since, AssetContent.created_at
+        ).where(
+            AssetContent.is_missing.is_(True),
+            AssetContent.missing_since >= since,
+            under_prefixes,
+            sa.exists().where(Asset.content_id == AssetContent.id),
+        )
+        for content_id, path, size_bytes, missing_since, created_at in session.execute(stmt):
+            key = (missing_since, created_at)
+            if path not in newest or key > newest[path][0]:
+                newest[path] = (key, content_id, size_bytes)
+    return {path: (content_id, size_bytes) for path, (_, content_id, size_bytes) in newest.items()}
+
+
+def _returned_files(candidates: dict[str, tuple[str, int]], should_stop: ShouldStop) -> dict[str, int]:
+    """Content id -> mtime_ns for each candidate its directory lists again as a file of the
+    row's size. One listing per directory: a directory Core recreated empty (a save, an
+    upload) lists nothing, so its rows stay missing. A name the listing spells differently
+    (a case-insensitive filesystem) is left to the per-file revive."""
+    by_dir: dict[str, list[tuple[str, str, int]]] = {}
+    for path, (content_id, size_bytes) in candidates.items():
+        by_dir.setdefault(os.path.dirname(path), []).append((os.path.basename(path), content_id, size_bytes))
+    returned: dict[str, int] = {}
+    for directory, rows in by_dir.items():
+        if should_stop():
+            return {}
+        try:
+            with os.scandir(directory) as it:
+                entries = {entry.name: entry for entry in it}
+        except OSError:
+            continue
+        for name, content_id, size_bytes in rows:
+            entry = entries.get(name)
+            try:
+                if entry is None or not entry.is_file():
+                    continue
+                stat_result = entry.stat()
+            except OSError:
+                continue
+            if stat_result.st_size == size_bytes:
+                returned[content_id] = get_mtime_ns(stat_result)
+    return returned
+
+
+def revive_returned_references_safely(
+    root: RootType,
+    progress: _ScanProgress | None = None,
+    should_stop: ShouldStop = _never_stop,
+) -> None:
+    """Bulk-revive the rows under ``root`` a scan marked missing within REVIVE_WINDOW whose
+    file is back at the same size, counting them as recovered. Not with hashing on: there
+    a returning file keeps the per-file revive, which verifies its hash first."""
+    if mode.hashing_enabled():
+        return
+    revived: list[int] = []
+    try:
+        with create_session() as session:
+            candidates = _revival_candidates(
+                session, get_scan_prefixes_for_root(root), get_utc_now() - REVIVE_WINDOW
+            )
+        returned = _returned_files(candidates, should_stop)
+        _write_in_batches(
+            list(returned.items()),
+            lambda session, batch: len(revive_contents(session, dict(batch))),
+            should_stop,
+            revived,
+        )
+    except Exception as exc:
+        logging.exception("bulk revive failed for %s: %s", root, exc)
+        emit(
+            "scanner.fast_scan_failed",
+            root=root,
+            error_type=error_type(exc),
+            error_kind=error_kind(exc),
+        )
+    if progress is not None:
+        progress.recovered += sum(revived)
 
 
 def list_output_for_rescan() -> ListingWalk:

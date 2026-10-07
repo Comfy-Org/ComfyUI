@@ -504,6 +504,7 @@ def test_prune_before_scan_emits_marked_missing_with_pruning_stage(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     scan_seeder._prune_first = True
+    scan_seeder._prune_pending = scan_seeder._node_list_served = True
     scan_seeder._phase = ScanPhase.FAST
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: ())
     monkeypatch.setattr(
@@ -571,6 +572,7 @@ def test_scan_prune_failure_is_reported_and_the_scan_still_runs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     scan_seeder._prune_first = True
+    scan_seeder._prune_pending = scan_seeder._node_list_served = True
     scan_seeder._phase = ScanPhase.FAST
     fast_phase_roots: list[tuple[str, ...]] = []
     monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
@@ -625,6 +627,7 @@ def test_batch_insert_failure_emits_only_the_exception_type(
         raise PermissionError("/private/models/asset.safetensors")
 
     monkeypatch.setattr(seeder_module, "insert_asset_specs", fail_insert)
+    monkeypatch.setattr(seeder_module, "revive_returned_references_safely", lambda *_args: None)
     monkeypatch.setattr(seeder_module, "create_session", lambda: nullcontext(session))
     monkeypatch.setattr(seeder_module, "tick_watch_list", lambda _progress=None: None)
 

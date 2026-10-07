@@ -51,6 +51,8 @@ class AssetContent(Base):
     is_missing: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="0"
     )
+    # When a scan marked it missing; a returning file revives in bulk only within a window of it.
+    missing_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), nullable=False, default=get_utc_now
     )
@@ -65,6 +67,11 @@ class AssetContent(Base):
             "path",
             unique=True,
             sqlite_where=text("is_missing = 0"),
+        ),
+        Index(
+            "ix_asset_contents_missing_since",
+            "missing_since",
+            sqlite_where=text("missing_since IS NOT NULL"),
         ),
     )
 

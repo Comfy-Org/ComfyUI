@@ -219,7 +219,9 @@ def test_a_genuinely_deleted_file_is_still_marked_missing(drive, session, caplog
     ]
 
 
-def test_a_returning_file_with_a_changed_mtime_gets_a_new_record(drive, session):
+def test_a_returning_file_with_a_changed_mtime_keeps_its_record(drive, session):
+    """Within the revive window a file back at the same path and size keeps its row, and
+    the user's history with it, whatever its mtime."""
     files = _populate(drive)
     _scan()
     target = files[0]
@@ -231,10 +233,10 @@ def test_a_returning_file_with_a_changed_mtime_gets_a_new_record(drive, session)
 
     state = _scan()
 
-    assert state.recovered == len(files) - 1
+    assert state.recovered == len(files)
     session.expire_all()
     rows = list(session.scalars(sa.select(AssetContent).where(AssetContent.path == str(target))))
-    assert sorted(row.is_missing for row in rows) == [False, True]
+    assert [(row.is_missing, row.mtime_ns) for row in rows] == [(False, target.stat().st_mtime_ns)]
 
 
 def test_hashing_on_recovers_through_the_hash_path(drive, session):
