@@ -171,7 +171,7 @@ def _backup_database(source_path, destination_path):
 
 
 _db_lock = None
-_cannot_move_aside = False  # set when the corrupt database stays in use, so recovery stops
+_recovery_attempted = False  # once per launch: after that, asset startup logs corruption, as before
 _DAILY_BACKUP_INTERVAL_SECONDS = 24 * 60 * 60
 _LOCK_WAIT_SECONDS = 5.0
 
@@ -305,15 +305,17 @@ def is_recoverable_corruption(error):
     # Only the default database (see _is_default_db).
     # SQLITE_CORRUPT or SQLITE_NOTADB, never "database is locked". The error can come from
     # another file (the pre-upgrade backup), so the live database must fail its check too.
-    if _cannot_move_aside or not _is_default_db() or error_kind(error) != "database_corrupt":
+    if _recovery_attempted or not _is_default_db() or error_kind(error) != "database_corrupt":
         return False
     return not _passes_integrity_check(get_db_path())
 
 
 def recover_from_corruption(error):
     """Replace a default database found corrupt after init_db. False for any other error."""
+    global _recovery_attempted
     if not is_recoverable_corruption(error):
         return False
+    _recovery_attempted = True
     db_path = get_db_path()
     for session_factory in (Session, WriteSession):
         session_factory.kw["bind"].dispose()  # Windows refuses to rename an open file
@@ -323,8 +325,6 @@ def recover_from_corruption(error):
         logging.exception(f"Could not recover the corrupt database '{db_path}'; continuing without recovery")
         if not os.path.exists(db_path):
             raise  # a move that couldn't be undone: fail rather than run on a new empty file
-        global _cannot_move_aside
-        _cannot_move_aside = True
         return True
     _migrate_and_bind(get_database_url(), db_path, os.path.exists(db_path))
     return True

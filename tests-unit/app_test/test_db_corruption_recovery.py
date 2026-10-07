@@ -93,7 +93,7 @@ def _break_schema(db_path: str) -> None:
 @pytest.fixture(autouse=True)
 def boot_state(monkeypatch):
     """Undo what a boot binds: sessions, their engines, the database lock and recovery state."""
-    monkeypatch.setattr(db_module, "_cannot_move_aside", False)
+    monkeypatch.setattr(db_module, "_recovery_attempted", False)
     monkeypatch.setattr(db_module, "Session", None)
     monkeypatch.setattr(db_module, "WriteSession", None)
     monkeypatch.setattr(db_module, "_db_lock", None)
@@ -271,7 +271,7 @@ def test_failed_restore_is_undone_and_recovered_on_the_next_launch(default_db, m
             session_factory.kw["bind"].dispose()
     if db_module._db_lock is not None:
         db_module._db_lock.release(force=True)
-    monkeypatch.setattr(db_module, "_cannot_move_aside", False)
+    monkeypatch.setattr(db_module, "_recovery_attempted", False)
     monkeypatch.setattr(db_module, "_db_lock", None)
     _boot()
 
@@ -457,20 +457,57 @@ class _NoThread:
 
 
 @pytest.mark.parametrize("table", ["asset_system_state", "assets", "asset_contents"])
-def test_corruption_first_hit_by_asset_startup_is_recovered(default_db, boot_events, table):
+def test_corruption_first_hit_by_asset_startup_is_recovered(default_db, boot_events, monkeypatch, table):
     # init_db reads none of these tables; asset startup is the first to.
     _make_db(default_db + ".daily-backup", marker="from backup")
     _make_db(default_db)
     _overwrite_page_of(default_db, table)
+    open_at_rename = []
+    real_replace = os.replace
+
+    def _replace(src, dst):
+        if src == default_db and os.path.isdir("/proc/self/fd"):  # Windows refuses to rename an open file
+            open_at_rename.append(os.path.realpath(src) in _open_files())
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(db_module.os, "replace", _replace)
 
     _boot()
 
-    [quarantined] = _quarantined(default_db)
+    _quarantined(default_db)
     with closing(sqlite3.connect(default_db)) as conn:
         assert conn.execute("SELECT value FROM marker").fetchone() == ("from backup",)
     assert boot_events == ["startup", "backup"]
-    if os.path.isdir("/proc/self/fd"):  # Windows refuses to rename a file this process has open
-        assert os.path.realpath(quarantined) not in _open_files()
+    assert True not in open_at_rename
+
+
+def test_corruption_again_after_recovery_is_logged_as_before(default_db, boot_events, monkeypatch):
+    # Recovery is attempted once per launch; after that, asset startup logs corruption and carries on.
+    _make_db(default_db)
+    monkeypatch.setattr(db_module, "_passes_integrity_check", lambda path: path.endswith(".restore-tmp"))
+
+    def _wipe(session):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(lifecycle, "wipe_temp_db_rows", _wipe)
+
+    _boot()
+
+    assert boot_events == ["startup", "backup"]
+    assert len(_quarantined(default_db)) == 1
+
+
+def test_failed_reopen_after_recovery_fails_the_launch(default_db, monkeypatch):
+    _make_db(default_db)
+    _overwrite_page_of(default_db, "assets")
+    db_module.init_db()
+
+    def _reopen_fails(*a):
+        raise RuntimeError("the new database would not open")
+
+    monkeypatch.setattr(db_module, "_migrate_and_bind", _reopen_fails)
+    with pytest.raises(RuntimeError, match="would not open"):
+        db_module.recover_from_corruption(sqlite3.DatabaseError("database disk image is malformed"))
 
 
 def test_healthy_boot_starts_the_backup_after_asset_startup(default_db, boot_events, monkeypatch):
@@ -637,7 +674,7 @@ def test_unmovable_database_found_corrupt_after_init_starts_as_before(default_db
         return real_replace(src, dst)
 
     monkeypatch.setattr(db_module.os, "replace", _held_open)
-    monkeypatch.setattr(db_module, "_cannot_move_aside", False)
+    monkeypatch.setattr(db_module, "_recovery_attempted", False)
 
     _boot()
 
@@ -772,7 +809,7 @@ def test_wal_kept_by_another_connection_does_not_reach_the_restored_database(def
     with closing(sqlite3.connect(default_db)) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
         assert conn.execute("SELECT value FROM marker").fetchall() == [("from backup",)]
-    assert os.path.exists(quarantined + "-wal")  # kept with the database it belongs to
+    assert os.path.exists(quarantined + "-wal") and os.path.exists(quarantined + "-shm")  # kept together
 
 
 def test_journal_of_another_connection_moves_with_the_corrupt_database(default_db):
