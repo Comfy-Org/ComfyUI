@@ -27,22 +27,26 @@ DEFAULT_PALETTE = [
 ]
 
 
-def _unpack(track_data):
-    packed = track_data["packed_masks"]
-    if packed is None or packed.shape[1] == 0:
-        return None
-    return unpack_masks(packed)
+_RENDER_CHUNK = 8  # frames processed per GPU chunk
 
 
-def _first_appearance_cx_area(masks_bool):
-    """Per object: first frame it appears in, plus centroid-x and area in that frame."""
-    m = masks_bool.float()
-    T, H, W = m.shape[0], m.shape[-2], m.shape[-1]
-    grid_x = torch.arange(W, device=m.device, dtype=m.dtype).view(1, 1, 1, W)
-    area_t = m.sum(dim=(-1, -2))
-    cx_t = (m * grid_x).sum(dim=(-1, -2)) / area_t.clamp(min=1)
+def _first_appearance_cx_area(packed):
+    """Per object: first frame it appears in, plus centroid-x and area in that frame.
+    Works directly on bit-packed masks, unpacks chunk by chunk on the GPU and only keeps
+    per-column counts, so no full-resolution float tensor is ever materialized."""
+    device = comfy.model_management.get_torch_device()
+    T, H = packed.shape[0], packed.shape[-2]
+    cols = []
+    for t0 in range(0, T, _RENDER_CHUNK):
+        m = unpack_masks(packed[t0:t0 + _RENDER_CHUNK].to(device, non_blocking=True))  # [t, N, H, W] bool
+        cols.append(m.sum(dim=-2, dtype=torch.int32))  # [t, N, W]
+    col = torch.cat(cols, dim=0).double()  # [T, N, W]
+    W = col.shape[-1]
+    grid_x = torch.arange(W, device=device, dtype=col.dtype)
+    area_t = col.sum(dim=-1)  # [T, N]
+    cx_t = (col * grid_x).sum(dim=-1) / area_t.clamp(min=1)
     present = area_t > 0
-    frame_idx = torch.arange(T, device=m.device).unsqueeze(1)
+    frame_idx = torch.arange(T, device=device).unsqueeze(1)
     first_t = torch.where(present, frame_idx, T).amin(dim=0)
     sel = first_t.clamp(max=T - 1).unsqueeze(0)
     cx = cx_t.gather(0, sel).squeeze(0)
@@ -76,20 +80,25 @@ def _render_colored_masks(track_data, background="black"):
         out = torch.empty(T, H, W, 3, device=device, dtype=dtype)
         out[..., 0], out[..., 1], out[..., 2] = bg_rgb[0], bg_rgb[1], bg_rgb[2]
         return out
-    T, N_obj = packed.shape[0], packed.shape[1]
-    colors = torch.tensor(
-        [DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)] for i in range(N_obj)],
-        device=device, dtype=dtype,
-    )
-    masks_full = unpack_masks(packed.to(device)).float()
-    Hm, Wm = masks_full.shape[-2], masks_full.shape[-1]
-    masks_full = F.interpolate(
-        masks_full.view(T * N_obj, 1, Hm, Wm), size=(H, W), mode="nearest"
-    ).view(T, N_obj, H, W) > 0.5
-    any_mask = masks_full.any(dim=1)
-    color_overlay = colors[masks_full.to(torch.uint8).argmax(dim=1)]
-    bg_tensor = torch.tensor(bg_rgb, device=device, dtype=color_overlay.dtype).view(1, 1, 1, 3)
-    return torch.where(any_mask.unsqueeze(-1), color_overlay, bg_tensor.expand_as(color_overlay))
+    T = packed.shape[0]
+    gpu = comfy.model_management.get_torch_device()
+    n_pal = len(DEFAULT_PALETTE)
+    # Lookup table: index 0 = background, 1..n_pal = palette colors.
+    lut = torch.tensor([bg_rgb] + DEFAULT_PALETTE, device=gpu, dtype=dtype)
+    out = torch.empty((T, H, W, 3), device=device, dtype=dtype)
+    for t0 in range(0, T, _RENDER_CHUNK):
+        t1 = min(t0 + _RENDER_CHUNK, T)
+        m = unpack_masks(packed[t0:t1].to(gpu, non_blocking=True))  # [t, N, Hm, Wm] bool
+        # Build the label map by painting objects from last to first, so the lowest object index
+        # wins on overlap (same as the previous argmax). Avoids argmax over dim=1, which is very slow on CPU.
+        label = torch.zeros(m.shape[0], m.shape[2], m.shape[3], device=gpu, dtype=torch.uint8)  # [t, Hm, Wm]
+        for i in reversed(range(m.shape[1])):
+            label.masked_fill_(m[:, i], i % n_pal + 1)
+        if label.shape[-2:] != (H, W):
+            # Nearest resize of the label map is identical to nearest-resizing every object mask first.
+            label = F.interpolate(label.unsqueeze(1), size=(H, W), mode="nearest").squeeze(1)
+        out[t0:t1].copy_(lut.index_select(0, label.reshape(-1).long()).view(*label.shape, 3))
+    return out
 
 
 def _render_mask_as_identity(mask, background="black"):
@@ -304,9 +313,9 @@ class SCAIL2ColoredMask(io.ComfyNode):
     @classmethod
     def execute(cls, driving_track_data, object_indices, sort_by, replacement_mode, ref_track_data=None):
         def _prep(td):
-            masks_bool = _unpack(td)
-            if sort_by != "none" and masks_bool is not None:
-                first_t, cx, area = _first_appearance_cx_area(masks_bool)
+            packed = td["packed_masks"]
+            if sort_by != "none" and packed is not None and packed.shape[1] > 0:
+                first_t, cx, area = _first_appearance_cx_area(packed)
                 if sort_by == "left_to_right":
                     order = sorted(range(len(cx)), key=lambda i: (first_t[i], cx[i]))
                 else:  # "area"
