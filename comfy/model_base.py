@@ -2964,14 +2964,6 @@ class Kandinsky6(Kandinsky5):
     def concat_cond(self, **kwargs):
         return None
 
-    def _apply_model(self, *args, **kwargs):
-        if self.diffusion_model.n_grid > 1:
-            raise ValueError(
-                "Distilled Kandinsky 6 (n_grid > 1) requires PiFlow sampling, "
-                "which is not supported in this build. Use the base checkpoint."
-            )
-        return super()._apply_model(*args, **kwargs)
-
     def extra_conds(self, **kwargs):
         out = super().extra_conds(**kwargs)
         cross_attn = kwargs.get("cross_attn")
@@ -2980,13 +2972,10 @@ class Kandinsky6(Kandinsky5):
         latent_shapes = kwargs.get("latent_shapes")
         if latent_shapes is not None:
             out["latent_shapes"] = comfy.conds.CONDConstant(latent_shapes)
-        reference_tail = kwargs.get("k6_reference_tail")
-        if reference_tail is not None:
-            out["k6_reference_tail"] = comfy.conds.CONDConstant(bool(reference_tail))
+        reference = kwargs.get("k6_reference")
+        if reference is not None:
+            out["k6_reference"] = comfy.conds.CONDRegular(reference)
         return out
-
-    def scale_latent_inpaint(self, sigma, noise, latent_image, **kwargs):
-        return latent_image
 
     def _process_video_stream(self, latent, process):
         if getattr(latent, "is_nested", False):

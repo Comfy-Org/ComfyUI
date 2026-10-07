@@ -1,14 +1,15 @@
 import pytest
 import torch
 
-import comfy.nested_tensor
+import comfy.ops
 from comfy import model_detection
+from comfy import supported_models
 from comfy.ldm.kandinsky6.audio_vae import Kandinsky6AudioVAE
 from comfy.ldm.kandinsky6.core_contract import AUDIO_DEFAULTS
-from comfy.ldm.kandinsky6.detection import detect_kandinsky6
+from comfy.ldm.kandinsky6.detection import detect_kandinsky6, to_native_state_dict
+from comfy.ldm.kandinsky6.model import Kandinsky6NativeAVDiT
 from comfy_extras.nodes_kandinsky6 import (
     Kandinsky6EmptyLatent,
-    Kandinsky6RemoveReferenceLatent,
 )
 
 
@@ -93,25 +94,56 @@ def test_detect_kandinsky6_pro():
     assert cfg["image_model"] == "kandinsky6"
     assert cfg["in_visual_dim"] == _PRO["in_visual_dim"]
     assert cfg["out_visual_dim"] == _PRO["out_visual_dim"]
-    assert cfg["out_audio_dim"] == _PRO["in_audio_dim"]
     assert cfg["model_dim"] == _PRO["model_dim"]
     assert cfg["model_dim_a"] == _PRO["model_dim_a"]
-    assert cfg["n_grid"] == 1
     assert cfg["num_visual_blocks"] == _PRO["num_visual_blocks"]
     assert cfg["num_text_blocks"] == _PRO["num_text_blocks"]
     assert cfg["visual_token_type_num_embeddings"] == 2
     assert cfg["visual_embed_dim"] == (2 * _PRO["in_visual_dim"] + 1) * 4
 
 
-def test_detect_kandinsky6_renames_diffusers_keys_in_place():
-    native = _k6_pro_state_dict()
-    diffusers = {_to_diffusers_key(key): value for key, value in native.items()}
+def test_detect_kandinsky6_leaves_state_dict_untouched():
+    diffusers = {_to_diffusers_key(key): value for key, value in _k6_pro_state_dict().items()}
+    original_keys = set(diffusers)
 
     cfg = detect_kandinsky6(diffusers, "")
 
     assert cfg is not None
     assert cfg["image_model"] == "kandinsky6"
-    assert set(diffusers) == set(native)
+    assert set(diffusers) == original_keys
+
+
+def test_to_native_state_dict_converts_diffusers_layout():
+    native = _k6_pro_state_dict()
+    diffusers = {_to_diffusers_key(key): value for key, value in native.items()}
+
+    converted = to_native_state_dict(diffusers)
+
+    assert set(converted) == set(native)
+    assert all(converted[key] is value for key, value in native.items())
+    # The input dict is left as the caller provided it.
+    assert set(diffusers) == {_to_diffusers_key(key) for key in native}
+    # A native layout passes through without a copy.
+    assert to_native_state_dict(native) is native
+
+
+def test_supported_model_converts_diffusers_unet_state_dict():
+    native = _k6_pro_state_dict()
+    diffusers = {_to_diffusers_key(key): value for key, value in native.items()}
+    model_config = supported_models.Kandinsky6(detect_kandinsky6(native, ""))
+
+    converted = model_config.process_unet_state_dict(diffusers)
+
+    assert set(converted) == set(native)
+
+
+def test_detect_kandinsky6_rejects_distilled_checkpoints():
+    sd = _k6_pro_state_dict()
+    # A two-stage DX output head marks a distilled release.
+    sd["out_layer.out_layer.weight"] = _meta(2 * _PRO["out_visual_dim"] * 4, _PRO["model_dim"])
+
+    with pytest.raises(ValueError, match="PiFlow"):
+        detect_kandinsky6(sd, "")
 
 
 def test_detect_kandinsky6_rejects_mixed_key_layouts():
@@ -196,39 +228,88 @@ def test_empty_latent_node_builds_joint_latent():
     assert latent["sample_rate"] == 44100
 
 
-@pytest.mark.parametrize(
-    "width, height, length, batch_size",
-    [
-        (865, 480, 121, 1),  # width not divisible by 16
-        (864, 479, 121, 1),  # height not divisible by 16
-        (864, 480, 122, 1),  # frame count not of the form 4*n + 1
-        (864, 480, 121, 2),  # batch_size > 1
-    ],
-)
-def test_empty_latent_node_rejects_invalid_shapes(width, height, length, batch_size):
-    with pytest.raises(ValueError):
-        Kandinsky6EmptyLatent().build(width, height, length, batch_size)
-
-
-def test_remove_reference_latent_strips_tail():
-    latent = Kandinsky6EmptyLatent().build(864, 480, 121, 1)[0]
+def test_empty_latent_node_rounds_unaligned_shapes():
+    # Width/height floor to the VAE factor, the frame count to 4*n+1, and
+    # batch sizes above 1 build unchanged. 122 frames round down to 121,
+    # which the audio stream is sized from as well.
+    latent = Kandinsky6EmptyLatent().build(865, 479, 122, 2)[0]
     video, audio = latent["samples"].unbind()
-    generated_frames = video.shape[2]
-    tail = torch.zeros_like(video[:, :, :1])
-    latent["samples"] = comfy.nested_tensor.NestedTensor((torch.cat((video, tail), dim=2), audio))
-    latent["k6_reference_tail"] = True
-    latent["k6_generated_video_latent_frames"] = generated_frames
-
-    out = Kandinsky6RemoveReferenceLatent().remove(latent)[0]
-    out_video, out_audio = out["samples"].unbind()
-
-    assert tuple(out_video.shape) == tuple(video.shape)
-    assert torch.equal(out_audio, audio)
-    assert "k6_reference_tail" not in out
-    assert "k6_generated_video_latent_frames" not in out
+    assert tuple(video.shape) == (2, 16, 31, 59, 108)
+    assert tuple(audio.shape) == (2, 218, 40)
 
 
-def test_remove_reference_latent_requires_tail_metadata():
-    latent = Kandinsky6EmptyLatent().build(864, 480, 121, 1)[0]
-    with pytest.raises(ValueError):
-        Kandinsky6RemoveReferenceLatent().remove(latent)
+def _small_dit():
+    # disable_weight_init leaves torch.empty garbage behind; bound the weights
+    # so the forward stays finite for the value checks below.
+    torch.manual_seed(0)
+    model = Kandinsky6NativeAVDiT(
+        in_visual_dim=16,
+        out_visual_dim=16,
+        in_audio_dim=40,
+        in_text_dim=32,
+        in_text_dim2=32,
+        time_dim=32,
+        model_dim=32,
+        ff_dim=64,
+        time_dim_a=32,
+        model_dim_a=32,
+        ff_dim_a=64,
+        head_dim_a=16,
+        visual_embed_dim=(2 * 16 + 1) * 4,
+        patch_size=(1, 2, 2),
+        num_text_blocks=1,
+        num_visual_blocks=1,
+        axes_dims=(8, 4, 4),
+        rope_scale_factor=(1.0, 1.0, 1.0),
+        cross_gates=True,
+        fix_modulation=True,
+        ca_rope=True,
+        visual_token_type_num_embeddings=2,
+        dtype=torch.float32,
+        device="cpu",
+        operations=comfy.ops.disable_weight_init,
+    )
+    for param in model.parameters():
+        if param.dim() >= 2:
+            torch.nn.init.normal_(param, std=0.02)
+        else:
+            torch.nn.init.zeros_(param)
+    return model
+
+
+def test_dit_appends_i2va_reference_from_conditioning():
+    model = _small_dit()
+    video = torch.randn(1, 16, 2, 4, 4)
+    audio = torch.randn(1, 4, 40)
+    context = torch.randn(1, 6, 32)
+    pooled = torch.randn(1, 32)
+    timestep = torch.tensor([0.5])
+    reference = torch.randn(1, 16, 1, 4, 4)
+
+    out_t2va, _ = model(x=(video, audio), timestep=timestep, context=context, y=pooled)
+    out_i2va, _ = model(
+        x=(video, audio), timestep=timestep, context=context, y=pooled,
+        k6_reference=reference,
+    )
+
+    # The sampler only ever sees the generated frames: the reference tail is
+    # appended inside the model and cropped from the output.
+    assert tuple(out_i2va.shape) == tuple(video.shape)
+    assert not torch.equal(out_t2va, out_i2va)
+
+
+def test_dit_expands_single_reference_to_video_batch():
+    model = _small_dit()
+    video = torch.randn(2, 16, 2, 4, 4)
+    audio = torch.randn(2, 4, 40)
+    context = torch.randn(2, 6, 32)
+    pooled = torch.randn(2, 32)
+    timestep = torch.tensor([0.5, 0.5])
+    reference = torch.randn(1, 16, 1, 4, 4)
+
+    out, _ = model(
+        x=(video, audio), timestep=timestep, context=context, y=pooled,
+        k6_reference=reference,
+    )
+
+    assert tuple(out.shape) == tuple(video.shape)

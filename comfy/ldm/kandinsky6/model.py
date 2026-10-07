@@ -1,17 +1,17 @@
 """Kandinsky 6 video+audio transformer for ComfyUI."""
 
-import contextlib
 import math
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 import comfy.ldm.common_dit
+import comfy.model_prefetch
 import comfy.ops
 import comfy.patcher_extension
 from comfy.ldm.flux.layers import EmbedND
 from comfy.ldm.flux.math import apply_rope1
+from comfy.ldm.modules.attention import ComfyAttention
 
 from comfy.ldm.kandinsky5.model import (
     TimeEmbeddings,
@@ -22,6 +22,8 @@ from comfy.ldm.kandinsky5.model import (
     TransformerEncoderBlock,
     TransformerDecoderBlock,
     attention,
+    apply_gate_sum,
+    apply_scale_shift_norm,
     get_shift_scale_gate,
 )
 from .core_contract import DIT_CONFIG, GENERATION_DEFAULTS
@@ -29,87 +31,18 @@ from .core_contract import DIT_CONFIG, GENERATION_DEFAULTS
 
 _DEFAULT_PATCH_SIZE = tuple(int(value) for value in DIT_CONFIG["patch_size"])
 _DEFAULT_VISUAL_INPUT_DIM = (
-    (
-        2 * int(DIT_CONFIG["in_visual_dim"]) + 1
-        if bool(DIT_CONFIG["visual_cond"])
-        else int(DIT_CONFIG["in_visual_dim"])
-    )
-    * math.prod(_DEFAULT_PATCH_SIZE)
-)
+    2 * int(DIT_CONFIG["in_visual_dim"]) + 1
+) * math.prod(_DEFAULT_PATCH_SIZE)
 _DEFAULT_AUDIO_HEAD_DIM = sum(int(value) for value in DIT_CONFIG["axes_dims_a"])
 _DEFAULT_ROPE_SCALE = tuple(
     float(value) for value in GENERATION_DEFAULTS["scale_factor"]
 )
 
 
-@contextlib.contextmanager
-def _cast_bias_weight_fp32(layer, x):
-    """Use Comfy's patched/offloadable weights in fp32."""
-    with comfy.ops.CastBiasWeightContext(
-        layer,
-        device=x.device,
-        dtype=torch.float32,
-        bias_dtype=torch.float32,
-        offloadable=True,
-    ) as weights:
-        yield weights
-
-
-def _linear_fp32(layer, x):
-    """Run a Comfy-managed Linear in fp32 without bypassing weight patches."""
-    with _cast_bias_weight_fp32(layer, x) as (weight, bias):
-        return F.linear(x.float(), weight, bias)
-
-
-def _time_embeddings_fp32(module, timestep, output_dtype):
-    """Canonical K6 sinusoidal embedding and MLP, evaluated in fp32."""
-    freqs = module.freqs.to(device=timestep.device, dtype=torch.float32)
-    args = torch.outer(timestep.float(), freqs)
-    embed = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    hidden = _linear_fp32(module.in_layer, embed)
-    output = _linear_fp32(module.out_layer, module.activation(hidden))
-    return output.to(dtype=output_dtype)
-
-
-def _modulation_fp32(module, x):
-    """Canonical K6 AdaLN parameter projection, evaluated in fp32."""
-    return _linear_fp32(module.out_layer, module.activation(x.float())).to(dtype=x.dtype)
-
-
-def _apply_scale_shift_norm_fp32(norm, x, scale, shift):
-    """Apply AdaLN affine math in fp32 and restore the residual dtype."""
-    return (
-        norm(x.float()) * (scale.float() + 1.0) + shift.float()
-    ).to(dtype=x.dtype)
-
-
-def _apply_gate_sum_fp32(x, out, gate):
-    """Apply a gated residual in fp32 and restore the residual dtype."""
-    return (x.float() + gate.float() * out.float()).to(dtype=x.dtype)
-
-
-def _encoder_block_fp32(block, x, time_embed, rope, transformer_options):
-    """Run a stock K5-shaped text block with the K6 fp32 residual contract."""
-    self_attn_params, ff_params = torch.chunk(
-        _modulation_fp32(block.text_modulation, time_embed), 2, dim=-1
-    )
-
-    shift, scale, gate = get_shift_scale_gate(self_attn_params)
-    out = _apply_scale_shift_norm_fp32(
-        block.self_attention_norm, x, scale, shift
-    )
-    out = block.self_attention(out, rope, transformer_options=transformer_options)
-    x = _apply_gate_sum_fp32(x, out, gate)
-
-    shift, scale, gate = get_shift_scale_gate(ff_params)
-    out = _apply_scale_shift_norm_fp32(block.feed_forward_norm, x, scale, shift)
-    out = block.feed_forward(out)
-    return _apply_gate_sum_fp32(x, out, gate)
-
-
 class AsymCrossAttention(nn.Module):
     def __init__(self, q_dim, head_dim, kv_dim, operation_settings=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         assert q_dim % head_dim == 0
         self.num_heads = q_dim // head_dim
         self.head_dim = head_dim
@@ -136,6 +69,7 @@ class AsymCrossAttention(nn.Module):
         if rope_kv is not None:
             k = apply_rope1(k, rope_kv)
         out = attention(q, k, v, self.num_heads,
+                        preferred_attention=self.comfy_attention,
                         transformer_options=transformer_options)
         return self.out_layer(out)
 
@@ -153,8 +87,8 @@ class OutLayerAudio(nn.Module):
         self.out_layer = operations.Linear(model_dim_a, in_audio_dim, bias=True, device=device, dtype=dtype)
 
     def forward(self, audio_embed, time_embed):
-        shift, scale = torch.chunk(_modulation_fp32(self.modulation, time_embed), 2, dim=-1)
-        audio_embed = _apply_scale_shift_norm_fp32(
+        shift, scale = torch.chunk(self.modulation(time_embed), 2, dim=-1)
+        audio_embed = apply_scale_shift_norm(
             self.norm, audio_embed, scale.unsqueeze(1), shift.unsqueeze(1)
         )
         audio_embed = self.norm(audio_embed)
@@ -202,19 +136,19 @@ class FusedTransformerDecoderBlock(nn.Module):
                 video_time_embed, audio_time_embed, visual_rope, audio_rope,
                 transformer_options={}):
         v_self, v_cross, v_ff = torch.chunk(
-            _modulation_fp32(self.videoT.visual_modulation, video_time_embed),
+            self.videoT.visual_modulation(video_time_embed),
             3,
             dim=-1,
         )
         shift, scale, gate = get_shift_scale_gate(v_self)
-        out = _apply_scale_shift_norm_fp32(
+        out = apply_scale_shift_norm(
             self.videoT.self_attention_norm, visual_embed, scale, shift
         )
         out = self.videoT.self_attention(out, visual_rope, transformer_options=transformer_options)
-        visual_embed = _apply_gate_sum_fp32(visual_embed, out, gate)
+        visual_embed = apply_gate_sum(visual_embed, out, gate)
 
         shift, scale, gate_v_cross = get_shift_scale_gate(v_cross)
-        visual_out_t = _apply_scale_shift_norm_fp32(
+        visual_out_t = apply_scale_shift_norm(
             self.videoT.cross_attention_norm, visual_embed, scale, shift
         )
         visual_before = visual_out_t
@@ -222,44 +156,44 @@ class FusedTransformerDecoderBlock(nn.Module):
                                                    transformer_options=transformer_options)
 
         a_self, a_cross, a_ff = torch.chunk(
-            _modulation_fp32(self.audioT.visual_modulation, audio_time_embed),
+            self.audioT.visual_modulation(audio_time_embed),
             3,
             dim=-1,
         )
         shift, scale, gate = get_shift_scale_gate(a_self)
-        out = _apply_scale_shift_norm_fp32(
+        out = apply_scale_shift_norm(
             self.audioT.self_attention_norm, audio_embed, scale, shift
         )
         out = self.audioT.self_attention(out, audio_rope, transformer_options=transformer_options)
-        audio_embed = _apply_gate_sum_fp32(audio_embed, out, gate)
+        audio_embed = apply_gate_sum(audio_embed, out, gate)
 
         shift, scale, gate_a_cross = get_shift_scale_gate(a_cross)
-        audio_out = _apply_scale_shift_norm_fp32(
+        audio_out = apply_scale_shift_norm(
             self.audioT.cross_attention_norm, audio_embed, scale, shift
         )
         audio_before = audio_out
 
         audio_out_t = self.audioT.cross_attention(audio_out, audio_text_embed,
                                                   transformer_options=transformer_options)
-        audio_embed = _apply_gate_sum_fp32(audio_embed, audio_out_t, gate_a_cross)
+        audio_embed = apply_gate_sum(audio_embed, audio_out_t, gate_a_cross)
 
         va_input = video_time_embed if self.fix_modulation else audio_time_embed
         av_input = audio_time_embed if self.fix_modulation else video_time_embed
         if not self.cross_gates:
             va_shift, va_scale, va_gate = get_shift_scale_gate(
-                _modulation_fp32(self.va_modulation, va_input)
+                self.va_modulation(va_input)
             )
             av_shift, av_scale, av_gate = get_shift_scale_gate(
-                _modulation_fp32(self.av_modulation, av_input)
+                self.av_modulation(av_input)
             )
         else:
             va_shift, va_scale, va_gate = torch.split(
-                _modulation_fp32(self.va_modulation, va_input),
+                self.va_modulation(va_input),
                 [self.model_dim, self.model_dim, self.model_dim_a],
                 dim=-1,
             )
             av_shift, av_scale, av_gate = torch.split(
-                _modulation_fp32(self.av_modulation, av_input),
+                self.av_modulation(av_input),
                 [self.model_dim_a, self.model_dim_a, self.model_dim],
                 dim=-1,
             )
@@ -274,12 +208,12 @@ class FusedTransformerDecoderBlock(nn.Module):
                 value.unsqueeze(1) for value in (av_shift, av_scale, av_gate)
             )
 
-        visual_embed = _apply_gate_sum_fp32(visual_embed, visual_out_t, gate_v_cross)
+        visual_embed = apply_gate_sum(visual_embed, visual_out_t, gate_v_cross)
 
-        visual_out_a = _apply_scale_shift_norm_fp32(
+        visual_out_a = apply_scale_shift_norm(
             self.va_normalization, visual_embed, va_scale, va_shift
         )
-        audio_out_v = _apply_scale_shift_norm_fp32(
+        audio_out_v = apply_scale_shift_norm(
             self.av_normalization, audio_embed, av_scale, av_shift
         )
 
@@ -288,31 +222,33 @@ class FusedTransformerDecoderBlock(nn.Module):
         rope_q_av = audio_rope if self.ca_rope else None
         rope_kv_av = visual_rope if self.ca_rope else None
 
-        visual_out_a = self.va_cross_attention(visual_out_a, audio_before, rope_q=rope_q_va, rope_kv=rope_kv_va)
-        audio_out_v = self.av_cross_attention(audio_out_v, visual_before, rope_q=rope_q_av, rope_kv=rope_kv_av)
+        visual_out_a = self.va_cross_attention(visual_out_a, audio_before, rope_q=rope_q_va, rope_kv=rope_kv_va,
+                                               transformer_options=transformer_options)
+        audio_out_v = self.av_cross_attention(audio_out_v, visual_before, rope_q=rope_q_av, rope_kv=rope_kv_av,
+                                              transformer_options=transformer_options)
 
         va_gate_applied = av_gate if self.cross_gates else va_gate
         av_gate_applied = va_gate if self.cross_gates else av_gate
-        visual_embed = _apply_gate_sum_fp32(
+        visual_embed = apply_gate_sum(
             visual_embed, visual_out_a, va_gate_applied
         )
-        audio_embed = _apply_gate_sum_fp32(
+        audio_embed = apply_gate_sum(
             audio_embed, audio_out_v, av_gate_applied
         )
 
         shift, scale, gate = get_shift_scale_gate(v_ff)
-        out = _apply_scale_shift_norm_fp32(
+        out = apply_scale_shift_norm(
             self.videoT.feed_forward_norm, visual_embed, scale, shift
         )
-        visual_embed = _apply_gate_sum_fp32(
+        visual_embed = apply_gate_sum(
             visual_embed, self.videoT.feed_forward(out), gate
         )
 
         shift, scale, gate = get_shift_scale_gate(a_ff)
-        out = _apply_scale_shift_norm_fp32(
+        out = apply_scale_shift_norm(
             self.audioT.feed_forward_norm, audio_embed, scale, shift
         )
-        audio_embed = _apply_gate_sum_fp32(
+        audio_embed = apply_gate_sum(
             audio_embed, self.audioT.feed_forward(out), gate
         )
 
@@ -325,8 +261,6 @@ class Kandinsky6(nn.Module):
         in_visual_dim=int(DIT_CONFIG["in_visual_dim"]),
         out_visual_dim=int(DIT_CONFIG["out_visual_dim"]),
         in_audio_dim=int(DIT_CONFIG["in_audio_dim"]),
-        out_audio_dim=None,
-        n_grid=1,
         in_text_dim=int(DIT_CONFIG["in_text_dim"]),
         in_text_dim2=int(DIT_CONFIG["in_text_dim2"]),
         time_dim=int(DIT_CONFIG["time_dim"]),
@@ -357,7 +291,6 @@ class Kandinsky6(nn.Module):
         self.model_dim = model_dim
         self.in_visual_dim = in_visual_dim
         self.in_audio_dim = in_audio_dim
-        self.n_grid = int(n_grid)
         self.rope_scale_factor = rope_scale_factor
         self.freqs_scaling = float(freqs_scaling)
         self.visual_token_type_num_embeddings = int(
@@ -392,7 +325,7 @@ class Kandinsky6(nn.Module):
             [TransformerEncoderBlock(model_dim_a, time_dim_a, ff_dim_a, head_dim_a, operation_settings=op)
              for _ in range(num_text_blocks)]
         )
-        self.audio_outLayer = OutLayerAudio(model_dim_a, time_dim_a, in_audio_dim if out_audio_dim is None else out_audio_dim, operation_settings=op)
+        self.audio_outLayer = OutLayerAudio(model_dim_a, time_dim_a, in_audio_dim, operation_settings=op)
 
         self.visual_blocks = nn.ModuleList(
             [FusedTransformerDecoderBlock(model_dim, time_dim, ff_dim, head_dim,
@@ -471,14 +404,11 @@ class Kandinsky6(nn.Module):
         patches_replace = transformer_options.get("patches_replace", {})
         blocks_replace = patches_replace.get("dit", {})
 
-        tev = _time_embeddings_fp32(
-            self.video_time_embeddings, t_V, dtype
-        ) + self.video_pooled_text_embeddings(pooled)
-        tea = _time_embeddings_fp32(
-            self.audio_time_embeddings, t_A, dtype
-        ) + self.audio_pooled_text_embeddings(pooled_a)
+        tev = self.video_time_embeddings(t_V, dtype) + self.video_pooled_text_embeddings(pooled)
+        tea = self.audio_time_embeddings(t_A, dtype) + self.audio_pooled_text_embeddings(pooled_a)
 
         _, _, t_len, h, w = x_V.shape
+        x_V = comfy.ldm.common_dit.pad_to_patch_size(x_V, self.patch_size)
         visual_embed = self.visual_embeddings(x_V)
         if (
             hasattr(self, "visual_token_type_embeddings")
@@ -541,9 +471,7 @@ class Kandinsky6(nn.Module):
             dtype=dtype,
         )
         for block in self.video_text_transformer_blocks:
-            ctx_v = _encoder_block_fp32(
-                block, ctx_v, tev, rope_text_v, transformer_options
-            )
+            ctx_v = block(ctx_v, tev, rope_text_v, transformer_options=transformer_options)
 
         ctx_a = self.audio_text_embeddings(context_a)
         rope_text_a = self.rope_encode_1d(
@@ -553,13 +481,15 @@ class Kandinsky6(nn.Module):
             dtype=dtype,
         )
         for block in self.audio_text_transformer_blocks:
-            ctx_a = _encoder_block_fp32(
-                block, ctx_a, tea, rope_text_a, transformer_options
-            )
+            ctx_a = block(ctx_a, tea, rope_text_a, transformer_options=transformer_options)
 
         transformer_options["total_blocks"] = len(self.visual_blocks)
+        prefetch = comfy.model_prefetch.make_prefetch_queue(
+            list(self.visual_blocks), x_V.device, transformer_options
+        )
         for i, block in enumerate(self.visual_blocks):
             transformer_options["block_index"] = i
+            comfy.model_prefetch.prefetch_queue_pop(prefetch, x_V.device, block, dtype)
             if ("double_block", i) in blocks_replace:
                 def block_wrap(args, _block=block):
                     v, a = _block(args["visual"], args["audio"], args["ctx_v"], args["ctx_a"],
@@ -578,35 +508,12 @@ class Kandinsky6(nn.Module):
                     visual_embed, audio_embed, ctx_v, ctx_a, tev, tea, rope_v, rope_a,
                     transformer_options=transformer_options,
                 )
+        comfy.model_prefetch.prefetch_queue_pop(prefetch, x_V.device, None)
 
         visual_embed = visual_embed.reshape(*visual_shape, -1)
-        shift, scale = torch.chunk(
-            _modulation_fp32(self.out_layer.modulation, tev), 2, dim=-1
-        )
-        out = _apply_scale_shift_norm_fp32(
-            self.out_layer.norm,
-            visual_embed,
-            scale[:, None, None, None, :],
-            shift[:, None, None, None, :],
-        )
-        out = self.out_layer.out_layer(out)
-        out_dim = out.shape[-1] // math.prod(self.patch_size)
-        v_out = (
-            out.view(
-                out.shape[0],
-                out.shape[1],
-                out.shape[2],
-                out.shape[3],
-                out_dim,
-                self.patch_size[0],
-                self.patch_size[1],
-                self.patch_size[2],
-            )
-            .permute(0, 4, 1, 5, 2, 6, 3, 7)
-            .flatten(2, 3)
-            .flatten(3, 4)
-            .flatten(4, 5)
-        )
+        v_out = self.out_layer(visual_embed, tev)
+        # Drop the patch padding added before the visual embeddings.
+        v_out = v_out[:, :, :t_len, :h, :w]
         a_out = self.audio_outLayer(audio_embed, tea)
         return v_out, a_out
 
@@ -615,9 +522,10 @@ class Kandinsky6NativeAVDiT(Kandinsky6):
     """Adapt ComfyUI's generic multimodal call to the canonical K6 call.
 
     ComfyUI unpacks a nested ``LATENT`` before calling the diffusion model, so
-    ``x`` is a two-item sequence containing the video and audio streams. The
-    released K6 T2VA checkpoint uses the core contract's noisy video
-    channels and, when enabled, appends a zero visual condition plus mask.
+    ``x`` is a two-item sequence containing the video and audio streams. A
+    noisy video latent gets a zero visual condition plus mask appended; for
+    I2VA the ``k6_reference`` conditioning carries the encoded reference,
+    which is appended as a clean tail frame and cropped from the output.
     """
 
     def _legacy_forward(self, *args, **kwargs):
@@ -632,8 +540,7 @@ class Kandinsky6NativeAVDiT(Kandinsky6):
         control=None,
         transformer_options=None,
         freqs_scaling=None,
-        k6_reference_tail=False,
-        visual_token_type_ids=None,
+        k6_reference=None,
         **kwargs,
     ):
         if not isinstance(x, (list, tuple)) or len(x) != 2:
@@ -657,32 +564,43 @@ class Kandinsky6NativeAVDiT(Kandinsky6):
         if y is None:
             raise ValueError("Kandinsky 6 requires CLIP-L pooled conditioning.")
 
-        reference_tail = bool(k6_reference_tail)
+        # For I2VA the clean reference frame is appended as a tail inside the
+        # model and cropped from the output, so the sampler only ever sees the
+        # generated latent.
+        reference_tail = k6_reference is not None
+        visual_token_type_ids = None
         if reference_tail:
-            if video.shape[2] < 2:
-                raise ValueError(
-                    "Kandinsky 6 I2VA requires generated frames plus one reference tail."
-                )
             if self.visual_token_type_num_embeddings < 2:
                 raise ValueError(
                     "Kandinsky 6 I2VA requires two visual token-type embeddings."
                 )
+            if k6_reference.ndim != 5 or k6_reference.shape[1] != self.in_visual_dim:
+                raise ValueError(
+                    "Kandinsky 6 I2VA expects a reference latent shaped "
+                    f"[B, {self.in_visual_dim}, T, H, W], got {tuple(k6_reference.shape)}."
+                )
+            if k6_reference.shape[0] == 1 and video.shape[0] != 1:
+                k6_reference = k6_reference.expand(video.shape[0], -1, -1, -1, -1)
+            if k6_reference.shape[0] != video.shape[0]:
+                raise ValueError(
+                    "Kandinsky 6 I2VA reference batch size must match the video "
+                    f"batch: reference={k6_reference.shape[0]}, video={video.shape[0]}."
+                )
+            generated_frames = video.shape[2]
+            video = torch.cat((video, k6_reference), dim=2)
             visual_token_type_ids = torch.zeros(
                 video.shape[2], dtype=torch.long, device=video.device
             )
             visual_token_type_ids[-1] = 1
 
-        if bool(DIT_CONFIG["visual_cond"]):
-            visual_cond = torch.zeros_like(video)
-            visual_mask = torch.zeros_like(video[:, :1])
-            if reference_tail:
-                visual_mask[:, :, -1] = 1
-            video_input = torch.cat((video, visual_cond, visual_mask), dim=1)
-        else:
-            video_input = video
+        visual_cond = torch.zeros_like(video)
+        visual_mask = torch.zeros_like(video[:, :1])
+        if reference_tail:
+            visual_mask[:, :, -1] = 1
+        video_input = torch.cat((video, visual_cond, visual_mask), dim=1)
         transformer_options = {} if transformer_options is None else transformer_options
 
-        return self._legacy_forward(
+        v_out, a_out = self._legacy_forward(
             video_input,
             audio,
             (timestep, timestep),
@@ -696,3 +614,6 @@ class Kandinsky6NativeAVDiT(Kandinsky6):
             transformer_options=transformer_options,
             **kwargs,
         )
+        if reference_tail:
+            v_out = v_out[:, :, :generated_frames]
+        return v_out, a_out

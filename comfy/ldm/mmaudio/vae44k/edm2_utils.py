@@ -1,10 +1,3 @@
-# Copyright (c) 2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# This work is licensed under a Creative Commons
-# Attribution-NonCommercial-ShareAlike 4.0 International License.
-# You should have received a copy of the license along with this
-# work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
-
 import math
 
 import torch
@@ -41,7 +34,7 @@ class MPConv1D(torch.nn.Module):
 
     def remove_weight_norm(self):
         w = self.weight.to(torch.float32)
-        w = normalize(w)  # traditional weight normalization
+        w = normalize(w)
         w = w / math.sqrt(w[0].numel())
         w = w.to(self.weight.dtype)
         self.weight.data.copy_(w)

@@ -71,7 +71,7 @@ def _native_key(key):
     return key
 
 
-def _detect_diffusers_k6(state_dict, key_prefix):
+def _diffusers_renames(state_dict, key_prefix):
     renames = {}
     for key in state_dict:
         if not key.startswith(key_prefix):
@@ -84,16 +84,20 @@ def _detect_diffusers_k6(state_dict, key_prefix):
                     f"{key!r} conflicts with {target!r}."
                 )
             renames[key] = target
+    return renames
 
-    # Validate before changing the caller's dictionary. Both dictionaries hold
-    # references to the existing tensors; no weights are copied or cast here.
-    normalized = {renames.get(key, key): value for key, value in state_dict.items()}
-    config = _detect_k6(normalized, key_prefix)
-    # The standard diffusion loader passes this same dictionary to weight
-    # loading after detection, so normalize it before Comfy constructs the DiT.
-    for source, target in renames.items():
-        state_dict[target] = state_dict.pop(source)
-    return config
+
+def to_native_state_dict(state_dict, key_prefix=""):
+    """Return the state dict with Diffusers-layout keys converted to native names.
+
+    Used by the supported-model class at weight-load time. The returned
+    dictionary holds references to the existing tensors; no weights are copied
+    or cast here.
+    """
+    renames = _diffusers_renames(state_dict, key_prefix)
+    if not renames:
+        return state_dict
+    return {renames.get(key, key): value for key, value in state_dict.items()}
 
 
 def _detect_k6(state_dict, key_prefix):
@@ -125,27 +129,14 @@ def _detect_k6(state_dict, key_prefix):
 
     patch_size = tuple(int(value) for value in dit_config["patch_size"])
     patch_volume = math.prod(patch_size)
-    visual_input_dim = get_tensor("visual_embeddings.in_layer.weight").shape[1]
-    if visual_input_dim % patch_volume:
-        raise ValueError(
-            "Kandinsky 6 visual input projection is not divisible by the "
-            f"generated DiT patch volume {patch_volume}."
-        )
-    visual_channels = visual_input_dim // patch_volume
-    if bool(dit_config["visual_cond"]):
-        if (visual_channels - 1) % 2:
-            raise ValueError(
-                "Kandinsky 6 visual input projection is incompatible with the "
-                "generated visual-conditioning contract."
-            )
-        in_visual_dim = (visual_channels - 1) // 2
-    else:
-        in_visual_dim = visual_channels
+    # Linear input widths come from the matched release contract, not the
+    # checkpoint: quantized exports may carry a reduced second dimension.
+    in_visual_dim = int(dit_config["in_visual_dim"])
 
     cfg = {"image_model": "kandinsky6"}
     cfg["in_visual_dim"] = in_visual_dim
     cfg["model_dim"] = model_dim
-    cfg["visual_embed_dim"] = visual_input_dim
+    cfg["visual_embed_dim"] = (2 * in_visual_dim + 1) * patch_volume
     visual_output_dim = get_tensor("out_layer.out_layer.weight").shape[0]
     if visual_output_dim % patch_volume:
         raise ValueError(
@@ -156,21 +147,25 @@ def _detect_k6(state_dict, key_prefix):
     base_visual_output = int(dit_config["out_visual_dim"])
     if cfg["out_visual_dim"] % base_visual_output:
         raise ValueError("Kandinsky 6 output head does not contain complete DX grids.")
-    cfg["n_grid"] = cfg["out_visual_dim"] // base_visual_output
-    if cfg["n_grid"] > 1 and model_dim != int(DIT_CONFIG["model_dim"]):
-        raise ValueError("Distilled K6 Lite checkpoints are not supported.")
+    if cfg["out_visual_dim"] > base_visual_output:
+        raise ValueError(
+            "Distilled Kandinsky 6 checkpoints require PiFlow sampling, "
+            "which is not supported. Use the base checkpoint."
+        )
+    in_audio_dim = int(dit_config["in_audio_dim"])
     audio_output_key = f"{kp}audio_outLayer.out_layer.weight"
-    cfg["out_audio_dim"] = int(dit_config["in_audio_dim"]) * cfg["n_grid"]
-    if cfg["n_grid"] > 1 and audio_output_key not in state_dict:
-        raise ValueError("Kandinsky 6 PiFlow checkpoint is missing its audio DX output head.")
-    if audio_output_key in state_dict and state_dict[audio_output_key].shape[0] != cfg["out_audio_dim"]:
-        raise ValueError("Kandinsky 6 video and audio DX grid sizes do not match.")
+    if audio_output_key in state_dict and state_dict[audio_output_key].shape[0] != in_audio_dim:
+        raise ValueError(
+            "Kandinsky 6 audio output head does not match the released "
+            f"architecture: expected {in_audio_dim} channels, got "
+            f"{state_dict[audio_output_key].shape[0]}."
+        )
     cfg["model_dim_a"] = get_tensor("audio_embeddings.in_layer.weight").shape[0]
-    cfg["in_audio_dim"] = get_tensor("audio_embeddings.in_layer.weight").shape[1]
+    cfg["in_audio_dim"] = in_audio_dim
     cfg["time_dim"] = get_tensor("video_time_embeddings.out_layer.weight").shape[0]
     cfg["time_dim_a"] = get_tensor("audio_time_embeddings.out_layer.weight").shape[0]
-    cfg["in_text_dim"] = get_tensor("video_text_embeddings.in_layer.weight").shape[1]
-    cfg["in_text_dim2"] = get_tensor("video_pooled_text_embeddings.in_layer.weight").shape[1]
+    cfg["in_text_dim"] = int(dit_config["in_text_dim"])
+    cfg["in_text_dim2"] = int(dit_config["in_text_dim2"])
     cfg["ff_dim"] = get_tensor("visual_blocks.0.videoT.feed_forward.in_layer.weight").shape[0]
     cfg["ff_dim_a"] = get_tensor("visual_blocks.0.audioT.feed_forward.in_layer.weight").shape[0]
 
@@ -197,15 +192,11 @@ def _detect_k6(state_dict, key_prefix):
     cfg["ca_rope"] = bool(dit_config["ca_rope"])
 
     expected = {
-        "in_visual_dim": int(dit_config["in_visual_dim"]),
-        "out_visual_dim": int(dit_config["out_visual_dim"]) * cfg["n_grid"],
+        "out_visual_dim": int(dit_config["out_visual_dim"]),
         "model_dim": int(dit_config["model_dim"]),
         "model_dim_a": int(dit_config["model_dim_a"]),
-        "in_audio_dim": int(dit_config["in_audio_dim"]),
         "time_dim": int(dit_config["time_dim"]),
         "time_dim_a": int(dit_config["time_dim_a"]),
-        "in_text_dim": int(dit_config["in_text_dim"]),
-        "in_text_dim2": int(dit_config["in_text_dim2"]),
         "ff_dim": int(dit_config["ff_dim"]),
         "ff_dim_a": int(dit_config["ff_dim_a"]),
         "num_visual_blocks": int(dit_config["num_visual_blocks"]),
@@ -222,17 +213,6 @@ def _detect_k6(state_dict, key_prefix):
             "visual_token_type_num_embeddings: "
             f"checkpoint={cfg['visual_token_type_num_embeddings']!r}, "
             f"core={_VISUAL_TOKEN_TYPE_COUNTS!r}"
-        )
-    expected_visual_input = (
-        (2 * expected["in_visual_dim"] + 1)
-        if bool(dit_config["visual_cond"])
-        else expected["in_visual_dim"]
-    ) * patch_volume
-    if cfg["visual_embed_dim"] != expected_visual_input:
-        mismatches.append(
-            "visual_embed_dim: "
-            f"checkpoint={cfg['visual_embed_dim']!r}, "
-            f"core={expected_visual_input!r}"
         )
     if video_head_dim != sum(cfg["axes_dims"]):
         mismatches.append(
@@ -263,8 +243,6 @@ def _detect_k6(state_dict, key_prefix):
             f"core={expected_va_modulation!r}"
         )
 
-    if not bool(dit_config["is_multimodal"]):
-        mismatches.append("is_multimodal: the Comfy adapter requires the joint AV DiT")
     if mismatches:
         details = "; ".join(mismatches)
         raise ValueError(
@@ -280,4 +258,7 @@ def detect_kandinsky6(state_dict, key_prefix):
     }
     if not all(name in normalized_keys for name in _K6_REQUIRED_KEYS):
         return None
-    return _detect_diffusers_k6(state_dict, key_prefix)
+    renames = _diffusers_renames(state_dict, key_prefix)
+    if renames:
+        state_dict = {renames.get(key, key): value for key, value in state_dict.items()}
+    return _detect_k6(state_dict, key_prefix)

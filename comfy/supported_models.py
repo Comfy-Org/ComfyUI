@@ -46,6 +46,7 @@ import comfy.text_encoders.pixeldit
 from . import supported_models_base
 from . import latent_formats
 from .ldm.kandinsky6.core_contract import SCHEDULER_DEFAULTS
+from .ldm.kandinsky6.detection import to_native_state_dict
 
 from . import diffusers_convert
 import comfy.model_management
@@ -2291,6 +2292,9 @@ class Kandinsky6(Kandinsky5):
 
     def get_model(self, state_dict, prefix="", device=None):
         return model_base.Kandinsky6(self, device=device)
+
+    def process_unet_state_dict(self, state_dict):
+        return to_native_state_dict(state_dict)
 
 
 class ACEStep15(supported_models_base.BASE):
