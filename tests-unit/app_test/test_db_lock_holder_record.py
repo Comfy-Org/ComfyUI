@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -151,6 +152,35 @@ def test_no_record_without_a_start_token(db_path, monkeypatch, token):
 
     assert db_module._db_lock.is_locked
     assert os.listdir(os.path.dirname(db_path)) == ["comfyui.db.lock"]
+
+
+def test_a_reader_holding_the_record_open_does_not_keep_the_old_one(db_path):
+    with open(db_path + ".lock.json", "w") as f:
+        f.write('{"pid": 1}')
+    reader = open(db_path + ".lock.json")
+    threading.Timer(0.05, reader.close).start()
+
+    db_module._acquire_file_lock(db_path)
+
+    assert _read_record(db_path)["pid"] == os.getpid()
+
+
+def test_the_replace_is_retried_while_it_is_refused(db_path, monkeypatch):
+    replace = os.replace
+    refusals = []
+
+    def _refuse_twice(src, dst):
+        if len(refusals) < 2:
+            refusals.append(dst)
+            raise PermissionError("in use")
+        replace(src, dst)
+
+    monkeypatch.setattr(db_module.os, "replace", _refuse_twice)
+
+    db_module._acquire_file_lock(db_path)
+
+    assert len(refusals) == 2
+    assert _read_record(db_path)["pid"] == os.getpid()
 
 
 def test_a_failed_write_keeps_the_lock_and_leaves_no_files(db_path, monkeypatch, caplog):

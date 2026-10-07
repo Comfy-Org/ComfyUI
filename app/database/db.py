@@ -249,7 +249,15 @@ def _write_holder_record(db_path):
         }
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(record, f)
-        os.replace(tmp_path, path)
+        # On Windows a reader holding the record open blocks the replace, so wait it out briefly.
+        for _ in range(10):
+            try:
+                os.replace(tmp_path, path)
+                break
+            except PermissionError:
+                time.sleep(0.02)
+        else:
+            os.replace(tmp_path, path)
     except Exception as e:
         logging.warning(f"Could not record the database lock holder in '{path}': {e}")
         with suppress(OSError):
