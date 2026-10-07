@@ -77,8 +77,6 @@ def _stop_holder(holder, how):
 
 
 def test_record_describes_the_lock_holder(db_path, monkeypatch):
-    monkeypatch.setattr(db_module.args, "port", 18765)
-    monkeypatch.setattr(db_module.args, "listen", "0.0.0.0,::")
     # The macOS token must not depend on the holder's time zone or locale.
     monkeypatch.setenv("TZ", "America/New_York")
     monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
@@ -90,12 +88,20 @@ def test_record_describes_the_lock_holder(db_path, monkeypatch):
         "version": 1,
         "pid": os.getpid(),
         "started": _independent_start_token(os.getpid()),
+        "db": db_path,
         "main": str(REPO_ROOT / "main.py"),
         "argv": sys.argv,
-        "port": 18765,
-        "listen": "0.0.0.0,::",
     }
     assert sorted(os.listdir(os.path.dirname(db_path))) == ["comfyui.db.lock", "comfyui.db.lock.json"]
+
+
+def test_record_names_the_database_by_absolute_path(tmp_path, monkeypatch):
+    # A copied record then names a database other than the one it sits beside.
+    monkeypatch.chdir(tmp_path)
+
+    db_module._acquire_file_lock("comfyui.db")
+
+    assert _read_record("comfyui.db")["db"] == str(tmp_path / "comfyui.db")
 
 
 def test_another_process_reads_the_record_while_the_lock_is_held(db_path):

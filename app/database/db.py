@@ -248,10 +248,9 @@ def _write_holder_record(db_path):
             "version": 1,
             "pid": os.getpid(),
             "started": started,
+            "db": os.path.abspath(db_path),
             "main": os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "main.py")),
             "argv": sys.argv,
-            "port": args.port,
-            "listen": args.listen,
         }
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(record, f)
