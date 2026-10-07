@@ -1,3 +1,4 @@
+import atexit
 import importlib
 import logging
 import os
@@ -309,6 +310,7 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     if any(name.startswith("._") for name in os.listdir(versions)):
         filtered = os.path.join(tempfile.mkdtemp(), "versions")
         shutil.copytree(versions, filtered, ignore=shutil.ignore_patterns("._*", "__pycache__"))
+        atexit.register(shutil.rmtree, os.path.dirname(filtered), True)
         config.set_main_option("version_locations", filtered)
 
     # Check if we need to upgrade

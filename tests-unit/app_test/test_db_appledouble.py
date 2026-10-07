@@ -81,8 +81,10 @@ def test_appledouble_file_breaks_alembic_on_its_own(scripts):
         ScriptDirectory.from_config(_config(scripts_path, db_path)).get_current_head()
 
 
-def test_upgrade_ignores_appledouble_files_and_leaves_the_install_unchanged(scripts):
+def test_upgrade_ignores_appledouble_files_and_leaves_the_install_unchanged(scripts, monkeypatch):
     scripts_path, db_path = scripts
+    at_exit = []
+    monkeypatch.setattr(db_module.atexit, "register", lambda fn, *a: at_exit.append((fn, a)))
     head = _head(scripts_path)
     command.upgrade(_config(scripts_path, db_path), "0006_add_loader_path")
     _plant_appledouble(scripts_path)
@@ -95,6 +97,13 @@ def test_upgrade_ignores_appledouble_files_and_leaves_the_install_unchanged(scri
     assert _current_revision(db_path) == head
     assert os.path.exists(db_path + ".bkp")
     assert _tree(scripts_path) == install
+
+    # The filtered copy is removed when the process exits.
+    (rmtree_args,) = [args for fn, args in at_exit if fn is shutil.rmtree]
+    copy = rmtree_args[0]
+    assert os.path.isdir(os.path.join(copy, "versions"))
+    shutil.rmtree(*rmtree_args)
+    assert not os.path.exists(copy)
 
 
 def test_versions_without_appledouble_files_are_used_in_place(scripts, monkeypatch):
