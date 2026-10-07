@@ -326,6 +326,9 @@ def _quarantine_and_restore(db_path, error):
     except OSError:
         logging.exception(f"Could not move the corrupt database '{db_path}' aside")
         raise error
+    for suffix in ("-wal", "-shm"):  # left when another connection has it open; SQLite would replay it
+        if os.path.exists(db_path + suffix):
+            os.replace(db_path + suffix, quarantine_path + suffix)
 
     backup_path = db_path + ".daily-backup"
     restore_path = db_path + ".restore-tmp"
@@ -379,9 +382,11 @@ def _write_daily_backup(db_path, backup_path):
     try:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)  # left by a process that exited mid-backup
-        # VACUUM INTO fails on a corrupt page it reads, so a corrupt database never replaces the backup.
         with closing(sqlite3.connect(db_path)) as conn:
             conn.execute("VACUUM INTO ?", (tmp_path,))
+        # VACUUM INTO copies a row that breaks a constraint; only a copy a restore accepts replaces the backup.
+        if not _passes_integrity_check(tmp_path):
+            raise sqlite3.DatabaseError("the new backup failed its integrity check")
         os.replace(tmp_path, backup_path)
         logging.info(f"Database daily backup written to '{backup_path}'")
     except Exception:

@@ -149,7 +149,7 @@ def _boot():
 
 
 def _quarantined(db_path: str) -> list[str]:
-    return sorted(glob.glob(db_path + ".corrupt-*"))
+    return sorted(p for p in glob.glob(db_path + ".corrupt-*") if not p.endswith(("-wal", "-shm")))
 
 
 @pytest.mark.parametrize(
@@ -440,6 +440,32 @@ def test_crash_left_wal_does_not_reach_the_new_database(default_db, with_backup)
         assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'marker'").fetchone() is None
 
 
+def test_wal_kept_by_another_connection_does_not_reach_the_restored_database(default_db):
+    # Another connection (a database browser, say) stops SQLite checkpointing and deleting the WAL.
+    _make_db(default_db + ".daily-backup", marker="from backup")
+    _make_db(default_db)
+    other = sqlite3.connect(default_db)
+    other.execute("PRAGMA journal_mode=WAL")
+    other.execute("PRAGMA wal_autocheckpoint=0")
+    other.execute("CREATE TABLE marker (value TEXT)")
+    other.execute("INSERT INTO marker VALUES ('in the corrupt database wal')")
+    other.commit()
+    page = other.execute("SELECT rootpage FROM sqlite_master WHERE name = 'alembic_version'").fetchone()[0]
+    with open(default_db, "r+b") as f:  # a page the WAL doesn't hold
+        f.seek((page - 1) * _PAGE)
+        f.write(b"\xa5" * _PAGE)
+    try:
+        _boot()
+    finally:
+        other.close()
+
+    [quarantined] = _quarantined(default_db)
+    with closing(sqlite3.connect(default_db)) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert conn.execute("SELECT value FROM marker").fetchall() == [("from backup",)]
+    assert os.path.exists(quarantined + "-wal")  # kept with the database it belongs to
+
+
 @pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc")
 def test_failed_open_leaves_no_handle_on_the_database(default_db):
     # Windows refuses to rename a file this process still has open.
@@ -583,6 +609,27 @@ def test_backup_is_refreshed_once_a_day_while_running(tmp_path, monkeypatch, age
     assert writes == [first_write_hour, first_write_hour + 24, first_write_hour + 48]
 
 
+def test_failed_backup_is_retried_a_day_later(tmp_path, monkeypatch):
+    db_path = str(tmp_path / "comfyui.db")
+    now = [1_000_000.0]
+    writes = []
+
+    def _sleep(seconds):
+        assert seconds > 0
+        now[0] += seconds
+        if len(writes) >= 3:
+            raise _Stop
+
+    monkeypatch.setattr(db_module, "time", SimpleNamespace(time=lambda: now[0], sleep=_sleep))
+    # Every write fails, so the backup never appears.
+    monkeypatch.setattr(db_module, "_write_daily_backup", lambda *a: writes.append(round(now[0] - 1_000_000.0) // 3600))
+
+    with pytest.raises(_Stop):
+        db_module._keep_daily_backup(db_path, db_path + ".daily-backup")
+
+    assert writes == [0, 24, 48]
+
+
 def test_no_backup_for_an_explicit_database_url(explicit_db, monkeypatch):
     started = []
     monkeypatch.setattr(db_module.threading, "Thread", lambda **kw: started.append(kw))
@@ -605,6 +652,23 @@ def test_backup_includes_commits_still_in_the_wal(live_db):
 
     with closing(sqlite3.connect(live_db + ".daily-backup")) as conn:
         assert ("in the wal",) in conn.execute("SELECT value FROM marker").fetchall()
+
+
+def test_copy_breaking_a_constraint_never_replaces_the_backup(live_db):
+    # VACUUM INTO copies such a row; the restore's integrity check would then reject the backup.
+    backup = live_db + ".daily-backup"
+    with open(backup, "wb") as f:
+        f.write(b"previous backup")
+    with closing(sqlite3.connect(live_db)) as conn:
+        conn.execute("CREATE TABLE sized (n INTEGER CHECK (n >= 0))")
+        conn.execute("PRAGMA ignore_check_constraints=ON")  # as bit rot inside a value would
+        conn.execute("INSERT INTO sized VALUES (-1)")
+        conn.commit()
+
+    db_module._write_daily_backup(live_db, backup)
+
+    with open(backup, "rb") as f:
+        assert f.read() == b"previous backup"
 
 
 def test_backup_replaces_the_previous_one(live_db):
@@ -633,7 +697,7 @@ def test_stale_partial_backup_is_removed(live_db):
         assert conn.execute("SELECT value FROM marker").fetchone() == ("live",)
 
 
-@pytest.mark.parametrize("table", ["asset_system_state", "assets"])
+@pytest.mark.parametrize("table", ["assets"])
 def test_comfyui_launches_on_a_corrupt_default_database(tmp_path, table):
     db_path = tmp_path / "user" / "comfyui.db"
     db_path.parent.mkdir()

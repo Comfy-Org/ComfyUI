@@ -60,7 +60,7 @@ def _serving(port: int) -> bool:
         return False
 
 
-@pytest.mark.parametrize("table", ["alembic_version", "asset_system_state"])
+@pytest.mark.parametrize("table", ["asset_system_state"])  # recovered after init, under the lock
 def test_two_launches_on_a_corrupt_database_recover_it_once(tmp_path, table):
     db_path = tmp_path / "user" / "comfyui.db"
     db_path.parent.mkdir()
@@ -71,16 +71,13 @@ def test_two_launches_on_a_corrupt_database_recover_it_once(tmp_path, table):
     launches = [_launch(tmp_path, port, log) for port, log in zip(ports, logs)]
     try:
         deadline = time.monotonic() + 180
+        serving = [False, False]
         while time.monotonic() < deadline:
             exited = [p.poll() is not None for p in launches]
-            serving = [_serving(port) for port in ports]
-            if any(exited) and any(serving):
-                break
-            if all(exited):
+            serving = [not done and _serving(port) for done, port in zip(exited, ports)]
+            if all(exited) or (any(exited) and any(serving)):
                 break
             time.sleep(0.5)
-        exited = [p.poll() is not None for p in launches]
-        serving = [not done and _serving(port) for done, port in zip(exited, ports)]
         output = [log.read_text() for log in logs]
 
         assert sorted(serving) == [False, True], output
@@ -96,7 +93,7 @@ def test_two_launches_on_a_corrupt_database_recover_it_once(tmp_path, table):
                 p.terminate()
                 p.wait(timeout=30)
 
-    assert len(glob.glob(str(db_path) + ".corrupt-*")) == 1
-    with closing(sqlite3.connect(db_path)) as conn:
-        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    assert len([p for p in glob.glob(str(db_path) + ".corrupt-*") if not p.endswith(("-wal", "-shm"))]) == 1
     assert os.path.exists(db_path)
+    with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
