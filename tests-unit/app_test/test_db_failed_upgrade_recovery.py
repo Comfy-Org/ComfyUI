@@ -50,6 +50,16 @@ _INTERRUPTED_UPGRADES = {
         ["CREATE TABLE tags_new (name VARCHAR(512) NOT NULL, CONSTRAINT pk_tags PRIMARY KEY (name))"],
         "table tags_new already exists",
     ),
+    "0001 created its tables, no version stamp": (
+        "0001_assets",
+        ["DROP TABLE alembic_version"],
+        "table assets already exists",
+    ),
+    "0007 created asset_system_state": (
+        "0006_add_loader_path",
+        ["CREATE TABLE asset_system_state (key VARCHAR(256) NOT NULL PRIMARY KEY, value TEXT NOT NULL)"],
+        "table asset_system_state already exists",
+    ),
 }
 
 
