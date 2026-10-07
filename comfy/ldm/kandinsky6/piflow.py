@@ -102,7 +102,6 @@ def rollout(dit, video, audio, context, pooled, *, steps, dtype, reference=None,
     device = video.device
     n_grid = dit.n_grid
     options = dict(transformer_options or {})
-    options.pop("k6_magcache", None)
 
     for index in range(steps):
         mm.throw_exception_if_processing_interrupted()
