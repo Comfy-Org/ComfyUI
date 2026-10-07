@@ -320,8 +320,9 @@ def recover_from_corruption(error):
     try:
         _quarantine_and_restore(db_path, error)
     except Exception:  # e.g. held open on Windows: asset startup now logs the corruption, as before
+        logging.exception(f"Could not recover the corrupt database '{db_path}'; continuing without recovery")
         if not os.path.exists(db_path):
-            raise  # moved but not restored: fail rather than run on a new empty file
+            raise  # a move that couldn't be undone: fail rather than run on a new empty file
         global _cannot_move_aside
         _cannot_move_aside = True
         return True
@@ -401,8 +402,8 @@ def _keep_daily_backup(db_path, backup_path):
     while True:
         due_in = 0  # no backup yet
         with suppress(OSError):
-            # By distance from now, so a backup dated in the future (the clock moved back) can't stall it.
-            due_in = _DAILY_BACKUP_INTERVAL_SECONDS - abs(time.time() - os.path.getmtime(backup_path))
+            age = time.time() - os.path.getmtime(backup_path)
+            due_in = _DAILY_BACKUP_INTERVAL_SECONDS - age if age >= 0 else 0  # dated in the future: the clock moved back
         if due_in <= 0:
             _write_daily_backup(db_path, backup_path)
             due_in = _DAILY_BACKUP_INTERVAL_SECONDS  # also the retry delay after a failure

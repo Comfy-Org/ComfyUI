@@ -231,7 +231,7 @@ def test_copy_left_by_a_killed_recovery_is_replaced(default_db, startup_warnings
     assert any("restored from the daily backup" in w for w in startup_warnings)
 
 
-def _refuse_restore(monkeypatch):
+def _refuse_restore(monkeypatch):  # monkeypatch or a monkeypatch.context()
     # E.g. a virus scanner holding the fresh copy, after the corrupt database has moved aside.
     real_replace = os.replace
 
@@ -249,40 +249,37 @@ def test_failed_restore_is_undone_and_recovered_on_the_next_launch(default_db, m
     _make_db(default_db)
     _overwrite_page_of(default_db, table)
     corrupt_file = os.stat(default_db).st_ino
-    _refuse_restore(monkeypatch)
-
-    if table == "alembic_version":
-        with pytest.raises(SystemExit):  # init can't continue on a corrupt database, as before
-            _boot()
-        db_module._db_lock.release(force=True)
-    else:
-        _boot()  # asset startup logs the corruption and carries on, as before
+    with monkeypatch.context() as held:
+        _refuse_restore(held)
+        if table == "alembic_version":
+            with pytest.raises(SystemExit):  # init can't continue on a corrupt database, as before
+                _boot()
+        else:
+            _boot()  # asset startup logs the corruption and carries on, as before
 
     assert os.stat(default_db).st_ino == corrupt_file  # moved back
     assert glob.glob(default_db + ".corrupt-*") == [] and not os.path.exists(default_db + ".restore-tmp")
 
-    for session_factory in (db_module.Session, db_module.WriteSession):  # before undo() unbinds them
+    # The next launch, once the file is no longer held.
+    for session_factory in (db_module.Session, db_module.WriteSession):
         if session_factory is not None:
             session_factory.kw["bind"].dispose()
-    monkeypatch.undo()  # the next launch, once the file is no longer held
+    if db_module._db_lock is not None:
+        db_module._db_lock.release(force=True)
     monkeypatch.setattr(db_module, "_cannot_move_aside", False)
     monkeypatch.setattr(db_module, "_db_lock", None)
-    monkeypatch.setattr(db_module.args, "database_url", None)
-    monkeypatch.setattr("folder_paths.get_user_directory", lambda: os.path.dirname(default_db))
-    monkeypatch.setattr(main, "start_daily_backup", lambda: None)
-    monkeypatch.setattr(lifecycle, "start_asset_seeder", lambda: False)
-    monkeypatch.setattr(lifecycle, "cleanup_temp_filesystem", lambda: None)
     _boot()
 
     with closing(sqlite3.connect(default_db)) as conn:
         assert conn.execute("SELECT value FROM marker").fetchone() == ("from backup",)
 
 
-def test_restore_that_cannot_be_undone_fails_the_launch(default_db, monkeypatch):
+@pytest.mark.parametrize("table", ["alembic_version", "assets"])
+def test_restore_that_cannot_be_undone_fails_the_launch(default_db, monkeypatch, table):
     # Moved aside, not restored, not moved back: running on would mean a new empty database.
     _make_db(default_db + ".daily-backup")
     _make_db(default_db)
-    _overwrite_page_of(default_db, "assets")
+    _overwrite_page_of(default_db, table)
     real_replace = os.replace
 
     def _restore_and_undo_refused(src, dst):
@@ -299,11 +296,12 @@ def test_restore_that_cannot_be_undone_fails_the_launch(default_db, monkeypatch)
     assert len(_quarantined(default_db)) == 1
 
 
-def test_unreadable_backup_stops_recovery_before_anything_moves(default_db, monkeypatch):
+@pytest.mark.parametrize("table", ["alembic_version", "assets"])
+def test_unreadable_backup_stops_recovery_before_anything_moves(default_db, monkeypatch, caplog, table):
     # E.g. a virus scanner holding the backup: not the same as having none.
     _make_db(default_db + ".daily-backup", marker="from backup")
     _make_db(default_db)
-    _overwrite_page_of(default_db, "assets")
+    _overwrite_page_of(default_db, table)
     corrupt_file = os.stat(default_db).st_ino
 
     def _backup_held(src, dst):
@@ -311,7 +309,12 @@ def test_unreadable_backup_stops_recovery_before_anything_moves(default_db, monk
 
     monkeypatch.setattr(db_module.shutil, "copyfile", _backup_held)
 
-    _boot()  # asset startup logs the corruption and carries on, as before
+    if table == "alembic_version":
+        with pytest.raises(SystemExit):  # init can't continue on a corrupt database, as before
+            _boot()
+    else:
+        _boot()  # asset startup logs the corruption and carries on, as before
+        assert "Could not recover the corrupt database" in caplog.text
 
     assert os.stat(default_db).st_ino == corrupt_file
     assert glob.glob(default_db + ".corrupt-*") == []
@@ -704,7 +707,7 @@ def test_damaged_pre_upgrade_backup_does_not_quarantine_a_sound_database(default
 @pytest.mark.parametrize("with_backup", [False, True])
 def test_crash_left_wal_does_not_reach_the_new_database(default_db, with_backup):
     if with_backup:
-        _make_db(default_db + ".daily-backup")
+        _make_db(default_db + ".daily-backup", marker="from backup")
     _make_db(default_db)
     writer = sqlite3.connect(default_db)
     writer.execute("PRAGMA journal_mode=WAL")
@@ -729,7 +732,10 @@ def test_crash_left_wal_does_not_reach_the_new_database(default_db, with_backup)
     assert _revision(default_db) == _head()
     with closing(sqlite3.connect(default_db)) as conn:
         assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
-        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'marker'").fetchone() is None
+        if with_backup:  # the backup, not the crashed database's WAL
+            assert conn.execute("SELECT value FROM marker").fetchall() == [("from backup",)]
+        else:
+            assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'marker'").fetchone() is None
 
 
 def test_wal_kept_by_another_connection_does_not_reach_the_restored_database(default_db):
@@ -913,7 +919,7 @@ class _Stop(Exception):
     pass
 
 
-@pytest.mark.parametrize("age_hours, first_write_hour", [(None, 0), (25, 0), (1, 23), (-2400, 0)])
+@pytest.mark.parametrize("age_hours, first_write_hour", [(None, 0), (25, 0), (1, 23), (-12, 0), (-2400, 0)])
 def test_backup_is_refreshed_once_a_day_while_running(tmp_path, monkeypatch, age_hours, first_write_hour):
     db_path = str(tmp_path / "comfyui.db")
     backup = db_path + ".daily-backup"
