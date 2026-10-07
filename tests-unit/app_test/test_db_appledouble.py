@@ -1,6 +1,8 @@
 import os
 import shutil
 import sqlite3
+import stat
+import sys
 
 import pytest
 from alembic import command
@@ -55,6 +57,28 @@ def scripts(tmp_path, monkeypatch):
         db_module._db_lock.release(force=True)
 
 
+@pytest.fixture
+def temp_root(tmp_path, monkeypatch):
+    """The directory tempfile.gettempdir() returns, so copies land in tmp_path."""
+    root = tmp_path / "tmp"
+    root.mkdir()
+    monkeypatch.setattr(db_module.tempfile, "tempdir", str(root))
+    return root
+
+
+def _copies(temp_root) -> list[str]:
+    return [str(p) for p in temp_root.glob("comfyui-alembic-versions-*")]
+
+
+def _relaunch():
+    """Run _init_file_db again, as the next launch of the same install would."""
+    for factory in (db_module.Session, db_module.WriteSession):
+        factory.kw["bind"].dispose()
+    db_module._db_lock.release(force=True)
+    db_module.Session = db_module.WriteSession = db_module._db_lock = None
+    db_module._init_file_db(db_module.args.database_url)
+
+
 def _tree(path: str) -> dict[str, bytes]:
     files = {}
     for root, dirs, names in os.walk(path):
@@ -81,10 +105,8 @@ def test_appledouble_file_breaks_alembic_on_its_own(scripts):
         ScriptDirectory.from_config(_config(scripts_path, db_path)).get_current_head()
 
 
-def test_upgrade_ignores_appledouble_files_and_leaves_the_install_unchanged(scripts, monkeypatch):
+def test_upgrade_ignores_appledouble_files_and_leaves_the_install_unchanged(scripts, temp_root):
     scripts_path, db_path = scripts
-    at_exit = []
-    monkeypatch.setattr(db_module.atexit, "register", lambda fn, *a: at_exit.append((fn, a)))
     head = _head(scripts_path)
     command.upgrade(_config(scripts_path, db_path), "0006_add_loader_path")
     _plant_appledouble(scripts_path)
@@ -97,22 +119,55 @@ def test_upgrade_ignores_appledouble_files_and_leaves_the_install_unchanged(scri
     assert _current_revision(db_path) == head
     assert os.path.exists(db_path + ".bkp")
     assert _tree(scripts_path) == install
-
-    # The filtered copy is removed when the process exits.
-    (rmtree_args,) = [args for fn, args in at_exit if fn is shutil.rmtree]
-    copy = rmtree_args[0]
-    assert os.path.isdir(os.path.join(copy, "versions"))
-    shutil.rmtree(*rmtree_args)
-    assert not os.path.exists(copy)
+    assert len(_copies(temp_root)) == 1
 
 
-def test_versions_without_appledouble_files_are_used_in_place(scripts, monkeypatch):
+def test_next_launch_replaces_the_copy(scripts, temp_root):
+    scripts_path, db_path = scripts
+    head = _head(scripts_path)
+    _plant_appledouble(scripts_path)
+    db_module._init_file_db(db_module.args.database_url)
+    (copy,) = _copies(temp_root)
+    # A copy left by an earlier launch, here one with a revision this install no longer has.
+    stale = os.path.join(copy, "0099_stale.py")
+    with open(stale, "wb") as f:
+        f.write(_APPLEDOUBLE)
+
+    _relaunch()
+
+    assert _copies(temp_root) == [copy]
+    assert not os.path.exists(stale)
+    assert _current_revision(db_path) == head
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions, as non-root"
+)
+def test_copy_of_a_read_only_install_stays_removable(scripts, temp_root):
+    scripts_path, db_path = scripts
+    head = _head(scripts_path)
+    _plant_appledouble(scripts_path)
+    versions = os.path.join(scripts_path, "versions")
+    read_only = [os.path.join(versions, name) for name in os.listdir(versions)] + [versions]
+    for path in read_only:
+        os.chmod(path, os.stat(path).st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+    try:
+        db_module._init_file_db(db_module.args.database_url)
+        _relaunch()
+    finally:
+        for path in read_only:
+            os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
+
+    (copy,) = _copies(temp_root)
+    # Windows can't delete read-only files, so the copied files must not keep the source's mode.
+    assert all(os.access(os.path.join(copy, name), os.W_OK) for name in os.listdir(copy))
+    assert _current_revision(db_path) == head
+
+
+def test_versions_without_appledouble_files_are_used_in_place(scripts, temp_root):
     scripts_path, db_path = scripts
 
-    def _no_copy():
-        raise AssertionError("copied the versions dir without any ._ files in it")
-
-    monkeypatch.setattr(db_module.tempfile, "mkdtemp", _no_copy)
     db_module._init_file_db(db_module.args.database_url)
 
+    assert _copies(temp_root) == []
     assert _current_revision(db_path) == _head(scripts_path)
