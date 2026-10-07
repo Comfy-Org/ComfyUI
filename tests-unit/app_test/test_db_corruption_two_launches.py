@@ -12,7 +12,6 @@ import urllib.request
 from contextlib import closing
 from pathlib import Path
 
-import pytest
 from alembic import command
 from alembic.config import Config
 
@@ -60,8 +59,8 @@ def _serving(port: int) -> bool:
         return False
 
 
-@pytest.mark.parametrize("table", ["asset_system_state"])  # recovered after init, under the lock
-def test_two_launches_on_a_corrupt_database_recover_it_once(tmp_path, table):
+def test_two_launches_on_a_corrupt_database_recover_it_once(tmp_path, table="asset_system_state"):
+    # asset_system_state: recovered after init, while the lock is held.
     db_path = tmp_path / "user" / "comfyui.db"
     db_path.parent.mkdir()
     _make_corrupt_db(db_path, table)

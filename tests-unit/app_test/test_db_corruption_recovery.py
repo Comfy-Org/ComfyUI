@@ -322,6 +322,31 @@ def test_index_damage_quick_check_misses_counts_as_corruption(live_db):
     assert not db_module._passes_integrity_check(live_db)
 
 
+def test_recovery_after_init_leaves_a_sound_database(default_db):
+    _make_db(default_db)
+    db_module.init_db()
+
+    assert not db_module.recover_from_corruption(sqlite3.DatabaseError("database disk image is malformed"))
+    assert _quarantined(default_db) == []
+
+
+def test_corruption_error_on_a_sound_database_is_logged_at_asset_startup(default_db, boot_events, monkeypatch):
+    _make_db(default_db)
+    seeded = []
+    monkeypatch.setattr(lifecycle, "start_asset_seeder", lambda: seeded.append(True))
+
+    def _wipe(session):
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    monkeypatch.setattr(lifecycle, "wipe_temp_db_rows", _wipe)
+
+    _boot()
+
+    assert boot_events == ["startup", "backup"]
+    assert seeded == [True]  # the previous flow: logged, then the seeder starts anyway
+    assert _quarantined(default_db) == []
+
+
 def test_recovery_after_init_ignores_other_errors(default_db):
     _make_db(default_db)
     db_module.init_db()
@@ -475,7 +500,8 @@ def test_failed_open_leaves_no_handle_on_the_database(default_db):
     with pytest.raises(Exception) as raised:
         db_module._migrate_and_bind(db_module.get_database_url(), default_db, True)
 
-    assert raised.value is not None  # its traceback still references the failed engines
+    # `raised` keeps the traceback, and the failed engines it references, alive during the check.
+    assert error_kind(raised.value) == "database_corrupt"
     assert os.path.realpath(default_db) not in _open_files()
 
 
@@ -532,17 +558,21 @@ def test_failed_backup_keeps_the_previous_one(live_db, monkeypatch):
 
 
 def _end_backup_thread_after_one_pass(monkeypatch):
-    # The loop would otherwise sleep for a day; SystemExit ends a thread quietly.
+    """The started backup thread, which ends after one pass instead of sleeping for a day."""
     monkeypatch.setattr(db_module, "time", SimpleNamespace(time=time.time, sleep=lambda s: sys.exit()))
+    started = []
 
+    def _thread(**kwargs):
+        started.append(threading.Thread(**kwargs))
+        return started[-1]
 
-def _backup_thread():
-    return next(t for t in threading.enumerate() if t.name == "database-daily-backup")
+    monkeypatch.setattr(db_module, "threading", SimpleNamespace(Thread=_thread))
+    return started
 
 
 def test_backup_is_written_off_the_startup_thread(default_db, monkeypatch):
     _make_db(default_db)
-    _end_backup_thread_after_one_pass(monkeypatch)
+    started = _end_backup_thread_after_one_pass(monkeypatch)
     release = threading.Event()
     writers = []
 
@@ -554,7 +584,7 @@ def test_backup_is_written_off_the_startup_thread(default_db, monkeypatch):
 
     db_module.start_daily_backup()  # returns while the write is still blocked
 
-    thread = _backup_thread()
+    [thread] = started
     deadline = time.monotonic() + 10
     while not writers and time.monotonic() < deadline:
         time.sleep(0.01)
@@ -565,10 +595,10 @@ def test_backup_is_written_off_the_startup_thread(default_db, monkeypatch):
 
 def test_started_backup_writes_a_sound_copy(default_db, monkeypatch):
     _make_db(default_db, marker="live")
-    _end_backup_thread_after_one_pass(monkeypatch)
+    started = _end_backup_thread_after_one_pass(monkeypatch)
 
     db_module.start_daily_backup()
-    _backup_thread().join(30)
+    started[0].join(30)
 
     backup = default_db + ".daily-backup"
     with closing(sqlite3.connect(backup)) as conn:
@@ -697,8 +727,7 @@ def test_stale_partial_backup_is_removed(live_db):
         assert conn.execute("SELECT value FROM marker").fetchone() == ("live",)
 
 
-@pytest.mark.parametrize("table", ["assets"])
-def test_comfyui_launches_on_a_corrupt_default_database(tmp_path, table):
+def test_comfyui_launches_on_a_corrupt_default_database(tmp_path, table="assets"):
     db_path = tmp_path / "user" / "comfyui.db"
     db_path.parent.mkdir()
     _make_db(str(db_path))
