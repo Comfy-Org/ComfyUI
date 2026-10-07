@@ -41,12 +41,12 @@ def test_camera_angle_elevation_wording_matches_the_rendered_view(vertical, term
     # The splat frame is Y-down, so a camera above the subject looks along a positive forward Y.
     _, _, _, _, fwd = _camera_basis(build_camera_info(0, vertical, 5.0), DEVICE)
     assert vertical_term(vertical) == term
-    assert (float(fwd[1]) > 0) is (vertical > 0)
+    assert (float(fwd[1]) > 0) == (vertical > 0)
 
 
 def test_camera_info_flags_custom_up_when_world_up_would_be_wrong():
-    # The viewer honours the quaternion's up only when useCustomUp is set. A rolled camera and an
-    # explicitly supplied rotation both have to say so, or the frontend falls back to world up.
+    # The viewer reads the quaternion's up only when useCustomUp is set, so a rolled camera and an
+    # explicitly supplied rotation both say so. A plain look-at leaves it off and keeps world up.
     assert "useCustomUp" not in _lookat_camera_info(EYE, ORIGIN, 35.0, DEVICE)
     assert _lookat_camera_info(EYE, ORIGIN, 35.0, DEVICE, roll=30.0)["useCustomUp"] is True
     assert _quat_camera_info(EYE, [0.0, 0.0, 0.0, 1.0], 35.0, DEVICE)["useCustomUp"] is True

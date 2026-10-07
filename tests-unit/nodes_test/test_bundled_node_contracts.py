@@ -9,10 +9,12 @@ if not torch.cuda.is_available():
     args.cpu = True
 
 import nodes
+from comfy_api.latest import io
 from comfy_api.latest._io import _DynamicGroup
 
-# nodes_replacements.py only registers node replacements, and needs a running PromptServer to do
-# it. It contributes no nodes of its own, so skipping it here costs no coverage.
+# Startup only logs an import failure and carries on. The sweep below is only meaningful over a
+# complete node list, so here a failure is fatal instead. nodes_replacements.py is exempt: it needs
+# a running PromptServer, and registers no nodes of its own, so skipping it costs no coverage.
 ALLOWED_IMPORT_FAILURES = {"nodes_replacements.py"}
 
 
@@ -24,11 +26,12 @@ async def _load_bundled_nodes():
 def bundled_nodes():
     class_mappings = dict(nodes.NODE_CLASS_MAPPINGS)
     display_name_mappings = dict(nodes.NODE_DISPLAY_NAME_MAPPINGS)
-    # Both halves of a default startup, so the sweep below sees every node a user gets.
-    import_failed = asyncio.run(_load_bundled_nodes())
-    assert set(import_failed) <= ALLOWED_IMPORT_FAILURES, \
-        "a bundled module failed to import, so the checks below would skip its nodes"
     try:
+        # Both halves of a default startup, so the sweep below sees every node a user gets. The
+        # loaded modules themselves stay resident; only the mappings are put back.
+        import_failed = asyncio.run(_load_bundled_nodes())
+        assert set(import_failed) <= ALLOWED_IMPORT_FAILURES, \
+            "a bundled module failed to import, so the checks below would skip its nodes"
         yield nodes.NODE_CLASS_MAPPINGS
     finally:
         nodes.NODE_CLASS_MAPPINGS.clear()
@@ -57,9 +60,21 @@ def _strings(value):
             yield from _strings(item)
 
 
+def test_a_dynamic_group_widget_is_detectable(bundled_nodes):
+    class Grouped(io.ComfyNode):
+        @classmethod
+        def define_schema(cls):
+            return io.Schema(node_id=cls.__name__, inputs=[
+                _DynamicGroup.Input("rows", template=[io.Float.Input("x")]),
+            ], outputs=[])
+
+    assert _DynamicGroup.io_type in _strings(Grouped.INPUT_TYPES())
+
+
 def test_no_bundled_node_offers_a_dynamic_group_widget(bundled_nodes):
-    # The bundled frontend has no DynamicGroup renderer, so a bundled node offering one would show
-    # an unusable widget. The input stays internal until the frontend ships support for it.
+    # comfyui-frontend-package 1.55.x has no DynamicGroup renderer, so a bundled node offering one
+    # would show an unusable widget. Frontend support landed in 1.57.0; drop this once the pin in
+    # requirements.txt reaches a version that has it.
     offenders = sorted(
         name for name, node in bundled_nodes.items()
         if _DynamicGroup.io_type in _strings(node.INPUT_TYPES())
