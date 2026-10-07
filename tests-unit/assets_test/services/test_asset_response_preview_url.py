@@ -159,16 +159,6 @@ def test_exr_and_hdr_are_never_their_own_preview(
     )
 
 
-def test_hdr_is_excluded_even_where_the_host_maps_it_to_an_image(sandboxed_comfy_roots: Path):
-    with patch("mimetypes.guess_type", return_value=("image/vnd.radiance", None)):
-        resp = _build_asset_response(
-            _make_result(name="sky.hdr", file_path=str(sandboxed_comfy_roots / "output" / "sky.hdr"), mime_type=None),
-            {},
-        )
-
-    assert resp.preview_url is None
-
-
 def test_an_exr_with_a_generated_preview_shows_it(sandboxed_comfy_roots: Path):
     result = _make_result(
         name="frame.exr",

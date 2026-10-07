@@ -10,8 +10,7 @@ from PIL import Image
 from app.assets.manager import AssetsEnabled
 from app.assets.previews import generate_upload_preview
 
-from .test_preview_lifecycle import roots  # noqa: F401 - fixture
-from .test_previews import write_exr
+from .preview_helpers import write_exr
 
 
 class _Args:
@@ -47,7 +46,7 @@ def _form(name: str, data: bytes, **fields) -> FormData:
 
 
 @pytest.mark.asyncio
-async def test_an_exr_upload_returns_its_generated_preview(mock_create_session, roots, tmp_path):  # noqa: F811
+async def test_an_exr_upload_returns_its_generated_preview(mock_create_session, roots, tmp_path):
     exr = write_exr(tmp_path / "src.exr", 64, 48).read_bytes()
     async with await _client(AssetsEnabled(_Args())) as client:
         resp = await client.post("/upload/image", data=_form("frame.exr", exr))
@@ -60,7 +59,7 @@ async def test_an_exr_upload_returns_its_generated_preview(mock_create_session, 
 
 
 @pytest.mark.asyncio
-async def test_a_png_upload_is_its_own_preview(mock_create_session, roots):  # noqa: F811
+async def test_a_png_upload_is_its_own_preview(mock_create_session, roots):
     async with await _client(AssetsEnabled(_Args())) as client:
         resp = await client.post("/upload/image", data=_form("still.png", _png()))
         asset = (await resp.json())["asset"]
@@ -69,7 +68,7 @@ async def test_a_png_upload_is_its_own_preview(mock_create_session, roots):  # n
 
 
 @pytest.mark.asyncio
-async def test_mask_upload_still_answers_with_json(mock_create_session, roots):  # noqa: F811
+async def test_mask_upload_still_answers_with_json(mock_create_session, roots):
     (roots / "input" / "base.png").write_bytes(_png())
     original_ref = json.dumps({"filename": "base.png", "type": "input", "subfolder": ""})
     async with await _client(AssetsEnabled(_Args())) as client:
@@ -81,7 +80,7 @@ async def test_mask_upload_still_answers_with_json(mock_create_session, roots): 
 
 
 @pytest.mark.asyncio
-async def test_with_assets_off_an_exr_upload_has_no_asset(roots):  # noqa: F811
+async def test_with_assets_off_an_exr_upload_has_no_asset(roots):
     async with await _client(MagicMock(enabled=False, register_upload=MagicMock(return_value=None))) as client:
         resp = await client.post("/upload/image", data=_form("frame.exr", b"exr"))
         body = await resp.json()
@@ -98,7 +97,7 @@ async def test_a_preview_the_client_already_set_is_kept(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_api_asset_uploads_get_a_generated_preview(mock_create_session, roots, tmp_path):  # noqa: F811
+async def test_api_asset_uploads_get_a_generated_preview(mock_create_session, roots, tmp_path):
     from app.assets.api.routes import _build_asset_response, _resolve_preview_paths, _with_upload_preview
     from app.assets.services.ingest import register_file_in_place
     from utils.mime_types import init_mime_types
@@ -112,3 +111,85 @@ async def test_api_asset_uploads_get_a_generated_preview(mock_create_session, ro
 
     assert response.preview_id not in (None, response.id)
     assert response.preview_url == f"/api/assets/{response.preview_id}/content"
+
+
+async def _assets_client():
+    from aiohttp import web
+
+    from app.assets.api import routes
+    from utils.mime_types import init_mime_types
+
+    init_mime_types()
+    app = web.Application()
+    app.add_routes(routes.ROUTES)
+    return TestClient(TestServer(app))
+
+
+@pytest.fixture
+def assets_routes_on():
+    from app.assets.api import routes
+
+    with (
+        patch.object(routes, "_ASSETS_ENABLED", True),
+        patch.object(routes, "USER_MANAGER", MagicMock(get_request_user_id=MagicMock(return_value="default"))),
+    ):
+        yield
+
+
+@pytest.mark.asyncio
+async def test_a_multipart_exr_upload_gets_a_generated_preview(mock_create_session, roots, tmp_path, assets_routes_on):
+    exr = write_exr(tmp_path / "src.exr", 64, 48).read_bytes()
+    form = FormData()
+    form.add_field("file", exr, filename="frame.exr")
+    form.add_field("tags", json.dumps(["input"]))
+    async with await _assets_client() as client:
+        resp = await client.post("/api/assets", data=form)
+        body = await resp.json()
+
+    assert resp.status == 201, body
+    assert body["preview_id"] not in (None, body["id"])
+    assert body["preview_url"] == f"/api/assets/{body['preview_id']}/content"
+
+
+@pytest.mark.asyncio
+async def test_a_from_hash_exr_gets_a_generated_preview(mock_create_session, roots, assets_routes_on, session):
+    from app.assets import mode
+    from app.assets.database.queries.records import create_content
+
+    class _HashingOn:
+        enable_asset_hashing = True
+
+    mode.init(_HashingOn())
+    exr = write_exr(roots / "input" / "frame.exr", 64, 48)
+    digest = "blake3:" + "ab" * 32
+    create_content(session, str(exr), hash=digest, size_bytes=exr.stat().st_size, mtime_ns=exr.stat().st_mtime_ns)
+    session.commit()
+    async with await _assets_client() as client:
+        resp = await client.post("/api/assets/from-hash", json={"hash": digest, "name": "frame.exr", "tags": ["input"]})
+        body = await resp.json()
+
+    assert resp.status == 201, body
+    assert body["preview_id"] not in (None, body["id"]), "no sibling had a preview, so this one was generated"
+
+
+@pytest.mark.asyncio
+async def test_put_null_preview_id_clears_the_link(mock_create_session, roots, assets_routes_on, session):
+    from app.assets.database.models import Asset
+    from app.assets.database.queries.records import create_content, create_record
+
+    thumb = roots / "output" / "thumb.png"
+    thumb.write_bytes(_png())
+    model = roots / "output" / "m.glb"
+    model.write_bytes(b"glb")
+    preview = create_record(session, create_content(session, str(thumb)).id, "thumb.png")
+    parent = create_record(session, create_content(session, str(model)).id, "m.glb")
+    parent.preview_id = preview.id
+    session.commit()
+    parent_id = parent.id
+
+    async with await _assets_client() as client:
+        resp = await client.put(f"/api/assets/{parent_id}", json={"preview_id": None})
+
+    assert resp.status == 200, await resp.text()
+    session.expire_all()
+    assert session.get(Asset, parent_id).preview_id is None

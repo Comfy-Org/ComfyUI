@@ -1,14 +1,10 @@
 import asyncio
 import os
-import struct
 import threading
 import time
-from fractions import Fraction
 from pathlib import Path
 from unittest.mock import patch
 
-import av
-import numpy as np
 import pytest
 from PIL import Image
 from sqlalchemy import select
@@ -20,25 +16,9 @@ from app.assets.database.queries.records import create_content, create_record, f
 from app.assets.services.image_dimensions import extract_image_dimensions, read_exr_windows
 from comfy_execution import preview_generators
 
+from .preview_helpers import write_exr
 
-def write_exr(path: Path, width: int, height: int, value=(1.0, 0.5, 0.25), display_window=None) -> Path:
-    """An EXR the way SaveImageAdvanced writes one (PyAV, uncompressed half)."""
-    rgb = np.empty((height, width, 3), np.float32)
-    rgb[...] = value
-    codec = av.CodecContext.create("exr", "w")
-    codec.width, codec.height, codec.pix_fmt = width, height, "gbrpf32le"
-    codec.time_base = Fraction(1, 1)
-    codec.options = {"format": "half"}
-    frame = av.VideoFrame.from_ndarray(rgb, format="gbrpf32le")
-    frame.pts = 0
-    frame.time_base = codec.time_base
-    data = bytearray(b"".join(bytes(p) for p in list(codec.encode(frame)) + list(codec.encode(None))))
-    if display_window is not None:
-        key = b"displayWindow\x00box2i\x00"
-        at = data.find(key) + len(key) + 4
-        struct.pack_into("<4i", data, at, *display_window)
-    path.write_bytes(bytes(data))
-    return path
+
 
 
 @pytest.fixture
@@ -179,7 +159,7 @@ def test_a_generated_preview_is_stored_tagged_and_linked(session, mock_create_se
     assert len(_events(caplog, "previews.generated")) == 1
 
 
-def test_a_parent_deleted_during_generation_leaves_nothing_behind(session, mock_create_session, previews_dir, exr_mime, tmp_path):
+def test_a_parent_deleted_before_storing_leaves_nothing_behind(session, mock_create_session, previews_dir, exr_mime, tmp_path):
     parent = _parent(session, write_exr(tmp_path / "frame.exr", 64, 48))
     session.delete(parent)
     session.commit()
@@ -189,6 +169,27 @@ def test_a_parent_deleted_during_generation_leaves_nothing_behind(session, mock_
     assert linked == {}
     assert not any(previews_dir.glob("*")) if previews_dir.exists() else True
     assert session.scalars(select(Asset).where(Asset.mime_type == "image/webp")).first() is None
+
+
+def test_a_preview_set_while_generating_is_kept(session, mock_create_session, previews_dir, exr_mime, tmp_path):
+    parent = _parent(session, write_exr(tmp_path / "frame.exr", 64, 48))
+    chosen = _parent(session, tmp_path / "frame.exr", mime_type="image/png")
+    parent.preview_id = chosen.id  # a client's PUT landed first
+    session.commit()
+
+    linked = asyncio.run(previews.generate_previews([(parent.id, str(tmp_path / "frame.exr"))], "upload"))
+
+    assert linked == {}
+    session.expire_all()
+    assert session.get(Asset, parent.id).preview_id == chosen.id
+    assert not previews_dir.exists() or not any(previews_dir.iterdir())
+
+
+class _Instant:
+    mime_types = ("image/x-test-fast",)
+
+    def generate(self, source_path, max_pixels):
+        return Image.new("RGB", (4, 4))
 
 
 class _Sleeper:
@@ -232,24 +233,62 @@ def test_a_slow_generator_does_not_hold_the_caller_past_the_deadline(session, mo
     assert any("reason=timeout" in e for e in _events(caplog, "previews.generation_failed"))
 
 
-def test_storing_stops_when_the_deadline_passes(session, mock_create_session, previews_dir, exr_mime, tmp_path, caplog):
+def _sources(tmp_path, session, mime_types):
+    paths = []
+    for i, mime_type in enumerate(mime_types):
+        path = tmp_path / f"source{i}.tst"
+        path.write_bytes(b"x")
+        paths.append(path)
+    mimes = {str(p): m for p, m in zip(paths, mime_types)}
+    parents = [_parent(session, p, mime_type=m) for p, m in zip(paths, mime_types)]
+    return [(parent.id, str(path)) for parent, path in zip(parents, paths)], mimes
+
+
+def test_storing_stops_when_the_deadline_passes(session, mock_create_session, previews_dir, tmp_path, caplog):
     caplog.set_level("INFO")
-    frames = [write_exr(tmp_path / f"f{i}.exr", 8, 8) for i in range(2)]
-    parents = [_parent(session, f) for f in frames]
+    items, mimes = _sources(tmp_path, session, ["image/x-test-fast"] * 2)
     store = previews._store_and_link
 
     def slow_store(*args):
         time.sleep(0.4)
         return store(*args)
 
-    with (
-        patch.object(previews, "preview_deadline_seconds", lambda count: 0.3),
-        patch.object(previews, "_store_and_link", slow_store),
-    ):
-        linked = asyncio.run(previews.generate_previews([(p.id, str(f)) for p, f in zip(parents, frames)], "output"))
+    instant = _Instant()
+    preview_generators.register_preview_generator(instant)
+    try:
+        with (
+            patch.object(previews, "preview_mime_type", lambda path: mimes.get(path)),
+            patch.object(previews, "preview_deadline_seconds", lambda count: 0.3),
+            patch.object(previews, "_store_and_link", slow_store),
+        ):
+            started = time.monotonic()
+            linked = asyncio.run(previews.generate_previews(items, "output"))
+            waited = time.monotonic() - started
+    finally:
+        preview_generators.unregister_preview_generator(instant)
 
-    assert len(linked) <= 1, "nothing is stored once the deadline has passed"
-    assert any("reason=timeout" in e for e in _events(caplog, "previews.generation_failed"))
+    assert len(linked) == 1, "the store already under way finishes; nothing starts after the deadline"
+    assert waited < 0.8, "at most one store runs past the deadline"
+    assert sum("reason=timeout" in e for e in _events(caplog, "previews.generation_failed")) == 1
+
+
+def test_one_slow_file_does_not_cost_the_others_their_previews(session, mock_create_session, previews_dir, tmp_path):
+    items, mimes = _sources(tmp_path, session, ["image/x-test-fast", "image/x-test-slow"])
+    instant, sleeper = _Instant(), _Sleeper(1.0)
+    for g in (instant, sleeper):
+        preview_generators.register_preview_generator(g)
+    try:
+        with (
+            patch.object(previews, "preview_mime_type", lambda path: mimes.get(path)),
+            patch.object(previews, "preview_deadline_seconds", lambda count: 0.4),
+        ):
+            linked = asyncio.run(previews.generate_previews(items, "output"))
+            assert sleeper.finished.wait(5)
+    finally:
+        for g in (instant, sleeper):
+            preview_generators.unregister_preview_generator(g)
+
+    assert list(linked) == [items[0][0]], "the fast file is stored as soon as it finishes"
 
 
 def test_the_event_loop_keeps_running_while_previews_generate(session, mock_create_session, previews_dir, tmp_path):
@@ -372,7 +411,7 @@ async def _unregister(generator):
     await ComfyAPI().previews.unregister_generator(generator)
 
 
-def test_lookup_uses_the_path_not_an_uploader_supplied_type(tmp_path):
+def test_generators_are_looked_up_by_the_path(tmp_path):
     from utils.mime_types import init_mime_types
 
     init_mime_types()

@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-import folder_paths
+
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_content, create_record, mark_content_missing
 from app.assets.manager import AssetsEnabled
@@ -13,21 +13,9 @@ from app.assets.services.asset_management import delete_asset_reference
 from app.assets.services.ingest import register_cached_output, register_file_in_place
 from comfy_execution.asset_enrichment import generate_output_previews, register_executed_outputs
 
-from .test_previews import write_exr
+from .preview_helpers import write_exr
 
 
-@pytest.fixture
-def roots(tmp_path: Path):
-    saved = (folder_paths.get_output_directory(), folder_paths.get_input_directory(), folder_paths.get_previews_directory())
-    folder_paths.set_output_directory(str(tmp_path / "output"))
-    folder_paths.set_input_directory(str(tmp_path / "input"))
-    folder_paths.set_previews_directory(str(tmp_path / "previews"))
-    for name in ("output", "input", "previews"):
-        (tmp_path / name).mkdir()
-    yield tmp_path
-    folder_paths.set_output_directory(saved[0])
-    folder_paths.set_input_directory(saved[1])
-    folder_paths.set_previews_directory(saved[2])
 
 
 def _record(session, path: Path, *, tags=(), preview_id=None, mime_type=None) -> Asset:
@@ -209,3 +197,84 @@ def test_generation_is_only_asked_for_types_with_a_generator(session, mock_creat
         asyncio.run(generate_output_previews(enriched))
 
     generate.assert_not_called()
+
+
+def test_a_preview_tagged_asset_outside_previews_is_not_cascaded(session, mock_create_session, roots):
+    user_file = roots / "output" / "my-preview.png"
+    tagged = _record(session, user_file, tags=["preview"])
+    tagged_id = tagged.id
+    parent = _record(session, roots / "output" / "a.exr", preview_id=tagged_id)
+
+    delete_asset_reference(parent.id)
+
+    session.expire_all()
+    assert session.get(Asset, tagged_id) is not None, "a user's own asset, whatever its tags"
+    assert user_file.exists()
+
+
+def test_a_self_linked_sibling_is_not_reused(session, mock_create_session, roots):
+    frame = roots / "output" / "f.exr"
+    sibling = _record(session, frame)
+    sibling.preview_id = sibling.id
+    session.commit()
+
+    assert register_cached_output(str(frame), "job-2").preview_id is None
+
+
+def test_a_hand_picked_preview_is_not_reused(session, mock_create_session, roots):
+    frame = roots / "output" / "f.exr"
+    picked = _record(session, roots / "output" / "thumb.png", tags=["output"])
+    _record(session, frame, preview_id=picked.id)
+
+    assert register_cached_output(str(frame), "job-2").preview_id is None
+
+
+def test_a_preview_whose_file_was_removed_is_not_reused(session, mock_create_session, roots):
+    frame = roots / "output" / "f.exr"
+    preview = _record(session, roots / "previews" / "p.webp", tags=["preview"])
+    _record(session, frame, preview_id=preview.id)
+    (roots / "previews" / "p.webp").unlink()
+
+    assert register_cached_output(str(frame), "job-2").preview_id is None
+
+
+def test_a_cached_replay_drops_a_stale_preview_id(session, mock_create_session, roots):
+    from comfy_execution.asset_enrichment import register_cached_outputs
+
+    write_exr(roots / "output" / "frame.exr", 8, 8)
+    wrapper = {"meta": {}, "output": {"images": [
+        {"filename": "frame.exr", "subfolder": "", "type": "output", "id": "old", "preview_id": "old-preview"},
+    ]}}
+    register_executed_outputs(_ui("frame.exr"), "seed", AssetsEnabled(_Args()))
+
+    entry = register_cached_outputs(wrapper, "replay", AssetsEnabled(_Args()))["output"]["images"][0]
+
+    assert entry["id"] != "old"
+    assert "preview_id" not in entry, "no reusable preview, and a replay never generates"
+
+
+def test_a_non_file_ui_entry_with_an_id_does_not_fail_the_node(session, mock_create_session, roots):
+    ui = {"items": [{"id": "row-1", "label": "Result"}]}
+
+    asyncio.run(generate_output_previews(ui))
+
+    assert ui == {"items": [{"id": "row-1", "label": "Result"}]}
+
+
+@pytest.mark.parametrize(
+    ("tags", "root"),
+    [(["preview"], "previews"), (["input", "preview"], "input"), (["output", "preview"], "output")],
+)
+def test_preview_is_a_destination_only_on_its_own(roots, tags, root):
+    from app.assets.services.path_utils import resolve_destination_from_tags
+
+    base, _ = resolve_destination_from_tags(tags)
+
+    assert base == str(roots / root)
+
+
+def test_preview_is_a_reserved_tag():
+    from app.assets.api.routes import SystemTagForbiddenError, _reject_system_tags
+
+    with pytest.raises(SystemTagForbiddenError):
+        _reject_system_tags(["preview"])
