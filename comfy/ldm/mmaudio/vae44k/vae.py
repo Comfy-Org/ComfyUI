@@ -1,15 +1,9 @@
-import logging
-from typing import Optional
-
 import torch
 import torch.nn as nn
 
 from .edm2_utils import MPConv1D
-from .vae_modules import (AttnBlock1D, Downsample1D, ResnetBlock1D,
-                                                 Upsample1D, nonlinearity)
-from .distributions import DiagonalGaussianDistribution
-
-log = logging.getLogger()
+from .vae_modules import (AttnBlock1D, ResnetBlock1D,
+                          Upsample1D, nonlinearity)
 
 DATA_MEAN_128D = [
     -3.3462, -2.6723, -2.4893, -2.3143, -2.2664, -2.3317, -2.1802, -2.4006, -2.2357, -2.4597,
@@ -61,15 +55,6 @@ class VAE(nn.Module):
         self.data_mean = self.data_mean.view(1, -1, 1)
         self.data_std = self.data_std.view(1, -1, 1)
 
-        self.encoder = Encoder1D(
-            dim=hidden_dim,
-            ch_mult=(1, 2, 4),
-            num_res_blocks=2,
-            attn_layers=[3],
-            down_layers=[0],
-            in_dim=data_dim,
-            embed_dim=embed_dim,
-        )
         self.decoder = Decoder1D(
             dim=hidden_dim,
             ch_mult=(1, 2, 4),
@@ -81,158 +66,21 @@ class VAE(nn.Module):
             embed_dim=embed_dim,
         )
 
-        self.embed_dim = embed_dim
-        # self.quant_conv = nn.Conv1d(2 * embed_dim, 2 * embed_dim, 1)
-        # self.post_quant_conv = nn.Conv1d(embed_dim, embed_dim, 1)
-
-    def encode(self, x: torch.Tensor, normalize: bool = True) -> DiagonalGaussianDistribution:
-        if normalize:
-            x = self.normalize(x)
-        moments = self.encoder(x)
-        posterior = DiagonalGaussianDistribution(moments)
-        return posterior
-
     def decode(self, z: torch.Tensor, unnormalize: bool = True) -> torch.Tensor:
         dec = self.decoder(z)
         if unnormalize:
             dec = self.unnormalize(dec)
         return dec
 
-    def normalize(self, x: torch.Tensor) -> torch.Tensor:
-        return (x - self.data_mean) / self.data_std
-
     def unnormalize(self, x: torch.Tensor) -> torch.Tensor:
         return x * self.data_std + self.data_mean
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        sample_posterior: bool = True,
-        rng: Optional[torch.Generator] = None,
-        normalize: bool = True,
-        unnormalize: bool = True,
-    ) -> tuple[torch.Tensor, DiagonalGaussianDistribution]:
-
-        posterior = self.encode(x, normalize=normalize)
-        if sample_posterior:
-            z = posterior.sample(rng)
-        else:
-            z = posterior.mode()
-        dec = self.decode(z, unnormalize=unnormalize)
-        return dec, posterior
-
-    def load_weights(self, src_dict) -> None:
-        self.load_state_dict(src_dict, strict=True)
-
-    @property
-    def device(self) -> torch.device:
-        return next(self.parameters()).device
-
-    def get_last_layer(self):
-        return self.decoder.conv_out.weight
-
     def remove_weight_norm(self):
-        for name, m in self.named_modules():
-            if isinstance(m, MPConv1D):
-                m.remove_weight_norm()
-                log.debug(f"Removed weight norm from {name}")
+        for module in self.modules():
+            if isinstance(module, MPConv1D):
+                module.remove_weight_norm()
         return self
 
-
-class Encoder1D(nn.Module):
-
-    def __init__(self,
-                 *,
-                 dim: int,
-                 ch_mult: tuple[int] = (1, 2, 4, 8),
-                 num_res_blocks: int,
-                 attn_layers: list[int] = [],
-                 down_layers: list[int] = [],
-                 resamp_with_conv: bool = True,
-                 in_dim: int,
-                 embed_dim: int,
-                 double_z: bool = True,
-                 kernel_size: int = 3,
-                 clip_act: float = 256.0):
-        super().__init__()
-        self.dim = dim
-        self.num_layers = len(ch_mult)
-        self.num_res_blocks = num_res_blocks
-        self.in_channels = in_dim
-        self.clip_act = clip_act
-        self.down_layers = down_layers
-        self.attn_layers = attn_layers
-        self.conv_in = MPConv1D(in_dim, self.dim, kernel_size=kernel_size)
-
-        in_ch_mult = (1, ) + tuple(ch_mult)
-        self.in_ch_mult = in_ch_mult
-        # downsampling
-        self.down = nn.ModuleList()
-        for i_level in range(self.num_layers):
-            block = nn.ModuleList()
-            attn = nn.ModuleList()
-            block_in = dim * in_ch_mult[i_level]
-            block_out = dim * ch_mult[i_level]
-            for i_block in range(self.num_res_blocks):
-                block.append(
-                    ResnetBlock1D(in_dim=block_in,
-                                  out_dim=block_out,
-                                  kernel_size=kernel_size,
-                                  use_norm=True))
-                block_in = block_out
-                if i_level in attn_layers:
-                    attn.append(AttnBlock1D(block_in))
-            down = nn.Module()
-            down.block = block
-            down.attn = attn
-            if i_level in down_layers:
-                down.downsample = Downsample1D(block_in, resamp_with_conv)
-            self.down.append(down)
-
-        # middle
-        self.mid = nn.Module()
-        self.mid.block_1 = ResnetBlock1D(in_dim=block_in,
-                                         out_dim=block_in,
-                                         kernel_size=kernel_size,
-                                         use_norm=True)
-        self.mid.attn_1 = AttnBlock1D(block_in)
-        self.mid.block_2 = ResnetBlock1D(in_dim=block_in,
-                                         out_dim=block_in,
-                                         kernel_size=kernel_size,
-                                         use_norm=True)
-
-        # end
-        self.conv_out = MPConv1D(block_in,
-                                 2 * embed_dim if double_z else embed_dim,
-                                 kernel_size=kernel_size)
-
-        self.learnable_gain = nn.Parameter(torch.zeros([]))
-
-    def forward(self, x):
-
-        # downsampling
-        hs = [self.conv_in(x)]
-        for i_level in range(self.num_layers):
-            for i_block in range(self.num_res_blocks):
-                h = self.down[i_level].block[i_block](hs[-1])
-                if len(self.down[i_level].attn) > 0:
-                    h = self.down[i_level].attn[i_block](h)
-                h = h.clamp(-self.clip_act, self.clip_act)
-                hs.append(h)
-            if i_level in self.down_layers:
-                hs.append(self.down[i_level].downsample(hs[-1]))
-
-        # middle
-        h = hs[-1]
-        h = self.mid.block_1(h)
-        h = self.mid.attn_1(h)
-        h = self.mid.block_2(h)
-        h = h.clamp(-self.clip_act, self.clip_act)
-
-        # end
-        h = nonlinearity(h)
-        h = self.conv_out(h, gain=(self.learnable_gain + 1))
-        return h
 
 class Decoder1D(nn.Module):
 
@@ -241,7 +89,7 @@ class Decoder1D(nn.Module):
                  dim: int,
                  out_dim: int,
                  ch_mult: tuple[int] = (1, 2, 4, 8),
-                 num_res_blocks: int,
+                 num_res_blocks: int = 2,
                  attn_layers: list[int] = [],
                  down_layers: list[int] = [],
                  kernel_size: int = 3,

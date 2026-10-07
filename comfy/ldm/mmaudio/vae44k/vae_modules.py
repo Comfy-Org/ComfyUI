@@ -91,26 +91,3 @@ class Upsample1D(nn.Module):
         if self.with_conv:
             x = self.conv(x)
         return x
-
-
-class Downsample1D(nn.Module):
-
-    def __init__(self, in_channels, with_conv):
-        super().__init__()
-        self.with_conv = with_conv
-        if self.with_conv:
-            # no asymmetric padding in torch conv, must do it ourselves
-            self.conv1 = MPConv1D(in_channels, in_channels, kernel_size=1)
-            self.conv2 = MPConv1D(in_channels, in_channels, kernel_size=1)
-
-    def forward(self, x):
-
-        if self.with_conv:
-            x = self.conv1(x)
-
-        x = F.avg_pool1d(x, kernel_size=2, stride=2)
-
-        if self.with_conv:
-            x = self.conv2(x)
-
-        return x

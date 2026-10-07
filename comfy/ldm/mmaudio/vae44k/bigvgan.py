@@ -1,9 +1,7 @@
 # Copyright (c) 2024 NVIDIA CORPORATION.
 #   Licensed under the MIT license.
-
+#
 # Adapted from https://github.com/jik876/hifi-gan under the MIT license.
-
-import json
 
 import torch
 import torch.nn as nn
@@ -12,34 +10,30 @@ from torch.nn.utils.parametrizations import weight_norm
 from torch.nn.utils.parametrize import remove_parametrizations
 
 from . import activations
-from .alias_free_activation.torch.act import \
-    Activation1d as TorchActivation1d
-from .env import AttrDict
-from .utils import get_padding, init_weights
+from .alias_free_torch import Activation1d
 
 
-def load_hparams_from_json(path) -> AttrDict:
-    with open(path) as f:
-        data = f.read()
-    return AttrDict(json.loads(data))
+class AttrDict(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.__dict__ = self
+
+
+def init_weights(m, mean=0.0, std=0.01):
+    classname = m.__class__.__name__
+    if classname.find("Conv") != -1:
+        m.weight.data.normal_(mean, std)
+
+
+def get_padding(kernel_size, dilation=1):
+    return int((kernel_size * dilation - dilation) / 2)
 
 
 class AMPBlock1(torch.nn.Module):
-    """
-    AMPBlock applies Snake / SnakeBeta activation functions with trainable parameters that control periodicity, defined for each layer.
-    AMPBlock1 has additional self.convs2 that contains additional Conv1d layers with a fixed dilation=1 followed by each layer in self.convs1
-
-    Args:
-        h (AttrDict): Hyperparameters.
-        channels (int): Number of convolution channels.
-        kernel_size (int): Size of the convolution kernel. Default is 3.
-        dilation (tuple): Dilation rates for the convolutions. Each dilation layer has two convolutions. Default is (1, 3, 5).
-        activation (str): Activation function type. Should be either 'snake' or 'snakebeta'. Default is None.
-    """
 
     def __init__(
             self,
-            h: AttrDict,
+            h,
             channels: int,
             kernel_size: int = 3,
             dilation: tuple = (1, 3, 5),
@@ -80,13 +74,13 @@ class AMPBlock1(torch.nn.Module):
         # Activation functions
         if activation == "snake":
             self.activations = nn.ModuleList([
-                TorchActivation1d(
+                Activation1d(
                     activation=activations.Snake(channels, alpha_logscale=h.snake_logscale))
                 for _ in range(self.num_layers)
             ])
         elif activation == "snakebeta":
             self.activations = nn.ModuleList([
-                TorchActivation1d(
+                Activation1d(
                     activation=activations.SnakeBeta(channels, alpha_logscale=h.snake_logscale))
                 for _ in range(self.num_layers)
             ])
@@ -114,21 +108,10 @@ class AMPBlock1(torch.nn.Module):
 
 
 class AMPBlock2(torch.nn.Module):
-    """
-    AMPBlock applies Snake / SnakeBeta activation functions with trainable parameters that control periodicity, defined for each layer.
-    Unlike AMPBlock1, AMPBlock2 does not contain extra Conv1d layers with fixed dilation=1
-
-    Args:
-        h (AttrDict): Hyperparameters.
-        channels (int): Number of convolution channels.
-        kernel_size (int): Size of the convolution kernel. Default is 3.
-        dilation (tuple): Dilation rates for the convolutions. Each dilation layer has two convolutions. Default is (1, 3, 5).
-        activation (str): Activation function type. Should be either 'snake' or 'snakebeta'. Default is None.
-    """
 
     def __init__(
             self,
-            h: AttrDict,
+            h,
             channels: int,
             kernel_size: int = 3,
             dilation: tuple = (1, 3, 5),
@@ -156,13 +139,13 @@ class AMPBlock2(torch.nn.Module):
         # Activation functions
         if activation == "snake":
             self.activations = nn.ModuleList([
-                TorchActivation1d(
+                Activation1d(
                     activation=activations.Snake(channels, alpha_logscale=h.snake_logscale))
                 for _ in range(self.num_layers)
             ])
         elif activation == "snakebeta":
             self.activations = nn.ModuleList([
-                TorchActivation1d(
+                Activation1d(
                     activation=activations.SnakeBeta(channels, alpha_logscale=h.snake_logscale))
                 for _ in range(self.num_layers)
             ])
@@ -184,17 +167,8 @@ class AMPBlock2(torch.nn.Module):
 
 
 class BigVGAN(torch.nn.Module):
-    """
-    BigVGAN is a neural vocoder model that applies anti-aliased periodic activation for residual blocks (resblocks).
 
-    Args:
-        h (AttrDict): Hyperparameters.
-
-    Note:
-        - Ensure that the activation function is correctly specified in the hyperparameters (h.activation).
-    """
-
-    def __init__(self, h: AttrDict):
+    def __init__(self, h):
         super().__init__()
         self.h = h
 
@@ -245,7 +219,7 @@ class BigVGAN(torch.nn.Module):
                 "activation incorrectly specified. check the config file and look for 'activation'."
             )
 
-        self.activation_post = TorchActivation1d(activation=activation_post)
+        self.activation_post = Activation1d(activation=activation_post)
 
         # Whether to use bias for the final conv_post. Default to True for backward compatibility
         self.use_bias_at_final = h.get("use_bias_at_final", True)
@@ -288,15 +262,17 @@ class BigVGAN(torch.nn.Module):
         return x
 
     def remove_weight_norm(self):
-        try:
-            # print("Removing weight norm...")
-            for l in self.ups:
-                for l_i in l:
-                    remove_parametrizations(l_i, 'weight')
-            for l in self.resblocks:
-                l.remove_weight_norm()
-            remove_parametrizations(self.conv_pre, 'weight')
-            remove_parametrizations(self.conv_post, 'weight')
-        except ValueError:
-            print("[INFO] Model already removed weight norm. Skipping!")
-            pass
+        for l in self.ups:
+            for l_i in l:
+                remove_parametrizations(l_i, 'weight')
+        for l in self.resblocks:
+            l.remove_weight_norm()
+        remove_parametrizations(self.conv_pre, 'weight')
+        remove_parametrizations(self.conv_post, 'weight')
+
+
+def build_bigvgan(config):
+    """Build an inference-ready BigVGAN-v2 from its serialized configuration."""
+    model = BigVGAN(config if isinstance(config, AttrDict) else AttrDict(config))
+    model.remove_weight_norm()
+    return model
