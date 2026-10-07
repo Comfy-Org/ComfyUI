@@ -30,17 +30,34 @@ def _execute(db_path, *statements):
 
 # Left by an upgrade killed part way through a migration, before it stamped its revision.
 _INTERRUPTED_UPGRADES = {
-    "0002 dropped its first index": ("0001_assets", ["DROP INDEX ix_asset_info_meta_key_val_bool"]),
+    "0002 dropped its first index": (
+        "0001_assets",
+        ["DROP INDEX ix_asset_info_meta_key_val_bool"],
+        "no such index: ix_asset_info_meta_key_val_bool",
+    ),
+    "0002 dropped all the old tables": (
+        "0001_assets",
+        [f"DROP TABLE {t}" for t in ("asset_info_meta", "asset_info_tags", "asset_cache_state", "assets_info")],
+        "no such index: ix_asset_info_meta_key_val_bool",
+    ),
     "0003 added its first column": (
         "0002_merge_to_asset_references",
         ["ALTER TABLE asset_references ADD COLUMN system_metadata JSON"],
+        "duplicate column name: system_metadata",
+    ),
+    "0005 created tags_new": (
+        "0004_drop_tag_type",
+        ["CREATE TABLE tags_new (name VARCHAR(512) NOT NULL, CONSTRAINT pk_tags PRIMARY KEY (name))"],
+        "table tags_new already exists",
     ),
 }
 
 
-@pytest.mark.parametrize("revision, statements", _INTERRUPTED_UPGRADES.values(), ids=_INTERRUPTED_UPGRADES.keys())
+@pytest.mark.parametrize(
+    "revision, statements, error", _INTERRUPTED_UPGRADES.values(), ids=_INTERRUPTED_UPGRADES.keys()
+)
 def test_database_an_interrupted_upgrade_left_unupgradable_is_recreated(
-    default_db, startup_warnings, revision, statements
+    default_db, startup_warnings, revision, statements, error
 ):
     _make_db(default_db, revision=revision)
     _execute(default_db, *statements)
@@ -51,7 +68,7 @@ def test_database_an_interrupted_upgrade_left_unupgradable_is_recreated(
     assert _revision(default_db) == _head()
     [moved] = _moved_aside(default_db)
     assert os.stat(moved).st_ino == old_file  # moved aside, not deleted
-    assert any("Database upgrade failed" in w and moved in w for w in startup_warnings)
+    assert any("Database upgrade failed" in w and error in w and moved in w for w in startup_warnings)
 
 
 def _failing_upgrade(monkeypatch):
@@ -109,10 +126,11 @@ def test_revision_from_a_newer_release_reports_the_upgrade_error(default_db):
     assert _moved_aside(default_db) == []
 
 
-def test_failed_first_upgrade_of_a_new_database_is_not_moved_aside(default_db, monkeypatch):
+def test_failed_first_upgrade_of_a_new_database_is_not_moved_aside(default_db, monkeypatch, startup_warnings):
     _failing_upgrade(monkeypatch)
 
     with pytest.raises(SystemExit):
         _boot()
 
     assert _moved_aside(default_db) == []
+    assert not any("Database upgrade failed" in w for w in startup_warnings)
