@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -68,7 +69,12 @@ def _start_holder(db_path):
         [sys.executable, "-c", HOLDER_SCRIPT, db_path],
         cwd=REPO_ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
     )
-    return holder, int(holder.stdout.readline())
+    line = holder.stdout.readline()
+    if not line.strip().isdigit():
+        holder.kill()
+        holder.communicate()
+        pytest.fail(f"the lock holder did not start: {line!r}")
+    return holder, int(line)
 
 
 def _stop_holder(holder, how):
@@ -172,10 +178,20 @@ def test_no_start_token_on_other_platforms(monkeypatch):
 def test_a_planted_symlink_is_not_written_through(db_path, tmp_path):
     victim = tmp_path / "victim"
     victim.write_text("keep me")
-    for name in (".lock.json.tmp", f".lock.json.{os.getpid()}.tmp"):
+    # The record itself, and the fixed temp names an atomic writer might pick.
+    for name in (".lock.json", ".lock.json.tmp", f".lock.json.{os.getpid()}.tmp"):
         os.symlink(victim, db_path + name)
 
     db_module._acquire_file_lock(db_path)
 
     assert victim.read_text() == "keep me"
+    assert not os.path.islink(db_path + ".lock.json")
     assert _read_record(db_path)["pid"] == os.getpid()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_only_the_owner_can_read_the_record(db_path):
+    # It carries the launch arguments.
+    db_module._acquire_file_lock(db_path)
+
+    assert stat.S_IMODE(os.stat(db_path + ".lock.json").st_mode) == 0o600

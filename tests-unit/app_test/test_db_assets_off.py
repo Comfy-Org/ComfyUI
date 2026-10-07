@@ -119,12 +119,16 @@ def test_assets_off_warns_and_continues_when_another_process_holds_the_lock(
     asset_manager = _AssetsOff()
     holder = FileLock(db_path + ".lock")
     holder.acquire(timeout=0)
+    with open(db_path + ".lock.json", "w") as f:
+        f.write('{"pid": 1}')
     try:
         main.setup_database(asset_manager)
     finally:
         holder.release()
 
     assert asset_manager.started
+    with open(db_path + ".lock.json") as f:
+        assert f.read() == '{"pid": 1}'
     assert len(startup_warnings) == 1
     warning = startup_warnings[0]
     assert "Another ComfyUI is already using this install's asset database" in warning
