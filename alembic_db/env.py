@@ -1,4 +1,5 @@
 from sqlalchemy import engine_from_config
+from sqlalchemy import event
 from sqlalchemy import pool
 
 from alembic import context
@@ -48,6 +49,17 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+
+    if connectable.dialect.name == "sqlite":
+        # pysqlite opens a transaction only before DML, so each DDL statement would commit alone
+        # and a killed upgrade could leave a half-applied migration under the old version stamp.
+        @event.listens_for(connectable, "connect")
+        def disable_driver_transactions(dbapi_connection, connection_record):
+            dbapi_connection.isolation_level = None
+
+        @event.listens_for(connectable, "begin")
+        def begin(connection):
+            connection.exec_driver_sql("BEGIN")
 
     with connectable.connect() as connection:
         context.configure(
