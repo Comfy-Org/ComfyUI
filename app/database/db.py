@@ -398,6 +398,10 @@ def start_daily_backup():
 
 
 def _keep_daily_backup(db_path, backup_path):
+    with closing(_connect_existing(db_path)) as conn:  # without WAL, copying it would block every write
+        if conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+            logging.warning(f"No daily backup of '{db_path}': it isn't in WAL mode, so a backup would block writes")
+            return
     # A daemon thread: exiting mid-backup leaves only a .tmp file, which the next backup removes.
     while True:
         due_in = 0  # no backup yet

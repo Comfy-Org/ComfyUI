@@ -59,6 +59,11 @@ def _make_db(db_path: str, revision: str = "head", marker: str | None = None) ->
         conn.execute("PRAGMA journal_mode=DELETE")  # one self-contained file to corrupt
 
 
+def _use_wal(db_path: str) -> None:
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+
+
 def _overwrite_page_of(db_path: str, table: str) -> None:
     with closing(sqlite3.connect(db_path)) as conn:
         page = conn.execute("SELECT rootpage FROM sqlite_master WHERE name = ?", (table,)).fetchone()[0]
@@ -879,6 +884,7 @@ def _end_backup_thread_after_one_pass(monkeypatch):
 
 def test_backup_is_written_off_the_startup_thread(default_db, monkeypatch):
     _make_db(default_db)
+    _use_wal(default_db)
     started = _end_backup_thread_after_one_pass(monkeypatch)
     release = threading.Event()
     writers = []
@@ -904,6 +910,7 @@ def test_backup_is_written_off_the_startup_thread(default_db, monkeypatch):
 
 def test_started_backup_writes_a_sound_copy(default_db, monkeypatch):
     _make_db(default_db, marker="live")
+    _use_wal(default_db)
     started = _end_backup_thread_after_one_pass(monkeypatch)
 
     db_module.start_daily_backup()
@@ -915,6 +922,20 @@ def test_started_backup_writes_a_sound_copy(default_db, monkeypatch):
         assert conn.execute("SELECT value FROM marker").fetchone() == ("live",)
 
 
+def test_no_backup_without_wal(default_db, monkeypatch, caplog):
+    # Without WAL, VACUUM INTO's read lock would block every write for the length of the copy.
+    _make_db(default_db)  # rollback-journal mode
+    written = []
+    monkeypatch.setattr(db_module, "_write_daily_backup", lambda *a: written.append(a))
+    started = _end_backup_thread_after_one_pass(monkeypatch)
+
+    db_module.start_daily_backup()
+    started[0].join(30)
+
+    assert written == []
+    assert caplog.text.count("isn't in WAL mode") == 1
+
+
 class _Stop(Exception):
     pass
 
@@ -922,6 +943,7 @@ class _Stop(Exception):
 @pytest.mark.parametrize("age_hours, first_write_hour", [(None, 0), (25, 0), (1, 23), (-12, 0), (-2400, 0)])
 def test_backup_is_refreshed_once_a_day_while_running(tmp_path, monkeypatch, age_hours, first_write_hour):
     db_path = str(tmp_path / "comfyui.db")
+    _use_wal(db_path)
     backup = db_path + ".daily-backup"
     now = [1_000_000.0]
     if age_hours is not None:
@@ -951,6 +973,7 @@ def test_backup_is_refreshed_once_a_day_while_running(tmp_path, monkeypatch, age
 
 def test_failed_backup_is_retried_a_day_later(tmp_path, monkeypatch):
     db_path = str(tmp_path / "comfyui.db")
+    _use_wal(db_path)
     now = [1_000_000.0]
     writes = []
 
