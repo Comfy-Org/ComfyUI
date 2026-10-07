@@ -313,8 +313,8 @@ def _passes_integrity_check(path):
     try:
         with closing(sqlite3.connect(path)) as conn:
             return conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
-    except sqlite3.Error:
-        return False
+    except sqlite3.Error as e:
+        return error_kind(e) == "database_locked"  # another process has it: not shown to be corrupt
 
 
 def _quarantine_and_restore(db_path, error):

@@ -347,6 +347,17 @@ def test_corruption_error_on_a_sound_database_is_logged_at_asset_startup(default
     assert _quarantined(default_db) == []
 
 
+def test_a_live_database_locked_by_another_process_is_not_called_corrupt(default_db):
+    # E.g. a damaged pre-upgrade .bkp raised the error while a database tool has the live file locked.
+    _make_db(default_db)
+    holder = sqlite3.connect(default_db, isolation_level=None)
+    holder.execute("BEGIN EXCLUSIVE")
+    try:
+        assert not db_module.is_recoverable_corruption(sqlite3.DatabaseError("file is not a database"))
+    finally:
+        holder.close()
+
+
 def test_recovery_after_init_ignores_other_errors(default_db):
     _make_db(default_db)
     db_module.init_db()
@@ -480,6 +491,12 @@ def test_wal_kept_by_another_connection_does_not_reach_the_restored_database(def
         f.seek((page - 1) * _PAGE)
         f.write(b"\xa5" * _PAGE)
     try:
+        if os.name == "nt":
+            # Windows refuses to rename a file another connection has open: launch fails as before.
+            with pytest.raises(SystemExit):
+                _boot()
+            assert _quarantined(default_db) == []
+            return
         _boot()
     finally:
         other.close()
