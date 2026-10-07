@@ -17,7 +17,7 @@ HOLDER_SCRIPT = (
     "import os, sys; "
     "from app.database import db; "
     "db._acquire_file_lock(sys.argv[1]); "
-    "print('held', flush=True); "
+    "print(os.getpid(), flush=True); "
     "how = sys.stdin.readline().strip(); "
     "os._exit(0) if how == 'crash' else sys.exit(0)"
 )
@@ -61,12 +61,13 @@ def _independent_start_token(pid):
 
 
 def _start_holder(db_path):
+    """The holder process and its pid. A Windows venv's python.exe is a launcher that runs
+    the interpreter as a child, so Popen.pid is not the holder's pid there."""
     holder = subprocess.Popen(
         [sys.executable, "-c", HOLDER_SCRIPT, db_path],
         cwd=REPO_ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
     )
-    assert holder.stdout.readline().strip() == "held"
-    return holder
+    return holder, int(holder.stdout.readline())
 
 
 def _stop_holder(holder, how):
@@ -92,36 +93,36 @@ def test_record_describes_the_lock_holder(db_path):
 
 
 def test_another_process_reads_the_record_while_the_lock_is_held(db_path):
-    holder = _start_holder(db_path)
+    holder, pid = _start_holder(db_path)
     try:
         record = _read_record(db_path)
-        assert record["pid"] == holder.pid
-        assert record["started"] == _independent_start_token(holder.pid)
+        assert record["pid"] == pid
+        assert record["started"] == _independent_start_token(pid)
     finally:
         _stop_holder(holder, "exit")
 
 
 def test_a_failed_acquire_leaves_the_holders_record(db_path, monkeypatch):
     monkeypatch.setattr(db_module, "_LOCK_WAIT_SECONDS", 0.2)
-    holder = _start_holder(db_path)
+    holder, pid = _start_holder(db_path)
     try:
         with pytest.raises(RuntimeError, match="Could not acquire lock"):
             db_module._acquire_file_lock(db_path)
-        assert _read_record(db_path)["pid"] == holder.pid
+        assert _read_record(db_path)["pid"] == pid
     finally:
         _stop_holder(holder, "exit")
 
 
 def test_clean_exit_removes_the_record(db_path):
-    _stop_holder(_start_holder(db_path), "exit")
+    _stop_holder(_start_holder(db_path)[0], "exit")
 
     assert not os.path.exists(db_path + ".lock.json")
 
 
 def test_a_crashed_holders_record_is_replaced_by_the_next_holder(db_path):
-    holder = _start_holder(db_path)
+    holder, pid = _start_holder(db_path)
     _stop_holder(holder, "crash")
-    assert _read_record(db_path)["pid"] == holder.pid
+    assert _read_record(db_path)["pid"] == pid
 
     db_module._acquire_file_lock(db_path)
 
@@ -148,11 +149,11 @@ def test_exit_after_a_failed_init_leaves_the_next_holders_record(db_path, monkey
     monkeypatch.setattr(db_module, "get_alembic_config", lambda: 1 / 0)
     with pytest.raises(ZeroDivisionError):
         db_module._init_file_db(db_module.args.database_url)
-    holder = _start_holder(db_path)
+    holder, pid = _start_holder(db_path)
     try:
         db_module._remove_holder_record()  # what atexit runs
 
-        assert _read_record(db_path)["pid"] == holder.pid
+        assert _read_record(db_path)["pid"] == pid
     finally:
         _stop_holder(holder, "exit")
 
