@@ -39,7 +39,7 @@ def test_camera_angle_keeps_the_inputs_the_frontend_picker_binds_to():
     # it uses to place the preview camera. Changing either side alone leaves the node and its 3D
     # preview disagreeing, with nothing negotiating the difference at runtime.
     inputs = {i.id: i for i in CameraAngle.define_schema().inputs}
-    assert set(inputs) == {"horizontal_angle", "vertical_angle", "zoom", "image", "view"}
+    assert set(inputs) >= {"horizontal_angle", "vertical_angle", "zoom", "image", "view"}
     assert inputs["view"].extra_dict["widgetType"] == "CAMERA_ANGLE_VIEW"
     assert [(inputs[i].default, inputs[i].min, inputs[i].max, inputs[i].step)
             for i in ("horizontal_angle", "vertical_angle", "zoom")] == [

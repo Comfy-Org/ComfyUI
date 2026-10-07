@@ -50,7 +50,8 @@ def test_both_halves_of_a_default_startup_are_loaded(bundled_nodes):
 
 def test_camera_nodes_register_under_the_ids_workflows_reference(bundled_nodes):
     # CreateCameraInfo has shipped since v0.23.0 and just moved out of nodes_gaussian_splat.py into
-    # nodes_camera.py, so saved workflows already carry its id.
+    # nodes_camera.py, so saved workflows already carry its id. CameraAngle is new, and shipped
+    # under a display name agreed after its node id was already in use.
     assert "CreateCameraInfo" in bundled_nodes
     assert nodes.NODE_DISPLAY_NAME_MAPPINGS["CameraAngle"] == "Compose Camera Angle Prompt"
 
