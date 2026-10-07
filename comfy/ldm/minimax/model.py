@@ -208,7 +208,7 @@ class MLP(nn.Module):
         self.fc2 = operations.Linear(ffn, hidden, bias=False, dtype=dtype, device=device)
 
     def forward(self, x):
-        return comfy.ops.linear_input_act(self.fc2, self.fc1(x), "swiglu")
+        return self.fc2(self.fc1(x), input_act="swiglu")
 
 
 class AdalnProj(nn.Module):
