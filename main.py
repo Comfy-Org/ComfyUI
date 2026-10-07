@@ -17,6 +17,7 @@ import importlib.metadata
 import folder_paths
 import time
 from comfy.cli_args import enables_dynamic_vram
+from app import governance
 from app.logger import setup_logger
 console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
@@ -130,16 +131,6 @@ def handle_comfyui_manager_unavailable():
     args.enable_manager = False
 
 
-if args.enable_manager:
-    if importlib.util.find_spec("comfyui_manager"):
-        import comfyui_manager
-
-        if not comfyui_manager.__file__ or not comfyui_manager.__file__.endswith('__init__.py'):
-            handle_comfyui_manager_unavailable()
-    else:
-        handle_comfyui_manager_unavailable()
-
-
 def apply_custom_paths():
     # extra model paths
     extra_model_paths_config_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "extra_model_paths.yaml")
@@ -190,7 +181,7 @@ def execute_prestartup_script():
     def execute_script(script_path):
         module_name = os.path.splitext(script_path)[0]
         try:
-            spec = importlib.util.spec_from_file_location(module_name, script_path)
+            spec = governance.pack_module_spec(module_name, script_path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return True
@@ -213,6 +204,11 @@ def execute_prestartup_script():
             if os.path.isfile(module_path) or module_path.endswith(".disabled") or module_path == "__pycache__":
                 continue
 
+            refusal = governance.pack_refusal(module_path)
+            if refusal is not None:
+                logging.warning(refusal)
+                continue
+
             script_path = os.path.join(module_path, "prestartup_script.py")
             if os.path.exists(script_path):
                 if args.disable_all_custom_nodes and possible_module not in args.whitelist_custom_nodes:
@@ -231,8 +227,18 @@ def execute_prestartup_script():
             logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
         logging.info("")
 
+governance.initialize()
 apply_custom_paths()
 init_mime_types()
+
+if args.enable_manager:
+    if importlib.util.find_spec("comfyui_manager"):
+        import comfyui_manager
+
+        if not comfyui_manager.__file__ or not comfyui_manager.__file__.endswith('__init__.py'):
+            handle_comfyui_manager_unavailable()
+    else:
+        handle_comfyui_manager_unavailable()
 
 if args.enable_manager:
     comfyui_manager.prestartup()
@@ -357,6 +363,7 @@ def prompt_worker(q, server_instance, asset_manager):
                 execution_start_time = time.perf_counter()
                 prompt_id = item[1]
                 server_instance.last_prompt_id = prompt_id
+                server_instance.workflow_metadata = item[3].get("workflow_metadata", {})
 
                 sensitive = item[5]
                 extra_data = item[3].copy()
@@ -376,8 +383,12 @@ def prompt_worker(q, server_instance, asset_manager):
                                 status_str='success' if e.success else 'error',
                                 completed=e.success,
                                 messages=e.status_messages), process_item=remove_sensitive)
+                if q.get_tasks_remaining() == 0:
+                    # Nothing else is queued, so let the background scan run now rather than on the next GC tick.
+                    asset_manager.resume_background_scan()
                 if server_instance.client_id is not None:
                     server_instance.send_sync("executing", {"node": None, "prompt_id": prompt_id}, server_instance.client_id)
+                server_instance.workflow_metadata = {}
 
                 current_time = time.perf_counter()
                 execution_time = current_time - execution_start_time
@@ -545,6 +556,8 @@ def start_comfyui(asyncio_loop=None):
         init_custom_nodes=(not args.disable_all_custom_nodes) or len(args.whitelist_custom_nodes) > 0,
         init_api_nodes=not args.disable_partner_nodes
     ))
+    disabled_nodes = governance.load_disabled_nodes(args.disabled_nodes_config) if args.disabled_nodes_config else set()
+    governance.apply_disabled_nodes(disabled_nodes)
 
     # Re-apply Comfy's cuDNN benchmark policy after custom-node imports. Benchmark
     # mode can request near-card-sized autotune workspaces, and some custom nodes set it at import time.

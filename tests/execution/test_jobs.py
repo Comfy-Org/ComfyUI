@@ -9,6 +9,7 @@ from comfy_execution.jobs import (
     normalize_history_item,
     normalize_output_item,
     normalize_outputs,
+    get_job_create_times,
     get_outputs_summary,
     count_previewable_outputs,
     apply_sorting,
@@ -493,6 +494,33 @@ class TestApplySorting:
         ]
         result = apply_sorting(jobs, 'execution_duration', 'asc')
         assert result[0]['id'] == 'b'  # None treated as 0, comes first
+
+
+class TestGetJobCreateTimes:
+    """get_job_create_times reads each job's create_time wherever the job still lives."""
+
+    @staticmethod
+    def queue_item(prompt_id, extra_data):
+        return (1, prompt_id, {'nodes': {}}, extra_data, ['node1'])
+
+    @pytest.mark.parametrize(
+        "running, queued, history, expected",
+        [
+            ([], [], {'job-h': {'prompt': (1, 'job-h', {}, {'create_time': 1000}, [])}}, {'job-h': 1000}),
+            ([('job-r', {'create_time': 2000})], [], {}, {'job-r': 2000}),
+            ([], [('job-q', {'create_time': 3000})], {}, {'job-q': 3000}),
+            ([('job-r', {})], [], {}, {}),
+            ([], [], {'job-h': {'prompt': (1, 'job-h', {}, {'create_time': '1000'}, [])}}, {}),
+            ([], [('job-other', {'create_time': 4000})], {}, {}),
+        ],
+        ids=["history", "running", "queued", "missing create_time", "non-integer create_time", "unrequested job"],
+    )
+    def test_reads_create_times_of_known_jobs(self, running, queued, history, expected):
+        requested = ['job-h', 'job-r', 'job-q', 'job-gone']
+        running_items = [self.queue_item(prompt_id, extra) for prompt_id, extra in running]
+        queued_items = [self.queue_item(prompt_id, extra) for prompt_id, extra in queued]
+
+        assert get_job_create_times(requested, running_items, queued_items, history) == expected
 
 
 class TestNormalizeQueueItem:
