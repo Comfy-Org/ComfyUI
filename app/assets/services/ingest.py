@@ -98,7 +98,6 @@ def _live_sibling_preview_id(session: Session, content_id: str) -> str | None:
         .join(AssetTag, (AssetTag.asset_id == preview.id) & (AssetTag.tag_name == "preview"))
         .where(
             Asset.content_id == content_id,
-            Asset.preview_id != Asset.id,
             preview_content.is_missing == false(),
         )
         .order_by(Asset.created_at.desc())

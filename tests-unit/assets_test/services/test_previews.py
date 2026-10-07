@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import Future
 import os
 import threading
 import time
@@ -159,7 +160,8 @@ def test_a_generated_preview_is_stored_tagged_and_linked(session, mock_create_se
     assert len(_events(caplog, "previews.generated")) == 1
 
 
-def test_a_parent_deleted_before_storing_leaves_nothing_behind(session, mock_create_session, previews_dir, exr_mime, tmp_path):
+def test_a_parent_deleted_before_storing_leaves_nothing_behind(session, mock_create_session, previews_dir, exr_mime, tmp_path, caplog):
+    caplog.set_level("INFO")
     parent = _parent(session, write_exr(tmp_path / "frame.exr", 64, 48))
     session.delete(parent)
     session.commit()
@@ -169,6 +171,7 @@ def test_a_parent_deleted_before_storing_leaves_nothing_behind(session, mock_cre
     assert linked == {}
     assert not any(previews_dir.glob("*")) if previews_dir.exists() else True
     assert session.scalars(select(Asset).where(Asset.mime_type == "image/webp")).first() is None
+    assert not _events(caplog, "previews.generation_failed"), "a gone parent is not a failure"
 
 
 def test_a_preview_set_while_generating_is_kept(session, mock_create_session, previews_dir, exr_mime, tmp_path):
@@ -253,6 +256,12 @@ def test_storing_stops_when_the_deadline_passes(session, mock_create_session, pr
         time.sleep(0.4)
         return store(*args)
 
+    def run_inline(fn):
+        # Both results are ready before the first wait, so one wait returns both.
+        future = Future()
+        future.set_result(fn())
+        return future
+
     instant = _Instant()
     preview_generators.register_preview_generator(instant)
     try:
@@ -260,6 +269,7 @@ def test_storing_stops_when_the_deadline_passes(session, mock_create_session, pr
             patch.object(previews, "preview_mime_type", lambda path: mimes.get(path)),
             patch.object(previews, "preview_deadline_seconds", lambda count: 0.3),
             patch.object(previews, "_store_and_link", slow_store),
+            patch.object(previews, "submit_preview_job", run_inline),
         ):
             started = time.monotonic()
             linked = asyncio.run(previews.generate_previews(items, "output"))

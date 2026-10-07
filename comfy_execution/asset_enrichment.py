@@ -88,11 +88,9 @@ async def generate_output_previews(output_ui: dict) -> None:
             # A linked preview stays; an entry that is only its own preview can get a better one.
             if entry.get("preview_id") not in (None, entry["id"]):
                 continue
-            if "filename" not in entry or "type" not in entry:
-                continue
             try:
                 abs_path = _resolve_output_path(entry)
-            except Exception:
+            except Exception:  # not a file entry, e.g. a custom node's own {"id": ...} rows
                 continue
             if abs_path is not None and has_preview_generator(abs_path):
                 pending.append((entry, abs_path))

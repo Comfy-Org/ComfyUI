@@ -278,3 +278,14 @@ def test_preview_is_a_reserved_tag():
 
     with pytest.raises(SystemTagForbiddenError):
         _reject_system_tags(["preview"])
+
+
+def test_an_untagged_asset_in_previews_is_not_cascaded(session, mock_create_session, roots):
+    stray = _record(session, roots / "previews" / "stray.webp")
+    stray_id = stray.id
+    parent = _record(session, roots / "output" / "a.exr", preview_id=stray_id)
+
+    delete_asset_reference(parent.id)
+
+    session.expire_all()
+    assert session.get(Asset, stray_id) is not None, "only Core's own preview records go with their parent"
