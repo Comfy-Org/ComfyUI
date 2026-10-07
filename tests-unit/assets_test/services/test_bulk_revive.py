@@ -375,8 +375,9 @@ def test_a_pre_epoch_file_does_not_stop_the_rest_reviving(root, session):
 
 def test_a_cancel_during_the_revive_leaves_the_rows_missing(root, session):
     files, _ = _gone_and_copied_back(root, session)
+    stops = iter([True])  # the cancel lands while the files are being checked, then clears
 
-    scanner.revive_returned_references_safely("output", should_stop=lambda: True)
+    scanner.revive_returned_references_safely("output", should_stop=lambda: next(stops, False))
 
     assert sum(1 for c in _contents(session) if c.is_missing) == len(files)
 
