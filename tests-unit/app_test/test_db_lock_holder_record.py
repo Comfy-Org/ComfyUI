@@ -4,7 +4,6 @@ import os
 import re
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
 import pytest
@@ -154,13 +153,22 @@ def test_no_record_without_a_start_token(db_path, monkeypatch, token):
     assert os.listdir(os.path.dirname(db_path)) == ["comfyui.db.lock"]
 
 
-def test_a_reader_holding_the_record_open_does_not_keep_the_old_one(db_path):
+@pytest.mark.skipif(sys.platform != "win32", reason="only Windows refuses to replace an open file")
+def test_a_reader_holding_the_record_open_does_not_keep_the_old_one(db_path, monkeypatch):
     with open(db_path + ".lock.json", "w") as f:
         f.write('{"pid": 1}')
     reader = open(db_path + ".lock.json")
-    threading.Timer(0.05, reader.close).start()
+    sleep = db_module.time.sleep
 
-    db_module._acquire_file_lock(db_path)
+    def _reader_lets_go(seconds):
+        reader.close()
+        sleep(seconds)
+
+    monkeypatch.setattr(db_module.time, "sleep", _reader_lets_go)
+    try:
+        db_module._acquire_file_lock(db_path)
+    finally:
+        reader.close()
 
     assert _read_record(db_path)["pid"] == os.getpid()
 
