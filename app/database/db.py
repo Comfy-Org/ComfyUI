@@ -335,7 +335,8 @@ def _passes_integrity_check(path):
 
 def _quarantine_and_restore(db_path, error):
     """Rename a corrupt database aside and restore the daily backup in its place if it is sound.
-    With no sound backup, no database file is left, so the caller creates a new one."""
+    With no sound backup, no database file is left, so the caller creates a new one. On a failure,
+    every move is undone, so the corrupt database stays in place to be recovered next time."""
     quarantine_path = f"{db_path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
     backup_path, restore_path = db_path + ".daily-backup", db_path + ".restore-tmp"
     outcome = "Database recreated empty: there was no sound daily backup"
@@ -346,19 +347,25 @@ def _quarantine_and_restore(db_path, error):
             taken = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(backup_path)))
         except OSError:
             sound = False  # no backup, or it can't be read
+        moved = []
         try:
             # With its WAL and journal: when another connection keeps one, SQLite would replay it.
-            # Sidecars first, so a failure leaves the database in place.
             for suffix in ("-wal", "-shm", "-journal", ""):
                 if os.path.exists(db_path + suffix):
                     os.replace(db_path + suffix, quarantine_path + suffix)
+                    moved.append((db_path + suffix, quarantine_path + suffix))
+            if sound:
+                # Atomic: a crash leaves either no database or the whole backup, never part of it.
+                os.replace(restore_path, db_path)
+                outcome = f"Database restored from the daily backup taken {taken}; later changes are lost"
         except OSError:
-            logging.exception(f"Could not move the corrupt database '{db_path}' aside")
+            logging.exception(f"Could not move the corrupt database '{db_path}' aside or restore the backup")
+            for src, dst in reversed(moved):
+                try:
+                    os.replace(dst, src)
+                except OSError:
+                    logging.exception(f"Could not move '{dst}' back to '{src}'")
             raise error
-        if sound:
-            # Atomic: a crash leaves either no database or the whole backup, never part of it.
-            os.replace(restore_path, db_path)
-            outcome = f"Database restored from the daily backup taken {taken}; later changes are lost"
     finally:
         with suppress(OSError):  # a leftover copy must not undo a finished restore
             os.remove(restore_path)
@@ -383,7 +390,8 @@ def _keep_daily_backup(db_path, backup_path):
     while True:
         due_in = 0  # no backup yet
         with suppress(OSError):
-            due_in = _DAILY_BACKUP_INTERVAL_SECONDS - abs(time.time() - os.path.getmtime(backup_path))  # future: due
+            # By distance from now, so a backup dated in the future (the clock moved back) can't stall it.
+            due_in = _DAILY_BACKUP_INTERVAL_SECONDS - abs(time.time() - os.path.getmtime(backup_path))
         if due_in <= 0:
             _write_daily_backup(db_path, backup_path)
             due_in = _DAILY_BACKUP_INTERVAL_SECONDS  # also the retry delay after a failure

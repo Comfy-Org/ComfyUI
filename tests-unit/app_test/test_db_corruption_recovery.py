@@ -231,11 +231,8 @@ def test_copy_left_by_a_killed_recovery_is_replaced(default_db, startup_warnings
     assert any("restored from the daily backup" in w for w in startup_warnings)
 
 
-def test_failed_restore_after_init_fails_the_launch_instead_of_starting_empty(default_db, monkeypatch):
-    # E.g. a virus scanner holding the fresh copy: the database is already moved aside.
-    _make_db(default_db + ".daily-backup", marker="from backup")
-    _make_db(default_db)
-    _overwrite_page_of(default_db, "assets")
+def _refuse_restore(monkeypatch):
+    # E.g. a virus scanner holding the fresh copy, after the corrupt database has moved aside.
     real_replace = os.replace
 
     def _restore_refused(src, dst):
@@ -245,14 +242,80 @@ def test_failed_restore_after_init_fails_the_launch_instead_of_starting_empty(de
 
     monkeypatch.setattr(db_module.os, "replace", _restore_refused)
 
-    with pytest.raises(SystemExit):
-        _boot()
 
-    assert not db_module._cannot_move_aside
-    assert not os.path.exists(default_db)  # no new empty database in its place
-    assert len(_quarantined(default_db)) == 1
-    with closing(sqlite3.connect(default_db + ".daily-backup")) as conn:
+@pytest.mark.parametrize("table", ["alembic_version", "assets"])  # found by init, then by asset startup
+def test_failed_restore_is_undone_and_recovered_on_the_next_launch(default_db, monkeypatch, startup_warnings, table):
+    _make_db(default_db + ".daily-backup", marker="from backup")
+    _make_db(default_db)
+    _overwrite_page_of(default_db, table)
+    corrupt_file = os.stat(default_db).st_ino
+    _refuse_restore(monkeypatch)
+
+    if table == "alembic_version":
+        with pytest.raises(SystemExit):  # init can't continue on a corrupt database, as before
+            _boot()
+        db_module._db_lock.release(force=True)
+    else:
+        _boot()  # asset startup logs the corruption and carries on, as before
+
+    assert os.stat(default_db).st_ino == corrupt_file  # moved back
+    assert glob.glob(default_db + ".corrupt-*") == [] and not os.path.exists(default_db + ".restore-tmp")
+
+    monkeypatch.undo()  # the next launch, once the file is no longer held
+    for session_factory in (db_module.Session, db_module.WriteSession):
+        if session_factory is not None:
+            session_factory.kw["bind"].dispose()
+    monkeypatch.setattr(db_module, "_cannot_move_aside", False)
+    monkeypatch.setattr(db_module, "_db_lock", None)
+    monkeypatch.setattr(db_module.args, "database_url", None)
+    monkeypatch.setattr("folder_paths.get_user_directory", lambda: os.path.dirname(default_db))
+    monkeypatch.setattr(main, "start_daily_backup", lambda: None)
+    monkeypatch.setattr(lifecycle, "start_asset_seeder", lambda: False)
+    monkeypatch.setattr(lifecycle, "cleanup_temp_filesystem", lambda: None)
+    _boot()
+
+    with closing(sqlite3.connect(default_db)) as conn:
         assert conn.execute("SELECT value FROM marker").fetchone() == ("from backup",)
+
+
+def test_database_that_wont_move_keeps_its_wal(default_db, monkeypatch):
+    _make_db(default_db)
+    with open(default_db + "-wal", "wb") as f:
+        f.write(b"recent commits")
+    real_replace = os.replace
+
+    def _database_held(src, dst):
+        if os.path.abspath(src) == os.path.abspath(default_db):
+            raise PermissionError("[WinError 32] The process cannot access the file")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(db_module.os, "replace", _database_held)
+
+    with pytest.raises(sqlite3.DatabaseError):
+        db_module._quarantine_and_restore(default_db, sqlite3.DatabaseError("database disk image is malformed"))
+
+    with open(default_db + "-wal", "rb") as f:  # moved aside first, then back
+        assert f.read() == b"recent commits"
+    assert glob.glob(default_db + ".corrupt-*") == []
+
+
+def test_failed_undo_is_reported(default_db, monkeypatch, caplog):
+    _make_db(default_db + ".daily-backup")
+    _make_db(default_db)
+    real_replace = os.replace
+
+    def _restore_and_undo_refused(src, dst):
+        if src.endswith(".restore-tmp") or ".corrupt-" in src:
+            raise PermissionError("[WinError 32] The process cannot access the file")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(db_module.os, "replace", _restore_and_undo_refused)
+
+    with pytest.raises(sqlite3.DatabaseError):
+        db_module._quarantine_and_restore(default_db, sqlite3.DatabaseError("database disk image is malformed"))
+
+    [quarantined] = _quarantined(default_db)
+    assert f"Could not move '{quarantined}' back to '{default_db}'" in caplog.text
 
 
 def test_corrupt_daily_backup_is_not_restored(default_db, startup_warnings):
