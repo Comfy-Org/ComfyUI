@@ -79,6 +79,7 @@ def test_database_an_interrupted_upgrade_left_unupgradable_is_recreated(
     [moved] = _moved_aside(default_db)
     assert os.stat(moved).st_ino == old_file  # moved aside, not deleted
     assert any("Database upgrade failed" in w and error in w and moved in w for w in startup_warnings)
+    assert not any("[SQL:" in w for w in startup_warnings)  # the driver's message, not SQLAlchemy's wrapper
 
 
 def _failing_upgrade(monkeypatch):
@@ -112,10 +113,15 @@ def test_failed_upgrade_of_an_explicit_database_url_is_not_recreated(explicit_db
     assert _revision(explicit_db) == "0006_add_loader_path"
 
 
-def test_database_locked_by_another_process_is_not_recreated(default_db):
+@pytest.mark.parametrize("hold", [
+    ["BEGIN IMMEDIATE"],  # others may still read (the pre-upgrade backup), not write
+    ["BEGIN", "SELECT count(*) FROM sqlite_master"],  # a reader: the upgrade can't commit, the probe could
+])
+def test_database_locked_by_another_process_is_not_recreated(default_db, hold):
     _make_db(default_db, revision="0006_add_loader_path")
-    holder = sqlite3.connect(default_db)
-    holder.execute("BEGIN IMMEDIATE")  # others may still read (the pre-upgrade backup), not write
+    holder = sqlite3.connect(default_db, isolation_level=None)
+    for statement in hold:
+        holder.execute(statement)
     try:
         with pytest.raises(SystemExit):
             _boot()
@@ -208,7 +214,7 @@ def test_failed_move_puts_every_file_back(default_db, monkeypatch):
     assert _revision(default_db) == "0001_assets"
 
 
-def test_unupgradable_database_held_by_another_process_is_not_moved(default_db):
+def test_unupgradable_database_held_by_another_process_is_not_moved(default_db, caplog):
     # The upgrade fails on the schema before it needs a lock, so its error says nothing about the holder.
     _make_db(default_db, revision="0001_assets")
     _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
@@ -220,5 +226,6 @@ def test_unupgradable_database_held_by_another_process_is_not_moved(default_db):
     finally:
         holder.close()
 
+    assert "no such index: ix_asset_info_meta_key_val_bool" in caplog.text  # failed on the schema, not the lock
     assert glob.glob(default_db + ".failed-upgrade-*") == []
     assert _revision(default_db) == "0001_assets"
