@@ -232,6 +232,26 @@ def test_a_slow_generator_does_not_hold_the_caller_past_the_deadline(session, mo
     assert any("reason=timeout" in e for e in _events(caplog, "previews.generation_failed"))
 
 
+def test_storing_stops_when_the_deadline_passes(session, mock_create_session, previews_dir, exr_mime, tmp_path, caplog):
+    caplog.set_level("INFO")
+    frames = [write_exr(tmp_path / f"f{i}.exr", 8, 8) for i in range(2)]
+    parents = [_parent(session, f) for f in frames]
+    store = previews._store_and_link
+
+    def slow_store(*args):
+        time.sleep(0.4)
+        return store(*args)
+
+    with (
+        patch.object(previews, "preview_deadline_seconds", lambda count: 0.3),
+        patch.object(previews, "_store_and_link", slow_store),
+    ):
+        linked = asyncio.run(previews.generate_previews([(p.id, str(f)) for p, f in zip(parents, frames)], "output"))
+
+    assert len(linked) <= 1, "nothing is stored once the deadline has passed"
+    assert any("reason=timeout" in e for e in _events(caplog, "previews.generation_failed"))
+
+
 def test_the_event_loop_keeps_running_while_previews_generate(session, mock_create_session, previews_dir, tmp_path):
     source = tmp_path / "slow.tst"
     source.write_bytes(b"x")

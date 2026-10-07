@@ -143,6 +143,7 @@ def test_other_media_get_a_url_but_no_preview_id(
         ("sky.hdr", "image/vnd.radiance"),
         ("sky.hdr", None),
         ("sky.HDR", "image/x-whatever-this-host-says"),
+        ("blake3-named-upload", "image/x-exr"),
     ],
 )
 def test_exr_and_hdr_are_never_their_own_preview(
