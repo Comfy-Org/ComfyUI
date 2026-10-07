@@ -49,11 +49,14 @@ from app.assets.event_log import emit
 from app.database.db import dependencies_available
 
 if dependencies_available():
+    from app.assets.previews import generate_upload_preview
     from app.assets.services.asset_management import (
         get_export_file,
+        get_preview_file_paths,
         list_job_export_files,
         resolve_hash_to_path,
     )
+    from app.assets.services.preview_rules import preview_fields
     from app.asset_export import AssetExportManager
 
 from app.user_manager import UserManager
@@ -532,10 +535,6 @@ class PromptServer():
             post = await request.post()
             resp, view, filepath = store_image_upload(post)
             if view is not None:
-                from app.assets.previews import generate_upload_preview
-                from app.assets.services.asset_management import get_preview_file_paths
-                from app.assets.services.preview_rules import preview_fields
-
                 preview_id = await generate_upload_preview(view.asset.id, filepath, view.asset.preview_id)
                 live_previews = get_preview_file_paths([preview_id]) if preview_id else {}
                 preview_id, preview_url = preview_fields(

@@ -12,6 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
+import av
 import numpy as np
 from PIL import Image
 
@@ -46,8 +47,6 @@ class _Failed:
 
 def _decode_for_preview(path: str, max_pixels: int) -> Image.Image:
     """An SDR image of an EXR's display window, at most ``max_pixels``."""
-    import av
-
     # Name the demuxer: left to probe, FFmpeg picks one from the file's contents.
     with av.open(path, format="exr_pipe") as container:
         frame = next(container.decode(video=0))
