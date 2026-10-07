@@ -30,23 +30,28 @@ def _schema(db_path):
 
 def _version(db_path):
     with sqlite3.connect(db_path) as conn:
-        return [row[0] for row in conn.execute("SELECT version_num FROM alembic_version")]
+        try:
+            return [row[0] for row in conn.execute("SELECT version_num FROM alembic_version")]
+        except sqlite3.OperationalError:  # no version table: nothing was ever stamped
+            return []
 
 
-def _revisions_with_a_parent():
+def _revisions_and_parents():
     script = ScriptDirectory.from_config(_make_config("unused.db"))
-    return [(rev.down_revision, rev.revision) for rev in script.walk_revisions() if rev.down_revision]
+    return [(rev.down_revision, rev.revision) for rev in script.walk_revisions()]
 
 
-def _fresh_schema(tmp_path, revision):
-    db_path = tmp_path / f"fresh-{revision}.db"
-    command.upgrade(_make_config(db_path), revision)
+@pytest.fixture(scope="module")
+def fresh_head_schema(tmp_path_factory):
+    db_path = tmp_path_factory.mktemp("fresh") / "head.db"
+    command.upgrade(_make_config(db_path), "head")
     return _schema(db_path)
 
 
 def _count_statements(tmp_path, monkeypatch, start, revision):
     cfg = _make_config(tmp_path / "count.db")
-    command.upgrade(cfg, start)
+    if start is not None:
+        command.upgrade(cfg, start)
     count = 0
     real_exec = DefaultImpl._exec
 
@@ -61,16 +66,18 @@ def _count_statements(tmp_path, monkeypatch, start, revision):
     return count
 
 
-@pytest.mark.parametrize("start, revision", _revisions_with_a_parent())
+@pytest.mark.parametrize("start, revision", _revisions_and_parents())
 def test_migration_failing_at_its_last_statement_leaves_a_consistent_revision(
-    tmp_path, monkeypatch, start, revision
+    tmp_path, monkeypatch, start, revision, fresh_head_schema
 ):
     last = _count_statements(tmp_path, monkeypatch, start, revision)
     db_path = tmp_path / "comfyui.db"
     cfg = _make_config(db_path)
-    command.upgrade(cfg, start)
+    if start is not None:
+        command.upgrade(cfg, start)
+    before = _schema(db_path)
 
-    # Every earlier statement of the migration has run when its last one fails.
+    # The last statement is the migration's version stamp, so all of its own statements have run.
     seen = 0
     real_exec = DefaultImpl._exec
 
@@ -86,7 +93,7 @@ def test_migration_failing_at_its_last_statement_leaves_a_consistent_revision(
         command.upgrade(cfg, "head")
     monkeypatch.undo()
 
-    assert _version(db_path) == [start]
-    assert _schema(db_path) == _fresh_schema(tmp_path, start)
+    assert _version(db_path) == ([start] if start else [])
+    assert _schema(db_path) == before
     command.upgrade(cfg, "head")
-    assert _schema(db_path) == _fresh_schema(tmp_path, "head")
+    assert _schema(db_path) == fresh_head_schema
