@@ -49,11 +49,17 @@ from comfy_api_nodes.apis.kling import (
     Kling3TurboImage2VideoRequest,
     Kling3TurboCreateResponse,
     Kling3TurboQueryResponse,
+    KlingSolutionContent,
+    KlingSolutionCreateResponse,
+    KlingSolutionQueryResponse,
+    KlingTryOnRequest,
+    KlingTryOnSettings,
     TaskStatusResponse,
     TextToVideoWithAudioRequest,
 )
 from comfy_api_nodes.util import (
     ApiEndpoint,
+    downscale_image_tensor_by_max_side,
     download_url_to_image_tensor,
     download_url_to_video_output,
     get_number_of_images,
@@ -2650,6 +2656,103 @@ class KlingAvatarNode(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_video_output(final_response.data.task_result.videos[0].url))
 
 
+class KlingTryOnNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls) -> IO.Schema:
+        return IO.Schema(
+            node_id="KlingTryOnNode",
+            display_name="Kling Virtual Try-On",
+            category="partner/image/Kling",
+            description="Dress a person in a clothing item. The result has the same size as the person image, "
+            "capped at 2048px on the longest side.",
+            inputs=[
+                IO.Image.Input(
+                    "person_image",
+                    tooltip="Photo of one person, ideally front-facing or three-quarter view. "
+                    "Images with a side over 2048px are downscaled first.",
+                ),
+                IO.Image.Input(
+                    "garment_image",
+                    tooltip="The clothing to put on: product photo, flat lay, mannequin or on-model photo. "
+                    "An on-model photo can carry over the rest of that outfit. "
+                    "Clothing only; shoes, bags and accessories are not supported.",
+                ),
+                IO.Boolean.Input(
+                    "keep_pose",
+                    default=True,
+                    tooltip="Turn off to allow the pose to change for a better outfit presentation.",
+                    advanced=True,
+                ),
+                IO.Int.Input(
+                    "seed",
+                    default=42,
+                    min=0,
+                    max=2147483647,
+                    display_mode=IO.NumberDisplay.number,
+                    control_after_generate=True,
+                    tooltip="Seed controls whether the node should re-run; "
+                    "results are non-deterministic regardless of seed.",
+                ),
+            ],
+            outputs=[
+                IO.Image.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                expr="""{"type":"usd","usd":0.16016}""",
+            ),
+        )
+
+    @classmethod
+    async def execute(
+        cls,
+        person_image: Input.Image,
+        garment_image: Input.Image,
+        keep_pose: bool,
+        seed: int,
+    ) -> IO.NodeOutput:
+        _ = seed
+        response = await sync_op(
+            cls,
+            ApiEndpoint(path="/proxy/kling/solutions/virtual_try_on", method="POST"),
+            response_model=KlingSolutionCreateResponse,
+            data=KlingTryOnRequest(
+                contents=[
+                    KlingSolutionContent(
+                        type="product_image",
+                        url=await upload_image_to_comfyapi(
+                            cls,
+                            downscale_image_tensor_by_max_side(garment_image, max_side=2048),
+                            wait_label="Uploading garment image",
+                        ),
+                    ),
+                    KlingSolutionContent(
+                        type="person_image",
+                        url=await upload_image_to_comfyapi(
+                            cls,
+                            downscale_image_tensor_by_max_side(person_image, max_side=2048),
+                            wait_label="Uploading person image",
+                        ),
+                    ),
+                ],
+                settings=KlingTryOnSettings(keep_pose=keep_pose),
+            ),
+        )
+        final_response = await poll_op(
+            cls,
+            ApiEndpoint(path="/proxy/kling/solutions", query_params={"task_ids": response.data.task_id}),
+            response_model=KlingSolutionQueryResponse,
+            status_extractor=lambda r: (r.data[0].status if r.data else None),
+        )
+        return IO.NodeOutput(await download_url_to_image_tensor(final_response.data[0].outputs[0].url))
+
+
 class KlingExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -2672,6 +2775,7 @@ class KlingExtension(ComfyExtension):
             KlingVideoNode,
             KlingFirstLastFrameNode,
             KlingAvatarNode,
+            KlingTryOnNode,
         ]
 
 
