@@ -20,6 +20,7 @@ import comfy.memory_management
 import comfy.utils
 import comfy.model_management
 import comfy.model_base
+import comfy.lora_convert
 import comfy.weight_adapter as weight_adapter
 import logging
 import torch
@@ -88,9 +89,11 @@ def load_lora(lora, to_load, log_missing=True):
             loaded_keys.add(set_weight_name)
 
     if log_missing:
-        for x in lora.keys():
-            if x not in loaded_keys:
-                logging.warning("lora key not loaded: {}".format(x))
+        unloaded = [x for x in lora.keys() if x not in loaded_keys]
+        for x in unloaded:
+            logging.warning("lora key not loaded: {}".format(x))
+        if unloaded and comfy.lora_convert.krea2_fused_qkv_lora(lora):
+            logging.warning("Krea2 lora: fused to_qkv adapters were not converted, their weights are not applied. Load this lora with the built-in Load LoRA node or call comfy.lora_convert.convert_lora().")
 
     return patch_dict
 
