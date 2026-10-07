@@ -731,7 +731,9 @@ def register_cached_output(
                     tags=path_tags,
                     system_metadata=system_metadata,
                 )
-                record.preview_id = _live_sibling_preview_id(session, existing.id)
+                sibling_preview_id = _live_sibling_preview_id(session, existing.id)
+                if sibling_preview_id is not None:
+                    record.preview_id = sibling_preview_id
                 session.commit()
             except Exception:
                 session.rollback()

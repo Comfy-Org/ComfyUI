@@ -181,6 +181,7 @@ def test_executed_and_cached_outputs_share_unhashed_content(
         "content_id",
         "job_id",
         "name",
+        "preview_id",
     }
     with mock_create_session() as session:
         asset = session.get(Asset, executed.id)
