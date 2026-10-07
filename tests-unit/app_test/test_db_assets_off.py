@@ -106,6 +106,7 @@ def test_assets_off_leaves_the_database_alone(db_path, startup_warnings, monkeyp
     assert asset_manager.started
     assert not os.path.exists(db_path)
     assert not os.path.exists(db_path + ".lock")
+    assert not os.path.exists(db_path + ".lock.json")
     assert startup_warnings == []
 
 
