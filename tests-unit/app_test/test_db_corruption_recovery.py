@@ -888,6 +888,7 @@ def test_corrupt_database_never_replaces_the_backup(live_db):
 
     with open(backup, "rb") as f:
         assert f.read() == b"previous backup"
+    assert not os.path.exists(backup + ".tmp")  # the failed copy is removed
 
 
 def test_failed_backup_keeps_the_previous_one(live_db, monkeypatch):
@@ -904,6 +905,7 @@ def test_failed_backup_keeps_the_previous_one(live_db, monkeypatch):
 
     with open(backup, "rb") as f:
         assert f.read() == b"previous backup"
+    assert not os.path.exists(backup + ".tmp")  # the failed copy is removed
 
 
 def _end_backup_thread_after_one_pass(monkeypatch):
@@ -1069,6 +1071,7 @@ def test_copy_breaking_a_constraint_never_replaces_the_backup(live_db):
 
     with open(backup, "rb") as f:
         assert f.read() == b"previous backup"
+    assert not os.path.exists(backup + ".tmp")  # the failed copy is removed
 
 
 def test_deleted_database_never_replaces_the_backup(tmp_path):

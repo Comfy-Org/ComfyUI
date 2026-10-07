@@ -428,6 +428,9 @@ def _write_daily_backup(db_path, backup_path):
         logging.info(f"Database daily backup written to '{backup_path}'")
     except Exception:
         logging.exception("Database daily backup failed; keeping the previous one")
+    finally:
+        with suppress(OSError):  # a failed copy is about as big as the database
+            os.remove(tmp_path)
 
 
 # NORMAL: commits skip the fsync that held the write lock. A power loss or OS crash can
