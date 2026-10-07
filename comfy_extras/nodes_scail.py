@@ -40,13 +40,15 @@ def _first_appearance_cx_area(packed):
     for t0 in range(0, T, _RENDER_CHUNK):
         m = unpack_masks(packed[t0:t0 + _RENDER_CHUNK].to(device, non_blocking=True))  # [t, N, H, W] bool
         cols.append(m.sum(dim=-2, dtype=torch.int32))  # [t, N, W]
-    col = torch.cat(cols, dim=0).double()  # [T, N, W]
+    # The per-column counts are small, so finish the statistics on the CPU in float64
+    # (MPS does not support float64).
+    col = torch.cat(cols, dim=0).cpu().double()  # [T, N, W]
     W = col.shape[-1]
-    grid_x = torch.arange(W, device=device, dtype=col.dtype)
+    grid_x = torch.arange(W, dtype=col.dtype)
     area_t = col.sum(dim=-1)  # [T, N]
     cx_t = (col * grid_x).sum(dim=-1) / area_t.clamp(min=1)
     present = area_t > 0
-    frame_idx = torch.arange(T, device=device).unsqueeze(1)
+    frame_idx = torch.arange(T).unsqueeze(1)
     first_t = torch.where(present, frame_idx, T).amin(dim=0)
     sel = first_t.clamp(max=T - 1).unsqueeze(0)
     cx = cx_t.gather(0, sel).squeeze(0)
