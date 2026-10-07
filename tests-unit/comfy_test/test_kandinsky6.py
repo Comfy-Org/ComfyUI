@@ -1,8 +1,13 @@
+import json
+import types
+
 import pytest
 import torch
 
 import comfy.ops
+import comfy.sd
 from comfy import model_detection
+from comfy import model_management
 from comfy import samplers
 from comfy import supported_models
 from comfy.ldm.kandinsky6 import piflow
@@ -211,6 +216,81 @@ def test_audio_vae_decodes_to_comfy_audio_layout():
     expected_samples = latent_frames * 2 * 4 * 4
     assert tuple(out.shape) == (1, 1, expected_samples)
     assert out.dtype == torch.float32
+
+
+def _k6_audio_tiling_wrapper():
+    # Minimal stand-in for comfy.sd.VAE carrying the attributes decode_tiled_1d_k6 reads.
+    # upscale_ratio is the small config's real 2x VAE times 4x4 BigVGAN upsampling.
+    return types.SimpleNamespace(
+        first_stage_model=Kandinsky6AudioVAE(_SMALL_BIGVGAN_CONFIG),
+        vae_dtype=torch.float32,
+        device=torch.device("cpu"),
+        vae_output_dtype=lambda: torch.float32,
+        output_device=torch.device("cpu"),
+        process_output=lambda audio: audio,
+        upscale_ratio=32,
+        output_channels=1,
+    )
+
+
+def _k6_audio_vae():
+    model = Kandinsky6AudioVAE(_SMALL_BIGVGAN_CONFIG)
+    metadata = {"kandinsky6_audio_vae": "1", "bigvgan_config": json.dumps(_SMALL_BIGVGAN_CONFIG)}
+    vae = comfy.sd.VAE(sd=model.state_dict(), metadata=metadata, device=torch.device("cpu"))
+    # Match the tiler's output sizing to the small config's real upsampling.
+    vae.upscale_ratio = 32
+    return vae
+
+
+def test_audio_vae_decode_tiled_k6_tiles_time_axis():
+    # T and C differ so a tiler slicing the channel axis cannot produce the right size.
+    wrapper = _k6_audio_tiling_wrapper()
+    torch.manual_seed(0)
+    samples = torch.randn(1, 50, 40)
+    full = wrapper.first_stage_model.decode(samples)
+    out = comfy.sd.VAE.decode_tiled_1d_k6(wrapper, samples, tile_x=16, overlap=4)
+    assert tuple(out.shape) == tuple(full.shape) == (1, 1, 50 * 32)
+    assert torch.isfinite(out).all()
+    # The decoder's middle attention is non-local, so tiled output approximates the
+    # full decode: it must be close, not bit-identical.
+    assert (out - full).abs().mean() < 0.05
+
+
+def test_audio_vae_decode_tiled_k6_single_tile_matches_full():
+    wrapper = _k6_audio_tiling_wrapper()
+    torch.manual_seed(0)
+    samples = torch.randn(1, 10, 40)
+    out = comfy.sd.VAE.decode_tiled_1d_k6(wrapper, samples, tile_x=16, overlap=4)
+    assert torch.equal(out, wrapper.first_stage_model.decode(samples))
+
+
+def test_vae_decode_tiled_routes_k6_audio_to_duration_tiling():
+    vae = _k6_audio_vae()
+    torch.manual_seed(0)
+    samples = torch.randn(1, 50, 40)
+    out = vae.decode_tiled(samples, tile_x=16, tile_y=16, overlap=4)
+    assert tuple(out.shape) == (1, 50 * 32, 1)
+    assert torch.isfinite(out).all()
+
+
+def test_vae_decode_oom_fallback_tiles_k6_audio():
+    vae = _k6_audio_vae()
+    torch.manual_seed(0)
+    samples = torch.randn(1, 50, 40)
+    calls = [0]
+    real_decode = vae.first_stage_model.decode
+
+    def flaky_decode(a, **kwargs):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise model_management.OOM_EXCEPTION("test")
+        return real_decode(a, **kwargs)
+
+    vae.first_stage_model.decode = flaky_decode
+    out = vae.decode(samples)
+    assert calls[0] > 1
+    assert tuple(out.shape) == (1, 50 * 32, 1)
+    assert torch.isfinite(out).all()
 
 
 def test_audio_vae_state_dict_matches_checkpoint_layout():
