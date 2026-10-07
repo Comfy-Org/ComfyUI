@@ -185,6 +185,36 @@ def test_sound_daily_backup_is_restored(default_db, startup_warnings):
     assert any("restored from the daily backup" in w for w in startup_warnings)
 
 
+class _Killed(BaseException):
+    pass
+
+
+def test_kill_while_checking_the_backup_leaves_the_database_to_recover_again(default_db, monkeypatch, startup_warnings):
+    _make_db(default_db + ".daily-backup", marker="from backup")
+    _make_db(default_db)
+    _overwrite_page_of(default_db, "alembic_version")
+    corrupt_file = os.stat(default_db).st_ino
+    real_check = db_module._passes_integrity_check
+
+    def _killed_during_restore_check(path):
+        if path.endswith(".restore-tmp"):
+            raise _Killed  # the process dies during the slow copy and check of a big backup
+        return real_check(path)
+
+    monkeypatch.setattr(db_module, "_passes_integrity_check", _killed_during_restore_check)
+    with pytest.raises(_Killed):
+        _boot()
+    assert os.stat(default_db).st_ino == corrupt_file and _quarantined(default_db) == []
+
+    monkeypatch.setattr(db_module, "_passes_integrity_check", real_check)
+    db_module._db_lock.release(force=True)  # the killed process's lock
+    _boot()
+
+    with closing(sqlite3.connect(default_db)) as conn:
+        assert conn.execute("SELECT value FROM marker").fetchone() == ("from backup",)
+    assert any("restored from the daily backup" in w for w in startup_warnings)
+
+
 def test_corrupt_daily_backup_is_not_restored(default_db, startup_warnings):
     backup = default_db + ".daily-backup"
     _make_db(backup, marker="from backup")

@@ -330,25 +330,25 @@ def _passes_integrity_check(path):  # after an error only; unlike quick_check, i
 def _quarantine_and_restore(db_path, error):
     """Rename a corrupt database aside and restore a sound daily backup; else leave none to recreate."""
     quarantine_path = f"{db_path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
-    try:
-        for suffix in ("", "-wal", "-shm", "-journal"):  # SQLite would replay one another connection kept
-            if os.path.exists(db_path + suffix):
-                os.replace(db_path + suffix, quarantine_path + suffix)
-    except OSError:
-        logging.exception(f"Could not move the corrupt database '{db_path}' aside")
-        raise error
-
-    backup_path = db_path + ".daily-backup"
-    restore_path = db_path + ".restore-tmp"
+    backup_path, restore_path = db_path + ".daily-backup", db_path + ".restore-tmp"
     outcome = "Database recreated empty: there was no sound daily backup"
     try:
-        shutil.copyfile(backup_path, restore_path)
-        if _passes_integrity_check(restore_path):
+        try:  # before the database moves: a kill until the final rename leaves it to recover again
+            shutil.copyfile(backup_path, restore_path)
+            sound = _passes_integrity_check(restore_path)
+        except OSError:
+            sound = False  # no backup, or it can't be read
+        try:
+            for suffix in ("", "-wal", "-shm", "-journal"):  # SQLite would replay one another connection kept
+                if os.path.exists(db_path + suffix):
+                    os.replace(db_path + suffix, quarantine_path + suffix)
+        except OSError:
+            logging.exception(f"Could not move the corrupt database '{db_path}' aside")
+            raise error
+        if sound:
             taken = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(backup_path)))
             os.replace(restore_path, db_path)  # atomic: never part of a backup
             outcome = f"Database restored from the daily backup taken {taken}; later changes are lost"
-    except OSError:
-        pass  # no backup, or it can't be read
     finally:
         if os.path.exists(restore_path):
             os.remove(restore_path)
