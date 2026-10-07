@@ -3123,7 +3123,7 @@ class Prism(BaseModel):
         self.prism_row_scaled = bool(scaled)
         comfy.model_management.archive_model_dtypes(self.diffusion_model)
         if scaled:
-            logging.warning('Prism: loaded %d row-scaled FP8 layers. Weight-only dequantization; existing FP8 visual/audio quality remains unverified.', len(scaled))
+            logging.info('Prism: loaded %d row-scaled FP8 layers.', len(scaled))
         if native_layers:
             logging.info('Prism: loaded %d native INT8 ConvRot layers.', len(native_layers))
         return self
