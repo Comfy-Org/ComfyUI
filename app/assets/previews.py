@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
-from sqlalchemy import update
 
 import folder_paths
 from app.assets.database.models import Asset
@@ -36,7 +35,7 @@ from comfy_execution.preview_generators import (
 )
 
 if TYPE_CHECKING:
-    from concurrent.futures import Future
+    pass
 
 PREVIEW_MAX_PIXELS = 1_000_000
 # Above this the decode alone needs gigabytes; a crash there can't be caught.
@@ -125,7 +124,7 @@ def _generate(path: str) -> tuple[bytes, int, int] | _Failed | None:
         image = generator.generate(path, PREVIEW_MAX_PIXELS)
     except PreviewSkipped as skipped:
         return _Failed(skipped.reason)
-    except Exception as exc:
+    except BaseException as exc:  # third-party code on a worker: nothing may escape to the caller
         return _Failed("decode_failed", exc)
     if image is None:
         return None
@@ -136,35 +135,38 @@ def _generate(path: str) -> tuple[bytes, int, int] | _Failed | None:
 
 
 def _store_and_link(parent_id: str, webp: bytes, width: int, height: int) -> str | None:
-    """Write the preview, register it and link it to its parent. None if the parent is gone."""
+    """Write the preview, register it and link it. None if the parent is gone or got a preview meanwhile."""
     preview_id = str(uuid.uuid4())
     directory = folder_paths.get_previews_directory()
-    os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, f"{preview_id}.webp")
-    with open(path, "wb") as f:
-        f.write(webp)
-    mtime_ns = os.stat(path).st_mtime_ns
-    record_id = None
+    linked = False
     try:
-        # A write session holds the lock from its first statement, so the parent can't go after this check.
+        os.makedirs(directory, exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(webp)
+        mtime_ns = os.stat(path).st_mtime_ns
+        # A write session holds the lock from its first statement, so this check and the link are atomic.
         with create_write_session() as session:
-            if session.get(Asset, parent_id) is not None:
-                content = create_content(session, path, size_bytes=len(webp), mtime_ns=mtime_ns)
-                record = create_record(
-                    session,
-                    content.id,
-                    f"{preview_id}.webp",
-                    mime_type="image/webp",
-                    tags=["preview"],
-                    system_metadata={"kind": "image", "width": width, "height": height},
-                )
-                session.execute(update(Asset).where(Asset.id == parent_id).values(preview_id=record.id))
-                record_id = record.id
-                session.commit()
+            parent = session.get(Asset, parent_id)
+            if parent is None or parent.preview_id is not None:
+                return None
+            content = create_content(session, path, size_bytes=len(webp), mtime_ns=mtime_ns)
+            record = create_record(
+                session,
+                content.id,
+                f"{preview_id}.webp",
+                mime_type="image/webp",
+                tags=["preview"],
+                system_metadata={"kind": "image", "width": width, "height": height},
+            )
+            parent.preview_id = record.id
+            record_id = record.id
+            session.commit()
+            linked = True
+        return record_id
     finally:
-        if record_id is None:
+        if not linked and os.path.exists(path):
             os.remove(path)
-    return record_id
 
 
 def _format(path: str) -> str:
@@ -190,6 +192,26 @@ def _emit_error(path: str, source: str, reason: str, exc: BaseException) -> None
     emit("previews.generation_failed", format=_format(path), reason=reason, source=source, error_type=error_type(exc))
 
 
+def _store_result(parent_id: str, path: str, source: str, result, started: float) -> str | None:
+    if result is None:
+        return None
+    if isinstance(result, _Failed):
+        if result.exc is None:
+            _emit_failed(path, source, result.reason)
+        else:
+            _emit_error(path, source, result.reason, result.exc)
+        return None
+    webp, width, height = result
+    try:
+        preview_id = _store_and_link(parent_id, webp, width, height)
+    except Exception as exc:
+        _emit_error(path, source, "write_failed", exc)
+        return None
+    if preview_id is not None:
+        emit("previews.generated", format=_format(path), source=source, elapsed_ms=int((time.monotonic() - started) * 1000))
+    return preview_id
+
+
 async def generate_previews(parents: list[tuple[str, str]], source: str) -> dict[str, str]:
     """Make, store and link previews for (asset id, path) pairs; returns asset id -> preview id.
 
@@ -200,40 +222,25 @@ async def generate_previews(parents: list[tuple[str, str]], source: str) -> dict
         return {}
     started = time.monotonic()
     deadline = started + preview_deadline_seconds(len(parents))
-    futures: list[Future] = [submit_preview_job(lambda p=path: _generate(p)) for _, path in parents]
-    pending = [asyncio.wrap_future(f) for f in futures]
-    await asyncio.wait(pending, timeout=max(0.0, deadline - time.monotonic()))
-
+    futures = {submit_preview_job(lambda p=path: _generate(p)): (parent_id, path) for parent_id, path in parents}
+    waiting = {asyncio.wrap_future(f): f for f in futures}
     linked: dict[str, str] = {}
-    for (parent_id, path), future in zip(parents, futures):
-        if not future.done() or time.monotonic() > deadline:
-            future.cancel()
-            _emit_failed(path, source, "timeout")
-            continue
-        try:
-            result = future.result()
-            if result is None:
+    # Store each preview as it finishes, so one slow file never costs the others theirs.
+    while waiting and time.monotonic() < deadline:
+        done, _ = await asyncio.wait(waiting, timeout=deadline - time.monotonic(), return_when=asyncio.FIRST_COMPLETED)
+        for wrapped in done:
+            parent_id, path = futures[waiting.pop(wrapped)]
+            if time.monotonic() > deadline:
+                _emit_failed(path, source, "timeout")
                 continue
-            if isinstance(result, _Failed):
-                if result.exc is None:
-                    _emit_failed(path, source, result.reason)
-                else:
-                    _emit_error(path, source, result.reason, result.exc)
-                continue
-            webp, width, height = result
             try:
-                preview_id = _store_and_link(parent_id, webp, width, height)
+                result = wrapped.result()
             except Exception as exc:
-                _emit_error(path, source, "write_failed", exc)
-                continue
+                result = _Failed("encode_failed", exc)
+            preview_id = _store_result(parent_id, path, source, result, started)
             if preview_id is not None:
                 linked[parent_id] = preview_id
-                emit(
-                    "previews.generated",
-                    format=_format(path),
-                    source=source,
-                    elapsed_ms=int((time.monotonic() - started) * 1000),
-                )
-        except Exception:
-            logging.warning("Preview generation failed for %s", path, exc_info=True)
+    for future in waiting.values():
+        future.cancel()
+        _emit_failed(futures[future][1], source, "timeout")
     return linked

@@ -164,9 +164,12 @@ def update_asset_metadata(
 
 
 def _unshared_preview(session, preview_id: str) -> Asset | None:
-    """The preview record, if it is a generated or uploaded preview nothing else links."""
+    """The preview record, if it is one in previews/ that nothing else links."""
     preview = session.get(Asset, preview_id)
     if preview is None or "preview" not in fetch_record_tags(session, preview_id):
+        return None
+    content = session.get(AssetContent, preview.content_id)
+    if not Path(content.path).is_relative_to(os.path.abspath(folder_paths.get_previews_directory())):
         return None
     if session.scalar(select(Asset.id).where(Asset.preview_id == preview_id).limit(1)) is not None:
         return None
@@ -183,14 +186,12 @@ def delete_asset_reference(
             return False
         preview_id = record.preview_id
         delete_record(session, reference_id)
-        preview = _unshared_preview(session, preview_id) if preview_id and preview_id != reference_id else None
+        preview = _unshared_preview(session, preview_id) if preview_id else None
         if preview is not None:
             content = session.get(AssetContent, preview.content_id)
             delete_record(session, preview.id)
-            other_user = session.scalar(select(Asset.id).where(Asset.content_id == content.id).limit(1))
-            previews_dir = os.path.abspath(folder_paths.get_previews_directory())
-            # Only a file in previews/ that no record still uses; Core never unlinks user files.
-            if other_user is None and Path(content.path).is_relative_to(previews_dir):
+            # Only a file no record still uses; Core never unlinks files outside previews/.
+            if session.scalar(select(Asset.id).where(Asset.content_id == content.id).limit(1)) is None:
                 orphaned_file = content.path
                 session.delete(content)
         session.commit()
@@ -301,7 +302,9 @@ def resolve_asset_for_download(
 
         ctype = (
             asset_mime
-            or mimetypes.guess_type(ref_name or abs_path)[0]
+            # The path first: the name is editable and may have no extension.
+            or mimetypes.guess_type(abs_path)[0]
+            or mimetypes.guess_type(ref_name or "")[0]
             or "application/octet-stream"
         )
         download_name = ref_name or os.path.basename(abs_path)

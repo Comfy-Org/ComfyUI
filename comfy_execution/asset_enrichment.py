@@ -69,10 +69,9 @@ def _enrich_in_place(
 
 
 def _is_own_image_preview(abs_path: str) -> bool:
-    from app.assets.previews import has_preview_generator
     from app.assets.services.preview_rules import own_preview_kind
 
-    return not has_preview_generator(abs_path) and own_preview_kind(None, abs_path) == "image"
+    return own_preview_kind(None, abs_path) == "image"
 
 
 async def generate_output_previews(output_ui: dict) -> None:
@@ -84,9 +83,17 @@ async def generate_output_previews(output_ui: dict) -> None:
         if not isinstance(entries, list):
             continue
         for entry in entries:
-            if not isinstance(entry, dict) or "id" not in entry or "preview_id" in entry:
+            if not isinstance(entry, dict) or "id" not in entry:
                 continue
-            abs_path = _resolve_output_path(entry)
+            # A linked preview stays; an entry that is only its own preview can get a better one.
+            if entry.get("preview_id") not in (None, entry["id"]):
+                continue
+            if "filename" not in entry or "type" not in entry:
+                continue
+            try:
+                abs_path = _resolve_output_path(entry)
+            except Exception:
+                continue
             if abs_path is not None and has_preview_generator(abs_path):
                 pending.append((entry, abs_path))
     if not pending:

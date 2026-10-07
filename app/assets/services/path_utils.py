@@ -36,7 +36,10 @@ def resolve_destination_from_tags(tags: list[str]) -> tuple[str, list[str]]:
     The request tags are only used to choose the write destination. Extra tags
     remain labels; they do not become path components or trusted classification.
     """
-    destination_roles = [t for t in tags if t in {"input", "models", "output", "preview"}]
+    destination_roles = [t for t in tags if t in {"input", "models", "output"}]
+    # "preview" is a destination only on its own; beside another role it stays a label.
+    if not destination_roles and "preview" in tags:
+        destination_roles = ["preview"]
     if len(destination_roles) != 1:
         raise ValueError("uploads require exactly one destination role: input, models, output, or preview")
 

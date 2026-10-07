@@ -85,21 +85,26 @@ def _extract_system_metadata_sync(
 
 
 def _live_sibling_preview_id(session: Session, content_id: str) -> str | None:
-    """A preview another record of the same content already has, if its file is live."""
+    """A generated preview another record of the same content has, if its file is still there.
+
+    Only ``preview``-tagged previews: a preview someone nominated by hand is theirs, not the bytes'.
+    """
     preview = aliased(Asset)
     preview_content = aliased(AssetContent)
-    return session.scalars(
-        select(Asset.preview_id)
+    rows = session.execute(
+        select(Asset.preview_id, preview_content.path)
         .join(preview, preview.id == Asset.preview_id)
         .join(preview_content, preview_content.id == preview.content_id)
+        .join(AssetTag, (AssetTag.asset_id == preview.id) & (AssetTag.tag_name == "preview"))
         .where(
             Asset.content_id == content_id,
             Asset.preview_id != Asset.id,
             preview_content.is_missing == false(),
         )
         .order_by(Asset.created_at.desc())
-        .limit(1)
-    ).first()
+    )
+    # previews/ is never scanned, so a file removed by hand still reads as live.
+    return next((preview_id for preview_id, path in rows if os.path.isfile(path)), None)
 
 
 def _discard_unreferenced_content(session: Session, content_id: str) -> None:

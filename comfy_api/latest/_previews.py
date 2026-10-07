@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, ClassVar
 if TYPE_CHECKING:
     from PIL import Image
 
-# Every preview Core links is one of these; Core encodes generator output itself.
+# Every preview Core generates is one of these: Core encodes generator output itself.
 PREVIEW_FORMATS = frozenset({"image/jpeg", "image/png", "image/webp", "image/gif"})
 
 
