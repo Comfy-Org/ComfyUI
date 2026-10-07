@@ -487,3 +487,10 @@ def test_a_malformed_exr_header_reads_as_none(tmp_path, mutate):
     path.write_bytes(mutate(path.read_bytes()))
 
     assert read_exr_windows(str(path)) is None
+
+
+def test_a_very_wide_image_fits_webp_side_limit():
+    webp, width, height = previews._encode(Image.new("RGB", (20000, 40)))
+
+    assert webp[8:12] == b"WEBP"
+    assert max(width, height) <= 16383

@@ -93,11 +93,12 @@ def has_preview_generator(path: str) -> bool:
 def _encode(image: object) -> tuple[bytes, int, int]:
     if not isinstance(image, Image.Image) or image.mode not in _ENCODABLE_MODES:
         raise TypeError("preview generators must return an 8-bit PIL image")
-    image = image.convert("RGB")
     width, height = image.size
-    if width * height > PREVIEW_MAX_PIXELS:
-        scale = (PREVIEW_MAX_PIXELS / (width * height)) ** 0.5
+    # Downscale before converting, and to WebP's 16383 px side limit as well as the area cap.
+    scale = min(1.0, (PREVIEW_MAX_PIXELS / (width * height)) ** 0.5, 16383 / max(width, height))
+    if scale < 1.0:
         image = image.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.BILINEAR)
+    image = image.convert("RGB")
     buffer = io.BytesIO()
     image.save(buffer, format="WEBP", quality=80)
     return buffer.getvalue(), image.width, image.height
