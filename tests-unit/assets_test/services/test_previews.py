@@ -113,7 +113,7 @@ def test_oversized_exr_is_skipped_without_decoding(tmp_path):
         with pytest.raises(previews.PreviewSkipped) as skipped:
             previews.ExrPreviewGenerator().generate(str(path), previews.PREVIEW_MAX_PIXELS)
 
-    assert skipped.value.reason == "too_large"
+    assert skipped.value.args == ("too_large",)
     decode.assert_not_called()
 
 

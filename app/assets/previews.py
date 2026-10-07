@@ -1,10 +1,5 @@
-"""Generated previews: Core's EXR generator, and making, storing and linking a preview.
-
-Generation runs on the preview workers; storing and linking run on the caller, and
-only for previews that finished before the caller's deadline, so a late or failed
-preview never leaves a file or record behind. Everything here is best-effort: an
-asset without a preview is a normal state, so failures are logged, never raised.
-"""
+"""Core's EXR generator, and making, storing and linking previews: best-effort, since
+an asset without a preview is a normal state, and bounded by the caller's deadline."""
 
 from __future__ import annotations
 
@@ -16,7 +11,6 @@ import os
 import time
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
@@ -34,9 +28,6 @@ from comfy_execution.preview_generators import (
     submit_preview_job,
 )
 
-if TYPE_CHECKING:
-    pass
-
 PREVIEW_MAX_PIXELS = 1_000_000
 # Above this the decode alone needs gigabytes; a crash there can't be caught.
 PREVIEW_MAX_SOURCE_PIXELS = 100_000_000
@@ -44,9 +35,7 @@ _ENCODABLE_MODES = frozenset({"RGB", "RGBA", "L", "LA", "P"})
 
 
 class PreviewSkipped(Exception):
-    def __init__(self, reason: str):
-        super().__init__(reason)
-        self.reason = reason
+    """A preview Core declines to make; the argument is the event's reason."""
 
 
 @dataclass(frozen=True)
@@ -123,7 +112,7 @@ def _generate(path: str) -> tuple[bytes, int, int] | _Failed | None:
     try:
         image = generator.generate(path, PREVIEW_MAX_PIXELS)
     except PreviewSkipped as skipped:
-        return _Failed(skipped.reason)
+        return _Failed(skipped.args[0])
     except BaseException as exc:  # third-party code on a worker: nothing may escape to the caller
         return _Failed("decode_failed", exc)
     if image is None:
