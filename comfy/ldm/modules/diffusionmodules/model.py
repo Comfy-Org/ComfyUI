@@ -264,7 +264,7 @@ def slice_attention(q, k, v):
             model_management.raise_non_oom(e)
             model_management.soft_empty_cache(True)
             steps *= 2
-            if steps > 128:
+            if steps > 128 or mem_required / steps > model_management.get_free_memory(q.device):
                 raise e
             logging.warning("out of memory error, increasing steps and trying again {}".format(steps))
 
