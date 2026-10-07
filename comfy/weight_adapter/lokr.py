@@ -12,24 +12,24 @@ from .base import (
 )
 
 
-def fused_qkv_row_offset(out_dim, in_dim, row_count, key):
-    """Row window of a fused qkv adapter for one projection, None if it is not one.
+def fused_qkv_row_offset(out_dim, in_dim, name, rows=None):
+    """Row window of a fused qkv adapter for one projection, None if it is not that projection.
 
-    Krea2 attention is trained fused (to_qkv) but keeps wq/wk/wv separate. comfy.lora_convert
-    splits such adapters, but loading paths that call comfy.lora.load_lora directly (some
-    custom nodes) skip that, so work out which rows this projection needs from the target key.
+    Krea2 attention is trained as one to_qkv module while ComfyUI keeps wq/wk/wv separate.
+    comfy.lora_convert splits such adapters, but adapters that reach a model through loaders or
+    tools which rename the fused factors per projection stay as wide as the whole module and
+    have to take the rows of the projection they are loaded for. name is the target weight key
+    when rows is given, otherwise the lora key the adapter was loaded from.
     """
-    if row_count == out_dim:
-        return None
-    if ".wq" in key or "_to_q" in key:
-        return 0 if row_count == in_dim else None
     kv = (out_dim - in_dim) // 2
-    if kv <= 0 or row_count != kv:
+    if kv <= 0 or "qkv" in name or (rows is not None and rows not in (in_dim, kv)):
         return None
-    if ".wv" in key or "_to_v" in key:
-        return in_dim + kv
-    if ".wk" in key or "_to_k" in key:
+    if ".wq" in name or "_to_q" in name or "_wq" in name:
+        return 0
+    if ".wk" in name or "_to_k" in name or "_wk" in name:
         return in_dim
+    if ".wv" in name or "_to_v" in name or "_wv" in name:
+        return in_dim + kv
     return None
 
 
@@ -194,6 +194,7 @@ class LoKrAdapter(WeightAdapterBase):
     def __init__(self, loaded_keys, weights):
         self.loaded_keys = loaded_keys
         self.weights = weights
+        self.key = None
         self.row_offset = None
 
     @classmethod
@@ -291,6 +292,7 @@ class LoKrAdapter(WeightAdapterBase):
                 dora_scale,
             )
             adapter = cls(loaded_keys, weights)
+            adapter.key = x
             # A fused adapter applied to one projection of a split qkv module offsets into the
             # rows of the Kronecker product instead of using split factors.
             row_offset_name = "{}.row_offset".format(x)
@@ -376,16 +378,18 @@ class LoKrAdapter(WeightAdapterBase):
 
         try:
             lora_diff = torch.kron(w1, w2)
-            offset = None
             if lora_diff.shape[0] != weight.shape[0]:
                 offset = self.row_offset
                 if offset is None:
-                    offset = fused_qkv_row_offset(lora_diff.shape[0], lora_diff.shape[1], weight.shape[0], key)
+                    offset = fused_qkv_row_offset(lora_diff.shape[0], lora_diff.shape[1], key, weight.shape[0])
                 if offset is None:
-                    raise ValueError("Kronecker product is larger than the target weight, a fused qkv adapter must be split first")
+                    offset = fused_qkv_row_offset(lora_diff.shape[0], lora_diff.shape[1], self.key or "")
+                if offset is None:
+                    raise ValueError("Kronecker product {}x{} does not fit the target weight {}x{}, lora key {} names no q/k/v projection".format(
+                        lora_diff.shape[0], lora_diff.shape[1], weight.shape[0], weight.shape[1], self.key))
                 lora_diff = lora_diff.narrow(0, offset, weight.shape[0])
-            if offset is not None and dora_scale is not None and dora_scale.shape[0] != weight.shape[0]:
-                dora_scale = dora_scale.narrow(0, offset, weight.shape[0])
+                if dora_scale is not None and dora_scale.shape[0] != weight.shape[0]:
+                    dora_scale = dora_scale.narrow(0, offset, weight.shape[0])
             lora_diff = lora_diff.reshape(weight.shape)
             if dora_scale is not None:
                 weight = weight_decompose(
@@ -519,6 +523,12 @@ class LoKrAdapter(WeightAdapterBase):
             out = hc.reshape(*hc.shape[:-2], -1)
 
         out = out * scale
-        if self.row_offset is not None:
-            out = out.narrow(-1, self.row_offset, base_out.shape[-1])
+        if out.shape[-1] != base_out.shape[-1]:
+            offset = self.row_offset
+            if offset is None:
+                in_dim = x.shape[1] if is_conv else x.shape[-1]
+                offset = fused_qkv_row_offset(out.shape[-1], in_dim, self.key)
+            if offset is None:
+                raise ValueError("Kronecker product is larger than the target output, lora key {} names no q/k/v projection".format(self.key))
+            out = out.narrow(-1, offset, base_out.shape[-1])
         return out
