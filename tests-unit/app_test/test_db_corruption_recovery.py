@@ -412,6 +412,42 @@ def test_explicit_database_url_is_not_quarantined(explicit_db):
     assert _quarantined(explicit_db) == []
 
 
+@pytest.mark.parametrize("spelling", ["{db}", "{dir}/../{base}/comfyui.db"])
+def test_explicit_url_naming_the_default_file_is_recovered(default_db, monkeypatch, spelling):
+    # A launcher may pin --database-url to the default file; it is still the default database.
+    folder = os.path.dirname(default_db)
+    path = spelling.format(db=default_db, dir=folder, base=os.path.basename(folder))
+    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{path}")
+    _make_db(default_db)
+    _overwrite_header(default_db)
+
+    _boot()
+
+    assert len(_quarantined(default_db)) == 1
+    assert _revision(default_db) == _head()
+
+
+@pytest.mark.parametrize("url, backed_up", [
+    ("sqlite:///{default_db}", True),
+    ("sqlite:///{other}", False),
+    ("sqlite:///:memory:", False),
+    ("sqlite://", False),
+])
+def test_backup_only_for_the_default_file(default_db, monkeypatch, url, backed_up):
+    monkeypatch.setattr(db_module.args, "database_url", url.format(default_db=default_db, other=default_db + ".other"))
+    started = []
+    monkeypatch.setattr(db_module, "threading", SimpleNamespace(Thread=lambda **kw: started.append(kw) or _NoThread()))
+
+    db_module.start_daily_backup()
+
+    assert bool(started) == backed_up
+
+
+class _NoThread:
+    def start(self):
+        pass
+
+
 @pytest.mark.parametrize("table", ["asset_system_state", "assets", "asset_contents"])
 def test_corruption_first_hit_by_asset_startup_is_recovered(default_db, boot_events, table):
     # init_db reads none of these tables; asset startup is the first to.

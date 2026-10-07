@@ -290,11 +290,22 @@ def _init_file_db(db_url):
         raise
 
 
+def _is_default_db():
+    """The default database file, also when --database-url names it; any other database may be managed elsewhere."""
+    import folder_paths
+
+    default_path = os.path.join(folder_paths.get_user_directory(), "comfyui.db")
+    try:
+        return os.path.normcase(os.path.abspath(get_db_path())) == os.path.normcase(os.path.abspath(default_path))
+    except ValueError:  # not a SQLite file URL
+        return False
+
+
 def is_recoverable_corruption(error):
-    # Only the default database: one named by --database-url may be managed elsewhere.
+    # Only the default database (see _is_default_db).
     # SQLITE_CORRUPT or SQLITE_NOTADB, never "database is locked". The error can come from
     # another file (the pre-upgrade backup), so the live database must fail its check too.
-    if _cannot_move_aside or args.database_url is not None or error_kind(error) != "database_corrupt":
+    if _cannot_move_aside or not _is_default_db() or error_kind(error) != "database_corrupt":
         return False
     return not _passes_integrity_check(get_db_path())
 
@@ -377,7 +388,7 @@ def _quarantine_and_restore(db_path, error):
 
 def start_daily_backup():
     """Keep a compact copy of the default database, refreshed once a day, off the startup path."""
-    if args.database_url is not None:
+    if not _is_default_db():
         return
     db_path = get_db_path()
     threading.Thread(
