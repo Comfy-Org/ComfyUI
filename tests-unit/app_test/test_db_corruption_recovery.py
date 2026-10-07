@@ -460,6 +460,28 @@ def test_unmovable_database_found_corrupt_after_init_starts_as_before(default_db
     assert _quarantined(default_db) == []
 
 
+def test_failed_sidecar_move_leaves_the_database_in_place(default_db, monkeypatch):
+    _make_db(default_db)
+    with open(default_db + "-wal", "wb") as f:
+        f.write(b"held by another program")
+    database_file = os.stat(default_db).st_ino
+    real_replace = os.replace
+
+    def _wal_held(src, dst):
+        if src.endswith("-wal"):
+            raise PermissionError("[WinError 32] The process cannot access the file")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(db_module.os, "replace", _wal_held)
+    error = sqlite3.DatabaseError("database disk image is malformed")
+
+    with pytest.raises(sqlite3.DatabaseError):
+        db_module._quarantine_and_restore(default_db, error)
+
+    assert os.stat(default_db).st_ino == database_file
+    assert _quarantined(default_db) == []
+
+
 def test_second_failure_propagates_and_releases_the_lock(default_db, monkeypatch):
     _make_db(default_db)
     _overwrite_header(default_db)
@@ -679,7 +701,7 @@ def test_backup_is_written_off_the_startup_thread(default_db, monkeypatch):
 
     def _blocked_write(db_path, backup_path):
         writers.append((threading.current_thread().name, db_path, backup_path))
-        release.wait()
+        assert release.wait(10)
 
     monkeypatch.setattr(db_module, "_write_daily_backup", _blocked_write)
 
@@ -713,7 +735,7 @@ class _Stop(Exception):
     pass
 
 
-@pytest.mark.parametrize("age_hours, first_write_hour", [(None, 0), (25, 0), (1, 23), (-2400, 2424)])
+@pytest.mark.parametrize("age_hours, first_write_hour", [(None, 0), (25, 0), (1, 23), (-2400, 0)])
 def test_backup_is_refreshed_once_a_day_while_running(tmp_path, monkeypatch, age_hours, first_write_hour):
     db_path = str(tmp_path / "comfyui.db")
     backup = db_path + ".daily-backup"

@@ -338,7 +338,7 @@ def _passes_integrity_check(path):  # after an error only; unlike quick_check, i
 def _move_aside(db_path, label, error):
     aside_path = f"{db_path}.{label}-{time.strftime('%Y%m%d-%H%M%S')}"
     try:
-        for suffix in ("", "-wal", "-shm", "-journal"):  # SQLite would replay one another connection kept
+        for suffix in ("-wal", "-shm", "-journal", ""):  # sidecars first, so a failure leaves the database in place
             if os.path.exists(db_path + suffix):
                 os.replace(db_path + suffix, aside_path + suffix)
     except OSError:
@@ -361,14 +361,14 @@ def _quarantine_and_restore(db_path, error):
     backup_path, restore_path = db_path + ".daily-backup", db_path + ".restore-tmp"
     outcome = "Database recreated empty: there was no sound daily backup"
     try:
-        try:  # before the database moves: a kill until the final rename leaves it to recover again
+        try:  # before anything moves: a kill during the slow copy and check leaves it to recover again
             shutil.copyfile(backup_path, restore_path)
             sound = _passes_integrity_check(restore_path)
+            taken = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(backup_path)))
         except OSError:
             sound = False  # no backup, or it can't be read
         quarantine_path = _move_aside(db_path, "corrupt", error)
         if sound:
-            taken = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(backup_path)))
             os.replace(restore_path, db_path)  # atomic: never part of a backup
             outcome = f"Database restored from the daily backup taken {taken}; later changes are lost"
     finally:
@@ -394,7 +394,7 @@ def _keep_daily_backup(db_path, backup_path):
     while True:  # a daemon: an exit mid-backup leaves only a .tmp, which the next backup removes
         due_in = 0  # no backup yet
         with suppress(OSError):
-            due_in = os.path.getmtime(backup_path) + _DAILY_BACKUP_INTERVAL_SECONDS - time.time()
+            due_in = _DAILY_BACKUP_INTERVAL_SECONDS - abs(time.time() - os.path.getmtime(backup_path))  # future: due
         if due_in <= 0:
             _write_daily_backup(db_path, backup_path)
             due_in = _DAILY_BACKUP_INTERVAL_SECONDS  # also the retry delay after a failure
