@@ -68,10 +68,11 @@ def test_handles_no_files():
     assert filter_files_content_types(files, ["image", "audio", "video"]) == []
 
 
-def test_exr_and_hdr_are_never_listed_as_images():
-    # Pillow can't decode them, so an image loader that listed them would fail on select.
-    files = ["a.exr", "b.EXR", "c.hdr", "d.png"]
-    warm = {**extension_mimetypes_cache, "exr": "image", "EXR": "image", "hdr": "image"}
-    for cache in (extension_mimetypes_cache.copy(), warm):
-        with patch("folder_paths.extension_mimetypes_cache", cache):
-            assert filter_files_content_types(files, ["image"]) == ["d.png"]
+
+def test_exr_is_listed_as_an_image_once_registered():
+    # LoadImage decodes EXR through PyAV, so registering .exr makes it selectable.
+    from utils.mime_types import init_mime_types
+
+    init_mime_types()
+    with patch("folder_paths.extension_mimetypes_cache", extension_mimetypes_cache.copy()):
+        assert filter_files_content_types(["a.exr", "b.png"], ["image"]) == ["a.exr", "b.png"]

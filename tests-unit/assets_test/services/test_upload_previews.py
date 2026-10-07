@@ -264,3 +264,19 @@ async def test_an_upload_tagged_preview_lands_in_previews(mock_create_session, r
 
     assert resp.status == 201, await resp.text()
     assert [p.suffix for p in (roots / "previews").iterdir()] == [".png"]
+
+
+@pytest.mark.parametrize(("dest", "records"), [("image", False), ("video", False), ("audio", False), ("document", True), (None, True)])
+@pytest.mark.asyncio
+async def test_only_reads_that_are_not_media_renders_record_access(mock_create_session, roots, assets_routes_on, session, dest, records):
+    from app.assets.database.models import Asset
+
+    still = roots / "output" / "still.png"
+    still.write_bytes(_png())
+    asset_id = _plain_record(session, still, "still.png", "image/png")
+    async with await _assets_client() as client:
+        resp = await client.get(f"/api/assets/{asset_id}/content", headers={"Sec-Fetch-Dest": dest} if dest else {})
+
+    assert resp.status == 200
+    session.expire_all()
+    assert (session.get(Asset, asset_id).last_access_time is not None) == records

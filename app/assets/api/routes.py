@@ -558,6 +558,8 @@ async def download_asset_content(request: web.Request) -> web.Response:
     try:
         result = resolve_asset_for_download(
             reference_id=str(uuid.UUID(request.match_info["id"])),
+            # Showing a thumbnail or playing media isn't a read worth a database write per render.
+            record_access=request.headers.get("Sec-Fetch-Dest") not in ("image", "video", "audio"),
         )
         abs_path = result.abs_path
         content_type = result.content_type

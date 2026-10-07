@@ -276,6 +276,7 @@ def get_preview_file_paths(preview_ids: list[str]) -> dict[str, str]:
 
 def resolve_asset_for_download(
     reference_id: str,
+    record_access: bool = True,
 ) -> DownloadResolutionResult:
     with create_session() as session:
         record = get_record_by_id(session, reference_id)
@@ -297,8 +298,9 @@ def resolve_asset_for_download(
         asset_mime = record.mime_type
         abs_path = content.path
 
-        update_record_access_time(session, reference_id)
-        session.commit()
+        if record_access:
+            update_record_access_time(session, reference_id)
+            session.commit()
 
         ctype = (
             asset_mime
