@@ -137,7 +137,7 @@ Classification is fixed at record creation. A newly visible path receives the re
 
 Delete the target asset record. Leave its content row and file intact. Do not soft-delete the record or revive the deleted identity during later discovery. The retained content row is not a tombstone: it is ordinary live content describing bytes that are still there, and nothing records that a deletion happened.
 
-Deleting a record never deletes any other record. A preview record the deleted asset nominated stays untouched; references to a preview clear only when the preview record itself is deleted. The preview reference points from the deleted record to its target, so deleting the pointer must not destroy the target.
+Deleting a record deletes no other record, with one exception: a preview record tagged `preview` that no other record links goes with it, and so does its file when no record still uses that content and the file is under the previews directory (see Previews). Any other preview the deleted asset nominated, such as an `output` image, stays untouched; references to a preview clear only when the preview record itself is deleted.
 
 Content left behind after all its asset records are deleted can still be resolved by hash lookup, falling back to a generic name and a guessed content type when no record is left to supply one. There is currently no mechanism that reclaims or removes such orphaned content.
 
@@ -280,6 +280,14 @@ Create one asset record and one content row per location. Equal hashes may revea
 ### Byte-identical content from two local users
 
 The local asset system has global records and no owner field. It does not isolate or duplicate records by user.
+
+### Previews
+
+An asset's response carries `preview_url`, always `/api/assets/{id}/content` with no query string, and, for images, `preview_id`. `preview_id` is only ever sent together with a working `preview_url`. A linked preview wins; otherwise an image, video, audio or text file previews itself, except EXR and Radiance HDR, which browsers can't display and which are never their own preview, matched by extension as well as MIME type. A stored link from an asset to itself is ignored. `PUT /api/assets/{id}` with `"preview_id": null` clears a link, and a link to the asset itself is refused.
+
+Core generates a preview for files whose type has a generator: EXR out of the box, and other types through `comfy_api` `Previews.register_generator`. Generators are looked up by the MIME type of the file's path, never a type an uploader supplied. Generation runs on `/upload/image`, multipart `POST /api/assets`, from-hash creation and executed outputs, only when the record has no preview yet; a record over content another record already has a live preview for reuses that preview instead. A cached rerun only ever reuses. Generated previews are WebP of at most one megapixel, stored in the previews directory (`<base>/previews`, or `--previews-directory`), tagged `preview`, and never scanned; the directory is owned, so the startup prune keeps them. `preview` is a destination for uploads and a reserved tag the tag endpoints refuse.
+
+Generation is best-effort and bounded. Two daemon workers do the decoding and encoding; the caller waits at most `min(5 s + 0.5 s × files, 30 s)` and stores only what finished in time. Whatever didn't never gets a preview and leaves nothing behind. Each outcome is a `previews.generated` or `previews.generation_failed` event.
 
 ### `/view` routes
 
