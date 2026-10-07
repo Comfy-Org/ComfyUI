@@ -3,13 +3,16 @@ import torch
 
 import comfy.ops
 from comfy import model_detection
+from comfy import samplers
 from comfy import supported_models
+from comfy.ldm.kandinsky6 import piflow
 from comfy.ldm.kandinsky6.audio_vae import Kandinsky6AudioVAE
 from comfy.ldm.kandinsky6.core_contract import AUDIO_DEFAULTS
 from comfy.ldm.kandinsky6.detection import detect_kandinsky6, to_native_state_dict
 from comfy.ldm.kandinsky6.model import Kandinsky6NativeAVDiT
 from comfy_extras.nodes_kandinsky6 import (
     Kandinsky6EmptyLatent,
+    Kandinsky6PiFlowGuider,
 )
 
 
@@ -137,12 +140,25 @@ def test_supported_model_converts_diffusers_unet_state_dict():
     assert set(converted) == set(native)
 
 
-def test_detect_kandinsky6_rejects_distilled_checkpoints():
+def test_detect_kandinsky6_accepts_distilled_checkpoints():
     sd = _k6_pro_state_dict()
-    # A two-stage DX output head marks a distilled release.
+    # A multi-grid DX output head marks a distilled release; both heads expand
+    # by the same n_grid factor.
+    sd["out_layer.out_layer.weight"] = _meta(2 * _PRO["out_visual_dim"] * 4, _PRO["model_dim"])
+    sd["audio_outLayer.out_layer.weight"] = _meta(2 * _PRO["in_audio_dim"], _PRO["model_dim_a"])
+
+    cfg = detect_kandinsky6(sd, "")
+    assert cfg["n_grid"] == 2
+    assert cfg["out_visual_dim"] == 2 * _PRO["out_visual_dim"]
+    assert cfg["out_audio_dim"] == 2 * _PRO["in_audio_dim"]
+
+
+def test_detect_kandinsky6_rejects_mismatched_audio_dx_grids():
+    sd = _k6_pro_state_dict()
+    # The video head declares two grids but the audio head is left unexpanded.
     sd["out_layer.out_layer.weight"] = _meta(2 * _PRO["out_visual_dim"] * 4, _PRO["model_dim"])
 
-    with pytest.raises(ValueError, match="PiFlow"):
+    with pytest.raises(ValueError, match="audio output head"):
         detect_kandinsky6(sd, "")
 
 
@@ -313,3 +329,100 @@ def test_dit_expands_single_reference_to_video_batch():
     )
 
     assert tuple(out.shape) == tuple(video.shape)
+
+
+def _small_distilled_dit(n_grid=2):
+    # A distilled head expands both output heads into n_grid DX grids.
+    torch.manual_seed(0)
+    model = Kandinsky6NativeAVDiT(
+        in_visual_dim=16,
+        out_visual_dim=16 * n_grid,
+        in_audio_dim=40,
+        out_audio_dim=40 * n_grid,
+        n_grid=n_grid,
+        in_text_dim=32,
+        in_text_dim2=32,
+        time_dim=32,
+        model_dim=32,
+        ff_dim=64,
+        time_dim_a=32,
+        model_dim_a=32,
+        ff_dim_a=64,
+        head_dim_a=16,
+        visual_embed_dim=(2 * 16 + 1) * 4,
+        patch_size=(1, 2, 2),
+        num_text_blocks=1,
+        num_visual_blocks=1,
+        axes_dims=(8, 4, 4),
+        rope_scale_factor=(1.0, 1.0, 1.0),
+        cross_gates=True,
+        fix_modulation=True,
+        ca_rope=True,
+        visual_token_type_num_embeddings=2,
+        dtype=torch.float32,
+        device="cpu",
+        operations=comfy.ops.disable_weight_init,
+    )
+    for param in model.parameters():
+        if param.dim() >= 2:
+            torch.nn.init.normal_(param, std=0.02)
+        else:
+            torch.nn.init.zeros_(param)
+    return model
+
+
+def test_distilled_dit_returns_raw_grids_when_not_collapsing():
+    model = _small_distilled_dit(n_grid=2)
+    video = torch.randn(1, 16, 2, 4, 4)
+    audio = torch.randn(1, 4, 40)
+    context = torch.randn(1, 6, 32)
+    pooled = torch.randn(1, 32)
+    timestep = torch.tensor([0.5])
+
+    v_raw, a_raw = model(
+        x=(video, audio), timestep=timestep, context=context, y=pooled,
+        collapse_grids=False,
+    )
+    v_col, a_col = model(x=(video, audio), timestep=timestep, context=context, y=pooled)
+
+    # collapse_grids=False keeps the n_grid channel expansion for the PiFlow
+    # guider; the default call averages the grids for a standard sampler.
+    assert tuple(v_raw.shape) == (1, 32, 2, 4, 4)
+    assert tuple(a_raw.shape) == (1, 4, 80)
+    assert tuple(v_col.shape) == (1, 16, 2, 4, 4)
+    assert tuple(a_col.shape) == (1, 4, 40)
+    assert torch.allclose(v_col, v_raw.view(1, 2, 16, 2, 4, 4).mean(dim=1))
+    assert torch.allclose(a_col, a_raw.view(1, 4, 2, 40).mean(dim=2))
+
+
+def test_piflow_rollout_evaluates_dit_once_per_segment():
+    model = _small_distilled_dit(n_grid=2)
+    video = torch.randn(1, 16, 2, 4, 4)
+    audio = torch.randn(1, 4, 40)
+    context = torch.randn(1, 6, 32)
+    pooled = torch.randn(1, 32)
+
+    calls = {"n": 0}
+    original = model.forward
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    model.forward = counting
+    try:
+        v_out, a_out = piflow.rollout(model, video, audio, context, pooled, steps=4, dtype=torch.float32)
+    finally:
+        model.forward = original
+
+    # One DiT evaluation per segment, and the streams keep their shape.
+    assert calls["n"] == 4
+    assert tuple(v_out.shape) == tuple(video.shape)
+    assert tuple(a_out.shape) == tuple(audio.shape)
+    assert torch.isfinite(v_out).all() and torch.isfinite(a_out).all()
+
+
+def test_piflow_guider_is_a_basic_guider():
+    # The PiFlow guider is a CFG guider that keeps a single conditioning, so it
+    # slots into the custom sampler like the other guiders.
+    assert issubclass(Kandinsky6PiFlowGuider, samplers.CFGGuider)

@@ -261,6 +261,8 @@ class Kandinsky6(nn.Module):
         in_visual_dim=int(DIT_CONFIG["in_visual_dim"]),
         out_visual_dim=int(DIT_CONFIG["out_visual_dim"]),
         in_audio_dim=int(DIT_CONFIG["in_audio_dim"]),
+        out_audio_dim=None,
+        n_grid=1,
         in_text_dim=int(DIT_CONFIG["in_text_dim"]),
         in_text_dim2=int(DIT_CONFIG["in_text_dim2"]),
         time_dim=int(DIT_CONFIG["time_dim"]),
@@ -291,6 +293,10 @@ class Kandinsky6(nn.Module):
         self.model_dim = model_dim
         self.in_visual_dim = in_visual_dim
         self.in_audio_dim = in_audio_dim
+        # A distilled release expands both output heads into n_grid DX grids;
+        # the forward collapses them to a single velocity for standard sampling.
+        self.n_grid = int(n_grid)
+        self.out_audio_dim = in_audio_dim if out_audio_dim is None else int(out_audio_dim)
         self.rope_scale_factor = rope_scale_factor
         self.freqs_scaling = float(freqs_scaling)
         self.visual_token_type_num_embeddings = int(
@@ -325,7 +331,7 @@ class Kandinsky6(nn.Module):
             [TransformerEncoderBlock(model_dim_a, time_dim_a, ff_dim_a, head_dim_a, operation_settings=op)
              for _ in range(num_text_blocks)]
         )
-        self.audio_outLayer = OutLayerAudio(model_dim_a, time_dim_a, in_audio_dim, operation_settings=op)
+        self.audio_outLayer = OutLayerAudio(model_dim_a, time_dim_a, self.out_audio_dim, operation_settings=op)
 
         self.visual_blocks = nn.ModuleList(
             [FusedTransformerDecoderBlock(model_dim, time_dim, ff_dim, head_dim,
@@ -541,6 +547,7 @@ class Kandinsky6NativeAVDiT(Kandinsky6):
         transformer_options=None,
         freqs_scaling=None,
         k6_reference=None,
+        collapse_grids=True,
         **kwargs,
     ):
         if not isinstance(x, (list, tuple)) or len(x) != 2:
@@ -616,4 +623,23 @@ class Kandinsky6NativeAVDiT(Kandinsky6):
         )
         if reference_tail:
             v_out = v_out[:, :, :generated_frames]
+        # The native distilled output is the n_grid velocity grids. Standard
+        # samplers consume one velocity, so collapse by default; the PiFlow
+        # guider passes collapse_grids=False to read the raw grids.
+        if self.n_grid > 1 and collapse_grids:
+            v_out = self._collapse_dx_grids(v_out)
+            a_out = self._collapse_dx_grids_audio(a_out)
         return v_out, a_out
+
+    def _collapse_dx_grids(self, v_out):
+        # A distilled head emits n_grid velocity grids stacked on the channel
+        # axis. Average them into one velocity so a standard flow-matching
+        # sampler can consume the output without the PiFlow machinery.
+        b, c, t, h, w = v_out.shape
+        base_c = c // self.n_grid
+        return v_out.view(b, self.n_grid, base_c, t, h, w).mean(dim=1)
+
+    def _collapse_dx_grids_audio(self, a_out):
+        b, t, c = a_out.shape
+        base_c = c // self.n_grid
+        return a_out.view(b, t, self.n_grid, base_c).mean(dim=2)

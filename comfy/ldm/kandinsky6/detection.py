@@ -147,17 +147,17 @@ def _detect_k6(state_dict, key_prefix):
     base_visual_output = int(dit_config["out_visual_dim"])
     if cfg["out_visual_dim"] % base_visual_output:
         raise ValueError("Kandinsky 6 output head does not contain complete DX grids.")
-    if cfg["out_visual_dim"] > base_visual_output:
-        raise ValueError(
-            "Distilled Kandinsky 6 checkpoints require PiFlow sampling, "
-            "which is not supported. Use the base checkpoint."
-        )
+    # A distilled release expands both output heads into n_grid DX grids. The
+    # adapter collapses the grids back to a single velocity so a standard
+    # flow-matching sampler can consume the checkpoint (PiFlow is not required).
+    cfg["n_grid"] = cfg["out_visual_dim"] // base_visual_output
     in_audio_dim = int(dit_config["in_audio_dim"])
+    cfg["out_audio_dim"] = in_audio_dim * cfg["n_grid"]
     audio_output_key = f"{kp}audio_outLayer.out_layer.weight"
-    if audio_output_key in state_dict and state_dict[audio_output_key].shape[0] != in_audio_dim:
+    if audio_output_key in state_dict and state_dict[audio_output_key].shape[0] != cfg["out_audio_dim"]:
         raise ValueError(
             "Kandinsky 6 audio output head does not match the released "
-            f"architecture: expected {in_audio_dim} channels, got "
+            f"architecture: expected {cfg['out_audio_dim']} channels, got "
             f"{state_dict[audio_output_key].shape[0]}."
         )
     cfg["model_dim_a"] = get_tensor("audio_embeddings.in_layer.weight").shape[0]
@@ -192,7 +192,7 @@ def _detect_k6(state_dict, key_prefix):
     cfg["ca_rope"] = bool(dit_config["ca_rope"])
 
     expected = {
-        "out_visual_dim": int(dit_config["out_visual_dim"]),
+        "out_visual_dim": int(dit_config["out_visual_dim"]) * cfg["n_grid"],
         "model_dim": int(dit_config["model_dim"]),
         "model_dim_a": int(dit_config["model_dim_a"]),
         "time_dim": int(dit_config["time_dim"]),

@@ -5,6 +5,7 @@ import torch
 
 import comfy.model_management as mm
 import comfy.nested_tensor
+import comfy.samplers
 import comfy.utils
 import node_helpers
 
@@ -12,6 +13,7 @@ from comfy.ldm.kandinsky6.core_contract import (
     GENERATION_DEFAULTS,
     LATENT_DEFAULTS,
 )
+from comfy.ldm.kandinsky6 import piflow
 
 
 _VIDEO_CHANNELS = int(LATENT_DEFAULTS["video_channels"])
@@ -186,12 +188,95 @@ class Kandinsky6ImageToVideoAudio:
         return positive, negative, empty_latent
 
 
+class Kandinsky6PiFlowGuider(comfy.samplers.CFGGuider):
+    """Runs the vendor PiFlow schedule on a distilled Kandinsky 6 checkpoint.
+
+    Each segment costs one DiT evaluation; the model's n_grid velocity grids are
+    then integrated over the segment by a network-free policy, so the distilled
+    model runs on its intended step budget. Only the positive conditioning is
+    consumed (the distilled release runs without CFG) and the sampling is full
+    denoise. The custom sampler's ``sampler`` and sigma values only set the
+    segment count (len(sigmas) - 1); PiFlow keeps its own shifted schedule.
+    """
+
+    def set_conds(self, positive):
+        self.inner_set_conds({"positive": positive})
+
+    def inner_sample(self, noise, latent_image, device, sampler, sigmas,
+                     denoise_mask, callback, disable_pbar, seed, latent_shapes=None):
+        self.inner_model.latent_shapes = latent_shapes
+
+        if denoise_mask is not None and bool(torch.any(denoise_mask < 1.0 - 1e-6)):
+            raise ValueError("Kandinsky 6 PiFlow sampling supports full denoise only.")
+        if len(self.conds["positive"]) != 1:
+            raise ValueError(
+                "Kandinsky 6 PiFlow sampling expects a single joint conditioning, "
+                "without regional or scheduled prompts."
+            )
+
+        cond = self.conds["positive"][0]
+        dtype = self.inner_model.get_dtype_inference()
+        context = mm.cast_to_device(cond["cross_attn"], device, dtype)
+        pooled = mm.cast_to_device(cond["pooled_output"], device, dtype)
+        reference = cond.get("k6_reference", None)
+        if reference is not None:
+            reference = mm.cast_to_device(reference, device, dtype)
+
+        video, audio = comfy.utils.unpack_latents(noise, latent_shapes)
+        steps = max(int(sigmas.shape[-1]) - 1, 1)
+
+        def segment_callback(step, x0_streams, x_streams, total):
+            if callback is None:
+                return
+            x0_packed, _ = comfy.utils.pack_latents(x0_streams)
+            x_packed, _ = comfy.utils.pack_latents(x_streams)
+            callback(step, x0_packed, x_packed, total)
+
+        video, audio = piflow.rollout(
+            self.inner_model.diffusion_model,
+            video,
+            audio,
+            context,
+            pooled,
+            steps=steps,
+            dtype=dtype,
+            reference=reference,
+            transformer_options=self.model_options.get("transformer_options", {}),
+            callback=segment_callback,
+        )
+        samples, _ = comfy.utils.pack_latents((video, audio))
+        return self.inner_model.process_latent_out(samples.to(torch.float32))
+
+
+class Kandinsky6PiFlowGuiderNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "conditioning": ("CONDITIONING",),
+            }
+        }
+
+    RETURN_TYPES = ("GUIDER",)
+    RETURN_NAMES = ("guider",)
+    FUNCTION = "build"
+    CATEGORY = "Kandinsky 6"
+
+    def build(self, model, conditioning):
+        guider = Kandinsky6PiFlowGuider(model)
+        guider.set_conds(conditioning)
+        return (guider,)
+
+
 NODE_CLASS_MAPPINGS = {
     "Kandinsky6EmptyLatent": Kandinsky6EmptyLatent,
     "Kandinsky6ImageToVideoAudio": Kandinsky6ImageToVideoAudio,
+    "Kandinsky6PiFlowGuider": Kandinsky6PiFlowGuiderNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Kandinsky6EmptyLatent": "Kandinsky 6 Empty Latent (video+audio)",
     "Kandinsky6ImageToVideoAudio": "Kandinsky 6 Image to Video+Audio",
+    "Kandinsky6PiFlowGuider": "Kandinsky 6 PiFlow Guider",
 }
