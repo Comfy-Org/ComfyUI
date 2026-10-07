@@ -3,6 +3,7 @@ import shutil
 import sqlite3
 
 import pytest
+from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
@@ -44,10 +45,24 @@ def scripts(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{db_path}")
     monkeypatch.setattr(db_module, "get_alembic_config", lambda: _config(scripts_path, db_path))
     monkeypatch.setattr(db_module, "Session", None)
+    monkeypatch.setattr(db_module, "WriteSession", None)
     monkeypatch.setattr(db_module, "_db_lock", None)
     yield scripts_path, db_path
+    for factory in (db_module.Session, db_module.WriteSession):
+        if factory is not None:
+            factory.kw["bind"].dispose()
     if db_module._db_lock is not None:
         db_module._db_lock.release(force=True)
+
+
+def _tree(path: str) -> dict[str, bytes]:
+    files = {}
+    for root, dirs, names in os.walk(path):
+        dirs[:] = [d for d in dirs if d != "__pycache__"]
+        for name in names:
+            with open(os.path.join(root, name), "rb") as f:
+                files[os.path.relpath(os.path.join(root, name), path)] = f.read()
+    return files
 
 
 def _plant_appledouble(scripts_path: str) -> str:
@@ -66,18 +81,20 @@ def test_appledouble_file_breaks_alembic_on_its_own(scripts):
         ScriptDirectory.from_config(_config(scripts_path, db_path)).get_current_head()
 
 
-def test_init_ignores_appledouble_files_and_leaves_them_in_place(scripts):
+def test_upgrade_ignores_appledouble_files_and_leaves_the_install_unchanged(scripts):
     scripts_path, db_path = scripts
     head = _head(scripts_path)
-    planted = _plant_appledouble(scripts_path)
+    command.upgrade(_config(scripts_path, db_path), "0006_add_loader_path")
+    _plant_appledouble(scripts_path)
+    install = _tree(scripts_path)
 
     # Alembic must read revisions from the filtered copy only: if it also scanned
     # <script_location>/versions it would load the planted file and raise SyntaxError.
     db_module._init_file_db(db_module.args.database_url)
 
     assert _current_revision(db_path) == head
-    with open(planted, "rb") as f:
-        assert f.read() == _APPLEDOUBLE
+    assert os.path.exists(db_path + ".bkp")
+    assert _tree(scripts_path) == install
 
 
 def test_versions_without_appledouble_files_are_used_in_place(scripts, monkeypatch):
