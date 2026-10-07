@@ -261,10 +261,10 @@ def test_failed_restore_is_undone_and_recovered_on_the_next_launch(default_db, m
     assert os.stat(default_db).st_ino == corrupt_file  # moved back
     assert glob.glob(default_db + ".corrupt-*") == [] and not os.path.exists(default_db + ".restore-tmp")
 
-    monkeypatch.undo()  # the next launch, once the file is no longer held
-    for session_factory in (db_module.Session, db_module.WriteSession):
+    for session_factory in (db_module.Session, db_module.WriteSession):  # before undo() unbinds them
         if session_factory is not None:
             session_factory.kw["bind"].dispose()
+    monkeypatch.undo()  # the next launch, once the file is no longer held
     monkeypatch.setattr(db_module, "_cannot_move_aside", False)
     monkeypatch.setattr(db_module, "_db_lock", None)
     monkeypatch.setattr(db_module.args, "database_url", None)
@@ -276,6 +276,45 @@ def test_failed_restore_is_undone_and_recovered_on_the_next_launch(default_db, m
 
     with closing(sqlite3.connect(default_db)) as conn:
         assert conn.execute("SELECT value FROM marker").fetchone() == ("from backup",)
+
+
+def test_restore_that_cannot_be_undone_fails_the_launch(default_db, monkeypatch):
+    # Moved aside, not restored, not moved back: running on would mean a new empty database.
+    _make_db(default_db + ".daily-backup")
+    _make_db(default_db)
+    _overwrite_page_of(default_db, "assets")
+    real_replace = os.replace
+
+    def _restore_and_undo_refused(src, dst):
+        if src.endswith(".restore-tmp") or ".corrupt-" in src:
+            raise PermissionError("[WinError 32] The process cannot access the file")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(db_module.os, "replace", _restore_and_undo_refused)
+
+    with pytest.raises(SystemExit):
+        _boot()
+
+    assert not os.path.exists(default_db)
+    assert len(_quarantined(default_db)) == 1
+
+
+def test_unreadable_backup_stops_recovery_before_anything_moves(default_db, monkeypatch):
+    # E.g. a virus scanner holding the backup: not the same as having none.
+    _make_db(default_db + ".daily-backup", marker="from backup")
+    _make_db(default_db)
+    _overwrite_page_of(default_db, "assets")
+    corrupt_file = os.stat(default_db).st_ino
+
+    def _backup_held(src, dst):
+        raise PermissionError("[WinError 32] The process cannot access the file")
+
+    monkeypatch.setattr(db_module.shutil, "copyfile", _backup_held)
+
+    _boot()  # asset startup logs the corruption and carries on, as before
+
+    assert os.stat(default_db).st_ino == corrupt_file
+    assert glob.glob(default_db + ".corrupt-*") == []
 
 
 def test_database_that_wont_move_keeps_its_wal(default_db, monkeypatch):

@@ -345,8 +345,8 @@ def _quarantine_and_restore(db_path, error):
             shutil.copyfile(backup_path, restore_path)
             sound = _passes_integrity_check(restore_path)
             taken = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(backup_path)))
-        except OSError:
-            sound = False  # no backup, or it can't be read
+        except FileNotFoundError:
+            sound = False  # no backup; any other error stops here, before anything moves
         moved = []
         try:
             # With its WAL and journal: when another connection keeps one, SQLite would replay it.
