@@ -6,7 +6,6 @@ import sqlite3
 import threading
 import time
 from contextlib import closing, suppress
-from urllib.parse import quote
 from app.assets.event_log import error_kind
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
@@ -292,10 +291,9 @@ def _init_file_db(db_url):
 
 
 def is_recoverable_corruption(error):
-    # Default database, CORRUPT/NOTADB only; the error may be another file's (the pre-upgrade backup)
-    if _cannot_move_aside or args.database_url is not None or error_kind(error) != "database_corrupt":
+    if _cannot_move_aside or args.database_url is not None or error_kind(error) != "database_corrupt":  # default DB only
         return False
-    return not _passes_integrity_check(get_db_path())
+    return not _passes_integrity_check(get_db_path())  # the error may be another file's, e.g. the pre-upgrade backup
 
 
 def recover_from_corruption(error):
@@ -307,6 +305,8 @@ def recover_from_corruption(error):
     try:
         _quarantine_and_restore(db_path, error)
     except Exception:  # e.g. held open on Windows: asset startup now logs the corruption, as before
+        if not os.path.exists(db_path):
+            raise  # moved but not restored: fail rather than run on a new empty file
         global _cannot_move_aside
         _cannot_move_aside = True
         return True
@@ -314,9 +314,10 @@ def recover_from_corruption(error):
     return True
 
 
-def _connect_existing(path):  # sqlite3.connect would create a missing file; mode=rw doesn't
-    uri = quote(os.path.abspath(path).replace(os.sep, "/"), safe="/:")  # file:////server/share for UNC
-    return sqlite3.connect(f"file://{'' if uri.startswith('/') else '/'}{uri}?mode=rw", uri=True)
+def _connect_existing(path):  # sqlite3.connect would create a missing file
+    if not os.path.exists(path):
+        raise sqlite3.OperationalError("unable to open database file")
+    return sqlite3.connect(path)
 
 
 def _passes_integrity_check(path):  # after an error only; unlike quick_check, it finds index damage
@@ -350,7 +351,7 @@ def _quarantine_and_restore(db_path, error):
             os.replace(restore_path, db_path)  # atomic: never part of a backup
             outcome = f"Database restored from the daily backup taken {taken}; later changes are lost"
     finally:
-        if os.path.exists(restore_path):
+        with suppress(OSError):  # a leftover copy must not undo a finished restore
             os.remove(restore_path)
     log_startup_warning(
         f"Database quarantined: '{db_path}' was corrupt ({getattr(error, 'orig', error)}) and was "
@@ -358,8 +359,7 @@ def _quarantine_and_restore(db_path, error):
     )
 
 
-def start_daily_backup():
-    """Keep a compact copy of the default database, refreshed once a day, off the startup path."""
+def start_daily_backup():  # a compact copy of the default database, refreshed daily, off the startup path
     if args.database_url is not None:
         return
     db_path = get_db_path()
@@ -376,7 +376,7 @@ def _keep_daily_backup(db_path, backup_path):
         if due_in <= 0:
             _write_daily_backup(db_path, backup_path)
             due_in = _DAILY_BACKUP_INTERVAL_SECONDS  # also the retry delay after a failure
-        time.sleep(min(due_in, _DAILY_BACKUP_INTERVAL_SECONDS))  # a backup dated in the future
+        time.sleep(due_in)
 
 
 def _write_daily_backup(db_path, backup_path):

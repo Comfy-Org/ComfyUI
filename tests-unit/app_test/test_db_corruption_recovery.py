@@ -215,6 +215,46 @@ def test_kill_while_checking_the_backup_leaves_the_database_to_recover_again(def
     assert any("restored from the daily backup" in w for w in startup_warnings)
 
 
+def test_copy_left_by_a_killed_recovery_is_replaced(default_db, startup_warnings):
+    # A SIGKILL skips cleanup, so the next recovery finds the old .restore-tmp.
+    _make_db(default_db + ".daily-backup", marker="from backup")
+    _make_db(default_db)
+    _overwrite_page_of(default_db, "alembic_version")
+    with open(default_db + ".restore-tmp", "wb") as f:
+        f.write(b"half a copy")
+
+    _boot()
+
+    with closing(sqlite3.connect(default_db)) as conn:
+        assert conn.execute("SELECT value FROM marker").fetchone() == ("from backup",)
+    assert not os.path.exists(default_db + ".restore-tmp")
+    assert any("restored from the daily backup" in w for w in startup_warnings)
+
+
+def test_failed_restore_after_init_fails_the_launch_instead_of_starting_empty(default_db, monkeypatch):
+    # E.g. a virus scanner holding the fresh copy: the database is already moved aside.
+    _make_db(default_db + ".daily-backup", marker="from backup")
+    _make_db(default_db)
+    _overwrite_page_of(default_db, "assets")
+    real_replace = os.replace
+
+    def _restore_refused(src, dst):
+        if src.endswith(".restore-tmp"):
+            raise PermissionError("[WinError 32] The process cannot access the file")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(db_module.os, "replace", _restore_refused)
+
+    with pytest.raises(SystemExit):
+        _boot()
+
+    assert not db_module._cannot_move_aside
+    assert not os.path.exists(default_db)  # no new empty database in its place
+    assert len(_quarantined(default_db)) == 1
+    with closing(sqlite3.connect(default_db + ".daily-backup")) as conn:
+        assert conn.execute("SELECT value FROM marker").fetchone() == ("from backup",)
+
+
 def test_corrupt_daily_backup_is_not_restored(default_db, startup_warnings):
     backup = default_db + ".daily-backup"
     _make_db(backup, marker="from backup")
@@ -825,21 +865,6 @@ def test_copy_breaking_a_constraint_never_replaces_the_backup(live_db):
 
     with open(backup, "rb") as f:
         assert f.read() == b"previous backup"
-
-
-def test_paths_that_need_escaping_in_a_uri_open(tmp_path):
-    db_path = tmp_path / "a #%? dir" / "comfyui.db"
-    db_path.parent.mkdir()
-    db_path = str(db_path)
-    with closing(sqlite3.connect(db_path)) as conn:
-        conn.execute("CREATE TABLE marker (value TEXT)")
-        conn.execute("INSERT INTO marker VALUES ('escaped')")
-        conn.commit()
-
-    assert db_module._passes_integrity_check(db_path)
-    db_module._write_daily_backup(db_path, db_path + ".daily-backup")
-    with closing(sqlite3.connect(db_path + ".daily-backup")) as conn:
-        assert conn.execute("SELECT value FROM marker").fetchall() == [("escaped",)]
 
 
 def test_deleted_database_never_replaces_the_backup(tmp_path):
