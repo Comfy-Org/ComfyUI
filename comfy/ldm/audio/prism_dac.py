@@ -10,6 +10,7 @@ from comfy.ldm.minimax.audio_vae import Snake1d
 
 class ResidualUnit(nn.Module):
     def __init__(self, channels, dilation, operations):
+        """Build a dilated Snake/Conv residual unit with checkpoint-compatible names."""
         super().__init__()
         self.block = nn.Sequential(
             Snake1d(channels),
@@ -19,6 +20,7 @@ class ResidualUnit(nn.Module):
         )
 
     def forward(self, x):
+        """Apply the residual branch, aligning temporal edges before addition."""
         y = self.block(x)
         padding = (x.shape[-1] - y.shape[-1]) // 2
         if padding > 0:
@@ -28,6 +30,7 @@ class ResidualUnit(nn.Module):
 
 class EncoderBlock(nn.Module):
     def __init__(self, channels, stride, operations):
+        """Double channel width while downsampling by the specified stride."""
         super().__init__()
         self.block = nn.Sequential(
             *(ResidualUnit(channels // 2, dilation, operations) for dilation in (1, 3, 9)),
@@ -37,11 +40,13 @@ class EncoderBlock(nn.Module):
         )
 
     def forward(self, x):
+        """Downsample a waveform feature sequence through residual units."""
         return self.block(x)
 
 
 class Encoder(nn.Module):
     def __init__(self, operations):
+        """Build the mono encoder with a total temporal stride of 960."""
         super().__init__()
         channels = 128
         layers = [operations.Conv1d(1, channels, 7, padding=3)]
@@ -52,11 +57,13 @@ class Encoder(nn.Module):
         self.block = nn.Sequential(*layers)
 
     def forward(self, x):
+        """Map waveform samples to the continuous posterior feature sequence."""
         return self.block(x)
 
 
 class DecoderBlock(nn.Module):
     def __init__(self, channels, output_channels, stride, operations):
+        """Halve channel width and upsample with a transposed convolution."""
         super().__init__()
         self.block = nn.Sequential(
             Snake1d(channels),
@@ -66,11 +73,13 @@ class DecoderBlock(nn.Module):
         )
 
     def forward(self, x):
+        """Upsample latent features and refine them with residual units."""
         return self.block(x)
 
 
 class Decoder(nn.Module):
     def __init__(self, operations):
+        """Build the waveform decoder matching the released DAC state dict."""
         super().__init__()
         channels = 2048
         layers = [operations.Conv1d(128, channels, 7, padding=3)]
@@ -81,12 +90,14 @@ class Decoder(nn.Module):
         self.model = nn.Sequential(*layers)
 
     def forward(self, x):
+        """Decode features to a mono waveform bounded by tanh."""
         return self.model(x)
 
 
 class PrismDAC(nn.Module):
     """48 kHz mono continuous DAC; latents are [B, 128, T] with hop 960."""
     def __init__(self, operations):
+        """Construct the continuous posterior projections and DAC encoder/decoder."""
         super().__init__()
         self.encoder = Encoder(operations)
         self.quant_conv = operations.Conv1d(128, 256, 1)
@@ -94,9 +105,11 @@ class PrismDAC(nn.Module):
         self.decoder = Decoder(operations)
 
     def encode(self, waveform):
+        """Pad to hop 960 and return the deterministic 128-channel posterior mean."""
         waveform = nn.functional.pad(waveform, (0, (-waveform.shape[-1]) % 960))
         # Official continuous posterior mode; not a sampled or discrete codebook.
         return self.quant_conv(self.encoder(waveform)).chunk(2, dim=1)[0]
 
     def decode(self, latent):
+        """Decode continuous latents without discrete codebook quantization."""
         return self.decoder(self.post_quant_conv(latent))

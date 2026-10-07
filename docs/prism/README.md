@@ -38,3 +38,9 @@ The video assets are linked in the upstream PR. GPU speedup, arbitrary samplers,
 ## Provenance
 
 Architecture and sparse kernels: Tencent-Hunyuan/Prism (MIT with the listed third-party licenses). Continuous audio codec: Prism and descript-audio-codec (MIT). The copied license/attribution files are retained next to the corresponding implementations. Wan and UMT5 components retain their own original licenses. This change does not download or upload models or contact any network service from core inference code.
+
+## Attention precision and portability
+
+Without a `PrismAttention` override, the model uses `dense` attention and does not import Triton. The supplied workflow explicitly selects `prism_sparse_tail_safe`; that optional path still requires CUDA and Triton.
+
+On devices supporting FP64, adjacent-pair rotary arithmetic retains the upstream complex multiplication and single final rounding, with sequence chunks limiting temporary allocation size. Devices without FP64 use real FP32 rotation matrices and the shared ComfyUI RoPE dispatcher. Frequency tables are created on the target device once per tower forward and are not retained between executions. The FP32 fallback is not claimed to be numerically identical to the FP64 reference.

@@ -13,10 +13,12 @@ import comfy.model_management
 class RowScaledFP8Ops(comfy.ops.manual_cast):
     class Linear(comfy.ops.manual_cast.Linear):
         def __init__(self, *args, **kwargs):
+            """Register the row scale separately from the compressed FP8 parameter."""
             super().__init__(*args, **kwargs)
             self.register_buffer('prism_scale', None, persistent=False)
 
         def forward(self, input):
+            """Reconstruct only the active linear weight through native cast/offload hooks."""
             if self.prism_scale is None:
                 return super().forward(input)
             comfy.ops.run_every_op()
@@ -29,6 +31,7 @@ class RowScaledFP8Ops(comfy.ops.manual_cast):
                 return torch.nn.functional.linear(input, weight, bias)
 
         def _save_to_state_dict(self, destination, prefix, keep_vars):
+            """Export the compressed weight and its row scale without requantization."""
             super()._save_to_state_dict(destination, prefix, keep_vars)
             if self.prism_scale is not None:
                 destination[prefix + 'weight.prism_scale'] = (

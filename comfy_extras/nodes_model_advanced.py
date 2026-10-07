@@ -151,6 +151,7 @@ class ModelSamplingSD3:
 class ModelSamplingAV:
     @classmethod
     def INPUT_TYPES(s):
+        """Expose separate flow shifts for the joint video and audio schedules."""
         return {"required": {
             "model": ("MODEL",),
             "shift_video": ("FLOAT", {"default": 9.0, "min": 0.01, "max": 100.0, "step": 0.01}),
@@ -164,6 +165,7 @@ class ModelSamplingAV:
     CATEGORY = "model/patch"
 
     def patch(self, model, shift_video, shift_audio, schedule_steps):
+        """Patch Prism sampling with independent audio/video shifts on a shared step grid."""
         if shift_video <= 0 or shift_audio <= 0 or schedule_steps < 1:
             raise ValueError("Audio/video flow shifts and schedule_steps must be positive.")
         original = model.get_model_object("model_sampling")

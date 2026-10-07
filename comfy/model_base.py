@@ -3037,14 +3037,17 @@ class CogVideoX(BaseModel):
 
 class Prism(BaseModel):
     def __init__(self, model_config, device=None):
+        """Initialize native joint AV sampling and row-scaled checkpoint bookkeeping."""
         super().__init__(model_config, ModelType.FLOW_AV, device=device,
             unet_model=comfy.ldm.prism.model.Prism)
         self.prism_row_scaled = False
 
     def get_dynamic_vram__units(self):
+        """Delegate dynamic offload units to the Prism transformer."""
         return self.diffusion_model.get_dynamic_units(), []
 
     def load_model_weights(self, sd, unet_prefix="", assign=False):
+        """Load legacy row-scaled FP8 or native quantized weights with their metadata."""
         to_load = {k[len(unet_prefix):]: sd.pop(k) for k in list(sd) if k.startswith(unet_prefix)}
         scale_keys = {k for k in to_load if k.endswith('.prism_scale')}
         quant_layers = {k[:-len('.comfy_quant')] for k in to_load if k.endswith('.comfy_quant')}
@@ -3126,6 +3129,7 @@ class Prism(BaseModel):
         return self
 
     def _transform_streams(self, latent, into_model):
+        """Map video normalization and audio scale across the packed latent boundary."""
         nested = latent.is_nested
         if nested:
             streams = latent.unbind()
@@ -3148,12 +3152,15 @@ class Prism(BaseModel):
         return comfy.utils.pack_latents((video, audio))[0]
 
     def process_latent_in(self, latent):
+        """Convert external video/audio latents to Prism sampling coordinates."""
         return self._transform_streams(latent, True)
 
     def process_latent_out(self, latent):
+        """Restore decoded-model coordinates for both latent streams."""
         return self._transform_streams(latent, False)
 
     def extra_conds(self, **kwargs):
+        """Pass reference, text, audio timing, and latent shapes into the native guider."""
         out = super().extra_conds(**kwargs)
         if 'prism_reference' not in kwargs or 'prism_audio_context' not in kwargs:
             raise ValueError('Use Prism Prepare AV conditioning for both KSampler positive and negative inputs.')
@@ -3166,6 +3173,7 @@ class Prism(BaseModel):
     def _apply_model(self, x, t, c_concat=None, c_crossattn=None, control=None,
                      transformer_options={}, prism_reference=None, prism_audio_context=None,
                      prism_fps=24.0, latent_shapes=None, **kwargs):
+        """Unpack AV latents, select the video expert, and repack denoised streams."""
         if self.prism_row_scaled and self.current_patcher is not None and self.current_patcher.patches:
             raise ValueError('Prism row-scaled FP8 LoRA patches are not implemented; use the unpatched model or BF16.')
         if latent_shapes is None or len(latent_shapes) != 2:
@@ -3212,5 +3220,6 @@ class Prism(BaseModel):
     def memory_required(self, input_shape, cond_shapes={}):
         # Packed length contains both streams. Estimate activations, not all
         # weights: native ModelPatcher accounts for resident/offloaded weights.
+        """Estimate the joint audio/video activation footprint for native offloading."""
         tokens = max(1, input_shape[0] * math.prod(input_shape[1:]) // 64)
         return 6 * 1024**3 + tokens * (20 * 5120 + 6 * 13824) * 2

@@ -7,32 +7,55 @@ from torch import nn
 import torch.nn.functional as F
 
 import comfy.ops
+import comfy.model_management
 import comfy.model_prefetch
 from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.common_dit import pad_to_patch_size
+from comfy.ldm.flux.math import apply_rope1
 
 
 def timestep_embedding(dim, timestep):
-    frequency = torch.pow(10000, -torch.arange(dim // 2, device=timestep.device, dtype=torch.float64) / (dim // 2))
-    phase = torch.outer(timestep.double(), frequency)
+    """Encode timesteps in FP64 where supported, otherwise in FP32."""
+    dtype = torch.float64 if comfy.model_management.supports_fp64(timestep.device) else torch.float32
+    frequency = torch.pow(10000, -torch.arange(dim // 2, device=timestep.device, dtype=dtype) / (dim // 2))
+    phase = torch.outer(timestep.to(dtype), frequency)
     return torch.cat((phase.cos(), phase.sin()), dim=-1).to(timestep.dtype)
 
 
-def rotary_table(dim, length):
-    frequency = 1.0 / (10000 ** (torch.arange(0, dim, 2, device='cpu').double() / dim))
-    phase = torch.outer(torch.arange(length, device='cpu', dtype=torch.float64), frequency)
-    return torch.polar(torch.ones_like(phase), phase)
+def rotary_table(dim, length, device=None):
+    """Build adjacent-pair rotation frequencies directly on the execution device."""
+    device = torch.device('cpu') if device is None else device
+    dtype = torch.float64 if comfy.model_management.supports_fp64(device) else torch.float32
+    frequency = 1.0 / (10000 ** (torch.arange(0, dim, 2, device=device, dtype=dtype) / dim))
+    phase = torch.outer(torch.arange(length, device=device, dtype=dtype), frequency)
+    if dtype == torch.float64:
+        return torch.polar(torch.ones_like(phase), phase)
+    # Use real matrices for backends that also lack complex tensor operations.
+    cos, sin = phase.cos(), phase.sin()
+    return torch.stack((cos, -sin, sin, cos), dim=-1).unflatten(-1, (2, 2))
 
 
 def apply_rotary(x, freqs, heads):
-    # Released Prism rotates adjacent real/imaginary pairs in FP64 and rounds
-    # only once. Lower-precision intermediate arithmetic is not equivalent.
-    pairs = x.reshape(x.shape[0], x.shape[1], heads, -1, 2).double()
-    rotated = torch.view_as_complex(pairs) * freqs
-    return torch.view_as_real(rotated).flatten(2).to(x.dtype)
+    """Preserve upstream rotation precision while bounding temporary tensor size."""
+    # Shared RoPE kernels use FP32 intermediates, which do not reproduce Prism's
+    # FP64 complex multiply followed by a single rounding to the model dtype.
+    # Slice both batch and sequence so FP64 intermediates never span a full Q/K.
+    if not freqs.is_complex():
+        pairs = x.reshape(x.shape[0], x.shape[1], heads, -1).transpose(1, 2)
+        matrices = freqs.squeeze(1).unsqueeze(0).unsqueeze(0)
+        return apply_rope1(pairs, matrices).transpose(1, 2).flatten(2)
+    out = torch.empty_like(x)
+    for batch in range(x.shape[0]):
+        for start in range(0, x.shape[1], 256):
+            part = x[batch:batch + 1, start:start + 256]
+            pairs = part.reshape(1, part.shape[1], heads, -1, 2).to(freqs.real.dtype).contiguous()
+            rotated = torch.view_as_complex(pairs) * freqs[start:start + 256]
+            out[batch:batch + 1, start:start + 256] = torch.view_as_real(rotated).flatten(2)
+    return out
 
 
 def bridge_rotary(x, positions):
+    """Build FP32 half-split RoPE cosine/sine tables for cross-modal bridges."""
     frequency = 1.0 / (10000 ** (torch.arange(0, 128, 2, device=x.device, dtype=torch.int64).float() / 128))
     with torch.autocast(x.device.type, enabled=False):
         phase = (frequency[None, :, None] @ positions[None, None, :]).transpose(1, 2)
@@ -41,6 +64,7 @@ def bridge_rotary(x, positions):
 
 
 def apply_bridge_rotary(x, freqs, heads):
+    """Rotate the two channel halves using cross-modal position tables."""
     x = x.reshape(x.shape[0], x.shape[1], heads, -1)
     cos, sin = (f.unsqueeze(2).to(x) for f in freqs)
     first, second = x.chunk(2, dim=-1)
@@ -50,11 +74,13 @@ def apply_bridge_rotary(x, freqs, heads):
 
 class AttentionModule(nn.Module):
     def __init__(self, heads):
+        """Own the attention backend preference for this projection group."""
         super().__init__()
         self.heads = heads
         self.comfy_attention = ComfyAttention()
 
     def forward(self, q, k, v, transformer_options):
+        """Dispatch packed Q/K/V through the selected native attention backend."""
         return optimized_attention(AttentionTensorContainer(q), AttentionTensorContainer(k),
             AttentionTensorContainer(v), self.heads, preferred_attention=self.comfy_attention,
             transformer_options=transformer_options)
@@ -62,6 +88,7 @@ class AttentionModule(nn.Module):
 
 class SelfAttention(nn.Module):
     def __init__(self, dim, heads, eps, device, dtype, operations):
+        """Build Q/K-normalized self-attention with native castable operations."""
         super().__init__()
         self.heads = heads
         self.q = operations.Linear(dim, dim, device=device, dtype=dtype)
@@ -73,10 +100,11 @@ class SelfAttention(nn.Module):
         self.attn = AttentionModule(heads)
 
     def forward(self, x, freqs, grid, sparse, options):
+        """Apply dense attention by default, or explicitly selected video sparsity."""
         q = apply_rotary(self.norm_q(self.q(x)), freqs, self.heads)
         k = apply_rotary(self.norm_k(self.k(x)), freqs, self.heads)
         v = self.v(x)
-        attention = options.get('prism_attention', 'prism_sparse_tail_safe')
+        attention = options.get('prism_attention', 'dense')
         if sparse and attention != 'dense' and grid[0] > 1:
             from .sparse import sparse_attention
             out = sparse_attention(q, k, v, self.heads, grid,
@@ -92,6 +120,7 @@ class SelfAttention(nn.Module):
 
 class CrossAttention(nn.Module):
     def __init__(self, dim, kv_dim, heads, eps, device, dtype, operations):
+        """Build normalized cross-attention with independent context width."""
         super().__init__()
         self.heads = heads
         self.q = operations.Linear(dim, dim, device=device, dtype=dtype)
@@ -103,6 +132,7 @@ class CrossAttention(nn.Module):
         self.attn = AttentionModule(heads)
 
     def forward(self, x, context, options, q_freqs=None, k_freqs=None):
+        """Attend to context, optionally rotating cross-modal Q/K projections."""
         q = self.norm_q(self.q(x))
         k = self.norm_k(self.k(context))
         v = self.v(context)
@@ -115,16 +145,19 @@ class CrossAttention(nn.Module):
 
 class Conditioner(nn.Module):
     def __init__(self, dim, kv_dim, device, dtype, operations):
+        """Project normalized cross-modal context back to the target stream."""
         super().__init__()
         self.y_norm = operations.LayerNorm(kv_dim, eps=1e-6, device=device, dtype=dtype)
         self.inner = CrossAttention(dim, kv_dim, dim // 128, 1e-6, device, dtype, operations)
 
     def forward(self, x, context, x_freqs, context_freqs, options):
+        """Return a cross-modal residual without updating either source stream."""
         return self.inner(x, self.y_norm(context), options, x_freqs, context_freqs)
 
 
 class DiTBlock(nn.Module):
     def __init__(self, dim, heads, ffn_dim, eps, device, dtype, operations):
+        """Construct the checkpoint-compatible time-modulated transformer block."""
         super().__init__()
         self.self_attn = SelfAttention(dim, heads, eps, device, dtype, operations)
         self.cross_attn = CrossAttention(dim, dim, heads, eps, device, dtype, operations)
@@ -136,6 +169,7 @@ class DiTBlock(nn.Module):
         self.modulation = nn.Parameter(torch.empty(1, 6, dim, device=device, dtype=dtype))
 
     def forward(self, x, context, modulation, freqs, grid, sparse, options):
+        """Apply gated self-attention, text cross-attention, and the feed-forward residual."""
         shift, scale, gate, mlp_shift, mlp_scale, mlp_gate = (
             comfy.ops.cast_to_input(self.modulation, modulation) + modulation).chunk(6, dim=1)
         out = self.norm1(x) * (1 + scale) + shift
@@ -152,18 +186,21 @@ class DiTBlock(nn.Module):
 
 class Head(nn.Module):
     def __init__(self, dim, out_dim, patch, device, dtype, operations):
+        """Build the modulated projection from tokens to latent patches."""
         super().__init__()
         self.norm = operations.LayerNorm(dim, eps=1e-6, elementwise_affine=False, device=device, dtype=dtype)
         self.head = operations.Linear(dim, out_dim * math.prod(patch), device=device, dtype=dtype)
         self.modulation = nn.Parameter(torch.empty(1, 2, dim, device=device, dtype=dtype))
 
     def forward(self, x, time):
+        """Project time-modulated tokens to output patch values."""
         shift, scale = (comfy.ops.cast_to_input(self.modulation, time) + time.unsqueeze(1)).chunk(2, dim=1)
         return self.head(self.norm(x) * (1 + scale) + shift)
 
 
 class Tower(nn.Module):
     def __init__(self, dim, heads, ffn_dim, layers, audio, device, dtype, operations):
+        """Build an audio or video tower without retaining execution-time frequency tensors."""
         super().__init__()
         self.dim = dim
         self.audio = audio
@@ -179,33 +216,35 @@ class Tower(nn.Module):
         self.time_projection = nn.Sequential(nn.SiLU(), operations.Linear(dim, dim * 6, device=device, dtype=dtype))
         self.blocks = nn.ModuleList(DiTBlock(dim, heads, ffn_dim, 1e-6, device, dtype, operations) for _ in range(layers))
         self.head = Head(dim, 128 if audio else 16, self.patch, device, dtype, operations)
-        head_dim = dim // heads
-        if audio:
-            self.freqs = rotary_table(head_dim, 16384).chunk(3, dim=-1)
-        else:
-            self.freqs = tuple(rotary_table(d, 1024) for d in (head_dim - 2 * (head_dim // 3), head_dim // 3, head_dim // 3))
+        self.head_dim = dim // heads
 
     def embed_time(self, timestep, dtype):
+        """Compute time embeddings and six modulation vectors outside autocast."""
         with torch.autocast(timestep.device.type, enabled=False):
             time = self.time_embedding(timestep_embedding(256, timestep.float()))
             modulation = self.time_projection(time).unflatten(1, (6, self.dim))
         return time.to(dtype), modulation.to(dtype)
 
     def patchify(self, x):
+        """Embed channel-first latents as contiguous tokens and return their grid."""
         x = self.patch_embedding(x)
         grid = x.shape[2:]
         return x.flatten(2).transpose(1, 2).contiguous(), grid
 
     def assemble_freqs(self, grid, device):
+        """Create one forward-local frequency table shared by all tower blocks."""
         if self.audio:
-            return torch.cat(tuple(f[:grid[0]] for f in self.freqs), dim=-1).reshape(grid[0], 1, -1).to(device)
+            return rotary_table(self.head_dim, grid[0], device).unsqueeze(1)
         t, h, w = grid
-        f = tuple(freq.to(device) for freq in self.freqs)
-        return torch.cat((f[0][:t].view(t, 1, 1, -1).expand(t, h, w, -1),
-            f[1][:h].view(1, h, 1, -1).expand(t, h, w, -1),
-            f[2][:w].view(1, 1, w, -1).expand(t, h, w, -1)), dim=-1).reshape(t * h * w, 1, -1)
+        dims = (self.head_dim - 2 * (self.head_dim // 3), self.head_dim // 3, self.head_dim // 3)
+        f = tuple(rotary_table(dim, length, device) for dim, length in zip(dims, grid))
+        parts = (f[0].view(t, 1, 1, *f[0].shape[1:]).expand(t, h, w, *f[0].shape[1:]),
+            f[1].view(1, h, 1, *f[1].shape[1:]).expand(t, h, w, *f[1].shape[1:]),
+            f[2].view(1, 1, w, *f[2].shape[1:]).expand(t, h, w, *f[2].shape[1:]))
+        return torch.cat(parts, dim=3).flatten(0, 2).unsqueeze(1)
 
     def unpatchify(self, x, grid):
+        """Restore output tokens to the native audio or video latent layout."""
         if self.audio:
             return x.transpose(1, 2)
         t, h, w = grid
@@ -214,6 +253,7 @@ class Tower(nn.Module):
 
 class FusedBlock(nn.Module):
     def __init__(self, video_block, audio_block, device, dtype, operations):
+        """Pair checkpoint-owned audio/video blocks and bidirectional conditioners."""
         super().__init__()
         self.video_block = video_block
         self.audio_block = audio_block
@@ -224,6 +264,7 @@ class FusedBlock(nn.Module):
 class Prism(nn.Module):
     def __init__(self, device=None, dtype=None, operations=None, image_model=None,
                  video_layers=40, audio_layers=30, boundary_ratio=0.9):
+        """Construct both video experts and the fused audio tower using native operations."""
         super().__init__()
         self.dtype = dtype
         self.boundary_ratio = boundary_ratio
@@ -238,6 +279,7 @@ class Prism(nn.Module):
         self.audio_dit.blocks = nn.ModuleList()
 
     def get_dynamic_units(self):
+        """Expose independently offloadable blocks and cross-modal conditioners."""
         units = []
         for fused in self.fusion_blocks:
             units.extend((fused.a2v_conditioner, fused.v2a_conditioner, fused.video_block, fused.audio_block))
@@ -247,6 +289,7 @@ class Prism(nn.Module):
 
     def forward(self, video, audio, reference, context, audio_context, video_time, audio_time,
                 fps, low_noise, transformer_options):
+        """Run joint AV denoising with forward-local positions and block prefetching."""
         original_shape = video.shape[2:]
         video = pad_to_patch_size(video, (1, 2, 2))
         reference = pad_to_patch_size(reference, (1, 2, 2))

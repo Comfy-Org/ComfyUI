@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 
 def sparse_attention(q, k, v, heads, grid, sparsity, cdf_threshold):
+    """Pad the latent grid for BSA and remove padded queries from the result."""
     from .kernels.bsa_interface import flash_attn_bsa_3d
     temporal, height, width = grid
     padding = tuple((-value) % 4 for value in grid)

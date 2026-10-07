@@ -10,6 +10,7 @@ import comfy.nested_tensor
 
 
 def prepare_reference_image(image, width, height, mode):
+    """Resize the first reference image with the selected upstream-compatible method."""
     if mode == 'legacy_center_crop':
         return comfy.utils.common_upscale(image[:1,:,:,:3].movedim(-1,1), width,height,'bilinear','center').movedim(1,-1).cpu()
     if mode != 'official_lanczos':
@@ -20,11 +21,13 @@ def prepare_reference_image(image, width, height, mode):
 
 
 def latent_statistics(device, dtype):
+    """Return Wan 2.1 normalization statistics on the requested device and dtype."""
     layout=comfy.latent_formats.Wan21()
     return layout.latents_mean.to(device=device,dtype=dtype), layout.latents_std.to(device=device,dtype=dtype)
 
 
 def prepare_av_reference(video_vae,image,width,height,frames,fps,reference_resize):
+    """Encode the image reference and construct stock-sampler video/audio latents."""
     if video_vae.latent_channels != 16 or video_vae.downscale_index_formula != (4,8,8):
         raise ValueError('Use the 16-channel Wan 2.1 video VAE.')
     if fps <= 0:
@@ -54,6 +57,7 @@ def prepare_av_reference(video_vae,image,width,height,frames,fps,reference_resiz
 class PrismAttention:
     @classmethod
     def INPUT_TYPES(cls):
+        """Expose explicit attention mode and block-selection controls."""
         return {'required': {
             'model': ('MODEL',),
             'attention': (['dense','prism_sparse','prism_sparse_tail_safe'], {'default':'prism_sparse_tail_safe'}),
@@ -65,6 +69,7 @@ class PrismAttention:
     CATEGORY = 'model/conditioning/prism'
 
     def configure(self,model,attention,sparsity,cdf_threshold):
+        """Clone the model patcher and set Prism attention options without mutating weights."""
         if not isinstance(model.model,comfy.model_base.Prism):
             raise ValueError('Prism attention settings require a Prism model.')
         if attention not in ('dense','prism_sparse','prism_sparse_tail_safe'):
@@ -75,6 +80,7 @@ class PrismAttention:
         return (configured,)
 
 def attach_av_conditions(video_conditions,audio_conditions,reference,fps):
+    """Attach audio context and reference metadata while preserving conditioning schedules."""
     if len(audio_conditions) not in (1,len(video_conditions)):
         raise ValueError('Audio conditioning must have one global entry or match the video conditioning entries.')
     result = []
@@ -91,6 +97,7 @@ def attach_av_conditions(video_conditions,audio_conditions,reference,fps):
 class PrismPrepareAV:
     @classmethod
     def INPUT_TYPES(cls):
+        """Declare image-to-video inputs and optional independent audio conditioning."""
         return {'required': {
             'positive': ('CONDITIONING',), 'negative': ('CONDITIONING',),
             'video_vae': ('VAE',), 'image': ('IMAGE',),
@@ -106,6 +113,7 @@ class PrismPrepareAV:
     CATEGORY = 'model/conditioning/prism'
 
     def prepare(self,positive,negative,video_vae,image,width,height,frames,fps,reference_resize,audio_positive=None):
+        """Return joint AV conditioning and a latent with the original audio sample count."""
         reference,latent = prepare_av_reference(video_vae,image,width,height,frames,fps,reference_resize)
         audio_positive = positive if audio_positive is None else audio_positive
         return (attach_av_conditions(positive,audio_positive,reference,fps),
