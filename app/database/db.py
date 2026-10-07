@@ -25,6 +25,7 @@ try:
     from alembic.config import Config
     from alembic.runtime.migration import MigrationContext
     from alembic.script import ScriptDirectory
+    from alembic.script.revision import ResolutionError
     from sqlalchemy import create_engine, event
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import sessionmaker
@@ -284,7 +285,11 @@ def _init_file_db(db_url):
         except Exception as e:
             if is_recoverable_corruption(e):
                 _quarantine_and_restore(db_path, e)
-            elif args.database_url is None and getattr(e, "upgrade_discards_the_catalog", False):
+            elif (
+                args.database_url is None
+                and getattr(e, "upgrade_discards_the_catalog", False)
+                and error_kind(e) != "database_locked"  # another process has it open
+            ):
                 _recreate_after_failed_upgrade(db_path, e)
             else:
                 raise
@@ -347,7 +352,7 @@ def _recreate_after_failed_upgrade(db_path, error):
     aside_path = _move_aside(db_path, "failed-upgrade", error)
     log_startup_warning(
         f"Database upgrade failed ({getattr(error, 'orig', error)}): '{db_path}' was moved to "
-        f"'{aside_path}' and a new database was created. The asset catalog is rebuilt by rescanning your files."
+        f"'{aside_path}'; starting with a new database. The asset catalog is rebuilt by rescanning your files."
     )
 
 
@@ -492,6 +497,10 @@ def _migrate(conn, engine, write_engine, config, db_path, db_exists):
     if target_rev is None:
         logging.warning("No target revision found.")
     elif current_rev != target_rev:
+        try:
+            discards_catalog = db_exists and _upgrade_discards_the_catalog(script, target_rev, current_rev)
+        except ResolutionError:  # stamped by a newer release: the upgrade reports it
+            discards_catalog = False
         # Backup the database pre upgrade
         backup_path = db_path + ".bkp"
         if db_exists:
@@ -514,10 +523,10 @@ def _migrate(conn, engine, write_engine, config, db_path, db_exists):
                         f"Restoring the database from its pre-upgrade backup, or removing the "
                         f"backup afterwards, failed; the pre-upgrade copy is kept at {backup_path}"
                     )
-            e.upgrade_discards_the_catalog = _upgrade_discards_the_catalog(script, target_rev, current_rev)
+            e.upgrade_discards_the_catalog = discards_catalog
             raise e
 
-        if backup_path and _upgrade_discards_the_catalog(script, target_rev, current_rev):
+        if discards_catalog:
             log_startup_warning(
                 f"The asset catalog was rebuilt from scratch by migration "
                 f"{_DESTRUCTIVE_REVISION}: manual tags, user metadata, previews, renames, "

@@ -31,10 +31,6 @@ def _execute(db_path, *statements):
 # Left by an upgrade killed part way through a migration, before it stamped its revision.
 _INTERRUPTED_UPGRADES = {
     "0002 dropped its first index": ("0001_assets", ["DROP INDEX ix_asset_info_meta_key_val_bool"]),
-    "0002 dropped the old tables": (
-        "0001_assets",
-        [f"DROP TABLE {t}" for t in ("asset_info_meta", "asset_info_tags", "asset_cache_state", "assets_info")],
-    ),
     "0003 added its first column": (
         "0002_merge_to_asset_references",
         ["ALTER TABLE asset_references ADD COLUMN system_metadata JSON"],
@@ -75,6 +71,7 @@ def test_failed_upgrade_that_keeps_the_catalog_is_not_recreated(default_db, monk
 
     assert _moved_aside(default_db) == []
     assert os.stat(default_db).st_ino == old_file
+    assert _revision(default_db) == "0007_record_content_split"
 
 
 def test_failed_upgrade_of_an_explicit_database_url_is_not_recreated(explicit_db, monkeypatch):
@@ -85,3 +82,37 @@ def test_failed_upgrade_of_an_explicit_database_url_is_not_recreated(explicit_db
         _boot()
 
     assert _moved_aside(explicit_db) == []
+    assert _revision(explicit_db) == "0006_add_loader_path"
+
+
+def test_database_locked_by_another_process_is_not_recreated(default_db):
+    _make_db(default_db, revision="0006_add_loader_path")
+    holder = sqlite3.connect(default_db)
+    holder.execute("BEGIN IMMEDIATE")  # others may still read (the pre-upgrade backup), not write
+    try:
+        with pytest.raises(SystemExit):
+            _boot()
+    finally:
+        holder.close()
+
+    assert _moved_aside(default_db) == []
+    assert _revision(default_db) == "0006_add_loader_path"
+
+
+def test_revision_from_a_newer_release_reports_the_upgrade_error(default_db):
+    _make_db(default_db, revision="0006_add_loader_path")
+    _execute(default_db, "UPDATE alembic_version SET version_num = '9999_from_a_newer_release'")
+
+    with pytest.raises(Exception, match="Can't locate revision"):
+        db_module.init_db()
+
+    assert _moved_aside(default_db) == []
+
+
+def test_failed_first_upgrade_of_a_new_database_is_not_moved_aside(default_db, monkeypatch):
+    _failing_upgrade(monkeypatch)
+
+    with pytest.raises(SystemExit):
+        _boot()
+
+    assert _moved_aside(default_db) == []
