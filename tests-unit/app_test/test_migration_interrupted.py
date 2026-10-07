@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+from contextlib import closing
 
 import pytest
 from alembic import command
@@ -20,7 +21,7 @@ def _make_config(db_path) -> Config:
 
 def _schema(db_path):
     # Batch-mode table rebuilds emit constraints in no fixed order, so compare definition lines as a set.
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         rows = conn.execute(
             "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name != 'alembic_version'"
         )
@@ -29,7 +30,7 @@ def _schema(db_path):
 
 
 def _version(db_path):
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn:
         try:
             return [row[0] for row in conn.execute("SELECT version_num FROM alembic_version")]
         except sqlite3.OperationalError:  # no version table: nothing was ever stamped
@@ -48,47 +49,25 @@ def fresh_head_schema(tmp_path_factory):
     return _schema(db_path)
 
 
-def _count_statements(tmp_path, monkeypatch, start, revision):
-    cfg = _make_config(tmp_path / "count.db")
-    if start is not None:
-        command.upgrade(cfg, start)
-    count = 0
-    real_exec = DefaultImpl._exec
-
-    def counting(self, *args, **kwargs):
-        nonlocal count
-        count += 1
-        return real_exec(self, *args, **kwargs)
-
-    monkeypatch.setattr(DefaultImpl, "_exec", counting)
-    command.upgrade(cfg, revision)
-    monkeypatch.undo()
-    return count
-
-
 @pytest.mark.parametrize("start, revision", _revisions_and_parents())
 def test_migration_failing_at_its_last_statement_leaves_a_consistent_revision(
     tmp_path, monkeypatch, start, revision, fresh_head_schema
 ):
-    last = _count_statements(tmp_path, monkeypatch, start, revision)
     db_path = tmp_path / "comfyui.db"
     cfg = _make_config(db_path)
     if start is not None:
         command.upgrade(cfg, start)
     before = _schema(db_path)
 
-    # The last statement is the migration's version stamp, so all of its own statements have run.
-    seen = 0
+    # The version stamp is a migration's last statement, so all of its own statements have run.
     real_exec = DefaultImpl._exec
 
-    def fail_last(self, *args, **kwargs):
-        nonlocal seen
-        seen += 1
-        if seen == last:
+    def fail_at_version_stamp(self, construct, *args, **kwargs):
+        if getattr(getattr(construct, "table", None), "name", None) == "alembic_version":
             raise RuntimeError("upgrade interrupted")
-        return real_exec(self, *args, **kwargs)
+        return real_exec(self, construct, *args, **kwargs)
 
-    monkeypatch.setattr(DefaultImpl, "_exec", fail_last)
+    monkeypatch.setattr(DefaultImpl, "_exec", fail_at_version_stamp)
     with pytest.raises(RuntimeError, match="upgrade interrupted"):
         command.upgrade(cfg, "head")
     monkeypatch.undo()
@@ -97,3 +76,11 @@ def test_migration_failing_at_its_last_statement_leaves_a_consistent_revision(
     assert _schema(db_path) == before
     command.upgrade(cfg, "head")
     assert _schema(db_path) == fresh_head_schema
+
+
+def test_ensure_version_keeps_the_version_table(tmp_path):
+    db_path = tmp_path / "comfyui.db"
+    command.ensure_version(_make_config(db_path))
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'alembic_version'").fetchone()

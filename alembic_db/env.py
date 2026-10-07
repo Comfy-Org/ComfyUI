@@ -71,6 +71,7 @@ def run_migrations_online() -> None:
 
         with context.begin_transaction():
             context.run_migrations()
+        connection.commit()  # a command that runs no migration (ensure_version) leaves its transaction open
 
 
 if context.is_offline_mode():
