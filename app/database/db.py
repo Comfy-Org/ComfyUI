@@ -282,9 +282,12 @@ def _init_file_db(db_url):
         try:
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
         except Exception as e:
-            if not is_recoverable_corruption(e):
+            if is_recoverable_corruption(e):
+                _quarantine_and_restore(db_path, e)
+            elif args.database_url is None and getattr(e, "upgrade_discards_the_catalog", False):
+                _recreate_after_failed_upgrade(db_path, e)
+            else:
                 raise
-            _quarantine_and_restore(db_path, e)
             _migrate_and_bind(db_url, db_path, os.path.exists(db_path))
     except Exception:
         _db_lock.release()
@@ -327,16 +330,30 @@ def _passes_integrity_check(path):  # after an error only; unlike quick_check, i
         return error_kind(e) == "database_locked"  # another process has it: not shown to be corrupt
 
 
-def _quarantine_and_restore(db_path, error):
-    """Rename a corrupt database aside and restore a sound daily backup; else leave none to recreate."""
-    quarantine_path = f"{db_path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+def _move_aside(db_path, label, error):
+    aside_path = f"{db_path}.{label}-{time.strftime('%Y%m%d-%H%M%S')}"
     try:
         for suffix in ("", "-wal", "-shm", "-journal"):  # SQLite would replay one another connection kept
             if os.path.exists(db_path + suffix):
-                os.replace(db_path + suffix, quarantine_path + suffix)
+                os.replace(db_path + suffix, aside_path + suffix)
     except OSError:
-        logging.exception(f"Could not move the corrupt database '{db_path}' aside")
+        logging.exception(f"Could not move the {label} database '{db_path}' aside")
         raise error
+    return aside_path
+
+
+def _recreate_after_failed_upgrade(db_path, error):
+    """The failed upgrade would have discarded the asset catalog, so start a new database instead."""
+    aside_path = _move_aside(db_path, "failed-upgrade", error)
+    log_startup_warning(
+        f"Database upgrade failed ({getattr(error, 'orig', error)}): '{db_path}' was moved to "
+        f"'{aside_path}' and a new database was created. The asset catalog is rebuilt by rescanning your files."
+    )
+
+
+def _quarantine_and_restore(db_path, error):
+    """Rename a corrupt database aside and restore a sound daily backup; else leave none to recreate."""
+    quarantine_path = _move_aside(db_path, "corrupt", error)
 
     backup_path = db_path + ".daily-backup"
     restore_path = db_path + ".restore-tmp"
@@ -497,6 +514,7 @@ def _migrate(conn, engine, write_engine, config, db_path, db_exists):
                         f"Restoring the database from its pre-upgrade backup, or removing the "
                         f"backup afterwards, failed; the pre-upgrade copy is kept at {backup_path}"
                     )
+            e.upgrade_discards_the_catalog = _upgrade_discards_the_catalog(script, target_rev, current_rev)
             raise e
 
         if backup_path and _upgrade_discards_the_catalog(script, target_rev, current_rev):
