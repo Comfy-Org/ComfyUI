@@ -6,7 +6,7 @@ import sqlite3
 import threading
 import time
 from contextlib import closing
-from pathlib import Path
+from urllib.parse import quote
 from app.assets.event_log import error_kind
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
@@ -308,8 +308,9 @@ def recover_from_corruption(error):
     return True
 
 
-def _connect_existing(path):  # sqlite3.connect would create a missing file
-    return sqlite3.connect(Path(os.path.abspath(path)).as_uri() + "?mode=rw", uri=True)
+def _connect_existing(path):  # sqlite3.connect would create a missing file; mode=rw doesn't
+    uri = quote(os.path.abspath(path).replace(os.sep, "/"), safe="/:")  # file:////server/share for UNC
+    return sqlite3.connect(f"file://{'' if uri.startswith('/') else '/'}{uri}?mode=rw", uri=True)
 
 
 def _passes_integrity_check(path):
@@ -368,8 +369,7 @@ def start_daily_backup():
 
 
 def _keep_daily_backup(db_path, backup_path):
-    # A daemon thread: exiting mid-backup leaves only a .tmp file, which the next backup removes.
-    while True:
+    while True:  # a daemon: an exit mid-backup leaves only a .tmp, which the next backup removes
         try:
             due_in = os.path.getmtime(backup_path) + _DAILY_BACKUP_INTERVAL_SECONDS - time.time()
         except OSError:
@@ -377,7 +377,7 @@ def _keep_daily_backup(db_path, backup_path):
         if due_in <= 0:
             _write_daily_backup(db_path, backup_path)
             due_in = _DAILY_BACKUP_INTERVAL_SECONDS  # also the retry delay after a failure
-        time.sleep(due_in)
+        time.sleep(min(due_in, _DAILY_BACKUP_INTERVAL_SECONDS))  # a backup dated in the future
 
 
 def _write_daily_backup(db_path, backup_path):

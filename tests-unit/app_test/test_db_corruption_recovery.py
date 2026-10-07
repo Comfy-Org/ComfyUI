@@ -217,6 +217,7 @@ def test_corruption_found_by_an_upgrade_is_quarantined(default_db, startup_warni
 
 def test_locked_database_is_not_mistaken_for_corruption(default_db):
     _make_db(default_db)
+    database_file = os.stat(default_db).st_ino
     holder = sqlite3.connect(default_db)
     holder.execute("BEGIN EXCLUSIVE")
     try:
@@ -225,7 +226,7 @@ def test_locked_database_is_not_mistaken_for_corruption(default_db):
     finally:
         holder.close()
     assert _quarantined(default_db) == []
-    assert _revision(default_db) == _head()
+    assert os.stat(default_db).st_ino == database_file  # the same file, not recreated
 
 
 def test_explicit_database_url_is_not_quarantined(explicit_db):
@@ -623,16 +624,18 @@ def test_backup_is_written_off_the_startup_thread(default_db, monkeypatch):
 
     def _blocked_write(db_path, backup_path):
         writers.append((threading.current_thread().name, db_path, backup_path))
-        release.wait(10)
+        release.wait()
 
     monkeypatch.setattr(db_module, "_write_daily_backup", _blocked_write)
 
-    db_module.start_daily_backup()  # returns while the write is still blocked
+    db_module.start_daily_backup()
 
     [thread] = started
+    assert thread.daemon  # never keeps ComfyUI from exiting
     deadline = time.monotonic() + 10
     while not writers and time.monotonic() < deadline:
         time.sleep(0.01)
+    assert thread.is_alive()  # start_daily_backup returned while the write is still blocked
     release.set()
     thread.join(10)
     assert writers == [("database-daily-backup", default_db, default_db + ".daily-backup")]
@@ -655,7 +658,7 @@ class _Stop(Exception):
     pass
 
 
-@pytest.mark.parametrize("age_hours, first_write_hour", [(None, 0), (25, 0), (1, 23)])
+@pytest.mark.parametrize("age_hours, first_write_hour", [(None, 0), (25, 0), (1, 23), (-2400, 2424)])
 def test_backup_is_refreshed_once_a_day_while_running(tmp_path, monkeypatch, age_hours, first_write_hour):
     db_path = str(tmp_path / "comfyui.db")
     backup = db_path + ".daily-backup"
@@ -671,6 +674,7 @@ def test_backup_is_refreshed_once_a_day_while_running(tmp_path, monkeypatch, age
         os.utime(backup, (now[0], now[0]))
 
     def _sleep(seconds):
+        assert seconds <= 24 * 3600  # longer waits overflow time.sleep on Windows
         now[0] += seconds
         if len(writes) >= 3:
             raise _Stop
@@ -707,7 +711,7 @@ def test_failed_backup_is_retried_a_day_later(tmp_path, monkeypatch):
 
 def test_no_backup_for_an_explicit_database_url(explicit_db, monkeypatch):
     started = []
-    monkeypatch.setattr(db_module.threading, "Thread", lambda **kw: started.append(kw))
+    monkeypatch.setattr(db_module, "threading", SimpleNamespace(Thread=lambda **kw: started.append(kw)))
 
     db_module.start_daily_backup()
 
@@ -744,6 +748,21 @@ def test_copy_breaking_a_constraint_never_replaces_the_backup(live_db):
 
     with open(backup, "rb") as f:
         assert f.read() == b"previous backup"
+
+
+def test_paths_that_need_escaping_in_a_uri_open(tmp_path):
+    db_path = tmp_path / "a #%? dir" / "comfyui.db"
+    db_path.parent.mkdir()
+    db_path = str(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("CREATE TABLE marker (value TEXT)")
+        conn.execute("INSERT INTO marker VALUES ('escaped')")
+        conn.commit()
+
+    assert db_module._passes_integrity_check(db_path)
+    db_module._write_daily_backup(db_path, db_path + ".daily-backup")
+    with closing(sqlite3.connect(db_path + ".daily-backup")) as conn:
+        assert conn.execute("SELECT value FROM marker").fetchall() == [("escaped",)]
 
 
 def test_deleted_database_never_replaces_the_backup(tmp_path):

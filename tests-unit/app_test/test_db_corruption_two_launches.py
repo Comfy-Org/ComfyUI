@@ -92,7 +92,7 @@ def test_two_launches_on_a_corrupt_database_recover_it_once(tmp_path, table="ass
                 p.terminate()
                 p.wait(timeout=30)
 
-    assert len([p for p in glob.glob(str(db_path) + ".corrupt-*") if not p.endswith(("-wal", "-shm"))]) == 1
+    assert len([p for p in glob.glob(str(db_path) + ".corrupt-*") if not p.endswith(("-wal", "-shm", "-journal"))]) == 1
     assert os.path.exists(db_path)
     with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
