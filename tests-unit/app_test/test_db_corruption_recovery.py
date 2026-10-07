@@ -87,7 +87,8 @@ def _break_schema(db_path: str) -> None:
 
 @pytest.fixture(autouse=True)
 def boot_state(monkeypatch):
-    """Undo what a boot binds: sessions, their engines and the database lock."""
+    """Undo what a boot binds: sessions, their engines, the database lock and recovery state."""
+    monkeypatch.setattr(db_module, "_cannot_move_aside", False)
     monkeypatch.setattr(db_module, "Session", None)
     monkeypatch.setattr(db_module, "WriteSession", None)
     monkeypatch.setattr(db_module, "_db_lock", None)
@@ -403,6 +404,30 @@ def test_failed_quarantine_raises_the_corruption(default_db, monkeypatch, startu
         db_module.init_db()
     assert error_kind(raised.value) == "database_corrupt"
     assert startup_warnings == []
+
+
+def test_unmovable_database_found_corrupt_after_init_starts_as_before(default_db, boot_events, monkeypatch):
+    # As on Windows when another program has the file open: asset startup logs the corruption and
+    # carries on, instead of failing the launch.
+    _make_db(default_db)
+    _overwrite_page_of(default_db, "assets")
+    seeded = []
+    monkeypatch.setattr(lifecycle, "start_asset_seeder", lambda: seeded.append(True))
+    real_replace = os.replace
+
+    def _held_open(src, dst):
+        if os.path.abspath(src) == os.path.abspath(default_db):
+            raise PermissionError("[WinError 32] The process cannot access the file")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(db_module.os, "replace", _held_open)
+    monkeypatch.setattr(db_module, "_cannot_move_aside", False)
+
+    _boot()
+
+    assert boot_events == ["startup", "backup"]
+    assert seeded == [True]
+    assert _quarantined(default_db) == []
 
 
 def test_second_failure_propagates_and_releases_the_lock(default_db, monkeypatch):
