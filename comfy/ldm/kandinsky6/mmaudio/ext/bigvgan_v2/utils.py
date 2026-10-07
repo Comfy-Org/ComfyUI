@@ -1,5 +1,4 @@
 # Adapted from https://github.com/jik876/hifi-gan under the MIT license.
-#   LICENSE is in incl_licenses directory.
 
 def init_weights(m, mean=0.0, std=0.01):
     classname = m.__class__.__name__
