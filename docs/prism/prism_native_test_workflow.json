@@ -1,0 +1,921 @@
+{
+  "id": "439d87a3-a698-4257-a8c5-7cb48b9e7632",
+  "revision": 0,
+  "last_node_id": 16,
+  "last_link_id": 20,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [
+        10,
+        20
+      ],
+      "size": [
+        350,
+        110
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            1
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "UNETLoader"
+      },
+      "widgets_values": [
+        "Prism\\diffusion_pytorch_model.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "Prism\\diffusion_pytorch_model.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    {
+      "id": 2,
+      "type": "ModelSamplingAV",
+      "pos": [
+        410,
+        20
+      ],
+      "size": [
+        330,
+        170
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            2
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ModelSamplingAV"
+      },
+      "widgets_values": [
+        9,
+        7,
+        30
+      ],
+      "widgets_values_named": {
+        "shift_video": 9,
+        "shift_audio": 7,
+        "schedule_steps": 30
+      }
+    },
+    {
+      "id": 3,
+      "type": "CLIPLoader",
+      "pos": [
+        10,
+        185
+      ],
+      "size": [
+        350,
+        125
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 0,
+          "links": [
+            4,
+            5
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader"
+      },
+      "widgets_values": [
+        "prism_umt5_xxl_bf16.safetensors",
+        "wan",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "prism_umt5_xxl_bf16.safetensors",
+        "type": "wan",
+        "device": "default"
+      }
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncode",
+      "pos": [
+        410,
+        345
+      ],
+      "size": [
+        420,
+        320
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            6
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "No background music. A quiet indoor recording environment with clear, close-miked speech. A static, eye-level close-up of the elderly woman in the reference image. Preserve her facial identity, short gray curly hair, black coat and red scarf with a white floral pattern. The wooden furniture, pale yellow wall and miniature canal houses remain unchanged in the background. Soft, steady lighting. She looks directly at the camera with a solemn, restrained expression. In a natural, slightly hoarse elderly female voice, she says in Dutch: <speech>Ze liepen weg. Ik bleef achter.</speech> There is a brief natural pause between the two sentences. Her lips and jaw move subtly in time with the speech, while her head and shoulders remain steady. After finishing, she closes her mouth naturally and holds her gaze on the camera, with one gentle blink. One continuous shot. The camera remains fixed throughout."
+      ],
+      "widgets_values_named": {
+        "text": "No background music. A quiet indoor recording environment with clear, close-miked speech. A static, eye-level close-up of the elderly woman in the reference image. Preserve her facial identity, short gray curly hair, black coat and red scarf with a white floral pattern. The wooden furniture, pale yellow wall and miniature canal houses remain unchanged in the background. Soft, steady lighting. She looks directly at the camera with a solemn, restrained expression. In a natural, slightly hoarse elderly female voice, she says in Dutch: <speech>Ze liepen weg. Ik bleef achter.</speech> There is a brief natural pause between the two sentences. Her lips and jaw move subtly in time with the speech, while her head and shoulders remain steady. After finishing, she closes her mouth naturally and holds her gaze on the camera, with one gentle blink. One continuous shot. The camera remains fixed throughout."
+      }
+    },
+    {
+      "id": 5,
+      "type": "VAELoader",
+      "pos": [
+        10,
+        350
+      ],
+      "size": [
+        350,
+        95
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 0,
+          "links": [
+            8,
+            15
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "Wan2_1_VAE_bf16.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "Wan2_1_VAE_bf16.safetensors"
+      }
+    },
+    {
+      "id": 6,
+      "type": "LoadImage",
+      "pos": [
+        10,
+        500
+      ],
+      "size": [
+        350,
+        314
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            9
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "slot_index": 1,
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "pasted/image (225).png",
+        "image"
+      ],
+      "widgets_values_named": {
+        "image": "pasted/image (225).png",
+        "upload": "image"
+      }
+    },
+    {
+      "id": 7,
+      "type": "PrismPrepareAV",
+      "pos": [
+        870,
+        345
+      ],
+      "size": [
+        350,
+        350
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 6
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 7
+        },
+        {
+          "name": "video_vae",
+          "type": "VAE",
+          "link": 8
+        },
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 9
+        },
+        {
+          "name": "audio_positive",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            10
+          ]
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "slot_index": 1,
+          "links": [
+            11
+          ]
+        },
+        {
+          "name": "av_latent",
+          "type": "LATENT",
+          "slot_index": 2,
+          "links": [
+            12
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PrismPrepareAV"
+      },
+      "widgets_values": [
+        848,
+        480,
+        81,
+        24,
+        "official_lanczos"
+      ],
+      "widgets_values_named": {
+        "width": 848,
+        "height": 480,
+        "frames": 81,
+        "fps": 24,
+        "reference_resize": "official_lanczos"
+      }
+    },
+    {
+      "id": 8,
+      "type": "KSampler",
+      "pos": [
+        1265,
+        20
+      ],
+      "size": [
+        335,
+        355
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 3
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 10
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 11
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 12
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            13
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "KSampler"
+      },
+      "widgets_values": [
+        666,
+        "fixed",
+        30,
+        5,
+        "euler",
+        "simple",
+        1
+      ],
+      "widgets_values_named": {
+        "seed": 666,
+        "control_after_generate": "fixed",
+        "steps": 30,
+        "cfg": 5,
+        "sampler_name": "euler",
+        "scheduler": "simple",
+        "denoise": 1
+      }
+    },
+    {
+      "id": 9,
+      "type": "LTXVSeparateAVLatent",
+      "pos": [
+        1660,
+        20
+      ],
+      "size": [
+        240,
+        95
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "av_latent",
+          "type": "LATENT",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "video_latent",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            14
+          ]
+        },
+        {
+          "name": "audio_latent",
+          "type": "LATENT",
+          "slot_index": 1,
+          "links": [
+            16
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LTXVSeparateAVLatent"
+      }
+    },
+    {
+      "id": 10,
+      "type": "VAEDecode",
+      "pos": [
+        1970,
+        20
+      ],
+      "size": [
+        250,
+        105
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 14
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 15
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            18
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecode"
+      }
+    },
+    {
+      "id": 11,
+      "type": "VAELoader",
+      "pos": [
+        1270.2629925092788,
+        437.8947860107554
+      ],
+      "size": [
+        350,
+        95
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 0,
+          "links": [
+            17
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "prism_dac_audio_vae.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "prism_dac_audio_vae.safetensors"
+      }
+    },
+    {
+      "id": 12,
+      "type": "VAEDecodeAudio",
+      "pos": [
+        1990,
+        210
+      ],
+      "size": [
+        250,
+        105
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 16
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 17
+        }
+      ],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "slot_index": 0,
+          "links": [
+            19
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecodeAudio"
+      }
+    },
+    {
+      "id": 13,
+      "type": "CreateVideo",
+      "pos": [
+        2300,
+        20
+      ],
+      "size": [
+        270,
+        220
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 18
+        },
+        {
+          "name": "audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": 19
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "slot_index": 0,
+          "links": [
+            20
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CreateVideo"
+      },
+      "widgets_values": [
+        24,
+        "auto",
+        "sRGB",
+        "none"
+      ],
+      "widgets_values_named": {
+        "fps": 24,
+        "bit_depth": "auto",
+        "color_space": "sRGB",
+        "codec": "none"
+      }
+    },
+    {
+      "id": 14,
+      "type": "SaveVideo",
+      "pos": [
+        2630,
+        20
+      ],
+      "size": [
+        310,
+        250
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 20
+        }
+      ],
+      "outputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "slot_index": 0,
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SaveVideo"
+      },
+      "widgets_values": [
+        "Prism/native_core",
+        "auto",
+        "auto",
+        "auto"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "Prism/native_core",
+        "format": "auto",
+        "format.codec": "auto",
+        "codec": "auto"
+      }
+    },
+    {
+      "id": 15,
+      "type": "CLIPTextEncode",
+      "pos": [
+        410,
+        735
+      ],
+      "size": [
+        420,
+        260
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            7
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "blurry, low quality, distorted face, facial deformation, melting skin, unstable facial features, unnatural mouth movement, exaggerated expressions, excessive head movement, camera shake, scene cuts, flickering, colored block artifacts, subtitles, text overlays, watermark"
+      ],
+      "widgets_values_named": {
+        "text": "blurry, low quality, distorted face, facial deformation, melting skin, unstable facial features, unnatural mouth movement, exaggerated expressions, excessive head movement, camera shake, scene cuts, flickering, colored block artifacts, subtitles, text overlays, watermark"
+      }
+    },
+    {
+      "id": 16,
+      "type": "PrismAttention",
+      "pos": [
+        815,
+        20
+      ],
+      "size": [
+        330,
+        220
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            3
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PrismAttention"
+      },
+      "widgets_values": [
+        "prism_sparse_tail_safe",
+        0.75,
+        0.2
+      ],
+      "widgets_values_named": {
+        "attention": "prism_sparse_tail_safe",
+        "sparsity": 0.75,
+        "cdf_threshold": 0.2
+      }
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "MODEL"
+    ],
+    [
+      2,
+      2,
+      0,
+      16,
+      0,
+      "MODEL"
+    ],
+    [
+      3,
+      16,
+      0,
+      8,
+      0,
+      "MODEL"
+    ],
+    [
+      4,
+      3,
+      0,
+      4,
+      0,
+      "CLIP"
+    ],
+    [
+      5,
+      3,
+      0,
+      15,
+      0,
+      "CLIP"
+    ],
+    [
+      6,
+      4,
+      0,
+      7,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      7,
+      15,
+      0,
+      7,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      8,
+      5,
+      0,
+      7,
+      2,
+      "VAE"
+    ],
+    [
+      9,
+      6,
+      0,
+      7,
+      3,
+      "IMAGE"
+    ],
+    [
+      10,
+      7,
+      0,
+      8,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      11,
+      7,
+      1,
+      8,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      12,
+      7,
+      2,
+      8,
+      3,
+      "LATENT"
+    ],
+    [
+      13,
+      8,
+      0,
+      9,
+      0,
+      "LATENT"
+    ],
+    [
+      14,
+      9,
+      0,
+      10,
+      0,
+      "LATENT"
+    ],
+    [
+      15,
+      5,
+      0,
+      10,
+      1,
+      "VAE"
+    ],
+    [
+      16,
+      9,
+      1,
+      12,
+      0,
+      "LATENT"
+    ],
+    [
+      17,
+      11,
+      0,
+      12,
+      1,
+      "VAE"
+    ],
+    [
+      18,
+      10,
+      0,
+      13,
+      0,
+      "IMAGE"
+    ],
+    [
+      19,
+      12,
+      0,
+      13,
+      1,
+      "AUDIO"
+    ],
+    [
+      20,
+      13,
+      0,
+      14,
+      0,
+      "VIDEO"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1.0629366000000013,
+      "offset": [
+        362.46188391998606,
+        194.92099467014756
+      ]
+    },
+    "frontendVersion": "1.53.10"
+  },
+  "version": 0.4
+}

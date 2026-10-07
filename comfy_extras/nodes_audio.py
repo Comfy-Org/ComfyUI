@@ -105,6 +105,14 @@ def vae_decode_audio(vae, samples, tile=None, overlap=None):
     else:
         audio = vae.decode(latent).movedim(-1, 1)
 
+    # Continuous audio latents may contain padding to a codec-hop boundary.
+    # Clip only when the producer supplies an explicit original sample count.
+    if "num_samples" in samples:
+        num_samples = samples["num_samples"]
+        if not isinstance(num_samples, int) or not 0 < num_samples <= audio.shape[-1]:
+            raise ValueError("Audio latent num_samples must be a positive integer within the decoded length.")
+        audio = audio[..., :num_samples]
+
     std = torch.std(audio, dim=[1, 2], keepdim=True) * 5.0
     std[std < 1.0] = 1.0
     audio /= std

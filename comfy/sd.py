@@ -85,6 +85,7 @@ import comfy.text_encoders.minimax_music
 import comfy.text_encoders.yue2
 import comfy.ldm.minimax.vae
 import comfy.ldm.minimax.audio_vae
+import comfy.ldm.audio.prism_dac
 import comfy.text_encoders.boogu
 import comfy.text_encoders.ernie
 import comfy.text_encoders.gemma4
@@ -527,7 +528,26 @@ class VAE:
         self.audio_sample_rate = 44100
 
         if config is None:
-            if "dec_in_proj.weight" in sd and "decoder.model.0.weight_g" in sd:  # MiniMax Music3 DAV
+            if (
+                "quant_conv.weight" in sd and tuple(sd["quant_conv.weight"].shape) == (256, 128, 1)
+                and "post_quant_conv.weight" in sd and tuple(sd["post_quant_conv.weight"].shape) == (128, 128, 1)
+                and "encoder.block.0.weight" in sd and tuple(sd["encoder.block.0.weight"].shape) == (128, 1, 7)
+                and "decoder.model.0.weight" in sd and tuple(sd["decoder.model.0.weight"].shape) == (2048, 128, 7)
+            ):  # Prism continuous DAC, not the discrete-codebook or MiniMax variants
+                self.first_stage_model = comfy.ldm.audio.prism_dac.PrismDAC(operations=comfy.ops.manual_cast)
+                self.latent_channels = 128
+                self.output_channels = 1
+                self.latent_dim = 1
+                self.audio_sample_rate = 48000
+                self.crop_input = False
+                self.upscale_ratio = 960
+                self.downscale_ratio = 960
+                self.process_input = lambda audio: audio
+                self.process_output = lambda audio: audio
+                self.working_dtypes = [torch.float32]
+                self.memory_used_encode = lambda shape, dtype: (shape[-1] * 1400 + 128_000_000) * model_management.dtype_size(dtype)
+                self.memory_used_decode = lambda shape, dtype: (shape[-1] * 960 * 1400 + 128_000_000) * model_management.dtype_size(dtype)
+            elif "dec_in_proj.weight" in sd and "decoder.model.0.weight_g" in sd:  # MiniMax Music3 DAV
                 self.first_stage_model = comfy.ldm.minimax_music.dav.MiniMaxMusic3DAV(operations=comfy.ops.disable_weight_init)
                 self.latent_channels = 128
                 self.output_channels = 2

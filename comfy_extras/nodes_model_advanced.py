@@ -148,6 +148,40 @@ class ModelSamplingSD3:
         m.add_object_patch("model_sampling", model_sampling)
         return (m, )
 
+class ModelSamplingAV:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "model": ("MODEL",),
+            "shift_video": ("FLOAT", {"default": 9.0, "min": 0.01, "max": 100.0, "step": 0.01}),
+            "shift_audio": ("FLOAT", {"default": 7.0, "min": 0.01, "max": 100.0, "step": 0.01}),
+            "schedule_steps": ("INT", {"default": 30, "min": 1, "max": 10000,
+                "tooltip": "Flow sigma-table resolution. Match KSampler steps with simple scheduler for an exact uniform base-time grid."}),
+        }}
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "patch"
+    CATEGORY = "model/patch"
+
+    def patch(self, model, shift_video, shift_audio, schedule_steps):
+        if shift_video <= 0 or shift_audio <= 0 or schedule_steps < 1:
+            raise ValueError("Audio/video flow shifts and schedule_steps must be positive.")
+        original = model.get_model_object("model_sampling")
+        if not isinstance(original, comfy.model_sampling.ModelSamplingAV):
+            raise ValueError("This model does not support packed audio/video flow sampling.")
+        m = model.clone()
+
+        class ModelSamplingAdvanced(comfy.model_sampling.ModelSamplingAV, comfy.model_sampling.CONST):
+            pass
+
+        model_sampling = ModelSamplingAdvanced(model.model.model_config)
+        model_sampling.set_parameters(shift=shift_video, audio_shift=shift_audio,
+            timesteps=schedule_steps, multiplier=original.multiplier)
+        model_sampling.set_noise_scale(original.noise_scale)
+        m.add_object_patch("model_sampling", model_sampling)
+        return (m,)
+
+
 class ModelSamplingAuraFlow(ModelSamplingSD3):
     @classmethod
     def INPUT_TYPES(s):
@@ -419,6 +453,7 @@ NODE_CLASS_MAPPINGS = {
     "ModelSamplingContinuousV": ModelSamplingContinuousV,
     "ModelSamplingStableCascade": ModelSamplingStableCascade,
     "ModelSamplingSD3": ModelSamplingSD3,
+    "ModelSamplingAV": ModelSamplingAV,
     "ModelSamplingAuraFlow": ModelSamplingAuraFlow,
     "ModelSamplingFlux": ModelSamplingFlux,
     "ModelNoiseScale": ModelNoiseScale,

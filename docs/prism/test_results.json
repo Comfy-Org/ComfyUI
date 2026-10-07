@@ -1,0 +1,68 @@
+[
+  {
+    "file": "nativebf16test.mp4",
+    "bytes": 736168,
+    "width": 848,
+    "height": 480,
+    "frames": 81,
+    "fps": "24",
+    "duration_seconds": 3.375,
+    "model": {
+      "unet_name": "Prism\\diffusion_pytorch_model.safetensors",
+      "weight_dtype": "default"
+    },
+    "sampling": {
+      "seed": 666,
+      "steps": 30,
+      "cfg": 5.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    },
+    "attention": "prism_sparse_tail_safe"
+  },
+  {
+    "file": "nativefp8test.mp4",
+    "bytes": 758360,
+    "width": 848,
+    "height": 480,
+    "frames": 81,
+    "fps": "24",
+    "duration_seconds": 3.375,
+    "model": {
+      "unet_name": "prism_alpha_video_fp8_scaled.safetensors",
+      "weight_dtype": "default"
+    },
+    "sampling": {
+      "seed": 666,
+      "steps": 30,
+      "cfg": 5.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    },
+    "attention": "prism_sparse_tail_safe"
+  },
+  {
+    "file": "int8ctest.mp4",
+    "bytes": 777620,
+    "width": 848,
+    "height": 480,
+    "frames": 81,
+    "fps": "24",
+    "duration_seconds": 3.375,
+    "model": {
+      "unet_name": "prism_alpha_video_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "sampling": {
+      "seed": 666,
+      "steps": 30,
+      "cfg": 5.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0
+    },
+    "attention": "prism_sparse_tail_safe"
+  }
+]
