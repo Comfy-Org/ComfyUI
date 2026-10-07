@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import closing, suppress
 from app.logger import log_startup_warning
@@ -202,7 +203,9 @@ def _acquire_file_lock(db_path):
 
 
 def _process_start_token():
-    """An identifier of this process's start, so a reused pid does not match it."""
+    """An identifier of this process's start, so a reused pid does not match it.
+    Windows: the creation FILETIME in decimal. Linux: `<boot_id>:<starttime ticks>`.
+    macOS: `ps -o lstart=` with TZ=UTC and LC_ALL=C."""
     if sys.platform == "win32":
         import ctypes
         from ctypes import wintypes
@@ -234,7 +237,7 @@ def _write_holder_record(db_path):
     identify it. It is never removed, so it is only valid while its pid runs with the same
     start token; the next holder overwrites it. Best effort: startup never fails over it."""
     path = db_path + ".lock.json"
-    tmp_path = path + ".tmp"
+    tmp_path = None
     try:
         started = _process_start_token()
         if not started:
@@ -247,13 +250,16 @@ def _write_holder_record(db_path):
             "main": os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "main.py")),
             "argv": sys.argv,
         }
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        # A fresh temp file, so a symlink or FIFO planted next to the database is never opened.
+        fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)), suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(record, f)
         os.replace(tmp_path, path)
     except Exception as e:
         logging.warning(f"Could not record the database lock holder in '{path}': {e}")
-        with suppress(OSError):
-            os.remove(tmp_path)
+        if tmp_path is not None:
+            with suppress(OSError):
+                os.remove(tmp_path)
 
 
 def lock_holder_db_path():

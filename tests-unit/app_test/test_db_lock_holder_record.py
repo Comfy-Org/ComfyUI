@@ -12,9 +12,11 @@ from app.database import db as db_module
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Takes the lock as ComfyUI does, reports it, then exits the way stdin asks.
+# Takes the lock as ComfyUI does, reports it, then exits the way stdin asks. On Linux it
+# first renames itself, since a process name may contain spaces and parentheses.
 HOLDER_SCRIPT = (
     "import os, sys; "
+    "sys.platform.startswith('linux') and open('/proc/self/comm', 'w').write('a) b (c'); "
     "from app.database import db; "
     "db._acquire_file_lock(sys.argv[1]); "
     "print(os.getpid(), flush=True); "
@@ -88,9 +90,10 @@ def test_record_describes_the_lock_holder(db_path, monkeypatch):
         "pid": os.getpid(),
         "started": _independent_start_token(os.getpid()),
         "db": db_path,
-        "main": str(REPO_ROOT / "main.py"),
+        "main": record["main"],
         "argv": sys.argv,
     }
+    assert os.path.realpath(record["main"]) == os.path.realpath(REPO_ROOT / "main.py")
     assert sorted(os.listdir(os.path.dirname(db_path))) == ["comfyui.db.lock", "comfyui.db.lock.json"]
 
 
@@ -163,3 +166,16 @@ def test_no_start_token_on_other_platforms(monkeypatch):
     monkeypatch.setattr(sys, "platform", "freebsd14")
 
     assert db_module._process_start_token() is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+def test_a_planted_symlink_is_not_written_through(db_path, tmp_path):
+    victim = tmp_path / "victim"
+    victim.write_text("keep me")
+    for name in (".lock.json.tmp", f".lock.json.{os.getpid()}.tmp"):
+        os.symlink(victim, db_path + name)
+
+    db_module._acquire_file_lock(db_path)
+
+    assert victim.read_text() == "keep me"
+    assert _read_record(db_path)["pid"] == os.getpid()
