@@ -39,6 +39,7 @@ from comfy.cli_args import args
 
 import importlib
 
+from app import governance
 import folder_paths
 import latent_preview
 import node_helpers
@@ -2262,11 +2263,12 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
 
     try:
         logging.debug("Trying to load custom node {}".format(module_path))
+        spec_from_file_location = governance.pack_module_spec if module_parent == "custom_nodes" else importlib.util.spec_from_file_location
         if os.path.isfile(module_path):
-            module_spec = importlib.util.spec_from_file_location(sys_module_name, module_path)
+            module_spec = spec_from_file_location(sys_module_name, module_path)
             module_dir = os.path.split(module_path)[0]
         else:
-            module_spec = importlib.util.spec_from_file_location(sys_module_name, os.path.join(module_path, "__init__.py"))
+            module_spec = spec_from_file_location(sys_module_name, os.path.join(module_path, "__init__.py"))
             module_dir = module_path
 
         module = importlib.util.module_from_spec(module_spec)
@@ -2384,6 +2386,11 @@ async def init_external_custom_nodes():
                 if comfyui_manager.should_be_disabled(module_path):
                     logging.info(f"Blocked by policy: {module_path}")
                     continue
+
+            refusal = governance.pack_refusal(module_path)
+            if refusal is not None:
+                logging.warning(refusal)
+                continue
 
             time_before = time.perf_counter()
             success = await load_custom_node(module_path, base_node_names, module_parent="custom_nodes")
