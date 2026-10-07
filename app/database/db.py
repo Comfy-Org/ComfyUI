@@ -6,6 +6,7 @@ import sqlite3
 import threading
 import time
 from contextlib import closing
+from pathlib import Path
 from app.assets.event_log import error_kind
 from app.logger import log_startup_warning
 from utils.install_util import get_missing_requirements_message
@@ -289,9 +290,8 @@ def _init_file_db(db_url):
 
 
 def is_recoverable_corruption(error):
-    # Only the default database: one named by --database-url may be managed elsewhere.
-    # SQLITE_CORRUPT or SQLITE_NOTADB, never "database is locked". The error can come from
-    # another file (the pre-upgrade backup), so the live database must fail its check too.
+    # Default database only (--database-url may be managed elsewhere); SQLITE_CORRUPT/NOTADB, never
+    # "locked". The error may come from another file (the pre-upgrade backup), so check the live one.
     is_default = args.database_url is None
     return is_default and error_kind(error) == "database_corrupt" and not _passes_integrity_check(get_db_path())
 
@@ -308,27 +308,30 @@ def recover_from_corruption(error):
     return True
 
 
+def _connect_existing(path):  # sqlite3.connect would create a missing file
+    return sqlite3.connect(Path(os.path.abspath(path)).as_uri() + "?mode=rw", uri=True)
+
+
 def _passes_integrity_check(path):
     # Only after an error: unlike quick_check it also finds an index that disagrees with its table.
     try:
-        with closing(sqlite3.connect(path)) as conn:
+        with closing(_connect_existing(path)) as conn:
             return conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
     except sqlite3.Error as e:
         return error_kind(e) == "database_locked"  # another process has it: not shown to be corrupt
 
 
 def _quarantine_and_restore(db_path, error):
-    """Rename a corrupt database aside, then restore the daily backup if it is sound.
-    With no sound backup, no database file is left, so the caller creates a new one."""
+    """Rename a corrupt database aside and restore a sound daily backup; else leave none to recreate."""
     quarantine_path = f"{db_path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
     try:
-        os.replace(db_path, quarantine_path)
+        # With its WAL and journal: when another connection keeps one, SQLite would replay it.
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            if os.path.exists(db_path + suffix):
+                os.replace(db_path + suffix, quarantine_path + suffix)
     except OSError:
         logging.exception(f"Could not move the corrupt database '{db_path}' aside")
         raise error
-    for suffix in ("-wal", "-shm"):  # left when another connection has it open; SQLite would replay it
-        if os.path.exists(db_path + suffix):
-            os.replace(db_path + suffix, quarantine_path + suffix)
 
     backup_path = db_path + ".daily-backup"
     restore_path = db_path + ".restore-tmp"
@@ -382,7 +385,7 @@ def _write_daily_backup(db_path, backup_path):
     try:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)  # left by a process that exited mid-backup
-        with closing(sqlite3.connect(db_path)) as conn:
+        with closing(_connect_existing(db_path)) as conn:  # a deleted database must not back up as empty
             conn.execute("VACUUM INTO ?", (tmp_path,))
         # VACUUM INTO copies a row that breaks a constraint; only a copy a restore accepts replaces the backup.
         if not _passes_integrity_check(tmp_path):

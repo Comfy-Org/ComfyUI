@@ -149,7 +149,7 @@ def _boot():
 
 
 def _quarantined(db_path: str) -> list[str]:
-    return sorted(p for p in glob.glob(db_path + ".corrupt-*") if not p.endswith(("-wal", "-shm")))
+    return sorted(p for p in glob.glob(db_path + ".corrupt-*") if not p.endswith(("-wal", "-shm", "-journal")))
 
 
 @pytest.mark.parametrize(
@@ -508,6 +508,34 @@ def test_wal_kept_by_another_connection_does_not_reach_the_restored_database(def
     assert os.path.exists(quarantined + "-wal")  # kept with the database it belongs to
 
 
+def test_journal_of_another_connection_moves_with_the_corrupt_database(default_db):
+    _make_db(default_db + ".daily-backup", marker="from backup")
+    _make_db(default_db)
+    other = sqlite3.connect(default_db, isolation_level=None)  # rollback-journal mode
+    other.execute("BEGIN IMMEDIATE")
+    other.execute("CREATE TABLE marker (value TEXT)")  # its -journal now exists
+    page = other.execute("SELECT rootpage FROM sqlite_master WHERE name = 'alembic_version'").fetchone()[0]
+    with open(default_db, "r+b") as f:
+        f.seek((page - 1) * _PAGE)
+        f.write(b"\xa5" * _PAGE)
+    assert os.path.exists(default_db + "-journal")
+    try:
+        if os.name == "nt":
+            # Windows refuses to rename a file another connection has open: launch fails as before.
+            with pytest.raises(SystemExit):
+                _boot()
+            return
+        _boot()
+    finally:
+        other.close()
+
+    [quarantined] = _quarantined(default_db)
+    assert os.path.exists(quarantined + "-journal")
+    with closing(sqlite3.connect(default_db)) as conn:
+        assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert conn.execute("SELECT value FROM marker").fetchall() == [("from backup",)]
+
+
 @pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc")
 def test_failed_open_leaves_no_handle_on_the_database(default_db):
     # Windows refuses to rename a file this process still has open.
@@ -716,6 +744,21 @@ def test_copy_breaking_a_constraint_never_replaces_the_backup(live_db):
 
     with open(backup, "rb") as f:
         assert f.read() == b"previous backup"
+
+
+def test_deleted_database_never_replaces_the_backup(tmp_path):
+    db_path = str(tmp_path / "comfyui.db")
+    backup = db_path + ".daily-backup"
+    with open(backup, "wb") as f:
+        f.write(b"previous backup")
+
+    db_module._write_daily_backup(db_path, backup)
+
+    with open(backup, "rb") as f:
+        assert f.read() == b"previous backup"
+    assert not os.path.exists(db_path)  # not recreated empty
+    assert not db_module._passes_integrity_check(db_path)
+    assert not os.path.exists(db_path)
 
 
 def test_backup_replaces_the_previous_one(live_db):
