@@ -34,6 +34,8 @@ def _equal_length_runs(lengths):
 
 
 def var_attention_optimized_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *args, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    if isinstance(q, _attention.AttentionTensorContainer):
+        q, k, v = q.take(), k.take(), v.take()
     q, k, v, head_dim = _var_attention_qkv(q, k, v, heads, skip_reshape)
 
     if k.shape[0] != v.shape[0]:
@@ -54,7 +56,10 @@ def var_attention_optimized_split(q, k, v, heads, cu_seqlens_q, cu_seqlens_k, *a
         q_i = q[q_slice].reshape(n, len_q, heads, head_dim).transpose(1, 2)
         k_i = k[k_slice].reshape(n, len_k, heads, head_dim).transpose(1, 2)
         v_i = v[k_slice].reshape(n, len_k, heads, head_dim).transpose(1, 2)
-        out_i = _attention.optimized_attention(q_i, k_i, v_i, heads, skip_reshape=True, skip_output_reshape=True)
+        if last == len(q_lens):
+            del q, k, v
+        q_i, k_i, v_i = _attention.AttentionTensorContainer(q_i), _attention.AttentionTensorContainer(k_i), _attention.AttentionTensorContainer(v_i)
+        out_i = _attention.optimized_attention(q_i, k_i, v_i, heads, skip_reshape=True, skip_output_reshape=True, **kwargs)
         out[q_slice] = out_i.transpose(1, 2).reshape(n * len_q, heads, head_dim)
 
     return _var_attention_output(out, heads, head_dim, skip_output_reshape)

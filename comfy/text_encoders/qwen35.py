@@ -727,6 +727,16 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         self.visual = Qwen35VisionModel(vision_config, device=device, dtype=dtype, ops=operations)
         self.dtype = dtype
 
+    def get_dynamic_vram__units(self):
+        units, last_units = self.model.get_dynamic_vram__units()
+        # head and MTP draft weights run every decode step: fault them resident ahead of the body.
+        # a separate embedding goes last: evicted, its rows are gathered from the host copy instead.
+        # a tied table is the head, so it stays first.
+        hot = [] if self.mtp is None else [self.mtp]
+        if hasattr(self.model, "lm_head"):
+            return [self.model.lm_head, *hot, *units], [*last_units, self.model.embed_tokens]
+        return [self.model.embed_tokens, *hot, *units], last_units
+
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
             # Qwen3.5 normalizes to [-1, 1] (mean/std 0.5), same as Qwen3-VL.
