@@ -325,6 +325,21 @@ def test_unreadable_backup_stops_recovery_before_anything_moves(default_db, monk
     assert glob.glob(default_db + ".corrupt-*") == []
 
 
+def test_sidecars_move_before_the_database(default_db, monkeypatch):
+    # A kill between moves must never leave an old WAL beside whatever is at the live path.
+    _make_db(default_db)
+    for suffix in ("-wal", "-shm", "-journal"):
+        with open(default_db + suffix, "wb") as f:
+            f.write(b"sidecar")
+    moved = []
+    real_replace = os.replace
+    monkeypatch.setattr(db_module.os, "replace", lambda src, dst: moved.append(src[len(default_db):]) or real_replace(src, dst))
+
+    db_module._quarantine_and_restore(default_db, sqlite3.DatabaseError("database disk image is malformed"))
+
+    assert moved == ["-wal", "-shm", "-journal", ""]
+
+
 def test_database_that_wont_move_keeps_its_wal(default_db, monkeypatch):
     _make_db(default_db)
     with open(default_db + "-wal", "wb") as f:
@@ -462,23 +477,26 @@ def test_corruption_first_hit_by_asset_startup_is_recovered(default_db, boot_eve
     _make_db(default_db + ".daily-backup", marker="from backup")
     _make_db(default_db)
     _overwrite_page_of(default_db, table)
+    corrupt_file = os.stat(default_db).st_ino
     open_at_rename = []
     real_replace = os.replace
 
     def _replace(src, dst):
-        if src == default_db and os.path.isdir("/proc/self/fd"):  # Windows refuses to rename an open file
-            open_at_rename.append(os.path.realpath(src) in _open_files())
+        if os.path.abspath(src) == os.path.abspath(default_db) and os.path.isdir("/proc/self/fd"):
+            open_at_rename.append(os.path.realpath(src) in _open_files())  # Windows refuses to rename an open file
         return real_replace(src, dst)
 
     monkeypatch.setattr(db_module.os, "replace", _replace)
 
     _boot()
 
-    _quarantined(default_db)
+    [quarantined] = _quarantined(default_db)
+    assert os.stat(quarantined).st_ino == corrupt_file  # kept, not deleted
     with closing(sqlite3.connect(default_db)) as conn:
         assert conn.execute("SELECT value FROM marker").fetchone() == ("from backup",)
     assert boot_events == ["startup", "backup"]
-    assert True not in open_at_rename
+    if os.path.isdir("/proc/self/fd"):
+        assert open_at_rename == [False]
 
 
 def test_corruption_again_after_recovery_is_logged_as_before(default_db, boot_events, monkeypatch):
@@ -744,40 +762,6 @@ def test_damaged_pre_upgrade_backup_does_not_quarantine_a_sound_database(default
     assert checked == [(default_db, True)]  # the corruption error was raised, and vetoed
     assert _quarantined(default_db) == []
     assert _revision(default_db) == "0006_add_loader_path"
-
-
-@pytest.mark.parametrize("with_backup", [False, True])
-def test_crash_left_wal_does_not_reach_the_new_database(default_db, with_backup):
-    if with_backup:
-        _make_db(default_db + ".daily-backup", marker="from backup")
-    _make_db(default_db)
-    writer = sqlite3.connect(default_db)
-    writer.execute("PRAGMA journal_mode=WAL")
-    writer.execute("PRAGMA wal_autocheckpoint=0")
-    writer.execute("CREATE TABLE marker (value TEXT)")
-    writer.execute("INSERT INTO marker VALUES ('in the wal')")
-    writer.commit()
-    page = writer.execute("SELECT rootpage FROM sqlite_master WHERE name = 'alembic_version'").fetchone()[0]
-    crashed = default_db + ".crashed"
-    shutil.copyfile(default_db, crashed)
-    shutil.copyfile(default_db + "-wal", crashed + "-wal")  # as a crash leaves them
-    writer.close()
-    with open(crashed, "r+b") as f:  # a page the WAL doesn't hold
-        f.seek((page - 1) * _PAGE)
-        f.write(b"\xa5" * _PAGE)
-    os.replace(crashed, default_db)
-    os.replace(crashed + "-wal", default_db + "-wal")
-
-    _boot()
-
-    assert len(_quarantined(default_db)) == 1
-    assert _revision(default_db) == _head()
-    with closing(sqlite3.connect(default_db)) as conn:
-        assert conn.execute("PRAGMA quick_check").fetchone() == ("ok",)
-        if with_backup:  # the backup, not the crashed database's WAL
-            assert conn.execute("SELECT value FROM marker").fetchall() == [("from backup",)]
-        else:
-            assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'marker'").fetchone() is None
 
 
 def test_wal_kept_by_another_connection_does_not_reach_the_restored_database(default_db):
