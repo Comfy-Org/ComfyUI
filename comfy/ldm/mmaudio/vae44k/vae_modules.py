@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 
 from .edm2_utils import (MPConv1D, mp_silu, mp_sum, normalize)
 
@@ -59,6 +59,7 @@ class AttnBlock1D(nn.Module):
         self.in_channels = in_channels
 
         self.num_heads = num_heads
+        self.comfy_attention = ComfyAttention()
         self.qkv = MPConv1D(in_channels, in_channels * 3, kernel_size=1)
         self.proj_out = MPConv1D(in_channels, in_channels, kernel_size=1)
 
@@ -72,7 +73,15 @@ class AttnBlock1D(nn.Module):
         k = k.permute(0, 1, 3, 2)
         v = v.permute(0, 1, 3, 2)
 
-        h = optimized_attention(q, k, v, heads=self.num_heads, skip_reshape=True, skip_output_reshape=True)
+        h = optimized_attention(
+            AttentionTensorContainer(q),
+            AttentionTensorContainer(k),
+            AttentionTensorContainer(v),
+            heads=self.num_heads,
+            skip_reshape=True,
+            skip_output_reshape=True,
+            preferred_attention=self.comfy_attention,
+        )
         h = h.permute(0, 1, 3, 2).reshape(h.shape[0], -1, h.shape[2])
 
         h = self.proj_out(h)
