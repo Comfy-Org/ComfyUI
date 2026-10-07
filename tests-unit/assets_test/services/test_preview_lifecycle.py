@@ -18,6 +18,12 @@ from .preview_helpers import write_exr
 
 
 
+@pytest.fixture
+def db_engine(db_engine_fk):
+    """Foreign keys on, as in production: deletes rely on RESTRICT, SET NULL and cascades."""
+    return db_engine_fk
+
+
 def _record(session, path: Path, *, tags=(), preview_id=None, mime_type=None) -> Asset:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
@@ -289,3 +295,39 @@ def test_an_untagged_asset_in_previews_is_not_cascaded(session, mock_create_sess
 
     session.expire_all()
     assert session.get(Asset, stray_id) is not None, "only Core's own preview records go with their parent"
+
+
+class _PngGenerator:
+    mime_types = ("image/png",)
+
+    def generate(self, source_path, max_pixels):
+        from PIL import Image
+
+        return Image.new("RGB", (4, 4))
+
+
+def test_a_generator_upgrades_an_output_that_is_its_own_preview(session, mock_create_session, roots):
+    from comfy_execution import preview_generators
+
+    (roots / "output" / "still.png").write_bytes(b"png")
+    generator = _PngGenerator()
+    preview_generators.register_preview_generator(generator)
+    try:
+        enriched = register_executed_outputs(_ui("still.png"), "job", AssetsEnabled(_Args()))
+        assert enriched["images"][0]["preview_id"] == enriched["images"][0]["id"], "its own preview until generated"
+        asyncio.run(generate_output_previews(enriched))
+    finally:
+        preview_generators.unregister_preview_generator(generator)
+
+    entry = enriched["images"][0]
+    assert entry["preview_id"] not in (None, entry["id"])
+
+
+def test_an_output_with_a_linked_preview_is_not_regenerated(session, mock_create_session, roots):
+    (roots / "output" / "frame.exr").write_bytes(b"exr")
+    ui = {"images": [{"filename": "frame.exr", "subfolder": "", "type": "output", "id": "a", "preview_id": "p"}]}
+
+    with patch("app.assets.previews.generate_previews") as generate:
+        asyncio.run(generate_output_previews(ui))
+
+    generate.assert_not_called()

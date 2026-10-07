@@ -15,6 +15,7 @@ from app.assets import previews
 from app.assets.database.models import Asset, AssetContent
 from app.assets.database.queries.records import create_content, create_record, fetch_record_tags
 from app.assets.services.image_dimensions import extract_image_dimensions, read_exr_windows
+from comfy_api.latest import Previews
 from comfy_execution import preview_generators
 
 from .preview_helpers import write_exr
@@ -378,7 +379,9 @@ def test_a_raising_generator_is_logged_and_a_declining_one_is_not(session, mock_
 # --- registry ---
 
 
-class _ExrOverride:
+class _ExrOverride(Previews.PreviewGenerator):
+    """Written the way the public docstring tells custom nodes to."""
+
     mime_types = ("image/x-exr",)
 
     def generate(self, source_path, max_pixels):
@@ -399,6 +402,7 @@ def test_a_registered_generator_replaces_cores_and_unregistering_restores_it():
 
 
 def test_registration_order_against_core_does_not_matter():
+    core = preview_generators.get_preview_generator("image/x-exr")
     override = _ExrOverride()
     asyncio.run(_register(override))
     try:
@@ -407,6 +411,7 @@ def test_registration_order_against_core_does_not_matter():
         assert preview_generators.get_preview_generator("image/x-exr") is override
     finally:
         asyncio.run(_unregister(override))
+        preview_generators.set_core_preview_generator(core)
 
 
 async def _register(generator):
@@ -440,3 +445,45 @@ def test_workers_are_daemon_threads():
 
 def test_previews_live_beside_the_other_roots_by_default():
     assert folder_paths.get_previews_directory() == os.path.join(folder_paths.base_path, "previews")
+
+
+def test_a_job_still_queued_at_the_deadline_never_runs(session, mock_create_session, previews_dir, tmp_path):
+    slow = [_Sleeper(0.8) for _ in range(preview_generators.PREVIEW_WORKERS)]
+    queued = _Instant()
+    calls = []
+    queued.generate = lambda *args: calls.append(args) or Image.new("RGB", (4, 4))
+    mimes = [f"image/x-test-slow{i}" for i in range(len(slow))] + ["image/x-test-fast"]
+    for sleeper, mime in zip(slow, mimes):
+        sleeper.mime_types = (mime,)
+    items, by_path = _sources(tmp_path, session, mimes)
+    for g in [*slow, queued]:
+        preview_generators.register_preview_generator(g)
+    try:
+        with (
+            patch.object(previews, "preview_mime_type", lambda path: by_path.get(path)),
+            patch.object(previews, "preview_deadline_seconds", lambda count: 0.2),
+        ):
+            asyncio.run(previews.generate_previews(items, "output"))
+            assert all(s.finished.wait(5) for s in slow)
+            time.sleep(0.2)
+    finally:
+        for g in [*slow, queued]:
+            preview_generators.unregister_preview_generator(g)
+
+    assert calls == [], "a job cancelled before a worker reached it is skipped"
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda b: b[:20],  # truncated mid-attribute
+        lambda b: b.replace(b"displayWindow\x00box2i\x00\x10\x00\x00\x00", b"displayWindow\x00box2i\x00\xff\xff\xff\xff"),  # negative size
+        lambda b: b.replace(b"displayWindow", b"displayWindoX"),  # missing window
+        lambda b: b.replace(b"\x00" * 8 + b"\x3f\x00\x00\x00", b"\x00" * 8 + b"\xf0\xff\xff\xff", 1),  # inverted window
+    ],
+)
+def test_a_malformed_exr_header_reads_as_none(tmp_path, mutate):
+    path = write_exr(tmp_path / "a.exr", 64, 48)
+    path.write_bytes(mutate(path.read_bytes()))
+
+    assert read_exr_windows(str(path)) is None

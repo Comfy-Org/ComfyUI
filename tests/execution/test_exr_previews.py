@@ -2,6 +2,7 @@
 
 import io
 import json
+import socket
 import subprocess
 import time
 import urllib.request
@@ -18,18 +19,22 @@ from comfy_execution.graph_utils import GraphBuilder
 def server(args_pytest, tmp_path_factory):
     work = tmp_path_factory.mktemp("exr-previews")
     log = (work / "server.log").open("w")
+    # Its own port: a server another module hasn't finished killing must not answer for this one.
+    with socket.socket() as probe:
+        probe.bind((args_pytest["listen"], 0))
+        port = probe.getsockname()[1]
     process = subprocess.Popen([
         "python", "main.py",
         "--output-directory", args_pytest["output_dir"],
         "--listen", args_pytest["listen"],
-        "--port", str(args_pytest["port"]),
+        "--port", str(port),
         "--extra-model-paths-config", "tests/execution/extra_model_paths.yaml",
         "--cpu",
         "--enable-assets",
         "--database-url", f"sqlite:///{work / 'assets.db'}",
         "--previews-directory", str(work / "previews"),
     ], stdout=log, stderr=subprocess.STDOUT)
-    base = f"http://{args_pytest['listen']}:{args_pytest['port']}"
+    base = f"http://{args_pytest['listen']}:{port}"
     try:
         for _ in range(120):
             if process.poll() is not None:

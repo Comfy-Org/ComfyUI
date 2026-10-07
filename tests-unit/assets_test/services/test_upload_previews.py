@@ -91,9 +91,14 @@ async def test_with_assets_off_an_exr_upload_has_no_asset(roots):
 
 @pytest.mark.asyncio
 async def test_a_preview_the_client_already_set_is_kept(tmp_path):
+    from utils.mime_types import init_mime_types
+
+    init_mime_types()
     exr = write_exr(tmp_path / "frame.exr", 8, 8)
 
-    assert await generate_upload_preview("asset-id", str(exr), "client-preview") == "client-preview"
+    with patch("app.assets.previews.generate_previews") as generate:
+        assert await generate_upload_preview("asset-id", str(exr), "client-preview") == "client-preview"
+    generate.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -193,3 +198,69 @@ async def test_put_null_preview_id_clears_the_link(mock_create_session, roots, a
     assert resp.status == 200, await resp.text()
     session.expire_all()
     assert session.get(Asset, parent_id).preview_id is None
+
+
+def _plain_record(session, path, name, mime_type=None):
+    from app.assets.database.queries.records import create_content, create_record
+
+    record = create_record(session, create_content(session, str(path)).id, name, mime_type=mime_type)
+    session.commit()
+    return record.id
+
+
+@pytest.mark.asyncio
+async def test_the_content_route_serves_byte_ranges(mock_create_session, roots, assets_routes_on, session):
+    clip = roots / "output" / "clip.mp4"
+    clip.write_bytes(b"0123456789")
+    asset_id = _plain_record(session, clip, "clip.mp4", "video/mp4")
+    async with await _assets_client() as client:
+        resp = await client.get(f"/api/assets/{asset_id}/content", headers={"Range": "bytes=0-3"})
+        body = await resp.read()
+
+    assert (resp.status, body) == (206, b"0123"), "video previews must be able to seek"
+
+
+@pytest.mark.asyncio
+async def test_the_content_route_never_serves_a_compressed_sibling(mock_create_session, roots, assets_routes_on, session):
+    still = roots / "output" / "still.png"
+    still.write_bytes(_png())
+    (roots / "output" / "still.png.gz").write_bytes(b"something else entirely")
+    asset_id = _plain_record(session, still, "still.png", "image/png")
+    async with await _assets_client() as client:
+        resp = await client.get(f"/api/assets/{asset_id}/content", headers={"Accept-Encoding": "gzip, br"}, auto_decompress=False)
+        body = await resp.read()
+
+    assert body == still.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_the_content_type_comes_from_the_path_when_the_name_has_none(mock_create_session, roots, assets_routes_on, session):
+    still = roots / "output" / "still.png"
+    still.write_bytes(_png())
+    asset_id = _plain_record(session, still, "untitled")
+    async with await _assets_client() as client:
+        resp = await client.get(f"/api/assets/{asset_id}/content")
+
+    assert resp.headers["Content-Type"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_a_corrupt_exr_upload_still_succeeds(mock_create_session, roots):
+    async with await _client(AssetsEnabled(_Args())) as client:
+        resp = await client.post("/upload/image", data=_form("broken.exr", b"not an exr"))
+        asset = (await resp.json())["asset"]
+
+    assert resp.status == 200
+    assert "preview_id" not in asset and "preview_url" not in asset
+
+
+@pytest.mark.asyncio
+async def test_an_upload_tagged_preview_lands_in_previews(mock_create_session, roots, assets_routes_on):
+    form = FormData()
+    form.add_field("file", _png(), filename="thumb.png")
+    form.add_field("tags", json.dumps(["preview"]))
+    async with await _assets_client() as client:
+        resp = await client.post("/api/assets", data=form)
+
+    assert resp.status == 201, await resp.text()
+    assert [p.suffix for p in (roots / "previews").iterdir()] == [".png"]
