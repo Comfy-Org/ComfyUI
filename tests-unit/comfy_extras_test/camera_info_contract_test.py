@@ -34,17 +34,19 @@ def test_camera_angle_aims_the_splat_renderer_where_it_was_asked_to(horizontal, 
     assert [float(v) for v in target] == pytest.approx(ORIGIN, abs=1e-6)
 
 
-@pytest.mark.parametrize("vertical, term", [(-30, "low-angle shot"), (60, "high-angle shot")])
+@pytest.mark.parametrize("vertical, term", [
+    (-30, "low-angle shot"), (0, "eye-level shot"), (20, "elevated shot"), (60, "high-angle shot"),
+])
 def test_camera_angle_elevation_wording_matches_the_rendered_view(vertical, term):
     # The splat frame is Y-down, so a camera above the subject looks along a positive forward Y.
     _, _, _, _, fwd = _camera_basis(build_camera_info(0, vertical, 5.0), DEVICE)
     assert vertical_term(vertical) == term
-    assert (float(fwd[1]) > 0) is (term == "high-angle shot")
+    assert (float(fwd[1]) > 0) is (vertical > 0)
 
 
-def test_custom_up_is_flagged_only_when_the_camera_carries_roll():
-    # The viewer honours the quaternion's up only when useCustomUp is set, so a camera that rolls
-    # has to say so or its roll is dropped on the way to the frontend.
+def test_camera_info_flags_custom_up_when_world_up_would_be_wrong():
+    # The viewer honours the quaternion's up only when useCustomUp is set. A rolled camera and an
+    # explicitly supplied rotation both have to say so, or the frontend falls back to world up.
     assert "useCustomUp" not in _lookat_camera_info(EYE, ORIGIN, 35.0, DEVICE)
     assert _lookat_camera_info(EYE, ORIGIN, 35.0, DEVICE, roll=30.0)["useCustomUp"] is True
     assert _quat_camera_info(EYE, [0.0, 0.0, 0.0, 1.0], 35.0, DEVICE)["useCustomUp"] is True
