@@ -355,6 +355,11 @@ def _passes_integrity_check(path):
 
 def _recreate_after_failed_upgrade(db_path, error):
     """The failed upgrade would have discarded the asset catalog, so start a new database instead."""
+    with closing(sqlite3.connect(db_path, timeout=0)) as conn:
+        try:
+            conn.execute("BEGIN IMMEDIATE")  # the upgrade's error can be a schema error while another process holds it
+        except sqlite3.OperationalError:
+            raise error
     aside_path = f"{db_path}.failed-upgrade-{time.strftime('%Y%m%d-%H%M%S')}"
     moved = []
     try:
@@ -365,8 +370,10 @@ def _recreate_after_failed_upgrade(db_path, error):
     except OSError:
         logging.exception(f"Could not move the database '{db_path}' aside")
         for src, dst in reversed(moved):
-            with suppress(OSError):
+            try:
                 os.replace(dst, src)
+            except OSError:
+                logging.exception(f"Could not move '{dst}' back to '{src}'")
         raise error
     log_startup_warning(
         f"Database upgrade failed ({getattr(error, 'orig', error)}): '{db_path}' was moved to "

@@ -157,26 +157,68 @@ def test_explicit_database_url_naming_the_default_file_is_recreated(default_db, 
     assert len(_moved_aside(default_db)) == 1
 
 
+def _recreate_with_a_journal_left_behind(monkeypatch):
+    real_recreate = db_module._recreate_after_failed_upgrade
+
+    def recreate(db_path, error):
+        open(db_path + "-journal", "wb").close()  # a sidecar another connection left
+        real_recreate(db_path, error)
+
+    monkeypatch.setattr(db_module, "_recreate_after_failed_upgrade", recreate)
+
+
+def test_sidecars_move_before_the_database(default_db, monkeypatch):
+    _make_db(default_db, revision="0001_assets")
+    _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
+    real_replace, moves = os.replace, []
+
+    def recording_replace(src, dst):
+        if dst.startswith(default_db + ".failed-upgrade-"):
+            moves.append((src, dst))
+        real_replace(src, dst)
+
+    with monkeypatch.context() as patch:
+        _recreate_with_a_journal_left_behind(patch)
+        patch.setattr(db_module.os, "replace", recording_replace)
+        _boot()
+
+    [moved] = _moved_aside(default_db)
+    assert moves == [(default_db + "-journal", moved + "-journal"), (default_db, moved)]
+    assert os.path.exists(moved + "-journal")
+
+
 def test_failed_move_puts_every_file_back(default_db, monkeypatch):
     _make_db(default_db, revision="0001_assets")
     _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
-    real_recreate, real_replace = db_module._recreate_after_failed_upgrade, os.replace
-
-    def recreate_with_a_wal_left_behind(db_path, error):
-        open(db_path + "-wal", "wb").close()  # moves before the database does
-        real_recreate(db_path, error)
+    real_replace = os.replace
 
     def database_cannot_move(src, dst):
         if src == default_db:
             raise PermissionError("held open")
         real_replace(src, dst)
 
-    monkeypatch.setattr(db_module, "_recreate_after_failed_upgrade", recreate_with_a_wal_left_behind)
-    monkeypatch.setattr(db_module.os, "replace", database_cannot_move)
-    with pytest.raises(SystemExit):
-        _boot()
-    monkeypatch.undo()
+    with monkeypatch.context() as patch:
+        _recreate_with_a_journal_left_behind(patch)
+        patch.setattr(db_module.os, "replace", database_cannot_move)
+        with pytest.raises(SystemExit):
+            _boot()
 
-    assert os.path.exists(default_db + "-wal")
+    assert os.path.exists(default_db + "-journal")
+    assert glob.glob(default_db + ".failed-upgrade-*") == []
+    assert _revision(default_db) == "0001_assets"
+
+
+def test_unupgradable_database_held_by_another_process_is_not_moved(default_db):
+    # The upgrade fails on the schema before it needs a lock, so its error says nothing about the holder.
+    _make_db(default_db, revision="0001_assets")
+    _execute(default_db, "DROP INDEX ix_asset_info_meta_key_val_bool")
+    holder = sqlite3.connect(default_db)
+    holder.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(SystemExit):
+            _boot()
+    finally:
+        holder.close()
+
     assert glob.glob(default_db + ".failed-upgrade-*") == []
     assert _revision(default_db) == "0001_assets"
