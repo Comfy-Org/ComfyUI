@@ -30,8 +30,8 @@ from comfy_execution.preview_generators import (
 )
 
 PREVIEW_MAX_PIXELS = 1_000_000
-# Above this the decode alone needs gigabytes; a crash there can't be caught.
-PREVIEW_MAX_SOURCE_PIXELS = 100_000_000
+# 8K is 33-35 MP; at 40 MP one float decode is ~0.5 GB, and running out of memory can't be caught.
+PREVIEW_MAX_SOURCE_PIXELS = 40_000_000
 _ENCODABLE_MODES = frozenset({"RGB", "RGBA", "L", "LA", "P"})
 
 
