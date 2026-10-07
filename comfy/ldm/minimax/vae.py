@@ -269,10 +269,8 @@ class FeedForward(nn.Module):
 
     def forward(self, x, pre_norm, residual, residual_scale):
         # norm, gated silu and residual addcmul fold into the INT8 kernels
-        with comfy.ops.CastBiasWeightContext(pre_norm if pre_norm.weight is not None else None, x, offloadable=True) as (weight, bias):
-            h = comfy.ops.linear_input_act(self.w1, x, "rms_norm", weight, pre_norm.eps)
-        return comfy.ops.linear_input_act(
-            self.w2, h, "swiglu", residual=residual, residual_scale=residual_scale)
+        h = self.w1(x, input_act="rms_norm", act_weight=pre_norm)
+        return self.w2(h, input_act="swiglu", residual=residual, residual_scale=residual_scale)
 
 
 class Attention(nn.Module):
@@ -291,8 +289,7 @@ class Attention(nn.Module):
     def forward(self, x, rotary_pos_emb, pre_norm, residual, residual_scale):
         batch_size, seq_len, _ = x.shape
 
-        with comfy.ops.CastBiasWeightContext(pre_norm if pre_norm.weight is not None else None, x, offloadable=True) as (weight, bias):
-            qkv = comfy.ops.linear_input_act(self.to_qkv, x, "rms_norm", weight, pre_norm.eps)
+        qkv = self.to_qkv(x, input_act="rms_norm", act_weight=pre_norm)
         qkv = qkv.view(batch_size, seq_len, -1, 3 * self.dim_head)
         query, key, value = torch.chunk(qkv, 3, dim=-1)
 
@@ -316,9 +313,7 @@ class Attention(nn.Module):
             out = out.transpose(1, 2).reshape(batch_size, seq_len, -1)
         else:
             out = optimized_attention(query, key, value, self.heads, skip_reshape=True)
-        return comfy.ops.linear_input_act(
-            self.to_out, torch.nan_to_num(out), None,
-            residual=residual, residual_scale=residual_scale)
+        return self.to_out(torch.nan_to_num(out), residual=residual, residual_scale=residual_scale)
 
 
 class TransformerBlock(nn.Module):
