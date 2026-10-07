@@ -64,6 +64,68 @@ Supports all operating systems and GPU types (NVIDIA, AMD, Intel, Apple Silicon,
 
 ## Examples
 See what ComfyUI can do with the [newer template workflows](https://comfy.org/workflows) or old [example workflows](https://comfyanonymous.github.io/ComfyUI_examples/).
+### Verified local RealVisXL portrait workflow
+
+This local setup was tested on an Apple M4 Pro with 24 GB unified memory,
+using ComfyUI 0.34.0, frontend 1.49.6, Python 3.12.13 and PyTorch 2.11.0 (MPS).
+
+#### Configuration and use
+
+1. Start ComfyUI from this directory with `./launch-local.sh`, then open
+   <http://127.0.0.1:8188>. The launcher uses the isolated `.venv`, binds to
+   loopback, and disables API nodes, custom nodes and automatic browser launch.
+2. In the **Workflows** sidebar, select the bookmarked **RealVisXL_Portrait**.
+   Alternatively, load
+   [RealVisXL_Portrait.json](user/default/workflows/RealVisXL_Portrait.json)
+   with the workflow file-open action.
+3. Confirm the checkpoint and parameters below, keep the queue batch count at
+   one, and click **Run** once.
+
+- Checkpoint: `RealVisXL_V5.0_fp16.safetensors`, shared with AUTOMATIC1111 through
+  `extra_model_paths.yaml`; no duplicate checkpoint is needed. Its local location
+  is `../stable-diffusion-webui/models/Stable-diffusion/`.
+- Native graph: `CheckpointLoaderSimple`, two `CLIPTextEncode` nodes,
+  `EmptyLatentImage`, `KSampler`, `VAEDecode`, and `SaveImage` (seven nodes,
+  nine links). The checkpoint supplies the model, text encoders and VAE.
+- Image size: **896 × 1152**; latent batch size: **1**.
+- Sampling: **32 steps**, **CFG 5**, **DPM++ SDE** (`dpmpp_sde`),
+  **Karras**, **denoise 1**.
+- Seed: **424242**, with `control_after_generate` set to **fixed**.
+- Output prefix: `RealVisXL_Portrait`; PNGs are saved in `output/`.
+- No LoRA, refiner or upscaler is used.
+
+On a fresh browser session, ComfyUI's built-in **Unsaved Workflow** uses
+Z-Image Turbo and may report missing `qwen_3_4b.safetensors` and
+`z_image_turbo_bf16.safetensors`, plus invalid `clip_name` and `unet_name`
+inputs. Those weights are not installed and are not required for RealVisXL.
+Select **RealVisXL_Portrait** instead; do not substitute an SDXL checkpoint into
+the Z-Image loaders. Loading the bookmarked graph and restoring it after a page
+reload were verified without missing-model or invalid-input warnings.
+
+**Positive prompt:** Photorealistic head and shoulders portrait of an adult woman in her thirties, wearing a simple linen shirt, relaxed natural expression, looking at the camera, realistic skin texture, soft window light, neutral studio background, shallow depth of field, 85mm lens, editorial photography
+
+**Negative prompt:** cartoon, anime, illustration, CGI, plastic skin, excessive retouching, blurry, low resolution, distorted face, asymmetrical eyes, bad anatomy, extra limbs, duplicate person, text, watermark, logo
+
+#### Generation test — 2026-10-07
+
+- Submitted once through the browser's **Run** button and completed with
+  `status_str: success` and `completed: true` in **258.379 seconds**
+  (approximately **4 minutes 18 seconds**).
+- Local result: [RealVisXL_Portrait_00001_.png](output/RealVisXL_Portrait_00001_.png),
+  an RGB PNG at **896 × 1152**, **1,416,376 bytes**. Generated outputs are not
+  tracked in Git.
+- Verified that the executed node graph and parameters matched the saved JSON,
+  the PNG's embedded prompt matched the executed graph, and the image endpoint
+  served the same file. The image was nonblank, visually coherent, and visible
+  in the frontend's **Save Image** node. The queue was empty afterward.
+- To avoid competing for unified memory, the idle Qwen server on port **1235**
+  was temporarily stopped. After the test, ComfyUI's models and execution cache
+  were released using `/free` with `unload_models` and `free_memory` enabled;
+  Qwen was restored with its original launch configuration. LM Studio on port
+  **1234** was left untouched.
+- This verifies the saved SDXL portrait graph, not AUTOMATIC1111 inference or
+  Qwen GGUF support in ComfyUI. The Templates gallery still appeared empty in
+  the browser; load the saved workflow JSON directly.
 
 ## Features
 - A visual node graph for building and reusing image, video, audio, 3D, and text workflows without code.
