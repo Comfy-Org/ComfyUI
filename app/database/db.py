@@ -311,12 +311,12 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     if any(name.startswith("._") for name in os.listdir(versions)):
         key = hashlib.sha256(os.path.abspath(versions).encode()).hexdigest()[:12]
         filtered = os.path.join(tempfile.gettempdir(), f"comfyui-alembic-versions-{key}")
-        if os.path.isdir(filtered):
-            os.chmod(filtered, 0o700)  # copytree gives the copy the source's mode; make it removable
         shutil.rmtree(filtered, ignore_errors=True)
-        shutil.copytree(versions, filtered, ignore=shutil.ignore_patterns("._*", "__pycache__"),
-                        copy_function=shutil.copyfile)
-        config.set_main_option("version_locations", filtered)
+        os.makedirs(filtered, mode=0o700)
+        for name in os.listdir(versions):
+            if name.endswith(".py") and not name.startswith("._"):
+                shutil.copyfile(os.path.join(versions, name), os.path.join(filtered, name))
+        config.set_main_option("version_locations", filtered.replace("%", "%%"))  # ConfigParser syntax
 
     # Check if we need to upgrade
     engine = create_engine(db_url)

@@ -60,7 +60,7 @@ def scripts(tmp_path, monkeypatch):
 @pytest.fixture
 def temp_root(tmp_path, monkeypatch):
     """The directory tempfile.gettempdir() returns, so copies land in tmp_path."""
-    root = tmp_path / "tmp"
+    root = tmp_path / "100% tmp"  # % is ConfigParser syntax in Alembic options
     root.mkdir()
     monkeypatch.setattr(db_module.tempfile, "tempdir", str(root))
     return root
@@ -167,14 +167,15 @@ def test_copy_of_a_read_only_install_stays_removable(scripts, temp_root):
         os.chmod(path, os.stat(path).st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
     try:
         db_module._init_file_db(db_module.args.database_url)
-        # The copy now has the source's read-only mode, as after a launch that was killed.
         _relaunch()
     finally:
         for path in read_only:
             os.chmod(path, os.stat(path).st_mode | stat.S_IWUSR)
 
     (copy,) = _copies(temp_root)
-    # Windows can't delete read-only files, so the copied files must not keep the source's mode.
+    # Other users can't write code into the copy, whatever the source's mode, and the copied
+    # files don't keep a read-only mode (Windows can't delete read-only files).
+    assert stat.S_IMODE(os.stat(copy).st_mode) & 0o077 == 0
     assert all(os.access(os.path.join(copy, name), os.W_OK) for name in os.listdir(copy))
     assert _current_revision(db_path) == head
 
