@@ -22,6 +22,7 @@ from app.assets.database.queries.records import (
     ensure_tag,
     ensure_tag_link,
     mark_content_missing,
+    revive_contents,
     unset_content_missing,
 )
 from app.assets.helpers import get_utc_now
@@ -321,3 +322,75 @@ def test_hashing_on_keeps_the_per_file_revive(root, session):
 
     assert all(c.is_missing for c in _contents(session))
     assert len(files) == len(_contents(session))
+
+
+def test_the_newest_of_two_rows_with_records_wins(root, session):
+    files = _populate(root / "batch", 1)
+    _scan()
+    (older,) = _contents(session)
+    older.created_at = older.created_at - timedelta(days=1)
+    older.is_missing, older.missing_since = True, get_utc_now()
+    session.commit()
+    newer = create_content(session, path=str(files[0]), size_bytes=10, mtime_ns=1)
+    create_record(session, content_id=newer.id, name="newer")
+    newer.is_missing, newer.missing_since = True, get_utc_now()
+    session.commit()
+    stat_result = files[0].stat()
+    os.utime(files[0], ns=(stat_result.st_atime_ns, stat_result.st_mtime_ns + 5_000_000_000))
+
+    assert _scan().recovered == 1
+
+    assert not session.get(AssetContent, newer.id).is_missing
+    assert session.get(AssetContent, older.id).is_missing
+
+
+def test_a_row_whose_record_went_before_the_write_is_not_revived(root, session):
+    _populate(root / "batch", 1)
+    _scan()
+    parked = _move_away(root / "batch")
+    _scan()
+    _copy_back(parked, root / "batch")
+    (content,) = _contents(session)
+    candidates = scanner._revival_candidates(
+        session, [str(root)], get_utc_now() - scanner.REVIVE_WINDOW
+    )
+    assert list(candidates.values()) == [(content.id, 10)]
+    session.execute(sa.delete(AssetTag))
+    session.execute(sa.delete(Asset))  # the user deletes it while the scan is paused
+    session.commit()
+
+    assert revive_contents(session, {content.id: 1}) == []
+    assert session.get(AssetContent, content.id).is_missing
+
+
+def test_a_pre_epoch_file_does_not_stop_the_rest_reviving(root, session):
+    files, edits = _gone_and_copied_back(root, session)
+    os.utime(files[0], ns=(0, -1_000_000_000))
+
+    state = _scan()
+
+    assert state.recovered == len(files) - 1
+    assert all(not c.is_missing for c in _contents(session) if c.path != str(files[0]))
+
+
+def test_a_cancel_during_the_revive_leaves_the_rows_missing(root, session):
+    files, _ = _gone_and_copied_back(root, session)
+
+    scanner.revive_returned_references_safely("output", should_stop=lambda: True)
+
+    assert sum(1 for c in _contents(session) if c.is_missing) == len(files)
+
+
+def test_a_failing_revive_leaves_the_rest_of_the_scan_running(root, session, monkeypatch, caplog):
+    files, _ = _gone_and_copied_back(root, session)
+    (root / "new.png").write_bytes(b"new")
+
+    def broken(*_args):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(scanner, "_revival_candidates", broken)
+    state = _scan()
+
+    assert state.recovered == 0
+    assert any(c.path == str(root / "new.png") and not c.is_missing for c in _contents(session))
+    assert "bulk revive failed" in caplog.text

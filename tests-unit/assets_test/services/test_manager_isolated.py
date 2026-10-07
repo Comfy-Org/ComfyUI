@@ -253,15 +253,14 @@ def test_startup_runs_against_memory_db_without_starting_a_scanner_thread(
 def test_ensure_scan_started_starts_the_lazy_object_info_scan(
     enabled_manager: AssetsEnabled, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seeder_start = MagicMock()
-    served = MagicMock()
-    monkeypatch.setattr(asset_seeder, "start", seeder_start)
-    monkeypatch.setattr(asset_seeder, "node_list_served", served)
+    calls = MagicMock()
+    monkeypatch.setattr(asset_seeder, "start", calls.start)
+    monkeypatch.setattr(asset_seeder, "node_list_served", calls.node_list_served)
 
     enabled_manager.ensure_scan_started()
 
-    served.assert_called_once_with()
-    seeder_start.assert_called_once_with(roots=("models", "input", "output"))
+    # The flag first: a scan thread started before it would skip the pending prune.
+    assert calls.mock_calls[:2] == [call.node_list_served(), call.start(roots=("models", "input", "output"))]
 
 
 @pytest.mark.parametrize("pending", [True, False])

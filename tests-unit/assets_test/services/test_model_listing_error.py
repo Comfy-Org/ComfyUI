@@ -90,7 +90,7 @@ def _startup_scan(caplog: pytest.LogCaptureFixture) -> dict:
     seeder._roots = ALL_ROOTS
     seeder._phase = seeder_module.ScanPhase.FAST
     seeder._prune_first = True
-    seeder._node_list_served = True
+    seeder._prune_pending = seeder._node_list_served = True
     seeder._run_gate.set()
     caplog.clear()
     with caplog.at_level(logging.INFO):

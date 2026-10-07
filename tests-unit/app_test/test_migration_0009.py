@@ -46,8 +46,11 @@ def test_0009_adds_missing_since_and_leaves_existing_rows_unstamped(db_at_0008_w
     command.upgrade(cfg, _REVISION_0009)
 
     assert "missing_since" in _columns(db_path)
-    assert "ix_asset_contents_missing_since" in _indexes(db_path)
     with sqlite3.connect(db_path) as conn:
+        (index_sql,) = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'ix_asset_contents_missing_since'"
+        ).fetchone()
+        assert "WHERE missing_since IS NOT NULL" in index_sql
         assert conn.execute("SELECT is_missing, missing_since FROM asset_contents").fetchall() == [(1, None)]
 
 

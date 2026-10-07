@@ -366,8 +366,9 @@ def unset_content_missing(session: Session, content_id: str) -> None:
 def revive_contents(session: Session, mtimes: Mapping[str, int]) -> list[str]:
     """Unmark the missing rows in ``mtimes`` (content id -> the returned file's mtime_ns),
     recording that mtime and, when it moved, dropping the hash, as a same-size mtime bump
-    on a live row does. Skips a row no longer missing or whose path a live row now holds;
-    returns the ids it revived."""
+    on a live row does. Skips a row no longer missing, without a record (it would come back
+    invisible and hold the path), or whose path a live row now holds; returns the ids it
+    revived."""
     if not mtimes:
         return []
     live = aliased(AssetContent)
@@ -376,6 +377,7 @@ def revive_contents(session: Session, mtimes: Mapping[str, int]) -> list[str]:
             AssetContent.id.in_(list(mtimes)),
             AssetContent.is_missing.is_(True),
             ~sa.exists().where(live.path == AssetContent.path, live.is_missing == sa.false()),
+            sa.exists().where(Asset.content_id == AssetContent.id),
         )
     ).all()
     for content_id, mtime_ns in rows:

@@ -1,6 +1,8 @@
 """The startup prune waits until the node list has been built once, so a model folder a
 custom node registers in INPUT_TYPES counts as not yet scanned rather than missing."""
 
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -125,3 +127,51 @@ def test_a_scan_queued_during_startup_does_not_run_into_shutdown(monkeypatch):
 
     thread.assert_not_called()
     assert instance._state is State.IDLE
+
+
+@pytest.fixture
+def live_seeder(monkeypatch: pytest.MonkeyPatch, prunes, temp_syncs) -> _AssetSeeder:
+    """A seeder whose scans run on real threads through the public calls, with the
+    filesystem phases stubbed out."""
+    instance = _AssetSeeder()
+    monkeypatch.setattr(seeder_module, "dependencies_available", lambda: True)
+    monkeypatch.setattr(seeder_module, "get_owned_prefixes", lambda: [])
+    monkeypatch.setattr(instance, "_log_scan_config", lambda roots: None)
+    monkeypatch.setattr(instance, "_run_fast_phase", lambda roots: (0, 0, 0))
+    monkeypatch.setattr(instance, "_run_enrich_phase", lambda roots: (False, 0))
+    return instance
+
+
+def test_the_startup_prune_runs_in_the_first_ordinary_scan_after_the_node_list(live_seeder, prunes):
+    assert live_seeder.start(prune_first=True, phase=ScanPhase.FAST)
+    assert live_seeder.wait(5)
+    assert prunes == []
+
+    live_seeder.node_list_served()
+    assert live_seeder.start(phase=ScanPhase.FAST)
+    assert live_seeder.wait(5)
+
+    assert len(prunes) == 1
+    assert not live_seeder.prune_pending()
+
+
+def test_a_scan_queued_behind_the_startup_scan_runs_the_prune(live_seeder, prunes, monkeypatch):
+    release = threading.Event()
+
+    def held_fast_phase(roots):
+        release.wait(5)
+        return 0, 0, 0
+
+    monkeypatch.setattr(live_seeder, "_run_fast_phase", held_fast_phase)
+    assert live_seeder.start(prune_first=True, phase=ScanPhase.FAST)
+    live_seeder.node_list_served()
+    assert not live_seeder.start(phase=ScanPhase.FAST)
+    live_seeder.enqueue_scan(roots=("models", "input", "output"), phase=ScanPhase.FAST)
+
+    release.set()
+    deadline = time.monotonic() + 5
+    while (live_seeder.prune_pending() or live_seeder.get_status().state is not State.IDLE) and time.monotonic() < deadline:
+        live_seeder.wait(0.1)
+
+    assert len(prunes) == 1
+    assert not live_seeder.prune_pending()
