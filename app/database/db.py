@@ -306,7 +306,6 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     config = get_alembic_config()
     # macOS writes AppleDouble ._* files beside every file on exFAT, FAT and SMB volumes, and
     # Alembic would load them as revisions, so migrate from a copy of versions/ without them.
-    # The copy has a fixed name per install, so each launch replaces the last one's.
     versions = os.path.join(config.get_main_option("script_location"), "versions")
     if any(name.startswith("._") for name in os.listdir(versions)):
         key = hashlib.sha256(os.path.abspath(versions).encode()).hexdigest()[:12]
