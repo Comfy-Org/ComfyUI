@@ -66,6 +66,7 @@ def test_probe_does_not_keep_a_free_lock(db_path, monkeypatch):
 
     assert db_module.lock_holder_db_path() is None
     assert len(probes) == 1
+    assert not os.path.exists(db_path + ".lock.json")
 
     contender = FileLock(db_path + ".lock")
     try:

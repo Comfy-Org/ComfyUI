@@ -26,7 +26,7 @@ HOLDER_SCRIPT = (
 @pytest.fixture(autouse=True)
 def isolated_lock(monkeypatch):
     monkeypatch.setattr(db_module, "_db_lock", None)
-    monkeypatch.setattr(db_module, "_holder_record_path", None)
+    monkeypatch.setattr(db_module, "_holder_record", None)
     yield
     if db_module._db_lock is not None:
         db_module._db_lock.release(force=True)
@@ -76,7 +76,13 @@ def _stop_holder(holder, how):
     assert holder.wait(timeout=30) == 0
 
 
-def test_record_describes_the_lock_holder(db_path):
+def test_record_describes_the_lock_holder(db_path, monkeypatch):
+    monkeypatch.setattr(db_module.args, "port", 18765)
+    monkeypatch.setattr(db_module.args, "listen", "0.0.0.0,::")
+    # The macOS token must not depend on the holder's time zone or locale.
+    monkeypatch.setenv("TZ", "America/New_York")
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+
     db_module._acquire_file_lock(db_path)
 
     record = _read_record(db_path)
@@ -86,8 +92,8 @@ def test_record_describes_the_lock_holder(db_path):
         "started": _independent_start_token(os.getpid()),
         "main": str(REPO_ROOT / "main.py"),
         "argv": sys.argv,
-        "port": db_module.args.port,
-        "listen": db_module.args.listen,
+        "port": 18765,
+        "listen": "0.0.0.0,::",
     }
     assert sorted(os.listdir(os.path.dirname(db_path))) == ["comfyui.db.lock", "comfyui.db.lock.json"]
 
@@ -158,6 +164,37 @@ def test_exit_after_a_failed_init_leaves_the_next_holders_record(db_path, monkey
         _stop_holder(holder, "exit")
 
 
+def test_failed_init_removes_the_record_before_releasing_the_lock(db_path, monkeypatch):
+    monkeypatch.setattr(db_module.args, "database_url", f"sqlite:///{db_path}")
+    monkeypatch.setattr(db_module, "get_alembic_config", lambda: 1 / 0)
+    record_at_release = []
+
+    class _Lock(db_module.FileLock):
+        def release(self, *args, **kwargs):
+            record_at_release.append(os.path.exists(db_path + ".lock.json"))
+            super().release(*args, **kwargs)
+
+    monkeypatch.setattr(db_module, "FileLock", _Lock)
+    with pytest.raises(ZeroDivisionError):
+        db_module._init_file_db(db_module.args.database_url)
+
+    # A holder waiting on the lock writes its record as soon as it is released.
+    assert record_at_release == [False]
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+def test_a_forked_child_leaves_the_parents_record(db_path):
+    db_module._acquire_file_lock(db_path)
+
+    child = os.fork()
+    if child == 0:
+        db_module._remove_holder_record()  # what atexit runs in the child
+        os._exit(0)
+    os.waitpid(child, 0)
+
+    assert _read_record(db_path)["pid"] == os.getpid()
+
+
 @pytest.mark.parametrize("token", [lambda: None, lambda: 1 / 0], ids=["empty", "raises"])
 def test_no_record_without_a_start_token(db_path, monkeypatch, token):
     monkeypatch.setattr(db_module, "_process_start_token", token)
@@ -180,3 +217,9 @@ def test_a_failed_write_keeps_the_lock_and_leaves_no_files(db_path, monkeypatch,
     assert db_module._db_lock.is_locked
     assert os.listdir(os.path.dirname(db_path)) == ["comfyui.db.lock"]
     assert "Could not record the database lock holder" in caplog.text
+
+
+def test_no_start_token_on_other_platforms(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "freebsd14")
+
+    assert db_module._process_start_token() is None
