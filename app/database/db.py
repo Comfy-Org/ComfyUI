@@ -197,6 +197,31 @@ def _acquire_file_lock(db_path):
             )
 
 
+def lock_holder_db_path():
+    """The database path if another process holds its lock, else None.
+
+    Never waits and never keeps the lock: a free lock is taken and released at once.
+    A missing lock file means no holder, so none is created.
+    """
+    try:
+        db_path = get_db_path()
+    except ValueError:
+        return None
+    lock_path = db_path + ".lock"
+    if not os.path.exists(lock_path):
+        return None
+    probe = FileLock(lock_path)
+    try:
+        probe.acquire(timeout=0)
+        probe.release()
+    except Timeout:
+        return db_path
+    except Exception as e:
+        # The check is advisory, so it must never stop startup.
+        logging.debug(f"Could not check the database lock '{lock_path}': {e}")
+    return None
+
+
 def _is_memory_db(db_url):
     """Check if the database URL refers to an in-memory SQLite database."""
     return db_url in ("sqlite:///:memory:", "sqlite://")
@@ -256,6 +281,15 @@ def _init_file_db(db_url):
         raise
 
 
+# NORMAL: commits skip the fsync that held the write lock. A power loss or OS crash can
+# roll back recent commits but cannot corrupt the database. "FULL" is SQLite's default.
+WAL_SYNCHRONOUS = "NORMAL"
+
+
+def _set_wal_synchronous(dbapi_connection, connection_record=None):
+    dbapi_connection.execute(f"PRAGMA synchronous={WAL_SYNCHRONOUS}")
+
+
 _DESTRUCTIVE_REVISION = "0007_record_content_split"
 
 
@@ -303,6 +337,11 @@ def _migrate_and_bind(db_url, db_path, db_exists):
     else:
         if journal_mode.lower() != "wal":
             logging.warning("SQLite WAL mode unavailable; continuing with %s journal mode.", journal_mode)
+        else:
+            # Only in WAL mode: with a rollback journal, NORMAL risks corruption on power loss.
+            event.listen(engine, "connect", _set_wal_synchronous)
+            event.listen(write_engine, "connect", _set_wal_synchronous)
+            _set_wal_synchronous(conn.connection.dbapi_connection)  # opened before the hooks
 
     context = MigrationContext.configure(conn)
     current_rev = context.get_current_revision()

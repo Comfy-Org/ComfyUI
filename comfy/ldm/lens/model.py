@@ -12,7 +12,7 @@ import comfy.ldm.flux.layers
 import comfy.patcher_extension
 from comfy.ldm.flux.layers import EmbedND
 from comfy.ldm.flux.math import apply_rope
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 
 
 def _lens_time_proj(t: torch.Tensor, dim: int = 256) -> torch.Tensor:
@@ -105,6 +105,7 @@ class LensJointAttention(nn.Module):
         operations=None,
     ) -> None:
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.inner_dim = out_dim if out_dim is not None else dim_head * heads
         self.heads = self.inner_dim // dim_head
         self.dim_head = dim_head
@@ -148,6 +149,7 @@ class LensJointAttention(nn.Module):
         txt_q, txt_k, txt_v = txt_qkv.unbind(dim=2)
         txt_q = self.norm_added_q(txt_q)
         txt_k = self.norm_added_k(txt_k)
+        del txt_qkv
 
         # [B, S, H, D] → [B, H, S, D] for attention, dels to avoid VRAM peaks
         q = torch.cat([img_q, txt_q], dim=1).transpose(1, 2)
@@ -167,9 +169,11 @@ class LensJointAttention(nn.Module):
                 )
             attention_mask = attention_mask.to(q.dtype)
 
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
         out = optimized_attention(
             q, k, v, self.heads, mask=attention_mask, skip_reshape=True,
             transformer_options=transformer_options,
+            preferred_attention=self.comfy_attention,
         )
 
         img_out = self.to_out[1](self.to_out[0](out[:, :seq_img, :]))

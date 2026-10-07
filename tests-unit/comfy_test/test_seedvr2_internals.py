@@ -125,8 +125,8 @@ def test_seedvr2_7b_swin_attention_forward_uses_optimized_var_attention(monkeypa
     calls = []
 
     def fake_optimized_var_attention(**kwargs):
-        calls.append(kwargs)
-        return kwargs["q"]
+        calls.append({**kwargs, **{name: kwargs[name].take() for name in ("q", "k", "v")}})
+        return calls[-1]["q"]
 
     monkeypatch.setattr(seedvr_model, "optimized_var_attention", fake_optimized_var_attention)
 
@@ -136,6 +136,7 @@ def test_seedvr2_7b_swin_attention_forward_uses_optimized_var_attention(monkeypa
     assert tuple(txt_out.shape) == (3, dim)
     assert len(calls) == 1
     call = calls[0]
+    assert call["preferred_attention"] is attn.comfy_attention
     assert tuple(call["q"].shape) == (14, heads, head_dim)
     assert tuple(call["k"].shape) == (14, heads, head_dim)
     assert tuple(call["v"].shape) == (14, heads, head_dim)
@@ -195,7 +196,8 @@ def test_seedvr2_swin_attention_batched_samples_match_one_at_a_time(rope_type):
     torch.testing.assert_close(batched_txt, torch.cat(single_txt), rtol=1e-4, atol=1e-5)
 
 
-def test_var_attention_optimized_split_batches_equal_length_windows(monkeypatch):
+@pytest.mark.parametrize("container_inputs", [False, True])
+def test_var_attention_optimized_split_batches_equal_length_windows(monkeypatch, container_inputs):
     heads = 2
     head_dim = 3
     q = torch.arange(36, dtype=torch.float32).reshape(6, heads, head_dim)
@@ -203,14 +205,20 @@ def test_var_attention_optimized_split_batches_equal_length_windows(monkeypatch)
     v = q + 200
     cu = [0, 2, 4, 6]
     calls = []
+    preference = attention.ComfyAttention()
+    options = {"block_index": 2}
 
     def fake_optimized_attention(q_arg, k_arg, v_arg, heads_arg, **kwargs):
+        assert kwargs["preferred_attention"] is preference
+        assert kwargs["transformer_options"] is options
+        q_arg, k_arg, v_arg = q_arg.take(), k_arg.take(), v_arg.take()
         calls.append(tuple(q_arg.shape))
         return q_arg + v_arg
 
     monkeypatch.setattr(attention, "optimized_attention", fake_optimized_attention)
 
-    out = var_attention_optimized_split(q, k, v, heads, cu, cu, skip_reshape=True, skip_output_reshape=True)
+    inputs = tuple(attention.AttentionTensorContainer(t) for t in (q, k, v)) if container_inputs else (q, k, v)
+    out = var_attention_optimized_split(*inputs, heads, cu, cu, skip_reshape=True, skip_output_reshape=True, preferred_attention=preference, transformer_options=options)
 
     assert calls == [(3, heads, 2, head_dim)], (
         f"equal-length windows must share one batched attention call; got {calls}"
@@ -228,6 +236,7 @@ def test_var_attention_optimized_split_calls_dense_backend_per_window(monkeypatc
     calls = []
 
     def fake_optimized_attention(q_arg, k_arg, v_arg, heads_arg, **kwargs):
+        q_arg, k_arg, v_arg = q_arg.take(), k_arg.take(), v_arg.take()
         calls.append(
             {
                 "q_shape": tuple(q_arg.shape),
