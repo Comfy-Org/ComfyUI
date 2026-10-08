@@ -844,6 +844,7 @@ class ModelPatcher:
     def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
         with self.use_ejected():
             p = set()
+            weights_changed = False
             model_sd = self.model.state_dict()
             for k in patches:
                 offset = None
@@ -874,8 +875,10 @@ class ModelPatcher:
                     current_patches = self.patches.get(key, [])
                     current_patches.append((strength_patch, patches[k], strength_model, offset, function))
                     self.patches[key] = current_patches
+                    weights_changed = True
 
-            self.patches_uuid = uuid.uuid4()
+            if weights_changed:
+                self.patches_uuid = uuid.uuid4()
             return list(p)
 
     def get_key_patches(self, filter_prefix=None):
