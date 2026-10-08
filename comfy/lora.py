@@ -87,6 +87,11 @@ def load_lora(lora, to_load, log_missing=True):
             patch_dict[to_load[x]] = ("set", (set_weight,))
             loaded_keys.add(set_weight_name)
 
+    for key in lora:
+        if key.endswith(".config"):
+            patch_dict[key] = ("config", (lora[key],))
+            loaded_keys.add(key)
+
     if log_missing:
         for x in lora.keys():
             if x not in loaded_keys:
