@@ -372,20 +372,29 @@ def revive_contents(session: Session, mtimes: Mapping[str, int]) -> list[str]:
     if not mtimes:
         return []
     live = aliased(AssetContent)
-    rows = session.execute(
-        sa.select(AssetContent.id, AssetContent.mtime_ns).where(
+    revived = list(session.scalars(
+        sa.select(AssetContent.id).where(
             AssetContent.id.in_(list(mtimes)),
             AssetContent.is_missing.is_(True),
             ~sa.exists().where(live.path == AssetContent.path, live.is_missing == sa.false()),
             sa.exists().where(Asset.content_id == AssetContent.id),
         )
-    ).all()
-    for content_id, mtime_ns in rows:
-        values: dict[str, Any] = {"is_missing": False, "missing_since": None, "mtime_ns": mtimes[content_id]}
-        if mtime_ns != mtimes[content_id]:
-            values["hash"] = None
-        session.execute(sa.update(AssetContent).where(AssetContent.id == content_id).values(**values))
-    revived = [content_id for content_id, _ in rows]
+    ))
+    if not revived:
+        return []
+    mtime = sa.bindparam("new_mtime")
+    # One statement for the batch; SET reads the row as it was, so the CASE sees the old mtime.
+    session.connection().execute(
+        sa.update(AssetContent)
+        .where(AssetContent.id == sa.bindparam("content_id"))
+        .values(
+            is_missing=False,
+            missing_since=None,
+            mtime_ns=mtime,
+            hash=sa.case((AssetContent.mtime_ns == mtime, AssetContent.hash), else_=None),
+        ),
+        [{"content_id": content_id, "new_mtime": mtimes[content_id]} for content_id in revived],
+    )
     session.execute(sa.delete(AssetTag).where(AssetTag.tag_name == "missing", AssetTag.asset_id.in_(sa.select(Asset.id).where(Asset.content_id.in_(revived)))))
     session.flush()
     return revived
