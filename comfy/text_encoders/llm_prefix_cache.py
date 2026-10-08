@@ -38,8 +38,10 @@ def _host(t):
     # pinned when the driver allows it; ComfyUI's own pinned weights can exhaust that before RAM runs out
     try:
         h = torch.empty(t.shape, dtype=t.dtype, pin_memory=True)
+        stats["pinned_mb"] = stats.get("pinned_mb", 0) + t.nbytes // 2**20
     except RuntimeError:
         h = torch.empty(t.shape, dtype=t.dtype)
+        stats["pageable_mb"] = stats.get("pageable_mb", 0) + t.nbytes // 2**20
     h.copy_(t, non_blocking=h.is_pinned())
     return h
 
@@ -72,7 +74,8 @@ class _Slot:
         device = next(iter(self.attn.values())).key.device
         _sync(device)
         self.attn = None
-        logging.info("llm prefix cache: moved %.2f GB to RAM in %.2f s", self.nbytes() / 1e9, time.perf_counter() - t)
+        stats["park_s"] = round(time.perf_counter() - t, 3)
+        logging.info("llm prefix cache: moved %.2f GB to RAM in %.2f s", self.nbytes() / 1e9, stats["park_s"])
 
 
 def _match(ids):
@@ -120,14 +123,24 @@ def _restore(model, key, ids, need, device, dtype):
         stats["restore"] = "in-place"
     else:
         # parked, or too small for this prompt + max_length: copy the prefix into a new allocation
+        t = time.perf_counter()
         pkv = model.init_kv_cache(1, max(need + HEADROOM, _slot.capacity), device, dtype)
+        _sync(device)
+        stats["alloc_s"] = round(time.perf_counter() - t, 3)
+        t = time.perf_counter()
         src = _slot.parked if _slot.parked is not None else {i: (kv.key, kv.value) for i, kv in _slot.attn.items()}
         for i, (k, v) in src.items():
             pkv[i].key[:, :, :n].copy_(k[:, :, :n], non_blocking=True)
             pkv[i].value[:, :, :n].copy_(v[:, :, :n], non_blocking=True)
+        _sync(device)
+        stats["kv_copy_s"] = round(time.perf_counter() - t, 3)
+        stats["kv_copy_gb"] = round(sum(k[:, :, :n].nbytes + v[:, :, :n].nbytes for k, v in src.values()) / 1e9, 2)
         stats["restore"] = "from-ram" if _slot.parked is not None else "grow"
+    t = time.perf_counter()
     for i, (c, r) in st.items():
         pkv[i] = LinearKV(c.to(device, copy=True, non_blocking=True), r.to(device, copy=True, non_blocking=True), n, None, None)
+    _sync(device)
+    stats["ckpt_copy_s"] = round(time.perf_counter() - t, 3)
     _set_prefix(pkv, n)
     _slot = None  # rebuilt from this call's cache in prefill()
     return pkv, n, carried
