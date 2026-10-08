@@ -127,7 +127,7 @@ def test_assets_off_warns_and_continues_when_another_process_holds_the_lock(
     warning = startup_warnings[0]
     assert "Another ComfyUI is already using this install's asset database" in warning
     assert db_path in warning
-    assert "This ComfyUI was started without --enable-assets, so it doesn't need that database and will start anyway" in warning
+    assert "This ComfyUI was started with --disable-assets, so it doesn't need that database and will start anyway" in warning
     assert "A future version will refuse to start two ComfyUIs on the same asset database" in warning
 
 

@@ -23,7 +23,9 @@ console_log_level = get_console_log_level(args.verbose)
 file_log_outputs = get_file_log_outputs(args.verbose)
 setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_stdout=args.log_stdout)
 
-from app.database.db import dependencies_available, init_db, lock_holder_db_path
+from app.database.db import dependencies_available, get_database_url, init_db, lock_holder_db_path, missing_dependencies
+from app.assets.event_log import error_kind
+from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
 from app.assets.manager import AssetManager, default_asset_manager
 import itertools
@@ -55,6 +57,9 @@ if __name__ == "__main__":
 
     if args.disable_api_nodes:
         logging.warning("--disable-api-nodes is deprecated and will be removed in a future version. It currently behaves like --offline. Use --offline to keep the frontend offline, or --disable-partner-nodes to only disable partner nodes.")
+
+    if args.enable_assets:
+        logging.warning("--enable-assets is deprecated and does nothing: the assets system is on by default. Use --disable-assets to turn it off.")
 
 faulthandler.enable(file=sys.stderr, all_threads=args.debug_hang)
 if __name__ == "__main__" and args.debug_hang:
@@ -490,22 +495,38 @@ def setup_database(asset_manager):
         init_db()
         asset_manager.startup()
     except Exception as e:
-        if "database is locked" in str(e) or "Could not acquire lock on database" in str(e):
-            logging.error(
-                "Database is locked. Another ComfyUI process is already using this database.\n"
-                "To resolve this, specify a separate database file for this instance:\n"
-                "  --database-url sqlite:///path/to/another.db"
-            )
-            sys.exit(1)
-        logging.error(
-            f"Failed to initialize database: {e}\n"
-            "The --enable-assets flag requires a working database connection.\n"
-            "To resolve this, try one of the following:\n"
-            "  1. Install the latest requirements: pip install -r requirements.txt\n"
-            "  2. Specify an alternative database URL: --database-url sqlite:///path/to/your.db\n"
-            "  3. Use an in-memory database: --database-url sqlite:///:memory:"
-        )
+        logging.error(database_failure_message(e, get_database_url()))
         sys.exit(1)
+
+
+WITHOUT_ASSETS = "Or start ComfyUI without the assets system: --disable-assets"
+
+
+def database_failure_message(error, db_url):
+    """What stopped the asset database from opening, and how to fix it."""
+    if not db_url.startswith("sqlite:"):
+        return f"--database-url must be a SQLite URL, like sqlite:///path/to/comfyui.db, not '{db_url}'.\n{WITHOUT_ASSETS}"
+    location = db_url.removeprefix("sqlite:///")
+    kind = error_kind(error)
+    detail = getattr(error, "orig", None) or error
+    if "Could not acquire lock on database" in str(error):
+        what = f"Another ComfyUI is already using the asset database '{location}'."
+        fix = "Close the other ComfyUI and start this one again."
+    elif kind == "database_locked":
+        what = f"The asset database '{location}' is locked by another program ({detail})."
+        fix = "Close any program that has it open, such as another ComfyUI or a database viewer, and start again."
+    elif "Can't locate revision" in str(error):
+        what = f"The asset database '{location}' was last used by a newer version of ComfyUI ({detail})."
+        fix = "Update ComfyUI, or move that file aside and start again to create a new database."
+    elif kind == "permission_denied" or isinstance(error, FileExistsError):
+        what = f"ComfyUI can't create or write the asset database '{location}' ({detail})."
+        fix = "Make its folder writable."
+    else:
+        what = (f"The asset database '{location}' is corrupt ({detail})." if kind == "database_corrupt"
+                else f"Could not open or upgrade the asset database '{location}': {detail}")
+        fix = ("Move that file aside, or delete it, and start again: ComfyUI creates a new database "
+               "and rebuilds the asset catalog by rescanning your files.")
+    return f"{what}\n{fix}\nOr give this ComfyUI its own database: --database-url sqlite:///path/to/another.db\n{WITHOUT_ASSETS}"
 
 
 def warn_if_database_in_use():
@@ -519,7 +540,7 @@ WARNING WARNING WARNING WARNING WARNING
 
 Another ComfyUI is already using this install's asset database:
   {db_path}
-This ComfyUI was started without --enable-assets, so it doesn't need that database and will start anyway.
+This ComfyUI was started with --disable-assets, so it doesn't need that database and will start anyway.
 A future version will refuse to start two ComfyUIs on the same asset database.
 To run both, give this one its own:
   --database-url sqlite:///path/to/another.db
@@ -538,6 +559,13 @@ def start_comfyui(asyncio_loop=None):
         logging.info(f"Setting temp directory to: {temp_dir}")
         folder_paths.set_temp_directory(temp_dir)
 
+    if not args.disable_assets and not dependencies_available():
+        missing = ", ".join(missing_dependencies()) or "see the import error above"
+        logging.error(
+            f"The assets system needs packages that could not be imported: {missing}.\n"
+            f"{get_missing_requirements_message()}\n{WITHOUT_ASSETS}"
+        )
+        sys.exit(1)
     asset_manager: AssetManager = default_asset_manager()
     feature_flags.SERVER_FEATURE_FLAGS["assets"] = asset_manager.enabled
     if not asset_manager.enabled:

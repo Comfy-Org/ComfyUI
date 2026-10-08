@@ -110,7 +110,7 @@ _CORE_FEATURE_FLAGS: dict[str, Any] = {
     "extension": {"manager": {"supports_v4": True}},
     "node_replacements": True,
     # main.py replaces this at startup with the selected AssetManager's state, which is off without database dependencies.
-    "assets": args.enable_assets,
+    "assets": not args.disable_assets,
 }
 
 # CLI-provided flags cannot overwrite core flags. Startup code may: main.py sets "assets".

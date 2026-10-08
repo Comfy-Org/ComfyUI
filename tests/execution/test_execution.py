@@ -497,6 +497,8 @@ class TestExecution:
             '--cpu',
         ]
         pargs += [ str(param) for param in request.param["extra_args"] ]
+        if not assets_enabled:
+            pargs.append('--disable-assets')
         if assets_enabled:
             assets_tmp_dir = tmp_path_factory.mktemp("execution-assets")
             database_path = assets_tmp_dir / "assets.db"

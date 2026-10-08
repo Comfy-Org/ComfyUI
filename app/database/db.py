@@ -76,8 +76,11 @@ def get_alembic_config():
     scripts_path = os.path.abspath(os.path.join(root_path, "alembic_db"))
 
     config = Config(config_path)
-    config.set_main_option("script_location", scripts_path)
-    config.set_main_option("sqlalchemy.url", get_database_url())
+    # Config values go through ConfigParser interpolation, so a literal % in a path must be doubled,
+    # including in the %(here)s default that alembic fills in unescaped.
+    config.file_config.set("DEFAULT", "here", os.path.dirname(config_path).replace("%", "%%"))
+    config.set_main_option("script_location", scripts_path.replace("%", "%%"))
+    config.set_main_option("sqlalchemy.url", get_database_url().replace("%", "%%"))
 
     return config
 
