@@ -169,8 +169,9 @@ class AssetsEnabled:
         asset_seeder.node_list_served()
         roots = ("models", "input", "output")
         # Busy with the startup scan: queue one, so the deferred prune still runs.
-        if not asset_seeder.start(roots=roots) and asset_seeder.prune_pending():
-            asset_seeder.enqueue_scan(roots=roots, phase=ScanPhase.FULL)
+        hashes = self._args.enable_asset_hashing
+        if not asset_seeder.start(roots=roots, compute_hashes=hashes) and asset_seeder.prune_pending():
+            asset_seeder.enqueue_scan(roots=roots, phase=ScanPhase.FULL, compute_hashes=hashes)
 
     def pause_background_scan(self) -> None:
         asset_seeder.pause()

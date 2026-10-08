@@ -658,12 +658,11 @@ def revive_returned_references_safely(
     if mode.hashing_enabled():
         return set()
     revived: list[int] = []
-    revived_ids: set[str] = set()
+    batch_ids: list[list[str]] = []
 
     def write(session: Session, batch: list) -> int:
-        ids = revive_contents(session, dict(batch))
-        revived_ids.update(ids)
-        return len(ids)
+        batch_ids.append(revive_contents(session, dict(batch)))
+        return len(batch_ids[-1])
 
     returned: dict[str, tuple[str, int]] = {}
     try:
@@ -683,7 +682,10 @@ def revive_returned_references_safely(
         )
     if progress is not None:
         progress.recovered += sum(revived)
-    return {path for path, (content_id, _) in returned.items() if content_id in revived_ids}
+    # ``revived`` grows only once a batch commits; a batch whose commit failed is left
+    # to the per-file revive.
+    committed = {content_id for ids in batch_ids[: len(revived)] for content_id in ids}
+    return {path for path, (content_id, _) in returned.items() if content_id in committed}
 
 
 def list_output_for_rescan() -> ListingWalk:

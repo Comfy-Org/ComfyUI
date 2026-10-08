@@ -564,3 +564,32 @@ def test_only_a_path_the_walk_found_is_revived(root, session):
     assert progress.recovered == len(files) - 1
     assert revived == {str(p) for p in files[1:]}
     assert [c.path for c in _contents(session) if c.is_missing] == [str(files[0])]
+
+
+def test_a_batch_whose_commit_failed_is_left_to_the_per_file_revive(root, session, monkeypatch, db_engine):
+    files, _ = _gone_and_copied_back(root, session)
+    monkeypatch.setattr(scanner, "WRITE_BATCH_ROWS", 2)
+    commits = 0
+
+    @contextmanager
+    def failing_second_commit():
+        nonlocal commits
+        with SASession(db_engine) as write_session:
+            real_commit = write_session.commit
+
+            def commit():
+                nonlocal commits
+                commits += 1
+                if commits == 2:
+                    raise RuntimeError("disk I/O error")
+                real_commit()
+
+            write_session.commit = commit
+            yield write_session
+
+    monkeypatch.setattr(scanner, "create_write_session", failing_second_commit)
+    revived = scanner.revive_returned_references_safely("output", _walked(root))
+
+    live = {c.path for c in _contents(session) if not c.is_missing}
+    assert len(live) == 2
+    assert revived == live
