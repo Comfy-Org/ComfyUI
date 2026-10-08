@@ -15,6 +15,7 @@ from comfy.quant_ops import QuantizedTensor
 from comfy.ldm.modules.attention import optimized_attention_for_device
 from comfy import sd1_clip
 import comfy.text_encoders.qwen_vl
+from . import llm_prefix_cache
 
 from .llama import BaseLlama, BaseGenerate, FixedKV, FixedKVBias, Llama2_, MLP, RMSNorm, apply_penalty, apply_rope, penalty_active, precompute_freqs_cis, rope_matrix
 
@@ -259,6 +260,12 @@ class GatedDeltaNet(nn.Module):
             past_key_value.conv_state.copy_(combined[:, :, seq_len:])
             with comfy.ops.CastBiasWeightContext(self.conv1d, combined, offloadable=True) as (conv_weight, conv_bias):
                 mixed_qkv = F.silu(F.conv1d(combined, conv_weight, conv_bias, groups=self.conv1d.groups))
+        elif past_key_value is not None and past_key_value.index > 0:
+            # prefill continuing a cached prefix: the conv window starts from the cached state
+            combined = torch.cat([past_key_value.conv_state, mixed_qkv], dim=-1)
+            past_key_value.conv_state.copy_(combined[:, :, -past_key_value.conv_state.shape[-1]:])
+            with comfy.ops.CastBiasWeightContext(self.conv1d, combined, offloadable=True) as (conv_weight, conv_bias):
+                mixed_qkv = F.silu(F.conv1d(combined, conv_weight, conv_bias, groups=self.conv1d.groups))
         else:
             if past_key_value is not None:
                 conv_state = past_key_value.conv_state
@@ -316,7 +323,7 @@ class GatedDeltaNet(nn.Module):
         else:
             core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
                 query, key, value, g=g, beta=beta,
-                initial_state=None,
+                initial_state=past_key_value.recurrent_state if past_key_value is not None and past_key_value.index > 0 else None,
                 output_final_state=past_key_value is not None,
             )
 
@@ -761,9 +768,9 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                         "presence_penalty": kwargs.get("presence_penalty", 0.0) or 0.0,
                         "seed": seed if seed is not None else 42}
         fixed_depth = None if mtp is True else max(2, min(5, int(mtp)))
-        return self._generate_mtp(embeds, max_length, stop_tokens, sampling=sampling, fixed_depth=fixed_depth)
+        return self._generate_mtp(embeds, max_length, stop_tokens, sampling=sampling, fixed_depth=fixed_depth, cache_ids=kwargs.get("cache_ids"))
 
-    def _generate_mtp(self, embeds, max_length, stop_tokens, sampling=None, fixed_depth=None):
+    def _generate_mtp(self, embeds, max_length, stop_tokens, sampling=None, fixed_depth=None, cache_ids=None):
         device = embeds.device
         cfg = self.model.config
         if stop_tokens is None:
@@ -775,7 +782,12 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         # greedy drafts 3 deep (5 after the probe); sampled stays at 2
         depth = fixed_depth if fixed_depth is not None else (3 if sampling is None else 2)
         cap = embeds.shape[1] + max_length + 7
-        pkv = self.init_kv_cache(embeds.shape[0], cap, device, dt)
+        if cache_ids is None:
+            pkv = self.init_kv_cache(embeds.shape[0], cap, device, dt)
+        else:
+            pkv, x = llm_prefix_cache.prefill(self, embeds, cache_ids, cap,
+                                              lambda e, kv: self.model.forward(None, embeds=e, attention_mask=None, past_key_values=kv)[0])
+            cap = pkv[self.model.config.layer_types.index("full_attention")].key.shape[2]
         # repair window: drafting ahead plus a near-full rollback
         mtp_kv = FixedKVBias.zeros(embeds.shape[0], cfg.num_key_value_heads, cap, cfg.head_dim, device, dt,
                                    FixedKVBias.shared(cap, device, dt))
@@ -805,7 +817,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         # cross-step state lives in static carriers: nothing allocated inside a step may outlive it
         nt_buf = torch.empty((embeds.shape[0], 1), device=device, dtype=torch.long)
         h_buf = torch.empty((embeds.shape[0], 1, cfg.hidden_size), device=device, dtype=dt)
-        x, _, _ = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=pkv)
+        if cache_ids is None:
+            x, _, _ = self.model.forward(None, embeds=embeds, attention_mask=None, past_key_values=pkv)
         lg0 = self.logits(x)[:, -1]
         if sampling is None:
             nt_buf.copy_(lg0.argmax(dim=-1, keepdim=True))
@@ -816,6 +829,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
         h_buf.copy_(x[:, -1:, :])
         del x, lg0
         ids = [nt_buf[0].item()]
+        if cache_ids is not None:
+            llm_prefix_cache.note_token(1)
         if penalized:
             pen_mask.index_fill_(0, nt_buf.reshape(-1), True)
         pos = embeds.shape[1]
@@ -988,6 +1003,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
                 if stop is not None:
                     del commit[stop + 1:]
                 ids.extend(commit)
+                if cache_ids is not None:
+                    llm_prefix_cache.note_token(2)
                 update_progress(len(commit))
                 if probe is not None:
                     probe[0] += 1
@@ -1007,6 +1024,8 @@ class Qwen35(BaseLlama, BaseGenerate, torch.nn.Module):
             drop_draft_graph()
             if pinned:
                 comfy.model_prefetch.cleanup_prefetched_modules(None, pinned)
+        if cache_ids is not None:
+            llm_prefix_cache.finish(pkv, cache_ids, ids)
         return ids
 
     def init_kv_cache(self, batch, max_cache_len, device, execution_dtype):
@@ -1105,8 +1124,11 @@ class Qwen35ClipModel(sd1_clip.SDClipModel):
         tokens_only = [[t[0] for t in b] for b in tokens]
         embeds, _, _, embeds_info = self.process_tokens(tokens_only, self.execution_device)
         position_ids = comfy.text_encoders.qwen_vl.qwen2vl_mrope_position_ids(embeds_info, embeds.shape[1], embeds.device)
+        extra = {}
+        if llm_prefix_cache.enabled() and position_ids is None and len(tokens_only) == 1 and all(isinstance(t, int) for t in tokens_only[0]):
+            extra["cache_ids"] = tokens_only[0]
         return self.transformer.generate(embeds, do_sample, max_length, temperature, top_k, top_p, min_p, repetition_penalty, seed,
-                                         presence_penalty=presence_penalty, position_ids=position_ids, mtp=mtp)
+                                         presence_penalty=presence_penalty, position_ids=position_ids, mtp=mtp, **extra)
 
 
 class Qwen35TEModel(sd1_clip.SD1ClipModel):
