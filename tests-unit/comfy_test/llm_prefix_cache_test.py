@@ -138,3 +138,14 @@ def test_suffix_prefill_matches_full_prefill(model):
         pc.drop()
         _, full = pc.prefill(model, embeds.clone(), prompt + suffix, len(prompt) + 100, forward)
     assert torch.allclose(cached[:, -1], full[:, -1], atol=1e-4)
+
+
+@pytest.mark.parametrize("mtp", [False, True])
+def test_ram_mode_parks_and_restores(model, mtp, monkeypatch):
+    monkeypatch.setattr(pc, "MODE", "ram")
+    prompt = messages(5, 1, 200) + tokens(1, 100)
+    generate(model, prompt, mtp, cache=True)
+    assert pc._slot.parked is not None
+    longer = prompt + tokens(2, 40)
+    assert generate(model, longer, mtp, cache=True) == generate(model, longer, mtp, cache=False)
+    assert pc.stats["restore"] == "from-ram"

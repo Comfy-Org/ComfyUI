@@ -40,7 +40,7 @@ def _host(t):
         h = torch.empty(t.shape, dtype=t.dtype, pin_memory=True)
     except RuntimeError:
         h = torch.empty(t.shape, dtype=t.dtype)
-    h.copy_(t, non_blocking=h.is_host())
+    h.copy_(t, non_blocking=h.is_pinned())
     return h
 
 
