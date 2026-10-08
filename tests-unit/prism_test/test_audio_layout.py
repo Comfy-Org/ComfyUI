@@ -42,9 +42,7 @@ def audio_vae(monkeypatch):
     vae.patcher = SimpleNamespace(get_free_memory=lambda device: 1024)
     monkeypatch.setattr(model_management, 'load_models_gpu', lambda *args, **kwargs: None)
     monkeypatch.setattr(model_management, 'intermediate_dtype', lambda: torch.float32)
-    # Match the graph executor: tiled_scale_multidim returns inference tensors.
-    with torch.inference_mode():
-        yield vae
+    return vae
 
 
 @pytest.mark.parametrize('tiled', [False, True])
@@ -53,6 +51,7 @@ def audio_vae(monkeypatch):
 @pytest.mark.parametrize('nested', [False, True])
 def test_audio_sample_axis_and_trim(audio_vae, tiled, channels, num_samples, nested):
     """VAE wrappers and AUDIO conversion preserve channels and trim only time."""
+    assert not torch.is_inference_mode_enabled()
     # 81 frames at 24 fps: 162000 samples, padded to 169 codec hops.
     latent = torch.linspace(-0.1, 0.1, 2 * channels * 169).reshape(2, channels, 169)
     audio_vae.output_channels = channels
@@ -86,3 +85,23 @@ def test_audio_sample_rate_override(audio_vae):
     audio = vae_decode_audio(audio_vae, {'samples': torch.zeros(1, 1, 2), 'num_samples': 1500, 'sample_rate': 24000})
     assert audio['waveform'].shape == (1, 1, 1500)
     assert audio['sample_rate'] == 24000
+
+
+@pytest.mark.parametrize('tiled', [False, True])
+def test_audio_normalization_outside_inference_mode(audio_vae, tiled):
+    """Normalize non-silent decoder output without mutating an inference tensor."""
+    assert not torch.is_inference_mode_enabled()
+    latent = torch.tensor([[[-2., 2., -1., 1.]]])
+    original = latent.clone()
+    raw = audio_vae.first_stage_model.decode(latent)[..., :3500]
+    scale = (raw.std(dim=[1, 2], keepdim=True) * 5.0).clamp_min(1.0)
+    assert scale.item() > 1.0
+    if tiled:
+        decoded = audio_vae.decode_tiled(latent, tile_x=2, tile_y=2, overlap=1)
+        assert decoded.is_inference()
+    actual = vae_decode_audio(audio_vae, {'samples': latent, 'num_samples': 3500},
+                              tile=2 if tiled else None, overlap=1 if tiled else None)
+    torch.testing.assert_close(actual['waveform'], raw / scale)
+    torch.testing.assert_close(latent, original, rtol=0, atol=0)
+    assert actual['waveform'].shape == (1, 1, 3500)
+    assert not actual['waveform'].is_inference()
