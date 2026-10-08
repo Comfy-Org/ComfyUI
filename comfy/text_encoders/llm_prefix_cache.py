@@ -49,8 +49,13 @@ class _Host:
 
     def __call__(self, t):
         if not self.disk:
-            h = torch.empty(t.shape, dtype=t.dtype, pin_memory=True)
-            h.copy_(t, non_blocking=True)
+            # pinned when the driver allows it; ComfyUI's own pinned weights can exhaust that before RAM runs out
+            try:
+                h = torch.empty(t.shape, dtype=t.dtype, pin_memory=True)
+            except RuntimeError:
+                h = torch.empty(t.shape, dtype=t.dtype)
+                stats["park_pageable"] = True
+            h.copy_(t, non_blocking=h.is_pinned())
             return h
         self.n += 1
         path = os.path.join(DISK_DIR, f"g{_disk_gen[0]}-{self.n}.pt")
