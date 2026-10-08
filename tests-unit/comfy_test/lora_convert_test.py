@@ -89,6 +89,7 @@ def test_krea2_fused_qkv_lora_splits_up_rows():
     sd = {
         MAIN_PREFIX + ".lora_A.weight": torch.randn(8, MAIN_IN),
         MAIN_PREFIX + ".lora_B.weight": torch.randn(MAIN_OUT, 8),
+        MAIN_PREFIX + ".lora_mid.weight": torch.randn(8, 8),
         MAIN_PREFIX + ".alpha": torch.tensor(8.0),
         MAIN_PREFIX + ".dora_scale": torch.randn(MAIN_OUT, 1),
         TEXT_PREFIX + ".lora_A.weight": torch.randn(8, TEXT_IN),
@@ -101,6 +102,8 @@ def test_krea2_fused_qkv_lora_splits_up_rows():
     assert converted[MAIN_PREFIX.replace("qkv", "") + "k.lora_B.weight"].shape == (1536, 8)
     assert converted[MAIN_PREFIX.replace("qkv", "") + "v.lora_B.weight"].shape == (1536, 8)
     assert converted[MAIN_PREFIX.replace("qkv", "") + "q.lora_A.weight"].shape == (8, MAIN_IN)
+    assert MAIN_PREFIX + ".lora_mid.weight" not in converted
+    assert torch.equal(converted[MAIN_PREFIX.replace("qkv", "") + "v.lora_mid.weight"], sd[MAIN_PREFIX + ".lora_mid.weight"])
 
     fused = LoRAAdapter.load(MAIN_PREFIX, sd, float(sd[MAIN_PREFIX + ".alpha"].item()), sd[MAIN_PREFIX + ".dora_scale"], set())
     reference = comfy.lora.calculate_weight([(1.0, fused, 1.0, None, None)], torch.zeros(MAIN_OUT, MAIN_IN), MAIN_PREFIX)

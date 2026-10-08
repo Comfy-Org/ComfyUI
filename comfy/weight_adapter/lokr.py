@@ -3,6 +3,7 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+import comfy.lora_convert
 import comfy.model_management
 from .base import (
     WeightAdapterBase,
@@ -15,22 +16,21 @@ from .base import (
 def fused_qkv_row_offset(out_dim, in_dim, name, rows=None):
     """Row window of a fused qkv adapter for one projection, None if it is not that projection.
 
-    Krea2 attention is trained as one to_qkv module while ComfyUI keeps wq/wk/wv separate.
+    Some models keep attention as one fused to_qkv module while ComfyUI keeps wq/wk/wv separate.
     comfy.lora_convert splits such adapters, but adapters that reach a model through loaders or
     tools which rename the fused factors per projection stay as wide as the whole module and
     have to take the rows of the projection they are loaded for. name is the target weight key
     when rows is given, otherwise the lora key the adapter was loaded from.
     """
     kv = (out_dim - in_dim) // 2
-    if kv <= 0 or "qkv" in name or (rows is not None and rows not in (in_dim, kv)):
+    projection = comfy.lora_convert.qkv_projection(name)
+    if kv <= 0 or projection is None or (rows is not None and rows not in (in_dim, kv)):
         return None
-    if ".wq" in name or "_to_q" in name or "_wq" in name:
+    if projection == "q":
         return 0
-    if ".wk" in name or "_to_k" in name or "_wk" in name:
+    if projection == "k":
         return in_dim
-    if ".wv" in name or "_to_v" in name or "_wv" in name:
-        return in_dim + kv
-    return None
+    return in_dim + kv
 
 
 class LokrDiff(WeightAdapterTrainBase):
