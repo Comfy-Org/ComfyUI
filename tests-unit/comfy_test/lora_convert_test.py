@@ -117,6 +117,14 @@ def test_krea2_unused_per_projection_qkv_placeholders_are_skipped():
     sd[q + ".lokr_w2"] = torch.zeros(256, 256)
     sd[q + ".alpha"] = torch.tensor(3.0)
     sd[q + ".dora_scale"] = torch.randn(MAIN_IN, 1)
+    k = MAIN_PREFIX.replace("qkv", "k")
+    # a decomposed placeholder holds no delta either, its second factors are zero
+    sd[k + ".lokr_w1_a"] = torch.randn(24, 24)
+    sd[k + ".lokr_w1_b"] = torch.zeros(24, 24)
+    sd[k + ".lokr_w2_a"] = torch.randn(256, 256)
+    sd[k + ".lokr_w2_b"] = torch.zeros(256, 256)
+    sd[k + ".alpha"] = torch.tensor(3.0)
+    sd[k + ".dora_scale"] = torch.randn(1536, 1)
 
     messages, converted = _capture_warnings(lambda: comfy.lora_convert.convert_lora(sd))
 
@@ -125,6 +133,21 @@ def test_krea2_unused_per_projection_qkv_placeholders_are_skipped():
     assert converted[q + ".alpha"].item() == fused_alpha
     assert torch.equal(converted[q + ".dora_scale"], fused_dora[:MAIN_IN])
     assert messages == []
+
+
+def test_krea2_fused_qkv_lora_without_text_fusion_keys_is_converted():
+    # A lora that trained only the transformer blocks has no text_fusion key at all.
+    converted = comfy.lora_convert.convert_lora(_fused_lokr(MAIN_PREFIX, 24, 384, 24, 256))
+
+    assert MAIN_PREFIX not in converted
+    assert converted[MAIN_PREFIX.replace("qkv", "") + "k.lokr_w1"].shape == (4, 24)
+
+
+def test_krea2_incomplete_fused_qkv_adapter_is_left_alone():
+    # A fused entry with a missing factor pair is kept instead of raising a KeyError.
+    sd = {MAIN_PREFIX + ".lora_B.weight": torch.randn(MAIN_OUT, 8)}
+
+    assert MAIN_PREFIX + ".lora_B.weight" in comfy.lora_convert.convert_lora(sd)
 
 
 def test_krea2_trained_per_projection_qkv_adapter_is_reported():
