@@ -110,6 +110,10 @@ def test_upgrade_ignores_appledouble_files_and_leaves_the_install_unchanged(scri
     head = _head(scripts_path)
     command.upgrade(_config(scripts_path, db_path), "0006_add_loader_path")
     _plant_appledouble(scripts_path)
+    # A real install also has bytecode and non-revision files beside the revisions.
+    os.makedirs(os.path.join(scripts_path, "versions", "__pycache__"), exist_ok=True)
+    with open(os.path.join(scripts_path, "versions", "README"), "w") as f:
+        f.write("not a revision")
     install = _tree(scripts_path)
 
     # Alembic must read revisions from the filtered copy only: if it also scanned
