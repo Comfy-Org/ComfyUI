@@ -1,6 +1,7 @@
 """The startup prune waits until the node list has been built once, so a model folder a
 custom node registers in INPUT_TYPES counts as not yet scanned rather than missing."""
 
+import logging
 import threading
 from unittest.mock import MagicMock
 
@@ -162,7 +163,7 @@ def test_no_scan_starts_once_shutdown_has_begun(monkeypatch):
     thread.assert_not_called()
 
 
-def test_a_scan_queued_during_startup_does_not_run_into_shutdown(monkeypatch):
+def test_a_scan_queued_during_startup_does_not_run_into_shutdown(monkeypatch, caplog):
     instance = _AssetSeeder()
     instance._state = State.RUNNING
     instance._scan_state = _ScanState()
@@ -176,3 +177,16 @@ def test_a_scan_queued_during_startup_does_not_run_into_shutdown(monkeypatch):
 
     thread.assert_not_called()
     assert instance._state is State.IDLE
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_request_merged_into_a_queued_scan_logs_at_debug(monkeypatch, caplog):
+    instance = _AssetSeeder()
+    instance._state = State.RUNNING
+
+    with caplog.at_level(logging.DEBUG):
+        instance.enqueue_scan(roots=("models",), phase=ScanPhase.FULL)
+        instance.enqueue_scan(roots=("models",), phase=ScanPhase.FULL)
+
+    queued = [r.levelno for r in caplog.records if r.getMessage().startswith("Scan queued")]
+    assert queued == [logging.INFO, logging.DEBUG]
