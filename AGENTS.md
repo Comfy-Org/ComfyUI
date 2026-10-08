@@ -162,12 +162,34 @@
   adding parallel code paths. Use `comfy.quant_ops`, `comfy.model_management`,
   `comfy.memory_management`, `comfy.pinned_memory`, `comfy_aimdo`, and
   `comfy-kitchen` helpers where they already solve the problem.
-- Use optimized comfy-kitchen ops in places where they improve performance
-  without changing the expected dtype, device, memory, or interface behavior.
+- Model implementations must use an existing optimized Comfy Kitchen or
+  ComfyUI operation whenever one supports the required math and tensor layout
+  without changing expected dtype, device, memory, or interface behavior. This
+  is the default implementation requirement, not an optional follow-up
+  optimization.
+- Before implementing model math, inspect the operations already exposed by
+  Comfy Kitchen, `comfy.quant_ops`, and existing ComfyUI model helpers. Check
+  for optimized single, paired, fused, layout-specific, and quantized variants
+  before writing a local implementation or composing lower-level torch ops.
+- Use the compatible optimized operation first and adapt the model's inputs to
+  its documented layout while preserving the model's exact math. If several
+  optimized variants apply, benchmark representative model shapes and select
+  the fastest valid path.
+- Add or retain a local implementation only when no existing optimized
+  operation supports the required math, layout, dtype, device, autograd, or
+  patch contract. Keep differentiable or patch-compatible fallbacks when the
+  optimized inference operation does not provide those contracts.
+- Use the existing ComfyUI cast, offload, and cleanup helpers for parameters
+  passed to optimized operations. Preserve model-specific epsilon, scaling,
+  layout, dtype, device, and output-shape behavior.
 - Prefer ComfyUI's shared optimized kernels and backend dispatchers over
   handwritten implementations of the same operation. Remove duplicate local
   kernels and adapt inputs to the shared operation's documented layout while
   preserving the model's original math and output contract.
+- Model implementations must use `AttentionTensorContainer` and per-module
+  `self.comfy_attention = ComfyAttention()`, passed to attention as `preferred_attention`.
+- Integrate model block loops with the memory compiler and prefetch helpers in
+  `comfy.model_prefetch`, following existing model patterns.
 - All models should use the optimized attention function selected by ComfyUI.
   Treat optimized backend functions, dispatch helpers, and capability-selected
   callables as opaque. Higher-level code must not inspect function identity,
@@ -279,14 +301,45 @@
 - Avoid caches that persist across different executions as much as possible.
   Persistent caches are acceptable only when they use a very minimal amount of
   memory and have a clear ownership and invalidation story.
+- When condition-dependent model work would otherwise repeat on every denoising
+  step and preprocessing it once materially improves performance, expose a
+  model preprocessing method and call it from `BaseModel.extra_conds`, following
+  patterns such as LTXAV and Anima. Pass the result through normal conditioning;
+  do not add model-owned caches, sampler-option caches, or cache-management
+  wrappers for this work.
 - When optimizing, favor small measurable changes: fewer allocations, fewer
   device transfers, less peak memory, better batching, or use of a faster
   existing backend op.
+
+## User Input Tolerance
+
+- Prefer completing a workflow with the user's supplied values over rejecting
+  them because they fall outside recommended, UI-advertised, or quality-oriented
+  limits. If the downstream implementation can consume an input, pass it
+  through unchanged even when the result may be poor. For example, do not reject
+  or truncate additional reference images merely because a node advertises a
+  smaller recommended maximum.
+- Do not add validation errors solely to prevent degraded, nonsensical, or
+  low-quality model output. A bad result is preferable to failing an otherwise
+  executable workflow.
+- Resize, pad, clamp, normalize, or otherwise adapt user input only when passing
+  it through unchanged would make the existing model or underlying operation
+  fail. Make the smallest adjustment needed to keep execution running; do not
+  add a model-level validation failure merely to justify changing the input.
+- This permissive policy does not override security boundaries such as path
+  containment, or integrity checks required to load model formats and
+  checkpoints safely.
 
 ## Nodes and User-Facing Behavior
 
 - Follow existing node conventions: `INPUT_TYPES`, `RETURN_TYPES`, `FUNCTION`,
   `CATEGORY`, and registration through the local mapping used by that file.
+- Treat legacy combo inputs, `io.Combo`, and `io.DynamicCombo` values as
+  untrusted when they affect filesystem access. Any value used as a file or
+  folder name, path component, format, or extension must be validated again at
+  the load/save boundary using an existing `folder_paths` resolver or
+  containment helper, or a fixed allowlist/mapping. Do not rely only on the
+  advertised combo options or prompt validation.
 - Keep node changes backward compatible by default. Add inputs with sensible
   defaults and avoid changing output types unless the request requires it.
 - Model implementations should add the minimal number of ComfyUI nodes required

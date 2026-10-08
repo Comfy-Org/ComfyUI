@@ -10,7 +10,7 @@ def Fourier_filter(x, scale_low=1.0, scale_high=1.5, freq_cutoff=20):
     Apply frequency-dependent scaling to an image tensor using Fourier transforms.
 
     Parameters:
-        x:           Input tensor of shape (B, C, H, W)
+        x:           Input tensor of shape (..., H, W)
         scale_low:   Scaling factor for low-frequency components (default: 1.0)
         scale_high:  Scaling factor for high-frequency components (default: 1.5)
         freq_cutoff: Number of frequency indices around center to consider as low-frequency (default: 20)
@@ -31,8 +31,8 @@ def Fourier_filter(x, scale_low=1.0, scale_high=1.5, freq_cutoff=20):
     # Initialize mask with high-frequency scaling factor
     mask = torch.ones(x_freq.shape, device=device) * scale_high
     m = mask
-    for d in range(len(x_freq.shape) - 2):
-        dim = d + 2
+    for d in range(2):
+        dim = len(x_freq.shape) - 2 + d
         cc = x_freq.shape[dim] // 2
         f_c = min(freq_cutoff, cc)
         m = m.narrow(dim, cc - f_c, f_c * 2)

@@ -12,6 +12,7 @@ class EmptyLatentHunyuan3Dv2(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="EmptyLatentHunyuan3Dv2",
+            display_name="Empty Hunyuan 3D v2 Latent",
             category="model/latent/hunyuan 3d",
             inputs=[
                 IO.Int.Input("resolution", default=3072, min=1, max=8192),
@@ -97,6 +98,7 @@ class VAEDecodeHunyuan3D(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="VAEDecodeHunyuan3D",
+            display_name="Hunyuan 3D VAE Decode",
             category="model/latent/hunyuan 3d",
             inputs=[
                 IO.Latent.Input("samples"),

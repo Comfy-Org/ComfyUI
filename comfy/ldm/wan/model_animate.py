@@ -5,7 +5,7 @@ from einops import rearrange
 import torch.nn.functional as F
 import math
 from .model import WanModel, sinusoidal_embedding_1d
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 import comfy.model_management
 
 class CausalConv1d(nn.Module):
@@ -148,6 +148,7 @@ class FaceBlock(nn.Module):
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
+        self.comfy_attention = ComfyAttention()
 
         self.deterministic = False
         self.hidden_size = hidden_size
@@ -201,7 +202,11 @@ class FaceBlock(nn.Module):
 
         q = rearrange(q, "B (L S) H D -> (B L) S (H D)", L=T_comp)
 
-        attn = optimized_attention(q, k, v, heads=self.heads_num)
+        q = AttentionTensorContainer(q)
+        k = AttentionTensorContainer(k)
+        v = AttentionTensorContainer(v)
+        del kv
+        attn = optimized_attention(q, k, v, heads=self.heads_num, preferred_attention=self.comfy_attention)
 
         attn = rearrange(attn, "(B L) S C -> B (L S) C", L=T_comp)
 
@@ -493,6 +498,7 @@ class AnimateWanModel(WanModel):
         **kwargs,
     ):
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         x, motion_vec = self.after_patch_embedding(x, pose_latents, face_pixel_values)
         grid_sizes = x.shape[2:]
@@ -505,11 +511,13 @@ class AnimateWanModel(WanModel):
         e0 = self.time_projection(e).unflatten(2, (6, self.dim))
 
         full_ref = None
+        img_offset = 0
         if self.ref_conv is not None:
             full_ref = kwargs.get("reference_latent", None)
             if full_ref is not None:
                 full_ref = self.ref_conv(full_ref).flatten(2).transpose(1, 2)
                 x = torch.concat((full_ref, x), dim=1)
+                img_offset = full_ref.shape[1]
 
         # context
         context = self.text_embedding(context)
@@ -522,6 +530,7 @@ class AnimateWanModel(WanModel):
             context_img_len = clip_fea.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -536,6 +545,11 @@ class AnimateWanModel(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": img_offset, "transformer_options": transformer_options})
+                    x = out["img"]
 
             if i % 5 == 0 and motion_vec is not None:
                 x = x + self.face_adapter.fuser_blocks[i // 5](x, motion_vec)

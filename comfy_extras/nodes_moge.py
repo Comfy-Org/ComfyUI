@@ -2,6 +2,7 @@
 
 
 import torch
+import math
 
 import comfy.utils
 import folder_paths
@@ -105,12 +106,14 @@ class MoGePanoramaInference(io.ComfyNode):
                              tooltip="Long-side resolution of the merged equirect distance map."),
                 io.Int.Input("batch_size", default=4, min=1, max=12,
                              tooltip="Views per inference batch (12 splits total)."),
+                io.Int.Input("refine_steps", default=3, min=0, max=8, advanced=True,
+                             tooltip="MoGe-3 only: sparse volumetric refinement passes over the predicted depth. More passes sharpen fine detail and edges at a roughly linear cost. 0 disables refinement. Ignored by MoGe-1 / MoGe-2."),
             ],
             outputs=[MoGeGeometry.Output(display_name="moge_geometry")],
         )
 
     @classmethod
-    def execute(cls, moge_model, image, resolution_level, split_resolution, merge_resolution, batch_size) -> io.NodeOutput:
+    def execute(cls, moge_model, image, resolution_level, split_resolution, merge_resolution, batch_size, refine_steps) -> io.NodeOutput:
 
         if image.shape[0] != 1:
             raise ValueError(f"MoGePanoramaInference takes a single image (got batch of {image.shape[0]})")
@@ -154,7 +157,8 @@ class MoGePanoramaInference(io.ComfyNode):
                 # apply_metric_scale=False: per-view scales would not align across overlap seams.
                 result = moge_model.infer(batch, resolution_level=resolution_level,
                                           fov_x=90.0, force_projection=True,
-                                          apply_mask=False, apply_metric_scale=False)
+                                          apply_mask=False, apply_metric_scale=False,
+                                          refine_steps=refine_steps)
                 distance_maps.extend(list(result["points"].float().norm(dim=-1).cpu().numpy()))
                 masks.extend(list(result["mask"].cpu().numpy()))
                 n = batch.shape[0]
@@ -227,12 +231,14 @@ class MoGeInference(io.ComfyNode):
                 io.Boolean.Input("force_projection", default=True, advanced=True),
                 io.Boolean.Input("apply_mask", default=True, advanced=True,
                                  tooltip="Set masked-out (sky / invalid) pixels to inf in points and depth so meshing culls them. Disable to keep the raw predicted geometry everywhere; the mask is still returned separately."),
+                io.Int.Input("refine_steps", default=3, min=0, max=8, advanced=True,
+                             tooltip="MoGe-3 only: sparse volumetric refinement passes over the predicted depth. More passes sharpen fine detail and edges at a roughly linear cost. 0 disables refinement. Ignored by MoGe-1 / MoGe-2."),
             ],
             outputs=[MoGeGeometry.Output(display_name="moge_geometry")],
         )
 
     @classmethod
-    def execute(cls, moge_model, image, resolution_level, fov_x_degrees, batch_size, force_projection, apply_mask) -> io.NodeOutput:
+    def execute(cls, moge_model, image, resolution_level, fov_x_degrees, batch_size, force_projection, apply_mask, refine_steps) -> io.NodeOutput:
 
         image = image[..., :3]
         bchw = image.movedim(-1, -3).contiguous()
@@ -245,7 +251,8 @@ class MoGeInference(io.ComfyNode):
             for i in range(0, B, batch_size):
                 chunk = bchw[i:i + batch_size]
                 chunks.append(moge_model.infer(chunk, resolution_level=resolution_level, fov_x=fov,
-                                               force_projection=force_projection, apply_mask=apply_mask))
+                                               force_projection=force_projection, apply_mask=apply_mask,
+                                               refine_steps=refine_steps))
                 pbar.update_absolute(min(i + batch_size, B))
                 tq.update(chunk.shape[0])
 
@@ -391,10 +398,57 @@ class MoGePointMapToMesh(io.ComfyNode):
         return io.NodeOutput(mesh)
 
 
+class MoGeGeometryToFOV(io.ComfyNode):
+    """Extract horizontal/vertical FOV from MoGe intrinsics, e.g. fov_y to feed SAM3DBody_Predict."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MoGeGeometryToFOV",
+            search_aliases=["moge", "fov", "geometry", "intrinsics", "field of view"],
+            display_name="Get FoV from MoGe Geometry",
+            description="Derive the field of view and focal length from MoGe intrinsics.",
+            category="image/geometry estimation",
+            inputs=[
+                MoGeGeometry.Input("moge_geometry"),
+                io.Combo.Input("axis", options=["vertical", "horizontal", "diagonal"], default="vertical",
+                               tooltip="'vertical' (fov_y), 'horizontal' (fov_x), or 'diagonal'."),
+                io.Combo.Input("unit", options=["degrees", "radians"], default="degrees",
+                               tooltip="Output unit for the FOV."),
+            ],
+            outputs=[
+                io.Float.Output(display_name="fov"),
+                io.Float.Output(display_name="focal_pixels"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, moge_geometry, axis, unit) -> io.NodeOutput:
+        K = moge_geometry.get("intrinsics") if isinstance(moge_geometry, dict) else None
+        if K is None:
+            raise ValueError("moge_geometry has no intrinsics (panorama geometry has none).")
+        if K.ndim == 3:
+            K = K[0]
+        # MoGe normalizes fx by width and fy by height; with cx=cy=0.5 the half-extent
+        # in normalized units is 0.5, so fov = 2*atan(0.5 / f) per axis (hypot for diagonal).
+        hx = 0.5 / float(K[0, 0].item())
+        hy = 0.5 / float(K[1, 1].item())
+        half_tan = {"horizontal": hx, "vertical": hy, "diagonal": math.hypot(hx, hy)}[axis]
+        fov_radians = 2.0 * math.atan(half_tan)
+        fov = fov_radians if unit == "radians" else math.degrees(fov_radians)
+        # Pixels are square here, so fy*H == fx*W is the single lens focal in pixels.
+        src = next((moge_geometry[k] for k in ("image", "points", "depth") if k in moge_geometry), None)
+        if src is None:
+            raise ValueError("moge_geometry has no image/points/depth to read the pixel height from.")
+        H = int(src.shape[1])
+        focal_pixels = float(K[1, 1].item()) * H
+        return io.NodeOutput(fov, focal_pixels)
+
+
 class MoGeExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [LoadMoGeModel, MoGeInference, MoGePanoramaInference, MoGeRender, MoGePointMapToMesh]
+        return [LoadMoGeModel, MoGeInference, MoGePanoramaInference, MoGeRender, MoGePointMapToMesh, MoGeGeometryToFOV]
 
 
 async def comfy_entrypoint() -> MoGeExtension:

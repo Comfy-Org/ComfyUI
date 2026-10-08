@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import comfy
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.flux.math import apply_rope1
 from comfy.ldm.flux.layers import EmbedND
 
@@ -12,6 +12,7 @@ class MusicSelfAttention(nn.Module):
     def __init__(self, dim, num_heads, device=None, dtype=None, operations=None):
         assert dim % num_heads == 0
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.embed_dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -30,11 +31,13 @@ class MusicSelfAttention(nn.Module):
         k = self.k_proj(x).view(b, s, n, d)
         k = apply_rope1(k, freqs)
 
+        q = AttentionTensorContainer(q.view(b, s, n * d))
+        k = AttentionTensorContainer(k.view(b, s, n * d))
+        v = AttentionTensorContainer(self.v_proj(x).view(b, s, n * d))
         x = optimized_attention(
-            q.view(b, s, n * d),
-            k.view(b, s, n * d),
-            self.v_proj(x).view(b, s, n * d),
+            q, k, v,
             heads=self.num_heads,
+            preferred_attention=self.comfy_attention,
         )
 
         return self.out_proj(x)
@@ -111,6 +114,7 @@ class WanDancerModel(WanModel):
 
     def forward_orig(self, x, t, context, clip_fea=None, clip_fea_ref=None, freqs=None, audio_embed=None, fps=30, audio_inject_scale=1.0, transformer_options={}, **kwargs):
         # embeddings
+        x_input = x
         if int(fps + 0.5) != 30:
             x = self.patch_embedding_global(x.float()).to(x.dtype)
         else:
@@ -128,11 +132,13 @@ class WanDancerModel(WanModel):
         e0 = self.time_projection(e).unflatten(2, (6, self.dim))
 
         full_ref = None
+        img_offset = 0
         if self.ref_conv is not None: # model has the weight, but this wasn't used in the original pipeline
             full_ref = kwargs.get("reference_latent", None)
             if full_ref is not None:
                 full_ref = self.ref_conv(full_ref).flatten(2).transpose(1, 2)
                 x = torch.concat((full_ref, x), dim=1)
+                img_offset = full_ref.shape[1]
 
         # context
         context = self.text_embedding(context)
@@ -163,6 +169,7 @@ class WanDancerModel(WanModel):
             context_img_len += clip_fea_ref.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -177,6 +184,12 @@ class WanDancerModel(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": img_offset, "transformer_options": transformer_options})
+                    x = out["img"]
+
             if audio_emb is not None:
                 x = self.music_injector(x, i, audio_emb, audio_emb_global=None, seq_len=seq_len, scale=audio_inject_scale)
 

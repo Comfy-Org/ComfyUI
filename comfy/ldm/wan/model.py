@@ -6,12 +6,14 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from comfy.ldm.flux.layers import EmbedND
 from comfy.ldm.flux.math import apply_rope1, rope
 import comfy.ldm.common_dit
 import comfy.model_management
+import comfy.ops
 import comfy.patcher_extension
+import comfy.quant_ops
 
 
 def sinusoidal_embedding_1d(dim, position):
@@ -39,6 +41,7 @@ class WanSelfAttention(nn.Module):
                  operation_settings={}):
         assert dim % num_heads == 0
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -80,17 +83,22 @@ class WanSelfAttention(nn.Module):
         q = qkv_fn_q(x)
         k = qkv_fn_k(x)
 
+        if patches.get("attn1_patch"):
+            q_patch, k_patch = q, k
+        q = AttentionTensorContainer(q.view(b, s, n * d))
+        k = AttentionTensorContainer(k.view(b, s, n * d))
+        v = AttentionTensorContainer(self.v(x).view(b, s, n * d))
+
         x = optimized_attention(
-            q.view(b, s, n * d),
-            k.view(b, s, n * d),
-            self.v(x).view(b, s, n * d),
+            q, k, v,
             heads=self.num_heads,
+            preferred_attention=self.comfy_attention,
             transformer_options=transformer_options,
         )
 
         if "attn1_patch" in patches:
             for p in patches["attn1_patch"]:
-                x = p({"x": x, "q": q, "k": k, "transformer_options": transformer_options})
+                x = p({"x": x, "q": q_patch, "k": k_patch, "transformer_options": transformer_options})
 
         x = self.o(x)
         return x
@@ -105,12 +113,12 @@ class WanT2VCrossAttention(WanSelfAttention):
             context(Tensor): Shape [B, L2, C]
         """
         # compute query, key, value
-        q = self.norm_q(self.q(x))
-        k = self.norm_k(self.k(context))
-        v = self.v(context)
+        q = AttentionTensorContainer(self.norm_q(self.q(x)))
+        k = AttentionTensorContainer(self.norm_k(self.k(context)))
+        v = AttentionTensorContainer(self.v(context))
 
         # compute attention
-        x = optimized_attention(q, k, v, heads=self.num_heads, transformer_options=transformer_options)
+        x = optimized_attention(q, k, v, heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
 
         x = self.o(x)
         return x
@@ -142,13 +150,16 @@ class WanI2VCrossAttention(WanSelfAttention):
 
         # compute query, key, value
         q = self.norm_q(self.q(x))
-        k = self.norm_k(self.k(context))
-        v = self.v(context)
-        k_img = self.norm_k_img(self.k_img(context_img))
-        v_img = self.v_img(context_img)
-        img_x = optimized_attention(q, k_img, v_img, heads=self.num_heads, transformer_options=transformer_options)
+        k_img = AttentionTensorContainer(self.norm_k_img(self.k_img(context_img)))
+        v_img = AttentionTensorContainer(self.v_img(context_img))
+        # Sageattn can cause Nans here, don't allow it as there is no speed difference anyway as img attention is tiny.
+        img_x = optimized_attention(AttentionTensorContainer(q), k_img, v_img, heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options, low_precision_attention=False)
+        del k_img, v_img
         # compute attention
-        x = optimized_attention(q, k, v, heads=self.num_heads, transformer_options=transformer_options)
+        q = AttentionTensorContainer(q)
+        k = AttentionTensorContainer(self.norm_k(self.k(context)))
+        v = AttentionTensorContainer(self.v(context))
+        x = optimized_attention(q, k, v, heads=self.num_heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
 
         # output
         x = x + img_x
@@ -172,6 +183,20 @@ def repeat_e(e, x):
         return torch.repeat_interleave(e, repeats, dim=1)
     else:
         return torch.repeat_interleave(e, repeats + 1, dim=1)[:, :x.size(1)]
+
+
+def modulate(x, norm, shift, scale):
+    shift, scale = repeat_e(shift, x), repeat_e(scale, x)
+    if comfy.model_management.in_training or not x.is_cuda or x.numel() < 16 * 1024 * 1024:
+        return torch.addcmul(shift, norm(x), 1 + scale)
+    return comfy.quant_ops.ck.adaln(x, scale, shift, norm.eps)
+
+
+class WanFeedForward(nn.Sequential):
+    """[Linear, GELU(tanh), Linear], with the GELU folded into the down-projection."""
+
+    def forward(self, x):
+        return comfy.ops.linear_input_act(self[2], self[0](x), "gelu_tanh")
 
 
 class WanAttentionBlock(nn.Module):
@@ -207,7 +232,7 @@ class WanAttentionBlock(nn.Module):
                                                                       qk_norm,
                                                                       eps, operation_settings=operation_settings)
         self.norm2 = operation_settings.get("operations").LayerNorm(dim, eps, elementwise_affine=False, device=operation_settings.get("device"), dtype=operation_settings.get("dtype"))
-        self.ffn = nn.Sequential(
+        self.ffn = WanFeedForward(
             operation_settings.get("operations").Linear(dim, ffn_dim, device=operation_settings.get("device"), dtype=operation_settings.get("dtype")), nn.GELU(approximate='tanh'),
             operation_settings.get("operations").Linear(ffn_dim, dim, device=operation_settings.get("device"), dtype=operation_settings.get("dtype")))
 
@@ -242,7 +267,7 @@ class WanAttentionBlock(nn.Module):
         # self-attention
         x = x.contiguous() # otherwise implicit in LayerNorm
         y = self.self_attn(
-            torch.addcmul(repeat_e(e[0], x), self.norm1(x), 1 + repeat_e(e[1], x)),
+            modulate(x, self.norm1, e[0], e[1]),
             freqs, transformer_options=transformer_options)
 
         x = torch.addcmul(x, y, repeat_e(e[2], x))
@@ -255,7 +280,7 @@ class WanAttentionBlock(nn.Module):
             for p in patches["attn2_patch"]:
                 x = p({"x": x, "transformer_options": transformer_options})
 
-        y = self.ffn(torch.addcmul(repeat_e(e[3], x), self.norm2(x), 1 + repeat_e(e[4], x)))
+        y = self.ffn(modulate(x, self.norm2, e[3], e[4]))
         x = torch.addcmul(x, y, repeat_e(e[5], x))
         return x
 
@@ -371,7 +396,7 @@ class Head(nn.Module):
         else:
             e = (comfy.model_management.cast_to(self.modulation, dtype=x.dtype, device=x.device).unsqueeze(0) + e.unsqueeze(2)).unbind(2)
 
-        x = (self.head(torch.addcmul(repeat_e(e[0], x), self.norm(x), 1 + repeat_e(e[1], x))))
+        x = self.head(modulate(x, self.norm, e[0], e[1]))
         return x
 
 
@@ -552,6 +577,7 @@ class WanModel(torch.nn.Module):
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         grid_sizes = x.shape[2:]
         transformer_options["grid_sizes"] = grid_sizes
@@ -564,11 +590,13 @@ class WanModel(torch.nn.Module):
         e0 = self.time_projection(e).unflatten(2, (6, self.dim))
 
         full_ref = None
+        img_offset = 0
         if self.ref_conv is not None:
             full_ref = kwargs.get("reference_latent", None)
             if full_ref is not None:
                 full_ref = self.ref_conv(full_ref).flatten(2).transpose(1, 2)
                 x = torch.concat((full_ref, x), dim=1)
+                img_offset = full_ref.shape[1]
 
         # In-context reference (Bernini)
         context_latents = kwargs.get("context_latents", None)
@@ -589,6 +617,7 @@ class WanModel(torch.nn.Module):
             context_img_len = clip_fea.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -603,6 +632,11 @@ class WanModel(torch.nn.Module):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": img_offset, "transformer_options": transformer_options})
+                    x = out["img"]
 
         # head
         x = self.head(x, e)
@@ -740,12 +774,13 @@ class VaceWanModel(WanModel):
                  image_model=None,
                  vace_layers=None,
                  vace_in_dim=None,
+                 vace_image_input=False,
                  device=None,
                  dtype=None,
                  operations=None,
                  ):
 
-        super().__init__(model_type='t2v', patch_size=patch_size, text_len=text_len, in_dim=in_dim, dim=dim, ffn_dim=ffn_dim, freq_dim=freq_dim, text_dim=text_dim, out_dim=out_dim, num_heads=num_heads, num_layers=num_layers, window_size=window_size, qk_norm=qk_norm, cross_attn_norm=cross_attn_norm, eps=eps, flf_pos_embed_token_number=flf_pos_embed_token_number, image_model=image_model, device=device, dtype=dtype, operations=operations)
+        super().__init__(model_type='i2v' if vace_image_input else 't2v', patch_size=patch_size, text_len=text_len, in_dim=in_dim, dim=dim, ffn_dim=ffn_dim, freq_dim=freq_dim, text_dim=text_dim, out_dim=out_dim, num_heads=num_heads, num_layers=num_layers, window_size=window_size, qk_norm=qk_norm, cross_attn_norm=cross_attn_norm, eps=eps, flf_pos_embed_token_number=flf_pos_embed_token_number, image_model=image_model, device=device, dtype=dtype, operations=operations)
         operation_settings = {"operations": operations, "device": device, "dtype": dtype}
 
         # Vace
@@ -777,6 +812,7 @@ class VaceWanModel(WanModel):
         **kwargs,
     ):
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         grid_sizes = x.shape[2:]
         transformer_options["grid_sizes"] = grid_sizes
@@ -795,7 +831,13 @@ class VaceWanModel(WanModel):
             if self.img_emb is not None:
                 context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
                 context = torch.concat([context_clip, context], dim=1)
-            context_img_len = clip_fea.shape[-2]
+                context_img_len = clip_fea.shape[-2]
+
+        # vace blocks are t2v pretrained, they attend over text tokens only
+        if context_img_len is None:
+            context_vace = context
+        else:
+            context_vace = context[:, context_img_len:]
 
         orig_shape = list(vace_context.shape)
         vace_context = vace_context.movedim(0, 1).reshape([-1] + orig_shape[2:])
@@ -807,6 +849,7 @@ class VaceWanModel(WanModel):
         x_orig = x
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -822,10 +865,15 @@ class VaceWanModel(WanModel):
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
 
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": 0, "transformer_options": transformer_options})
+                    x = out["img"]
+
             ii = self.vace_layers_mapping.get(i, None)
             if ii is not None:
                 for iii in range(len(c)):
-                    c_skip, c[iii] = self.vace_blocks[ii](c[iii], x=x_orig, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+                    c_skip, c[iii] = self.vace_blocks[ii](c[iii], x=x_orig, e=e0, freqs=freqs, context=context_vace, context_img_len=None, transformer_options=transformer_options)
                     x += c_skip * vace_strength[iii]
                 del c_skip
         # head
@@ -887,6 +935,7 @@ class CameraWanModel(WanModel):
         **kwargs,
     ):
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         if self.control_adapter is not None and camera_conditions is not None:
             x = x + self.control_adapter(camera_conditions).to(x.dtype)
@@ -909,6 +958,7 @@ class CameraWanModel(WanModel):
             context_img_len = clip_fea.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -923,6 +973,11 @@ class CameraWanModel(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": 0, "transformer_options": transformer_options})
+                    x = out["img"]
 
         # head
         x = self.head(x, e)
@@ -1335,6 +1390,7 @@ class WanModel_S2V(WanModel):
 
         # embeddings
         bs, _, time, height, width = x.shape
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         if control_video is not None:
             x = x + self.cond_encoder(control_video)
@@ -1379,6 +1435,7 @@ class WanModel_S2V(WanModel):
         context = self.text_embedding(context)
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -1393,6 +1450,12 @@ class WanModel_S2V(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": 0, "transformer_options": transformer_options})
+                    x = out["img"]
+
             if audio_emb is not None:
                 x = self.audio_injector(x, i, audio_emb, audio_emb_global, seq_len)
         # head
@@ -1424,7 +1487,10 @@ class WanT2VCrossAttentionGather(WanSelfAttention):
         # Handle video spatial structure
         q = q.reshape(k.shape[0], -1, n, d).transpose(1, 2)
 
-        x = optimized_attention(q, k, v, heads=self.num_heads, skip_reshape=True, skip_output_reshape=True, transformer_options=transformer_options)
+        q = AttentionTensorContainer(q)
+        k = AttentionTensorContainer(k)
+        v = AttentionTensorContainer(v)
+        x = optimized_attention(q, k, v, heads=self.num_heads, preferred_attention=self.comfy_attention, skip_reshape=True, skip_output_reshape=True, transformer_options=transformer_options)
 
         x = x.transpose(1, 2).reshape(b, -1, n * d)
         x = self.o(x)
@@ -1483,7 +1549,7 @@ class WanAttentionBlockAudio(WanAttentionBlock):
 
         # self-attention
         y = self.self_attn(
-            torch.addcmul(repeat_e(e[0], x), self.norm1(x), 1 + repeat_e(e[1], x)),
+            modulate(x, self.norm1, e[0], e[1]),
             freqs, transformer_options=transformer_options)
 
         x = torch.addcmul(x, y, repeat_e(e[2], x))
@@ -1492,7 +1558,7 @@ class WanAttentionBlockAudio(WanAttentionBlock):
         x = x + self.cross_attn(self.norm3(x), context, context_img_len=context_img_len, transformer_options=transformer_options)
         if audio is not None:
             x = self.audio_cross_attn_wrapper(x, audio, transformer_options=transformer_options)
-        y = self.ffn(torch.addcmul(repeat_e(e[3], x), self.norm2(x), 1 + repeat_e(e[4], x)))
+        y = self.ffn(modulate(x, self.norm2, e[3], e[4]))
         x = torch.addcmul(x, y, repeat_e(e[5], x))
         return x
 
@@ -1599,6 +1665,7 @@ class HumoWanModel(WanModel):
         bs, _, time, height, width = x.shape
 
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         grid_sizes = x.shape[2:]
         x = x.flatten(2).transpose(1, 2)
@@ -1630,6 +1697,7 @@ class HumoWanModel(WanModel):
             audio = None
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -1644,6 +1712,11 @@ class HumoWanModel(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, audio=audio, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": 0, "transformer_options": transformer_options})
+                    x = out["img"]
 
         # head
         x = self.head(x, e)
@@ -1660,8 +1733,14 @@ class SCAILWanModel(WanModel):
 
     def forward_orig(self, x, t, context, clip_fea=None, freqs=None, transformer_options={}, pose_latents=None, reference_latent=None, ref_mask_latents=None, sam_latents=None, **kwargs):
 
+        x_input = x
+
+        img_offset = 0
         if reference_latent is not None:
             x = torch.cat((reference_latent, x), dim=2)
+            img_offset = (reference_latent.shape[2] // self.patch_size[0]) * \
+                         (reference_latent.shape[3] // self.patch_size[1]) * \
+                         (reference_latent.shape[4] // self.patch_size[2])
 
         # embeddings
         x = self.patch_embedding(x.float()).to(x.dtype)
@@ -1697,6 +1776,7 @@ class SCAILWanModel(WanModel):
             context_img_len = clip_fea.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
         transformer_options["total_blocks"] = len(self.blocks)
         transformer_options["block_type"] = "double"
@@ -1711,6 +1791,11 @@ class SCAILWanModel(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": img_offset, "transformer_options": transformer_options})
+                    x = out["img"]
 
         # head
         x = self.head(x, e)

@@ -1,14 +1,14 @@
 {
   "revision": 0,
-  "last_node_id": 306,
+  "last_node_id": 355,
   "last_link_id": 0,
   "nodes": [
     {
-      "id": 306,
-      "type": "bd7f73a0-ec67-4f46-8671-17088d8e31b7",
+      "id": 355,
+      "type": "21da7c57-d95a-48d7-b35a-a22d8e5f5163",
       "pos": [
-        -2950,
-        -410
+        -2290,
+        -60
       ],
       "size": [
         440,
@@ -160,59 +160,59 @@
       "properties": {
         "proxyWidgets": [
           [
-            "280",
+            "330",
             "text"
           ],
           [
-            "297",
+            "345",
             "value"
           ],
           [
-            "290",
+            "338",
             "value"
           ],
           [
-            "289",
+            "337",
             "length"
           ],
           [
-            "288",
+            "336",
             "seed"
           ],
           [
-            "299",
+            "347",
             "unet_name"
           ],
           [
-            "277",
+            "327",
             "clip_name"
           ],
           [
-            "278",
+            "328",
             "vae_name"
           ],
           [
-            "300",
+            "348",
             "value"
           ],
           [
-            "272",
+            "322",
             "lora_name"
           ],
           [
-            "268",
+            "318",
             "text"
           ],
           [
-            "269",
+            "319",
             "expand"
           ],
           [
-            "268",
+            "318",
             "ckpt_name"
           ],
           [
-            "312",
+            "351",
             "$$canvas-image-preview"
           ]
         ],
@@ -235,11 +235,11 @@
   "definitions": {
     "subgraphs": [
       {
-        "id": "bd7f73a0-ec67-4f46-8671-17088d8e31b7",
+        "id": "21da7c57-d95a-48d7-b35a-a22d8e5f5163",
         "version": 1,
         "state": {
           "lastGroupId": 31,
-          "lastNodeId": 315,
+          "lastNodeId": 355,
           "lastLinkId": 499,
           "lastRerouteId": 0
         },
@@ -479,7 +479,7 @@
         "widgets": [],
         "nodes": [
           {
-            "id": 266,
+            "id": 316,
             "type": "ModelSamplingSD3",
             "pos": [
               -560,
@@ -538,7 +538,7 @@
             ]
           },
           {
-            "id": 267,
+            "id": 317,
             "type": "CreateVideo",
             "pos": [
               530,
@@ -575,6 +575,16 @@
                   "name": "fps"
                 },
                 "link": 425
+              },
+              {
+                "localized_name": "bit_depth",
+                "name": "bit_depth",
+                "shape": 7,
+                "type": "INT",
+                "widget": {
+                  "name": "bit_depth"
+                },
+                "link": null
               }
             ],
             "outputs": [
@@ -601,12 +611,13 @@
               "widget_ue_connectable": {}
             },
             "widgets_values": [
-              16
+              16,
+              8
             ]
           },
           {
-            "id": 268,
-            "type": "17df2eeb-d89e-46ee-9480-a4ca2494b207",
+            "id": 318,
+            "type": "73d70937-ffa8-43fe-af02-aecff882d159",
             "pos": [
               -1960,
               3220
@@ -705,23 +716,23 @@
             "properties": {
               "proxyWidgets": [
                 [
-                  "237",
+                  "354",
                   "text"
                 ],
                 [
-                  "75",
+                  "352",
                   "threshold"
                 ],
                 [
-                  "75",
+                  "352",
                   "refine_iterations"
                 ],
                 [
-                  "75",
+                  "352",
                   "individual_masks"
                 ],
                 [
-                  "236",
+                  "353",
                   "ckpt_name"
                 ]
               ],
@@ -745,7 +756,7 @@
             "widgets_values": []
           },
           {
-            "id": 269,
+            "id": 319,
             "type": "GrowMask",
             "pos": [
               -1530,
@@ -815,7 +826,7 @@
             ]
           },
           {
-            "id": 270,
+            "id": 320,
             "type": "PrimitiveInt",
             "pos": [
               -1350,
@@ -868,7 +879,7 @@
             ]
           },
           {
-            "id": 271,
+            "id": 321,
             "type": "PrimitiveFloat",
             "pos": [
               -1340,
@@ -920,7 +931,7 @@
             ]
           },
           {
-            "id": 272,
+            "id": 322,
             "type": "LoraLoaderModelOnly",
             "pos": [
               -1380,
@@ -995,7 +1006,7 @@
             ]
           },
           {
-            "id": 273,
+            "id": 323,
             "type": "PrimitiveInt",
             "pos": [
               -1340,
@@ -1048,7 +1059,7 @@
             ]
           },
           {
-            "id": 274,
+            "id": 324,
             "type": "PrimitiveFloat",
             "pos": [
               -1340,
@@ -1100,7 +1111,7 @@
             ]
           },
           {
-            "id": 275,
+            "id": 325,
             "type": "ComfySwitchNode",
             "pos": [
               -960,
@@ -1163,7 +1174,7 @@
             ]
           },
           {
-            "id": 276,
+            "id": 326,
             "type": "ComfySwitchNode",
             "pos": [
               -960,
@@ -1226,7 +1237,7 @@
             ]
           },
           {
-            "id": 277,
+            "id": 327,
             "type": "CLIPLoader",
             "pos": [
               -2710,
@@ -1308,7 +1319,7 @@
             ]
           },
           {
-            "id": 278,
+            "id": 328,
             "type": "VAELoader",
             "pos": [
               -2700,
@@ -1369,7 +1380,7 @@
             ]
           },
           {
-            "id": 279,
+            "id": 329,
             "type": "CLIPTextEncode",
             "pos": [
               -2280,
@@ -1431,7 +1442,7 @@
             "bgcolor": "#335"
           },
           {
-            "id": 280,
+            "id": 330,
             "type": "CLIPTextEncode",
             "pos": [
               -2270,
@@ -1493,7 +1504,7 @@
             "bgcolor": "#353"
           },
           {
-            "id": 281,
+            "id": 331,
             "type": "WanVaceToVideo",
             "pos": [
               -1780,
@@ -1652,7 +1663,7 @@
             ]
           },
           {
-            "id": 282,
+            "id": 332,
             "type": "InvertMask",
             "pos": [
               -1510,
@@ -1697,7 +1708,7 @@
             }
           },
           {
-            "id": 283,
+            "id": 333,
             "type": "MaskToImage",
             "pos": [
               -1510,
@@ -1742,7 +1753,7 @@
             }
           },
           {
-            "id": 284,
+            "id": 334,
             "type": "ImageCompositeMasked",
             "pos": [
               -1210,
@@ -1833,7 +1844,7 @@
             ]
           },
           {
-            "id": 287,
+            "id": 335,
             "type": "TrimVideoLatent",
             "pos": [
               -220,
@@ -1895,7 +1906,7 @@
             ]
           },
           {
-            "id": 288,
+            "id": 336,
             "type": "KSampler",
             "pos": [
               -560,
@@ -2023,7 +2034,7 @@
             ]
           },
           {
-            "id": 289,
+            "id": 337,
             "type": "ImageFromBatch",
             "pos": [
               -2360,
@@ -2090,7 +2101,7 @@
             ]
           },
           {
-            "id": 290,
+            "id": 338,
             "type": "PrimitiveInt",
             "pos": [
               -2690,
@@ -2143,7 +2154,7 @@
             ]
           },
           {
-            "id": 291,
+            "id": 339,
             "type": "ComfyMathExpression",
             "pos": [
               -2650,
@@ -2223,7 +2234,7 @@
             ]
           },
           {
-            "id": 292,
+            "id": 340,
             "type": "ComfyMathExpression",
             "pos": [
               -2650,
@@ -2303,7 +2314,7 @@
             ]
           },
           {
-            "id": 293,
+            "id": 341,
             "type": "ResizeImageMaskNode",
             "pos": [
               -2360,
@@ -2402,7 +2413,7 @@
             ]
           },
           {
-            "id": 294,
+            "id": 342,
             "type": "ComfySwitchNode",
             "pos": [
               -960,
@@ -2465,7 +2476,7 @@
             ]
           },
           {
-            "id": 295,
+            "id": 343,
             "type": "GetImageSize",
             "pos": [
               -2010,
@@ -2526,7 +2537,7 @@
             }
           },
           {
-            "id": 296,
+            "id": 344,
             "type": "VAEDecode",
             "pos": [
               520,
@@ -2581,7 +2592,7 @@
             }
           },
           {
-            "id": 297,
+            "id": 345,
             "type": "PrimitiveInt",
             "pos": [
               -2690,
@@ -2634,7 +2645,7 @@
             ]
           },
           {
-            "id": 298,
+            "id": 346,
             "type": "GetVideoComponents",
             "pos": [
               -2330,
@@ -2681,6 +2692,12 @@
                 "links": [
                   425
                 ]
+              },
+              {
+                "localized_name": "bit_depth",
+                "name": "bit_depth",
+                "type": "INT",
+                "links": null
               }
             ],
             "properties": {
@@ -2697,7 +2714,7 @@
             }
           },
           {
-            "id": 299,
+            "id": 347,
             "type": "UNETLoader",
             "pos": [
               -2720,
@@ -2768,7 +2785,7 @@
             ]
           },
           {
-            "id": 300,
+            "id": 348,
             "type": "PrimitiveBoolean",
             "pos": [
               -1390,
@@ -2822,7 +2839,7 @@
             ]
           },
           {
-            "id": 308,
+            "id": 349,
             "type": "ImageFromBatch",
             "pos": [
               -2360,
@@ -2887,7 +2904,7 @@
             ]
           },
           {
-            "id": 310,
+            "id": 350,
             "type": "MaskPreview",
             "pos": [
               -900,
@@ -2923,7 +2940,7 @@
             }
           },
           {
-            "id": 312,
+            "id": 351,
             "type": "PreviewImage",
             "pos": [
               -520,
@@ -2944,7 +2961,14 @@
                 "link": 499
               }
             ],
-            "outputs": [],
+            "outputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "type": "IMAGE",
+                "links": null
+              }
+            ],
             "properties": {
               "Node name for S&R": "PreviewImage",
               "cnr_id": "comfy-core",
@@ -3096,385 +3120,385 @@
         "links": [
           {
             "id": 422,
-            "origin_id": 275,
+            "origin_id": 325,
             "origin_slot": 0,
-            "target_id": 266,
+            "target_id": 316,
             "target_slot": 0,
             "type": "MODEL"
           },
           {
             "id": 423,
-            "origin_id": 296,
+            "origin_id": 344,
             "origin_slot": 0,
-            "target_id": 267,
+            "target_id": 317,
             "target_slot": 0,
             "type": "IMAGE"
           },
           {
             "id": 424,
-            "origin_id": 298,
+            "origin_id": 346,
             "origin_slot": 1,
-            "target_id": 267,
+            "target_id": 317,
             "target_slot": 1,
             "type": "AUDIO"
           },
           {
             "id": 425,
-            "origin_id": 298,
+            "origin_id": 346,
             "origin_slot": 2,
-            "target_id": 267,
+            "target_id": 317,
             "target_slot": 2,
             "type": "FLOAT"
           },
           {
             "id": 426,
-            "origin_id": 293,
+            "origin_id": 341,
             "origin_slot": 0,
-            "target_id": 268,
+            "target_id": 318,
             "target_slot": 0,
             "type": "IMAGE"
           },
           {
             "id": 427,
-            "origin_id": 268,
+            "origin_id": 318,
             "origin_slot": 0,
-            "target_id": 269,
+            "target_id": 319,
             "target_slot": 0,
             "type": "MASK"
           },
           {
             "id": 428,
-            "origin_id": 299,
+            "origin_id": 347,
             "origin_slot": 0,
-            "target_id": 272,
+            "target_id": 322,
             "target_slot": 0,
             "type": "MODEL"
           },
           {
             "id": 429,
-            "origin_id": 299,
+            "origin_id": 347,
             "origin_slot": 0,
-            "target_id": 275,
+            "target_id": 325,
             "target_slot": 0,
             "type": "MODEL"
           },
           {
             "id": 430,
-            "origin_id": 272,
+            "origin_id": 322,
             "origin_slot": 0,
-            "target_id": 275,
+            "target_id": 325,
             "target_slot": 1,
             "type": "MODEL"
           },
           {
             "id": 431,
-            "origin_id": 300,
+            "origin_id": 348,
             "origin_slot": 0,
-            "target_id": 275,
+            "target_id": 325,
             "target_slot": 2,
             "type": "BOOLEAN"
           },
           {
             "id": 432,
-            "origin_id": 271,
+            "origin_id": 321,
             "origin_slot": 0,
-            "target_id": 276,
+            "target_id": 326,
             "target_slot": 0,
             "type": "FLOAT"
           },
           {
             "id": 433,
-            "origin_id": 274,
+            "origin_id": 324,
             "origin_slot": 0,
-            "target_id": 276,
+            "target_id": 326,
             "target_slot": 1,
             "type": "FLOAT"
           },
           {
             "id": 434,
-            "origin_id": 300,
+            "origin_id": 348,
             "origin_slot": 0,
-            "target_id": 276,
+            "target_id": 326,
             "target_slot": 2,
             "type": "BOOLEAN"
           },
           {
             "id": 435,
-            "origin_id": 277,
+            "origin_id": 327,
             "origin_slot": 0,
-            "target_id": 279,
+            "target_id": 329,
             "target_slot": 0,
             "type": "CLIP"
           },
           {
             "id": 436,
-            "origin_id": 277,
+            "origin_id": 327,
             "origin_slot": 0,
-            "target_id": 280,
+            "target_id": 330,
             "target_slot": 0,
             "type": "CLIP"
           },
           {
             "id": 437,
-            "origin_id": 280,
+            "origin_id": 330,
             "origin_slot": 0,
-            "target_id": 281,
+            "target_id": 331,
             "target_slot": 0,
             "type": "CONDITIONING"
           },
           {
             "id": 438,
-            "origin_id": 279,
+            "origin_id": 329,
             "origin_slot": 0,
-            "target_id": 281,
+            "target_id": 331,
             "target_slot": 1,
             "type": "CONDITIONING"
           },
           {
             "id": 439,
-            "origin_id": 278,
+            "origin_id": 328,
             "origin_slot": 0,
-            "target_id": 281,
+            "target_id": 331,
             "target_slot": 2,
             "type": "VAE"
           },
           {
             "id": 440,
-            "origin_id": 284,
+            "origin_id": 334,
             "origin_slot": 0,
-            "target_id": 281,
+            "target_id": 331,
             "target_slot": 3,
             "type": "IMAGE"
           },
           {
             "id": 441,
-            "origin_id": 269,
+            "origin_id": 319,
             "origin_slot": 0,
-            "target_id": 281,
+            "target_id": 331,
             "target_slot": 4,
             "type": "MASK"
           },
           {
             "id": 442,
-            "origin_id": 295,
+            "origin_id": 343,
             "origin_slot": 0,
-            "target_id": 281,
+            "target_id": 331,
             "target_slot": 6,
             "type": "INT"
           },
           {
             "id": 443,
-            "origin_id": 295,
+            "origin_id": 343,
             "origin_slot": 1,
-            "target_id": 281,
+            "target_id": 331,
             "target_slot": 7,
             "type": "INT"
           },
           {
             "id": 444,
-            "origin_id": 295,
+            "origin_id": 343,
             "origin_slot": 2,
-            "target_id": 281,
+            "target_id": 331,
             "target_slot": 8,
             "type": "INT"
           },
           {
             "id": 445,
-            "origin_id": 269,
+            "origin_id": 319,
             "origin_slot": 0,
-            "target_id": 282,
+            "target_id": 332,
             "target_slot": 0,
             "type": "MASK"
           },
           {
             "id": 446,
-            "origin_id": 282,
+            "origin_id": 332,
             "origin_slot": 0,
-            "target_id": 283,
+            "target_id": 333,
             "target_slot": 0,
             "type": "MASK"
           },
           {
             "id": 447,
-            "origin_id": 293,
+            "origin_id": 341,
             "origin_slot": 0,
-            "target_id": 284,
+            "target_id": 334,
             "target_slot": 0,
             "type": "IMAGE"
           },
           {
             "id": 448,
-            "origin_id": 283,
+            "origin_id": 333,
             "origin_slot": 0,
-            "target_id": 284,
+            "target_id": 334,
             "target_slot": 1,
             "type": "IMAGE"
           },
           {
             "id": 449,
-            "origin_id": 269,
+            "origin_id": 319,
             "origin_slot": 0,
-            "target_id": 284,
+            "target_id": 334,
             "target_slot": 2,
             "type": "MASK"
           },
           {
             "id": 452,
-            "origin_id": 288,
+            "origin_id": 336,
             "origin_slot": 0,
-            "target_id": 287,
+            "target_id": 335,
             "target_slot": 0,
             "type": "LATENT"
           },
           {
             "id": 453,
-            "origin_id": 281,
+            "origin_id": 331,
             "origin_slot": 3,
-            "target_id": 287,
+            "target_id": 335,
             "target_slot": 1,
             "type": "INT"
           },
           {
             "id": 454,
-            "origin_id": 266,
+            "origin_id": 316,
             "origin_slot": 0,
-            "target_id": 288,
+            "target_id": 336,
             "target_slot": 0,
             "type": "MODEL"
           },
           {
             "id": 455,
-            "origin_id": 281,
+            "origin_id": 331,
             "origin_slot": 0,
-            "target_id": 288,
+            "target_id": 336,
             "target_slot": 1,
             "type": "CONDITIONING"
           },
           {
             "id": 456,
-            "origin_id": 281,
+            "origin_id": 331,
             "origin_slot": 1,
-            "target_id": 288,
+            "target_id": 336,
             "target_slot": 2,
             "type": "CONDITIONING"
           },
           {
             "id": 457,
-            "origin_id": 281,
+            "origin_id": 331,
             "origin_slot": 2,
-            "target_id": 288,
+            "target_id": 336,
             "target_slot": 3,
             "type": "LATENT"
           },
           {
             "id": 458,
-            "origin_id": 294,
+            "origin_id": 342,
             "origin_slot": 0,
-            "target_id": 288,
+            "target_id": 336,
             "target_slot": 5,
             "type": "INT"
           },
           {
             "id": 459,
-            "origin_id": 276,
+            "origin_id": 326,
             "origin_slot": 0,
-            "target_id": 288,
+            "target_id": 336,
             "target_slot": 6,
             "type": "FLOAT"
           },
           {
             "id": 460,
-            "origin_id": 298,
+            "origin_id": 346,
             "origin_slot": 0,
-            "target_id": 289,
+            "target_id": 337,
             "target_slot": 0,
             "type": "IMAGE"
           },
           {
             "id": 461,
-            "origin_id": 290,
+            "origin_id": 338,
             "origin_slot": 0,
-            "target_id": 291,
+            "target_id": 339,
             "target_slot": 0,
             "type": "INT"
           },
           {
             "id": 462,
-            "origin_id": 297,
+            "origin_id": 345,
             "origin_slot": 0,
-            "target_id": 292,
+            "target_id": 340,
             "target_slot": 0,
             "type": "INT"
           },
           {
             "id": 463,
-            "origin_id": 289,
+            "origin_id": 337,
             "origin_slot": 0,
-            "target_id": 293,
+            "target_id": 341,
             "target_slot": 0,
             "type": "IMAGE"
           },
           {
             "id": 464,
-            "origin_id": 292,
+            "origin_id": 340,
             "origin_slot": 1,
-            "target_id": 293,
+            "target_id": 341,
             "target_slot": 2,
             "type": "INT"
           },
           {
             "id": 465,
-            "origin_id": 291,
+            "origin_id": 339,
             "origin_slot": 1,
-            "target_id": 293,
+            "target_id": 341,
             "target_slot": 3,
             "type": "INT"
           },
           {
             "id": 466,
-            "origin_id": 270,
+            "origin_id": 320,
             "origin_slot": 0,
-            "target_id": 294,
+            "target_id": 342,
             "target_slot": 0,
             "type": "INT"
           },
           {
             "id": 467,
-            "origin_id": 273,
+            "origin_id": 323,
             "origin_slot": 0,
-            "target_id": 294,
+            "target_id": 342,
             "target_slot": 1,
             "type": "INT"
           },
           {
             "id": 468,
-            "origin_id": 300,
+            "origin_id": 348,
             "origin_slot": 0,
-            "target_id": 294,
+            "target_id": 342,
             "target_slot": 2,
             "type": "BOOLEAN"
           },
           {
             "id": 469,
-            "origin_id": 293,
+            "origin_id": 341,
             "origin_slot": 0,
-            "target_id": 295,
+            "target_id": 343,
             "target_slot": 0,
             "type": "IMAGE"
           },
           {
             "id": 470,
-            "origin_id": 287,
+            "origin_id": 335,
             "origin_slot": 0,
-            "target_id": 296,
+            "target_id": 344,
             "target_slot": 0,
             "type": "LATENT"
           },
           {
             "id": 471,
-            "origin_id": 278,
+            "origin_id": 328,
             "origin_slot": 0,
-            "target_id": 296,
+            "target_id": 344,
             "target_slot": 1,
             "type": "VAE"
           },
@@ -3482,13 +3506,13 @@
             "id": 473,
             "origin_id": -10,
             "origin_slot": 0,
-            "target_id": 298,
+            "target_id": 346,
             "target_slot": 0,
             "type": "VIDEO"
           },
           {
             "id": 474,
-            "origin_id": 267,
+            "origin_id": 317,
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 0,
@@ -3498,7 +3522,7 @@
             "id": 478,
             "origin_id": -10,
             "origin_slot": 1,
-            "target_id": 281,
+            "target_id": 331,
             "target_slot": 5,
             "type": "IMAGE"
           },
@@ -3506,7 +3530,7 @@
             "id": 479,
             "origin_id": -10,
             "origin_slot": 2,
-            "target_id": 280,
+            "target_id": 330,
             "target_slot": 1,
             "type": "STRING"
           },
@@ -3514,7 +3538,7 @@
             "id": 480,
             "origin_id": -10,
             "origin_slot": 3,
-            "target_id": 297,
+            "target_id": 345,
             "target_slot": 0,
             "type": "INT"
           },
@@ -3522,7 +3546,7 @@
             "id": 481,
             "origin_id": -10,
             "origin_slot": 4,
-            "target_id": 290,
+            "target_id": 338,
             "target_slot": 0,
             "type": "INT"
           },
@@ -3530,7 +3554,7 @@
             "id": 494,
             "origin_id": -10,
             "origin_slot": 5,
-            "target_id": 289,
+            "target_id": 337,
             "target_slot": 2,
             "type": "INT"
           },
@@ -3538,7 +3562,7 @@
             "id": 483,
             "origin_id": -10,
             "origin_slot": 6,
-            "target_id": 288,
+            "target_id": 336,
             "target_slot": 4,
             "type": "INT"
           },
@@ -3546,7 +3570,7 @@
             "id": 485,
             "origin_id": -10,
             "origin_slot": 7,
-            "target_id": 299,
+            "target_id": 347,
             "target_slot": 0,
             "type": "COMBO"
           },
@@ -3554,7 +3578,7 @@
             "id": 486,
             "origin_id": -10,
             "origin_slot": 8,
-            "target_id": 277,
+            "target_id": 327,
             "target_slot": 0,
             "type": "COMBO"
           },
@@ -3562,7 +3586,7 @@
             "id": 487,
             "origin_id": -10,
             "origin_slot": 9,
-            "target_id": 278,
+            "target_id": 328,
             "target_slot": 0,
             "type": "COMBO"
           },
@@ -3570,7 +3594,7 @@
             "id": 489,
             "origin_id": -10,
             "origin_slot": 10,
-            "target_id": 300,
+            "target_id": 348,
             "target_slot": 0,
             "type": "BOOLEAN"
           },
@@ -3578,7 +3602,7 @@
             "id": 490,
             "origin_id": -10,
             "origin_slot": 11,
-            "target_id": 272,
+            "target_id": 322,
             "target_slot": 1,
             "type": "COMBO"
           },
@@ -3586,7 +3610,7 @@
             "id": 491,
             "origin_id": -10,
             "origin_slot": 12,
-            "target_id": 268,
+            "target_id": 318,
             "target_slot": 1,
             "type": "STRING"
           },
@@ -3594,7 +3618,7 @@
             "id": 496,
             "origin_id": -10,
             "origin_slot": 13,
-            "target_id": 269,
+            "target_id": 319,
             "target_slot": 1,
             "type": "INT"
           },
@@ -3602,37 +3626,39 @@
             "id": 497,
             "origin_id": -10,
             "origin_slot": 14,
-            "target_id": 268,
+            "target_id": 318,
             "target_slot": 8,
             "type": "COMBO"
           },
           {
             "id": 498,
-            "origin_id": 269,
+            "origin_id": 319,
             "origin_slot": 0,
-            "target_id": 310,
+            "target_id": 350,
             "target_slot": 0,
             "type": "MASK"
           },
           {
             "id": 499,
-            "origin_id": 284,
+            "origin_id": 334,
             "origin_slot": 0,
-            "target_id": 312,
+            "target_id": 351,
             "target_slot": 0,
             "type": "IMAGE"
           }
         ],
-        "extra": {},
-        "category": "Video generation and editing/Inpaint video",
+        "extra": {
+          "workflowRendererVersion": "LG"
+        },
+        "category": "Video editing/Inpaint video",
         "description": "Removes objects from video by inpainting masked regions using Wan 2.1 VACE, with SAM3 text-guided segmentation and optional Lightning LoRA turbo mode."
       },
       {
-        "id": "17df2eeb-d89e-46ee-9480-a4ca2494b207",
+        "id": "73d70937-ffa8-43fe-af02-aecff882d159",
         "version": 1,
         "state": {
           "lastGroupId": 31,
-          "lastNodeId": 315,
+          "lastNodeId": 355,
           "lastLinkId": 499,
           "lastRerouteId": 0
         },
@@ -3802,7 +3828,7 @@
         "widgets": [],
         "nodes": [
           {
-            "id": 75,
+            "id": 352,
             "type": "SAM3_Detect",
             "pos": [
               -1470,
@@ -3932,7 +3958,7 @@
             ]
           },
           {
-            "id": 236,
+            "id": 353,
             "type": "CheckpointLoaderSimple",
             "pos": [
               -1970,
@@ -4009,7 +4035,7 @@
             ]
           },
           {
-            "id": 237,
+            "id": 354,
             "type": "CLIPTextEncode",
             "pos": [
               -2000,
@@ -4075,31 +4101,31 @@
         "links": [
           {
             "id": 237,
-            "origin_id": 236,
+            "origin_id": 353,
             "origin_slot": 0,
-            "target_id": 75,
+            "target_id": 352,
             "target_slot": 0,
             "type": "MODEL"
           },
           {
             "id": 200,
-            "origin_id": 237,
+            "origin_id": 354,
             "origin_slot": 0,
-            "target_id": 75,
+            "target_id": 352,
             "target_slot": 2,
             "type": "CONDITIONING"
           },
           {
             "id": 240,
-            "origin_id": 236,
+            "origin_id": 353,
             "origin_slot": 1,
-            "target_id": 237,
+            "target_id": 354,
             "target_slot": 0,
             "type": "CLIP"
           },
           {
             "id": 231,
-            "origin_id": 75,
+            "origin_id": 352,
             "origin_slot": 0,
             "target_id": -20,
             "target_slot": 0,
@@ -4107,7 +4133,7 @@
           },
           {
             "id": 232,
-            "origin_id": 75,
+            "origin_id": 352,
             "origin_slot": 1,
             "target_id": -20,
             "target_slot": 1,
@@ -4117,7 +4143,7 @@
             "id": 264,
             "origin_id": -10,
             "origin_slot": 0,
-            "target_id": 75,
+            "target_id": 352,
             "target_slot": 1,
             "type": "IMAGE"
           },
@@ -4125,7 +4151,7 @@
             "id": 265,
             "origin_id": -10,
             "origin_slot": 1,
-            "target_id": 237,
+            "target_id": 354,
             "target_slot": 1,
             "type": "STRING"
           },
@@ -4133,7 +4159,7 @@
             "id": 266,
             "origin_id": -10,
             "origin_slot": 2,
-            "target_id": 75,
+            "target_id": 352,
             "target_slot": 3,
             "type": "BOUNDING_BOX"
           },
@@ -4141,7 +4167,7 @@
             "id": 267,
             "origin_id": -10,
             "origin_slot": 3,
-            "target_id": 75,
+            "target_id": 352,
             "target_slot": 4,
             "type": "STRING"
           },
@@ -4149,7 +4175,7 @@
             "id": 268,
             "origin_id": -10,
             "origin_slot": 4,
-            "target_id": 75,
+            "target_id": 352,
             "target_slot": 5,
             "type": "STRING"
           },
@@ -4157,7 +4183,7 @@
             "id": 269,
             "origin_id": -10,
             "origin_slot": 5,
-            "target_id": 75,
+            "target_id": 352,
             "target_slot": 6,
             "type": "FLOAT"
           },
@@ -4165,7 +4191,7 @@
             "id": 270,
             "origin_id": -10,
             "origin_slot": 6,
-            "target_id": 75,
+            "target_id": 352,
             "target_slot": 7,
             "type": "INT"
           },
@@ -4173,7 +4199,7 @@
             "id": 271,
             "origin_id": -10,
             "origin_slot": 7,
-            "target_id": 75,
+            "target_id": 352,
             "target_slot": 8,
             "type": "BOOLEAN"
           },
@@ -4181,7 +4207,7 @@
             "id": 272,
             "origin_id": -10,
             "origin_slot": 8,
-            "target_id": 236,
+            "target_id": 353,
             "target_slot": 0,
             "type": "COMBO"
           }

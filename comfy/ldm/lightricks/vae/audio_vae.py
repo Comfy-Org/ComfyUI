@@ -1,8 +1,7 @@
 import json
 from dataclasses import dataclass
-import math
 import torch
-import torchaudio
+import comfy.audio
 
 from comfy.ldm.mmaudio.vae.distributions import DiagonalGaussianDistribution
 from comfy.ldm.lightricks.symmetric_patchifier import AudioPatchifier
@@ -74,14 +73,14 @@ class AudioPreprocessor:
     def resample(self, waveform: torch.Tensor, source_rate: int) -> torch.Tensor:
         if source_rate == self.target_sample_rate:
             return waveform
-        return torchaudio.functional.resample(waveform, source_rate, self.target_sample_rate)
+        return comfy.audio.resample(waveform, source_rate, self.target_sample_rate)
 
     def waveform_to_mel(
         self, waveform: torch.Tensor, waveform_sample_rate: int, device
     ) -> torch.Tensor:
         waveform = self.resample(waveform, waveform_sample_rate)
 
-        mel_transform = torchaudio.transforms.MelSpectrogram(
+        mel_transform = comfy.audio.MelSpectrogram(
             sample_rate=self.target_sample_rate,
             n_fft=self.n_fft,
             win_length=self.n_fft,
@@ -89,12 +88,7 @@ class AudioPreprocessor:
             f_min=0.0,
             f_max=self.target_sample_rate / 2.0,
             n_mels=self.mel_bins,
-            window_fn=torch.hann_window,
-            center=True,
-            pad_mode="reflect",
             power=1.0,
-            mel_scale="slaney",
-            norm="slaney",
         ).to(device)
 
         mel = mel_transform(waveform)
@@ -185,8 +179,8 @@ class AudioVAE(torch.nn.Module):
             self.autoencoder.mel_bins,
         )
 
-    def num_of_latents_from_frames(self, frames_number: int, frame_rate: int) -> int:
-        return math.ceil((float(frames_number) / frame_rate) * self.latents_per_second)
+    def num_of_latents_from_frames(self, frames_number: int, frame_rate: float) -> int:
+        return round((float(frames_number) / frame_rate) * self.latents_per_second)
 
     def run_vocoder(self, mel_spec: torch.Tensor) -> torch.Tensor:
         audio_channels = self.autoencoder.decoder.out_ch

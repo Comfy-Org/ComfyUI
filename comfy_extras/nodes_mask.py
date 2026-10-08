@@ -416,7 +416,7 @@ class MaskPreview(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="MaskPreview",
-            search_aliases=["show mask", "view mask", "inspect mask", "debug mask"],
+            search_aliases=["preview", "preview mask", "show mask", "view mask", "inspect mask", "debug mask"],
             display_name="Preview Mask",
             category="image/mask",
             description="Preview the masks without saving them to the ComfyUI output directory.",

@@ -3,22 +3,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-class Text2ImageTaskCreationRequest(BaseModel):
-    model: str = Field(...)
-    prompt: str = Field(...)
-    response_format: str | None = Field("url")
-    size: str | None = Field(None)
-    seed: int | None = Field(0, ge=0, le=2147483647)
-    guidance_scale: float | None = Field(..., ge=1.0, le=10.0)
-    watermark: bool | None = Field(False)
-
-
 class Seedream4Options(BaseModel):
     max_images: int = Field(15)
 
 
 class Seedream5OptimizePromptOptions(BaseModel):
-    thinking: Literal["auto", "enabled", "disabled"] = Field(...)
+    thinking: Literal["auto", "enabled", "disabled"] | None = Field(None)
+    mode: Literal["standard", "fast"] | None = Field(None)
 
 
 class Seedream4TaskCreationRequest(BaseModel):
@@ -33,6 +24,23 @@ class Seedream4TaskCreationRequest(BaseModel):
     watermark: bool = Field(False)
     output_format: str | None = None
     optimize_prompt_options: Seedream5OptimizePromptOptions | None = None
+
+
+class Seedream5LayerOptimizePromptOptions(BaseModel):
+    mode: Literal["standard", "fast"] = Field(...)
+
+
+class Seedream5LayerSeparationRequest(BaseModel):
+    model: str = Field(...)
+    prompt: str | None = Field(None)
+    image: str = Field(..., description="Single image URL")
+    size: str = Field("auto")
+    seed: int = Field(..., ge=0, le=2147483647)
+    response_format: str = Field("url")
+    output_format: str = Field("png")
+    layer_decomposition: bool = Field(True)
+    watermark: bool = Field(False)
+    optimize_prompt_options: Seedream5LayerOptimizePromptOptions | None = Field(None)
 
 
 class ImageTaskCreationResponse(BaseModel):
@@ -77,6 +85,15 @@ class TaskAudioContent(BaseModel):
     role: str = Field("reference_audio")
 
 
+class TaskDraftTaskContentTask(BaseModel):
+    id: str = Field(...)
+
+
+class TaskDraftTaskContent(BaseModel):
+    type: str = Field("draft_task")
+    draft_task: TaskDraftTaskContentTask = Field(...)
+
+
 class Text2VideoTaskCreationRequest(BaseModel):
     model: str = Field(...)
     content: list[TaskTextContent] = Field(..., min_length=1)
@@ -91,13 +108,18 @@ class Image2VideoTaskCreationRequest(BaseModel):
 
 class Seedance2TaskCreationRequest(BaseModel):
     model: str = Field(...)
-    content: list[TaskTextContent | TaskImageContent | TaskVideoContent | TaskAudioContent] = Field(..., min_length=1)
+    content: list[
+        TaskTextContent | TaskImageContent | TaskVideoContent | TaskAudioContent | TaskDraftTaskContent
+    ] = Field(..., min_length=1)
     generate_audio: bool | None = Field(None)
     resolution: str | None = Field(None)
     ratio: str | None = Field(None)
-    duration: int | None = Field(None, ge=4, le=15)
+    duration: int | None = Field(None)
     seed: int | None = Field(None, ge=0, le=2147483647)
     watermark: bool | None = Field(None)
+    output_format: str | None = Field(None)
+    omni_reference_task_type: str | None = Field(None, description="One of: auto, reference, edit, extend.")
+    draft: bool | None = Field(None)
 
 
 class TaskCreationResponse(BaseModel):
@@ -168,44 +190,6 @@ class SeedanceVirtualLibraryCreateAssetRequest(BaseModel):
     asset_type: str | None = Field(None, description="BytePlus asset type. Defaults to Image server-side when omitted.")
 
 
-# Dollars per 1K tokens, keyed by (model_id, has_video_input, resolution).
-SEEDANCE2_PRICE_PER_1K_TOKENS = {
-    ("dreamina-seedance-2-0-260128", False, "480p"): 0.007,
-    ("dreamina-seedance-2-0-260128", True, "480p"): 0.0043,
-    ("dreamina-seedance-2-0-260128", False, "720p"): 0.007,
-    ("dreamina-seedance-2-0-260128", True, "720p"): 0.0043,
-    ("dreamina-seedance-2-0-260128", False, "1080p"): 0.0077,
-    ("dreamina-seedance-2-0-260128", True, "1080p"): 0.0047,
-    ("dreamina-seedance-2-0-260128", False, "4k"): 0.004,
-    ("dreamina-seedance-2-0-260128", True, "4k"): 0.0024,
-    ("dreamina-seedance-2-0-fast-260128", False, "480p"): 0.0056,
-    ("dreamina-seedance-2-0-fast-260128", True, "480p"): 0.0033,
-    ("dreamina-seedance-2-0-fast-260128", False, "720p"): 0.0056,
-    ("dreamina-seedance-2-0-fast-260128", True, "720p"): 0.0033,
-    ("dreamina-seedance-2-0-mini", False, "480p"): 0.0035,
-    ("dreamina-seedance-2-0-mini", True, "480p"): 0.0021,
-    ("dreamina-seedance-2-0-mini", False, "720p"): 0.0035,
-    ("dreamina-seedance-2-0-mini", True, "720p"): 0.0021,
-}
-
-
-def seedance2_price_per_1k_tokens(model_id: str, has_video_input: bool, resolution: str) -> float | None:
-    return SEEDANCE2_PRICE_PER_1K_TOKENS.get((model_id, has_video_input, resolution))
-
-
-RECOMMENDED_PRESETS = [
-    ("1024x1024 (1:1)", 1024, 1024),
-    ("864x1152 (3:4)", 864, 1152),
-    ("1152x864 (4:3)", 1152, 864),
-    ("1280x720 (16:9)", 1280, 720),
-    ("720x1280 (9:16)", 720, 1280),
-    ("832x1248 (2:3)", 832, 1248),
-    ("1248x832 (3:2)", 1248, 832),
-    ("1512x648 (21:9)", 1512, 648),
-    ("2048x2048 (1:1)", 2048, 2048),
-    ("Custom", None, None),
-]
-
 RECOMMENDED_PRESETS_SEEDREAM_4 = [
     ("2048x2048 (1:1)", 2048, 2048),
     ("2304x1728 (4:3)", 2304, 1728),
@@ -266,19 +250,35 @@ _PRESETS_SEEDREAM_4K = [
 
 _CUSTOM_PRESET = [("Custom", None, None)]
 
-_PRESETS_SEEDREAM_2K_PRO = [
+RECOMMENDED_PRESETS_SEEDREAM_5_PRO = (
+    _PRESETS_SEEDREAM_1K + _PRESETS_SEEDREAM_2K + _CUSTOM_PRESET
+)
+RECOMMENDED_PRESETS_SEEDREAM_5_FLASH = [
+    ("(1K) 1024x1024 (1:1)", 1024, 1024),
+    ("(1K) 864x1152 (3:4)", 864, 1152),
+    ("(1K) 1152x864 (4:3)", 1152, 864),
+    ("(1K) 1424x800 (16:9)", 1424, 800),
+    ("(1K) 800x1424 (9:16)", 800, 1424),
+    ("(1K) 832x1248 (2:3)", 832, 1248),
+    ("(1K) 1248x832 (3:2)", 1248, 832),
+    ("(1K) 1568x672 (21:9)", 1568, 672),
+    ("(1.5K) 1536x1536 (1:1)", 1536, 1536),
+    ("(1.5K) 1344x1792 (3:4)", 1344, 1792),
+    ("(1.5K) 1792x1344 (4:3)", 1792, 1344),
+    ("(1.5K) 2048x1152 (16:9)", 2048, 1152),
+    ("(1.5K) 1152x2048 (9:16)", 1152, 2048),
+    ("(1.5K) 1248x1872 (2:3)", 1248, 1872),
+    ("(1.5K) 1872x1248 (3:2)", 1872, 1248),
+    ("(1.5K) 2352x1008 (21:9)", 2352, 1008),
     ("(2K) 2048x2048 (1:1)", 2048, 2048),
-    ("(2K) 1728x2304 (3:4)", 1728, 2304),
-    ("(2K) 2304x1728 (4:3)", 2304, 1728),
-    # ("(2K) 2848x1600 (16:9)", 2848, 1600),  # 4,556,800 px - temporarily unavailable
-    # ("(2K) 1600x2848 (9:16)", 1600, 2848),  # 4,556,800 px - temporarily unavailable
+    ("(2K) 1776x2368 (3:4)", 1776, 2368),
+    ("(2K) 2368x1776 (4:3)", 2368, 1776),
+    ("(2K) 2816x1584 (16:9)", 2816, 1584),
+    ("(2K) 1584x2816 (9:16)", 1584, 2816),
     ("(2K) 1664x2496 (2:3)", 1664, 2496),
     ("(2K) 2496x1664 (3:2)", 2496, 1664),
-    # ("(2K) 3136x1344 (21:9)", 3136, 1344),  # 4,214,784 px - temporarily unavailable
-]
-RECOMMENDED_PRESETS_SEEDREAM_5_PRO = (
-    _PRESETS_SEEDREAM_1K + _PRESETS_SEEDREAM_2K_PRO + _CUSTOM_PRESET
-)
+    ("(2K) 3136x1344 (21:9)", 3136, 1344),
+] + _CUSTOM_PRESET
 RECOMMENDED_PRESETS_SEEDREAM_5_LITE = (
     _PRESETS_SEEDREAM_2K + _PRESETS_SEEDREAM_3K + _PRESETS_SEEDREAM_4K + _CUSTOM_PRESET
 )
@@ -304,20 +304,34 @@ SEEDANCE2_REF_VIDEO_PIXEL_LIMITS = {
         "480p": {"min": 409_600, "max": 927_408},
         "720p": {"min": 409_600, "max": 927_408},
     },
+    "dreamina-seedance-2-5-260628": {
+        "480p": {"min": 409_600, "max": 8_295_044},
+        "720p": {"min": 409_600, "max": 8_295_044},
+        "1080p": {"min": 409_600, "max": 8_295_044},
+    },
 }
+
+SEEDANCE2_REFERENCE_LIMITS_DEFAULT = {
+    "max_images": 9,
+    "max_videos": 3,
+    "max_audios": 3,
+    "max_total_seconds": 15.1,
+}
+SEEDANCE2_REFERENCE_LIMITS = {
+    "dreamina-seedance-2-5-260628": {
+        "max_images": 30,
+        "max_videos": 10,
+        "max_audios": 10,
+        "max_total_seconds": 30.1,
+    },
+}
+
+
+def seedance2_reference_limits(model_id: str) -> dict:
+    return SEEDANCE2_REFERENCE_LIMITS.get(model_id, SEEDANCE2_REFERENCE_LIMITS_DEFAULT)
 
 # The time in this dictionary are given for 10 seconds duration.
 VIDEO_TASKS_EXECUTION_TIME = {
-    "seedance-1-0-lite-t2v-250428": {
-        "480p": 40,
-        "720p": 60,
-        "1080p": 90,
-    },
-    "seedance-1-0-lite-i2v-250428": {
-        "480p": 40,
-        "720p": 60,
-        "1080p": 90,
-    },
     "seedance-1-0-pro-250528": {
         "480p": 70,
         "720p": 85,
@@ -367,3 +381,45 @@ class SeedAudioResponse(BaseModel):
     original_duration: float | None = Field(default=None)
     code: int | None = Field(default=None)
     message: str | None = Field(default=None)
+
+
+class MediaKitVideoEnhanceRequest(BaseModel):
+    video_url: str = Field(...)
+    tool_version: str = Field(...)
+    scene: str | None = Field(None)
+    enhance_style: str | None = Field(None)
+    resolution: str | None = Field(None)
+    resolution_limit: int | None = Field(None)
+    fps: float | None = Field(None)
+    bitrate_level: str = Field(...)
+
+
+class MediaKitError(BaseModel):
+    code: str | None = Field(None)
+    type: str | None = Field(None)
+    message: str | None = Field(None)
+    param: str | None = Field(None)
+
+
+class MediaKitTaskCreateResponse(BaseModel):
+    success: bool = Field(...)
+    task_id: str | None = Field(None)
+    request_id: str | None = Field(None)
+    error: MediaKitError | None = Field(None)
+
+
+class MediaKitTaskResult(BaseModel):
+    video_url: str = Field(...)
+    duration: float | None = Field(None)
+    fps: float | None = Field(None)
+    resolution: str | None = Field(None)
+    tool_version: str | None = Field(None)
+
+
+class MediaKitTaskResponse(BaseModel):
+    success: bool = Field(...)
+    task_id: str | None = Field(None)
+    task_type: str | None = Field(None)
+    status: str | None = Field(None)
+    result: MediaKitTaskResult | None = Field(None)
+    error: MediaKitError | None = Field(None)

@@ -1,6 +1,7 @@
 import math
 import sys
 import inspect
+import json
 
 import torch
 import torch.nn.functional as F
@@ -9,6 +10,8 @@ from einops import rearrange, repeat
 from typing import Optional, Any, Callable, Union
 import logging
 import functools
+
+import comfy_kitchen
 
 from .diffusionmodules.util import AlphaBlender, timestep_embedding
 from .sub_quadratic_attention import efficient_dot_product_attention
@@ -49,6 +52,8 @@ except ImportError:
         logging.error(f"\n\nTo use the `--use-flash-attention` feature, the `flash-attn` package must be installed first.\ncommand:\n\t{sys.executable} -m pip install flash-attn")
         exit(-1)
 
+COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE = comfy_kitchen.int8_attention_is_available()
+
 REGISTERED_ATTENTION_FUNCTIONS = {}
 def register_attention_function(name: str, func: Callable):
     # avoid replacing existing functions
@@ -66,6 +71,40 @@ def get_attention_function(name: str, default: Any=...) -> Union[Callable, None]
         else:
             return default
     return REGISTERED_ATTENTION_FUNCTIONS[name]
+
+
+class ComfyAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = None
+        self.function = None
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        self.config = None
+        self.function = None
+        metadata = state_dict.pop(prefix + "config", None)
+        if metadata is not None:
+            self.config = json.loads(metadata.numpy().tobytes())
+            configs = self.config if isinstance(self.config, list) else [self.config]
+            for config in configs:
+                method = config.get("attention")
+                if method == "comfy_kitchen_int8":
+                    if COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE and comfy_kitchen.int8_attention_is_available(model_management.get_torch_device()):
+                        self.function = attention_comfy_kitchen_int8
+                elif method == "comfy_kitchen_sol":
+                    if comfy_kitchen.sol_attn_is_available(model_management.get_torch_device()):
+                        self.function = functools.partial(attention_comfy_kitchen_sol, tau=config.get("tau", 1.0))
+                else:
+                    logging.warning(f"Ignoring unknown attention method {method!r} for {prefix.rstrip('.')}")
+                if self.function is not None:
+                    break
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        if self.config is not None:
+            destination[prefix + "config"] = torch.tensor(list(json.dumps(self.config).encode("utf-8")), dtype=torch.uint8)
+
 
 from comfy.cli_args import args
 import comfy.ops
@@ -90,22 +129,6 @@ def default(val, d):
         return val
     return d
 
-def _gqa_repeat_factor(query_heads, key_heads, value_heads):
-    if key_heads != value_heads:
-        raise ValueError(f"Key/value head count mismatch for GQA: {key_heads} != {value_heads}")
-    if query_heads == key_heads:
-        return 1
-    if query_heads % key_heads != 0:
-        raise ValueError(f"Query heads must be divisible by key/value heads for GQA: {query_heads} vs {key_heads}")
-    return query_heads // key_heads
-
-def _repeat_kv_for_gqa(k, v, query_heads, head_dim):
-    n_rep = _gqa_repeat_factor(query_heads, k.shape[head_dim], v.shape[head_dim])
-    if n_rep > 1:
-        k = k.repeat_interleave(n_rep, dim=head_dim)
-        v = v.repeat_interleave(n_rep, dim=head_dim)
-    return k, v
-
 def _heads_from_dim(tensor, dim_head, name):
     inner_dim = tensor.shape[-1]
     if inner_dim % dim_head != 0:
@@ -122,10 +145,8 @@ def _reshape_qkv_to_heads(q, k, v, b, heads, dim_head, enable_gqa=False, expand_
         value_heads = heads
     k = k.unsqueeze(3).reshape(b, -1, key_heads, dim_head)
     v = v.unsqueeze(3).reshape(b, -1, value_heads, dim_head)
-    if enable_gqa:
-        _gqa_repeat_factor(heads, key_heads, value_heads)
-        if expand_kv:
-            k, v = _repeat_kv_for_gqa(k, v, heads, -2)
+    if enable_gqa and expand_kv:
+        k, v = comfy.ops.repeat_kv_for_gqa(k, v, heads, -2)
     return q, k, v
 
 
@@ -163,9 +184,35 @@ def Normalize(in_channels, dtype=None, device=None):
     return torch.nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True, dtype=dtype, device=device)
 
 
+class AttentionTensorContainer:
+    """Single-owner tensor input consumed by an optimized attention backend."""
+
+    __slots__ = ("tensor",)
+
+    def __init__(self, tensor: torch.Tensor):
+        self.tensor: torch.Tensor | None = tensor
+
+    def peek(self) -> torch.Tensor:
+        if self.tensor is None:
+            raise RuntimeError("attention tensor container has already been consumed")
+        return self.tensor
+
+    def take(self) -> torch.Tensor:
+        tensor = self.peek()
+        self.tensor = None
+        return tensor
+
+
 def wrap_attn(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        preferred_attention = kwargs.pop("preferred_attention", None)
+        containers = None
+        if len(args) >= 3 and isinstance(args[0], AttentionTensorContainer):
+            if not isinstance(args[1], AttentionTensorContainer) or not isinstance(args[2], AttentionTensorContainer):
+                raise TypeError("q, k, and v must all be attention tensor containers")
+            containers = args[:3]
+
         remove_attn_wrapper_key = False
         try:
             if "_inside_attn_wrapper" not in kwargs:
@@ -174,11 +221,26 @@ def wrap_attn(func):
                 kwargs["_inside_attn_wrapper"] = True
                 if transformer_options is not None:
                     if "optimized_attention_override" in transformer_options:
-                        return transformer_options["optimized_attention_override"](func, *args, **kwargs)
+                        optimized_attention_override = transformer_options["optimized_attention_override"]
+                        if containers is not None:
+                            if hasattr(optimized_attention_override, "container_function"):
+                                return optimized_attention_override.container_function(*args, **kwargs)
+                            args = tuple(container.take() for container in containers) + args[3:]
+                        return optimized_attention_override(func, *args, **kwargs)
+                if preferred_attention is not None:
+                    attention = preferred_attention.function
+                    if attention is not None:
+                        return attention(*args, **kwargs)
+
+            if containers is not None:
+                if wrapper.container_function is not None:
+                    return wrapper.container_function(*args, **kwargs)
+                args = tuple(container.take() for container in containers) + args[3:]
             return func(*args, **kwargs)
         finally:
             if remove_attn_wrapper_key:
                 del kwargs["_inside_attn_wrapper"]
+    wrapper.container_function = None
     return wrapper
 
 @wrap_attn
@@ -196,7 +258,7 @@ def attention_basic(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     h = heads
     if skip_reshape:
         if kwargs.get("enable_gqa", False):
-            k, v = _repeat_kv_for_gqa(k, v, q.shape[-3], -3)
+            k, v = comfy.ops.repeat_kv_for_gqa(k, v, q.shape[-3], -3)
         q, k, v = map(
             lambda t: t.reshape(b * heads, -1, dim_head),
             (q, k, v),
@@ -262,7 +324,7 @@ def attention_sub_quad(query, key, value, heads, mask=None, attn_precision=None,
 
     if skip_reshape:
         if kwargs.get("enable_gqa", False):
-            key, value = _repeat_kv_for_gqa(key, value, query.shape[-3], -3)
+            key, value = comfy.ops.repeat_kv_for_gqa(key, value, query.shape[-3], -3)
         query = query.reshape(b * heads, -1, dim_head)
         value = value.reshape(b * heads, -1, dim_head)
         key = key.reshape(b * heads, -1, dim_head).movedim(1, 2)
@@ -338,7 +400,7 @@ def attention_split(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
 
     if skip_reshape:
         if kwargs.get("enable_gqa", False):
-            k, v = _repeat_kv_for_gqa(k, v, q.shape[-3], -3)
+            k, v = comfy.ops.repeat_kv_for_gqa(k, v, q.shape[-3], -3)
         q, k, v = map(
             lambda t: t.reshape(b * heads, -1, dim_head),
             (q, k, v),
@@ -476,7 +538,7 @@ def attention_xformers(q, k, v, heads, mask=None, attn_precision=None, skip_resh
             (q, k, v),
         )
         if kwargs.get("enable_gqa", False):
-            k, v = _repeat_kv_for_gqa(k, v, q.shape[-2], -2)
+            k, v = comfy.ops.repeat_kv_for_gqa(k, v, q.shape[-2], -2)
     # actually do the reshaping
     else:
         dim_head //= heads
@@ -563,6 +625,84 @@ def attention_pytorch(q, k, v, heads, mask=None, attn_precision=None, skip_resha
             ).transpose(1, 2).reshape(-1, q.shape[2], heads * dim_head)
     return out
 
+def _comfy_kitchen_int8_inputs(q, k, v, heads, mask, skip_reshape, enable_gqa):
+    dim_head = q.shape[-1] if skip_reshape else q.shape[-1] // heads
+    b = q.shape[0]
+    if not skip_reshape:
+        q, k, v = _reshape_qkv_to_heads(q, k, v, b, heads, dim_head, enable_gqa, expand_kv=False)
+        q, k, v = map(lambda t: t.transpose(1, 2), (q, k, v))
+
+    if mask is not None:
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0)
+        if mask.ndim == 3:
+            mask = mask.unsqueeze(1)
+
+    return q, k, v, mask, b, dim_head
+
+
+@wrap_attn
+def attention_comfy_kitchen_int8(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    if kwargs.get("low_precision_attention", True) is False and q.dtype == torch.float32:
+        return attention_pytorch(q, k, v, heads, mask=mask, attn_precision=attn_precision, skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs)
+    q, k, v, mask, b, dim_head = _comfy_kitchen_int8_inputs(
+        q, k, v, heads, mask, skip_reshape, kwargs.get("enable_gqa", False)
+    )
+    out = comfy_kitchen.int8_attention(
+        q,
+        k,
+        v,
+        scale=kwargs.get("scale", None),
+        attn_mask=mask,
+    )
+    if not skip_output_reshape:
+        out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+    return out
+
+
+def _attention_comfy_kitchen_int8_containers(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    q = q.take()
+    k = k.take()
+    v = v.take()
+    if kwargs.get("low_precision_attention", True) is False and q.dtype == torch.float32:
+        return attention_pytorch(q, k, v, heads, mask=mask, attn_precision=attn_precision, skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs)
+    q, k, v, mask, b, dim_head = _comfy_kitchen_int8_inputs(
+        q, k, v, heads, mask, skip_reshape, kwargs.get("enable_gqa", False)
+    )
+    quantized = comfy_kitchen.prequantize_int8_attention(
+        q,
+        k,
+        v,
+        scale=kwargs.get("scale", None),
+        attn_mask=mask,
+    )
+    del q, k, v
+    out = comfy_kitchen.int8_attention_from_prequantized(quantized)
+    if not skip_output_reshape:
+        out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+    return out
+
+
+attention_comfy_kitchen_int8.container_function = _attention_comfy_kitchen_int8_containers
+
+
+@wrap_attn
+def attention_comfy_kitchen_sol(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, *, tau=1.0, **kwargs):
+    if mask is not None:
+        return attention_pytorch(q, k, v, heads, mask=mask, attn_precision=attn_precision, skip_reshape=skip_reshape, skip_output_reshape=skip_output_reshape, **kwargs)
+
+    dim_head = q.shape[-1] if skip_reshape else q.shape[-1] // heads
+    b = q.shape[0]
+    if skip_reshape:
+        q, k, v = map(lambda t: t.transpose(1, 2), (q, k, v))
+    else:
+        q, k, v = _reshape_qkv_to_heads(q, k, v, b, heads, dim_head)
+    out = comfy_kitchen.sol_attn(q, k, v, tau=tau, scale=kwargs.get("scale"))
+    if skip_output_reshape:
+        return out.transpose(1, 2)
+    return out.reshape(b, -1, heads * dim_head)
+
+
 @wrap_attn
 def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
     if kwargs.get("low_precision_attention", True) is False or (mask is not None and not SAGE_ATTENTION_SUPPORTS_MASK):
@@ -573,7 +713,7 @@ def attention_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=
         b, _, _, dim_head = q.shape
         tensor_layout = "HND"
         if kwargs.get("enable_gqa", False):
-            k, v = _repeat_kv_for_gqa(k, v, q.shape[-3], -3)
+            k, v = comfy.ops.repeat_kv_for_gqa(k, v, q.shape[-3], -3)
     else:
         b, _, dim_head = q.shape
         dim_head //= heads
@@ -671,7 +811,7 @@ def attention3_sage(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     if skip_reshape:
         q_s = q
         if kwargs.get("enable_gqa", False):
-            k_s, v_s = _repeat_kv_for_gqa(k, v, H, -3)
+            k_s, v_s = comfy.ops.repeat_kv_for_gqa(k, v, H, -3)
         else:
             k_s, v_s = k, v
     else:
@@ -793,10 +933,20 @@ else:
         logging.info("Using sub quadratic optimization for attention, if you have memory or speed issues try using: --use-split-cross-attention")
         optimized_attention = attention_sub_quad
 
+if model_management.comfy_kitchen_attention_enabled():
+    if COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE:
+        logging.info("Using Comfy Kitchen attention")
+        optimized_attention = attention_comfy_kitchen_int8
+    else:
+        logging.error("Comfy Kitchen attention is unavailable. Install a Comfy Kitchen build with attention support to use --use-ck-attention.")
+        exit(-1)
+
 optimized_attention_masked = optimized_attention
 
 
 # register core-supported attention functions
+if COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE:
+    register_attention_function("comfy_kitchen_int8", attention_comfy_kitchen_int8)
 if SAGE_ATTENTION_IS_AVAILABLE:
     register_attention_function("sage", attention_sage)
 if SAGE_ATTENTION3_IS_AVAILABLE:
@@ -829,6 +979,7 @@ def optimized_attention_for_device(device, mask=False, small_input=False):
 class CrossAttention(nn.Module):
     def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0., attn_precision=None, dtype=None, device=None, operations=ops):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         inner_dim = dim_head * heads
         context_dim = default(context_dim, query_dim)
         self.attn_precision = attn_precision
@@ -852,10 +1003,11 @@ class CrossAttention(nn.Module):
         else:
             v = self.to_v(context)
 
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
         if mask is None:
-            out = optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            out = optimized_attention(q, k, v, self.heads, attn_precision=self.attn_precision, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         else:
-            out = optimized_attention_masked(q, k, v, self.heads, mask, attn_precision=self.attn_precision, transformer_options=transformer_options)
+            out = optimized_attention_masked(q, k, v, self.heads, mask, attn_precision=self.attn_precision, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
         return self.to_out(out)
 
 

@@ -2,7 +2,7 @@ import math
 import nodes
 import node_helpers
 import torch
-import torchaudio
+import comfy.audio
 import comfy.model_management
 import comfy.utils
 import numpy as np
@@ -742,7 +742,7 @@ class WanDancerEncodeAudio(io.ComfyNode):
 
         # resample to the sample rate used for feature extraction
         resample_sr = base_fps * hop_length
-        waveform = torchaudio.functional.resample(waveform, sample_rate, resample_sr)
+        waveform = comfy.audio.resample(waveform, sample_rate, resample_sr)
 
         waveform_np = waveform.cpu().numpy().squeeze()
         mel_spec = _compute_mel_spectrogram(waveform_np, model_sr, n_fft, hop_length, n_mels=128)

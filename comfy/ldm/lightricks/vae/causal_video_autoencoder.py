@@ -390,10 +390,10 @@ class Decoder(nn.Module):
 
         # Compute output channel to be product of all channel-multiplier blocks
         output_channel = base_channels
-        for block_name, block_params in list(reversed(blocks)):
+        for block_name, block_params in blocks:
             block_params = block_params if isinstance(block_params, dict) else {}
             if block_name == "res_x_y":
-                output_channel = output_channel * block_params.get("multiplier", 2)
+                output_channel = block_params.get("in_channels", output_channel * block_params.get("multiplier", 2))
             if block_name == "compress_all":
                 output_channel = output_channel * block_params.get("multiplier", 1)
             if block_name == "compress_space":
@@ -432,7 +432,7 @@ class Decoder(nn.Module):
                     spatial_padding_mode=spatial_padding_mode,
                 )
             elif block_name == "res_x_y":
-                output_channel = output_channel // block_params.get("multiplier", 2)
+                output_channel = block_params.get("out_channels", output_channel // block_params.get("multiplier", 2))
                 block = ResnetBlock3D(
                     dims=dims,
                     in_channels=input_channel,

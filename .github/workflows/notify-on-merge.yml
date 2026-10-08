@@ -1,0 +1,30 @@
+name: Notify on Merge
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    if: github.repository == 'Comfy-Org/ComfyUI'
+    steps:
+      - name: Notify downstream
+        env:
+          DISPATCH_TOKEN: ${{ secrets.SYNC_DISPATCH_TOKEN }}
+          TARGET_REPO: ${{ secrets.SYNC_TARGET_REPO }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISPATCH_TOKEN:-}" ] || [ -z "${TARGET_REPO:-}" ]; then
+            echo "::notice::SYNC_DISPATCH_TOKEN/SYNC_TARGET_REPO not set; skipping downstream notify."
+            exit 0
+          fi
+          PAYLOAD="$(jq -n --arg sha "$COMMIT_SHA" \
+            '{ event_type: "upstream-push", client_payload: { sha: $sha } }')"
+          curl -fsSL --connect-timeout 10 --max-time 60 -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            "https://api.github.com/repos/${TARGET_REPO}/dispatches" \
+            -d "$PAYLOAD"

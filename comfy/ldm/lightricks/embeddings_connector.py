@@ -6,9 +6,8 @@ import torch
 from comfy.ldm.lightricks.model import (
     CrossAttention,
     FeedForward,
+    freqs_cis_matrix,
     generate_freq_grid_np,
-    interleaved_freqs_cis,
-    split_freqs_cis,
 )
 from torch import nn
 
@@ -51,6 +50,7 @@ class BasicTransformerBlock1D(nn.Module):
         context_dim=None,
         attn_precision=None,
         apply_gated_attention=False,
+        ff_bias=True,
         dtype=None,
         device=None,
         operations=None,
@@ -75,6 +75,7 @@ class BasicTransformerBlock1D(nn.Module):
             dim,
             dim_out=dim,
             glu=True,
+            ff_bias=ff_bias,
             dtype=dtype,
             device=device,
             operations=operations,
@@ -124,6 +125,7 @@ class Embeddings1DConnector(nn.Module):
         causal_temporal_positioning=False,
         num_learnable_registers: Optional[int] = 128,
         apply_gated_attention=False,
+        connector_ff_bias=True,
         dtype=None,
         device=None,
         operations=None,
@@ -149,6 +151,7 @@ class Embeddings1DConnector(nn.Module):
                     attention_head_dim,
                     context_dim=cross_attention_dim,
                     apply_gated_attention=apply_gated_attention,
+                    ff_bias=connector_ff_bias,
                     dtype=dtype,
                     device=device,
                     operations=operations,
@@ -244,12 +247,15 @@ class Embeddings1DConnector(nn.Module):
             expected_freqs = dim // 2
             current_freqs = freqs.shape[-1]
             pad_size = expected_freqs - current_freqs
-            cos_freq, sin_freq = split_freqs_cis(
-                freqs, pad_size, self.num_attention_heads
-            )
         else:
-            cos_freq, sin_freq = interleaved_freqs_cis(freqs, dim % n_elem)
-        return cos_freq.to(dtype=out_dtype), sin_freq.to(dtype=out_dtype), self.split_rope
+            pad_size = dim % n_elem
+        return freqs_cis_matrix(
+            freqs,
+            pad_size,
+            self.split_rope,
+            self.num_attention_heads,
+            out_dtype,
+        )
 
     def forward(
         self,

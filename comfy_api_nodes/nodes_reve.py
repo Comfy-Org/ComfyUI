@@ -62,13 +62,6 @@ def _postprocessing_inputs():
     ]
 
 
-def _reve_price_extractor(headers: dict) -> float | None:
-    credits_used = headers.get("x-reve-credits-used")
-    if credits_used is not None:
-        return float(credits_used) / 524.48
-    return None
-
-
 def _reve_response_header_validator(headers: dict) -> None:
     error_code = headers.get("x-reve-error-code")
     if error_code:
@@ -144,6 +137,7 @@ class ReveImageCreateNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            is_deprecated=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(
                     widgets=["upscale", "upscale.upscale_factor"],
@@ -180,7 +174,6 @@ class ReveImageCreateNode(IO.ComfyNode):
                 headers={"Accept": "image/webp"},
             ),
             as_binary=True,
-            price_extractor=_reve_price_extractor,
             response_header_validator=_reve_response_header_validator,
             data=ReveImageCreateRequest(
                 prompt=prompt,
@@ -236,6 +229,7 @@ class ReveImageEditNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            is_deprecated=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(
                     widgets=["model", "upscale", "upscale.upscale_factor"],
@@ -279,7 +273,6 @@ class ReveImageEditNode(IO.ComfyNode):
                 headers={"Accept": "image/webp"},
             ),
             as_binary=True,
-            price_extractor=_reve_price_extractor,
             response_header_validator=_reve_response_header_validator,
             data=ReveImageEditRequest(
                 edit_instruction=edit_instruction,
@@ -346,6 +339,7 @@ class ReveImageRemixNode(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
+            is_deprecated=True,
             price_badge=IO.PriceBadge(
                 depends_on=IO.PriceBadgeDepends(
                     widgets=["model", "upscale", "upscale.upscale_factor"],
@@ -396,7 +390,6 @@ class ReveImageRemixNode(IO.ComfyNode):
                 headers={"Accept": "image/webp"},
             ),
             as_binary=True,
-            price_extractor=_reve_price_extractor,
             response_header_validator=_reve_response_header_validator,
             data=ReveImageRemixRequest(
                 prompt=prompt,

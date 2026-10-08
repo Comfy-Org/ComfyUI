@@ -16,7 +16,9 @@ from comfy.ldm.lightricks.model import (
 from comfy.ldm.lightricks.symmetric_patchifier import AudioPatchifier
 from comfy.ldm.lightricks.embeddings_connector import Embeddings1DConnector
 import comfy.ldm.common_dit
+import comfy.model_management
 import comfy.model_prefetch
+import comfy.quant_ops
 
 class CompressedTimestep:
     """Store video timestep embeddings in compressed form using per-frame indexing."""
@@ -94,6 +96,8 @@ class BasicAVTransformerBlock(nn.Module):
         attn_precision=None,
         apply_gated_attention=False,
         cross_attention_adaln=False,
+        ff_bias=True,
+        audio_ff_bias=True,
         dtype=None,
         device=None,
         operations=None,
@@ -176,10 +180,10 @@ class BasicAVTransformerBlock(nn.Module):
         )
 
         self.ff = FeedForward(
-            v_dim, dim_out=v_dim, glu=True, dtype=dtype, device=device, operations=operations
+            v_dim, dim_out=v_dim, glu=True, ff_bias=ff_bias, dtype=dtype, device=device, operations=operations
         )
         self.audio_ff = FeedForward(
-            a_dim, dim_out=a_dim, glu=True, dtype=dtype, device=device, operations=operations
+            a_dim, dim_out=a_dim, glu=True, ff_bias=audio_ff_bias, dtype=dtype, device=device, operations=operations
         )
 
         num_ada_params = ADALN_CROSS_ATTN_PARAMS_COUNT if cross_attention_adaln else ADALN_BASE_PARAMS_COUNT
@@ -271,7 +275,10 @@ class BasicAVTransformerBlock(nn.Module):
         if run_vx:
             # video self-attention
             vshift_msa, vscale_msa = (self.get_ada_values(self.scale_shift_table, vx.shape[0], v_timestep, slice(0, 2)))
-            norm_vx = comfy.ldm.common_dit.rms_norm(vx) * (1 + vscale_msa) + vshift_msa
+            if comfy.model_management.in_training:
+                norm_vx = comfy.ldm.common_dit.rms_norm(vx) * (1 + vscale_msa) + vshift_msa
+            else:
+                norm_vx = comfy.quant_ops.ck.rms_adaln(vx, vscale_msa, vshift_msa)
             del vshift_msa, vscale_msa
             attn1_out = self.attn1(norm_vx, pe=v_pe, mask=self_attention_mask, transformer_options=transformer_options)
             del norm_vx
@@ -305,7 +312,6 @@ class BasicAVTransformerBlock(nn.Module):
 
         # video - audio cross attention.
         if run_a2v or run_v2a:
-            vx_norm3 = comfy.ldm.common_dit.rms_norm(vx)
             ax_norm3 = comfy.ldm.common_dit.rms_norm(ax)
 
             # audio to video cross attention
@@ -315,7 +321,10 @@ class BasicAVTransformerBlock(nn.Module):
                 scale_ca_video_hidden_states_a2v_v, shift_ca_video_hidden_states_a2v_v = self.get_ada_values(
                     self.scale_shift_table_a2v_ca_video[:4, :], vx.shape[0], v_cross_scale_shift_timestep)[:2]
 
-                vx_scaled = vx_norm3 * (1 + scale_ca_video_hidden_states_a2v_v) + shift_ca_video_hidden_states_a2v_v
+                if comfy.model_management.in_training:
+                    vx_scaled = comfy.ldm.common_dit.rms_norm(vx) * (1 + scale_ca_video_hidden_states_a2v_v) + shift_ca_video_hidden_states_a2v_v
+                else:
+                    vx_scaled = comfy.quant_ops.ck.rms_adaln(vx, scale_ca_video_hidden_states_a2v_v, shift_ca_video_hidden_states_a2v_v)
                 ax_scaled = ax_norm3 * (1 + scale_ca_audio_hidden_states_a2v) + shift_ca_audio_hidden_states_a2v
                 del scale_ca_video_hidden_states_a2v_v, shift_ca_video_hidden_states_a2v_v, scale_ca_audio_hidden_states_a2v, shift_ca_audio_hidden_states_a2v
 
@@ -334,7 +343,10 @@ class BasicAVTransformerBlock(nn.Module):
                     self.scale_shift_table_a2v_ca_video[:4, :], vx.shape[0], v_cross_scale_shift_timestep)[2:4]
 
                 ax_scaled = ax_norm3 * (1 + scale_ca_audio_hidden_states_v2a) + shift_ca_audio_hidden_states_v2a
-                vx_scaled = vx_norm3 * (1 + scale_ca_video_hidden_states_v2a) + shift_ca_video_hidden_states_v2a
+                if comfy.model_management.in_training:
+                    vx_scaled = comfy.ldm.common_dit.rms_norm(vx) * (1 + scale_ca_video_hidden_states_v2a) + shift_ca_video_hidden_states_v2a
+                else:
+                    vx_scaled = comfy.quant_ops.ck.rms_adaln(vx, scale_ca_video_hidden_states_v2a, shift_ca_video_hidden_states_v2a)
                 del scale_ca_video_hidden_states_v2a, shift_ca_video_hidden_states_v2a, scale_ca_audio_hidden_states_v2a, shift_ca_audio_hidden_states_v2a
 
                 v2a_out = self.video_to_audio_attn(ax_scaled, context=vx_scaled, pe=a_cross_pe, k_pe=v_cross_pe, transformer_options=transformer_options)
@@ -344,12 +356,14 @@ class BasicAVTransformerBlock(nn.Module):
                 ax.addcmul_(v2a_out, gate_out_v2a)
                 del gate_out_v2a, v2a_out
 
-            del vx_norm3, ax_norm3
 
         # video feedforward
         if run_vx:
             vshift_mlp, vscale_mlp = self.get_ada_values(self.scale_shift_table, vx.shape[0], v_timestep, slice(3, 5))
-            vx_scaled = comfy.ldm.common_dit.rms_norm(vx) * (1 + vscale_mlp) + vshift_mlp
+            if comfy.model_management.in_training:
+                vx_scaled = comfy.ldm.common_dit.rms_norm(vx) * (1 + vscale_mlp) + vshift_mlp
+            else:
+                vx_scaled = comfy.quant_ops.ck.rms_adaln(vx, vscale_mlp, vshift_mlp)
             del vshift_mlp, vscale_mlp
 
             ff_out = self.ff(vx_scaled)
@@ -401,12 +415,16 @@ class LTXAVModel(LTXVModel):
         apply_gated_attention=False,
         caption_proj_before_connector=False,
         cross_attention_adaln=False,
+        ff_bias=True,
+        audio_ff_bias=True,
+        use_prompt_adaln_single=True,
         dtype=None,
         device=None,
         operations=None,
         **kwargs,
     ):
         # Store audio-specific parameters
+        self.audio_ff_bias = audio_ff_bias
         self.audio_in_channels = audio_in_channels
         self.audio_cross_attention_dim = audio_cross_attention_dim
         self.audio_attention_head_dim = audio_attention_head_dim
@@ -439,6 +457,8 @@ class LTXAVModel(LTXVModel):
             timestep_scale_multiplier=timestep_scale_multiplier,
             caption_proj_before_connector=caption_proj_before_connector,
             cross_attention_adaln=cross_attention_adaln,
+            ff_bias=ff_bias,
+            use_prompt_adaln_single=use_prompt_adaln_single,
             dtype=dtype,
             device=device,
             operations=operations,
@@ -463,7 +483,7 @@ class LTXAVModel(LTXVModel):
             operations=self.operations,
         )
 
-        if self.cross_attention_adaln:
+        if self.cross_attention_adaln and self.use_prompt_adaln_single:
             self.audio_prompt_adaln_single = AdaLayerNormSingle(
                 self.audio_inner_dim,
                 embedding_coefficient=2,
@@ -594,6 +614,8 @@ class LTXAVModel(LTXVModel):
                     a_context_dim=self.audio_cross_attention_dim,
                     apply_gated_attention=self.apply_gated_attention,
                     cross_attention_adaln=self.cross_attention_adaln,
+                    ff_bias=self.ff_bias,
+                    audio_ff_bias=self.audio_ff_bias,
                     dtype=dtype,
                     device=device,
                     operations=self.operations,
@@ -912,9 +934,18 @@ class LTXAVModel(LTXVModel):
         blocks_replace = patches_replace.get("dit", {})
         prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.transformer_blocks), vx.device, transformer_options)
 
+        # Blocks whose self-attention should be perturbed to a value-passthrough (STG).
+        stg_self_attn_blocks = transformer_options.get("stg_self_attn_blocks", ())
+
         # Process transformer blocks
+        comfy.model_prefetch.malloc_graph_begin(vx.device)
         for i, block in enumerate(self.transformer_blocks):
-            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, vx.device, block)
+            comfy.model_prefetch.prefetch_queue_pop(
+                prefetch_queue, vx.device, block, malloc_scope="block"
+            )
+            block_transformer_options = transformer_options
+            if i in stg_self_attn_blocks:
+                block_transformer_options = {**transformer_options, "stg_skip_self_attn": True}
             if ("double_block", i) in blocks_replace:
 
                 def block_wrap(args):
@@ -957,7 +988,7 @@ class LTXAVModel(LTXVModel):
                         "a_cross_scale_shift_timestep": av_ca_audio_scale_shift_timestep,
                         "v_cross_gate_timestep": av_ca_a2v_gate_noise_timestep,
                         "a_cross_gate_timestep": av_ca_v2a_gate_noise_timestep,
-                        "transformer_options": transformer_options,
+                        "transformer_options": block_transformer_options,
                         "self_attention_mask": self_attention_mask,
                         "v_prompt_timestep": v_prompt_timestep,
                         "a_prompt_timestep": a_prompt_timestep,
@@ -981,13 +1012,16 @@ class LTXAVModel(LTXVModel):
                     a_cross_scale_shift_timestep=av_ca_audio_scale_shift_timestep,
                     v_cross_gate_timestep=av_ca_a2v_gate_noise_timestep,
                     a_cross_gate_timestep=av_ca_v2a_gate_noise_timestep,
-                    transformer_options=transformer_options,
+                    transformer_options=block_transformer_options,
                     self_attention_mask=self_attention_mask,
                     v_prompt_timestep=v_prompt_timestep,
                     a_prompt_timestep=a_prompt_timestep,
                 )
 
-        comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, vx.device, None)
+        comfy.model_prefetch.prefetch_queue_pop(
+            prefetch_queue, vx.device, None, malloc_scope="block"
+        )
+        comfy.model_prefetch.malloc_graph_end()
 
         return [vx, ax]
 

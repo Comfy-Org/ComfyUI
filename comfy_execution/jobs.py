@@ -170,6 +170,19 @@ def is_previewable(media_type: str, item: dict) -> bool:
     return False
 
 
+def is_text_preview(media_type: str, item: dict) -> bool:
+    """
+    Check if a previewable output item is textual rather than visual media.
+
+    Saved text files (SaveText's .txt/.md/.json) are real outputs but must not
+    outrank visual media when picking the job preview.
+    """
+    if media_type == 'text':
+        return True
+    filename = item.get('filename', '').lower()
+    return any(filename.endswith(ext) for ext in TEXT_EXTENSIONS)
+
+
 def normalize_queue_item(item: tuple, status: str) -> dict:
     """Convert queue item tuple to unified job dict.
 
@@ -184,6 +197,7 @@ def normalize_queue_item(item: tuple, status: str) -> dict:
         'priority': priority,
         'create_time': create_time,
         'outputs_count': 0,
+        'previewable_outputs_count': 0,
         'workflow_id': workflow_id,
     })
 
@@ -202,6 +216,7 @@ def normalize_history_item(prompt_id: str, history_item: dict, include_outputs: 
 
     outputs = history_item.get('outputs', {})
     outputs_count, preview_output = get_outputs_summary(outputs)
+    previewable_outputs_count = count_previewable_outputs(outputs)
 
     execution_error = None
     execution_start_time = None
@@ -238,6 +253,7 @@ def normalize_history_item(prompt_id: str, history_item: dict, include_outputs: 
         'execution_end_time': execution_end_time,
         'execution_error': execution_error,
         'outputs_count': outputs_count,
+        'previewable_outputs_count': previewable_outputs_count,
         'preview_output': preview_output,
         'workflow_id': workflow_id,
     })
@@ -259,8 +275,13 @@ def get_outputs_summary(outputs: dict) -> tuple[int, Optional[dict]]:
     Returns (outputs_count, preview_output).
 
     Preview priority (matching frontend):
-    1. type="output" with previewable media
-    2. Any previewable media
+    1. type="output" visual media (saved images/video/audio/3d)
+    2. any other previewable visual media (e.g. temp/preview images)
+    3. saved text file (e.g. SaveText's .txt/.md/.json)
+    4. raw text (only when the job produced nothing else previewable)
+
+    Text is kept in its own slots so node/execution order can't let a text
+    output mask a visual one (e.g. a text node that runs before an image).
 
     Text content entries (strings under 'text') are preview-only metadata,
     matching the frontend's METADATA_KEYS: they can serve as the fallback
@@ -269,6 +290,8 @@ def get_outputs_summary(outputs: dict) -> tuple[int, Optional[dict]]:
     count = 0
     preview_output = None
     fallback_preview = None
+    text_file_fallback = None
+    text_fallback = None
 
     for node_id, node_outputs in outputs.items():
         if not isinstance(node_outputs, dict):
@@ -296,8 +319,8 @@ def get_outputs_summary(outputs: dict) -> tuple[int, Optional[dict]]:
                                     'nodeId': node_id,
                                     'mediaType': media_type
                                 }
-                                if fallback_preview is None:
-                                    fallback_preview = enriched
+                                if text_fallback is None:
+                                    text_fallback = enriched
                         continue
                     # normalize_output_item returned a dict (e.g. 3D file)
                     item = normalized
@@ -314,12 +337,42 @@ def get_outputs_summary(outputs: dict) -> tuple[int, Optional[dict]]:
                     }
                     if 'mediaType' not in item:
                         enriched['mediaType'] = media_type
-                    if item.get('type') == 'output':
+                    if is_text_preview(media_type, item):
+                        if text_file_fallback is None:
+                            text_file_fallback = enriched
+                    elif item.get('type') == 'output':
                         preview_output = enriched
                     elif fallback_preview is None:
                         fallback_preview = enriched
 
-    return count, preview_output or fallback_preview
+    return count, preview_output or fallback_preview or text_file_fallback or text_fallback
+
+
+def count_previewable_outputs(outputs: dict) -> int:
+    """
+    Count only outputs that would actually render in the expanded asset view,
+    i.e. items is_previewable() accepts (image/video/audio/3D/text). Kept
+    separate from get_outputs_summary()'s outputs_count, which counts every
+    output item regardless of media type, so a job with a non-previewable
+    saved file alongside real media (e.g. SaveLatent's .latent output next to
+    a SaveImage output) doesn't inflate the Media Assets badge beyond what
+    the expanded view shows.
+    """
+    count = 0
+    for node_outputs in outputs.values():
+        if not isinstance(node_outputs, dict):
+            continue
+        for media_type, items in node_outputs.items():
+            if media_type == 'animated' or not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    item = normalize_output_item(item)
+                    if item is None:
+                        continue
+                if is_previewable(media_type, item):
+                    count += 1
+    return count
 
 
 def apply_sorting(jobs: list[dict], sort_by: str, sort_order: str) -> list[dict]:
@@ -363,6 +416,38 @@ def get_job(prompt_id: str, running: list, queued: list, history: dict) -> Optio
             return normalize_queue_item(item, JobStatus.PENDING)
 
     return None
+
+
+def get_job_create_times(
+    prompt_ids: list[str],
+    running: list,
+    queued: list,
+    history: dict,
+) -> dict[str, int]:
+    """
+    Get the creation time (ms since epoch) of each given job that is still known.
+
+    A job is known while it is queued, running or in history.
+
+    Args:
+        prompt_ids: The prompt IDs to look up
+        running: List of currently running queue items
+        queued: List of pending queue items
+        history: Dict of history items keyed by prompt_id
+
+    Returns:
+        Dict of creation times keyed by prompt_id; jobs the server no longer knows are left out
+    """
+    extra_data_by_prompt = {item[1]: item[3] for item in [*running, *queued]}
+    for prompt_id, history_item in history.items():
+        extra_data_by_prompt[prompt_id] = history_item['prompt'][3]
+
+    create_times = {}
+    for prompt_id in prompt_ids:
+        create_time = (extra_data_by_prompt.get(prompt_id) or {}).get('create_time')
+        if isinstance(create_time, int):
+            create_times[prompt_id] = create_time
+    return create_times
 
 
 def get_all_jobs(

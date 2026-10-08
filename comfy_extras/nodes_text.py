@@ -8,6 +8,13 @@ import folder_paths
 class SaveTextNode(io.ComfyNode):
     """Save text content to .txt, .md, or .json."""
 
+    FORMAT_EXTENSIONS = {
+        "txt": "txt",
+        "csv": "csv",
+        "md": "md",
+        "json": "json",
+    }
+
     @classmethod
     def define_schema(cls):
         return io.Schema(
@@ -19,7 +26,7 @@ class SaveTextNode(io.ComfyNode):
             inputs=[
                 io.String.Input("text", force_input=True),
                 io.String.Input("filename_prefix", default="ComfyUI"),
-                io.Combo.Input("format", options=["txt", "md", "json"], default="txt"),
+                io.Combo.Input("format", options=list(cls.FORMAT_EXTENSIONS), default="txt"),
             ],
             outputs=[io.String.Output(display_name="text")],
             is_output_node=True,
@@ -27,6 +34,10 @@ class SaveTextNode(io.ComfyNode):
 
     @classmethod
     def execute(cls, text, filename_prefix, format):
+        extension = cls.FORMAT_EXTENSIONS.get(format)
+        if extension is None:
+            raise ValueError(f"Unsupported text format: {format!r}")
+
         full_output_folder, filename, counter, subfolder, filename_prefix = folder_paths.get_save_image_path(
             filename_prefix,
             folder_paths.get_output_directory(),
@@ -34,10 +45,10 @@ class SaveTextNode(io.ComfyNode):
             1,
         )
 
-        file = f"{filename}_{counter:05}.{format}"
+        file = f"{filename}_{counter:05}.{extension}"
         filepath = os.path.join(full_output_folder, file)
 
-        if format == "json":
+        if extension == "json":
             # tries to pretty print otherwise saves normally
             try:
                 data = json.loads(text)

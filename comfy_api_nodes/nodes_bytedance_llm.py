@@ -34,13 +34,6 @@ SEED_MODELS: dict[str, str] = {
     "Seed 2.0 Mini": "seed-2-0-mini-260215",
 }
 
-# USD per 1M tokens: (input, cache_hit_input, output)
-_SEED_PRICES_PER_MILLION: dict[str, tuple[float, float, float]] = {
-    "seed-2-0-pro-260328": (0.50, 0.10, 3.00),
-    "seed-2-0-lite-260228": (0.25, 0.05, 2.00),
-    "seed-2-0-mini-260215": (0.10, 0.02, 0.40),
-}
-
 
 def _seed_model_inputs(max_images: int = SEED_MAX_IMAGES, max_videos: int = SEED_MAX_VIDEOS):
     return [
@@ -72,24 +65,6 @@ def _seed_model_inputs(max_images: int = SEED_MAX_IMAGES, max_videos: int = SEED
             advanced=True,
         ),
     ]
-
-
-def _calculate_price(model_id: str, response: BytePlusResponseObject) -> float | None:
-    """Compute approximate USD price from response usage."""
-    if not response.usage:
-        return None
-    rates = _SEED_PRICES_PER_MILLION.get(model_id)
-    if rates is None:
-        return None
-    input_rate, cache_hit_rate, output_rate = rates
-    input_tokens = response.usage.input_tokens or 0
-    output_tokens = response.usage.output_tokens or 0
-    cached = 0
-    if response.usage.input_tokens_details:
-        cached = response.usage.input_tokens_details.cached_tokens or 0
-    fresh_input = max(0, input_tokens - cached)
-    total = fresh_input * input_rate + cached * cache_hit_rate + output_tokens * output_rate
-    return total / 1_000_000.0
 
 
 def _get_text_from_response(response: BytePlusResponseObject) -> str:
@@ -251,7 +226,6 @@ class ByteDanceSeedNode(IO.ComfyNode):
                 store=False,
                 stream=False,
             ),
-            price_extractor=lambda r: _calculate_price(model_id, r),
         )
         if response.error:
             raise ValueError(f"Seed API error ({response.error.code}): {response.error.message}")

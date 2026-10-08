@@ -194,6 +194,7 @@ class RunwayImageToVideoNodeGen3a(IO.ComfyNode):
                 depends_on=IO.PriceBadgeDepends(widgets=["duration"]),
                 expr="""{"type":"usd","usd": 0.0715 * widgets.duration}""",
             ),
+            is_deprecated=True,
         )
 
     @classmethod
@@ -390,6 +391,7 @@ class RunwayFirstLastFrameNode(IO.ComfyNode):
                 depends_on=IO.PriceBadgeDepends(widgets=["duration"]),
                 expr="""{"type":"usd","usd": 0.0715 * widgets.duration}""",
             ),
+            is_deprecated=True,
         )
 
     @classmethod

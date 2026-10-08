@@ -10,7 +10,7 @@ import comfy.ldm.common_dit
 import comfy.ops
 import comfy.patcher_extension
 from comfy.ldm.lightricks.model import GELU_approx, PixArtAlphaTextProjection, TimestepEmbedding, Timesteps
-from comfy.ldm.modules.attention import optimized_attention
+from comfy.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 
 
 class JoyImageModulate(nn.Module):
@@ -63,6 +63,7 @@ class JoyImageAttention(nn.Module):
     ):
         super().__init__()
         self.num_attention_heads = num_attention_heads
+        self.comfy_attention = ComfyAttention()
         inner_dim = num_attention_heads * attention_head_dim
 
         self.img_attn_qkv = operations.Linear(dim, inner_dim * 3, bias=True, dtype=dtype, device=device)
@@ -94,22 +95,32 @@ class JoyImageAttention(nn.Module):
         txt_k = txt_k.unflatten(-1, (heads, -1))
         txt_v = txt_v.unflatten(-1, (heads, -1))
 
-        img_q = self.img_attn_q_norm(img_q)
-        img_k = self.img_attn_k_norm(img_k)
         txt_q = self.txt_attn_q_norm(txt_q)
         txt_k = self.txt_attn_k_norm(txt_k)
 
-        img_q, img_k = comfy_kitchen.apply_rope(img_q, img_k, image_rotary_emb)
+        img_q_scale, _, img_q_offload_stream = comfy.ops.cast_bias_weight(self.img_attn_q_norm, img_q, offloadable=True)
+        img_k_scale, _, img_k_offload_stream = comfy.ops.cast_bias_weight(self.img_attn_k_norm, img_k, offloadable=True)
+        img_q, img_k = comfy_kitchen.rms_rope(
+            img_q,
+            img_k,
+            image_rotary_emb,
+            img_q_scale,
+            img_k_scale,
+            self.img_attn_q_norm.eps,
+        )
+        comfy.ops.uncast_bias_weight(self.img_attn_q_norm, img_q_scale, None, img_q_offload_stream)
+        comfy.ops.uncast_bias_weight(self.img_attn_k_norm, img_k_scale, None, img_k_offload_stream)
 
         joint_q = torch.cat([img_q, txt_q], dim=1)
         joint_k = torch.cat([img_k, txt_k], dim=1)
         joint_v = torch.cat([img_v, txt_v], dim=1)
+        del img_q, img_k, img_v, txt_q, txt_k, txt_v
 
-        joint_q = joint_q.flatten(2, 3)
-        joint_k = joint_k.flatten(2, 3)
-        joint_v = joint_v.flatten(2, 3)
+        joint_q = AttentionTensorContainer(joint_q.flatten(2, 3))
+        joint_k = AttentionTensorContainer(joint_k.flatten(2, 3))
+        joint_v = AttentionTensorContainer(joint_v.flatten(2, 3))
 
-        joint_out = optimized_attention(joint_q, joint_k, joint_v, heads=heads, transformer_options=transformer_options)
+        joint_out = optimized_attention(joint_q, joint_k, joint_v, heads=heads, preferred_attention=self.comfy_attention, transformer_options=transformer_options)
 
         seq_img = img.shape[1]
         img_out = joint_out[:, :seq_img, :]

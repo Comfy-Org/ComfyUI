@@ -17,9 +17,11 @@ from comfy_api_nodes.util import (
     get_number_of_images,
     poll_op,
     sync_op,
+    upload_audio_to_comfyapi,
     upload_image_to_comfyapi,
     upload_images_to_comfyapi,
     upload_video_to_comfyapi,
+    validate_audio_duration,
     validate_image_aspect_ratio,
     validate_image_dimensions,
     validate_images_aspect_ratio_closeness,
@@ -32,6 +34,8 @@ VIDU_IMAGE_TO_VIDEO = "/proxy/vidu/img2video"
 VIDU_REFERENCE_VIDEO = "/proxy/vidu/reference2video"
 VIDU_START_END_VIDEO = "/proxy/vidu/start-end2video"
 VIDU_GET_GENERATION_STATUS = "/proxy/vidu/tasks/%s/creations"
+
+VIDU_Q4_MODELS = {"Vidu Q4 Preview": "viduq4-preview"}
 
 
 async def execute_task(
@@ -54,9 +58,17 @@ async def execute_task(
         response_model=TaskStatusResponse,
         status_extractor=lambda r: r.state,
         progress_extractor=lambda r: r.progress,
-        price_extractor=lambda r: r.credits * 0.005 if r.credits is not None else None,
+        completed_statuses=["success", "failed"],
         max_poll_attempts=max_poll_attempts,
     )
+    if response.state == "failed":
+        blocked = ", ".join(
+            f"{r.content_type} {r.index + 1}" for r in response.blocked_resources or [] if r.index is not None
+        )
+        raise RuntimeError(
+            f"Vidu task {task_creation_response.task_id} failed: {response.err_code}"
+            + (f" (blocked: {blocked})" if blocked else "")
+        )
     if not response.creations:
         raise RuntimeError(
             f"Vidu request does not contain results. State: {response.state}, Error Code: {response.err_code}"
@@ -1703,6 +1715,264 @@ class Vidu3StartEndToVideoNode(IO.ComfyNode):
         return IO.NodeOutput(await download_url_to_video_output(results[0].url))
 
 
+class Vidu4ImageToVideoNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="Vidu4ImageToVideoNode",
+            display_name="Vidu Q4 Image-to-Video Generation",
+            category="partner/video/Vidu",
+            description="Generate a video from a start frame and an optional prompt. "
+            "The output keeps the aspect ratio of the input image.",
+            inputs=[
+                IO.Image.Input(
+                    "image",
+                    tooltip="Start frame of the generated video. Aspect ratio must be between 1:5 and 5:1.",
+                ),
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "Vidu Q4 Preview",
+                            [
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    default="",
+                                    tooltip="An optional text prompt for video generation (max 5000 characters).",
+                                ),
+                                IO.Combo.Input(
+                                    "resolution",
+                                    options=["540p", "720p", "1080p", "2K", "4K"],
+                                    default="720p",
+                                    tooltip="Resolution of the output video.",
+                                ),
+                                IO.Int.Input(
+                                    "duration",
+                                    default=5,
+                                    min=3,
+                                    max=16,
+                                    step=1,
+                                    display_mode=IO.NumberDisplay.slider,
+                                    tooltip="Duration of the output video in seconds.",
+                                ),
+                                IO.Boolean.Input(
+                                    "audio",
+                                    default=True,
+                                    tooltip="When enabled, outputs video with sound "
+                                    "(including dialogue and sound effects).",
+                                ),
+                                IO.Int.Input(
+                                    "seed",
+                                    default=42,
+                                    min=1,
+                                    max=2147483647,
+                                    step=1,
+                                    display_mode=IO.NumberDisplay.number,
+                                    control_after_generate=True,
+                                ),
+                            ],
+                        ),
+                    ],
+                    tooltip="Model to use for video generation.",
+                ),
+            ],
+            outputs=[
+                IO.Video.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["model.duration", "model.resolution"]),
+                expr="""
+                (
+                  $rate := $lookup(
+                    {"540p": 0.045, "720p": 0.095, "1080p": 0.12, "2k": 0.19, "4k": 0.39},
+                    $lookup(widgets, "model.resolution")
+                  );
+                  {"type":"usd","usd": $rate * $lookup(widgets, "model.duration")}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, image: Input.Image, model: dict) -> IO.NodeOutput:
+        validate_image_aspect_ratio(image, (1, 5), (5, 1), strict=False)
+        validate_string(model["prompt"], max_length=5000)
+        results = await execute_task(
+            cls,
+            VIDU_IMAGE_TO_VIDEO,
+            TaskCreationRequest(
+                model=VIDU_Q4_MODELS[model["model"]],
+                prompt=model["prompt"].strip(),
+                duration=model["duration"],
+                seed=model["seed"],
+                resolution=model["resolution"],
+                audio=model["audio"],
+                images=[await upload_image_to_comfyapi(cls, image, total_pixels=3840 * 2160)],
+            ),
+            max_poll_attempts=1440,
+        )
+        return IO.NodeOutput(await download_url_to_video_output(results[0].url))
+
+
+class Vidu4ReferenceVideoNode(IO.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return IO.Schema(
+            node_id="Vidu4ReferenceVideoNode",
+            display_name="Vidu Q4 Reference-to-Video Generation",
+            category="partner/video/Vidu",
+            description="Generate a video from reference images, optional reference audio, and a prompt.",
+            inputs=[
+                IO.DynamicCombo.Input(
+                    "model",
+                    options=[
+                        IO.DynamicCombo.Option(
+                            "Vidu Q4 Preview",
+                            [
+                                IO.Autogrow.Input(
+                                    "reference_images",
+                                    template=IO.Autogrow.TemplateNames(
+                                        IO.Image.Input("reference_image"),
+                                        names=[f"image_{i}" for i in range(1, 16)],
+                                        min=1,
+                                    ),
+                                    tooltip="Up to 15 reference images in total, every image of a batch counts. "
+                                    "Refer to them in the prompt by order: image 1, image 2, and so on.",
+                                ),
+                                IO.Autogrow.Input(
+                                    "reference_audios",
+                                    template=IO.Autogrow.TemplateNames(
+                                        IO.Audio.Input("reference_audio"),
+                                        names=["audio_1", "audio_2", "audio_3"],
+                                        min=0,
+                                    ),
+                                    tooltip="Up to 3 voice references, 3 to 12 seconds each. Only the voice is used, "
+                                    "not the words: write the dialogue in the prompt and assign a voice by order, "
+                                    'e.g. image 1 says "Hello!" in the voice from audio 1. Requires audio to be enabled.',
+                                ),
+                                IO.String.Input(
+                                    "prompt",
+                                    multiline=True,
+                                    tooltip="A textual description for video generation (max 5000 characters).",
+                                ),
+                                IO.Combo.Input(
+                                    "aspect_ratio",
+                                    options=["16:9", "9:16", "1:1", "3:4", "4:3"],
+                                    tooltip="The aspect ratio of the output video.",
+                                ),
+                                IO.Combo.Input(
+                                    "resolution",
+                                    options=["540p", "720p", "1080p", "2K", "4K"],
+                                    default="720p",
+                                    tooltip="Resolution of the output video.",
+                                ),
+                                IO.Int.Input(
+                                    "duration",
+                                    default=5,
+                                    min=3,
+                                    max=16,
+                                    step=1,
+                                    display_mode=IO.NumberDisplay.slider,
+                                    tooltip="Duration of the output video in seconds.",
+                                ),
+                                IO.Boolean.Input(
+                                    "audio",
+                                    default=True,
+                                    tooltip="When enabled, outputs video with sound "
+                                    "(including dialogue and sound effects).",
+                                ),
+                                IO.Int.Input(
+                                    "seed",
+                                    default=42,
+                                    min=1,
+                                    max=2147483647,
+                                    step=1,
+                                    display_mode=IO.NumberDisplay.number,
+                                    control_after_generate=True,
+                                ),
+                            ],
+                        ),
+                    ],
+                    tooltip="Model to use for video generation.",
+                ),
+            ],
+            outputs=[
+                IO.Video.Output(),
+            ],
+            hidden=[
+                IO.Hidden.auth_token_comfy_org,
+                IO.Hidden.api_key_comfy_org,
+                IO.Hidden.unique_id,
+            ],
+            is_api_node=True,
+            price_badge=IO.PriceBadge(
+                depends_on=IO.PriceBadgeDepends(widgets=["model.duration", "model.resolution"]),
+                expr="""
+                (
+                  $rate := $lookup(
+                    {"540p": 0.045, "720p": 0.095, "1080p": 0.12, "2k": 0.19, "4k": 0.39},
+                    $lookup(widgets, "model.resolution")
+                  );
+                  {"type":"usd","usd": $rate * $lookup(widgets, "model.duration")}
+                )
+                """,
+            ),
+        )
+
+    @classmethod
+    async def execute(cls, model: dict) -> IO.NodeOutput:
+        validate_string(model["prompt"], min_length=1, max_length=5000)
+        reference_images = list(model["reference_images"].values())
+        total_images = sum(get_number_of_images(i) for i in reference_images)
+        if total_images > 15:
+            raise ValueError(f"Too many reference images: {total_images}. The maximum is 15.")
+        for image in reference_images:
+            validate_image_aspect_ratio(image, (1, 5), (5, 1), strict=False)
+            validate_image_dimensions(image, min_width=128, min_height=128)
+        reference_audios = list(model["reference_audios"].values())
+        if reference_audios and not model["audio"]:
+            raise ValueError("Reference audio requires 'audio' to be enabled.")
+        for audio in reference_audios:
+            validate_audio_duration(audio, min_duration=3, max_duration=12)
+        payload = TaskCreationRequest(
+            model=VIDU_Q4_MODELS[model["model"]],
+            prompt=model["prompt"].strip(),
+            duration=model["duration"],
+            seed=model["seed"],
+            aspect_ratio=model["aspect_ratio"],
+            resolution=model["resolution"],
+            audio=model["audio"],
+            images=await upload_images_to_comfyapi(
+                cls,
+                reference_images,
+                max_images=15,
+                mime_type="image/png",
+                wait_label="Uploading reference images",
+            ),
+            sounds=[
+                await upload_audio_to_comfyapi(
+                    cls,
+                    audio,
+                    container_format="mp3",
+                    codec_name="libmp3lame",
+                    mime_type="audio/mpeg",
+                )
+                for audio in reference_audios
+            ],
+        )
+        results = await execute_task(cls, VIDU_REFERENCE_VIDEO, payload, max_poll_attempts=1440)
+        return IO.NodeOutput(await download_url_to_video_output(results[0].url))
+
+
 class ViduExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[IO.ComfyNode]]:
@@ -1720,6 +1990,8 @@ class ViduExtension(ComfyExtension):
             Vidu3TextToVideoNode,
             Vidu3ImageToVideoNode,
             Vidu3StartEndToVideoNode,
+            Vidu4ImageToVideoNode,
+            Vidu4ReferenceVideoNode,
         ]
 
 

@@ -9,11 +9,7 @@ from io import BytesIO
 import av
 import numpy as np
 import torch
-try:
-    import torchaudio
-    TORCH_AUDIO_AVAILABLE = True
-except:
-    TORCH_AUDIO_AVAILABLE = False
+import comfy.audio
 from PIL import Image as PILImage
 from PIL.PngImagePlugin import PngInfo
 
@@ -260,6 +256,7 @@ class ImageSaveHelper:
 class AudioSaveHelper:
     """A helper class with static methods to handle audio saving and metadata."""
     _OPUS_RATES = [8000, 12000, 16000, 24000, 48000]
+    _FORMATS = {"flac", "mp3", "opus"}
 
     @staticmethod
     def save_audio(
@@ -270,6 +267,9 @@ class AudioSaveHelper:
         format: str = "flac",
         quality: str = "128k",
     ) -> list[SavedResult]:
+        if format not in AudioSaveHelper._FORMATS:
+            raise ValueError(f"Unsupported audio format: {format!r}")
+
         full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
             filename_prefix, _get_directory_by_folder_type(folder_type)
         )
@@ -306,9 +306,7 @@ class AudioSaveHelper:
 
                 # Resample if necessary
                 if sample_rate != audio["sample_rate"]:
-                    if not TORCH_AUDIO_AVAILABLE:
-                        raise Exception("torchaudio is not available; cannot resample audio.")
-                    waveform = torchaudio.functional.resample(waveform, audio["sample_rate"], sample_rate)
+                    waveform = comfy.audio.resample(waveform, audio["sample_rate"], sample_rate)
 
             # Create output with specified format
             output_buffer = BytesIO()
@@ -452,14 +450,26 @@ class PreviewUI3D(_UIOutput):
         return {"result": [self.model_file, self.camera_info, self.bg_image_path]}
 
 
-class PreviewUI3DAdvanced(_UIOutput):
-    def __init__(self, model_file, camera_info, model_3d_info):
-        self.model_file = model_file
+class Saved3DModels(_UIOutput):
+    def __init__(self, results: list[SavedResult], camera_info=None, model_3d_info=None):
+        super().__init__()
+        self.results = results
         self.camera_info = camera_info
-        self.model_3d_info = model_3d_info
+        self.model_3d_info = model_3d_info if model_3d_info is not None else []
 
     def as_dict(self):
-        return {"result": [self.model_file, self.camera_info, self.model_3d_info]}
+        return {
+            "3d": self.results,
+            "camera_info": [self.camera_info],
+            "model_3d_info": list(self.model_3d_info),
+        }
+
+
+class PreviewUI3DAdvanced(Saved3DModels):
+    def __init__(self, model_file, camera_info, model_3d_info, folder_type: FolderType | None = None):
+        subfolder, _, filename = model_file.replace("\\", "/").rpartition("/")
+        result_type = FolderType(folder_type) if folder_type is not None else FolderType.output
+        super().__init__([SavedResult(filename, subfolder, result_type)], camera_info, model_3d_info)
 
 
 class PreviewText(_UIOutput):
@@ -481,6 +491,7 @@ __all__ = [
     "PreviewAudio",
     "PreviewVideo",
     "PreviewUI3D",
+    "Saved3DModels",
     "PreviewUI3DAdvanced",
     "PreviewText",
 ]

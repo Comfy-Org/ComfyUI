@@ -20,6 +20,41 @@ class ImageEnhanceRequest(BaseModel):
     color_preservation: str = Field("true", description="To preserve the original color")
 
 
+class ImageEnhanceRequestV2(BaseModel):
+    model: str = Field(...)
+    output_format: str = Field("png")
+    source_url: str = Field(...)
+    output_width: Optional[int] = Field(None)
+    output_height: Optional[int] = Field(None)
+    crop_to_fill: Optional[bool] = Field(None, description="Available for Reimagine only")
+    prompt: Optional[str] = Field(None, description="Available for Reimagine and Bloom 2")
+    creativity: Optional[int] = Field(None, description="From 1 to 9; available for Reimagine and Bloom 2")
+    subject_detection: Optional[str] = Field(None, description="Available for Reimagine only")
+    face_enhancement: Optional[bool] = Field(None, description="Available for Reimagine only")
+    face_enhancement_creativity: Optional[float] = Field(None, description="Is ignored if face_enhancement is false")
+    face_enhancement_strength: Optional[float] = Field(None, description="Is ignored if face_enhancement is false")
+    face_preservation: Optional[str] = Field(
+        None, description='String "true" or "false"; available for Reimagine only'
+    )
+    color_preservation: Optional[str] = Field(
+        None, description='String "true" or "false"; available for Reimagine and Bloom 2'
+    )
+    autoprompt: Optional[str] = Field(
+        None, description='String "true" or "false"; auto-generate a prompt, available for Bloom 2 only'
+    )
+    seed: Optional[int] = Field(None, description="Available for Bloom 2 only")
+    enhancement_strength: Optional[str] = Field(
+        None, description="low, medium or high; available for Wonder 3.5 only"
+    )
+    grain: Optional[str] = Field(
+        None, description='String "true" or "false"; available for Bloom 2 and Wonder 3.5'
+    )
+    grain_model: Optional[str] = Field(None, description="silver, gaussian or grey")
+    grain_strength: Optional[float] = Field(None, description="From 0 to 1")
+    grain_size: Optional[float] = Field(None, description="From 1 to 5")
+    grain_density: Optional[float] = Field(None, description="From 0 to 1")
+
+
 class ImageAsyncTaskResponse(BaseModel):
     process_id: str = Field(...)
 

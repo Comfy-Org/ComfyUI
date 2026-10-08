@@ -38,26 +38,20 @@ class LTXVLatentUpsampler(IO.ComfyNode):
         Returns:
             tuple: Tuple containing the upsampled latent
         """
-        device = model_management.get_torch_device()
-        memory_required = model_management.module_size(upscale_model)
-
-        model_dtype = next(upscale_model.parameters()).dtype
+        device = upscale_model.load_device
+        model = upscale_model.model
+        model_dtype = upscale_model.model_dtype()
         latents = samples["samples"]
         input_dtype = latents.dtype
 
-        memory_required += math.prod(latents.shape) * 3000.0  # TODO: more accurate
-        model_management.free_memory(memory_required, device)
+        memory_required = math.prod(latents.shape) * 3000.0  # TODO: more accurate
+        model_management.load_models_gpu([upscale_model], memory_required=memory_required)
 
-        try:
-            upscale_model.to(device)  # TODO: use the comfy model management system.
+        latents = latents.to(dtype=model_dtype, device=device)
 
-            latents = latents.to(dtype=model_dtype, device=device)
-
-            """Upsample latents without tiling."""
-            latents = vae.first_stage_model.per_channel_statistics.un_normalize(latents)
-            upsampled_latents = upscale_model(latents)
-        finally:
-            upscale_model.cpu()
+        """Upsample latents without tiling."""
+        latents = vae.first_stage_model.per_channel_statistics.un_normalize(latents)
+        upsampled_latents = model(latents)
 
         upsampled_latents = vae.first_stage_model.per_channel_statistics.normalize(
             upsampled_latents

@@ -1941,7 +1941,7 @@
         "extra": {
           "workflowRendererVersion": "Vue-corrected"
         },
-        "category": "Image generation and editing/Text to image",
+        "category": "Image generation/Text to image",
         "description": "Generates images from text prompts using Qwen-Image-2512, with enhanced human realism and finer natural detail over the base version."
       }
     ]
