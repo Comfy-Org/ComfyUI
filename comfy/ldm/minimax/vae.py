@@ -440,8 +440,7 @@ class MiniMaxH3VideoVAE(nn.Module):
         self.token_overlap = (-token_drop) % self.tokens_chunk_size
         self.frame_overlap = max(self.token_overlap * self.vae_ratio_t - self.frame_pre_padding, 0)
 
-        # a decoder fine-tuned to decode one latent directly keeps this output frame of it;
-        # the stock decoder cannot, and decodes a still as the first latent of a clip instead
+        # a decoder fine-tuned to decode one latent directly keeps this output frame of it
         if still_frame is not None and not 0 <= still_frame < self.vae_ratio_t:
             raise ValueError(f"still_frame must be in [0, {self.vae_ratio_t}), got {still_frame}")
         self.still_frame = still_frame
