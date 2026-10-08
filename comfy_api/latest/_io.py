@@ -53,7 +53,10 @@ class UploadType(str, Enum):
 
 class RemoteOptions:
     def __init__(self, route: str, refresh_button: bool, control_after_refresh: Literal["first", "last"]="first",
-                 timeout: int=None, max_retries: int=None, refresh: int=None):
+                 timeout: int=None, max_retries: int=None, refresh: int=None,
+                 initial_selection: Literal["first", "last"]=None, static_options: list[str]=None):
+        if initial_selection not in (None, "first", "last"):
+            raise ValueError("initial_selection must be first, last, or None")
         self.route = route
         """The route to the remote source."""
         self.refresh_button = refresh_button
@@ -66,6 +69,36 @@ class RemoteOptions:
         """The maximum number of retries before aborting the request."""
         self.refresh = refresh
         """The TTL of the remote input's value in milliseconds. Specifies the interval at which the remote input's value is refreshed."""
+        if initial_selection is not None:
+            self.initial_selection = initial_selection
+        """Select the first or last option during trusted initial schema hydration. None preserves the declared default; explicit selection requires a nonempty catalogue."""
+        if static_options is not None:
+            self.static_options = self._bounded_options(static_options, allow_empty=True)
+
+    @staticmethod
+    def _bounded_options(options, *, allow_empty=False):
+        if not isinstance(options, list) or len(options) > 4096:
+            raise ValueError("static_options must be a string list of at most 4096 entries")
+        total = 0
+        for value in options:
+            if not isinstance(value, str) or (not value and not allow_empty) or len(value) > 1024 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+                raise ValueError("static_options contains an invalid string")
+            try:
+                size = len(value.encode("utf-8"))
+            except UnicodeEncodeError as error:
+                raise ValueError("static_options contains invalid UTF-8") from error
+            total += size
+            if size > 1024 or total > 1024 * 1024:
+                raise ValueError("static_options exceeds its UTF-8 byte bounds")
+        return list(options)
+
+    def _merge_options(self, live_options):
+        static = getattr(self, "static_options", None)
+        if static is None:
+            return live_options
+        static = self._bounded_options(static, allow_empty=True)
+        live = self._bounded_options(live_options)
+        return self._bounded_options(list(dict.fromkeys(static + live)), allow_empty=True)
 
     def as_dict(self):
         return prune_dict({
@@ -75,6 +108,8 @@ class RemoteOptions:
             "timeout": self.timeout,
             "max_retries": self.max_retries,
             "refresh": self.refresh,
+            "initial_selection": getattr(self, "initial_selection", None),
+            "static_options": getattr(self, "static_options", None),
         })
 
 

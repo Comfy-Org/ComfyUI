@@ -87,7 +87,7 @@ class ImageSaveHelper:
         if args.disable_metadata or cls is None or not cls.hidden:
             return None
         metadata = PngInfo()
-        if cls.hidden.prompt:
+        if cls.hidden.prompt is not None:
             metadata.add_text("prompt", json.dumps(cls.hidden.prompt))
         if cls.hidden.extra_pnginfo:
             for x in cls.hidden.extra_pnginfo:

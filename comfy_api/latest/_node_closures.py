@@ -116,6 +116,16 @@ class ClosureKind:
 # separate declarative manifest surface, not a closure kind.
 # --------------------------------------------------------------------------- #
 KINDS: dict[str, ClosureKind] = {
+    "cross_attention_residual": ClosureKind(
+        phase="cross_attention_residual",
+        doc="Adds a pack-owned residual after canonical UNet cross-attention; model objects and options stay host-owned.",
+        arguments=("base_output", "query", "metadata", "tensors", "masks"),
+        returns="same-shape/dtype/device attention residual",
+        captures={
+            "tensors": ListOfRefs("TENSOR", min_items=0, max_items=512, default=[]),
+            "masks": ListOfRefs("MASK", min_items=0, max_items=32, default=[]),
+        },
+    ),
     "post_cfg": ClosureKind(
         phase="post_cfg",
         doc=(

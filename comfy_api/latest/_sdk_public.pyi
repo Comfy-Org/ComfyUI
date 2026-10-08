@@ -16,12 +16,12 @@ Two audiences, separated below:
 
 If prose and this stub disagree, treat the stub + its implementation tests as
 authoritative.
+
+The contract has no Torch or sandbox-engine dependency. Typed operations keep
+resource access behind the provider; permissioned raw access supports pack-local
+Torch work when the selected execution profile allows it.
 """
 from typing import Any, Awaitable, Callable, Mapping, Optional, Protocol, Sequence, TypeVar, runtime_checkable
-
-# NOTE: the contract deliberately does NOT import torch or any backend module.
-# Node code has no direct access to torch/CUDA/filesystem; it works through
-# refs, operations, and ctx — all brokered.
 
 # =========================================================================== #
 # 1. NODE-AUTHOR SURFACE
@@ -36,6 +36,9 @@ class Ref:
     async def describe(self, max_value_chars: int = ...) -> dict[str, Any]: ...
     async def op(self, name: str, **params: Any) -> Any: ...
 
+    async def release(self) -> None:
+        ...
+
 class ClosureRef(Ref):
     """Prompt-scoped handle to pack math retained for a sampling phase."""
     KIND: str
@@ -48,7 +51,10 @@ class ClosureRef(Ref):
         end_percent: Optional[float] = ...,
     ) -> "SamplerRef": ...
     async def as_latent_operation(self) -> "LatentOperationRef": ...
-    async def as_sampler(self) -> "SamplerRef": ...
+    async def as_sampler(self, *, sigmas_direction: str = ...) -> "SamplerRef": ...
+
+    async def attach_model_clip(self, model: 'ModelRef', clip: 'ClipRef') -> tuple['ModelRef', 'ClipRef']:
+        ...
 
 class LatentOperationRef(Ref):
     """Host-owned delayed one-tensor operation backed by a node closure."""
@@ -63,6 +69,10 @@ class ValueRef(Ref):
     async def from_value(cls, v: Any) -> "ValueRef": ...
 
 class TensorRef(Ref):
+    @classmethod
+    async def from_ref(cls, ref: Ref) -> TensorRef: ...
+    @classmethod
+    async def from_value(cls, value: Any) -> TensorRef: ...
     KIND: str
     # RAW ESCAPE HATCH — permissioned (`raw`/`tensor.read`), discouraged; forces
     # the dedicated tier under the overlay. Return is untyped by design (the
@@ -89,6 +99,11 @@ class ImageRef(TensorRef):
         self, width: int, height: int, method: str = ...,
         crop: str = ...,
     ) -> "ImageRef": ...
+
+    async def unbatch(self) -> list['ImageRef']:
+        ...
+    async def repeat_batch(self, amount: int) -> 'ImageRef':
+        ...
 
 class MaskRef(TensorRef):
     """MASK asset."""
@@ -137,6 +152,15 @@ class LatentRef(Ref):
     @classmethod
     async def from_value(cls: type[_L], v: dict) -> _L: ...
 
+    async def samples(self) -> 'TensorRef':
+        ...
+    async def with_samples(self, samples: 'TensorRef') -> 'LatentRef':
+        ...
+    async def batch_size(self) -> int:
+        ...
+    async def select_batch(self, indices: list[int]) -> 'LatentRef':
+        ...
+
 class CondRef(Ref):
     """CONDITIONING."""
     KIND: str
@@ -148,10 +172,10 @@ class CondRef(Ref):
         self, start: float, end: float,
     ) -> "CondRef": ...
     async def with_metadata(
-        self, *, width: Optional[int] = ...,
-        height: Optional[int] = ..., crop_w: Optional[int] = ...,
-        crop_h: Optional[int] = ..., target_width: Optional[int] = ...,
-        target_height: Optional[int] = ...,
+        self, *, width: Optional[int | float] = ...,
+        height: Optional[int | float] = ..., crop_w: Optional[int | float] = ...,
+        crop_h: Optional[int | float] = ..., target_width: Optional[int | float] = ...,
+        target_height: Optional[int | float] = ...,
     ) -> "CondRef": ...
     async def has_spatial_metadata(self) -> bool: ...
     async def with_mask(
@@ -184,6 +208,13 @@ class CondRef(Ref):
         target_height: Optional[int] = ...,
     ) -> "CondRef": ...
 
+    async def embedding(self, index: int=0) -> 'TensorRef':
+        ...
+    async def replace_embeddings(self, embeddings: list['TensorRef']) -> 'CondRef':
+        ...
+    async def scale_embeddings(self, factor: float) -> 'CondRef':
+        ...
+
 class GuiderRef(Ref):
     KIND: str
     async def spatial_crop_inputs(
@@ -199,6 +230,10 @@ class SamplerRef(Ref):
         cls, name: str, *, eta: Optional[float] = ...,
         ge_gamma: Optional[float] = ...,
     ) -> "SamplerRef": ...
+
+    @classmethod
+    async def self_refine_video(cls, stochastic_steps: list[dict[str, int]], certain_percentage: float, uncertainty_threshold: float, seed: int, verbose: bool=False, latent: Optional['LatentRef']=None) -> 'SamplerRef':
+        ...
 
 class SigmasRef(Ref):
     KIND: str
@@ -230,6 +265,11 @@ class UpscaleModelRef(Ref):
 class ModelRef(Ref):
     """MODEL — patch/hook via ctx.models; weights never materialize in-node."""
     KIND: str
+    async def merge(self, other: "ModelRef", ratio: float = ...) -> "ModelRef": ...
+    async def apply_lora(
+        self, asset: "AssetRef", clip: Optional["ClipRef"],
+        strength_model: float, strength_clip: float, *, skip_zero: bool = ...,
+    ) -> tuple["ModelRef", Optional["ClipRef"]]: ...
     async def patch(self, transform: str, **params: Any) -> "ModelRef": ...
     async def spatial_crop_inputs(
         self, *, regions: list[tuple[int, int, int, int]],
@@ -238,6 +278,7 @@ class ModelRef(Ref):
     ) -> "ModelRef": ...
     async def family(self) -> str: ...
     async def unet_context_dim(self) -> Optional[int]: ...
+    async def projection_dtype(self) -> str: ...
     async def sigma_for_percent(
         self, percent: float, actual_endpoints: bool = ...,
     ) -> float: ...
@@ -252,12 +293,33 @@ class ModelRef(Ref):
         shift: Optional[float] = ...,
     ) -> SigmasRef: ...
 
+    async def ground_image(self, image: ImageRef, conditioning: CondRef, *, threshold: float=0.5, refine_iterations: int=2, individual_masks: bool=True, max_detections: int=64) -> tuple[MaskRef, list[list[dict[str, float]]]]:
+        ...
+    async def transforms(self) -> list[dict]:
+        ...
+    async def latent_scale_factor(self) -> float:
+        ...
+    async def latent_channels(self) -> int:
+        ...
+    async def is_flow(self) -> bool:
+        ...
+    async def scheduled_cfg_guider(self, positive: 'CondRef', negative: 'CondRef', cfg: float, start_percent: float=0.0, end_percent: float=1.0, *, bounds: Optional[dict]=None) -> 'GuiderRef':
+        ...
+    async def lora_weight_differences(self, original: 'ModelRef', include_bias: bool=False) -> 'WeightDiffCursorRef':
+        ...
+    async def apply_dit_block_lora(self, asset: 'AssetRef', strength_model: float, block_weights: list[dict[str, Any]]) -> tuple['ModelRef', str]:
+        ...
+    async def apply_ltx2_lora(self, asset: 'AssetRef', strength_model: float, block_weights: list[dict[str, Any]], video: float, video_to_audio: float, audio: float, audio_to_video: float, other: float) -> tuple['ModelRef', str, str]:
+        ...
+
 class ClipRef(Ref):
     KIND: str
+    async def merge(self, other: "ClipRef", ratio: float = ...) -> "ClipRef": ...
     async def set_last_layer(self, stop_at_clip_layer: int) -> "ClipRef": ...
     async def with_attention_impl(self, mode: str) -> "ClipRef": ...
     async def describe_tokens(self, tokens: dict) -> dict: ...
     async def tokenize(self, text: str, **kwargs: Any) -> dict: ...
+    async def encode_from_tokens(self, tokens: dict) -> CondRef: ...
     async def encode_from_tokens_scheduled(
         self, tokens: dict, add_dict: Optional[dict] = ...,
     ) -> CondRef: ...
@@ -287,6 +349,11 @@ class ClipRef(Ref):
         num_beams: int = ...,
     ) -> str: ...
 
+    async def scale_attention_weights(self, *, clip_l: Optional[list[float]]=None, clip_g: Optional[list[float]]=None, t5xxl: Optional[list[float]]=None, query: bool=True, key: bool=True, value: bool=True, output: bool=True) -> 'ClipRef':
+        ...
+    async def lora_weight_differences(self, original: 'ClipRef', include_bias: bool=False) -> 'WeightDiffCursorRef':
+        ...
+
 class LlamaCppModelRef(Ref):
     KIND: str
     async def generate(
@@ -308,9 +375,18 @@ class ClipVisionOutputRef(Ref):
         self, other: "ClipVisionOutputRef",
     ) -> "ClipVisionOutputRef": ...
     async def image_embeds(self) -> TensorRef: ...
+    async def penultimate_hidden_states(
+        self, *, batch_start: int = ..., batch_count: Optional[int] = ...,
+    ) -> TensorRef: ...
+    async def last_hidden_state(
+        self, *, batch_start: int = ..., batch_count: Optional[int] = ...,
+    ) -> TensorRef: ...
 
 class ClipVisionRef(Ref):
     KIND: str
+    async def offload(self) -> None: ...
+    async def input_size(self) -> int: ...
+    async def encode_pixels(self, pixels: TensorRef) -> ClipVisionOutputRef: ...
     async def encode_image(
         self, image: ImageRef, crop: bool = ...,
     ) -> ClipVisionOutputRef: ...
@@ -323,8 +399,12 @@ class VaeRef(Ref):
     async def empty_audio_latent(
         self, video_frames: int, frame_rate: float,
     ) -> LatentRef: ...
-    async def decode(self, latent: LatentRef) -> ImageRef: ...
-    async def decode_tensor(self, latent: LatentRef) -> TensorRef: ...
+    async def decode(
+        self, latent: LatentRef, *, padding_mode: str = ...,
+    ) -> ImageRef: ...
+    async def decode_tensor(
+        self, latent: LatentRef, *, padding_mode: str = ...,
+    ) -> TensorRef: ...
     async def decode_tiled(
         self,
         latent: LatentRef,
@@ -332,6 +412,7 @@ class VaeRef(Ref):
         overlap: int = ...,
         temporal_size: int = ...,
         temporal_overlap: int = ...,
+        *, padding_mode: str = ...,
     ) -> ImageRef: ...
     async def decode_tensor_tiled(
         self,
@@ -340,8 +421,15 @@ class VaeRef(Ref):
         overlap: int = ...,
         temporal_size: int = ...,
         temporal_overlap: int = ...,
+        *, padding_mode: str = ...,
     ) -> TensorRef: ...
     async def encode(self, image: ImageRef) -> LatentRef: ...
+    async def decode_tiled_native(
+        self, latent: LatentRef, tile_x: Optional[int] = ...,
+        tile_y: Optional[int] = ..., overlap: Optional[int] = ...,
+        tile_t: Optional[int] = ..., overlap_t: Optional[int] = ...,
+        *, padding_mode: str = ...,
+    ) -> ImageRef: ...
     async def encode_for_inpaint(
         self,
         image: ImageRef,
@@ -356,6 +444,25 @@ class VaeRef(Ref):
         negative: CondRef,
         noise_mask: bool = ...,
     ) -> tuple[CondRef, CondRef, LatentRef]: ...
+
+    async def encode_tiled(self, image: 'ImageRef', tile_x: Optional[int]=None, tile_y: Optional[int]=None, overlap: Optional[int]=None, tile_t: Optional[int]=None, overlap_t: Optional[int]=None) -> 'LatentRef':
+        ...
+    async def input_dtype(self) -> str:
+        ...
+    async def encode_video(self, image: 'ImageRef') -> tuple['LatentRef', int]:
+        ...
+    async def decode_video(self, latent: 'LatentRef', *, tiled: bool=False, tile_size: int=512, overlap: int=64, temporal_size: int=4096, temporal_overlap: int=16) -> 'ImageRef':
+        ...
+    async def decode_audio(self, latent: 'LatentRef') -> 'AudioRef':
+        ...
+    async def downscale_index_formula(self) -> Optional[tuple[int, int, int]]:
+        ...
+    async def merge(self, other: 'VaeRef', ratio: float=0.5) -> 'VaeRef':
+        ...
+    async def compile(self, *, backend: str='inductor', mode: str='default', fullgraph: bool=False, encoder: bool=True, decoder: bool=True) -> 'VaeRef':
+        ...
+    async def patch_triton(self, *, fuse_norm_silu: bool=True, channels_last: bool=True, int8_conv: bool=False, autotune: bool=False) -> 'VaeRef':
+        ...
 
 class TimestepKeyframeRef(Ref):
     KIND: str
@@ -378,6 +485,14 @@ class ControlNetWeightsRef(Ref):
 
 class ControlNetRef(Ref):
     KIND: str
+    async def apply_single(
+        self,
+        conditioning: CondRef,
+        image: ImageRef,
+        strength: float = ...,
+        *,
+        apply_to_uncond: Optional[bool] = ...,
+    ) -> CondRef: ...
     async def apply(
         self,
         positive: CondRef,
@@ -423,12 +538,20 @@ class AudioRef(Ref):
 class VideoRef(Ref):
     KIND: str
 
+    async def encoded_source(self) -> ValueRef:
+        ...
+
 class AssetRef(Ref):
     """A file/model resolved by name+hash, tenant-scoped. Never a raw path."""
     KIND: str
 
 class ClipSegRef(Ref):
     KIND: str
+
+    async def predict_mask(self, images: ImageRef, text: str, use_accelerator: bool=True) -> MaskRef:
+        ...
+    async def segment(self, images: ImageRef, text: str, threshold: float=0.5, binary_mask: bool=True, combine_mask: bool=False, use_accelerator: bool=True, blur_sigma: float=0.0, previous_mask: Optional[MaskRef]=None, invert: bool=False, image_background_level: float=0.5) -> tuple[MaskRef, ImageRef]:
+        ...
 
 class InpaintModelRef(Ref):
     KIND: str
@@ -555,11 +678,19 @@ class AssetsDomain(Protocol):
     async def load_state_dict(
         self, ref: AssetRef, return_metadata: bool = ...
     ) -> Any: ...
+    async def load_tensor(self, ref: AssetRef) -> TensorRef: ...
 
     async def load_image(self, ref: AssetRef) -> ImageRef: ...
 
     async def load_video(self, ref: AssetRef) -> VideoRef: ...
     async def load_latent(self, ref: AssetRef) -> LatentRef: ...
+
+    async def font_names(self, folder: str='system', prefix: str='') -> list[str]:
+        ...
+    async def metadata(self, ref: AssetRef) -> dict[str, str]:
+        ...
+    async def load_image_and_mask(self, ref: AssetRef) -> tuple[ImageRef, MaskRef]:
+        ...
 
 class OutputDomain(Protocol):
     async def save_images(
@@ -572,6 +703,7 @@ class OutputDomain(Protocol):
         caption_extension: str = ...,
         save_metadata: bool = ...,
         extra_metadata: Optional[dict[str, Any]] = ...,
+        a1111_parameters: Optional[str] = ...,
         image_format: str = ...,
         quality: int = ...,
         filenames: Optional[list[str]] = ...,
@@ -580,6 +712,8 @@ class OutputDomain(Protocol):
         jpeg_subsampling: str = ...,
         webp_method: int = ...,
         tiff_compression: str = ...,
+        folder_type: str = ...,
+        overwrite: bool = ...,
     ) -> dict: ...
     async def save_images_with_alpha(
         self,
@@ -707,6 +841,9 @@ class OutputDomain(Protocol):
         save_output: bool = ...,
     ) -> dict: ...
 
+    async def record_text_input(self, name: str, *, title: Optional[str]=None, metadata_prefix: Optional[str]=None) -> None:
+        ...
+
 class GraphDomain(Protocol):
     async def current_node_id(self) -> str: ...
     async def input_label(
@@ -736,6 +873,7 @@ class ProgressDomain(Protocol):
     async def update(
         self, value: float, total: float, preview: Optional[ImageRef] = ...
     ) -> None: ...
+    async def text(self, message: str) -> None: ...
 
 class ScratchDomain(Protocol):
     async def dir(self) -> str: ...
@@ -744,8 +882,16 @@ class EventsDomain(Protocol):
     async def emit(self, event: str, data: dict) -> None: ...
 
 class StorageDomain(Protocol):
+    async def get_value(self, key: str) -> Optional[ValueRef]: ...
+    async def set_value(self, key: str, value: ValueRef, *, ttl_seconds: Optional[int] = None) -> None: ...
+    async def read_value(self, key: str) -> dict[str, Any]: ...
+    async def compare_and_set_value(self, key: str, revision: Optional[str], value: ValueRef, *, ttl_seconds: Optional[int] = None) -> dict[str, Any]: ...
+    async def list(self, prefix: str = "") -> list[str]: ...
     async def get(self, key: str) -> Optional[str]: ...
     async def set(self, key: str, value: str) -> None: ...
+    async def read(self, key: str) -> dict[str, Any]: ...
+    async def compare_and_set(self, key: str, revision: Optional[str], value: str) -> dict[str, Any]: ...
+    async def clear(self, key: Optional[str] = ...) -> int: ...
 
 class InteractionDomain(Protocol):
     async def request(
@@ -776,6 +922,7 @@ class ModelsDomain(Protocol):
         weight_dtype: str = ...,
         compute_dtype: str = ...,
         cublas_linear: bool = ...,
+        config_name: Optional[str] = ...,
     ) -> tuple[ModelRef, Optional[ClipRef], Optional[VaeRef]]: ...
     async def load_diffusion_model(
         self,
@@ -876,6 +1023,13 @@ class ModelsDomain(Protocol):
         unload_all_models: bool = ...,
     ) -> tuple[int, int]: ...
 
+    async def sampling_names(self) -> dict[str, list[str]]:
+        ...
+    async def load_gguf_text_encoders(self, names: Sequence[str], clip_type: str) -> ClipRef:
+        ...
+    async def load_style_model(self, model: str) -> StyleModelRef:
+        ...
+
 class IntegrationsDomain(Protocol):
     """Named dispatch to a host-registered third-party service.
 
@@ -893,6 +1047,9 @@ class IntegrationsDomain(Protocol):
 
 class SystemDomain(Protocol):
     async def stats(self) -> dict[str, Any]: ...
+
+    async def monitor(self) -> dict[str, Any]:
+        ...
 
 class ClosuresDomain(Protocol):
     async def retain(
@@ -916,7 +1073,10 @@ class ClosuresDomain(Protocol):
     async def create_latent_operation(
         self, closure: ClosureRef,
     ) -> LatentOperationRef: ...
-    async def create_sampler(self, closure: ClosureRef) -> SamplerRef: ...
+    async def create_sampler(self, closure: ClosureRef, *, sigmas_direction: str = ...) -> SamplerRef: ...
+
+    async def attach_model_clip(self, closure: ClosureRef, model: ModelRef, clip: ClipRef) -> tuple[ModelRef, ClipRef]:
+        ...
 
 class Context(Protocol):
     assets: AssetsDomain
@@ -957,7 +1117,12 @@ class ExecutionPlan:
     # Work-unit payload for out-of-process backends (set for SDK_REFS nodes).
     node_module: str
     inputs: Optional[dict]
+    input_mode: str
+    input_types: Optional[dict[str, str]]
+    prompt: Any
+    extra_pnginfo: Any
     dynamic_prompt: Any
+    method: str
     def __init__(
         self,
         prompt_id: str,
@@ -968,7 +1133,12 @@ class ExecutionPlan:
         required_weights: tuple[HuggingFaceWeight, ...] = ...,
         node_module: str = ...,
         inputs: Optional[dict] = ...,
+        input_mode: str = ...,
+        input_types: Optional[dict[str, str]] = ...,
+        prompt: Any = ...,
+        extra_pnginfo: Any = ...,
         dynamic_prompt: Any = ...,
+        method: str = ...,
     ) -> None: ...
 
 @runtime_checkable
@@ -982,7 +1152,7 @@ class OpsProvider(Protocol):
     """Engine-side operations on assets. Generic dispatch: the op vocabulary is
     data, extensible by an overlay without changing this contract."""
 
-    async def apply(self, op: str, image: ImageRef, params: dict) -> ImageRef: ...
+    async def apply(self, op: str, subject: Ref, params: dict) -> Ref: ...
     def supports(self, op: str) -> bool: ...
 
 class OpNotSupported(NotImplementedError):
@@ -1026,3 +1196,24 @@ class _Providers:
     ) -> None: ...
 
 providers: _Providers
+
+class StyleModelRef(Ref):
+    KIND: str
+    async def features(self, clip_vision_output: ClipVisionOutputRef) -> TensorRef:
+        ...
+    async def apply(self, clip_vision_output: ClipVisionOutputRef, conditioning: CondRef, strength: float=1.0) -> CondRef:
+        ...
+
+class GligenRef(Ref):
+    KIND: str
+    async def apply_batched(self, conditioning: 'CondRef', clip: 'ClipRef', text: str, boxes: list[tuple[int, int, int | float, int | float]]) -> 'CondRef':
+        ...
+
+class WeightDiffCursorRef(Ref):
+    KIND: str
+    async def next(self) -> Optional[dict[str, Any]]:
+        ...
+    def __aiter__(self) -> 'WeightDiffCursorRef':
+        ...
+    async def __anext__(self) -> dict[str, Any]:
+        ...

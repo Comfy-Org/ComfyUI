@@ -30,6 +30,7 @@ folder_names_and_paths["vae"] = ([os.path.join(models_dir, "vae")], supported_pt
 folder_names_and_paths["text_encoders"] = ([os.path.join(models_dir, "text_encoders"), os.path.join(models_dir, "clip")], supported_pt_extensions)
 folder_names_and_paths["diffusion_models"] = ([os.path.join(models_dir, "unet"), os.path.join(models_dir, "diffusion_models")], supported_pt_extensions)
 folder_names_and_paths["clip_vision"] = ([os.path.join(models_dir, "clip_vision")], supported_pt_extensions)
+folder_names_and_paths["ipadapter"] = ([os.path.join(models_dir, "ipadapter")], supported_pt_extensions)
 folder_names_and_paths["style_models"] = ([os.path.join(models_dir, "style_models")], supported_pt_extensions)
 folder_names_and_paths["embeddings"] = ([os.path.join(models_dir, "embeddings")], supported_pt_extensions)
 folder_names_and_paths["diffusers"] = ([os.path.join(models_dir, "diffusers")], ["folder"])

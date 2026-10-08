@@ -36,6 +36,7 @@ import os
 import comfy.utils
 import comfy.ops
 import comfy.model_prefetch
+from comfy.vae_policy import decode_policy, vae_operation
 
 from . import clip_vision
 from . import gligen
@@ -489,6 +490,11 @@ class CLIP:
         return self.patcher.is_dynamic()
 
 class VAE:
+    def decode_policy(self, padding_mode="default"):
+        """Scope Conv2d padding to one serialized encode/decode operation."""
+        self.throw_exception_if_invalid()
+        return decode_policy(self.first_stage_model, padding_mode)
+
     def __init__(self, sd=None, device=None, config=None, dtype=None, metadata=None):
         is_seedvr2_vae = "decoder.up_blocks.2.upsamplers.0.upscale_conv.weight" in sd
         if not is_seedvr2_vae and 'decoder.up_blocks.0.resnets.0.norm1.weight' in sd.keys(): #diffusers format
@@ -1143,6 +1149,7 @@ class VAE:
     def vae_output_dtype(self):
         return model_management.intermediate_dtype()
 
+    @vae_operation
     def decode_tiled_(self, samples, tile_x=64, tile_y=64, overlap = 16):
         steps = samples.shape[0] * comfy.utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x, tile_y, overlap)
         steps += samples.shape[0] * comfy.utils.get_tiled_scale_steps(samples.shape[3], samples.shape[2], tile_x // 2, tile_y * 2, overlap)
@@ -1157,6 +1164,7 @@ class VAE:
             / 3.0)
         return output
 
+    @vae_operation
     def decode_tiled_1d(self, samples, tile_x=256, overlap=32):
         if samples.ndim == 3:
             decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
@@ -1167,14 +1175,17 @@ class VAE:
 
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_x,), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, output_device=self.output_device))
 
+    @vae_operation
     def decode_tiled_3d(self, samples, tile_t=999, tile_x=32, tile_y=32, overlap=(1, 8, 8)):
         decode_fn = lambda a: self.first_stage_model.decode(a.to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return self.process_output(comfy.utils.tiled_scale_multidim(samples, decode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.upscale_ratio, out_channels=self.output_channels, index_formulas=self.upscale_index_formula, output_device=self.output_device))
 
+    @vae_operation
     def _decode_tiled_owned(self, samples, **kwargs):
         out = self.first_stage_model.decode_tiled(samples.to(self.vae_dtype).to(self.device), **kwargs)
         return self.process_output(out.to(device=self.output_device, dtype=self.vae_output_dtype(), copy=True))
 
+    @vae_operation
     def encode_tiled_(self, pixel_samples, tile_x=512, tile_y=512, overlap = 64):
         steps = pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2], tile_x, tile_y, overlap)
         steps += pixel_samples.shape[0] * comfy.utils.get_tiled_scale_steps(pixel_samples.shape[3], pixel_samples.shape[2], tile_x // 2, tile_y * 2, overlap)
@@ -1188,6 +1199,7 @@ class VAE:
         samples /= 3.0
         return samples
 
+    @vae_operation
     def encode_tiled_1d(self, samples, tile_x=256 * 2048, overlap=64 * 2048):
         if self.latent_dim == 1:
             encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
@@ -1207,10 +1219,12 @@ class VAE:
         else:
             return out.reshape(samples.shape[0], self.latent_channels, extra_channel_size, -1)
 
+    @vae_operation
     def encode_tiled_3d(self, samples, tile_t=9999, tile_x=512, tile_y=512, overlap=(1, 64, 64)):
         encode_fn = lambda a: self.first_stage_model.encode((self.process_input(a)).to(self.vae_dtype).to(self.device)).to(dtype=self.vae_output_dtype())
         return comfy.utils.tiled_scale_multidim(samples, encode_fn, tile=(tile_t, tile_x, tile_y), overlap=overlap, upscale_amount=self.downscale_ratio, out_channels=self.latent_channels, downscale=True, index_formulas=self.downscale_index_formula, output_device=self.output_device)
 
+    @vae_operation
     def _encode_tiled_owned(self, pixel_samples, **kwargs):
         x = self.process_input(pixel_samples).to(self.vae_dtype).to(self.device)
         out = self.first_stage_model.encode_tiled(x, **kwargs)
@@ -1230,6 +1244,7 @@ class VAE:
             args["overlap_t"] = overlap_t
         return args
 
+    @vae_operation
     def decode(self, samples_in, vae_options={}):
         self.throw_exception_if_invalid()
         pixel_samples = None
@@ -1339,6 +1354,7 @@ class VAE:
             s[-1] = min(s[-1], tile_x)
         return tuple(s)
 
+    @vae_operation
     def decode_tiled(self, samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
         self.throw_exception_if_invalid()
         memory_used = self.memory_used_decode(self._tile_bounded_shape(samples.shape, tile_x, tile_y, tile_t), self.vae_dtype)
@@ -1371,6 +1387,7 @@ class VAE:
                 output = self.decode_tiled_3d(samples, **args)
         return output.movedim(1, -1)
 
+    @vae_operation
     def encode(self, pixel_samples):
         self.throw_exception_if_invalid()
         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)
@@ -1429,6 +1446,7 @@ class VAE:
             samples = self.format_encoded(samples)
         return samples
 
+    @vae_operation
     def encode_tiled(self, pixel_samples, tile_x=None, tile_y=None, overlap=None, tile_t=None, overlap_t=None):
         self.throw_exception_if_invalid()
         pixel_samples = self.vae_encode_crop_pixels(pixel_samples)

@@ -68,6 +68,13 @@ class ClipVisionModel():
             pixel_values = comfy.clip_model.siglip2_preprocess(image.to(self.load_device), size=self.image_size, patch_size=self.config.get("patch_size", 16), num_patches=self.config.get("num_patches", 256), mean=self.image_mean, std=self.image_std, crop=crop).float()
         else:
             pixel_values = comfy.clip_model.clip_preprocess(image.to(self.load_device), size=self.image_size, mean=self.image_mean, std=self.image_std, crop=crop).float()
+        return self._encode_pixels(pixel_values)
+
+    def encode_pixels(self, pixel_values):
+        comfy.model_management.load_model_gpu(self.patcher)
+        return self._encode_pixels(pixel_values.to(self.load_device).float())
+
+    def _encode_pixels(self, pixel_values):
         out = self.model(pixel_values=pixel_values, intermediate_output='all' if self.return_all_hidden_states else -2)
 
         outputs = Output()

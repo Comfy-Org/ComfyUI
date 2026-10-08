@@ -457,8 +457,16 @@ class VideoFromFile(VideoInput):
         with av.open(self.__file, mode='r') as container:
             return container.format.name
 
-    def get_components_internal(self, container: InputContainer) -> VideoComponents:
+    def get_components_internal(self, container: InputContainer, *, decode_limits: tuple[int, int, int] | None = None) -> VideoComponents:
         video_stream = self._get_first_video_stream(container)
+        decoded_pixels = 0
+        if decode_limits is not None:
+            max_frames, max_pixels, max_axis = decode_limits
+            if any(type(value) is not int or value < 1 for value in decode_limits):
+                raise ValueError("video decode limits must be positive integers")
+            width, height = video_stream.codec_context.width, video_stream.codec_context.height
+            if width < 0 or height < 0 or max(width, height) > max_axis or width * height > max_pixels:
+                raise ValueError("image asset dimensions exceed the decode limit")
         video_stream.thread_type = "AUTO"
         start_time, duration = self.get_active_trim_window()
 
@@ -507,6 +515,14 @@ class VideoFromFile(VideoInput):
                         if duration and frame.pts >= end_pts:
                             video_done = True
                             break
+
+                        if decode_limits is not None:
+                            pixels = frame.width * frame.height
+                            if (len(frames) >= max_frames or frame.width < 1 or frame.height < 1
+                                    or max(frame.width, frame.height) > max_axis
+                                    or decoded_pixels + pixels > max_pixels):
+                                raise ValueError("image asset frames exceed the decode limit")
+                            decoded_pixels += pixels
 
                         if not checked_alpha:
                             alpha_channel = False

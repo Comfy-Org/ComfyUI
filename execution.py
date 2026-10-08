@@ -180,6 +180,31 @@ async def _notify_execution_backend_lifecycle(
         await hook(prompt_id, extra_data)
 
 
+async def _prune_invalid_cached_outputs(prompt_id, dynprompt, outputs_cache):
+    from comfy_api.latest import _sdk as _comfy_sdk
+
+    validate = getattr(_comfy_sdk.providers.execution_backend, "is_cached_output_valid", None)
+    if validate is None:
+        return set()
+    node_ids = dynprompt.all_node_ids()
+    invalid = set()
+    for node_id in node_ids:
+        cached = await outputs_cache.get(node_id)
+        if cached is not None and not await validate(prompt_id, cached.outputs):
+            invalid.add(node_id)
+    changed = True
+    while changed:
+        changed = False
+        for node_id in node_ids - invalid:
+            inputs = dynprompt.get_node(node_id)["inputs"]
+            if any(is_link(value) and value[0] in invalid for value in inputs.values()):
+                invalid.add(node_id)
+                changed = True
+    for node_id in invalid:
+        await outputs_cache.set(node_id, None)
+    return invalid
+
+
 async def _shutdown_execution_backend() -> None:
     from comfy_api.latest import _sdk as _comfy_sdk
 
@@ -411,6 +436,14 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                     _sdk_required_weights = getattr(
                         type_obj, "SDK_REQUIRED_WEIGHTS", ()) or ()
                     _sdk_refs_mode = bool(getattr(type_obj, "SDK_REFS", False))
+                    _sdk_input_schema = type_obj.INPUT_TYPES()
+                    _sdk_input_types = {
+                        name: info[0]
+                        for section in ("required", "optional")
+                        for name, info in _sdk_input_schema.get(section, {}).items()
+                        if info[0] in ("IMAGE", "MASK", "TENSOR", "SIGMAS")
+                        or (_sdk_refs_mode and info[0] == "CONDITIONING")
+                    }
                     _sdk_plan = _comfy_sdk.ExecutionPlan(
                         prompt_id=str(prompt_id),
                         node_id=str(unique_id),
@@ -418,6 +451,14 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                         node_module=getattr(type_obj, "__module__", "") or "",
                         inputs=inputs,
                         input_mode="refs" if _sdk_refs_mode else "values",
+                        input_types=_sdk_input_types,
+                        text_inputs={
+                            name: inputs[name]
+                            for section in ("required", "optional")
+                            for name, info in _sdk_input_schema.get(section, {}).items()
+                            if info[0] == "STRING" and name in inputs
+                            and type(inputs[name]) is str
+                        },
                         method=func,
                         permissions=tuple(_sdk_perms),
                         required_weights=tuple(_sdk_required_weights),
@@ -435,7 +476,8 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                     )
                     # SDK nodes see assets (refs), not buffers: wrap heavy inputs.
                     if _sdk_refs_mode:
-                        inputs = await _comfy_sdk.wrap_inputs(_sdk_refs, inputs)
+                        inputs = await _comfy_sdk.wrap_inputs(
+                            _sdk_refs, inputs, _sdk_input_types)
                         # Ship the work unit on the plan so an out-of-process
                         # backend can execute without local_call.
                         _sdk_plan.inputs = inputs
@@ -452,6 +494,7 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                             f"legacy node method {func!r} has no sandbox mapping")
 
                     from comfy_api.latest import _sdk as _comfy_sdk
+                    _sdk_input_schema = type_obj.INPUT_TYPES() if hasattr(type_obj, "INPUT_TYPES") else {}
                     _sdk_plan = _comfy_sdk.ExecutionPlan(
                         prompt_id=str(prompt_id),
                         node_id=str(unique_id),
@@ -459,6 +502,12 @@ async def _async_map_node_over_list(prompt_id, unique_id, obj, input_data_all, f
                         node_module=getattr(type_obj, "__module__", "") or "",
                         inputs=inputs,
                         input_mode="values",
+                        input_types={
+                            name: info[0]
+                            for section in ("required", "optional")
+                            for name, info in _sdk_input_schema.get(section, {}).items()
+                            if info[0] in ("IMAGE", "MASK", "TENSOR", "SIGMAS")
+                        },
                         method=_legacy_method,
                         permissions=tuple(
                             getattr(type_obj, "SDK_PERMISSIONS", ()) or ()),
@@ -643,15 +692,17 @@ async def execute(server: "ExecutionServer", dynprompt, caches, current_item, ex
     inputs = dynprompt.get_node(unique_id)['inputs']
     class_type = dynprompt.get_node(unique_id)['class_type']
     class_def = nodes.NODE_CLASS_MAPPINGS[class_type]
-    cached = await caches.outputs.get(unique_id)
-    if cached is not None:
-        emit_cached_output(server, unique_id, display_node_id, cached, prompt_id, ui_outputs, asset_manager)
-        get_progress_state().finish_progress(unique_id)
-        execution_list.cache_update(unique_id, cached)
-        return (ExecutionResult.SUCCESS, None, None)
-
     input_data_all = None
     try:
+        invalid = await _prune_invalid_cached_outputs(prompt_id, dynprompt, caches.outputs)
+        if invalid:
+            raise RuntimeError("cached outputs were revoked during execution; run the prompt again")
+        cached = await caches.outputs.get(unique_id)
+        if cached is not None:
+            emit_cached_output(server, unique_id, display_node_id, cached, prompt_id, ui_outputs, asset_manager)
+            get_progress_state().finish_progress(unique_id)
+            execution_list.cache_update(unique_id, cached)
+            return (ExecutionResult.SUCCESS, None, None)
         if unique_id in pending_async_nodes:
             results = []
             for r in pending_async_nodes[unique_id]:
@@ -1030,6 +1081,7 @@ class PromptExecutor:
                     await cache.set_prompt(dynamic_prompt, prompt.keys(), is_changed_cache)
                     cache.clean_unused()
 
+                await _prune_invalid_cached_outputs(prompt_id, dynamic_prompt, self.caches.outputs)
                 node_ids = list(prompt.keys())
                 cache_results = await asyncio.gather(
                     *(self.caches.outputs.get(node_id) for node_id in node_ids)
