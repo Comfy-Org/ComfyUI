@@ -382,10 +382,11 @@ def test_a_cancel_during_the_revive_leaves_the_rows_missing(root, session):
     calls = 0
 
     def cancelled_at_the_second_file() -> bool:
-        """The revive asks once per file before writing; cancel on the second ask."""
+        """The revive asks once for the directory, then once per file; cancel on the
+        second file, before anything is written."""
         nonlocal calls
         calls += 1
-        return calls >= 2
+        return calls >= 3
 
     scanner.revive_returned_references_safely("output", should_stop=cancelled_at_the_second_file)
 
@@ -402,7 +403,7 @@ def test_a_failing_revive_leaves_the_rest_of_the_scan_running(root, session, mon
     monkeypatch.setattr(scanner, "_revival_candidates", broken)
     state = _scan()
 
-    assert state.recovered == 0
+    assert state.recovered == len(files)  # the per-file revive, with the same window rule
     assert any(c.path == str(root / "new.png") and not c.is_missing for c in _contents(session))
     assert "bulk revive failed" in caplog.text
 
@@ -470,10 +471,40 @@ def test_the_revive_writes_in_batches_and_counts_what_committed(root, session, m
         return revive_contents(session, mtimes)
 
     monkeypatch.setattr(scanner, "revive_contents", revive)
-    state = _scan()
+    progress = seeder_module._ScanState()
+    scanner.revive_returned_references_safely("output", progress)
 
     assert batches == [2, 2]
-    assert state.recovered == 2  # the first batch committed; the failure stopped the rest
-    assert sum(1 for c in _contents(session) if not c.is_missing) == len(files)  # the scan's per-file path
+    assert progress.recovered == 2  # the first batch committed; the failure stopped the rest
+    assert sum(1 for c in _contents(session) if not c.is_missing) == 2
+    assert _scan().recovered == len(files) - 2
 
 
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions and a non-root user")
+def test_an_unreadable_entry_does_not_hide_the_rest_of_its_directory(root, session):
+    files, edits = _gone_and_copied_back(root, session)
+    locked = root.parent / "locked"
+    (locked / "inner").mkdir(parents=True)
+    (root / "batch" / "link").symlink_to(locked / "inner")
+    locked.chmod(0)  # stat'ing the link's target now raises PermissionError
+    try:
+        # A full scan: the output rescan reads names from its walk and never lists the folder itself.
+        assert _scan(("models", "input", "output")).recovered == len(files)
+    finally:
+        locked.chmod(0o755)
+    assert _records(session) == edits
+
+
+def test_a_file_the_bulk_pass_missed_still_keeps_its_row(root, session, monkeypatch):
+    """A file still being copied when the bulk pass looks is admitted later through the
+    per-file revive, which applies the same window and size rule."""
+    files, edits = _gone_and_copied_back(root, session)
+    monkeypatch.setattr(scanner, "_returned_files", lambda *_args: {})
+
+    state = _scan(("models", "input", "output"))
+
+    assert state.recovered == len(files)
+    assert _records(session) == edits
+    assert [(c.is_missing, c.mtime_ns) for c in _contents(session)] == [
+        (False, path.stat().st_mtime_ns) for path in sorted(files)
+    ]

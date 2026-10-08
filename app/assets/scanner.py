@@ -14,7 +14,7 @@ import os
 import stat
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from itertools import islice
 from pathlib import Path
 from typing import Callable, Literal, NamedTuple, Protocol, TypedDict
@@ -52,6 +52,7 @@ from app.assets.scanner_changes import (
     pending_recovery_count,
     recover_missing_content,
     recover_missing_content_by_stat,
+    REVIVE_WINDOW,
 )
 from app.assets.scanner_admission import (
     PARTIAL_DOWNLOAD_EXTENSIONS as PARTIAL_DOWNLOAD_EXTENSIONS,
@@ -588,11 +589,6 @@ def mark_unlisted_references_missing_safely(
         progress.missing_marked += sum(marked)
 
 
-# A row a scan marked missing revives in bulk when its file is listed again at the same
-# size within this long; after that only the per-file revive (exact size and mtime) applies.
-REVIVE_WINDOW = timedelta(days=7)
-
-
 def _revival_candidates(session: Session, prefixes: list[str], since: datetime) -> dict[str, list[tuple[str, int]]]:
     """Path -> (content id, size) of each row at the path that a scan marked missing since
     ``since`` and that still has a record, newest first, as the per-file revive prefers.
@@ -618,25 +614,45 @@ def _revival_candidates(session: Session, prefixes: list[str], since: datetime) 
     return found
 
 
-def _returned_files(candidates: dict[str, list[tuple[str, int]]], should_stop: ShouldStop) -> dict[str, int]:
-    """Content id -> mtime_ns of the newest candidate row whose file is back as a regular
-    file of the row's size. A directory Core recreated empty (a save, an upload) holds
-    none of them, so its rows stay missing."""
-    returned: dict[str, int] = {}
+def _returned_files(
+    candidates: dict[str, list[tuple[str, int]]], should_stop: ShouldStop, listings: DirListings | None = None
+) -> dict[str, int]:
+    """Content id -> mtime_ns of the newest candidate row whose file its directory lists
+    again at the row's size. Each directory is listed once, or taken from ``listings``
+    when the caller has already walked it: a directory Core recreated empty (a save, an
+    upload) lists nothing, so its rows stay missing. A name the listing spells
+    differently (a case-insensitive filesystem) is left to the per-file revive."""
+    by_dir: dict[str, list[tuple[str, list[tuple[str, int]]]]] = {}
     for path, rows in candidates.items():
-        yield_gil(run=RESCAN_YIELD_RUN)
+        by_dir.setdefault(os.path.dirname(path), []).append((os.path.basename(path), rows))
+    returned: dict[str, int] = {}
+    for directory, files in by_dir.items():
         if should_stop():
             return {}
-        try:
-            stat_result = os.stat(path)
-        except OSError:
-            continue
-        # A pre-epoch mtime can't be stored; that file is left to the per-file path.
-        if not stat.S_ISREG(stat_result.st_mode) or get_mtime_ns(stat_result) < 0:
-            continue
-        match = next((content_id for content_id, size in rows if size == stat_result.st_size), None)
-        if match is not None:
-            returned[match] = get_mtime_ns(stat_result)
+        if listings is not None and directory in listings:
+            names = set(listings[directory][0])
+        else:
+            try:
+                with os.scandir(directory) as it:
+                    names = {entry.name for entry in it}
+            except OSError:
+                continue
+        for name, rows in files:
+            yield_gil(run=RESCAN_YIELD_RUN)
+            if should_stop():
+                return {}
+            if name not in names:
+                continue
+            try:
+                stat_result = os.stat(os.path.join(directory, name))
+            except OSError:
+                continue
+            # A pre-epoch mtime can't be stored; that file is left to the per-file path.
+            if not stat.S_ISREG(stat_result.st_mode) or get_mtime_ns(stat_result) < 0:
+                continue
+            match = next((content_id for content_id, size in rows if size == stat_result.st_size), None)
+            if match is not None:
+                returned[match] = get_mtime_ns(stat_result)
     return returned
 
 
@@ -644,6 +660,7 @@ def revive_returned_references_safely(
     root: RootType,
     progress: _ScanProgress | None = None,
     should_stop: ShouldStop = _never_stop,
+    listings: DirListings | None = None,
 ) -> None:
     """Bulk-revive the rows under ``root`` a scan marked missing within REVIVE_WINDOW whose
     file is back at the same size, counting them as recovered. Not with hashing on: there
@@ -656,7 +673,7 @@ def revive_returned_references_safely(
             candidates = _revival_candidates(
                 session, get_scan_prefixes_for_root(root), get_utc_now() - REVIVE_WINDOW
             )
-        returned = _returned_files(candidates, should_stop)
+        returned = _returned_files(candidates, should_stop, listings)
         _write_in_batches(
             list(returned.items()),
             lambda session, batch: len(revive_contents(session, dict(batch))),
