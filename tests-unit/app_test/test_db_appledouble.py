@@ -184,6 +184,30 @@ def test_copy_of_a_read_only_install_stays_removable(scripts, temp_root):
     assert _current_revision(db_path) == head
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0, reason="needs POSIX permissions, as non-root"
+)
+@pytest.mark.parametrize("taken_by", ["another user", "a symlink"])
+def test_launch_works_when_the_copy_path_is_taken(scripts, temp_root, tmp_path, taken_by):
+    scripts_path, db_path = scripts
+    head = _head(scripts_path)
+    _plant_appledouble(scripts_path)
+    db_module._init_file_db(db_module.args.database_url)
+    (copy,) = _copies(temp_root)
+    if taken_by == "a symlink":
+        shutil.rmtree(copy)
+        os.symlink(tmp_path, copy)
+    else:
+        os.chmod(copy, 0o500)  # this user can no longer empty it, as with another user's copy
+    try:
+        _relaunch()
+    finally:
+        if not os.path.islink(copy):
+            os.chmod(copy, 0o700)
+
+    assert _current_revision(db_path) == head
+
+
 def test_versions_without_appledouble_files_are_used_in_place(scripts, temp_root):
     scripts_path, db_path = scripts
 

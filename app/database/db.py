@@ -312,7 +312,10 @@ def _migrate_and_bind(db_url, db_path, db_exists):
         key = hashlib.sha256(os.path.abspath(versions).encode()).hexdigest()[:12]
         filtered = os.path.join(tempfile.gettempdir(), f"comfyui-alembic-versions-{key}")
         shutil.rmtree(filtered, ignore_errors=True)
-        os.makedirs(filtered, mode=0o700)
+        try:
+            os.makedirs(filtered, mode=0o700)
+        except FileExistsError:  # another user's, or a symlink: use a private one-off copy
+            filtered = tempfile.mkdtemp()
         for name in os.listdir(versions):
             if name.endswith(".py") and not name.startswith("._"):
                 shutil.copyfile(os.path.join(versions, name), os.path.join(filtered, name))
