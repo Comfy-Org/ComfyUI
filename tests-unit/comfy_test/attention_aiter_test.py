@@ -24,6 +24,11 @@ def _run_aiter_import_probe(
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "_AITER_SUPPORTED_ARCHES" for target in node.targets)
     )
+    device_arch_cache = next(
+        node for node in source.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_AITER_DEVICE_ARCHES" for target in node.targets)
+    )
     device_arch = next(
         node for node in source.body
         if isinstance(node, ast.FunctionDef) and node.name == "_aiter_device_arch"
@@ -73,7 +78,7 @@ def _run_aiter_import_probe(
         "__builtins__": {**vars(builtins), "__import__": fake_import},
     }
     try:
-        exec(compile(ast.Module(body=[supported_arches, device_arch, probe], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
+        exec(compile(ast.Module(body=[supported_arches, device_arch_cache, device_arch, probe], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
     except ProbeExit as e:
         return namespace, imported, e.args[0], properties
     return namespace, imported, None, properties
@@ -215,6 +220,11 @@ def test_aiter_device_arch_reads_gcn_target_and_strips_suffix(arch):
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "_AITER_SUPPORTED_ARCHES" for target in node.targets)
     )
+    device_arch_cache = next(
+        node for node in source.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_AITER_DEVICE_ARCHES" for target in node.targets)
+    )
     device_arch = next(
         node for node in source.body
         if isinstance(node, ast.FunctionDef) and node.name == "_aiter_device_arch"
@@ -224,7 +234,7 @@ def test_aiter_device_arch_reads_gcn_target_and_strips_suffix(arch):
         "torch": SimpleNamespace(cuda=SimpleNamespace(get_device_properties=properties)),
         "functools": functools,
     }
-    exec(compile(ast.Module(body=[supported_arches, device_arch], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
+    exec(compile(ast.Module(body=[supported_arches, device_arch_cache, device_arch], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
 
     assert namespace["_aiter_device_arch"](torch.device("cuda:0")) == "gfx1151"
     properties.assert_called_once_with(torch.device("cuda:0"))
@@ -237,6 +247,11 @@ def test_aiter_device_arch_returns_unknown_when_runtime_property_is_unavailable(
         node for node in source.body
         if isinstance(node, ast.FunctionDef) and node.name == "_aiter_device_arch"
     )
+    device_arch_cache = next(
+        node for node in source.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_AITER_DEVICE_ARCHES" for target in node.targets)
+    )
     properties = Mock()
     if isinstance(properties_result, Exception):
         properties.side_effect = properties_result
@@ -246,7 +261,7 @@ def test_aiter_device_arch_returns_unknown_when_runtime_property_is_unavailable(
         "torch": SimpleNamespace(cuda=SimpleNamespace(get_device_properties=properties)),
         "functools": functools,
     }
-    exec(compile(ast.Module(body=[device_arch], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
+    exec(compile(ast.Module(body=[device_arch_cache, device_arch], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
 
     assert namespace["_aiter_device_arch"](torch.device("cuda:0")) is None
 
@@ -257,12 +272,17 @@ def test_aiter_device_arch_skips_device_query_for_cpu():
         node for node in source.body
         if isinstance(node, ast.FunctionDef) and node.name == "_aiter_device_arch"
     )
+    device_arch_cache = next(
+        node for node in source.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_AITER_DEVICE_ARCHES" for target in node.targets)
+    )
     properties = Mock()
     namespace = {
         "torch": SimpleNamespace(cuda=SimpleNamespace(get_device_properties=properties)),
         "functools": functools,
     }
-    exec(compile(ast.Module(body=[device_arch], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
+    exec(compile(ast.Module(body=[device_arch_cache, device_arch], type_ignores=[]), str(ATTENTION_SOURCE), "exec"), namespace)
 
     assert namespace["_aiter_device_arch"](torch.device("cpu")) is None
     properties.assert_not_called()

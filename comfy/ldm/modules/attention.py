@@ -125,16 +125,19 @@ AITER_OTHER_BACKEND_REQUESTED = any((
 
 # Aiter's documented FMHA targets; a CK codegen factory alone does not establish Aiter support.
 _AITER_SUPPORTED_ARCHES = {"gfx942", "gfx950", "gfx1100", "gfx1151", "gfx1201"}
+_AITER_DEVICE_ARCHES = {}
 
 
-@functools.cache
 def _aiter_device_arch(device):
     if device.type != "cuda":
         return None
-    try:
-        return torch.cuda.get_device_properties(device).gcnArchName.split(":", 1)[0]
-    except (AttributeError, RuntimeError):
-        return None
+    if device not in _AITER_DEVICE_ARCHES:
+        try:
+            arch = torch.cuda.get_device_properties(device).gcnArchName.split(":", 1)[0]
+        except (AttributeError, RuntimeError):
+            arch = None
+        _AITER_DEVICE_ARCHES[device] = arch
+    return _AITER_DEVICE_ARCHES[device]
 
 
 if AITER_EXPLICITLY_REQUESTED and (torch.version.hip is None or args.cpu):
