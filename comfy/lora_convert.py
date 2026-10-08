@@ -36,6 +36,38 @@ def convert_uso_lora(sd):
     return sd_out
 
 
+# q/k/v markers of a weight or lora key name.
+QKV_MARKERS = ((".wq", "_to_q", "_wq"), (".wk", "_to_k", "_wk"), (".wv", "_to_v", "_wv"))
+
+
+def qkv_projection(name):
+    """q, k or v when a weight or lora key name is one projection, None for a fused name."""
+    if "qkv" in name:
+        return None
+    for projection, markers in zip("qkv", QKV_MARKERS):
+        if any(marker in name for marker in markers):
+            return projection
+    return None
+
+
+def qkv_projection_key(x, target, lora):
+    """The key a fused qkv adapter has to be loaded under, x when it is not a split fused key.
+
+    A fused qkv adapter covers the q, k and v projections of one module, so a caller that maps
+    the fused key itself can only be loaded for the projection its target weight names.
+    """
+    if not x.endswith("qkv"):
+        return x
+    projection = qkv_projection(target)
+    if projection is None:
+        return x
+    key = x[:-len("qkv")] + projection
+    # a split adapter has its fused factors replaced by the projection ones
+    if any(k.startswith(x + ".") for k in lora) or not any(k.startswith(key + ".") for k in lora):
+        return x
+    return key
+
+
 KREA2_FUSED_QKV = re.compile(r"(.*attn[._]to_)qkv(?=\.|$)")
 KREA2_PROJECTION_QKV = re.compile(r"(.*attn[._]to_)([qkv])(?=\.|$)")
 
@@ -44,7 +76,7 @@ KREA2_PROJECTION_QKV = re.compile(r"(.*attn[._]to_)([qkv])(?=\.|$)")
 # split into rows and the LoKr outer factor is split too when the factorization allows it.
 KREA2_QKV_SHARED = (
     ".lokr_w2", ".lokr_w2_a", ".lokr_w2_b", ".lokr_t2", ".lokr_w1_b",
-    ".alpha", ".lora_A.weight", ".lora_down.weight",
+    ".alpha", ".lora_A.weight", ".lora_down.weight", ".lora_mid.weight",
 )
 KREA2_QKV_OUTER = (".lokr_w1", ".lokr_w1_a")
 KREA2_QKV_OUTPUT = (".dora_scale", ".lora_B.weight", ".lora_up.weight")

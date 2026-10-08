@@ -40,7 +40,9 @@ def load_lora(lora, to_load, log_missing=True):
     lora = comfy.lora_convert.convert_lora(lora)
     patch_dict = {}
     loaded_keys = set()
-    for x in to_load:
+    for x, to in to_load.items():
+        # A split fused qkv adapter is loaded for the projection of the target weight.
+        x = comfy.lora_convert.qkv_projection_key(x, to, lora)
         alpha_name = "{}.alpha".format(x)
         alpha = None
         if alpha_name in lora.keys():
@@ -56,7 +58,7 @@ def load_lora(lora, to_load, log_missing=True):
         for adapter_cls in weight_adapter.adapters:
             adapter = adapter_cls.load(x, lora, alpha, dora_scale, loaded_keys)
             if adapter is not None:
-                patch_dict[to_load[x]] = adapter
+                patch_dict[to] = adapter
                 loaded_keys.update(adapter.loaded_keys)
                 continue
 
@@ -67,27 +69,27 @@ def load_lora(lora, to_load, log_missing=True):
 
         if w_norm is not None:
             loaded_keys.add(w_norm_name)
-            patch_dict[to_load[x]] = ("diff", (w_norm,))
+            patch_dict[to] = ("diff", (w_norm,))
             if b_norm is not None:
                 loaded_keys.add(b_norm_name)
-                patch_dict["{}.bias".format(to_load[x][:-len(".weight")])] = ("diff", (b_norm,))
+                patch_dict["{}.bias".format(to[:-len(".weight")])] = ("diff", (b_norm,))
 
         diff_name = "{}.diff".format(x)
         diff_weight = lora.get(diff_name, None)
         if diff_weight is not None:
-            patch_dict[to_load[x]] = ("diff", (diff_weight,))
+            patch_dict[to] = ("diff", (diff_weight,))
             loaded_keys.add(diff_name)
 
         diff_bias_name = "{}.diff_b".format(x)
         diff_bias = lora.get(diff_bias_name, None)
         if diff_bias is not None:
-            patch_dict["{}.bias".format(to_load[x][:-len(".weight")])] = ("diff", (diff_bias,))
+            patch_dict["{}.bias".format(to[:-len(".weight")])] = ("diff", (diff_bias,))
             loaded_keys.add(diff_bias_name)
 
         set_weight_name = "{}.set_weight".format(x)
         set_weight = lora.get(set_weight_name, None)
         if set_weight is not None:
-            patch_dict[to_load[x]] = ("set", (set_weight,))
+            patch_dict[to] = ("set", (set_weight,))
             loaded_keys.add(set_weight_name)
 
     if log_missing:
