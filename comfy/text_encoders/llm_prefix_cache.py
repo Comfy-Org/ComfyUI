@@ -6,7 +6,7 @@ be truncated, so a new prompt reuses a checkpoint only when it starts with exact
 checkpoint's token ids; the KV is truncated to match by the decode bias.
 
 COMFY_LLM_PREFIX_CACHE: off (default) | gpu (resident, parked in pinned RAM when another model
-needs the VRAM) | cpu (parked in pinned RAM after every call).
+needs the VRAM) | cpu (parked in pinned RAM after every call) | stats (same timing log, never reuses).
 COMFY_LLM_PREFILL_CHUNK: prefill in chunks of this many tokens (0 = one pass).
 """
 import json
@@ -26,7 +26,7 @@ stats = {}
 
 
 def enabled():
-    return MODE in ("gpu", "cpu")
+    return MODE in ("gpu", "cpu", "stats")
 
 
 def _sync(device):
@@ -116,7 +116,7 @@ def _restore(model, key, ids, need, device, dtype):
     """Returns (pkv, prefix_len). Allocates a fresh cache on a miss."""
     global _slot
     from .qwen35 import LinearKV
-    hit = _match(ids) if _slot is not None and _slot.key == key else None
+    hit = _match(ids) if _slot is not None and _slot.key == key and MODE != "stats" else None
     if hit is None:
         if _slot is not None:
             stats["miss_reason"] = "key" if _slot.key != key else "prefix"
@@ -214,7 +214,10 @@ def finish(pkv, ids, generated):
         _slot.checkpoints.append((full[:idx], _linear_states(pkv, clone=False)))
         _slot.kv_len = idx
     stats["cache_gb"] = round(_slot.nbytes() / 1e9, 3)
-    if MODE == "cpu":
+    stats["mode"] = MODE
+    if MODE == "stats":
+        _slot = None
+    elif MODE == "cpu":
         _slot.park()
     out = {k: v for k, v in stats.items() if k != "t0"}
     logging.info("LLM_PREFIX_CACHE %s", json.dumps(out))
