@@ -325,14 +325,9 @@ class GrokImageEditNode(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="GrokImageEditNode",
-            display_name="Grok Image Edit (legacy)",
+            display_name="Grok Image Edit (DEPRECATED)",
             category="partner/image/Grok",
-            description=(
-                "Modify an existing image based on a text prompt. "
-                "This class name is historical and is kept only for compatibility with existing workflows; "
-                "it supports the current models, "
-                "so prefer the GrokImageEditNodeV2 ('Grok Image Edit') node for new workflows."
-            ),
+            description="Modify an existing image based on a text prompt",
             inputs=[
                 IO.Combo.Input(
                     "model",
@@ -417,7 +412,7 @@ class GrokImageEditNode(IO.ComfyNode):
                 )
                 """,
             ),
-            is_deprecated=True,
+            is_deprecated=True,  # superseded by GrokImageEditNodeV2
         )
 
     @classmethod

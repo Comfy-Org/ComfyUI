@@ -427,14 +427,9 @@ class ByteDanceSeedreamNode(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="ByteDanceSeedreamNode",
-            display_name="ByteDance Seedream 4.5 & 5.0 (legacy)",
+            display_name="ByteDance Seedream 4.5 & 5.0 (DEPRECATED)",
             category="partner/image/ByteDance",
-            description=(
-                "Unified text-to-image generation and precise single-sentence editing at up to 4K resolution. "
-                "This class name is historical and is kept only for compatibility with existing workflows; "
-                "it supports the current models, "
-                "so prefer the ByteDanceSeedreamNodeV2 ('ByteDance Seedream 4.5 & 5.0') node for new workflows."
-            ),
+            description="Unified text-to-image generation and precise single-sentence editing at up to 4K resolution.",
             inputs=[
                 IO.Combo.Input(
                     "model",
@@ -544,7 +539,7 @@ class ByteDanceSeedreamNode(IO.ComfyNode):
                 )
                 """,
             ),
-            is_deprecated=True,
+            is_deprecated=True,  # superseded by ByteDanceSeedreamNodeV3
         )
 
     @classmethod

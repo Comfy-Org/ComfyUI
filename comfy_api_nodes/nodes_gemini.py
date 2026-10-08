@@ -467,14 +467,11 @@ class GeminiNode(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="GeminiNode",
-            display_name="Google Gemini (legacy)",
+            display_name="Google Gemini (DEPRECATED)",
             category="partner/text/Gemini",
             description="Generate text responses with Google's Gemini AI model. "
             "You can provide multiple types of inputs (text, images, audio, video) "
-            "as context for generating more relevant and meaningful responses. "
-            "This class name is historical and is kept only for compatibility with existing workflows; "
-            "it supports the current Gemini models, "
-            "so prefer the GeminiNodeV2 ('Google Gemini') node for new workflows.",
+            "as context for generating more relevant and meaningful responses.",
             inputs=[
                 IO.String.Input(
                     "prompt",
@@ -576,7 +573,7 @@ class GeminiNode(IO.ComfyNode):
                 )
                 """,
             ),
-            is_deprecated=True,
+            is_deprecated=True,  # superseded by GeminiNodeV3
         )
 
     @classmethod
@@ -890,7 +887,7 @@ class GeminiNodeV2(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="GeminiNodeV2",
-            display_name="Google Gemini",
+            display_name="Google Gemini (DEPRECATED)",
             category="partner/text/Gemini",
             description="Generate text responses with Google's Gemini models. Provide a text prompt and, "
             "optionally, one or more images, audio clips, videos, or files as multimodal context.",
@@ -948,7 +945,7 @@ class GeminiNodeV2(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=GEMINI_TEXT_PRICE_BADGE,
-            is_deprecated=True,
+            is_deprecated=True,  # superseded by GeminiNodeV3
         )
 
     @classmethod
@@ -1402,14 +1399,9 @@ class GeminiNanoBanana2(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="GeminiNanoBanana2",
-            display_name="Nano Banana 2 (legacy)",
+            display_name="Nano Banana 2 (DEPRECATED)",
             category="partner/image/Gemini",
-            description=(
-                "Generate or edit images synchronously via Google Vertex API. "
-                "This class name is historical and is kept only for compatibility with existing workflows; "
-                "it supports the current models, "
-                "so prefer the GeminiNanoBanana2V2 ('Nano Banana 2') node for new workflows."
-            ),
+            description="Generate or edit images synchronously via Google Vertex API.",
             inputs=[
                 IO.String.Input(
                     "prompt",
@@ -1504,7 +1496,7 @@ class GeminiNanoBanana2(IO.ComfyNode):
             ],
             is_api_node=True,
             price_badge=GEMINI_IMAGE_2_PRICE_BADGE,
-            is_deprecated=True,
+            is_deprecated=True,  # superseded by GeminiNanoBanana2V2
         )
 
     @classmethod
@@ -1887,7 +1879,7 @@ class GeminiVideoOmni(IO.ComfyNode):
     def define_schema(cls):
         return IO.Schema(
             node_id="GeminiVideoOmni",
-            display_name="Google Gemini Omni (Video)",
+            display_name="Google Gemini Omni (Video) (DEPRECATED)",
             category="partner/video/Gemini",
             essentials_category="Video Generation",
             description="Generate a video with audio from a text prompt using Google's Gemini Omni Flash model. "
@@ -1921,7 +1913,7 @@ class GeminiVideoOmni(IO.ComfyNode):
                 IO.Hidden.unique_id,
             ],
             is_api_node=True,
-            is_deprecated=True,
+            is_deprecated=True,  # superseded by GeminiVideoOmniV2
             price_badge=IO.PriceBadge(
                 expr='{"type":"usd","usd":0.1449,"format":{"suffix":"/second","approximate":true}}'
             ),
