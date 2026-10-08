@@ -19,6 +19,7 @@ import torch
 MODE = os.environ.get("COMFY_LLM_PREFIX_CACHE", "off")
 CHUNK = int(os.environ.get("COMFY_LLM_PREFILL_CHUNK", "0"))
 HEADROOM = int(os.environ.get("COMFY_LLM_PREFIX_CACHE_HEADROOM", "4096"))
+MARGINS = os.environ.get("COMFY_LLM_PREFIX_CACHE_MARGINS", "0") == "1"  # log top-2 logit gaps (plain decode)
 MIN_SUFFIX = 7  # suffixes of 6 or fewer tokens would take the decode/verify paths
 
 _slot = None
