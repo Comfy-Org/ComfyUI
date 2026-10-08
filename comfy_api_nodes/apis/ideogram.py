@@ -264,3 +264,11 @@ class IdeogramV4Request(BaseModel):
     resolution: str | None = Field(None, description="Output resolution in WIDTHxHEIGHT (e.g. '2048x2048').")
     rendering_speed: str | None = Field(None, description="Rendering speed: 'TURBO', 'DEFAULT', or 'QUALITY'.")
     enable_copyright_detection: bool | None = Field(None, description="Opt into post-generation copyright detection.")
+
+
+class Ideogram45Request(BaseModel):
+    prompt: str
+    quality: str
+    seed: int = Field(..., ge=0, le=2147483647)
+    size: str | None = None
+    magic_prompt: str | None = None

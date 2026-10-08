@@ -269,9 +269,8 @@ class FeedForward(nn.Module):
 
     def forward(self, x, pre_norm, residual, residual_scale):
         # norm, gated silu and residual addcmul fold into the INT8 kernels
-        h = comfy.ops.linear_input_act(self.w1, x, "rms_norm", pre_norm.weight, pre_norm.eps)
-        return comfy.ops.linear_input_act(
-            self.w2, h, "swiglu", residual=residual, residual_scale=residual_scale)
+        h = comfy.ops.linear_input_act(self.w1, x, "rms_norm", act_weight=pre_norm)
+        return comfy.ops.linear_input_act(self.w2, h, "swiglu", residual=residual, residual_scale=residual_scale)
 
 
 class Attention(nn.Module):
@@ -290,7 +289,7 @@ class Attention(nn.Module):
     def forward(self, x, rotary_pos_emb, pre_norm, residual, residual_scale):
         batch_size, seq_len, _ = x.shape
 
-        qkv = comfy.ops.linear_input_act(self.to_qkv, x, "rms_norm", pre_norm.weight, pre_norm.eps)
+        qkv = comfy.ops.linear_input_act(self.to_qkv, x, "rms_norm", act_weight=pre_norm)
         qkv = qkv.view(batch_size, seq_len, -1, 3 * self.dim_head)
         query, key, value = torch.chunk(qkv, 3, dim=-1)
 
@@ -314,9 +313,7 @@ class Attention(nn.Module):
             out = out.transpose(1, 2).reshape(batch_size, seq_len, -1)
         else:
             out = optimized_attention(query, key, value, self.heads, skip_reshape=True)
-        return comfy.ops.linear_input_act(
-            self.to_out, torch.nan_to_num(out), None,
-            residual=residual, residual_scale=residual_scale)
+        return comfy.ops.linear_input_act(self.to_out, torch.nan_to_num(out), None, residual=residual, residual_scale=residual_scale)
 
 
 class TransformerBlock(nn.Module):
@@ -426,6 +423,7 @@ class MiniMaxH3VideoVAE(nn.Module):
         tile_overlap_min=64,
         tiling=True,
         operations=ops,
+        num_layers=36,
         still_frame=None,
     ):
         super().__init__()
@@ -467,6 +465,7 @@ class MiniMaxH3VideoVAE(nn.Module):
             patch_size_t=self.vae_ratio_t,
             in_channels=z_channels,
             out_channels=out_ch,
+            num_layers=num_layers,
             operations=operations,
         )
 

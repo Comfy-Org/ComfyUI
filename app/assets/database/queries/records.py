@@ -68,7 +68,7 @@ def create_content_reporting_insert(session: Session, path: str, hash: str | Non
     except IntegrityError as error:
         if not is_live_path_conflict(error):
             raise
-        winner = session.execute(sa.select(AssetContent).where(AssetContent.path == path, AssetContent.is_missing.is_(False))).scalar_one()
+        winner = session.execute(sa.select(AssetContent).where(AssetContent.path == path, AssetContent.is_missing == sa.false())).scalar_one()
         return winner, False
 
 
@@ -141,7 +141,7 @@ def get_record_by_path_or_none(session: Session, path: str) -> Asset | None:
     return session.scalar(
         sa.select(Asset)
         .join(AssetContent, Asset.content_id == AssetContent.id)
-        .where(AssetContent.path == path, AssetContent.is_missing.is_(False))
+        .where(AssetContent.path == path, AssetContent.is_missing == sa.false())
         .order_by(Asset.created_at.desc(), Asset.id.desc())
         .limit(1)
     )
@@ -323,6 +323,33 @@ def mark_content_missing(session: Session, content_id: str) -> None:
     for record_id in session.scalars(sa.select(Asset.id).where(Asset.content_id == content_id)):
         ensure_tag_link(session, asset_id=record_id, tag_name="missing", origin="automatic")
     session.flush()
+
+
+def mark_contents_missing(session: Session, content_ids: Sequence[str]) -> list[str]:
+    """mark_content_missing for many rows in a few statements; returns the ids it marked.
+    A row that is gone or already missing is skipped."""
+    if not content_ids:
+        return []
+    # "= 0", not "IS 0": SQLite only uses the partial live-path index for "= 0". This
+    # lookup is by primary key either way; the form matches the other live-row lookups.
+    live = list(session.scalars(sa.select(AssetContent.id).where(AssetContent.id.in_(content_ids), AssetContent.is_missing == sa.false())))
+    if not live:
+        return []
+    session.execute(sa.update(AssetContent).where(AssetContent.id.in_(live)).values(is_missing=True))
+    ensure_tag(session, "missing")
+    unlinked = sa.select(Asset.id, sa.literal("missing"), sa.literal("automatic"), sa.literal(get_utc_now(), sa.DateTime())).where(
+        Asset.content_id.in_(live),
+        ~sa.exists().where(AssetTag.asset_id == Asset.id, AssetTag.tag_name == "missing"),
+    )
+    try:
+        with session.begin_nested():
+            session.execute(sa.insert(AssetTag).from_select(["asset_id", "tag_name", "origin", "added_at"], unlinked))
+    except IntegrityError:
+        # A concurrent writer linked one of them first; settle each link the race-safe way.
+        for record_id in session.scalars(sa.select(Asset.id).where(Asset.content_id.in_(live))):
+            ensure_tag_link(session, asset_id=record_id, tag_name="missing", origin="automatic")
+    session.flush()
+    return live
 
 
 def unset_content_missing(session: Session, content_id: str) -> None:

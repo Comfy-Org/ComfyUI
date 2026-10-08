@@ -50,19 +50,29 @@ def test_attention_moves_offloaded_qk_norm_scale_to_input_device(monkeypatch):
     attn._buffers["qk_norm_scale"] = _OffloadedScale("meta")
 
     batch_size, seq_len = 1, 3
-    x = torch.randn(batch_size, seq_len, heads * dim_head)
+    x = torch.arange(1, 25, dtype=torch.float32).reshape(batch_size, seq_len, heads * dim_head)
     rotary_pos_emb = torch.randn(batch_size, 1, seq_len, dim_head // 2, 2, 2)
 
-    class _Norm:
-        weight = None
-        eps = 1e-5
-
+    pre_norm = comfy.ops.manual_cast.RMSNorm(heads * dim_head, elementwise_affine=False, eps=1e-5)
+    qkv_outputs = []
+    hook = attn.to_qkv.register_forward_hook(lambda module, inputs, output: qkv_outputs.append(output))
     with torch.no_grad():
+        attn.to_qkv.weight.copy_(torch.eye(heads * dim_head).repeat(3, 1))
+        attn.to_qkv.bias.zero_()
+        attn.to_out.weight.copy_(torch.eye(heads * dim_head))
+        attn.to_out.bias.zero_()
         out = attn.forward(
-            x, rotary_pos_emb, pre_norm=_Norm(), residual=None, residual_scale=None
+            x, rotary_pos_emb, pre_norm=pre_norm, residual=None, residual_scale=None
         )
+    hook.remove()
 
     assert out.device == x.device
+    normalized = torch.nn.functional.rms_norm(x, (heads * dim_head,), eps=pre_norm.eps)
+    expected = torch.nn.functional.linear(normalized, attn.to_qkv.weight, attn.to_qkv.bias)
+    unnormalized = torch.nn.functional.linear(x, attn.to_qkv.weight, attn.to_qkv.bias)
+    assert len(qkv_outputs) == 1
+    torch.testing.assert_close(qkv_outputs[0], expected)
+    assert not torch.allclose(qkv_outputs[0], unnormalized)
 
 
 

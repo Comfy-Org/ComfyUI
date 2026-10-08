@@ -1031,10 +1031,11 @@ class VAE:
                 minimax_quant = comfy.utils.detect_layer_quantization(sd, "")
                 if minimax_quant is not None:  # int8+convrot quantized decoder
                     minimax_ops = comfy.ops.mixed_precision_ops(minimax_quant, dtype if dtype is not None else torch.float16)
+                minimax_layers = sum(k.startswith("decoder.transformer_blocks.") and k.endswith(".scale1") for k in sd)
                 still_frame = None
                 if metadata is not None and metadata.get("h3_t1_direct") == "true":  # decoder fine-tuned for single-latent stills
                     still_frame = int(metadata.get("h3_t1_output_slice", 3))
-                self.first_stage_model = comfy.ldm.minimax.vae.MiniMaxH3VideoVAE(operations=minimax_ops, still_frame=still_frame)
+                self.first_stage_model = comfy.ldm.minimax.vae.MiniMaxH3VideoVAE(operations=minimax_ops, num_layers=minimax_layers, still_frame=still_frame)
                 self.latent_channels = 24
                 self.latent_dim = 3
                 # frames 17k+5 <-> latents 5k+2, 16x spatial
