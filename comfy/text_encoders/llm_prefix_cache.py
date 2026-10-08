@@ -207,6 +207,7 @@ def finish(pkv, ids, generated):
         return
     stats["t_end"] = round(time.perf_counter() - stats["t0"], 3)
     stats["gen_tokens"] = len(generated)
+    stats["gen_ids"] = list(generated)
     full = list(ids) + list(generated)
     idx = next(kv.index for kv in pkv if isinstance(kv, LinearKV))
     if _slot.cpu is None and len(ids) < idx <= len(full):
