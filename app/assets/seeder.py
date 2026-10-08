@@ -203,10 +203,11 @@ class _AssetSeeder:
         self._prune_first: bool = False
         # The startup prune waits for the node list: a custom node may register its model
         # folders in INPUT_TYPES, and a prune before that would mark their rows missing.
-        # A server no client loads the node list from never prunes, short of the prune API;
-        # a prune that fails stays pending, so the next scan tries again.
+        # A server no client loads the node list from never prunes, short of the prune API.
         self._prune_pending: bool = False
         self._node_list_served: bool = False
+        # Whether the scan now running was started to run the pending prune.
+        self._scan_prunes: bool = False
         self._progress_callback: ProgressCallback | None = None
         self._event_sink: Callable[[str, dict[str, Any]], None] | None = None
         self._disabled: bool = False
@@ -262,6 +263,7 @@ class _AssetSeeder:
             self._phase = phase
             self._prune_first = prune_first
             self._prune_pending = self._prune_pending or prune_first
+            self._scan_prunes = self._prune_pending and self._node_list_served
             self._compute_hashes = compute_hashes
             self._progress_callback = progress_callback
             self._cancel_event.clear()
@@ -393,15 +395,14 @@ class _AssetSeeder:
         self._emit_event("assets.seed.resumed", {})
         return True
 
-    def node_list_served(self) -> None:
-        """Every root a custom node registers at import or in INPUT_TYPES is now registered,
-        so a pending prune can run."""
+    def start_after_node_list(self, roots: tuple[RootType, ...], compute_hashes: bool) -> None:
+        """The node list has been built, so every root a custom node registers at import or
+        in INPUT_TYPES is registered. Start a scan, or, if the one running won't run the
+        pending prune, queue one behind it that will."""
         with self._lock:
             self._node_list_served = True
-
-    def prune_pending(self) -> bool:
-        with self._lock:
-            return self._prune_pending
+            if not self.start(roots=roots, compute_hashes=compute_hashes) and self._prune_pending and not self._scan_prunes:
+                self.enqueue_scan(roots=roots, phase=ScanPhase.FULL, compute_hashes=compute_hashes)
 
     def restart(
         self,
@@ -569,8 +570,6 @@ class _AssetSeeder:
             if stopped:
                 logging.info("Marking missing assets cancelled after marking %d", marked)
                 raise PruneCancelledError(marked)
-            with self._lock:
-                self._prune_pending = False
             if marked > 0:
                 logging.info("Marked %d references as missing", marked)
             return marked
@@ -737,7 +736,7 @@ class _AssetSeeder:
             assert self._scan_state is not None
             scan_state = self._scan_state
 
-            if self._prune_pending and self._node_list_served:
+            if self._scan_prunes:
                 all_prefixes = get_owned_prefixes()
                 marked = mark_missing_outside_prefixes_safely(
                     all_prefixes, lambda: self._check_pause_and_cancel(_ScanStage.PRUNING)
@@ -757,7 +756,7 @@ class _AssetSeeder:
                     logging.info(
                         "Marked %d refs as missing before scan", marked_count
                     )
-                if marked is not None and not self._cancel_event.is_set():
+                if not self._cancel_event.is_set():
                     with self._lock:
                         self._prune_pending = False
             if self._prune_first:
@@ -901,7 +900,7 @@ class _AssetSeeder:
         start_paused = self._state is State.PAUSED
         self._reset_to_idle()
         pending = self._pending_scan
-        if pending is not None and not self._shutting_down:
+        if pending is not None:
             self._pending_scan = None
             if not self.start(
                 roots=pending["roots"],
