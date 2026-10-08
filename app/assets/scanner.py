@@ -621,7 +621,8 @@ def _returned_files(
     again, settled, at the row's size. Each directory is listed once, or taken from ``listings``
     when the caller has already walked it: a directory Core recreated empty (a save, an
     upload) lists nothing, so its rows stay missing. A name the listing spells
-    differently (a case-insensitive filesystem) is left to the per-file revive."""
+    differently (a case-insensitive filesystem) is not revived; the scan catalogues
+    the file under its on-disk spelling."""
     by_dir: dict[str, list[tuple[str, list[tuple[str, int]]]]] = {}
     for path, rows in candidates.items():
         by_dir.setdefault(os.path.dirname(path), []).append((os.path.basename(path), rows))
