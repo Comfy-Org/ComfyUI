@@ -222,11 +222,12 @@ def test_failure_after_the_database_opened_doesnt_suggest_deleting_it(db_path, c
 
 
 def test_database_url_that_is_not_sqlite(monkeypatch, db_path, caplog):
-    monkeypatch.setattr(db_module.args, "database_url", "postgresql://localhost/comfy")
+    monkeypatch.setattr(db_module.args, "database_url", "postgresql://user:secret@localhost/comfy")
 
     error = _startup_error(caplog)
 
-    assert "--database-url must start with sqlite:///, like sqlite:///path/to/comfyui.db, not 'postgresql://localhost/comfy'." in error
+    assert "--database-url must start with sqlite:///, like sqlite:///path/to/comfyui.db." in error
+    assert "secret" not in error
 
 
 def test_opens_from_an_install_folder_with_a_percent_sign(tmp_path, monkeypatch, db_path):
