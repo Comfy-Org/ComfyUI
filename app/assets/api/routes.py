@@ -43,7 +43,7 @@ from app.assets.database.queries.records import (
     get_preview_file_paths_by_ids,
     list_records_page,
 )
-from app.assets.seeder import ScanInProgressError, asset_seeder
+from app.assets.seeder import PruneCancelledError, ScanInProgressError, asset_seeder
 from app.assets.services import (
     DependencyMissingError,
     HashMismatchError,
@@ -1030,6 +1030,9 @@ async def get_tags_refine(request: web.Request) -> web.Response:
     return web.json_response(payload.model_dump(mode="json", exclude_none=True), status=200)
 
 
+_PRUNE_POLL_SECONDS = 0.25
+
+
 @ROUTES.post("/api/assets/seed")
 @_require_assets_feature_enabled
 async def seed_assets(request: web.Request) -> web.Response:
@@ -1059,6 +1062,18 @@ async def seed_assets(request: web.Request) -> web.Response:
     started = asset_seeder.start(
         roots=valid_roots, compute_hashes=mode.hashing_enabled()
     )
+    # A prune from POST /api/assets/prune is not a scan and emits no scan events, so
+    # wait it out rather than answer 409, which a client takes as "a scan is coming".
+    # Polled on the loop: no executor thread is held for the prune's length. The
+    # retry also covers a prune that ended, or another that began, after start() failed.
+    for _ in range(2):
+        if started:
+            break
+        while asset_seeder.standalone_prune_running():
+            await asyncio.sleep(_PRUNE_POLL_SECONDS)
+        started = asset_seeder.start(
+            roots=valid_roots, compute_hashes=mode.hashing_enabled()
+        )
     if not started:
         return web.json_response({"status": "already_running"}, status=409)
 
@@ -1125,13 +1140,25 @@ async def mark_missing_assets(request: web.Request) -> web.Response:
 
     Returns:
         200 OK with count of marked assets
+        200 OK with status "cancelled" and the count marked before a cancel stopped it
         409 Conflict if a scan is currently running
+        500 Internal Server Error with PRUNE_FAILED if the marking failed, so a
+            prune that did not run is never reported as a completed one
     """
     try:
-        marked = asset_seeder.mark_missing_outside_prefixes()
+        # Off the event loop: a large prune takes seconds to minutes.
+        marked = await asyncio.to_thread(asset_seeder.mark_missing_outside_prefixes)
     except ScanInProgressError:
         return web.json_response(
             {"status": "scan_running", "marked": 0},
             status=409,
+        )
+    except PruneCancelledError as cancelled:
+        return web.json_response({"status": "cancelled", "marked": cancelled.marked}, status=200)
+    if marked is None:
+        return _build_error_response(
+            500,
+            "PRUNE_FAILED",
+            "Failed to mark missing assets.",
         )
     return web.json_response({"status": "completed", "marked": marked}, status=200)

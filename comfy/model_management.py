@@ -478,7 +478,7 @@ except:
 
 SUPPORT_FP8_OPS = args.supports_fp8_compute
 
-AMD_RDNA2_AND_OLDER_ARCH = ["gfx1030", "gfx1031", "gfx1035", "gfx1010", "gfx1011", "gfx1012", "gfx906", "gfx900", "gfx803"]
+AMD_RDNA2_AND_OLDER_ARCH = ["gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036", "gfx1010", "gfx1011", "gfx1012", "gfx906", "gfx900", "gfx803"]
 AMD_ENABLE_MIOPEN_ENV = 'COMFYUI_ENABLE_MIOPEN'
 
 try:
@@ -1219,7 +1219,9 @@ def text_encoder_offload_device():
 def text_encoder_device():
     if args.gpu_only:
         return get_torch_device()
-    elif vram_state in (VRAMState.HIGH_VRAM, VRAMState.NORMAL_VRAM) or comfy.memory_management.aimdo_enabled:
+    if comfy.memory_management.aimdo_enabled:
+        return get_torch_device()
+    elif vram_state in (VRAMState.HIGH_VRAM, VRAMState.NORMAL_VRAM):
         if should_use_fp16(prioritize_performance=False):
             return get_torch_device()
         else:
@@ -1389,6 +1391,8 @@ def current_stream(device):
         return torch.cuda.current_stream()
     elif is_device_xpu(device):
         return torch.xpu.current_stream()
+    elif is_device_npu(device):
+        return torch.npu.current_stream(device)
     else:
         return None
 
@@ -1521,6 +1525,18 @@ def get_offload_stream(device):
         s = ss[stream_counter]
         stream_counters[device] = stream_counter
         return s
+    elif is_device_npu(device):
+        ss = []
+        # Match the CUDA/XPU stream interface used by the shared offload path.
+        # torch.npu.stream provides the context manager for torch-npu streams.
+        for k in range(NUM_STREAMS):
+            s1 = torch.npu.Stream(device=device, priority=0)
+            s1.as_context = torch.npu.stream
+            ss.append(s1)
+        STREAMS[device] = ss
+        s = ss[stream_counter]
+        stream_counters[device] = stream_counter
+        return s
     return None
 
 def sync_stream(device, stream):
@@ -1608,7 +1624,16 @@ def get_disk_swap_total():
         logging.warning("Could not get amount of swap memory on system.")
     return total
 
-if not args.disable_pinned_memory:
+def is_integrated_gpu():
+    device = get_torch_device()
+    return device.type == "cuda" and bool(torch.cuda.get_device_properties(device).is_integrated)
+
+DISABLE_PINNED_MEMORY = args.disable_pinned_memory
+if not DISABLE_PINNED_MEMORY and is_integrated_gpu():
+    # Integrated GPU VRAM is carved out of system RAM, so pinning host memory only takes RAM from the GPU.
+    DISABLE_PINNED_MEMORY = True
+
+if not DISABLE_PINNED_MEMORY:
     if is_nvidia() or is_amd():
         ram = get_total_memory(torch.device("cpu"))
         if WINDOWS:
@@ -1635,7 +1660,7 @@ def discard_cuda_async_error():
         #Dump it! We already know about it from the synchronous return
         pass
 
-def pin_memory(tensor):
+def pin_memory(tensor, evict_active=True):
     global TOTAL_PINNED_MEMORY
     if MAX_PINNED_MEMORY <= 0:
         return False
@@ -1657,7 +1682,8 @@ def pin_memory(tensor):
 
     size = tensor.nbytes
     comfy.memory_management.extra_ram_release(comfy.memory_management.RAM_CACHE_HEADROOM)
-    ensure_pin_registerable(size)
+    if not ensure_pin_registerable(size, evict_active=evict_active):
+        return False
 
     ptr = tensor.data_ptr()
     if ptr == 0:
@@ -1776,6 +1802,12 @@ def force_upcast_attention_dtype():
     else:
         return None
 
+#Developers and agents: You almost never want to call this function from Model code as it does
+#not account for ComfyUIs smart memory feature combining with Dynamic VRAM, where inactive models
+#are preserved in VRAM right up until there is higher priority demand (I.E whatever you want to do
+#that makes you meansure VRAM from model code). Instead call get_free_memory() on the ModelPatcher
+#for your BaseModel object (.current_patcher) instead to count this VRAM as free and then Dynamic
+#VRAM will evict that extra VRAM for you when you use it.
 def get_free_memory(dev=None, torch_free_too=False):
     global directml_enabled
     if dev is None:
@@ -1847,6 +1879,9 @@ def is_device_xpu(device):
 
 def is_device_cuda(device):
     return is_device_type(device, 'cuda')
+
+def is_device_npu(device):
+    return is_device_type(device, 'npu')
 
 def set_torch_device(device):
     """Set the current device for the given torch device. Supports CUDA and XPU."""
@@ -2088,6 +2123,8 @@ def synchronize():
         return
     if is_intel_xpu():
         torch.xpu.synchronize()
+    elif is_ascend_npu():
+        torch.npu.synchronize()
     elif torch.cuda.is_available():
         torch.cuda.synchronize()
 

@@ -847,6 +847,7 @@ def test_sensenova_prefix_mask_matches_attention_dtype(monkeypatch):
     attention = SimpleNamespace(
         _project=lambda hidden_states, rope, generation: (query, key, value),
         o_proj=lambda output: output,
+        comfy_attention=sensenova_model.ComfyAttention(),
     )
 
     mask = torch.zeros(1, 1, 3, 3, dtype=torch.bfloat16)

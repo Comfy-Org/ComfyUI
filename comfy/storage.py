@@ -5,6 +5,7 @@ import platform
 import re
 
 import comfy_aimdo.storage
+from comfy.cli_args import args
 
 
 _NVME_NAMESPACE = re.compile(r"^(nvme\d+)n\d+$")
@@ -97,11 +98,14 @@ def state_dict_fast_disk(state_dict):
                 path = getattr(untyped_storage(), "_comfy_source_path", None)
                 if path is not None:
                     paths.add(path)
-    return model_fast_disk(sorted(paths)) if paths else False
+    return model_fast_disk(sorted(paths))
 
 
 def model_fast_disk(paths):
-    results = [fast_storage(path) for path in paths]
-    fast = bool(results) and all(result is True for result in results)
+    if args.fast_disk or args.disable_fast_disk:
+        fast = not args.disable_fast_disk
+    else:
+        results = [fast_storage(path) for path in paths]
+        fast = bool(results) and all(result is True for result in results)
     logging.info("Model storage policy: fast_disk=%s paths=%s", fast, [os.path.realpath(path) for path in paths])
     return fast

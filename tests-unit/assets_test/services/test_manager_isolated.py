@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, Mock, call
 import folder_paths
 import pytest
 from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session, Session as SASession
+from sqlalchemy.orm import Session, Session as SASession, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.assets import lifecycle
@@ -76,6 +76,7 @@ def threaded_create_session(
     monkeypatch.setattr(seeder_module, "create_session", _create_session)
     monkeypatch.setattr(scanner, "create_session", _create_session)
     monkeypatch.setattr("app.assets.services.ingest.create_session", _create_session)
+    monkeypatch.setattr("app.database.db.WriteSession", sessionmaker(bind=engine))
     yield _create_session
     engine.dispose()
 

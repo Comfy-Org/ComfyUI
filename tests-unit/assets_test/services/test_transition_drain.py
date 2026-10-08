@@ -419,3 +419,31 @@ def test_transition_drain_retires_only_the_unreadable_path_and_hashes_the_health
     assert session.get(AssetContent, unreadable_id).hash is None
     assert hash_mode_state.pending_transition_count() == 0
     assert read_stored_mode(session) == "on"
+
+
+def test_drain_commits_each_entry_before_hashing_the_next(session, temp_dir, monkeypatch):
+    gone = temp_dir / "gone.bin"
+    kept = temp_dir / "kept.bin"
+    for path in (gone, kept):
+        path.write_bytes(path.name.encode())
+        create_content(session, str(path), size_bytes=path.stat().st_size, mtime_ns=path.stat().st_mtime_ns)
+    session.commit()
+    gone.unlink()
+    for path in (gone, kept):
+        hash_mode_state._PENDING_QUEUE.append(hash_mode_state._PendingEntry(str(path)))
+        hash_mode_state._PENDING_PATHS.add(str(path))
+    in_transaction_while_hashing = []
+
+    def recording_snapshot_hash(path: str):
+        in_transaction_while_hashing.append(session.connection().connection.driver_connection.in_transaction)
+        return snapshot_hash(path)
+
+    monkeypatch.setattr(hash_mode_state, "snapshot_hash", recording_snapshot_hash)
+
+    drain_transition_queue(session)
+    session.commit()
+
+    assert in_transaction_while_hashing == [False, False]
+    live = {content.path: content for content in session.scalars(select(AssetContent)) if not content.is_missing}
+    assert list(live) == [str(kept)]
+    assert live[str(kept)].hash == _stored_hash(kept)

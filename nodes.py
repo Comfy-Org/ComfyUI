@@ -25,6 +25,7 @@ import comfy.samplers
 import comfy.sample
 import comfy.sd
 import comfy.utils
+import comfy.latent_formats
 import comfy.controlnet
 from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator
 from comfy_api.internal import register_versions, ComfyAPIWithVersion
@@ -38,6 +39,7 @@ from comfy.cli_args import args
 
 import importlib
 
+from app import governance
 import folder_paths
 import latent_preview
 import node_helpers
@@ -293,6 +295,9 @@ class ConditioningZeroOut:
             conditioning_scale = d.get("conditioning_scale", None)
             if conditioning_scale is not None:
                 d["conditioning_scale"] = torch.zeros_like(conditioning_scale)
+            direct_context = d.get("direct_context", None)
+            if direct_context is not None:
+                d["direct_context"] = torch.zeros_like(direct_context)
             n = [torch.zeros_like(t[0]), d]
             c.append(n)
         return (c, )
@@ -770,7 +775,7 @@ class LoraLoaderModelOnly(LoraLoader):
 
 class VAELoader:
     video_taes = ["taehv", "lighttaew2_2", "lighttaew2_1", "lighttaehy1_5", "taeltx_2", "taeh3"]
-    image_taes = ["taesd", "taesdxl", "taesd3", "taef1", "taef2"]
+    image_taes = ["taesd", "taesdxl", "taesd3", "taef1", "taef2", "taeqi2_1"]
 
     @staticmethod
     def vae_list(s):
@@ -778,7 +783,7 @@ class VAELoader:
         approx_vaes = folder_paths.get_filename_list("vae_approx")
         have_img_encoder, have_img_decoder = set(), set()
         for v in approx_vaes:
-            parts = v.split("_", 1)
+            parts = v.rsplit("_", 1)
             if len(parts) != 2 or parts[0] not in s.image_taes:
                 for tae in s.video_taes:
                     if v.startswith(tae):
@@ -821,6 +826,10 @@ class VAELoader:
         elif name == "taef1":
             sd["vae_scale"] = torch.tensor(0.3611)
             sd["vae_shift"] = torch.tensor(0.1159)
+        elif name == "taeqi2_1":
+            latent_format = comfy.latent_formats.QwenImage21()
+            sd["vae_scale"] = 1.0 / latent_format.latents_std[0]
+            sd["vae_shift"] = latent_format.latents_mean[0]
         return sd
 
     @classmethod
@@ -1248,8 +1257,8 @@ class EmptyLatentImage:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "width": ("INT", {"default": 512, "min": 16, "max": MAX_RESOLUTION, "step": 8, "tooltip": "The width of the latent images in pixels."}),
-                "height": ("INT", {"default": 512, "min": 16, "max": MAX_RESOLUTION, "step": 8, "tooltip": "The height of the latent images in pixels."}),
+                "width": ("INT", {"default": 1024, "min": 16, "max": MAX_RESOLUTION, "step": 8, "tooltip": "The width of the latent images in pixels."}),
+                "height": ("INT", {"default": 1024, "min": 16, "max": MAX_RESOLUTION, "step": 8, "tooltip": "The height of the latent images in pixels."}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 4096, "tooltip": "The number of latent images in the batch."})
             }
         }
@@ -2254,11 +2263,12 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
 
     try:
         logging.debug("Trying to load custom node {}".format(module_path))
+        spec_from_file_location = governance.pack_module_spec if module_parent == "custom_nodes" else importlib.util.spec_from_file_location
         if os.path.isfile(module_path):
-            module_spec = importlib.util.spec_from_file_location(sys_module_name, module_path)
+            module_spec = spec_from_file_location(sys_module_name, module_path)
             module_dir = os.path.split(module_path)[0]
         else:
-            module_spec = importlib.util.spec_from_file_location(sys_module_name, os.path.join(module_path, "__init__.py"))
+            module_spec = spec_from_file_location(sys_module_name, os.path.join(module_path, "__init__.py"))
             module_dir = module_path
 
         module = importlib.util.module_from_spec(module_spec)
@@ -2377,6 +2387,11 @@ async def init_external_custom_nodes():
                     logging.info(f"Blocked by policy: {module_path}")
                     continue
 
+            refusal = governance.pack_refusal(module_path)
+            if refusal is not None:
+                logging.warning(refusal)
+                continue
+
             time_before = time.perf_counter()
             success = await load_custom_node(module_path, base_node_names, module_parent="custom_nodes")
             node_import_times.append((time.perf_counter() - time_before, module_path, success))
@@ -2487,6 +2502,7 @@ async def init_builtin_extra_nodes():
         "nodes_seedvr.py",
         "nodes_context_windows.py",
         "nodes_qwen.py",
+        "nodes_ming.py",
         "nodes_mage.py",
         "nodes_joyimage.py",
         "nodes_boogu.py",
@@ -2535,6 +2551,8 @@ async def init_builtin_extra_nodes():
         "nodes_moge.py",
         "nodes_mediapipe.py",
         "nodes_gaussian_splat.py",
+        "nodes_camera.py",
+        "nodes_camera_angle.py",
         "nodes_triposplat.py",
         "nodes_depth_anything_3.py",
         "nodes_seed.py",

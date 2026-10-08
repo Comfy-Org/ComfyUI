@@ -2,8 +2,7 @@
 and files, recording a hash-mode transition, and handing the filesystem scan to
 the background seeder. Startup only enqueues transition work — draining it
 belongs to the seeder, so a large library cannot stall the server before it
-accepts requests. It also settles, before any of that, whether the database
-dependencies exist at all, disabling the asset routes when they do not.
+accepts requests.
 """
 
 from __future__ import annotations
@@ -13,15 +12,20 @@ import os
 import shutil
 
 import folder_paths
-from sqlalchemy import select
 
-from app.assets.database.models import Asset, AssetContent
-from app.assets.database.queries.records import delete_record
-from app.assets.helpers import sql_path_under_prefix
-from app.assets.services.hash_mode_state import enqueue_transition_work
-from app.assets.services.hash_mode_state import record_transition_intent
-from app.database.db import can_create_session, create_session
+from app.database.db import can_create_session, create_session, dependencies_available
 from comfy.cli_args import args
+
+# Startup imports this module even without the database packages; the functions
+# that need these are only called when a session can be created.
+if dependencies_available():
+    from sqlalchemy import select
+
+    from app.assets.database.models import Asset, AssetContent
+    from app.assets.database.queries.records import delete_record
+    from app.assets.helpers import sql_path_under_prefix
+    from app.assets.services.hash_mode_state import enqueue_transition_work
+    from app.assets.services.hash_mode_state import record_transition_intent
 
 _excluded_scan_roots: set[str] = set()
 _hash_mode_transition: str | None = None

@@ -58,17 +58,20 @@ class YuE2GenerateMusic(io.ComfyNode):
                 io.Float.Input("top_p", default=0.95, min=0.01, max=1.0, step=0.01, advanced=True),
                 io.Int.Input("top_k", default=100, min=1, max=32768, advanced=True),
                 io.Float.Input("repetition_penalty", default=1.2, min=0.01, max=10.0, step=0.01, advanced=True),
+                io.Float.Input("cfg_scale", default=1.0, min=0.0, max=100.0, step=0.01, optional=True, advanced=True, tooltip="Autoregressive guidance for style and lyrics. 1.0 disables CFG, matching the ABC workflow. Use 1.01 to match the original off-mode guidance."),
             ],
             outputs=[io.Conditioning.Output(), io.Float.Output(display_name="seconds")],
         )
 
     @classmethod
-    def execute(cls, clip, style, lyrics, seed, mode, max_duration, temperature, top_p, top_k, repetition_penalty, abc=""):
+    def execute(cls, clip, style, lyrics, seed, mode, max_duration, temperature, top_p, top_k, repetition_penalty, abc="", cfg_scale=None):
         if not abc.strip():
             mode = "off"
+        if cfg_scale is None:
+            cfg_scale = 1.01 if mode == "off" else 1.0
         tokens = clip.tokenize(style, lyrics=lyrics, cot=mode, seed=seed, abc=abc,
                                max_tokens=max(1, round(max_duration * FRAMES_PER_SECOND)),
-                               temperature=temperature, top_p=top_p, top_k=top_k, repetition_penalty=repetition_penalty)
+                               temperature=temperature, top_p=top_p, top_k=top_k, repetition_penalty=repetition_penalty, cfg_scale=cfg_scale)
         conditioning = clip.encode_from_tokens_scheduled(tokens)
         return io.NodeOutput(conditioning, conditioning[0][1]["yue2_frames"] / FRAMES_PER_SECOND)
 
