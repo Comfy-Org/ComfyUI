@@ -1,4 +1,5 @@
 import asyncio
+from fractions import Fraction
 from concurrent.futures import Future
 import os
 import threading
@@ -6,6 +7,8 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
+import av
+import numpy as np
 import pytest
 from PIL import Image
 from sqlalchemy import select
@@ -494,3 +497,19 @@ def test_a_very_wide_image_fits_webp_side_limit():
 
     assert webp[8:12] == b"WEBP"
     assert max(width, height) <= 16383
+
+
+def test_a_half_float_luminance_exr_keeps_its_darks(tmp_path):
+    path = tmp_path / "y.exr"
+    gray = np.full((8, 8), 0.0627, np.float16)  # sRGB ~70/255
+    codec = av.CodecContext.create("exr", "w")
+    codec.width, codec.height, codec.pix_fmt = 8, 8, "grayf32le"
+    codec.time_base = Fraction(1, 1)
+    codec.options = {"format": "half"}
+    frame = av.VideoFrame.from_ndarray(gray.astype(np.float32), format="grayf32le")
+    frame.pts, frame.time_base = 0, codec.time_base
+    path.write_bytes(b"".join(bytes(p) for p in list(codec.encode(frame)) + list(codec.encode(None))))
+
+    image = previews.ExrPreviewGenerator().generate(str(path), previews.PREVIEW_MAX_PIXELS)
+
+    assert 66 <= image.getpixel((4, 4))[0] <= 74, "linear 0.0627 is sRGB ~70, not near black"

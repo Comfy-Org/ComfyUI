@@ -50,7 +50,11 @@ def _decode_for_preview(path: str, max_pixels: int) -> Image.Image:
     # Name the demuxer: left to probe, FFmpeg picks one from the file's contents.
     with av.open(path, format="exr_pipe") as container:
         frame = next(container.decode(video=0))
-    rgb = frame.to_ndarray(format="gbrpf32le")
+    if frame.format.name.startswith("gray"):
+        # Exact; converting half-float gray to gbrpf32le crushes the darks.
+        rgb = np.repeat(frame.to_ndarray(format="grayf32le")[..., None], 3, axis=-1)
+    else:
+        rgb = frame.to_ndarray(format="gbrpf32le")
     height, width = rgb.shape[:2]
     scale = min(1.0, (max_pixels / (width * height)) ** 0.5)
     size = (max(1, int(width * scale)), max(1, int(height * scale)))
