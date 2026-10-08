@@ -6,7 +6,8 @@ be truncated, so a new prompt reuses a checkpoint only when it starts with exact
 checkpoint's token ids; the KV is truncated to match by the decode bias.
 
 COMFY_LLM_PREFIX_CACHE: off (default) | gpu (resident, parked in pinned RAM when another model
-needs the VRAM) | cpu (parked in pinned RAM after every call) | stats (same timing log, never reuses).
+needs the VRAM) | vram (resident, never parked) | cpu (parked in pinned RAM after every call) |
+disk (parked to COMFY_LLM_PREFIX_CACHE_DIR after every call, mmapped back) | stats (same timing log, never reuses).
 COMFY_LLM_PREFILL_CHUNK: prefill in chunks of this many tokens (0 = one pass).
 """
 import json
@@ -20,14 +21,42 @@ MODE = os.environ.get("COMFY_LLM_PREFIX_CACHE", "off")
 CHUNK = int(os.environ.get("COMFY_LLM_PREFILL_CHUNK", "0"))
 HEADROOM = int(os.environ.get("COMFY_LLM_PREFIX_CACHE_HEADROOM", "4096"))
 MARGINS = os.environ.get("COMFY_LLM_PREFIX_CACHE_MARGINS", "0") == "1"  # log top-2 logit gaps (plain decode)
+DISK_DIR = os.environ.get("COMFY_LLM_PREFIX_CACHE_DIR", "/tmp/llm_prefix_cache")
 MIN_SUFFIX = 7  # suffixes of 6 or fewer tokens would take the decode/verify paths
 
 _slot = None
 stats = {}
+_disk_gen = [0]
+
+
+class _Host:
+    # parks one tensor at a time: pinned RAM, or a file on disk that is mmapped back
+    def __init__(self, disk):
+        self.disk = disk
+        if disk:
+            _disk_gen[0] += 1
+            os.makedirs(DISK_DIR, exist_ok=True)
+            for f in os.listdir(DISK_DIR):
+                if not f.startswith(f"g{_disk_gen[0]}-"):
+                    try:
+                        os.remove(os.path.join(DISK_DIR, f))
+                    except OSError:
+                        pass
+        self.n = 0
+
+    def __call__(self, t):
+        if not self.disk:
+            h = torch.empty(t.shape, dtype=t.dtype, pin_memory=True)
+            h.copy_(t, non_blocking=True)
+            return h
+        self.n += 1
+        path = os.path.join(DISK_DIR, f"g{_disk_gen[0]}-{self.n}.pt")
+        torch.save(t.cpu(), path)
+        return torch.load(path, mmap=True)
 
 
 def enabled():
-    return MODE in ("gpu", "cpu", "stats")
+    return MODE in ("gpu", "vram", "cpu", "disk", "stats")
 
 
 def _sync(device):
@@ -63,30 +92,21 @@ class _Slot:
         if self.cpu is not None:
             return
         t = time.perf_counter()
+        host = _Host(MODE == "disk")
         cpu = {}
         for i, kv in self.attn.items():
-            k = torch.empty(kv.key[:, :, :self.kv_len].shape, dtype=kv.key.dtype, pin_memory=True)
-            v = torch.empty_like(k, pin_memory=True)
-            k.copy_(kv.key[:, :, :self.kv_len], non_blocking=True)
-            v.copy_(kv.value[:, :, :self.kv_len], non_blocking=True)
-            cpu[i] = (k, v)
+            cpu[i] = (host(kv.key[:, :, :self.kv_len]), host(kv.value[:, :, :self.kv_len]))
         cps = []
         for ids, st in self.checkpoints:
-            pst = {}
-            for i, (c, r) in st.items():
-                pc = torch.empty(c.shape, dtype=c.dtype, pin_memory=True)
-                pr = torch.empty(r.shape, dtype=r.dtype, pin_memory=True)
-                pc.copy_(c, non_blocking=True)
-                pr.copy_(r, non_blocking=True)
-                pst[i] = (pc, pr)
-            cps.append((ids, pst))
+            cps.append((ids, {i: (host(c), host(r)) for i, (c, r) in st.items()}))
         torch.cuda.synchronize()
         self.cpu = cpu
+        self.where = "disk" if host.disk else "pinned"
         self.checkpoints = cps
         self.attn = None
         self.shared = None
         stats["park_s"] = round(time.perf_counter() - t, 3)
-        logging.info("llm prefix cache: parked %.2f GB in pinned RAM in %.3f s", self.nbytes() / 1e9, stats["park_s"])
+        logging.info("llm prefix cache: parked %.2f GB (%s) in %.3f s", self.nbytes() / 1e9, MODE, stats["park_s"])
 
 
 def _match(ids):
@@ -137,7 +157,7 @@ def _restore(model, key, ids, need, device, dtype):
         for i, (k, v) in src.items():
             pkv[i].key[:, :, :n].copy_(k[:, :, :n], non_blocking=True)
             pkv[i].value[:, :, :n].copy_(v[:, :, :n], non_blocking=True)
-        stats["restore"] = "from-pinned" if _slot.cpu is not None else "grow"
+        stats["restore"] = ("from-" + _slot.where) if _slot.cpu is not None else "grow"
     for i, (c, r) in st.items():
         pkv[i] = LinearKV(c.to(device, copy=True, non_blocking=True), r.to(device, copy=True, non_blocking=True), n, None, None)
     _set_prefix(pkv, n)
@@ -219,7 +239,7 @@ def finish(pkv, ids, generated):
     stats["mode"] = MODE
     if MODE == "stats":
         _slot = None
-    elif MODE == "cpu":
+    elif MODE in ("cpu", "disk"):
         _slot.park()
     out = {k: v for k, v in stats.items() if k != "t0"}
     logging.info("LLM_PREFIX_CACHE %s", json.dumps(out))
@@ -232,7 +252,7 @@ def drop():
 
 def on_memory_pressure(memory_required, device):
     # model_management.free_memory hook: park instead of holding VRAM another model needs
-    if _slot is None or _slot.cpu is not None or device is None or device.type != "cuda":
+    if MODE == "vram" or _slot is None or _slot.cpu is not None or device is None or device.type != "cuda":
         return
     import comfy.model_management
     if comfy.model_management.get_free_memory(device) < memory_required:

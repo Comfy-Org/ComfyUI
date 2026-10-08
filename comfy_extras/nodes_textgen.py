@@ -45,7 +45,7 @@ class TextGenerate(io.ComfyNode):
                 io.Boolean.Input("use_default_template", optional=True, default=True, tooltip="Use the built in system prompt/template if the model has one.", advanced=True),
                 io.Combo.Input("mtp", options=["auto", "off", "2", "3", "4", "5"], default="auto", optional=True, tooltip="Speculative decoding with the checkpoint's multi-token-prediction head. No effect without MTP weights. auto adapts the draft depth; 2-5 pins it. Sampled output stays correctly distributed but differs from non-MTP output for the same seed."),
                 io.String.Input("system_prompt", force_input=True, optional=True, tooltip="Replaces the system prompt in the model's chat template. Ignored when the default template is not used."),
-                io.Combo.Input("prefix_cache", options=["env", "off", "stats", "gpu", "cpu"], default="env", optional=True, advanced=True, tooltip="Spike: prefix cache mode; env keeps COMFY_LLM_PREFIX_CACHE."),
+                io.Combo.Input("prefix_cache", options=["env", "off", "stats", "gpu", "vram", "cpu", "disk"], default="env", optional=True, advanced=True, tooltip="Spike: prefix cache mode; env keeps COMFY_LLM_PREFIX_CACHE."),
             ],
             outputs=[
                 io.String.Output(display_name="generated_text"),
