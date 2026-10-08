@@ -85,6 +85,20 @@ def test_krea2_fused_qkv_lokr_with_unaligned_factorization_uses_row_offset():
     _assert_projections_match(converted, reference, MAIN_PREFIX, MAIN_OUT, MAIN_IN)
 
 
+def test_krea2_fused_qkv_lokr_with_decomposed_w2_splits_into_projections():
+    # LyCORIS can store the outer factor whole and the inner factor decomposed.
+    sd = _fused_lokr(MAIN_PREFIX, 24, 384, 24, 256)
+    del sd[MAIN_PREFIX + ".lokr_w2"]
+    sd[MAIN_PREFIX + ".lokr_w2_a"] = torch.randn(384, 32)
+    sd[MAIN_PREFIX + ".lokr_w2_b"] = torch.randn(32, 256)
+    sd.update(_fused_lokr(TEXT_PREFIX, 24, 320, 20, 128))
+    reference = _apply(sd, MAIN_PREFIX, MAIN_OUT, MAIN_IN)
+    converted = comfy.lora_convert.convert_lora(sd)
+
+    assert converted[MAIN_PREFIX.replace("qkv", "") + "q.lokr_w1"].shape == (16, 24)
+    _assert_projections_match(converted, reference, MAIN_PREFIX, MAIN_OUT, MAIN_IN)
+
+
 def test_krea2_fused_qkv_lora_splits_up_rows():
     sd = {
         MAIN_PREFIX + ".lora_A.weight": torch.randn(8, MAIN_IN),
@@ -128,6 +142,14 @@ def test_krea2_unused_per_projection_qkv_placeholders_are_skipped():
     sd[q + ".lokr_w2"] = torch.zeros(256, 256)
     sd[q + ".alpha"] = torch.tensor(3.0)
     sd[q + ".dora_scale"] = torch.randn(MAIN_IN, 1)
+    k = MAIN_PREFIX.replace("qkv", "k")
+    # a decomposed placeholder holds no delta either, its second factors are zero
+    sd[k + ".lokr_w1_a"] = torch.randn(24, 24)
+    sd[k + ".lokr_w1_b"] = torch.zeros(24, 24)
+    sd[k + ".lokr_w2_a"] = torch.randn(256, 256)
+    sd[k + ".lokr_w2_b"] = torch.zeros(256, 256)
+    sd[k + ".alpha"] = torch.tensor(3.0)
+    sd[k + ".dora_scale"] = torch.randn(1536, 1)
 
     messages, converted = _capture_warnings(lambda: comfy.lora_convert.convert_lora(sd))
 
@@ -136,6 +158,21 @@ def test_krea2_unused_per_projection_qkv_placeholders_are_skipped():
     assert converted[q + ".alpha"].item() == fused_alpha
     assert torch.equal(converted[q + ".dora_scale"], fused_dora[:MAIN_IN])
     assert messages == []
+
+
+def test_krea2_fused_qkv_lora_without_text_fusion_keys_is_converted():
+    # A lora that trained only the transformer blocks has no text_fusion key at all.
+    converted = comfy.lora_convert.convert_lora(_fused_lokr(MAIN_PREFIX, 24, 384, 24, 256))
+
+    assert not any(k.startswith(MAIN_PREFIX + ".") for k in converted)
+    assert converted[MAIN_PREFIX.replace("qkv", "") + "k.lokr_w1"].shape == (4, 24)
+
+
+def test_krea2_incomplete_fused_qkv_adapter_is_left_alone():
+    # A fused entry with a missing factor pair is kept instead of raising a KeyError.
+    sd = {MAIN_PREFIX + ".lora_B.weight": torch.randn(MAIN_OUT, 8)}
+
+    assert MAIN_PREFIX + ".lora_B.weight" in comfy.lora_convert.convert_lora(sd)
 
 
 def test_krea2_trained_per_projection_qkv_adapter_is_reported():
