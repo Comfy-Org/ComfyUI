@@ -87,8 +87,22 @@ def test_corrupt_database_stops_startup(tmp_path):
     result = _quick_start(tmp_path)
 
     assert result.returncode == 1, result.stderr
+    assert "ASSETS_STARTUP_FAILED: corrupt" in result.stderr
     assert f"The asset database '{_db(tmp_path)}' is corrupt" in result.stderr
     assert "--disable-assets" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_database_from_a_newer_comfyui_stops_startup_without_a_traceback(tmp_path):
+    _db(tmp_path).parent.mkdir()
+    with sqlite3.connect(_db(tmp_path)) as conn:
+        conn.execute("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+        conn.execute("INSERT INTO alembic_version VALUES ('0099_from_a_newer_release')")
+
+    result = _quick_start(tmp_path)
+
+    assert result.returncode == 1, result.stderr
+    assert "ASSETS_STARTUP_FAILED: newer_revision" in result.stderr
     assert "Traceback" not in result.stderr
 
 

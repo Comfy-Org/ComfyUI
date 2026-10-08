@@ -1,3 +1,4 @@
+import errno
 import importlib
 import logging
 import os
@@ -34,15 +35,16 @@ try:
 
     _DB_AVAILABLE = True
 except ImportError as e:
-    log_startup_warning(
-        f"""
+    if not args.disable_assets:  # nothing else needs these packages
+        log_startup_warning(
+            f"""
 ------------------------------------------------------------------------
 Error importing dependencies: {e}
 {get_missing_requirements_message()}
 This error is happening because ComfyUI now uses a local sqlite database.
 ------------------------------------------------------------------------
 """.strip()
-    )
+        )
 
 
 def dependencies_available():
@@ -102,7 +104,8 @@ def get_database_url():
     if make_url(url).database != db_path:  # SQLAlchemy before 2.1 doesn't quote a ?
         raise DatabasePathError(
             f"The asset database path '{db_path}' contains a '?', which the installed SQLAlchemy can't open.\n"
-            "Move the user folder to a path without '?', set --database-url, or upgrade SQLAlchemy to 2.1 or newer (Python 3.11+)."
+            "Move the user folder to a path without '?', set --database-url, or upgrade SQLAlchemy to 2.1 or newer "
+            "(Python 3.11+): pip install -U \"SQLAlchemy>=2.1\""
         )
     return url
 
@@ -244,7 +247,6 @@ def _is_memory_db(db_url):
 
 def init_db():
     db_url = get_database_url()
-    logging.debug(f"Database URL: {db_url}")
 
     if _is_memory_db(db_url):
         _init_memory_db(db_url)
@@ -290,6 +292,10 @@ def _init_file_db(db_url):
     try:
         copy_legacy_default_db(db_path)
         db_exists = os.path.exists(db_path)
+        for path in (db_path, db_path + "-wal", db_path + "-shm"):
+            # Before the backup and upgrade, which would otherwise leave read-only copies behind.
+            if os.path.exists(path) and not os.access(path, os.W_OK):
+                raise PermissionError(errno.EACCES, "Permission denied", path)
         _migrate_and_bind(db_url, db_path, db_exists)
         _check_writable()
     except Exception:
@@ -388,7 +394,7 @@ def _migrate_and_bind(db_url, db_path, db_exists):
             command.upgrade(config, target_rev)
             logging.info(f"Database upgraded from {current_rev} to {target_rev}")
         except Exception as e:
-            logging.exception("Error upgrading database: ")
+            logging.debug("Error upgrading database", exc_info=True)
             if backup_path:
                 # Restore the database from backup if upgrade fails
                 try:

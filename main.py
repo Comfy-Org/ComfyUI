@@ -25,7 +25,6 @@ setup_logger(log_level=console_log_level, file_outputs=file_log_outputs, use_std
 
 from app.database.db import DatabasePathError, dependencies_available, get_database_url, get_db_path, init_db, lock_holder_db_path, missing_dependencies
 from app.assets.event_log import error_kind
-from utils.install_util import get_missing_requirements_message
 from app.assets.lifecycle import cleanup_temp_filesystem
 from app.assets.manager import AssetManager, default_asset_manager
 import itertools
@@ -59,7 +58,7 @@ if __name__ == "__main__":
         logging.warning("--disable-api-nodes is deprecated and will be removed in a future version. It currently behaves like --offline. Use --offline to keep the frontend offline, or --disable-partner-nodes to only disable partner nodes.")
 
     if args.enable_assets:
-        logging.warning("--enable-assets is deprecated and does nothing: the assets system is on by default. Use --disable-assets to turn it off.")
+        logging.warning("--enable-assets is deprecated and does nothing: the assets system is on unless ComfyUI is started with --disable-assets.")
 
 faulthandler.enable(file=sys.stderr, all_threads=args.debug_hang)
 if __name__ == "__main__" and args.debug_hang:
@@ -495,41 +494,66 @@ def setup_database(asset_manager):
         init_db()
         asset_manager.startup()
     except Exception as e:
-        logging.error(f"{e}\n{WITHOUT_ASSETS}" if isinstance(e, DatabasePathError) else database_failure_message(e, get_database_url()))
-        sys.exit(1)
+        if isinstance(e, DatabasePathError):
+            stop_startup("path_unsupported", f"{e}\n{WITHOUT_ASSETS}")
+        stop_startup(*database_failure_message(e, get_database_url()))
 
 
 WITHOUT_ASSETS = "Or start ComfyUI without the assets system: --disable-assets"
 
 
+def stop_startup(kind, message):
+    """Exit after a line a launcher can match, then the message for the user."""
+    logging.error(f"ASSETS_STARTUP_FAILED: {kind}\n{message}")
+    sys.exit(1)
+
+
+def another_database_url():
+    # An absolute path: on Linux and macOS that makes four slashes, which a hand-typed example tends to miss.
+    return f"sqlite:///{os.path.join(folder_paths.get_user_directory(), 'comfyui-2.db')}"
+
+
 def database_failure_message(error, db_url):
-    """What stopped the asset database from opening, and how to fix it."""
-    if not db_url.startswith("sqlite:"):
-        return f"--database-url must start with sqlite:///, like sqlite:///path/to/comfyui.db.\n{WITHOUT_ASSETS}"
+    """The kind of failure that stopped the asset database from opening, and how to fix it."""
+    if not (db_url.startswith("sqlite:///") or db_url == "sqlite://"):
+        return "unsupported_url", f"--database-url must start with sqlite:///, like {another_database_url()}\n{WITHOUT_ASSETS}"
     location = get_db_path() if db_url.startswith("sqlite:///") else db_url
     kind = error_kind(error)
     detail = getattr(error, "orig", None) or error
     if "Could not acquire lock on database" in str(error):
-        what = f"Another ComfyUI is already using the asset database '{location}'."
-        fix = "Close the other ComfyUI and start this one again, or, to run both, give this one its own database as below."
+        failure = "in_use"
+        what = f"Another ComfyUI is already using this database: '{location}'."
+        fix = "Close the other ComfyUI and start this one again."
     elif kind in ("database_locked", "file_locked"):
+        failure = "locked"
         what = f"The asset database '{location}' is locked by another program ({detail})."
         fix = "Close any program that has it open, such as another ComfyUI or a database viewer, and start again."
     elif "Can't locate revision" in str(error):
+        failure = "newer_revision"
         what = f"The asset database '{location}' was last used by a newer version of ComfyUI ({detail})."
         fix = "Update ComfyUI, or move that file aside and start again to create a new database."
+    elif isinstance(error, (FileExistsError, NotADirectoryError)):
+        failure = "path_blocked"
+        what = f"A file is in the way of the folder for the asset database '{location}' ({detail})."
+        fix = "Move that file, or choose another folder."
     elif kind in ("read_only", "unable_to_open") or isinstance(error, OSError):
+        failure = "not_writable"
         what = f"ComfyUI can't create, open or write the asset database '{location}' ({detail})."
         fix = "Make sure its folder is a writable directory and the database path is a writable file, or doesn't exist yet."
     elif kind == "database_corrupt":
+        failure = "corrupt"
         what = f"The asset database '{location}' is corrupt ({detail})."
         fix = ("Move that file aside, or delete it, and start again: ComfyUI creates a new database "
                "and rebuilds the asset catalog by rescanning your files.")
     else:
+        failure = "other"
         what = f"Could not open or upgrade the asset database '{location}': {detail}"
         fix = ("If the database is damaged, move that file aside and start again: ComfyUI creates a new "
                "database and rebuilds the asset catalog by rescanning your files.")
-    return f"{what}\n{fix}\nOr give this ComfyUI its own database: --database-url sqlite:///path/to/another.db\n{WITHOUT_ASSETS}"
+    lines = [what, fix]
+    if args.database_url is None:
+        lines.append(f"Or give this ComfyUI its own database: --database-url {another_database_url()}")
+    return failure, "\n".join(lines + [WITHOUT_ASSETS])
 
 
 def warn_if_database_in_use():
@@ -543,10 +567,7 @@ WARNING WARNING WARNING WARNING WARNING
 
 Another ComfyUI is already using this install's asset database:
   {db_path}
-This ComfyUI was started with --disable-assets, so it doesn't need that database and will start anyway.
-A future version will refuse to start two ComfyUIs on the same asset database.
-To run both, give this one its own:
-  --database-url sqlite:///path/to/another.db
+This ComfyUI was started with --disable-assets, so it doesn't use that database and will start anyway.
 ________________________________________________________________________
 """.strip()
     )
@@ -564,11 +585,8 @@ def start_comfyui(asyncio_loop=None):
 
     if not args.disable_assets and not dependencies_available():
         missing = ", ".join(missing_dependencies()) or "see the import error above"
-        logging.error(
-            f"The assets system needs packages that could not be imported: {missing}.\n"
-            f"{get_missing_requirements_message()}\n{WITHOUT_ASSETS}"
-        )
-        sys.exit(1)
+        stop_startup("missing_packages", f"The assets system needs packages that could not be imported: {missing}. "
+                                         f"Install them as shown above.\n{WITHOUT_ASSETS}")
     asset_manager: AssetManager = default_asset_manager()
     feature_flags.SERVER_FEATURE_FLAGS["assets"] = asset_manager.enabled
     if not asset_manager.enabled:
