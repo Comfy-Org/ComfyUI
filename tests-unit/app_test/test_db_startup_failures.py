@@ -13,6 +13,7 @@ import pytest
 import torch
 from alembic import command
 from alembic.script import ScriptDirectory
+from sqlalchemy.engine import URL, make_url
 from filelock import FileLock
 
 import folder_paths
@@ -244,8 +245,6 @@ def test_opens_from_an_install_folder_with_a_percent_sign(tmp_path, monkeypatch,
 
 
 def _sqlalchemy_quotes_question_marks():
-    from sqlalchemy.engine import URL, make_url
-
     return make_url(URL.create("sqlite", database="/a?/b.db").render_as_string()).database == "/a?/b.db"
 
 
