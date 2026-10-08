@@ -242,6 +242,22 @@ def test_lokr_fused_qkv_mapped_to_one_projection_picks_projection_rows():
     assert torch.allclose(result, reference[MAIN_IN:MAIN_IN + 1536], atol=1e-4)
 
 
+def test_load_lora_maps_fused_qkv_key_to_the_split_projection():
+    # convert_lora splits a fused to_qkv adapter per projection, so a loader that maps the fused
+    # key itself is loaded for the projection of the target weight. Keys the converter keeps under
+    # the fused name must not stop that.
+    sd = _make_sd(16, 576, 16, 384)  # not q/k/v aligned, so the projections need row offsets
+    sd[MAIN_PREFIX + ".reshape_weight"] = torch.tensor([1, 1])
+    reference = _apply(sd, MAIN_PREFIX, MAIN_OUT, MAIN_IN)
+
+    key = "diffusion_model.blocks.0.attn.wk.weight"
+    messages, patches = _capture_warnings(lambda: comfy.lora.load_lora(sd, {MAIN_PREFIX: key}))
+
+    assert list(patches) == [key]
+    result = comfy.lora.calculate_weight([(1.0, patches[key], 1.0, None, None)], torch.zeros(1536, MAIN_IN), key)
+    assert torch.allclose(result, reference[MAIN_IN:MAIN_IN + 1536], atol=1e-4)
+
+
 def test_convert_lora_leaves_other_fused_qkv_models_alone():
     # Audio models keep a real fused to_qkv module; their adapters must not be rewritten.
     sd = {
