@@ -500,6 +500,7 @@ class CastBiasWeightContext:
 
 class CastWeightBiasOp:
     comfy_cast_weights = False
+    comfy_force_forward = False
     weight_function = []
     bias_function = []
 
@@ -1019,7 +1020,7 @@ def linear_input_act(linear, x, input_act, act_weight=None, act_eps=0.0,
     run_every_op()
     weight = linear.weight
     quantized = isinstance(weight, QuantizedTensor)
-    if (comfy.model_management.in_training or getattr(linear, "_full_precision_mm", False)
+    if (comfy.model_management.in_training or getattr(linear, "comfy_force_forward", False) or getattr(linear, "_full_precision_mm", False)
             or not ((quantized and weight._layout_cls == "TensorWiseINT8Layout"
                      and not getattr(weight._params, "transposed", False))
                     or (not quantized and _fp16_linear_wanted(x)))):
