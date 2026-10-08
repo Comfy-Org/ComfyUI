@@ -1,9 +1,10 @@
 """Spike: reuse a hybrid (attention + DeltaNet) LLM's prompt state across generate calls.
 
-One global slot. It keeps the full-attention KV of the last call and the DeltaNet states at up to
-two checkpoints: the end of the prompt prefill and the end of generation. A recurrent state can't
-be truncated, so a new prompt reuses a checkpoint only when it starts with exactly that
-checkpoint's token ids; the KV is truncated to match by the decode bias.
+One global slot. It keeps the full-attention KV of the last call and DeltaNet state checkpoints at
+the end of the system message, the last few message boundaries, the end of the prompt and the end
+of generation. A recurrent state can't be truncated, so a new prompt resumes from the latest
+checkpoint inside its common prefix with the cached tokens; the KV is truncated to match by the
+decode bias.
 
 COMFY_LLM_PREFIX_CACHE: off (default) | gpu (resident, parked in pinned RAM when another model
 needs the VRAM) | vram (resident, never parked) | cpu (parked in pinned RAM after every call) |
@@ -22,6 +23,8 @@ CHUNK = int(os.environ.get("COMFY_LLM_PREFILL_CHUNK", "0"))
 HEADROOM = int(os.environ.get("COMFY_LLM_PREFIX_CACHE_HEADROOM", "4096"))
 MARGINS = os.environ.get("COMFY_LLM_PREFIX_CACHE_MARGINS", "0") == "1"  # log top-2 logit gaps (plain decode)
 DISK_DIR = os.environ.get("COMFY_LLM_PREFIX_CACHE_DIR", "/tmp/llm_prefix_cache")
+CKPT_RECENT = int(os.environ.get("COMFY_LLM_PREFIX_CACHE_CKPTS", "6"))  # message-boundary checkpoints kept
+MSG_END = (248046, 198)  # "<|im_end|>\n" in the Qwen3.5 vocab: a checkpoint may sit after it
 MIN_SUFFIX = 7  # suffixes of 6 or fewer tokens would take the decode/verify paths
 
 _slot = None
@@ -75,7 +78,8 @@ class _Slot:
             break
         self.capacity = next(iter(self.attn.values())).key.shape[2]
         self.kv_len = 0
-        self.checkpoints = []  # [(ids, {layer: (conv, recurrent)})]
+        self.ids = []  # the tokens the KV holds, up to kv_len
+        self.checkpoints = {}  # {position: {layer: (conv, recurrent)}}
         self.cpu = None  # {layer: (key, value)} when parked
 
     def nbytes(self):
@@ -84,7 +88,7 @@ class _Slot:
             n += sum(k.nbytes + v.nbytes for k, v in self.cpu.values())
         else:
             n += sum(kv.key[:, :, :self.kv_len].nbytes + kv.value[:, :, :self.kv_len].nbytes for kv in self.attn.values())
-        n += sum(c.nbytes + r.nbytes for _, st in self.checkpoints for c, r in st.values())
+        n += sum(c.nbytes + r.nbytes for st in self.checkpoints.values() for c, r in st.values())
         return n
 
     def park(self):
@@ -96,9 +100,7 @@ class _Slot:
         cpu = {}
         for i, kv in self.attn.items():
             cpu[i] = (host(kv.key[:, :, :self.kv_len]), host(kv.value[:, :, :self.kv_len]))
-        cps = []
-        for ids, st in self.checkpoints:
-            cps.append((ids, {i: (host(c), host(r)) for i, (c, r) in st.items()}))
+        cps = {pos: {i: (host(c), host(r)) for i, (c, r) in st.items()} for pos, st in self.checkpoints.items()}
         torch.cuda.synchronize()
         self.cpu = cpu
         self.where = "disk" if host.disk else "pinned"
@@ -110,14 +112,21 @@ class _Slot:
 
 
 def _match(ids):
-    best = None
+    """(position, states) of the latest checkpoint inside the common prefix, or None."""
     if _slot is None:
         return None
-    for cid, st in _slot.checkpoints:
-        n = len(cid)
-        if n <= len(ids) - MIN_SUFFIX and (best is None or n > len(best[0])) and ids[:n] == cid:
-            best = (cid, st)
-    return best
+    lcp = 0
+    for a, b in zip(ids, _slot.ids):
+        if a != b:
+            break
+        lcp += 1
+    stats["common_prefix"] = lcp
+    limit = min(lcp, len(ids) - MIN_SUFFIX)
+    usable = [pos for pos in _slot.checkpoints if pos <= limit]
+    if not usable:
+        return None
+    pos = max(usable)
+    return pos, _slot.checkpoints[pos]
 
 
 def _set_prefix(pkv, n):
@@ -134,7 +143,7 @@ def _set_prefix(pkv, n):
 
 
 def _restore(model, key, ids, need, device, dtype):
-    """Returns (pkv, prefix_len). Allocates a fresh cache on a miss."""
+    """Returns (pkv, prefix_len, carried checkpoints). Allocates a fresh cache on a miss."""
     global _slot
     from .qwen35 import LinearKV
     hit = _match(ids) if _slot is not None and _slot.key == key and MODE != "stats" else None
@@ -142,9 +151,10 @@ def _restore(model, key, ids, need, device, dtype):
         if _slot is not None:
             stats["miss_reason"] = "key" if _slot.key != key else "prefix"
         _slot = None  # drop the old KV before allocating the new one
-        return model.init_kv_cache(1, need + HEADROOM, device, dtype), 0
-    cid, st = hit
-    n = len(cid)
+        # stats mode sizes the cache as core does without it
+        return model.init_kv_cache(1, need + (0 if MODE == "stats" else HEADROOM), device, dtype), 0, {}
+    n, st = hit
+    carried = {pos: cst for pos, cst in _slot.checkpoints.items() if pos <= n}
     if _slot.cpu is None and _slot.capacity >= need:
         pkv = [None] * len(model.model.config.layer_types)
         for i, kv in _slot.attn.items():
@@ -161,9 +171,21 @@ def _restore(model, key, ids, need, device, dtype):
     for i, (c, r) in st.items():
         pkv[i] = LinearKV(c.to(device, copy=True, non_blocking=True), r.to(device, copy=True, non_blocking=True), n, None, None)
     _set_prefix(pkv, n)
-    # the slot is rebuilt from this call's cache in commit()
+    # the slot is rebuilt from this call's cache in prefill()
     _slot = None
-    return pkv, n
+    return pkv, n, carried
+
+
+def _checkpoint_positions(ids, start):
+    # after the system message (the static prefix) and after the last few messages
+    ends = [j for j in range(2, len(ids) + 1) if ids[j - 2] == MSG_END[0] and ids[j - 1] == MSG_END[1]]
+    want = sorted(set(ends[:1] + ends[-CKPT_RECENT:])) if CKPT_RECENT > 0 else []
+    out, prev = [], start
+    for pos in want:
+        if pos - prev >= MIN_SUFFIX and len(ids) - pos >= MIN_SUFFIX:
+            out.append(pos)
+            prev = pos
+    return out
 
 
 def prefill(model, embeds, ids, capacity, forward):
@@ -175,17 +197,30 @@ def prefill(model, embeds, ids, capacity, forward):
     _sync(device)
     t0 = time.perf_counter()
     stats["t0"] = t0
-    pkv, n = _restore(model, key, ids, capacity, device, dtype)
+    pkv, n, checkpoints = _restore(model, key, ids, capacity, device, dtype)
     _sync(device)
     t1 = time.perf_counter()
     stats.update(prompt_len=len(ids), prefix_len=n, hit=n > 0, restore_s=round(t1 - t0, 3))
-    x = _run_prefill(embeds[:, n:], pkv, forward)
+    # prefill in segments that end on checkpoint positions; the DeltaNet states are cloned at each
+    # because the next segment and decode update them in place
+    start = n
+    # stats mode prefills in one pass, as core does without the cache
+    for pos in ([] if MODE == "stats" else _checkpoint_positions(ids, n)) + [len(ids)]:
+        x = _run_prefill(embeds[:, start:pos], pkv, forward)
+        if MODE != "stats":
+            checkpoints[pos] = _linear_states(pkv, clone=True)
+        start = pos
     _sync(device)
     stats["prefill_s"] = round(time.perf_counter() - t1, 3)
-    # checkpoint A: the prompt end; the DeltaNet states are cloned because decode updates them in place
+    if len(checkpoints) > CKPT_RECENT + 3:
+        keep = sorted(checkpoints)
+        keep = keep[:1] + keep[-(CKPT_RECENT + 2):]
+        checkpoints = {pos: checkpoints[pos] for pos in keep}
+    stats["checkpoints"] = sorted(checkpoints)
     _slot = _Slot(key, pkv)
     _slot.kv_len = len(ids)
-    _slot.checkpoints = [(list(ids), _linear_states(pkv, clone=True))]
+    _slot.ids = list(ids)
+    _slot.checkpoints = checkpoints
     return pkv, x
 
 
@@ -233,7 +268,8 @@ def finish(pkv, ids, generated):
     idx = next(kv.index for kv in pkv if isinstance(kv, LinearKV))
     if _slot.cpu is None and len(ids) < idx <= len(full):
         # MTP may have consumed accepted drafts past a stop token: then idx > len(full) and the state is unusable
-        _slot.checkpoints.append((full[:idx], _linear_states(pkv, clone=False)))
+        _slot.checkpoints[idx] = _linear_states(pkv, clone=False)
+        _slot.ids = full[:idx]
         _slot.kv_len = idx
     stats["cache_gb"] = round(_slot.nbytes() / 1e9, 3)
     stats["mode"] = MODE
